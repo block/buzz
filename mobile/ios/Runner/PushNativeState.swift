@@ -139,6 +139,9 @@ final class BuzzNotificationReplyBridge {
   /// finished, even across a relaunch, still becomes a draft.
   private let journal = BuzzNotificationReplyJournal(defaults: .standard)
   private let selectedCommunityDefaults: UserDefaults?
+  /// Buffered replies whose community is gone: their notice is the only copy
+  /// of their text, so they're settled only once it's posted. Main queue only.
+  private var settleOnNotice: Set<String> = []
   /// Tells Flutter a reply is waiting; Flutter also takes waiting replies
   /// when its handler starts, so a call made before then is harmless.
   var notifyFlutter: (() -> Void)?
@@ -203,9 +206,13 @@ final class BuzzNotificationReplyBridge {
       endBackgroundTask()
     }
     journal.record(request.journalArguments)
-    buffer.add(request) { outcome in
+    buffer.add(request) { [weak self] outcome in
       Self.finish(request, outcome: outcome, notificationID: notificationID, center: center) {
+        posted in
         DispatchQueue.main.async {
+          if self?.settleOnNotice.remove(request.id) != nil, posted {
+            self?.journal.settle(id: request.id)
+          }
           completion()
           endBackgroundTask()
         }
@@ -258,13 +265,16 @@ final class BuzzNotificationReplyBridge {
       // its draft saved, or has no community left to keep one in.
       let draftKept = arguments["noDraft"] as? Bool != true
       let recorded = journal.recorded(id: id)
+      if !draftKept { settleOnNotice.insert(id) }
       if buffer.complete(id: id, outcome: outcome) {
-        journal.settle(id: id)
+        if draftKept { journal.settle(id: id) }
       } else {
+        settleOnNotice.remove(id)
+        // A notice that iOS refused leaves the reply for the next launch.
         finishUnbuffered(
           id: id, outcome: outcome, draftKept: draftKept, recorded: recorded
-        ) { [journal] in
-          journal.settle(id: id)
+        ) { [journal] posted in
+          if posted { journal.settle(id: id) }
         }
       }
       result(nil)
@@ -290,10 +300,11 @@ final class BuzzNotificationReplyBridge {
   /// posted; one that went out after all clears the notice its expiry posted.
   /// One whose community is gone keeps no draft, so it gets a "Reply not
   /// sent" notification with its text; its expiry's notice has the same
-  /// identifier, so the text shows once. Settles it once its notice is posted.
+  /// identifier, so the text shows once. Calls [settle] once its notice is
+  /// posted, saying whether iOS accepted it.
   private func finishUnbuffered(
     id: String, outcome: BuzzNotificationReplyOutcome, draftKept: Bool,
-    recorded: [String: String]?, settle: @escaping () -> Void
+    recorded: [String: String]?, settle: @escaping (Bool) -> Void
   ) {
     switch outcome {
     case .sent:
@@ -310,7 +321,7 @@ final class BuzzNotificationReplyBridge {
       // Its draft is saved, where its notice (if any) already points.
       break
     }
-    settle()
+    settle(true)
   }
 
   private static func replyNotSentIdentifier(_ id: String) -> String {
@@ -321,12 +332,13 @@ final class BuzzNotificationReplyBridge {
   /// and earlier ones in the same conversation. An unsent one is replaced by a
   /// "Reply not sent" notification that keeps the typed text and opens its
   /// draft; one that may have gone out says so instead, without a draft.
+  /// [done] says whether iOS accepted the notice.
   private static func finish(
     _ request: BuzzNotificationReplyRequest,
     outcome: BuzzNotificationReplyOutcome,
     notificationID: String,
     center: UNUserNotificationCenter,
-    done: @escaping () -> Void
+    done: @escaping (Bool) -> Void
   ) {
     guard outcome == .sent else {
       let content = UNMutableNotificationContent()
@@ -349,7 +361,7 @@ final class BuzzNotificationReplyBridge {
       center.add(
         UNNotificationRequest(
           identifier: Self.replyNotSentIdentifier(request.id), content: content, trigger: nil)
-      ) { _ in done() }
+      ) { error in done(error == nil) }
       return
     }
     center.getDeliveredNotifications { delivered in
@@ -364,7 +376,7 @@ final class BuzzNotificationReplyBridge {
         return identifier
       }
       center.removeDeliveredNotifications(withIdentifiers: ids)
-      done()
+      done(true)
     }
   }
 }
