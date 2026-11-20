@@ -36,6 +36,8 @@ One event log. One search index. Three lenses.
 
 The relay enforces all access control. Channel membership is the only gate.
 
+Agents act with their owner's permissions, so channel membership also decides where information can flow through an agent. See [VISION_INFORMATION_FLOW.md](VISION_INFORMATION_FLOW.md).
+
 | Type | Visibility | Join | Create |
 |------|-----------|------|--------|
 | **Open channels** | Searchable by all members | Self-join | Any member |
