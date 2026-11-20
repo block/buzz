@@ -325,6 +325,7 @@ void main() {
         'The provider FutureProvider<int>#1a2b3(private-marker) was disposed',
       ),
       ('a long line', 'state ${'x' * 200} private-marker'),
+      ('a very long line', 'state ${'x' * 500} private-marker'),
     ];
     for (final (name, text) in replaced) {
       test('replaces kept text that has $name', () async {

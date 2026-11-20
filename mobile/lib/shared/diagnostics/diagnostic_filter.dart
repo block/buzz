@@ -146,11 +146,11 @@ abstract final class DiagnosticFilter {
   /// line, or the lines after the first, usually quote other text, such as a
   /// response body or a wrapped error.
   static String _keptText(String text) {
-    final lineEnd = text.indexOf(_lineBreak);
-    final line = (lineEnd < 0 ? text : text.substring(0, lineEnd)).replaceAll(
-      _identityHash,
-      '',
-    );
+    final lineEnd = _lineBreak.firstMatch(text)?.start ?? text.length;
+    // Replaced without scanning: only a line made mostly of identity hashes
+    // could come under the limit after their removal.
+    if (lineEnd > 2 * _keptTextLimit) return removedText;
+    final line = text.substring(0, lineEnd).replaceAll(_identityHash, '');
     return line.length > _keptTextLimit || line.contains(_mayHoldUrl)
         ? removedText
         : line;
