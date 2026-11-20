@@ -93,9 +93,12 @@ class _ThreadMessageList extends HookWidget {
 
   Widget _buildHeadContent(BuildContext context) {
     if (accessDenied) {
-      return const Padding(
-        padding: EdgeInsets.only(bottom: Grid.xs),
-        child: Text('This thread is unavailable'),
+      return Padding(
+        padding: const EdgeInsets.only(bottom: Grid.xs),
+        child: Semantics(
+          liveRegion: true,
+          child: const Text('This thread is unavailable'),
+        ),
       );
     }
     if (headIsDeleted) {

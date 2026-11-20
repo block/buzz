@@ -291,7 +291,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     // settles, the message-list view keeps the original message visible and
     // reveals the positioned list in one frame, for empty and populated threads.
     final threadViewportVisible =
-        !relayRepliesAvailable || initialViewportReady.value;
+        accessDenied || !relayRepliesAvailable || initialViewportReady.value;
 
     // Item 0 is the thread head; reply `i` lives at `i + 1`.
     const headIndex = 0;

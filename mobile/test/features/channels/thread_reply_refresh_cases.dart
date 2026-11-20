@@ -293,7 +293,22 @@ void threadReplyRefreshTests() {
 
     query.completeError(Exception('restricted: not a channel member'));
     await tester.pumpAndSettle();
-    expect(find.text('This thread is unavailable'), findsOneWidget);
+    final unavailable = find.text('This thread is unavailable');
+    expect(unavailable, findsOneWidget);
+    final semantics = tester.ensureSemantics();
+    try {
+      await tester.pump();
+      expect(
+        tester
+            .getSemantics(unavailable)
+            .getSemanticsData()
+            .flagsCollection
+            .isLiveRegion,
+        isTrue,
+      );
+    } finally {
+      semantics.dispose();
+    }
     expect(findRichText('Cached reply'), findsNothing);
   });
 
