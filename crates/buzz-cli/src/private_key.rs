@@ -24,19 +24,15 @@ pub struct PrivateKeyInputs {
 
 /// Resolve the private key string, or leave identity selection to the desktop when no key was supplied.
 pub fn resolve_private_key(inputs: PrivateKeyInputs) -> Result<Option<String>, CliError> {
-    let mut sources = 0u8;
-    if inputs.private_key_file.is_some() {
-        sources += 1;
-    }
-    if inputs.private_key_stdin {
-        sources += 1;
-    }
-    if inputs.private_key.is_some() {
-        sources += 1;
-    }
-    if sources > 1 {
+    // An explicit flag overrides BUZZ_PRIVATE_KEY. The env var is injected for
+    // managed agents, so it must not reject --private-key-file or --private-key-stdin.
+    // Those flags still conflict with each other and with argv --private-key.
+    let explicit = u8::from(inputs.private_key_file.is_some())
+        + u8::from(inputs.private_key_stdin)
+        + u8::from(inputs.private_key_from_argv);
+    if explicit > 1 {
         return Err(CliError::Usage(
-            "specify only one of --private-key-file, --private-key-stdin, or BUZZ_PRIVATE_KEY/--private-key"
+            "specify only one of --private-key, --private-key-file, or --private-key-stdin"
                 .into(),
         ));
     }
@@ -142,14 +138,29 @@ mod tests {
     }
 
     #[test]
-    fn rejects_multiple_sources() {
+    fn rejects_argv_key_combined_with_another_flag() {
         let err = resolve_private_key(PrivateKeyInputs {
             private_key: Some("nsec1a".into()),
             private_key_stdin: true,
+            private_key_from_argv: true,
             ..Default::default()
         })
         .unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn file_overrides_env_key() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, "nsec1fromfile").unwrap();
+        let key = resolve_private_key(PrivateKeyInputs {
+            private_key: Some("nsec1env".into()),
+            private_key_file: Some(file.path().to_path_buf()),
+            private_key_from_argv: false,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(key.as_deref(), Some("nsec1fromfile"));
     }
 
     #[test]

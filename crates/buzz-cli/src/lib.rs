@@ -2650,7 +2650,16 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 
     // Desktop pairing binds the configured relay before reading a credential.
     let private_key = if matches!(cli.command, Cmd::Auth(_)) {
-        cli.private_key
+        // Desktop pairing does not use a Nostr key. Dropping an explicit flag
+        // here would silently pair a different identity than the one named.
+        if cli.private_key_file.is_some() || cli.private_key_stdin || cli.private_key_from_argv {
+            return Err(CliError::Usage(
+                "buzz auth uses the desktop credential provider and does not accept \
+                 --private-key, --private-key-file, or --private-key-stdin"
+                    .into(),
+            ));
+        }
+        None
     } else {
         private_key::resolve_private_key(private_key::PrivateKeyInputs {
             private_key: cli.private_key,
