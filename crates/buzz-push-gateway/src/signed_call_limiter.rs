@@ -11,7 +11,7 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 /// Most keys tracked at once. Past it, the key with the oldest window is
@@ -27,12 +27,13 @@ pub struct SignedCallLimiter {
 
 #[derive(Default)]
 struct State {
-    windows: HashMap<Vec<u8>, Window>,
+    /// Keys are shared with `starts`, so each key is stored once.
+    windows: HashMap<Arc<[u8]>, Window>,
     /// Every window start, oldest first. A key whose window restarted leaves
     /// a stale entry behind (its start no longer matches the map), which is
     /// skipped on eviction and dropped by compaction. Evicting from the front
     /// keeps a call on a full map O(1) amortized instead of a scan of it.
-    starts: VecDeque<(i64, Vec<u8>)>,
+    starts: VecDeque<(i64, Arc<[u8]>)>,
 }
 
 #[derive(Clone, Copy)]
@@ -60,15 +61,22 @@ impl State {
         }
     }
 
-    fn start_window(&mut self, key: &[u8], now: i64) {
-        self.starts.push_back((now, key.to_vec()));
+    fn start_window(&mut self, key: Arc<[u8]>, now: i64, calls: i64) {
+        self.windows.insert(
+            Arc::clone(&key),
+            Window {
+                started_at: now,
+                calls,
+            },
+        );
+        self.starts.push_back((now, key));
         // Restarted windows leave stale entries; drop them once they make up
         // half the queue, so compaction stays amortized O(1) per call.
         if self.starts.len() > 2 * self.windows.len().max(1) {
             let State { windows, starts } = self;
             starts.retain(|(started_at, key)| {
                 windows
-                    .get(key)
+                    .get(&**key)
                     .is_some_and(|w| w.started_at == *started_at)
             });
         }
@@ -90,7 +98,9 @@ impl SignedCallLimiter {
 
     /// Count one call by `key` at `now`; false when the key is over its limit.
     pub fn admit(&self, key: &[u8], now: i64) -> bool {
-        // The state holds only counters, so a poisoned lock is still consistent.
+        // The map and the queue must agree, but a panic between their updates
+        // would at worst leave a live key without a queue entry, which
+        // eviction skips, so a poisoned lock is still usable.
         let mut state = self
             .state
             .lock()
@@ -106,18 +116,20 @@ impl SignedCallLimiter {
             Some(_) => true,
             None => false,
         };
-        if !restarting && state.windows.len() >= MAX_TRACKED_KEYS {
-            state.evict_oldest();
-        }
+        let shared_key = if restarting {
+            state
+                .windows
+                .get_key_value(key)
+                .map(|(shared, _)| Arc::clone(shared))
+                .expect("a restarting key is in the map")
+        } else {
+            if state.windows.len() >= MAX_TRACKED_KEYS {
+                state.evict_oldest();
+            }
+            Arc::from(key)
+        };
         let admitted = self.max_calls > 0;
-        state.windows.insert(
-            key.to_vec(),
-            Window {
-                started_at: now,
-                calls: i64::from(admitted),
-            },
-        );
-        state.start_window(key, now);
+        state.start_window(shared_key, now, i64::from(admitted));
         admitted
     }
 }
@@ -165,5 +177,21 @@ mod tests {
         let state = limiter.state.lock().unwrap();
         assert_eq!(state.windows.len(), 1);
         assert!(state.starts.len() <= 2, "queue has {}", state.starts.len());
+    }
+
+    #[test]
+    fn eviction_skips_a_restarted_window() {
+        let limiter = SignedCallLimiter::new(60, 1);
+        assert!(limiter.admit(b"restarted", 0));
+        assert!(limiter.admit(b"oldest", 10));
+        // Leaves (0, "restarted") stale at the front of the queue.
+        assert!(limiter.admit(b"restarted", 70));
+        for index in 0..(MAX_TRACKED_KEYS - 2) {
+            limiter.admit(&index.to_be_bytes(), 71);
+        }
+        assert!(limiter.admit(b"new", 72));
+        let state = limiter.state.lock().unwrap();
+        assert!(state.windows.contains_key(b"restarted".as_slice()));
+        assert!(!state.windows.contains_key(b"oldest".as_slice()));
     }
 }
