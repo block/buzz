@@ -216,6 +216,7 @@ class ChannelsPage extends HookConsumerWidget {
 
       bottomHeight: _kTopSectionBottomPadding,
       useNativeNavigation: !messages,
+      alignWithStatusRegion: messages,
     );
     // A sheet's dim barrier can't composite over Home's native soft edge, so
     // use the Flutter backdrop while another route covers this page.
@@ -642,6 +643,7 @@ class ChannelsPage extends HookConsumerWidget {
           onNativeReadyChanged: (ready) => nativeHeaderReady.value = ready,
           nativeTitle: nativeDuoTitle ? 'Messages' : '',
           useNativeNavigation: !messages,
+          alignWithStatusRegion: messages,
           nativeViewSuppressed: headerNativeSuppressed,
           nativeLeading: messages
               ? null

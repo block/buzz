@@ -10,6 +10,8 @@ class IosNavigationMetrics {
     this.railTopClearance,
     this.windowSize,
     this.bookDivision,
+    this.portraitHeader,
+    this.portraitWindowSize,
   });
 
   final double compactHeight;
@@ -18,6 +20,44 @@ class IosNavigationMetrics {
   final double? railTopClearance;
   final Size? windowSize;
   final Rect? bookDivision;
+  final Rect? portraitHeader;
+  final Size? portraitWindowSize;
+
+  Rect? portraitHeaderFor(Size size) =>
+      portraitWindowSize == size ? portraitHeader : null;
+
+  static void updatePortraitHeader(BuildContext context, List<Object?> values) {
+    final notifier = _MetricsScope.of(context);
+    if (notifier == null ||
+        values.length != 6 ||
+        !values.every((v) => v is num && v.isFinite)) {
+      return;
+    }
+    final v = values.cast<num>().map((n) => n.toDouble()).toList();
+    if (v[0] <= 0 || v[1] <= 0) return;
+    final size = Size(v[0], v[1]);
+    final rect = Rect.fromLTWH(v[2], v[3], v[4], v[5]);
+    final header = rect.isEmpty ? null : rect;
+    if (header != null &&
+        (header.left < 0 ||
+            header.top < 0 ||
+            header.right > size.width ||
+            header.bottom > size.height)) {
+      return;
+    }
+    final old = notifier.value;
+    if (old.portraitWindowSize == size && old.portraitHeader == header) return;
+    notifier.value = IosNavigationMetrics(
+      compactHeight: old.compactHeight,
+      largeTitleHeight: old.largeTitleHeight,
+      railCenterX: old.railCenterX,
+      railTopClearance: old.railTopClearance,
+      windowSize: old.windowSize,
+      bookDivision: old.bookDivision,
+      portraitHeader: header,
+      portraitWindowSize: size,
+    );
+  }
 
   /// Aligns the shared rail with the status cluster in the reserved region.
   double railCenter(Size size, double fallback) {
@@ -85,6 +125,8 @@ class IosNavigationMetrics {
       railTopClearance: top,
       windowSize: size,
       bookDivision: division,
+      portraitHeader: old.portraitHeader,
+      portraitWindowSize: old.portraitWindowSize,
     );
   }
 
@@ -112,6 +154,8 @@ class IosNavigationMetrics {
       railTopClearance: notifier.value.railTopClearance,
       windowSize: notifier.value.windowSize,
       bookDivision: notifier.value.bookDivision,
+      portraitHeader: notifier.value.portraitHeader,
+      portraitWindowSize: notifier.value.portraitWindowSize,
     );
   }
 }

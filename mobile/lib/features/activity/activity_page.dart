@@ -7,6 +7,8 @@ import 'dart:math' show max;
 import '../../shared/widgets/ios_message_create_button.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
+import '../../shared/widgets/ios_navigation_metrics.dart';
+import '../../shared/widgets/ios_navigation_bar.dart' show IosNavigationBar;
 import '../../shared/widgets/top_edge_fade.dart';
 
 import 'package:flutter/foundation.dart';
@@ -589,6 +591,15 @@ class ActivityPage extends HookConsumerWidget {
       );
     }
 
+    final view = View.of(context);
+    final windowSize = view.physicalSize / view.devicePixelRatio;
+    final measurePortrait =
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        windowSize.width >= 600 &&
+        windowSize.height > windowSize.width;
+    final portraitHeader = measurePortrait
+        ? IosNavigationMetrics.of(context).portraitHeaderFor(windowSize)
+        : null;
     final strip = DuoToolbarScope.maybeStripOf(context);
     final closeInRail =
         defaultTargetPlatform == TargetPlatform.iOS &&
@@ -599,16 +610,34 @@ class ActivityPage extends HookConsumerWidget {
           windowSize:
               View.of(context).physicalSize / View.of(context).devicePixelRatio,
         );
+    // Duo reports no top safe area beside its strip. Clear the window edge
+    // as the other Duo pane headers do, on the cover and the wide layout.
+    final headerTop =
+        defaultTargetPlatform == TargetPlatform.iOS && strip != null
+        ? duoHeaderTopClearance
+        : Grid.xxs;
     return IosScrollToTop(
       child: Scaffold(
         backgroundColor: context.colors.surface,
         body: SafeArea(
+          top: !measurePortrait,
           bottom: false,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Stack(
                 children: [
+                  if (measurePortrait)
+                    const Positioned.fill(
+                      child: IgnorePointer(
+                        child: ExcludeSemantics(
+                          child: IosNavigationBar(
+                            title: '',
+                            backdropOnly: true,
+                          ),
+                        ),
+                      ),
+                    ),
                   if (closeInRail)
                     FrostedAppBar(
                       nativeTitle: '',
@@ -620,45 +649,67 @@ class ActivityPage extends HookConsumerWidget {
                         onPressed: () => Navigator.of(context).pop(),
                       ),
                     ),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(
-                      minHeight: 44 + Grid.xxs * 2,
+                  Padding(
+                    padding: EdgeInsets.only(
+                      top:
+                          portraitHeader?.top ??
+                          (measurePortrait
+                              ? MediaQuery.paddingOf(context).top
+                              : 0),
                     ),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: Grid.gutter,
-                        vertical: Grid.xxs,
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        minHeight:
+                            portraitHeader?.height ?? headerTop + 44 + Grid.xxs,
                       ),
-                      child: Row(
-                        children: [
-                          if (!closeInRail)
-                            defaultTargetPlatform == TargetPlatform.iOS
-                                ? Padding(
-                                    padding: const EdgeInsets.only(
-                                      right: Grid.twelve,
-                                    ),
-                                    child: IosGlassNavigationButton(
-                                      icon: IosGlassNavigationIcon.close,
-                                      semanticLabel: 'Close activity',
-                                      width: 44,
-                                      height: 44,
-                                      controlSize: 44,
-                                      foregroundColor:
-                                          navigationPrimaryForeground(context),
+                      child: Padding(
+                        padding: EdgeInsets.only(
+                          left: Grid.gutter,
+                          right:
+                              Grid.gutter +
+                              (portraitHeader == null
+                                  ? 0
+                                  : max(
+                                      0.0,
+                                      MediaQuery.sizeOf(context).width -
+                                          portraitHeader.right,
+                                    )),
+                          top: portraitHeader == null ? headerTop : 0,
+                          bottom: portraitHeader == null ? Grid.xxs : 0,
+                        ),
+                        child: Row(
+                          children: [
+                            if (!closeInRail)
+                              defaultTargetPlatform == TargetPlatform.iOS
+                                  ? Padding(
+                                      padding: const EdgeInsets.only(
+                                        right: Grid.twelve,
+                                      ),
+                                      child: IosGlassNavigationButton(
+                                        icon: IosGlassNavigationIcon.close,
+                                        semanticLabel: 'Close activity',
+                                        width: 44,
+                                        height: 44,
+                                        controlSize: 44,
+                                        foregroundColor:
+                                            navigationPrimaryForeground(
+                                              context,
+                                            ),
+                                        onPressed: () =>
+                                            Navigator.of(context).pop(),
+                                      ),
+                                    )
+                                  : IconButton(
+                                      tooltip: 'Close activity',
+                                      icon: const Icon(BuzzIcons.x),
                                       onPressed: () =>
                                           Navigator.of(context).pop(),
                                     ),
-                                  )
-                                : IconButton(
-                                    tooltip: 'Close activity',
-                                    icon: const Icon(BuzzIcons.x),
-                                    onPressed: () =>
-                                        Navigator.of(context).pop(),
-                                  ),
-                          Expanded(
-                            child: Text('Activity', style: headerTitleStyle),
-                          ),
-                        ],
+                            Expanded(
+                              child: Text('Activity', style: headerTitleStyle),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),

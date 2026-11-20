@@ -193,6 +193,37 @@ void main() {
     );
   }
 
+  testWidgets(
+    'unfolded portrait aligns Activity and Close beside the status cluster',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(669, 951);
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        IosNavigationMetricsHost(
+          child: await buildTestable(
+            mediaPadding: const EdgeInsets.only(top: 82),
+          ),
+        ),
+      );
+      IosNavigationMetrics.updatePortraitHeader(
+        tester.element(find.byType(ActivityPage)),
+        [669, 951, 0, 20, 535, 56],
+      );
+      await tester.pumpAndSettle();
+      expect(tester.getCenter(find.byTooltip('Close activity')).dy, 48);
+      expect(tester.getCenter(find.text('Activity')).dy, 48);
+      expect(
+        tester.getSize(find.byKey(const ValueKey('activity-filters'))).width,
+        669,
+      );
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
   for (final hasRail in [true, false]) {
     testWidgets(
       'expanded iOS Activity Close is in the rail only when present ($hasRail)',
@@ -243,6 +274,72 @@ void main() {
         debugDefaultTargetPlatformOverride = null;
       },
     );
+  }
+
+  for (final (name, platform, size, safeTop, viewPadding, headerTop) in [
+    (
+      'iOS Duo cover',
+      TargetPlatform.iOS,
+      const Size(466, 678),
+      0.0,
+      const FakeViewPadding(right: 84, bottom: 34),
+      24.0,
+    ),
+    (
+      'iOS Duo wide',
+      TargetPlatform.iOS,
+      const Size(951, 669),
+      0.0,
+      const FakeViewPadding(right: 84, bottom: 34),
+      24.0,
+    ),
+    (
+      'iOS phone',
+      TargetPlatform.iOS,
+      const Size(402, 874),
+      62.0,
+      const FakeViewPadding(top: 62, bottom: 34),
+      8.0,
+    ),
+    (
+      'Android with a side inset',
+      TargetPlatform.android,
+      const Size(466, 678),
+      0.0,
+      const FakeViewPadding(right: 84, bottom: 34),
+      8.0,
+    ),
+  ]) {
+    testWidgets('Activity header clears the top edge on $name', (tester) async {
+      debugDefaultTargetPlatformOverride = platform;
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = size;
+      tester.view.viewPadding = viewPadding;
+      addTearDown(tester.view.reset);
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      await tester.pumpWidget(
+        await buildTestable(
+          withPane: true,
+          mediaPadding: EdgeInsets.only(top: safeTop),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final title = find.text('Activity');
+      final row = tester.getRect(
+        find.ancestor(of: title, matching: find.byType(Row)).first,
+      );
+      expect(row.top, safeTop + headerTop);
+      expect(tester.getRect(title).center.dy, row.center.dy);
+      final inlineClose = find.byTooltip('Close activity');
+      if (size.width < 600) {
+        expect(tester.getRect(inlineClose).center.dy, row.center.dy);
+      } else {
+        // Close moves to the rail in the wide layout.
+        expect(inlineClose, findsNothing);
+      }
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    });
   }
 
   _activityTabJourneys(

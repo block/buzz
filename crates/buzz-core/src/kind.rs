@@ -511,6 +511,11 @@ pub const KIND_WORKFLOW_DEF: u32 = 30620;
 /// `hidden_at` per viewer; this is the only Nostr-visible projection of it.
 pub const KIND_DM_VISIBILITY: u32 = 30622;
 
+/// NIP-PM: a channel's pin list (relay-signed, parameterized replaceable,
+/// d=channel_id, h=channel_id). One `e` tag per pinned message, newest pin first. Members
+/// change it only through [`KIND_PIN_MESSAGE`] and [`KIND_UNPIN_MESSAGE`].
+pub const KIND_CHANNEL_PINS: u32 = 30623;
+
 /// Lower bound of the NIP-33 parameterized replaceable range (30000–39999).
 pub const PARAM_REPLACEABLE_KIND_MIN: u32 = 30000;
 /// Upper bound of the NIP-33 parameterized replaceable range (30000–39999).
@@ -547,7 +552,8 @@ pub const KIND_STREAM_MESSAGE: u32 = 9;
 pub const KIND_STREAM_MESSAGE_V2: u32 = 40002;
 /// V1 used kind:10004 (replaceable range + NIP-51 collision — wrong).
 pub const KIND_STREAM_MESSAGE_EDIT: u32 = 40003;
-/// A stream message that has been pinned in a channel.
+/// A stream message that has been pinned in a channel. Not a NIP-PM pin:
+/// see [`KIND_PIN_MESSAGE`].
 pub const KIND_STREAM_MESSAGE_PINNED: u32 = 40004;
 /// A stream message that has been bookmarked by a user.
 pub const KIND_STREAM_MESSAGE_BOOKMARKED: u32 = 40005;
@@ -557,6 +563,18 @@ pub const KIND_STREAM_MESSAGE_SCHEDULED: u32 = 40006;
 pub const KIND_STREAM_REMINDER: u32 = 40007;
 /// A diff/patch message showing file changes (unified diff format).
 pub const KIND_STREAM_MESSAGE_DIFF: u32 = 40008;
+/// NIP-PM: member-signed command that pins one message of its `h` channel.
+pub const KIND_PIN_MESSAGE: u32 = 40010;
+/// NIP-PM: member-signed command that unpins one message of its `h` channel.
+pub const KIND_UNPIN_MESSAGE: u32 = 40011;
+/// NIP-PM: the message kinds a channel can pin.
+pub const PINNABLE_KINDS: [u32; 5] = [
+    KIND_STREAM_MESSAGE,
+    KIND_STREAM_MESSAGE_V2,
+    KIND_STREAM_MESSAGE_DIFF,
+    KIND_FORUM_POST,
+    KIND_FORUM_COMMENT,
+];
 /// Canvas (shared document) for a channel.
 pub const KIND_CANVAS: u32 = 40100;
 /// System message for channel state changes (join, leave, rename, etc.).
@@ -786,11 +804,14 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_STREAM_MESSAGE_SCHEDULED,
     KIND_STREAM_REMINDER,
     KIND_STREAM_MESSAGE_DIFF,
+    KIND_PIN_MESSAGE,
+    KIND_UNPIN_MESSAGE,
     KIND_CANVAS,
     KIND_SYSTEM_MESSAGE,
     KIND_CHANNEL_SUMMARY,
     KIND_PRESENCE_SNAPSHOT,
     KIND_DM_VISIBILITY,
+    KIND_CHANNEL_PINS,
     KIND_DM_OPEN,
     KIND_DM_ADD_MEMBER,
     KIND_DM_HIDE,
@@ -934,6 +955,7 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
             | KIND_CHANNEL_SUMMARY
             | KIND_PRESENCE_SNAPSHOT
             | KIND_DM_VISIBILITY
+            | KIND_CHANNEL_PINS
             | KIND_THREAD_SUMMARY
             | KIND_WINDOW_BOUNDS
             | KIND_THREAD_WINDOW_BOUNDS
@@ -965,6 +987,7 @@ const _: () = assert!(is_parameterized_replaceable(KIND_EMOJI_ENTRY)); // 30180 
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_CHANNEL_PINS)); // 30623 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_PROJECT)); // 30621 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_THREAD_SUMMARY)); // 39005 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WINDOW_BOUNDS)); // 39006 ∈ 30000–39999

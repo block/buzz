@@ -570,6 +570,17 @@ class RunnerTests: XCTestCase {
   }
 
   @MainActor
+  func testPortraitControlRowDuringRouteTranslation() {
+    let row = CGRect(x: 0, y: 12, width: 620, height: 56)
+    let bar = UIView(frame: CGRect(x: 800, y: 300, width: 720, height: 80))
+    XCTAssertEqual(portraitControlRow(row, in: bar.bounds), row)
+    bar.frame.origin.x = 300
+    XCTAssertEqual(portraitControlRow(row, in: bar.bounds), row)
+    XCTAssertNil(portraitControlRow(row, in: .zero))
+    XCTAssertNil(portraitControlRow(row.offsetBy(dx: 800, dy: 0), in: bar.bounds))
+  }
+
+  @MainActor
   func testDmPortraitFloatsAboveGlassTitleAndClearsForChannels() throws {
     let parent = UIViewController()
     let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
@@ -611,12 +622,28 @@ class RunnerTests: XCTestCase {
     paneArguments["centerTitleInPane"] = true
     paneArguments["portraitTopPadding"] = 12
     paneArguments["alwaysFrosted"] = true
-    messenger.configure(paneArguments)
-    bar.view().layoutIfNeeded()
-    let paneTitle = try XCTUnwrap(bar.view().subviews.compactMap { $0 as? NavigationTitleView }.first)
-    XCTAssertEqual(paneTitle.frame.minY, 12 + 56)
+    for (left, right) in [(0.0, 76.0), (76.0, 0.0), (0.0, 0.0)] {
+      paneArguments["titleInsetLeft"] = left
+      paneArguments["titleInsetRight"] = right
+      messenger.configure(paneArguments)
+      bar.view().layoutIfNeeded()
+      let paneTitle = try XCTUnwrap(bar.view().subviews.compactMap { $0 as? NavigationTitleView }.first)
+      XCTAssertEqual(paneTitle.frame.minY, 12 + 56)
+      XCTAssertEqual(paneTitle.frame.midX, (bar.view().bounds.width + left - right) / 2, accuracy: 0.5)
+    }
     let paneMaterial = try XCTUnwrap(bar.view().subviews.first as? UIVisualEffectView)
     XCTAssertEqual(paneMaterial.frame, bar.view().bounds, "Portrait panes retain the full native navigation backdrop")
+    var chipArguments = arguments
+    chipArguments["inlinePortrait"] = true
+    chipArguments["horizontalControls"] = true
+    chipArguments["back"] = true
+    messenger.configure(chipArguments)
+    bar.view().layoutIfNeeded()
+    let chip = try XCTUnwrap(bar.view().subviews.compactMap { $0 as? NavigationTitleView }.first)
+    let back = try XCTUnwrap(bar.view().subviews.last { $0 !== chip && $0.frame.minX == 16 })
+    XCTAssertNotNil(chip.portraitSlot)
+    XCTAssertEqual(chip.frame.minX, back.frame.maxX + 16, accuracy: 0.5)
+    XCTAssertEqual(chip.frame.midY, back.frame.midY, accuracy: 0.5)
     var animatedArguments = arguments
     animatedArguments["titleHasAnimatedPortrait"] = true
     messenger.configure(animatedArguments)
