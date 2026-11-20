@@ -81,6 +81,7 @@ impl Indexer {
         // Spread lease attempts of instances that start together.
         tokio::time::sleep(POLL_INTERVAL.mul_f64(rand::random::<f64>())).await;
         let mut leader: Option<buzz_db::SessionLeader> = None;
+        let mut index_ready = false;
         let mut failures = 0u32;
         loop {
             if let Some(guard) = leader.as_mut() {
@@ -100,7 +101,20 @@ impl Indexer {
                 }
             }
             if leader.is_some() {
-                match self.drain().await {
+                // Create the index here rather than at startup, so an
+                // unreachable cluster never delays serving.
+                let result = if index_ready {
+                    self.drain().await
+                } else {
+                    match self.index.ensure().await {
+                        Ok(()) => {
+                            index_ready = true;
+                            self.drain().await
+                        }
+                        Err(error) => Err(error.into()),
+                    }
+                };
+                match result {
                     Ok(()) => failures = 0,
                     Err(error) => {
                         failures = failures.saturating_add(1);
