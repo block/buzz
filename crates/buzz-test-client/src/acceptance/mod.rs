@@ -281,8 +281,10 @@ async fn connect_auth(cfg: &Config) -> (CheckReport, Option<NostrWsConnection>) 
     let result = async {
         let mut conn = check
             .stage("ws_connect", async {
-                Ok(NostrWsConnection::connect_with_headers(&cfg.relay_url, upgrade_headers(cfg)?)
-                    .await?)
+                Ok(
+                    NostrWsConnection::connect_with_headers(&cfg.relay_url, upgrade_headers(cfg)?)
+                        .await?,
+                )
             })
             .await?;
         check
@@ -299,7 +301,10 @@ async fn connect_auth(cfg: &Config) -> (CheckReport, Option<NostrWsConnection>) 
     }
 }
 
-async fn channel_create(cfg: &Config, conn: &mut NostrWsConnection) -> (CheckReport, Option<String>) {
+async fn channel_create(
+    cfg: &Config,
+    conn: &mut NostrWsConnection,
+) -> (CheckReport, Option<String>) {
     let mut check = Check::new("channel_create", cfg.stage_timeout);
     let channel = uuid::Uuid::new_v4().to_string();
     let result = check
@@ -381,16 +386,20 @@ async fn fanout_on(
             wait_for_eose(listener, "fanout", timeout).await
         })
         .await?;
-    let event = message(&cfg.keys, channel, "acceptance fanout")
-        .map_err(|e| StageError { stage: "publish", error: format!("{e:#}") })?;
+    let event = message(&cfg.keys, channel, "acceptance fanout").map_err(|e| StageError {
+        stage: "publish",
+        error: format!("{e:#}"),
+    })?;
     let id = event.id;
-    let sent_at = tokio::time::Instant::now();
+    let sent_at = Instant::now();
     check.stage("publish", accepted(conn, event)).await?;
     let arrived = async {
         loop {
             match listener.next_event_received(timeout).await? {
                 (at, RelayMessage::Event { event, .. }) if event.id == id => return Ok(at),
-                (_, RelayMessage::Closed { message, .. }) => bail!("subscription closed: {message}"),
+                (_, RelayMessage::Closed { message, .. }) => {
+                    bail!("subscription closed: {message}")
+                }
                 _ => {}
             }
         }
@@ -403,7 +412,10 @@ async fn fanout_on(
             });
             Ok(())
         }
-        Ok(Err(e)) => Err(StageError { stage: "receive", error: format!("{e:#}") }),
+        Ok(Err(e)) => Err(StageError {
+            stage: "receive",
+            error: format!("{e:#}"),
+        }),
         Err(_) => Err(StageError {
             stage: "receive",
             error: format!("timed out after {timeout:?}"),
@@ -427,11 +439,17 @@ async fn history(
             let mut found = false;
             loop {
                 match conn.next_event(timeout).await? {
-                    RelayMessage::Event { subscription_id, event } if subscription_id == "history" => {
+                    RelayMessage::Event {
+                        subscription_id,
+                        event,
+                    } if subscription_id == "history" => {
                         found |= event.id == id;
                     }
                     RelayMessage::Eose { subscription_id } if subscription_id == "history" => break,
-                    RelayMessage::Closed { subscription_id, message } if subscription_id == "history" => {
+                    RelayMessage::Closed {
+                        subscription_id,
+                        message,
+                    } if subscription_id == "history" => {
                         bail!("subscription closed: {message}")
                     }
                     _ => {}
@@ -460,7 +478,9 @@ async fn access_control(cfg: &Config, conn: &mut NostrWsConnection, channel: &st
                 let mut anon = match NostrWsConnection::connect(&cfg.relay_url).await {
                     Ok(anon) => anon,
                     // A relay that requires federated identity refuses the upgrade.
-                    Err(e) if matches!(e.upgrade_rejection(), Some((401 | 403, _))) => return Ok(()),
+                    Err(e) if matches!(e.upgrade_rejection(), Some((401 | 403, _))) => {
+                        return Ok(())
+                    }
                     Err(e) => return Err(e.into()),
                 };
                 let outcome = anon.send_event(event).await;
@@ -518,7 +538,10 @@ async fn wait_for_eose(
     loop {
         match conn.next_event(timeout).await? {
             RelayMessage::Eose { subscription_id } if subscription_id == sub_id => return Ok(()),
-            RelayMessage::Closed { subscription_id, message } if subscription_id == sub_id => {
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == sub_id => {
                 bail!("subscription closed: {message}")
             }
             _ => {}
@@ -606,7 +629,10 @@ mod tests {
             .map(|c| (c.check, c.result, c.failed_stage))
             .collect();
         assert_eq!(results[0], ("relay_info", Outcome::Failure, Some("nip11")));
-        assert_eq!(results[1], ("connect_auth", Outcome::Failure, Some("ws_connect")));
+        assert_eq!(
+            results[1],
+            ("connect_auth", Outcome::Failure, Some("ws_connect"))
+        );
         for (name, outcome, stage) in &results[2..] {
             assert_eq!((*outcome, *stage), (Outcome::Skipped, None), "{name}");
         }
@@ -646,16 +672,28 @@ mod tests {
         assert!(upgrade_headers(&cfg).is_err(), "empty file must fail");
 
         std::fs::write(&path, "first\n").unwrap();
-        assert_eq!(upgrade_headers(&cfg).unwrap()[FEDERATED_IDENTITY_HEADER], "Bearer first");
+        assert_eq!(
+            upgrade_headers(&cfg).unwrap()[FEDERATED_IDENTITY_HEADER],
+            "Bearer first"
+        );
         std::fs::write(&path, "second").unwrap();
-        assert_eq!(upgrade_headers(&cfg).unwrap()[FEDERATED_IDENTITY_HEADER], "Bearer second");
+        assert_eq!(
+            upgrade_headers(&cfg).unwrap()[FEDERATED_IDENTITY_HEADER],
+            "Bearer second"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn http_url_maps_websocket_schemes() {
-        assert_eq!(http_url("wss://r.example/").unwrap().as_str(), "https://r.example/");
-        assert_eq!(http_url("ws://127.0.0.1:3000").unwrap().as_str(), "http://127.0.0.1:3000/");
+        assert_eq!(
+            http_url("wss://r.example/").unwrap().as_str(),
+            "https://r.example/"
+        );
+        assert_eq!(
+            http_url("ws://127.0.0.1:3000").unwrap().as_str(),
+            "http://127.0.0.1:3000/"
+        );
         assert!(http_url("https://r.example").is_err());
     }
 

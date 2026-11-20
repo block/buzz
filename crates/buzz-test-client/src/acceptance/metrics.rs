@@ -170,19 +170,13 @@ mod tests {
             format!(
                 "buzz.acceptance.check.runs:1|c|#check:publish,result:success,stage:none,{common}"
             ),
-            format!(
-                "buzz.acceptance.check.seconds:0.250|d|#check:publish,result:success,{common}"
-            ),
+            format!("buzz.acceptance.check.seconds:0.250|d|#check:publish,result:success,{common}"),
             format!("buzz.acceptance.stage.seconds:0.250|d|#check:publish,stage:ok,{common}"),
             format!(
                 "buzz.acceptance.check.runs:1|c|#check:fanout,result:failure,stage:receive,{common}"
             ),
-            format!(
-                "buzz.acceptance.check.seconds:10.000|d|#check:fanout,result:failure,{common}"
-            ),
-            format!(
-                "buzz.acceptance.stage.seconds:0.004|d|#check:fanout,stage:subscribe,{common}"
-            ),
+            format!("buzz.acceptance.check.seconds:10.000|d|#check:fanout,result:failure,{common}"),
+            format!("buzz.acceptance.stage.seconds:0.004|d|#check:fanout,stage:subscribe,{common}"),
             format!(
                 "buzz.acceptance.check.runs:1|c|#check:history,result:skipped,stage:none,{common}"
             ),
