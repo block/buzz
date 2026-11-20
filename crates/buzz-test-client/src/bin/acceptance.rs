@@ -16,6 +16,9 @@ use buzz_test_client::acceptance::{self, metrics, Config};
 use clap::Parser;
 use nostr::Keys;
 
+/// The longest resolving the metrics address or sending the metrics may take.
+const METRICS_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Parser)]
 #[command(
     name = "buzz-acceptance",
@@ -89,17 +92,23 @@ async fn probe(cli: Cli) -> anyhow::Result<bool> {
     println!("{}", serde_json::to_string(&report)?);
     if let Some(addr) = statsd {
         let lines = metrics::lines(&cli.metric_prefix, &report, &cli.tags);
-        metrics::send(addr, &lines)
+        tokio::time::timeout(METRICS_TIMEOUT, metrics::send(addr, &lines))
             .await
+            .map_err(|_| anyhow::anyhow!("send metrics to {addr}: timed out"))?
             .map_err(|e| anyhow::anyhow!("send metrics to {addr}: {e}"))?;
     }
     Ok(report.passed)
 }
 
 /// Resolves `host:port` once, before the run, so a bad address fails fast.
+/// An IP literal never reaches the resolver.
 async fn resolve(addr: &str) -> anyhow::Result<SocketAddr> {
-    tokio::net::lookup_host(addr)
+    if let Ok(literal) = addr.parse() {
+        return Ok(literal);
+    }
+    tokio::time::timeout(METRICS_TIMEOUT, tokio::net::lookup_host(addr))
         .await
+        .map_err(|_| anyhow::anyhow!("resolve statsd address {addr}: timed out"))?
         .map_err(|e| anyhow::anyhow!("resolve statsd address {addr}: {e}"))?
         .next()
         .ok_or_else(|| anyhow::anyhow!("statsd address {addr} resolved to nothing"))

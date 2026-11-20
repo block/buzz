@@ -10,6 +10,8 @@
 //! skipped when that check failed, so each failure is counted once, at its
 //! cause, and every run reports the same set of checks.
 
+#[cfg(test)]
+mod fake_relay;
 pub mod metrics;
 
 use std::future::Future;
@@ -32,6 +34,11 @@ const KIND_MESSAGE: u16 = 9;
 /// NIP-29 group create and delete kinds.
 const KIND_CREATE_GROUP: u16 = 9007;
 const KIND_DELETE_GROUP: u16 = 9008;
+/// Seconds of inactivity after which the relay archives a probe channel. A
+/// backstop for runs that end before `cleanup` can delete their channel.
+const CHANNEL_TTL_SECS: &str = "3600";
+/// Largest assertion file the probe reads.
+const MAX_ASSERTION_BYTES: u64 = 16 * 1024;
 
 /// Every check, in the order a run reports them.
 pub const CHECKS: [&str; 8] = [
@@ -209,9 +216,13 @@ pub async fn run(cfg: &Config) -> Report {
     checks.push(report);
     match conn {
         Some(mut conn) => {
-            run_channel_checks(cfg, &mut conn, &mut checks).await;
+            let created = run_channel_checks(cfg, &mut conn, &mut checks).await;
             // Closing is best effort: every check has already been recorded.
             let _ = conn.disconnect().await;
+            checks.push(match created {
+                Some(channel) => cleanup(cfg, &channel).await,
+                None => skipped("cleanup", "channel_create"),
+            });
         }
         None => {
             for &check in &CHECKS[2..] {
@@ -229,20 +240,24 @@ pub async fn run(cfg: &Config) -> Report {
     }
 }
 
-/// The checks that need the authenticated connection `conn`.
+/// The checks that need the authenticated connection `conn`, `cleanup`
+/// excepted. Returns the channel `cleanup` must delete: one the relay
+/// accepted, or one whose create may have committed without an answer.
 async fn run_channel_checks(
     cfg: &Config,
     conn: &mut NostrWsConnection,
     checks: &mut Vec<CheckReport>,
-) {
-    let (report, channel) = channel_create(cfg, conn).await;
+) -> Option<String> {
+    let (report, created) = channel_create(cfg, conn).await;
+    let passed = report.result == Outcome::Success;
     checks.push(report);
-    let Some(channel) = channel else {
-        for &check in &CHECKS[3..] {
+    if !passed {
+        for &check in &CHECKS[3..CHECKS.len() - 1] {
             checks.push(skipped(check, "channel_create"));
         }
-        return;
-    };
+        return created;
+    }
+    let channel = created?;
 
     let (report, published) = publish(cfg, conn, &channel).await;
     checks.push(report);
@@ -252,7 +267,7 @@ async fn run_channel_checks(
         None => skipped("history", "publish"),
     });
     checks.push(access_control(cfg, conn, &channel).await);
-    checks.push(cleanup(cfg, conn, &channel).await);
+    Some(channel)
 }
 
 async fn relay_info(cfg: &Config) -> (CheckReport, Option<String>) {
@@ -267,6 +282,9 @@ async fn relay_info(cfg: &Config) -> (CheckReport, Option<String>) {
                 .await?
                 .error_for_status()?;
             let info: serde_json::Value = response.json().await?;
+            if !info["supported_nips"].is_array() {
+                bail!("not a NIP-11 document: no supported_nips");
+            }
             Ok(info["version"].as_str().map(str::to_owned))
         })
         .await;
@@ -301,12 +319,16 @@ async fn connect_auth(cfg: &Config) -> (CheckReport, Option<NostrWsConnection>) 
     }
 }
 
+/// Creates the run's private channel, with a TTL as a backstop. Returns the
+/// channel unless the relay refused it: after a timeout or a lost connection
+/// the create may still have committed, so `cleanup` must try to delete it.
 async fn channel_create(
     cfg: &Config,
     conn: &mut NostrWsConnection,
 ) -> (CheckReport, Option<String>) {
     let mut check = Check::new("channel_create", cfg.stage_timeout);
     let channel = uuid::Uuid::new_v4().to_string();
+    let mut refused = false;
     let result = check
         .stage("create", async {
             let event = EventBuilder::new(Kind::Custom(KIND_CREATE_GROUP), "")
@@ -315,15 +337,19 @@ async fn channel_create(
                     tag(["name", &format!("acceptance-{channel}")])?,
                     tag(["channel_type", "stream"])?,
                     tag(["visibility", "private"])?,
+                    tag(["ttl", CHANNEL_TTL_SECS])?,
                 ])
                 .sign_with_keys(&cfg.keys)?;
-            accepted(conn, event).await
+            let ok = conn.send_event(event).await?;
+            if !ok.accepted {
+                refused = true;
+                bail!("relay rejected the event: {}", ok.message);
+            }
+            Ok(())
         })
         .await;
-    match result {
-        Ok(()) => (check.finish(Ok(())), Some(channel)),
-        Err(e) => (check.finish(Err(e)), None),
-    }
+    let report = check.finish(result);
+    (report, (!refused).then_some(channel))
 }
 
 async fn publish(
@@ -391,20 +417,38 @@ async fn fanout_on(
         error: format!("{e:#}"),
     })?;
     let id = event.id;
+    // Read the listener while the publish waits for its OK, so `receive`
+    // measures delivery, not the publisher's acknowledgement.
     let sent_at = Instant::now();
-    check.stage("publish", accepted(conn, event)).await?;
     let arrived = async {
         loop {
             match listener.next_event_received(timeout).await? {
-                (at, RelayMessage::Event { event, .. }) if event.id == id => return Ok(at),
-                (_, RelayMessage::Closed { message, .. }) => {
+                (
+                    at,
+                    RelayMessage::Event {
+                        subscription_id,
+                        event,
+                    },
+                ) if subscription_id == "fanout" && event.id == id => return Ok(at),
+                (
+                    _,
+                    RelayMessage::Closed {
+                        subscription_id,
+                        message,
+                    },
+                ) if subscription_id == "fanout" => {
                     bail!("subscription closed: {message}")
                 }
                 _ => {}
             }
         }
     };
-    match tokio::time::timeout(timeout, arrived).await {
+    let (published, arrived) = tokio::join!(
+        check.stage("publish", accepted(conn, event)),
+        tokio::time::timeout(timeout, arrived)
+    );
+    published?;
+    match arrived {
         Ok(Ok(at)) => {
             check.stages.push(StageTiming {
                 stage: "receive",
@@ -465,33 +509,34 @@ async fn history(
     check.finish(result)
 }
 
-/// The relay must refuse a write from a connection that has not
-/// authenticated, and a write signed by a key other than the one the
-/// connection authenticated as.
+/// Denial reason (NIP-01 prefix) for a write on a connection without NIP-42 AUTH.
+const AUTH_REQUIRED: &str = "auth-required:";
+/// Denial reason for a write signed by a key other than the authenticated one.
+const PUBKEY_MISMATCH: &str = "invalid: event pubkey does not match authenticated identity";
+
+/// The relay must refuse, with the matching reason, a write on a connection
+/// that skipped NIP-42 AUTH, and a write signed by a key other than the one
+/// the connection authenticated as. The unauthenticated connection still
+/// sends the NIP-FI assertion, so only AUTH is missing. Any other answer,
+/// including a closed socket or a different denial, fails the stage.
 async fn access_control(cfg: &Config, conn: &mut NostrWsConnection, channel: &str) -> CheckReport {
     let mut check = Check::new("access_control", cfg.stage_timeout);
     let result = async {
         check
             .stage("unauthenticated_rejected", async {
-                let stranger = Keys::generate();
-                let event = message(&stranger, channel, "acceptance unauthenticated")?;
-                let mut anon = match NostrWsConnection::connect(&cfg.relay_url).await {
-                    Ok(anon) => anon,
-                    // A relay that requires federated identity refuses the upgrade.
-                    Err(e) if matches!(e.upgrade_rejection(), Some((401 | 403, _))) => {
-                        return Ok(())
-                    }
-                    Err(e) => return Err(e.into()),
-                };
+                let event = message(&cfg.keys, channel, "acceptance unauthenticated")?;
+                let mut anon =
+                    NostrWsConnection::connect_with_headers(&cfg.relay_url, upgrade_headers(cfg)?)
+                        .await?;
                 let outcome = anon.send_event(event).await;
                 let _ = anon.disconnect().await;
-                refused(outcome)
+                denied(outcome, AUTH_REQUIRED)
             })
             .await?;
         check
             .stage("pubkey_mismatch_rejected", async {
                 let event = message(&Keys::generate(), channel, "acceptance mismatch")?;
-                refused(conn.send_event(event).await)
+                denied(conn.send_event(event).await, PUBKEY_MISMATCH)
             })
             .await
     }
@@ -499,16 +544,38 @@ async fn access_control(cfg: &Config, conn: &mut NostrWsConnection, channel: &st
     check.finish(result)
 }
 
-async fn cleanup(cfg: &Config, conn: &mut NostrWsConnection, channel: &str) -> CheckReport {
+/// Deletes `channel` over a fresh connection, so a socket an earlier check
+/// lost cannot strand it. A failure names the channel.
+async fn cleanup(cfg: &Config, channel: &str) -> CheckReport {
     let mut check = Check::new("cleanup", cfg.stage_timeout);
-    let result = check
-        .stage("delete_channel", async {
-            let event = EventBuilder::new(Kind::Custom(KIND_DELETE_GROUP), "")
-                .tags([tag(["h", channel])?])
-                .sign_with_keys(&cfg.keys)?;
-            accepted(conn, event).await
-        })
-        .await;
+    let result = async {
+        let mut conn = check
+            .stage("connect", async {
+                Ok(NostrWsConnection::connect_authenticated_with_headers(
+                    &cfg.relay_url,
+                    &cfg.keys,
+                    None,
+                    upgrade_headers(cfg)?,
+                )
+                .await?)
+            })
+            .await?;
+        let result = check
+            .stage("delete_channel", async {
+                let event = EventBuilder::new(Kind::Custom(KIND_DELETE_GROUP), "")
+                    .tags([tag(["h", channel])?])
+                    .sign_with_keys(&cfg.keys)?;
+                accepted(&mut conn, event).await
+            })
+            .await;
+        let _ = conn.disconnect().await;
+        result
+    }
+    .await
+    .map_err(|e| StageError {
+        stage: e.stage,
+        error: format!("channel {channel}: {}", e.error),
+    });
     check.finish(result)
 }
 
@@ -521,13 +588,20 @@ async fn accepted(conn: &mut NostrWsConnection, event: Event) -> anyhow::Result<
     Ok(())
 }
 
-/// Passes when the relay refused a write: `OK false`, or closed the socket.
-fn refused(outcome: Result<buzz_ws_client::OkResponse, WsClientError>) -> anyhow::Result<()> {
-    match outcome {
-        Ok(ok) if ok.accepted => bail!("relay accepted the event"),
-        Ok(_) | Err(WsClientError::ConnectionClosed | WsClientError::PolicyClose(_)) => Ok(()),
-        Err(e) => Err(e.into()),
+/// Passes only when the relay answered `OK false` with a reason starting
+/// with `expected`. No answer, a closed socket or another reason fails.
+fn denied(
+    outcome: Result<buzz_ws_client::OkResponse, WsClientError>,
+    expected: &str,
+) -> anyhow::Result<()> {
+    let ok = outcome.context("no OK for the write that should be refused")?;
+    if ok.accepted {
+        bail!("relay accepted the event");
     }
+    if !ok.message.starts_with(expected) {
+        bail!("relay refused for another reason: {}", ok.message);
+    }
+    Ok(())
 }
 
 async fn wait_for_eose(
@@ -553,6 +627,16 @@ async fn wait_for_eose(
 fn upgrade_headers(cfg: &Config) -> anyhow::Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     if let Some(path) = &cfg.assertion_file {
+        // Check before reading: a FIFO or device could block the read, which
+        // no async timeout can interrupt.
+        let meta = std::fs::metadata(path)
+            .with_context(|| format!("read assertion file {}", path.display()))?;
+        if !meta.is_file() || meta.len() > MAX_ASSERTION_BYTES {
+            bail!(
+                "assertion file {} must be a regular file of at most {MAX_ASSERTION_BYTES} bytes",
+                path.display()
+            );
+        }
         let assertion = std::fs::read_to_string(path)
             .with_context(|| format!("read assertion file {}", path.display()))?;
         let assertion = assertion.trim();
@@ -681,6 +765,11 @@ mod tests {
             upgrade_headers(&cfg).unwrap()[FEDERATED_IDENTITY_HEADER],
             "Bearer second"
         );
+
+        std::fs::write(&path, "x".repeat(MAX_ASSERTION_BYTES as usize + 1)).unwrap();
+        assert!(upgrade_headers(&cfg).is_err(), "oversized file must fail");
+        cfg.assertion_file = Some(dir.clone());
+        assert!(upgrade_headers(&cfg).is_err(), "a directory must fail");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -698,15 +787,180 @@ mod tests {
     }
 
     #[test]
-    fn refused_passes_only_when_the_relay_did_not_accept() {
-        let ok = |accepted| buzz_ws_client::OkResponse {
-            event_id: "e".into(),
-            accepted,
-            message: String::new(),
+    fn denied_passes_only_on_the_expected_refusal() {
+        let ok = |accepted, message: &str| {
+            Ok(buzz_ws_client::OkResponse {
+                event_id: "e".into(),
+                accepted,
+                message: message.into(),
+            })
         };
-        assert!(refused(Ok(ok(false))).is_ok());
-        assert!(refused(Err(WsClientError::ConnectionClosed)).is_ok());
-        assert!(refused(Ok(ok(true))).is_err());
-        assert!(refused(Err(WsClientError::Timeout)).is_err());
+        assert!(denied(ok(false, "auth-required: not authenticated"), AUTH_REQUIRED).is_ok());
+        assert!(denied(ok(false, PUBKEY_MISMATCH), PUBKEY_MISMATCH).is_ok());
+        assert!(denied(ok(false, "error: database unavailable"), AUTH_REQUIRED).is_err());
+        assert!(denied(ok(false, "rate-limited: slow down"), PUBKEY_MISMATCH).is_err());
+        assert!(denied(ok(true, ""), AUTH_REQUIRED).is_err());
+        assert!(denied(Err(WsClientError::ConnectionClosed), AUTH_REQUIRED).is_err());
+        assert!(denied(Err(WsClientError::Timeout), AUTH_REQUIRED).is_err());
+    }
+
+    fn check<'a>(report: &'a Report, name: &str) -> &'a CheckReport {
+        report.checks.iter().find(|c| c.check == name).unwrap()
+    }
+
+    fn stage_seconds(check: &CheckReport, stage: &str) -> f64 {
+        check
+            .stages
+            .iter()
+            .find(|s| s.stage == stage)
+            .unwrap_or_else(|| panic!("no {stage} stage in {check:?}"))
+            .seconds
+    }
+
+    /// The `h` tag of every event of `kind` the relay saw.
+    fn channels(relay: &fake_relay::FakeRelay, kind: u16) -> Vec<String> {
+        relay
+            .events()
+            .iter()
+            .filter(|e| e.kind.as_u16() == kind)
+            .filter_map(|e| {
+                e.tags
+                    .iter()
+                    .find(|t| t.kind().to_string() == "h")
+                    .and_then(|t| t.content().map(str::to_owned))
+            })
+            .collect()
+    }
+
+    /// The scripted relay serves no NIP-11, so only `relay_info` fails.
+    fn assert_all_pass_but_relay_info(report: &Report) {
+        for c in &report.checks[1..] {
+            assert_eq!(c.result, Outcome::Success, "{c:?}");
+        }
+    }
+
+    /// The publisher's OK arrives 600 ms after the event reaches the
+    /// listener; `receive` must report delivery, not the OK wait.
+    #[tokio::test]
+    async fn fanout_receive_is_timed_from_delivery_not_the_publishers_ack() {
+        let relay = fake_relay::start(fake_relay::Script {
+            ack_delay: [(KIND_MESSAGE, Duration::from_millis(600))].into(),
+            ..Default::default()
+        })
+        .await;
+        let report = run(&config(relay.url.clone())).await;
+
+        assert_all_pass_but_relay_info(&report);
+        let fanout = check(&report, "fanout");
+        assert!(stage_seconds(fanout, "publish") >= 0.6, "{fanout:?}");
+        assert!(stage_seconds(fanout, "receive") < 0.3, "{fanout:?}");
+        let channel = channels(&relay, KIND_CREATE_GROUP);
+        assert_eq!(channels(&relay, KIND_DELETE_GROUP), channel);
+        let create = relay
+            .events()
+            .into_iter()
+            .find(|e| e.kind.as_u16() == KIND_CREATE_GROUP);
+        let ttl = create
+            .unwrap()
+            .tags
+            .iter()
+            .find(|t| t.kind().to_string() == "ttl")
+            .cloned();
+        assert_eq!(
+            ttl.and_then(|t| t.content().map(str::to_owned)).as_deref(),
+            Some(CHANNEL_TTL_SECS)
+        );
+    }
+
+    /// A refusal for another reason, or a closed socket, is not proof the
+    /// relay enforces NIP-42: `access_control` fails at that stage.
+    #[tokio::test]
+    async fn access_control_fails_unless_the_refusal_is_the_auth_denial() {
+        for unauthenticated in [
+            fake_relay::Unauthenticated::Reason("error: database unavailable".into()),
+            fake_relay::Unauthenticated::Close,
+        ] {
+            let relay = fake_relay::start(fake_relay::Script {
+                unauthenticated,
+                ..Default::default()
+            })
+            .await;
+            let report = run(&config(relay.url.clone())).await;
+            let access = check(&report, "access_control");
+            assert_eq!(access.result, Outcome::Failure, "{access:?}");
+            assert_eq!(access.failed_stage, Some("unauthenticated_rejected"));
+            assert_eq!(check(&report, "cleanup").result, Outcome::Success);
+        }
+    }
+
+    /// The create's OK never comes, but the relay stored it: the run fails
+    /// at `channel_create`, skips what needed the channel, and still deletes
+    /// that exact channel.
+    #[tokio::test]
+    async fn an_unanswered_create_is_still_deleted() {
+        let relay = fake_relay::start(fake_relay::Script {
+            no_ack: [KIND_CREATE_GROUP].into(),
+            ..Default::default()
+        })
+        .await;
+        let mut cfg = config(relay.url.clone());
+        cfg.stage_timeout = Duration::from_millis(500);
+        let report = run(&cfg).await;
+
+        let create = check(&report, "channel_create");
+        assert_eq!(
+            (create.result, create.failed_stage),
+            (Outcome::Failure, Some("create"))
+        );
+        for name in ["publish", "fanout", "history", "access_control"] {
+            assert_eq!(check(&report, name).result, Outcome::Skipped, "{name}");
+        }
+        assert_eq!(check(&report, "cleanup").result, Outcome::Success);
+        let created = channels(&relay, KIND_CREATE_GROUP);
+        assert_eq!(created.len(), 1);
+        assert_eq!(channels(&relay, KIND_DELETE_GROUP), created);
+    }
+
+    /// The relay closes the socket right after accepting the create. The
+    /// checks on that socket fail, and cleanup deletes the channel over a
+    /// fresh connection.
+    #[tokio::test]
+    async fn a_socket_lost_after_create_still_deletes_the_channel() {
+        let relay = fake_relay::start(fake_relay::Script {
+            close_after: [KIND_CREATE_GROUP].into(),
+            ..Default::default()
+        })
+        .await;
+        let report = run(&config(relay.url.clone())).await;
+
+        assert_eq!(check(&report, "channel_create").result, Outcome::Success);
+        assert_eq!(check(&report, "publish").result, Outcome::Failure);
+        assert_eq!(check(&report, "cleanup").result, Outcome::Success);
+        let created = channels(&relay, KIND_CREATE_GROUP);
+        assert_eq!(channels(&relay, KIND_DELETE_GROUP), created);
+    }
+
+    /// A cleanup that fails names the channel it could not delete.
+    #[tokio::test]
+    async fn a_failed_cleanup_names_the_channel() {
+        let relay = fake_relay::start(fake_relay::Script {
+            no_ack: [KIND_DELETE_GROUP].into(),
+            ..Default::default()
+        })
+        .await;
+        let mut cfg = config(relay.url.clone());
+        cfg.stage_timeout = Duration::from_millis(500);
+        let report = run(&cfg).await;
+
+        let cleanup = check(&report, "cleanup");
+        assert_eq!(
+            (cleanup.result, cleanup.failed_stage),
+            (Outcome::Failure, Some("delete_channel"))
+        );
+        let channel = &channels(&relay, KIND_CREATE_GROUP)[0];
+        assert!(
+            cleanup.error.as_deref().unwrap().contains(channel.as_str()),
+            "{cleanup:?}"
+        );
     }
 }

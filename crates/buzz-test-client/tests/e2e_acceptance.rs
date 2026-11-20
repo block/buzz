@@ -1,4 +1,5 @@
-//! The `buzz-acceptance` probe against a running relay: every check passes.
+//! The `buzz-acceptance` probe against a running relay: every check passes,
+//! through the shared runner and through the binary.
 //!
 //! Requires a running relay, so it is `#[ignore]`d. Start the relay, then run:
 //!
@@ -6,17 +7,22 @@
 //! RELAY_URL=ws://localhost:3000 cargo test -p buzz-test-client --test e2e_acceptance -- --ignored
 //! ```
 
+use std::net::UdpSocket;
+use std::process::{Command, Output};
 use std::time::Duration;
 
 use buzz_test_client::acceptance::{self, Config, Outcome, CHECKS};
 use nostr::Keys;
 
+fn relay_url() -> String {
+    std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".into())
+}
+
 #[tokio::test]
 #[ignore]
 async fn every_acceptance_check_passes_against_a_live_relay() {
-    let relay_url = std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".into());
     let report = acceptance::run(&Config {
-        relay_url,
+        relay_url: relay_url(),
         keys: Keys::generate(),
         assertion_file: None,
         stage_timeout: Duration::from_secs(10),
@@ -31,4 +37,88 @@ async fn every_acceptance_check_passes_against_a_live_relay() {
         assert_eq!(check.result, Outcome::Success, "{summary}");
     }
     assert!(report.relay_version.is_some(), "{summary}");
+}
+
+/// Runs the binary with `args`, metrics sent to a local listener. Returns
+/// its output and every datagram that arrived.
+fn probe(args: &[&str]) -> (Output, Vec<String>) {
+    let agent = UdpSocket::bind("127.0.0.1:0").unwrap();
+    agent
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let addr = agent.local_addr().unwrap().to_string();
+    let output = Command::new(env!("CARGO_BIN_EXE_buzz-acceptance"))
+        .args(args)
+        .args(["--statsd-addr", &addr, "--tag", "env:test"])
+        .env_remove("BUZZ_PRIVATE_KEY")
+        .env_remove("BUZZ_RELAY_URL")
+        .output()
+        .unwrap();
+    let mut lines = Vec::new();
+    let mut buf = [0u8; 2048];
+    while let Ok(n) = agent.recv(&mut buf) {
+        lines.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+    }
+    (output, lines)
+}
+
+fn report(output: &Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "stdout is not a JSON report ({e}): {}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
+}
+
+#[test]
+#[ignore]
+fn the_binary_passes_against_a_live_relay_and_sends_metrics() {
+    let (output, lines) = probe(&["--relay-url", &relay_url()]);
+    let report = report(&output);
+    assert_eq!(output.status.code(), Some(0), "{report}");
+    assert_eq!(report["passed"], true);
+    assert!(
+        lines.iter().any(
+            |l| l.starts_with("buzz.acceptance.runs:1|c|#result:success,")
+                && l.ends_with(",env:test")
+        ),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with(
+            "buzz.acceptance.check.runs:1|c|#check:fanout,result:success,stage:none,"
+        )),
+        "{lines:?}"
+    );
+}
+
+#[test]
+#[ignore]
+fn the_binary_exits_1_and_reports_when_a_check_fails() {
+    let (output, lines) = probe(&[
+        "--relay-url",
+        "ws://127.0.0.1:1",
+        "--stage-timeout-secs",
+        "2",
+    ]);
+    let report = report(&output);
+    assert_eq!(output.status.code(), Some(1), "{report}");
+    assert_eq!(report["passed"], false);
+    assert_eq!(report["checks"][1]["failed_stage"], "ws_connect");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l == "buzz.acceptance.runs:1|c|#result:failure,env:test"),
+        "{lines:?}"
+    );
+}
+
+#[test]
+#[ignore]
+fn the_binary_exits_2_when_it_cannot_run() {
+    let (output, lines) = probe(&["--relay-url", &relay_url(), "--private-key", "not-a-key"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(lines.is_empty(), "{lines:?}");
 }
