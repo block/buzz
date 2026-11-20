@@ -11,8 +11,8 @@ final class DeviceTranscriptionPlugin {
   private var cancelAnalysis: (() -> Void)?
 
   /// Applies to new and existing durable drafts before Flutter opens their journal.
-  static func excludeDraftsFromBackup(in support: URL) throws {
-    var drafts = support.appendingPathComponent("bestie-transcripts", isDirectory: true)
+  static func excludeDraftsFromBackup(in support: URL, directory name: String) throws {
+    var drafts = support.appendingPathComponent(name, isDirectory: true)
     try FileManager.default.createDirectory(at: drafts, withIntermediateDirectories: true)
     var values = URLResourceValues()
     values.isExcludedFromBackup = true
@@ -22,6 +22,11 @@ final class DeviceTranscriptionPlugin {
   init(messenger: FlutterBinaryMessenger) {
     channel = FlutterMethodChannel(name: "buzz/transcription", binaryMessenger: messenger)
     channel.setMethodCallHandler { [weak self] call, reply in
+      if call.method == "isAvailable" {
+        guard #available(iOS 26.0, *) else { reply(false); return }
+        Task { reply(await Self.supportedLocale() != nil) }
+        return
+      }
       guard let self, let args = call.arguments as? [String: Any],
         let id = args["id"] as? String else {
         reply(FlutterError(code: "arguments", message: "Invalid transcription request.", details: nil))
@@ -41,11 +46,16 @@ final class DeviceTranscriptionPlugin {
         return
       }
       if call.method == "storageDirectory" {
+        guard let name = args["directory"] as? String,
+          name == "bestie-transcripts" || name == "composer-transcripts" else {
+          reply(FlutterError(code: "arguments", message: "Invalid transcription request.", details: nil))
+          return
+        }
         do {
           let support = try FileManager.default.url(
             for: .applicationSupportDirectory, in: .userDomainMask,
             appropriateFor: nil, create: true)
-          try Self.excludeDraftsFromBackup(in: support)
+          try Self.excludeDraftsFromBackup(in: support, directory: name)
           reply(support.path)
         } catch {
           reply(FlutterError(code: "storage_failed", message: error.localizedDescription, details: nil))
@@ -68,9 +78,10 @@ final class DeviceTranscriptionPlugin {
           if owner == id { owner = nil; cancelAnalysis = nil; operation = nil }
         }
         do {
-          guard SpeechTranscriber.isAvailable,
-            let locale = await SpeechTranscriber.supportedLocale(equivalentTo: Locale.current)
-          else { throw TranscriptionFailure.unavailable }
+          guard let locale = await Self.supportedLocale() else {
+            throw TranscriptionFailure.unavailable
+          }
+          try Task.checkCancellation()
           let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
           if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
             try await request.downloadAndInstall()
@@ -106,6 +117,11 @@ final class DeviceTranscriptionPlugin {
         }
       }
     }
+  }
+  @available(iOS 26.0, *)
+  private static func supportedLocale() async -> Locale? {
+    guard SpeechTranscriber.isAvailable else { return nil }
+    return await SpeechTranscriber.supportedLocale(equivalentTo: Locale.current)
   }
 }
 

@@ -413,6 +413,7 @@ void main() {
 }
 
 class _MemberRecorder extends NoopDiagnosticReporter {
+  @override
   String? member;
 
   @override

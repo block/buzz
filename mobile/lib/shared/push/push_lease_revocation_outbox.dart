@@ -11,6 +11,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../storage/secure_storage.dart';
 
+import '../diagnostics/diagnostic_reporter.dart';
 import '../community/community.dart';
 import '../hosted/hosted_relay_auth.dart';
 import '../relay/relay_provider.dart';
@@ -530,6 +531,7 @@ Uri _buzzPushRelayUri(String relayUrl) {
 Future<void> publishBuzzPushLeaseRevocation(
   BuzzPushLeaseRevocationRecord record, {
   required HostedRelayAuth relayAuth,
+  DiagnosticReporter diagnostics = const NoopDiagnosticReporter(),
 }) async {
   final descriptor = await fetchBuzzPushLeaseDescriptor(record.relayUrl);
   if (descriptor.origin != record.relayOrigin) {
@@ -560,6 +562,7 @@ Future<void> publishBuzzPushLeaseRevocation(
               content: content,
               tags: tags,
               createdAt: createdAt,
+              diagnostics: diagnostics,
             ),
   );
 }
@@ -576,6 +579,7 @@ final buzzPushLeaseRevocationOutboxProvider =
         publisher: (record) => publishBuzzPushLeaseRevocation(
           record,
           relayAuth: ref.read(hostedRelayAuthProvider),
+          diagnostics: ref.read(diagnosticReporterProvider),
         ),
       );
       ref.onDispose(outbox.dispose);

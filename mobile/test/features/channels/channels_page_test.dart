@@ -1,5 +1,7 @@
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/shared/widgets/app_list.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+import 'package:buzz/features/channels/channel_filter/channel_filter_activity.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_provider.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_manager.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_store.dart';
@@ -94,6 +96,17 @@ part 'channels_page_test/unread_readiness_tests.dart';
 part 'channels_page_test/filter_feedback_tests.dart';
 part 'channels_page_test/home_community_flight.dart';
 part 'channels_page_test/read_seed_journey.dart';
+
+Future<void> _chooseSectionOption(
+  WidgetTester tester,
+  String row,
+  String value,
+) async {
+  await tester.tap(find.byKey(ValueKey('section-menu-$row')));
+  await tester.pumpAndSettle();
+  await tester.tap(find.widgetWithText(MenuItemButton, value));
+  await tester.pumpAndSettle();
+}
 
 void main() {
   setUpAll(() async {
@@ -255,13 +268,15 @@ void main() {
       await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
       expect(find.text('general'), findsNothing);
-      final all = tester.widget<AppListRow>(
-        find.ancestor(of: find.text('All'), matching: find.byType(AppListRow)),
+      expect(
+        tester
+            .widget<AppListRow>(find.byKey(const ValueKey('section-menu-Show')))
+            .onTap,
+        isNull,
       );
-      expect(all.onTap, isNull);
-      await tester.tap(find.text('Cancel'));
+      await tester.binding.handlePopRoute();
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Show hidden channels · 1'));
+      await tester.tap(find.text('Show more'));
       await tester.pumpAndSettle();
       expect(find.text('general'), findsOneWidget);
       expect(tester.widget<InkWell>(_dmTileFor('general')).onTap, isNotNull);
@@ -317,7 +332,7 @@ void main() {
       await tester.pumpAndSettle();
       // Sort is available while preferences load. A late verified load must
       // update the untouched filter draft and never cause an All publication.
-      await tester.tap(find.text('Recent'));
+      await _chooseSectionOption(tester, 'Sort', 'Recent');
       await tester.pumpAndSettle();
       await manager.refresh();
       await tester.pumpAndSettle();
@@ -329,31 +344,17 @@ void main() {
         ),
       );
       expect(unreads.trailing, isA<Icon>());
-      await tester.tap(find.text('Apply'));
+      await tester.tap(find.byTooltip('Apply changes'));
       await tester.pumpAndSettle();
       expect(publications, 0);
       expect(manager.store.modeFor('channels'), ChannelFilterMode.unreads);
       await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
-      final header = find.byType(BuzzSheetHeader);
-      final apply = find.widgetWithText(FilledButton, 'Apply');
-      final collapsedTop = tester.getTopLeft(header).dy;
-      final footerBottom = tester.getBottomRight(apply).dy;
-      await tester.tap(find.text('Active'));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 80));
-      final expandingTop = tester.getTopLeft(header).dy;
-      expect(expandingTop, lessThan(collapsedTop));
-      expect(tester.getBottomRight(apply).dy, closeTo(footerBottom, 0.1));
-      await tester.pumpAndSettle();
-      final expandedTop = tester.getTopLeft(header).dy;
-      expect(expandedTop, lessThan(expandingTop));
-      expect(tester.getBottomRight(apply).dy, closeTo(footerBottom, 0.1));
-      await tester.ensureVisible(find.text('7 days'));
-      await tester.tap(find.text('7 days'));
-      await tester.pumpAndSettle();
+      expect(find.text('Active in the past'), findsNothing);
+      await _chooseSectionOption(tester, 'Show', 'Active');
+      await _chooseSectionOption(tester, 'Active in the past', '7 days');
       expect(manager.store.modeFor('channels'), ChannelFilterMode.unreads);
-      await tester.tap(find.text('Apply'));
+      await tester.tap(find.byTooltip('Apply changes'));
       await tester.pumpAndSettle();
       expect(manager.store.modeFor('channels'), ChannelFilterMode.active);
       expect(manager.store.windowFor('channels'), 7 * 86400);
@@ -366,16 +367,9 @@ void main() {
         ),
       );
       expect(days.trailing, isA<Icon>());
-      await tester.tap(find.text('All'));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 80));
-      final collapsingTop = tester.getTopLeft(header).dy;
-      expect(collapsingTop, greaterThan(expandedTop));
-      expect(collapsingTop, lessThan(collapsedTop));
-      await tester.pumpAndSettle();
-      expect(tester.getTopLeft(header).dy, closeTo(collapsedTop, 0.1));
+      await _chooseSectionOption(tester, 'Show', 'All');
       expect(find.text('Active in the past'), findsNothing);
-      await tester.tap(find.text('Cancel'));
+      await tester.tap(find.byTooltip('Discard changes'));
       await tester.pumpAndSettle();
       expect(manager.store.modeFor('channels'), ChannelFilterMode.active);
       expect(find.byType(AlertDialog), findsNothing);
@@ -385,7 +379,7 @@ void main() {
   );
 
   testWidgets(
-    'failed Active Apply retains duration draft; Cancel discards it at enlarged text',
+    'failed save keeps the duration draft until dismissal at enlarged text',
     (tester) async {
       tester.view.physicalSize = const Size(390, 844);
       tester.view.devicePixelRatio = 1;
@@ -406,13 +400,13 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(find.byTooltip('Team options'));
         await tester.pumpAndSettle();
-        await tester.tap(find.text('Active'));
+        await _chooseSectionOption(tester, 'Show', 'Active');
         await tester.pumpAndSettle();
-        await tester.ensureVisible(find.text('7 days'));
-        await tester.tap(find.text('7 days'));
+
+        await _chooseSectionOption(tester, 'Active in the past', '7 days');
         await tester.pumpAndSettle();
-        await tester.ensureVisible(find.text('Apply'));
-        await tester.tap(find.text('Apply'));
+
+        await tester.tap(find.byTooltip('Apply changes'));
         await tester.pumpAndSettle();
         expect(
           find.text(
@@ -426,10 +420,10 @@ void main() {
         final status = tester.getSemantics(failure);
         expect(status.getSemanticsData().flagsCollection.isLiveRegion, isTrue);
         final errorRect = tester.getRect(failure);
-        final footerRect = tester.getRect(find.text('Retry'));
+        final headerRect = tester.getRect(find.byTooltip('Apply changes'));
         expect(errorRect.top, greaterThanOrEqualTo(0));
-        expect(errorRect.bottom, lessThanOrEqualTo(footerRect.top));
-        expect(footerRect.bottom, lessThanOrEqualTo(844));
+        expect(headerRect.bottom, lessThanOrEqualTo(errorRect.top));
+        expect(errorRect.bottom, lessThanOrEqualTo(844));
         final selected = tester.widget<AppListRow>(
           find.ancestor(
             of: find.text('7 days'),
@@ -437,7 +431,7 @@ void main() {
           ),
         );
         expect(selected.trailing, isA<Icon>());
-        await tester.tap(find.text('Cancel'));
+        await tester.binding.handlePopRoute();
         await tester.pumpAndSettle();
         expect(find.byType(AlertDialog), findsNothing);
         expect(manager.store.modeFor('channels'), ChannelFilterMode.all);
@@ -837,11 +831,11 @@ void main() {
             ),
           )
           .dx,
-      closeTo(tester.getTopRight(find.byTooltip('Team options')).dx - 3, 0.01),
+      closeTo(tester.getTopRight(find.byTooltip('Team options')).dx - 15, 0.01),
     );
     await tester.tap(find.byTooltip('Team options'));
     await tester.pumpAndSettle();
-    expect(find.text('Recent'), findsOneWidget);
+    expect(find.text('Recent'), findsNothing);
     expect(find.text('A–Z'), findsOneWidget);
     expect(find.text('Show'), findsOneWidget);
     expect(find.byType(AlertDialog), findsNothing);
@@ -849,7 +843,7 @@ void main() {
       find.ancestor(of: find.text('A–Z'), matching: find.byType(AppListRow)),
     );
     expect(alpha.trailing, isA<Icon>());
-    await tester.tap(find.text('Cancel'));
+    await tester.binding.handlePopRoute();
     await tester.pumpAndSettle();
 
     for (final label in ['general', 'Alice']) {
@@ -1384,9 +1378,13 @@ void main() {
   testWidgets(
     'section options preserve management actions and Duo quick sort',
     (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
       await tester.pumpWidget(
         buildTestable(
           overrides: [
+            myPubkeyProvider.overrideWithValue('aabb'),
+            savedPrefsProvider.overrideWithValue(prefs),
             channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
             channelSectionsProvider.overrideWith(
               () => _FakeChannelSectionsNotifier(
@@ -1440,7 +1438,7 @@ void main() {
           tester
                   .getTopRight(find.byKey(const Key('section-menu-section-1')))
                   .dx -
-              3,
+              15,
           0.01,
         ),
       );
@@ -1449,26 +1447,18 @@ void main() {
 
       for (final (label, icon) in [
         ('Rename section', BuzzIcons.pencil),
-        ('Move up', BuzzIcons.arrowUp),
-        ('Move down', BuzzIcons.arrowDown),
+        ('Reorder sections', BuzzIcons.arrowUpDown),
         ('Delete section', BuzzIcons.trash2),
       ]) {
         final row = find.ancestor(
           of: find.text(label),
-          matching: find.byType(ListTile),
+          matching: find.byType(AppListRow),
         );
         expect(
           find.descendant(of: row, matching: find.byIcon(icon)),
           findsOneWidget,
         );
       }
-      final moveUp = tester.widget<ListTile>(
-        find.ancestor(
-          of: find.text('Move up'),
-          matching: find.byType(ListTile),
-        ),
-      );
-      expect(moveUp.enabled, isFalse);
       final deleteText = tester.widget<Text>(find.text('Delete section'));
       expect(
         deleteText.style?.color,
@@ -1478,13 +1468,13 @@ void main() {
         find.descendant(
           of: find.ancestor(
             of: find.text('Delete section'),
-            matching: find.byType(ListTile),
+            matching: find.byType(AppListRow),
           ),
           matching: find.byIcon(BuzzIcons.trash2),
         ),
       );
       expect(deleteIcon.color, deleteText.style?.color);
-      await tester.tap(find.text('Cancel'));
+      await tester.binding.handlePopRoute();
       await tester.pumpAndSettle();
 
       try {
@@ -1497,21 +1487,21 @@ void main() {
         await tester.pumpWidget(const SizedBox.shrink());
         SharedPreferences.setMockInitialValues({});
         final duoPrefs = await SharedPreferences.getInstance();
+        final sections = _FakeChannelSectionsNotifier(
+          const ChannelSectionStore(
+            sections: [
+              ChannelSection(id: 'section-1', name: 'Design\u0085', order: 0),
+            ],
+          ),
+        );
         await tester.pumpWidget(
           buildTestable(
             realHome: true,
             overrides: [
+              myPubkeyProvider.overrideWithValue('aabb'),
               savedPrefsProvider.overrideWithValue(duoPrefs),
               channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-              channelSectionsProvider.overrideWith(
-                () => _FakeChannelSectionsNotifier(
-                  const ChannelSectionStore(
-                    sections: [
-                      ChannelSection(id: 'section-1', name: 'Design', order: 0),
-                    ],
-                  ),
-                ),
-              ),
+              channelSectionsProvider.overrideWith(() => sections),
             ],
           ),
         );
@@ -1524,21 +1514,35 @@ void main() {
         expect(nativeMenu().iconSize, 14);
         expect(nativeMenu().actions.map((action) => action.label), [
           'Rename section',
-          'Move up',
-          'Move down',
+          'Reorder sections',
           'Sort: Recent',
           'Sort: A–Z',
           'Filter…',
           'Delete section',
         ]);
-        expect(nativeMenu().actions[1].onPressed, isNull);
-        expect(nativeMenu().actions[2].onPressed, isNull);
-        expect(nativeMenu().destructiveIndices, {6});
+        const editor = MethodChannel('buzz/profile_text_editor');
+        final messenger = tester.binding.defaultBinaryMessenger;
+        MethodCall? rename;
+        messenger.setMockMethodCallHandler(editor, (call) async {
+          rename = call;
+          return {'name': 'Design', 'icon': '🎨'};
+        });
+        addTearDown(() => messenger.setMockMethodCallHandler(editor, null));
+        nativeMenu().actions.first.onPressed!();
+        await tester.pumpAndSettle();
+        expect(sections.lastRename, (name: null, icon: '🎨'));
+        expect(rename?.method, 'presentSection');
+        expect(rename?.arguments.containsKey('icon'), isTrue);
+        expect(rename?.arguments['title'], 'Rename section');
+        expect(rename?.arguments['initialValue'], 'Design\u0085');
+        expect(rename?.arguments['requireNonEmpty'], isTrue);
+        expect(nativeMenu().actions[1].onPressed, isNotNull);
+        expect(nativeMenu().destructiveIndices, {5});
         final newMenu = find.byKey(const ValueKey('horizontal-create-menu'));
         expect(newMenu, findsOneWidget);
-        nativeMenu().actions[4].onPressed!();
+        nativeMenu().actions[3].onPressed!();
         await tester.pumpAndSettle();
-        expect(nativeMenu().selectedIndex, 4);
+        expect(nativeMenu().selectedIndex, 3);
         expect(newMenu, findsOneWidget);
         expect(
           find.byKey(const Key('section-popover-section-1')),
@@ -1549,11 +1553,33 @@ void main() {
             .singleWhere((action) => action.label == 'Filter…')
             .onPressed!();
         await tester.pumpAndSettle();
-        expect(find.text('Sort'), findsOneWidget);
-        expect(find.text('Show'), findsOneWidget);
-        await tester.tap(find.text('Cancel'));
+        final sortPicker = tester.widget<IosMessageCreateButton>(
+          find.byKey(const ValueKey('section-menu-Sort')),
+        );
+        expect(sortPicker.actions.map((action) => action.label), [
+          'A–Z',
+          'Recent',
+        ]);
+        expect(
+          tester
+              .widget<IosMessageCreateButton>(
+                find.byKey(const ValueKey('section-menu-Show')),
+              )
+              .actions
+              .map((action) => action.label),
+          ['All', 'Unreads', 'Active'],
+        );
+        tester
+            .widget<IosGlassNavigationButton>(
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget is IosGlassNavigationButton &&
+                    widget.semanticLabel == 'Apply changes',
+              ),
+            )
+            .onPressed!();
         await tester.pumpAndSettle();
-        expect(nativeMenu().selectedIndex, 4);
+        expect(nativeMenu().selectedIndex, 3);
         expect(ModalRoute.of(tester.element(newMenu))!.isCurrent, isTrue);
         expect(tester.takeException(), isNull);
       } finally {
@@ -4320,6 +4346,7 @@ void main() {
       addTearDown(filters.dispose);
       await tester.pumpWidget(
         buildTestable(
+          disableAnimations: true,
           overrides: [
             channelsProvider.overrideWith(
               () => _FakeNotifier(
@@ -4373,8 +4400,8 @@ void main() {
       }
 
       expect(find.text('general'), findsNothing);
-      await tester.tap(find.text('Show hidden channels · 1'));
-      await tester.pumpAndSettle();
+      await tester.tap(find.text('Show more'));
+      await tester.pump();
       expect(find.text('general'), findsOneWidget);
       expect(
         find.byKey(const ValueKey('channel-attention-dot-1')),
@@ -4384,6 +4411,9 @@ void main() {
         tester.getSemantics(find.byKey(const ValueKey('1'))).value,
         isEmpty,
       );
+      await tester.tap(find.text('Show fewer'));
+      await tester.pump();
+      expect(find.text('general'), findsNothing);
       semantics.dispose();
     });
   }
@@ -4510,7 +4540,7 @@ void main() {
       final hiddenByUnreads = seenAt != null && !bold && !dot;
       if (hiddenByUnreads) {
         expect(find.text('general'), findsNothing);
-        await tester.tap(find.text('Show hidden channels · 1'));
+        await tester.tap(find.text('Show more'));
         await tester.pumpAndSettle();
       }
 
@@ -4752,6 +4782,13 @@ class _FakeChannelSectionsNotifier extends ChannelSectionsNotifier {
   _FakeChannelSectionsNotifier(this._store);
 
   final ChannelSectionStore _store;
+
+  ({String? name, String? icon})? lastRename;
+
+  @override
+  void renameSection(String sectionId, String? newName, {String? icon}) {
+    lastRename = (name: newName, icon: icon);
+  }
 
   @override
   ChannelSectionsState build() =>

@@ -180,6 +180,7 @@ void _useComposeDraftLifecycle({
             threadHeadId: threadHeadId,
             text: text,
             mentionKeys: bindings,
+            transcriptionId: voiceNote.value.insertedTranscriptionId.value,
           );
     }
 

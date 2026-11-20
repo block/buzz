@@ -6,6 +6,8 @@ import '../../../shared/theme/buzz_icons.dart';
 import '../../../shared/widgets/collapsible_section_body.dart';
 import '../../../shared/widgets/collapsible_sliver_body.dart';
 
+import '../channel_sections/section_options_button.dart';
+
 /// A project or unassigned-chat section matching the Channels list headings.
 class MeSection extends HookWidget {
   const MeSection({
@@ -13,21 +15,29 @@ class MeSection extends HookWidget {
     required this.label,
     required this.children,
     this.sliver = false,
-  });
+    this.onFilter,
+  }) : buildBody = null;
+
+  const MeSection.sliverBody({
+    super.key,
+    required this.label,
+    required this.buildBody,
+    this.onFilter,
+  }) : sliver = true,
+       children = const [];
 
   final String label;
-
-  /// Render rows individually in the containing scroll view.
+  final VoidCallback? onFilter;
   final bool sliver;
-
   final List<Widget> children;
+  final Widget Function(bool expanded)? buildBody;
 
   @override
   Widget build(BuildContext context) {
     final expanded = useState(true);
     final color = navigationHeadingForeground(context);
     final reducedMotion = MediaQuery.disableAnimationsOf(context);
-    final header = Semantics(
+    final toggle = Semantics(
       label: label,
       excludeSemantics: true,
       onTap: () => expanded.value = !expanded.value,
@@ -74,14 +84,29 @@ class MeSection extends HookWidget {
         ),
       ),
     );
+    final header = onFilter == null
+        ? toggle
+        : Row(
+            children: [
+              Expanded(child: toggle),
+              Padding(
+                padding: EdgeInsets.zero,
+                child: SectionOptionsButton(
+                  tooltip: '$label options',
+                  onPressed: onFilter!,
+                ),
+              ),
+            ],
+          );
     if (sliver) {
       return SliverMainAxisGroup(
         slivers: [
           SliverToBoxAdapter(child: header),
-          CollapsibleSliverBody(
-            expanded: expanded.value,
-            sliver: SliverList.list(children: children),
-          ),
+          buildBody?.call(expanded.value) ??
+              CollapsibleSliverBody(
+                expanded: expanded.value,
+                sliver: SliverList.list(children: children),
+              ),
         ],
       );
     }

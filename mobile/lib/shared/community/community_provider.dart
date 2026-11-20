@@ -87,7 +87,7 @@ final communityTransitionProvider = Provider<CommunityTransitionCoordinator>(
 );
 
 final communityStorageProvider = Provider<CommunityStorage>((ref) {
-  return CommunityStorage();
+  return CommunityStorage(diagnostics: ref.read(diagnosticReporterProvider));
 });
 
 typedef CommunitySnapshotWriter =
@@ -113,6 +113,7 @@ final communityPushLeaseDeactivatorProvider =
         community,
         generation: generation,
         relayAuth: ref.read(hostedRelayAuthProvider),
+        diagnostics: ref.read(diagnosticReporterProvider),
       );
     });
 
@@ -135,6 +136,7 @@ Future<void> _deactivateCommunityPushLease(
   Community community, {
   int? generation,
   required HostedRelayAuth relayAuth,
+  required DiagnosticReporter diagnostics,
 }) async {
   final state = community.pushSubscriptionState;
   final acceptedGeneration = state.acceptedGeneration;
@@ -197,6 +199,7 @@ Future<void> _deactivateCommunityPushLease(
               content: content,
               tags: tags,
               createdAt: createdAt,
+              diagnostics: diagnostics,
             ),
   );
   pushLeaseCleanupError.value = null;
@@ -524,9 +527,15 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       final storage = ref.read(communityStorageProvider);
       final activeId = await storage.loadActiveId();
       if (activeId == id) return;
+      // From storage: while the list reloads (after sign-in, say), state can
+      // still hold the previous list. Read before anything changes, so a
+      // failed read leaves the switch to retry.
+      final target = (await storage.loadAll())
+          .where((c) => c.id == id)
+          .firstOrNull;
       await ref.read(communityTransitionProvider).run();
       await storage.saveActiveId(id);
-      _reportAs(state.value?.where((c) => c.id == id).firstOrNull);
+      _reportAs(target);
       // Reassign list state to trigger activeCommunityProvider (which watches
       // communityListProvider.future) to rebuild and pick up the new active ID.
       // We can't use ref.invalidate(activeCommunityProvider) here because that

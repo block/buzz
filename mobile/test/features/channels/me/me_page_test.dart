@@ -1,3 +1,7 @@
+import 'package:buzz/features/channels/channel_filter/channel_filter_activity.dart';
+import 'package:buzz/features/channels/channel_filter/channel_filter_manager.dart';
+import 'package:buzz/features/channels/channel_filter/channel_filter_provider.dart';
+import 'package:buzz/features/channels/channel_sort/channel_sort_manager.dart';
 import 'dart:convert';
 
 import 'package:image_picker/image_picker.dart';
@@ -128,6 +132,94 @@ class LabeledChannels extends ChannelsNotifier {
 }
 
 void main() {
+  testWidgets('Solo workspace activity window leaves unfiled chats visible', (
+    tester,
+  ) async {
+    final keys = nostr.Keys.generate();
+    const coordinate = 'solo-channel-filter';
+    var history = <NostrEvent>[];
+    final manager = ChannelFilterManager(
+      coordinate: coordinate,
+      pubkey: keys.public,
+      crypto: ChannelSortCrypto(keys.nsec, keys.public),
+      fetch: () async => history,
+      publish: (content, at) async {
+        history = [
+          NostrEvent.fromJson(
+            nostr.Event.from(
+              kind: EventKind.readState,
+              tags: const [
+                ['d', coordinate],
+              ],
+              content: content,
+              createdAt: at,
+              secretKey: nostr.Nip19.decode(payload: keys.nsec).data,
+              verify: false,
+            ).toMap(),
+          ),
+        ];
+      },
+      cache: (_) {},
+    );
+    addTearDown(manager.dispose);
+    await manager.refresh();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
+          myPubkeyProvider.overrideWithValue('owner'),
+          channelsProvider.overrideWith(LabeledChannels.new),
+          soloFilterProvider.overrideWithValue(manager),
+          channelFilterActivityProvider('filed').overrideWith(
+            (ref) async =>
+                DateTime.now()
+                    .subtract(const Duration(days: 8))
+                    .millisecondsSinceEpoch ~/
+                1000,
+          ),
+          meGroupsProvider.overrideWith(
+            (ref) => Stream.value(
+              const MeGroups(
+                groups: [
+                  {
+                    'id': 'project',
+                    'name': 'App work',
+                    'defaultTemplateId': '',
+                  },
+                ],
+                assignments: {'filed': 'project'},
+              ),
+            ),
+          ),
+        ],
+        child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Filed labeled chat'), findsOneWidget);
+    await tester.tap(find.byTooltip('App work options'));
+    await tester.pumpAndSettle();
+    expect(find.text('Sort'), findsOneWidget);
+    await tester.tap(find.text('Show'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Active'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Active in the past'));
+    await tester.pumpAndSettle();
+    for (final label in ['1 day', '7 days', '30 days', '90 days']) {
+      expect(find.widgetWithText(MenuItemButton, label), findsOneWidget);
+    }
+    await tester.ensureVisible(find.text('7 days'));
+    await tester.tap(find.text('7 days'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Apply changes'));
+    await tester.pumpAndSettle();
+    expect(history, hasLength(1));
+    expect(find.text('Filed labeled chat'), findsNothing);
+    expect(find.text('Unfiled labeled chat'), findsOneWidget);
+    expect(find.text('No matching chats'), findsOneWidget);
+  });
+
   testWidgets('label-only desktop chats appear in projects and unfiled chats', (
     tester,
   ) async {

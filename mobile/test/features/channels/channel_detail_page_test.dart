@@ -71,6 +71,7 @@ import 'package:buzz/features/channels/composer_dock_size_reporter.dart';
 import 'package:buzz/features/channels/date_formatters.dart';
 import 'package:buzz/features/channels/day_divider.dart';
 import 'package:buzz/shared/emoji/emoji_picker.dart';
+import 'package:buzz/features/channels/huddle_agents_provider.dart';
 import 'package:buzz/features/channels/ime_metrics_settle_observer.dart';
 import 'package:buzz/features/channels/local_message_send_animation_provider.dart';
 import 'package:buzz/features/channels/local_send_bubble_surface.dart';
@@ -296,6 +297,8 @@ Widget _buildTestable({
   Set<String>? archived,
   List<ChannelMember> huddleMembers = const [],
   _MutableHuddleMembersNotifier? huddleMembersNotifier,
+  Set<String>? huddleRecordAgentPubkeys,
+  Set<String> Function()? readHuddleRecordAgentPubkeys,
   Channel? channel,
   ChannelDetails Function()? channelDetails,
   List<Channel>? channels,
@@ -447,6 +450,16 @@ Widget _buildTestable({
       ),
       if (huddleMembersNotifier != null)
         _mutableHuddleMembersProvider.overrideWith(() => huddleMembersNotifier),
+      if (huddleRecordAgentPubkeys != null ||
+          readHuddleRecordAgentPubkeys != null)
+        huddleManagedAgentRecordPubkeysProvider(_huddleChannelId).overrideWith(
+          (ref) async => (
+            scope: ref.watch(huddleManagedAgentRecordScopeProvider),
+            agents:
+                readHuddleRecordAgentPubkeys?.call() ??
+                huddleRecordAgentPubkeys!,
+          ),
+        ),
       if (!watchChannelMembershipUpdates)
         channelBotPubkeysProvider(_channelId).overrideWith(
           (ref) async => loadChannelBotPubkeys?.call() ?? const <String>{},
@@ -4521,7 +4534,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        await tester.tap(find.text('Message #general'));
+        await tester.tap(find.text('Message'));
         await tester.pump();
         tester.view.viewInsets = const FakeViewPadding(bottom: 300);
         await tester.pump();
@@ -4834,7 +4847,7 @@ void main() {
       // The old placeholder text should be gone.
       expect(find.text('Forum threads are not on mobile yet'), findsNothing);
       // The compose bar for stream messages should not appear.
-      expect(find.text('Message…'), findsNothing);
+      expect(find.text('Message'), findsNothing);
       final scaffold = tester.widget<FrostedScaffold>(
         find.byType(FrostedScaffold).first,
       );
@@ -5649,7 +5662,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Message…'), findsNothing);
+      expect(find.text('Message'), findsNothing);
       expect(
         find.text('This channel is archived and read-only on mobile.'),
         findsOneWidget,
@@ -5794,7 +5807,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Join channel to send messages'), findsOneWidget);
-      expect(find.text('Message…'), findsNothing);
+      expect(find.text('Message'), findsNothing);
 
       await tester.tap(
         find.byKey(const ValueKey('channel-header-settings-trigger')),
@@ -5811,7 +5824,7 @@ void main() {
       expect(find.text('Join channel'), findsNothing);
       expect(find.text('Join channel to send messages'), findsNothing);
 
-      expect(find.text('Message #general'), findsOneWidget);
+      expect(find.text('Message'), findsOneWidget);
     });
 
     testWidgets('joins an open channel from the footer Join button', (
@@ -5839,13 +5852,13 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Message #general'), findsNothing);
+      expect(find.text('Message'), findsNothing);
       await tester.tap(find.byKey(const ValueKey('channel-join-button')));
       await tester.pumpAndSettle();
 
       expect(joined, [openChannel.id]);
       expect(find.byKey(const ValueKey('channel-join-button')), findsNothing);
-      expect(find.text('Message #general'), findsOneWidget);
+      expect(find.text('Message'), findsOneWidget);
     });
 
     testWidgets(
@@ -5895,14 +5908,14 @@ void main() {
           find.widgetWithText(FilledButton, 'Check again'),
           findsOneWidget,
         );
-        expect(find.text('Message #general'), findsNothing);
+        expect(find.text('Message'), findsNothing);
 
         await tester.tap(joinButton);
         await tester.pumpAndSettle();
         expect(rechecks, [openChannel.id]);
         expect(outcomes, isEmpty);
         expect(joinButton, findsNothing);
-        expect(find.text('Message #general'), findsOneWidget);
+        expect(find.text('Message'), findsOneWidget);
       },
     );
 
@@ -5925,7 +5938,7 @@ void main() {
 
       expect(find.text('This channel is read-only'), findsOneWidget);
       expect(find.byKey(const ValueKey('channel-join-button')), findsNothing);
-      expect(find.text('Message #general'), findsNothing);
+      expect(find.text('Message'), findsNothing);
     });
 
     testWidgets('offers no Join button for a private channel preview', (
@@ -6287,7 +6300,7 @@ void main() {
         find.byKey(const ValueKey('channel-jump-to-latest')),
         findsNothing,
       );
-      await tester.tap(find.text('Message #general'));
+      await tester.tap(find.text('Message'));
       await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('channel-jump-to-latest')),
@@ -6336,7 +6349,7 @@ void main() {
       final rowsBefore = [row('msg1'), row('msg2')];
       final insetBefore = listInset();
 
-      await tester.tap(find.text('Message #general'));
+      await tester.tap(find.text('Message'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'one\ntwo\nthree\nfour');
       await tester.pumpAndSettle();
@@ -7643,7 +7656,7 @@ void main() {
           closeTo(tester.getTopLeft(composerDock).dy, 1),
         );
 
-        await tester.tap(find.text('Message #general'));
+        await tester.tap(find.text('Message'));
         for (var frame = 0; frame < 15; frame += 1) {
           await tester.pump(const Duration(milliseconds: 16));
           expect(
@@ -7658,7 +7671,9 @@ void main() {
 
         expect(
           tester.getSize(composerDock).height,
-          greaterThan(compactDockHeight),
+          defaultTargetPlatform == TargetPlatform.iOS
+              ? equals(compactDockHeight)
+              : greaterThan(compactDockHeight),
         );
         expect(
           tester.getBottomLeft(latestMessage).dy,
@@ -7698,7 +7713,41 @@ void main() {
           find.byKey(const ValueKey('channel-jump-to-latest')),
           findsNothing,
         );
+        if (defaultTargetPlatform == TargetPlatform.iOS) {
+          final originalBottom = tester.getBottomLeft(latestMessage).dy;
+          tester
+              .widget<IosGlassNavigationButton>(
+                find.byWidgetPredicate(
+                  (widget) =>
+                      widget is IosGlassNavigationButton &&
+                      widget.semanticLabel == 'Add attachment',
+                ),
+              )
+              .onPressed!();
+          await tester.pump();
+          for (var frame = 0; frame < 14; frame++) {
+            await tester.pump(const Duration(milliseconds: 16));
+            expect(
+              tester.getBottomLeft(latestMessage).dy,
+              closeTo(originalBottom, 1),
+              reason:
+                  'Opening the native attachment menu must not shift the followed messages.',
+            );
+          }
+          await tester.tap(find.byType(TextField).first);
+          for (var frame = 0; frame < 14; frame++) {
+            await tester.pump(const Duration(milliseconds: 16));
+            expect(
+              tester.getBottomLeft(latestMessage).dy,
+              closeTo(originalBottom, 1),
+            );
+          }
+        }
       },
+      variant: TargetPlatformVariant({
+        TargetPlatform.android,
+        TargetPlatform.iOS,
+      }),
     );
 
     testWidgets(
@@ -7790,7 +7839,7 @@ void main() {
       );
       final composerDock = find.byKey(const ValueKey('channel-composer-dock'));
 
-      await tester.tap(find.text('Message #general'));
+      await tester.tap(find.text('Message'));
       await tester.pumpAndSettle();
 
       expect(
@@ -8302,7 +8351,7 @@ void main() {
           );
           await tester.pumpAndSettle();
 
-          await tester.tap(find.text('Message #general'));
+          await tester.tap(find.text('Message'));
           await tester.pump();
           tester.view.viewInsets = const FakeViewPadding(bottom: 300);
           await tester.pump();
@@ -8431,7 +8480,7 @@ void main() {
           final collapsedGap = latestGap();
           expect(collapsedGap, closeTo(Grid.xs, 0.5));
 
-          await tester.tap(find.text('Message #general'));
+          await tester.tap(find.text('Message'));
           await tester.pump();
           await tester.pump();
           tester.view.viewInsets = const FakeViewPadding(bottom: 300);
@@ -9819,6 +9868,233 @@ void main() {
       },
     );
 
+    testWidgets(
+      'keeps a record-only Huddle agent in the roster without audio',
+      (tester) async {
+        // After relay PR #8494 an agent without NIP-OA joins with role
+        // `member`. After admission the roster shows audio peers plus agents,
+        // so a record-only agent that is not on audio must still appear.
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final transport = _HuddleTestTransport(
+          peers: const {1: HuddlePeer(pubkey: 'self', peerIndex: 1, epoch: 0)},
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'record-only-quiet-agent-call',
+                kind: EventKind.huddleStarted,
+                pubkey: 'self',
+                createdAt: now,
+              ),
+            ],
+            users: const {
+              'agent': UserProfile(pubkey: 'agent', displayName: 'Pollen'),
+              'person': UserProfile(pubkey: 'person', displayName: 'Away'),
+              'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+            },
+            huddleMembers: [
+              ChannelMember(
+                pubkey: 'agent',
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+              ChannelMember(
+                pubkey: 'person',
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+            ],
+            huddleRecordAgentPubkeys: const {'agent'},
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: _HuddleTestMedia.new,
+            huddleTransportFactory: (_) => transport,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+        await tester.pumpAndSettle();
+
+        AvatarImage avatarIn(Finder owner) => tester.widget<AvatarImage>(
+          find.descendant(of: owner, matching: find.byType(AvatarImage)),
+        );
+        final agentAvatar = find.byKey(
+          const ValueKey('huddle-participant-avatar-agent'),
+        );
+        expect(agentAvatar, findsOneWidget);
+        // The record makes it an agent, so it renders as one too.
+        expect(avatarIn(agentAvatar).isAgent, isTrue);
+        expect(
+          avatarIn(
+            find.byKey(const ValueKey('huddle-participant-avatar-self')),
+          ).isAgent,
+          isFalse,
+        );
+        // A person who is not on audio is not in the roster after admission.
+        expect(
+          find.byKey(const ValueKey('huddle-participant-avatar-person')),
+          findsNothing,
+        );
+
+        await tester.tap(agentAvatar);
+        await tester.pumpAndSettle();
+        expect(
+          avatarIn(
+            find.byKey(
+              const ValueKey('huddle-participant-spotlight-avatar-agent'),
+            ),
+          ).isAgent,
+          isTrue,
+        );
+      },
+    );
+
+    testWidgets(
+      'keeps a record-only Huddle agent after minimize and a failed record read',
+      (tester) async {
+        // Minimizing pops the call page. The agents read before that must
+        // still apply when the call returns while records cannot be read.
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final transport = _HuddleTestTransport(
+          peers: const {1: HuddlePeer(pubkey: 'self', peerIndex: 1, epoch: 0)},
+        );
+        var recordReadFails = false;
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'record-only-minimized-agent-call',
+                kind: EventKind.huddleStarted,
+                pubkey: 'self',
+                createdAt: now,
+              ),
+            ],
+            users: const {
+              'agent': UserProfile(pubkey: 'agent', displayName: 'Pollen'),
+              'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+            },
+            huddleMembers: [
+              ChannelMember(
+                pubkey: 'agent',
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+            ],
+            readHuddleRecordAgentPubkeys: () {
+              if (recordReadFails) throw StateError('records not read');
+              return const {'agent'};
+            },
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: _HuddleTestMedia.new,
+            huddleTransportFactory: (_) => transport,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+        await tester.pumpAndSettle();
+        final agentAvatar = find.byKey(
+          const ValueKey('huddle-participant-avatar-agent'),
+        );
+        expect(agentAvatar, findsOneWidget);
+
+        await tester.tap(find.byKey(const ValueKey('huddle-minimize')));
+        await tester.pumpAndSettle();
+        recordReadFails = true;
+        ProviderScope.containerOf(
+          tester.element(find.byType(MobileHuddleShell)),
+        ).invalidate(huddleManagedAgentRecordPubkeysProvider(_huddleChannelId));
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byKey(const ValueKey('huddle-drawer-expand')));
+        await tester.pumpAndSettle();
+        expect(agentAvatar, findsOneWidget);
+        expect(
+          tester
+              .widget<AvatarImage>(
+                find.descendant(
+                  of: agentAvatar,
+                  matching: find.byType(AvatarImage),
+                ),
+              )
+              .isAgent,
+          isTrue,
+        );
+      },
+    );
+
+    testWidgets(
+      'shows preparing indicator for a Huddle agent known only by its record',
+      (tester) async {
+        // After relay PR #8494 an agent without NIP-OA joins with role
+        // `member`. A managed-agent record from a trusted author still makes
+        // it an agent in the Huddle.
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final typing = _FakeTypingNotifier([
+          TypingEntry(
+            pubkey: 'agent',
+            expiresAtMs: DateTime.now().millisecondsSinceEpoch + 8000,
+          ),
+        ], channelId: _huddleChannelId);
+        final transport = _HuddleTestTransport(
+          peers: const {
+            1: HuddlePeer(pubkey: 'self', peerIndex: 1, epoch: 0),
+            2: HuddlePeer(pubkey: 'agent', peerIndex: 2, epoch: 0),
+          },
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'record-only-working-agent-call',
+                kind: EventKind.huddleStarted,
+                pubkey: 'self',
+                createdAt: now,
+              ),
+            ],
+            users: const {
+              'agent': UserProfile(pubkey: 'agent', displayName: 'Pollen'),
+              'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+            },
+            huddleMembers: [
+              ChannelMember(
+                pubkey: 'agent',
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+            ],
+            huddleRecordAgentPubkeys: const {'agent'},
+            huddleTypingNotifier: typing,
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: _HuddleTestMedia.new,
+            huddleTransportFactory: (_) => transport,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        await tester.pump(const Duration(milliseconds: 200));
+
+        expect(
+          find.byKey(const ValueKey('huddle-agent-preparing-response-agent')),
+          findsOneWidget,
+        );
+        expect(
+          find.bySemanticsLabel('Pollen, preparing a response'),
+          findsOneWidget,
+        );
+      },
+    );
+
     testWidgets('does not revive response dots when typing follows audio', (
       tester,
     ) async {
@@ -11083,6 +11359,20 @@ void main() {
           ),
         );
         expect(membershipAgentRow, findsOneWidget);
+        // The `bot` role alone makes it an agent: no profile attestation or
+        // directory label is needed for the agent avatar.
+        AvatarImage rowAvatar(Finder row) => tester.widget<AvatarImage>(
+          find.descendant(of: row, matching: find.byType(AvatarImage)),
+        );
+        expect(rowAvatar(membershipAgentRow).isAgent, isTrue);
+        expect(
+          rowAvatar(
+            find.byKey(
+              const ValueKey('huddle-participant-roster-row-guest-23'),
+            ),
+          ).isAgent,
+          isFalse,
+        );
         await tester.tapAt(const Offset(8, 8));
         await tester.pumpAndSettle();
         expect(
@@ -14934,7 +15224,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Message #general'));
+      await tester.tap(find.byType(ComposeBar));
       await tester.pumpAndSettle();
       final editor = find.descendant(
         of: find.byType(ComposeBar),
@@ -14947,12 +15237,19 @@ void main() {
       ]) {
         await tester.enterText(editor, draft);
         await tester.pumpAndSettle();
-        await tester.tap(
-          find.descendant(
-            of: find.byType(ComposeBar),
-            matching: find.byIcon(BuzzIcons.arrowUp),
-          ),
-        );
+        if (defaultTargetPlatform == TargetPlatform.iOS) {
+          tester
+              .widget<IosGlassNavigationButton>(
+                find.byWidgetPredicate(
+                  (widget) =>
+                      widget is IosGlassNavigationButton &&
+                      widget.semanticLabel == 'Send',
+                ),
+              )
+              .onPressed!();
+        } else {
+          await tester.tap(find.byTooltip('Send'));
+        }
         await tester.pumpAndSettle();
         expect(tester.widget<TextField>(editor).controller!.text, isEmpty);
         expect(find.text('Not sent. Community changed.'), findsNothing);
@@ -15633,7 +15930,7 @@ void main() {
       expect(find.byType(TextField), findsNothing);
       expect(find.byIcon(BuzzIcons.arrowUp).hitTestable(), findsOneWidget);
 
-      await tester.tap(find.text('Message #general'));
+      await tester.tap(find.text('Message'));
       await tester.pumpAndSettle();
 
       expect(find.byType(TextField), findsOneWidget);
@@ -15644,7 +15941,7 @@ void main() {
       await tester.pumpWidget(_buildTestable(messages: []));
       await tester.pumpAndSettle();
 
-      expect(find.text('Message #general'), findsOneWidget);
+      expect(find.text('Message'), findsOneWidget);
     });
   });
 
@@ -15926,7 +16223,9 @@ void main() {
       expect(
         payload()['titleMaxWidth'],
         closeTo(
-          tester.getSize(find.byKey(const ValueKey('composer-surface'))).width *
+          tester
+                  .getSize(find.byKey(const ValueKey('ios-composer-controls')))
+                  .width *
               2 /
               3,
           0.5,
@@ -16160,7 +16459,9 @@ void main() {
       expect(
         payload['titleMaxWidth'],
         closeTo(
-          tester.getSize(find.byKey(const ValueKey('composer-surface'))).width *
+          tester
+                  .getSize(find.byKey(const ValueKey('ios-composer-controls')))
+                  .width *
               2 /
               3,
           0.5,

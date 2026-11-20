@@ -1962,6 +1962,17 @@ void wholeBlobLanes(SharedPreferences Function() prefs) {
       expect(names(), ['mine']);
     });
 
+    fakeAsyncTest('an emoji-only edit preserves the current section name', (
+      clock,
+    ) {
+      start(clock).createSection('Original');
+      final id = m.store.sections.single.id;
+      m.renameSection(id, 'Updated');
+      m.renameSection(id, null, icon: '🎨');
+      expect(m.store.sections.single.name, 'Updated');
+      expect(m.store.sections.single.icon, '🎨');
+    });
+
     fakeAsyncTest('OK before echo keeps a coherent cursor', (clock) {
       start(clock).createSection('mine');
       clock.elapse(const Duration(seconds: 5));
@@ -2018,7 +2029,8 @@ void wholeBlobLanes(SharedPreferences Function() prefs) {
       start(clock).createSection('mine');
       clock.elapse(const Duration(seconds: 5));
       final own = relay.published.single;
-      m.renameSection(m.store.sections.single.id, 'new-local');
+      m.renameSection(m.store.sections.single.id, 'new-local', icon: '🎨');
+      expect(m.store.sections.single.icon, '🎨');
       final loser = relay.event(
         'channel-sections',
         blob('loser'),
@@ -2083,7 +2095,8 @@ void wholeBlobLanes(SharedPreferences Function() prefs) {
       start(clock).createSection('mine');
       clock.elapse(const Duration(seconds: 5));
       expect(relay.published, hasLength(1));
-      m.renameSection(m.store.sections.single.id, 'new-local');
+      m.renameSection(m.store.sections.single.id, 'new-local', icon: '🎨');
+      expect(m.store.sections.single.icon, '🎨');
       relay.holdOk!.complete();
       relay.holdOk = null;
       clock.flushMicrotasks();

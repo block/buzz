@@ -1414,6 +1414,7 @@ dependencies = [
  "p256",
  "percent-encoding",
  "proptest",
+ "quick-xml 0.38.4",
  "rand 0.10.1",
  "reqwest 0.13.4",
  "rustls-pki-types",

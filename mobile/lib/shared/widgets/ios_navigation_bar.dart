@@ -16,6 +16,7 @@ import 'avatar_image.dart';
 import 'dm_header_portrait.dart';
 import 'dm_header_cluster.dart';
 import 'app_route_observer.dart';
+import 'bottom_up_page_route.dart';
 import 'ios_navigation_metrics.dart';
 export 'ios_navigation_metrics.dart';
 
@@ -577,6 +578,9 @@ class IosNavigationBar extends HookConsumerWidget {
       }
 
       void scheduleRestore() {
+        // The section sheet keeps Home visible at the same scroll depth. A
+        // second UIKit layout pass during its scrim fade disturbs the glass.
+        if (BottomUpPageRoute.hasRetainedControls(route)) return;
         // Restore at reveal and again after the covering route exits. Route
         // transforms can change UIKit's safe-area layout during transitions.
         // The initial didPopNext alone runs before that transform has settled.

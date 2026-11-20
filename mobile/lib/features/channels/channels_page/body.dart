@@ -258,11 +258,12 @@ class _SliverChannelsList extends HookConsumerWidget {
 
     var nextExpiry = 0;
     for (final MapEntry(key: id, value: key) in sectionKeyOf.entries) {
-      if (key == 'solo') continue;
       final group = sidebarGroupKey(key);
       if (filters?.store.modeFor(group) != ChannelFilterMode.active) continue;
       final evidence = ref.watch(channelFilterActivityProvider(id));
       activity[id] = evidence;
+      // Solo uses the same evidence and handles its own row expiry.
+      if (key == 'solo') continue;
       final at = evidence.asData?.value;
       if (at == null) continue;
       final expiry = at + filters!.store.windowFor(group);
@@ -383,8 +384,7 @@ class _SliverChannelsList extends HookConsumerWidget {
     }
 
     // Only the team sections record can be edited, and only until desktop's
-    // unified workspaces exist. Sorted as displayed, so Move up and Move down
-    // follow what the user sees, not storage order.
+    // unified workspaces exist. The mobile display order is stored separately.
     final teamSections = sectionsState.editable
         ? (sectionsState.store.sections.toList()
             ..sort((a, b) => a.order.compareTo(b.order)))
@@ -421,19 +421,21 @@ class _SliverChannelsList extends HookConsumerWidget {
     // section's ID when a Solo project shares that ID.
     _SectionEdits editsFor(ChannelSection section, String layoutId) => (
       onRename: () async {
-        final name = await showBuzzDialog<String>(
-          context: context,
-          builder: (_) => _SectionNameDialog(
-            title: 'Rename Section',
-            confirmLabel: 'Rename',
-            initialValue: section.name,
-          ),
-        );
-        if (name != null && name.isNotEmpty) {
-          ref
-              .read(channelSectionsProvider.notifier)
-              .renameSection(section.id, name);
+        final config = ref.read(relayConfigProvider);
+        final edit = await showSectionRenameEditor(context, section);
+        if (!context.mounted || edit == null) return;
+        final current = ref.read(relayConfigProvider);
+        if (current.storedOrigin != config.storedOrigin ||
+            current.nsec != config.nsec) {
+          return;
         }
+        ref
+            .read(channelSectionsProvider.notifier)
+            .renameSection(
+              section.id,
+              edit.name == section.name.trim() ? null : edit.name,
+              icon: edit.icon == section.icon ? null : edit.icon,
+            );
       },
       onDelete: () async {
         final confirmed = await showBuzzDialog<bool>(
@@ -481,11 +483,6 @@ class _SliverChannelsList extends HookConsumerWidget {
           }
         }
       },
-      onMoveUp: () =>
-          ref.read(channelSectionsProvider.notifier).moveSectionUp(section.id),
-      onMoveDown: () => ref
-          .read(channelSectionsProvider.notifier)
-          .moveSectionDown(section.id),
     );
 
     Widget? sectionFor(String key) {
@@ -532,8 +529,6 @@ class _SliverChannelsList extends HookConsumerWidget {
         isVisible: (c) => visible(group, c),
         buildRow: (c) => row(c, key),
         expanded: sectionExpanded(section.id),
-        isFirst: team == null || teamSections.first.id == team.id,
-        isLast: team == null || teamSections.last.id == team.id,
         onToggle: () => toggleSection(section.id),
         edits: team == null ? null : editsFor(team, section.id),
         sortMode: mode(),
@@ -541,44 +536,47 @@ class _SliverChannelsList extends HookConsumerWidget {
       );
     }
 
-    final sections = [for (final key in layout.sectionKeys) ?sectionFor(key)];
+    final keys = layout.sectionKeys.where((key) => key != 'forums').toList();
+    final orderKey = ref.watch(mobileSectionOrderKeyProvider);
+    final saved = orderKey == null
+        ? const <String>[]
+        : ref.watch(mobileSectionOrderProvider(orderKey)).value ??
+              const <String>[];
+    final labels = <String, String>{};
+    final sections = <Widget>[];
+    for (final key in resolveMobileSectionOrder(keys, saved)) {
+      final section = sectionFor(key);
+      if (section == null) continue;
+      sections.add(section);
+      labels[key] = switch (key) {
+        'starred' => 'Starred',
+        'solo' => 'Solo',
+        'channels' => 'Team',
+        'dms' => 'Direct messages',
+        _ => layout.section(key.substring(6))!.name,
+      };
+    }
     final empty = sectionKeyOf.isEmpty && layout.sections.isEmpty;
-
-    return SliverPadding(
-      padding: EdgeInsets.zero,
-      sliver: SliverMainAxisGroup(
-        slivers: [
-          if (activity.values.any((value) => value.hasError))
-            SliverToBoxAdapter(
-              child: ListTile(
-                title: const Text(
-                  'Some channel activity is unavailable. Channels remain visible.',
-                ),
-                trailing: TextButton(
-                  onPressed: () {
-                    for (final entry in activity.entries) {
-                      if (entry.value.hasError) {
-                        ref.invalidate(
-                          channelFilterActivityProvider(entry.key),
-                        );
-                      }
-                    }
-                  },
-                  child: const Text('Retry'),
-                ),
-              ),
-            ),
-          if (empty) ...[
-            ?soloSliver,
-            const SliverToBoxAdapter(child: _EmptyState()),
-          ] else
-            for (final (index, section) in sections.indexed) ...[
-              if (index > 0)
-                const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
-              section,
-            ],
-        ],
-      ),
+    final inventory = SliverMainAxisGroup(
+      slivers: [
+        if (empty) ...[
+          ?soloSliver,
+          const SliverToBoxAdapter(child: _EmptyState()),
+        ] else
+          for (final (index, section) in sections.indexed) ...[
+            if (index > 0)
+              const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
+            section,
+          ],
+      ],
+    );
+    final content = _ActivityRecovery(activity: activity, child: inventory);
+    if (orderKey == null) return content;
+    return SectionOrderScope(
+      labels: labels,
+      defaultOrder: keys,
+      storageKey: orderKey,
+      child: content,
     );
   }
 }

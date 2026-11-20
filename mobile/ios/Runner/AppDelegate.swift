@@ -329,6 +329,15 @@ import os.log
       )
     }
 
+    if let toolStripRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzComposerToolStripGlass"
+    ) {
+      toolStripRegistrar.register(
+        ComposerToolStripGlassFactory(messenger: toolStripRegistrar.messenger()),
+        withId: "buzz/composer_tool_strip_glass"
+      )
+    }
+
     if let stickyDateGlassRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzStickyDateGlassHeader"
     ) {
