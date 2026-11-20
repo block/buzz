@@ -1151,6 +1151,8 @@ mod tests {
         broken_kind: Option<u64>,
         /// Answer queries for this kind with HTTP 500.
         failing_kind: Option<u64>,
+        /// Hold kind:0 queries until the archive-list query has arrived.
+        profiles_after_archive: bool,
         /// NIP-11 document served at `/`.
         info: Value,
         /// Body of `POST /profiles/search`; `None` answers 404 like an older relay.
@@ -1171,6 +1173,18 @@ mod tests {
                     let held = relay.lock().unwrap().held_kind;
                     if held.is_some() && filters[0]["kinds"][0].as_u64() == held {
                         std::future::pending::<()>().await;
+                    }
+                    if filters[0]["kinds"][0] == 0 {
+                        while relay.lock().unwrap().profiles_after_archive
+                            && !relay
+                                .lock()
+                                .unwrap()
+                                .queries
+                                .iter()
+                                .any(|q| q["kinds"][0] == 13535)
+                        {
+                            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        }
                     }
                     let [filter] = filters.as_slice() else {
                         panic!("one filter expected: {filters:?}")
@@ -1725,6 +1739,24 @@ mod tests {
 
     #[tokio::test]
     async fn profile_errors_return_without_waiting_for_the_archive_read() {
+        // Rerun in a child process to read its stderr: no archive warning.
+        if std::env::var_os("BUZZ_USERS_STDERR_CHILD").is_none() {
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "commands::users::tests::profile_errors_return_without_waiting_for_the_archive_read",
+                    "--nocapture",
+                ])
+                .env("BUZZ_USERS_STDERR_CHILD", "1")
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success(), "{stdout}{stderr}");
+            assert!(stdout.contains("1 passed"), "{stdout}");
+            assert!(!stderr.contains("archived-identities"), "{stderr}");
+            return;
+        }
         let (client, relay) = setup().await;
         let relay_keys = Keys::generate();
         relay.lock().unwrap().info = json!({"self": relay_keys.public_key().to_hex()});
@@ -1745,6 +1777,36 @@ mod tests {
             assert!(result.is_err(), "{name:?}: {result:?}");
             assert!(started.elapsed() < ARCHIVE_READ_DEADLINE / 2, "{name:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn name_search_reads_the_archive_list_alongside_the_profiles() {
+        let (client, relay) = setup().await;
+        let relay_keys = Keys::generate();
+        let (old, new) = (Keys::generate(), Keys::generate());
+        relay.lock().unwrap().info = json!({"self": relay_keys.public_key().to_hex()});
+        seed_profile(&relay, &old, r#"{"name":"Alice Old"}"#);
+        seed_profile(&relay, &new, r#"{"name":"Alice New"}"#);
+        seed_archive_list(&relay, &relay_keys, &[&old]);
+        // The profile search answers only once the archive read has started.
+        relay.lock().unwrap().profiles_after_archive = true;
+        let raw = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            get_users_output(
+                &client,
+                &[],
+                Some("alice"),
+                None,
+                false,
+                &crate::OutputFormat::Json,
+            ),
+        )
+        .await
+        .expect("archive read starts before the profile search finishes")
+        .unwrap();
+        let rows: Vec<Value> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["pubkey"], new.public_key().to_hex());
     }
 
     #[tokio::test]
