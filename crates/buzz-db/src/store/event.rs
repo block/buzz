@@ -2989,8 +2989,13 @@ impl Db {
     /// resending a deletion repairs a target an earlier write left live. Ingest
     /// accepts the resend only within its timestamp window, so this does not
     /// repair older rows.
-    /// Returns `(StoredEvent, was_inserted, deleted)`, where `deleted[i]`
-    /// tells whether `targets[i]` was soft-deleted by this call.
+    ///
+    /// A target that is pinned leaves its channel's NIP-PM pin list in the
+    /// same transaction; the list is re-signed with `relay_signer`.
+    ///
+    /// Returns `(StoredEvent, was_inserted, deleted, pin_lists)`, where
+    /// `deleted[i]` tells whether `targets[i]` was soft-deleted by this call
+    /// and `pin_lists` holds each pin list this call rewrote.
     #[datastore_span(name = "insert_deletion_event", system = "postgresql")]
     pub async fn insert_deletion_event(
         &self,
@@ -2999,7 +3004,8 @@ impl Db {
         channel_id: Option<Uuid>,
         thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
         targets: &[crate::event::DeletionTarget<'_>],
-    ) -> Result<(StoredEvent, bool, Vec<bool>)> {
+        relay_signer: &nostr::Keys,
+    ) -> Result<(StoredEvent, bool, Vec<bool>, Vec<StoredEvent>)> {
         let mut tx = crate::begin_community_event_write_transaction(
             &self.pool,
             community_id,
@@ -3018,8 +3024,9 @@ impl Db {
             crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
         }
         let mut deleted = Vec::with_capacity(targets.len());
+        let mut messages = Vec::new();
         for target in targets {
-            deleted.push(
+            let (was_deleted, channel_id) =
                 crate::event::soft_delete_event_and_update_thread_in_tx(
                     &mut tx,
                     target.event_id,
@@ -3027,11 +3034,14 @@ impl Db {
                     target.parent_event_id,
                     target.root_event_id,
                 )
-                .await?,
-            );
+                .await?;
+            deleted.push(was_deleted);
+            messages.extend(channel_id.map(|channel_id| (channel_id, target.event_id)));
         }
+        let pin_lists =
+            crate::pins::unpin_deleted_messages(&mut tx, &messages, relay_signer).await?;
         tx.commit().await?;
-        Ok((stored, inserted, deleted))
+        Ok((stored, inserted, deleted, pin_lists))
     }
 
     /// Soft-delete NIP-29 discovery events for a channel created by a specific relay pubkey.
@@ -7291,7 +7301,14 @@ mod postgres_tests {
         .expect("install failure injection");
 
         let error = db
-            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+            .insert_deletion_event(
+                community,
+                &deletion,
+                Some(channel),
+                None,
+                &targets,
+                &nostr::Keys::generate(),
+            )
             .await
             .expect_err("a failed target soft-delete must fail the deletion");
         assert!(
@@ -7314,8 +7331,15 @@ mod postgres_tests {
             .execute(&pool)
             .await
             .expect("remove failure injection");
-        let (_, inserted, deleted) = db
-            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+        let (_, inserted, deleted, _) = db
+            .insert_deletion_event(
+                community,
+                &deletion,
+                Some(channel),
+                None,
+                &targets,
+                &nostr::Keys::generate(),
+            )
             .await
             .expect("resend after the failure clears");
         assert!(inserted, "the resend stores the deletion");
@@ -7353,8 +7377,15 @@ mod postgres_tests {
             root_event_id: None,
         }];
 
-        let (_, inserted, deleted) = db
-            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+        let (_, inserted, deleted, _) = db
+            .insert_deletion_event(
+                community,
+                &deletion,
+                Some(channel),
+                None,
+                &targets,
+                &nostr::Keys::generate(),
+            )
             .await
             .expect("resend the deletion");
         assert!(!inserted, "the deletion was already stored");
@@ -7369,8 +7400,15 @@ mod postgres_tests {
                 .is_some()
         );
 
-        let (_, inserted, deleted) = db
-            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+        let (_, inserted, deleted, _) = db
+            .insert_deletion_event(
+                community,
+                &deletion,
+                Some(channel),
+                None,
+                &targets,
+                &nostr::Keys::generate(),
+            )
             .await
             .expect("resend again");
         assert!(!inserted);

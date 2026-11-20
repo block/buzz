@@ -388,8 +388,11 @@ class BuilderlabAccountClient {
 
   /// Public identity metadata only. Private-key recovery belongs to the identity
   /// storage owner, which must derive and verify the key before any persistence.
-  Future<Map<String, dynamic>> currentIdentity() =>
-      post('/v1/buzz/nostr-identities/current', {});
+  ///
+  /// [signer] is the key a community is asking for, when that may not be the
+  /// active member's: a bad reply is then reported only while reports name it.
+  Future<Map<String, dynamic>> currentIdentity({String? signer}) =>
+      post('/v1/buzz/nostr-identities/current', {}, signer: signer);
 
   /// Saves a successfully admitted destination to the same account, even if
   /// another session operation was queued before this request runs.
@@ -425,12 +428,14 @@ class BuilderlabAccountClient {
     String path,
     Map<String, dynamic> body, {
     String? expectedSubject,
-  }) => _post(path, body, expectedSubject: expectedSubject);
+    String? signer,
+  }) => _post(path, body, expectedSubject: expectedSubject, signer: signer);
 
   Future<Map<String, dynamic>> _post(
     String path,
     Map<String, dynamic> body, {
     String? signingKey,
+    String? signer,
     String? expectedSubject,
   }) {
     if (!RegExp(r'^/v1/buzz(/[a-z0-9_-]+)+$').hasMatch(path) &&
@@ -455,6 +460,7 @@ class BuilderlabAccountClient {
           credential: credential,
           body: body,
           signingKey: signingKey,
+          signer: signer,
         );
       } on AccountFailure catch (failure) {
         if (failure == AccountFailure.denied &&
@@ -503,6 +509,7 @@ class BuilderlabAccountClient {
         }
         final pubkey = AccountIdentityStore.publicKeyForNsec(nsec);
         // Never creates a binding: the key must already belong to the account.
+        // Gated on [pubkey]: the community may be removed, not the active one.
         final current = await _request(
           '/v1/buzz/nostr-identities/current',
           credential: signedOut.credential,

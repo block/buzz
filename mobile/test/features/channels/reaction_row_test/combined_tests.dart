@@ -67,7 +67,7 @@ void combinedReactionTests() {
               messageId: message.id,
               channelId: 'channel',
               reactions: message.reactions,
-              onToggle: (emoji) => toggleReaction(ref, message, emoji),
+              onToggle: (emoji) => toggleReaction(context, ref, message, emoji),
             ),
           ),
         ),
@@ -294,6 +294,117 @@ void combinedReactionTests() {
     completion.complete({'action': 'addReaction'});
     await tester.pumpAndSettle();
     expect(added, 1);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  Future<void> pumpFailingTray(WidgetTester tester) async {
+    final message = TimelineMessage(
+      id: _messageId,
+      pubkey: _alice,
+      createdAt: 1,
+      content: '',
+      reactions: [
+        TimelineReaction(
+          emoji: _fire,
+          count: 1,
+          reactedByCurrentUser: true,
+          currentUserReactionId: 'own-reaction',
+          userPubkeys: const [_alice],
+        ),
+      ],
+    );
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          channelActionsProvider.overrideWithValue(
+            _FailingReactionActions(RelayNotConnectedError()),
+          ),
+          userCacheProvider.overrideWith(() => _FakeUserCacheNotifier({})),
+        ],
+        child: Consumer(
+          builder: (context, ref, _) => ReactionRow(
+            combined: true,
+            messageId: message.id,
+            channelId: 'channel',
+            reactions: message.reactions,
+            onToggle: (emoji) => toggleReaction(context, ref, message, emoji),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('a failed toggle in the details sheet shows above the sheet', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await pumpFailingTray(tester);
+    await tester.tap(find.byKey(const ValueKey('combined-reaction-tray')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('reaction-toggle-$_fire')));
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey('reaction-details-sheet')),
+      findsOneWidget,
+    );
+    // A page snackbar would sit in the Scaffold, under the sheet's route.
+    final notice = find.text('Couldn’t remove reaction. No connection.');
+    expect(notice, findsOneWidget);
+    expect(
+      find.ancestor(of: notice, matching: find.byType(Scaffold)),
+      findsNothing,
+    );
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('a failed toggle in the native sheet shows on that sheet', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final completion = Completer<Map<String, Object?>>();
+    Object? requestId;
+    final notices = <Map<Object?, Object?>>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      NativeMessagePresentation.channel,
+      (call) async {
+        final data = call.arguments as Map<Object?, Object?>;
+        if (call.method == 'reactions') {
+          requestId = data['requestId'];
+          return completion.future;
+        }
+        if (call.method == 'notice') notices.add(data);
+        return <String, Object?>{};
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        null,
+      ),
+    );
+    await pumpFailingTray(tester);
+    await tester.tap(find.byKey(const ValueKey('combined-reaction-tray')));
+    await tester.pump();
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      NativeMessagePresentation.channel.name,
+      const StandardMethodCodec().encodeMethodCall(
+        MethodCall('toggleReaction', {'requestId': requestId, 'emoji': _fire}),
+      ),
+      (_) {},
+    );
+    await tester.pump();
+    expect(notices, [
+      {
+        'requestId': requestId,
+        'message': 'Couldn’t remove reaction. No connection.',
+      },
+    ]);
+    expect(find.text('Couldn’t remove reaction. No connection.'), findsNothing);
+    completion.complete(<String, Object?>{});
+    await tester.pumpAndSettle();
     debugDefaultTargetPlatformOverride = null;
   });
 }

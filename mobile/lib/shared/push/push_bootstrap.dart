@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../community/community.dart';
 import '../community/community_provider.dart';
+import '../diagnostics/diagnostic_reporter.dart';
 import '../relay/relay_provider.dart';
 import '../relay/relay_session.dart';
 import '../relay/signed_event_relay.dart';
@@ -559,6 +560,12 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
       Env.pushGatewayUrl,
       communitiesForSnapshotRefresh:
           ref.read(communityListProvider).value ?? [community],
+      // Enrollment can finish after a community switch, when reports already
+      // name the next member.
+      diagnostics: SignerDiagnosticReporter(
+        ref.read(diagnosticReporterProvider),
+        signer: memberPubkey,
+      ),
     );
     // Relay lease replacement and gateway delegation are independent state
     // machines. Subscription changes advance only the kind-30350 generation;

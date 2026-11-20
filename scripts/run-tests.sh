@@ -580,9 +580,10 @@ run_unit_tests() {
   run_test_step "buzz-relay boot lifecycle tests" \
     cargo test -p buzz-relay --test boot_lifecycle -- --nocapture
 
-  # Load generator unit tests are infra-free. Keep in step with `just test-unit`.
-  run_test_step "buzz-test-client loadgen unit tests" \
-    cargo test -p buzz-test-client --lib loadgen:: -- --nocapture
+  # Load generator and acceptance probe unit tests are infra-free. Keep in
+  # step with `just test-unit`.
+  run_test_step "buzz-test-client loadgen and acceptance unit tests" \
+    cargo test -p buzz-test-client --lib -- --nocapture loadgen:: acceptance::
 }
 
 # ---- DB / integration tests (infra required) --------------------------------
