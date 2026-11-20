@@ -68,6 +68,7 @@ class _ChannelActivity {
       if (failedIds.contains(channel.id)) continue;
       covered.add(channel.id);
       _known.add(channel.id);
+      _catchUpFailed.remove(channel.id);
       if (sentAt != null) _coveredAt[channel.id] = sentAt;
       // Without its arrivals (dropped), only raise, as a live event would.
       if (arrivals == null) continue;

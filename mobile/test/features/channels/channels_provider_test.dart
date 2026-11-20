@@ -2674,6 +2674,33 @@ void main() {
     await reconnect();
     expect(notifier.activityFor(_channelA).at, offline.createdAt);
 
+    // A failed gap read leaves activity unknown but keeps the unread post the
+    // catch-up returned.
+    final mention = NostrEvent(
+      id: 'mention',
+      pubkey: 'alice',
+      createdAt: now - 5,
+      kind: EventKind.streamMessageV2,
+      tags: const [
+        ['h', _channelA],
+        ['p', myPk],
+      ],
+      content: 'hey',
+      sig: 'sig',
+    );
+    session.recentMessages = [old, offline, mention];
+    (container.read(readStateProvider.notifier) as _ActivityReadState)
+        .markReadThrough(_channelA, now - 8);
+    session.gapBatchError = RelayException(503, '{"error":"query timed out"}');
+    await reconnect();
+    await _waitUntil(() => !notifier.activityFor(_channelA).known);
+    expect(
+      notifier.observedUnreadEventsByChannel[_channelA]?.keys,
+      contains(mention.id),
+    );
+    session.gapBatchError = null;
+    session.recentMessages = [old, offline];
+
     // A failed catch-up leaves activity unknown until one succeeds.
     session.messageBatchError = RelayException(
       503,
@@ -2723,6 +2750,15 @@ void main() {
     gate.complete();
     await refreshing;
     expect(notifier.activityFor(_channelA).at, live.createdAt);
+
+    // So does a catch-up that fails before it sends anything.
+    final readState =
+        container.read(readStateProvider.notifier) as _ActivityReadState;
+    readState.unavailable = true;
+    container.invalidate(readStateProvider);
+    session.setStatus(SessionStatus.reconnecting);
+    session.setStatus(SessionStatus.connected);
+    await _waitUntil(() => !notifier.activityFor(_channelA).known);
   });
 
   test('live channel events update channel lastMessageAt', () async {
@@ -4242,6 +4278,8 @@ class _FakeRelaySession extends RelaySessionNotifier {
   Completer<void>? latestBatchGate;
   final List<List<NostrFilter>> queryBatches = [];
   Object? messageBatchError;
+  // Fails batches made only of the catch-up's activity gap reads.
+  Object? gapBatchError;
   Object? latestBatchError;
   Object? messageHistoryError;
   int messageHistoryCount = 0;
@@ -4633,6 +4671,11 @@ class _FakeRelaySession extends RelaySessionNotifier {
       throw RelayException(400, '{"error":"too many explicit channels"}');
     }
     if (messageBatchError case final error?) throw error;
+    if (gapBatchError case final error?
+        when filters.isNotEmpty &&
+            filters.every((f) => f.until != null && f.limit == 1)) {
+      throw error;
+    }
     // The unread catch-up is the only batch that carries `since` on every
     // filter; the latest-message batch leaves it null. Snapshot the messages at
     // request time so a parked response reflects the scope that asked for it.
@@ -4852,8 +4895,13 @@ class _BridgeDownRelaySession extends _FakeRelaySession {
 }
 
 class _ActivityReadState extends ReadStateNotifier {
+  bool unavailable = false;
+
   @override
-  ReadStateState build() => const ReadStateState.inert();
+  ReadStateState build() {
+    if (unavailable) throw StateError('read state unavailable');
+    return const ReadStateState.inert();
+  }
 
   void markReadThrough(String channelId, int at) =>
       state = state.copyWithContext(channelId, at);
