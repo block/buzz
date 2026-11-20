@@ -90,6 +90,7 @@ void main() {
       'https://gateway.example/',
       relayOrigin: 'wss://relay.example',
       relayPubkey: 'a' * 64,
+      desiredRelays: () => {'wss://relay.example'},
     ))!;
 
     expect(grant.relayOrigin, 'wss://relay.example');
@@ -120,6 +121,7 @@ void main() {
         'https://gateway.example/',
         relayOrigin: 'wss://relay.example',
         relayPubkey: 'a' * 64,
+        desiredRelays: () => {'wss://relay.example'},
       ),
       throwsA(isA<AndroidPushAttestationUnavailable>()),
     );
@@ -136,6 +138,7 @@ void main() {
         'https://gateway.example/',
         relayOrigin: 'wss://relay.example',
         relayPubkey: 'a' * 64,
+        desiredRelays: () => {'wss://relay.example'},
       ),
       throwsStateError,
     );

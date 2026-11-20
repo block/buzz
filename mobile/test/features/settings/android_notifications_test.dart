@@ -67,6 +67,7 @@ void main() {
           ),
         ];
         final session = _Connected();
+        var advertised = _descriptor;
         final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
         final gateway = FakePushGateway(nowSeconds: () => now);
         debugAndroidPushAuthority = AndroidPushAuthority(
@@ -126,7 +127,7 @@ void main() {
               relaySessionProvider.overrideWith(() => session),
               myPubkeyProvider.overrideWithValue(nostr.Keys('1' * 64).public),
               buzzPushDescriptorFetcherProvider.overrideWithValue(
-                (_) async => _descriptor,
+                (_) async => advertised,
               ),
               appLifecycleProvider.overrideWith(_Lifecycle.new),
             ],
@@ -156,6 +157,22 @@ void main() {
           expect(gateway.installations, hasLength(1));
           expect(session.leases.last['active'], isTrue);
           expect(session.leases.last['endpoint'], isNotEmpty);
+
+          // The relay reconnects advertising a new executor key: the old key's
+          // delegation is revoked while push stays on, and the lease carries a
+          // grant for the new key.
+          final oldExecutor = _descriptor.executorPubkey;
+          final newExecutor = nostr.Keys('3' * 64).public;
+          advertised = _descriptorFor(newExecutor);
+          session.executorSecret = '3' * 64;
+          final installationBefore = gateway.installations.values.single;
+          session.setStatus(SessionStatus.reconnecting);
+          await tester.pumpAndSettle();
+          session.setStatus(SessionStatus.connected);
+          await tester.pumpAndSettle();
+          expect(installationBefore.revokedDelegations, {'$oldExecutor/1'});
+          expect(installationBefore.delegations, contains(newExecutor));
+          expect(session.leases.last['endpoint'], contains(newExecutor));
 
           // Turning push off keeps the installation: the community remains.
           // Removing that community afterwards is what revokes it.
@@ -419,6 +436,7 @@ class _Auth extends AuthNotifier {
 
 class _Connected extends RelaySessionNotifier {
   final leases = <Map<String, dynamic>>[];
+  String executorSecret = '2' * 64;
 
   @override
   Future<NostrEvent> publish(
@@ -428,7 +446,7 @@ class _Connected extends RelaySessionNotifier {
   }) async {
     expect(event.kind, buzzPushLeaseKind);
     final plaintext = nip44Decrypt(
-      getConversationKey('2' * 64, event.pubkey),
+      getConversationKey(executorSecret, event.pubkey),
       event.content,
     );
     leases.add(jsonDecode(plaintext) as Map<String, dynamic>);
@@ -441,14 +459,17 @@ class _Connected extends RelaySessionNotifier {
   SessionState build() => const SessionState(status: SessionStatus.connected);
 }
 
-final _descriptor = BuzzPushLeaseDescriptor(
-  origin: 'wss://relay.example',
-  executorKeyId: 'relay-v1',
-  executorPubkey: nostr.Keys('2' * 64).public,
-  transport: 'apns',
-  maxLeaseTtlSeconds: 3600,
-  maxContentLength: 4096,
-  maxPlaintextLength: 4096,
-  maxEndpointLength: 2048,
-  maxStringLength: 512,
-);
+final _descriptor = _descriptorFor(nostr.Keys('2' * 64).public);
+
+BuzzPushLeaseDescriptor _descriptorFor(String executorPubkey) =>
+    BuzzPushLeaseDescriptor(
+      origin: 'wss://relay.example',
+      executorKeyId: 'relay-v1',
+      executorPubkey: executorPubkey,
+      transport: 'apns',
+      maxLeaseTtlSeconds: 3600,
+      maxContentLength: 4096,
+      maxPlaintextLength: 4096,
+      maxEndpointLength: 2048,
+      maxStringLength: 512,
+    );

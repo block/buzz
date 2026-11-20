@@ -492,9 +492,7 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
         unawaited(() async {
           try {
             await reconcileBuzzPushAuthority(
-              desiredRelays: () => _pushRelayOrigins(
-                ref.read(communityListProvider).value ?? const [],
-              ),
+              desiredRelays: () => _desiredPushRelays(ref),
               noCommunities: () =>
                   (ref.read(communityListProvider).value ?? const []).isEmpty,
             );
@@ -660,6 +658,7 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
           ref.read(communityListProvider).value ?? [community],
       relayOrigin: descriptor.origin,
       relayPubkey: descriptor.executorPubkey,
+      desiredRelays: () => _desiredPushRelays(ref),
       stillWanted: stillWanted,
       // Enrollment can finish after a community switch, when reports already
       // name the next member.
@@ -695,6 +694,9 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     return grant;
   }
 }
+
+Set<String> _desiredPushRelays(WidgetRef ref) =>
+    _pushRelayOrigins(ref.read(communityListProvider).value ?? const []);
 
 /// The relays of the communities whose push is on, as grants name them. A
 /// relay URL with no origin (a path, say) never had a grant, so it names none.

@@ -147,11 +147,17 @@ class AndroidPushAuthority {
   /// that creates authority, so an opt-out that lands while this waited its
   /// turn or the enrollment jitter leaves nothing behind. Returns null when it
   /// said no.
+  ///
+  /// Once the origin points at [relayPubkey], delegations that no relay in
+  /// [desiredRelays] points at are revoked, so a relay that rotated its
+  /// executor key does not leave the old key delegated. A failure propagates:
+  /// the caller retries, which reuses the new grant and sweeps again.
   Future<AndroidPushGrant?> enroll({
     required String relayOrigin,
     required String relayPubkey,
     required String endpoint,
     required bool Function() stillWanted,
+    required Set<String> Function() desiredRelays,
   }) => _serialized(() async {
     await _dropForeignGateway();
     var retriedDelegation = false;
@@ -185,7 +191,9 @@ class AndroidPushAuthority {
             continue;
           }
         }
-        return await _pointOrigin(relayOrigin, relayPubkey);
+        final grant = await _pointOrigin(relayOrigin, relayPubkey);
+        await _revokeUnreferencedDelegations(desiredRelays());
+        return grant;
       }
     } on _EnrollmentNoLongerWanted {
       return null;
@@ -211,7 +219,14 @@ class AndroidPushAuthority {
       state = await _load();
     }
     if (state.installation == null) return;
-    final desired = desiredRelays();
+    await _revokeUnreferencedDelegations(desiredRelays());
+    if (revokeInstallation()) await _revokeInstallation();
+  });
+
+  /// Revokes every delegated executor key that no origin in [desired] points
+  /// at. Needs an installation.
+  Future<void> _revokeUnreferencedDelegations(Set<String> desired) async {
+    final state = await _load();
     final referenced = {
       for (final origin in state.origins.values)
         if (desired.contains(origin.origin)) origin.pubkey,
@@ -221,8 +236,7 @@ class AndroidPushAuthority {
         await _revokeDelegation(delegation);
       }
     }
-    if (revokeInstallation()) await _revokeInstallation();
-  });
+  }
 
   void _fence(bool Function() stillWanted) {
     if (!stillWanted()) throw const _EnrollmentNoLongerWanted();

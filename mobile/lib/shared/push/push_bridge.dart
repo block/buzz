@@ -403,6 +403,9 @@ bool _wanted() => true;
 /// needs the relay's [relayOrigin] and push key [relayPubkey] from its
 /// descriptor, where iOS native code fetches them itself.
 ///
+/// [desiredRelays] (Android) are the relay origins whose push is on, which
+/// enrollment uses to revoke delegations no relay points at any more.
+///
 /// [stillWanted] says whether the community still wants push. It is read before
 /// each call that creates authority, and the result is null once it said no.
 Future<BuzzPushEndpointGrant?> enrollBuzzPush(
@@ -411,13 +414,17 @@ Future<BuzzPushEndpointGrant?> enrollBuzzPush(
   List<Community>? communitiesForSnapshotRefresh,
   String? relayOrigin,
   String? relayPubkey,
+  Set<String> Function()? desiredRelays,
   bool Function() stillWanted = _wanted,
   DiagnosticReporter diagnostics = const NoopDiagnosticReporter(),
 }) async {
   final BuzzPushEndpointGrant grant;
   if (defaultTargetPlatform == TargetPlatform.android) {
     final token = fcmDeviceToken.value;
-    if (token == null || relayOrigin == null || relayPubkey == null) {
+    if (token == null ||
+        relayOrigin == null ||
+        relayPubkey == null ||
+        desiredRelays == null) {
       throw StateError('Android push enrollment needs a token and a relay.');
     }
     final AndroidPushGrant? enrolled;
@@ -427,6 +434,7 @@ Future<BuzzPushEndpointGrant?> enrollBuzzPush(
         relayPubkey: relayPubkey,
         endpoint: token,
         stillWanted: stillWanted,
+        desiredRelays: desiredRelays,
       );
     } on AndroidPushAttestationUnavailable catch (error) {
       pushUnavailableReason.value = error.reason;

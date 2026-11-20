@@ -57,6 +57,7 @@ void main() {
     relayPubkey: pubkey ?? (relay == _relayA ? _keyA : _keyB),
     endpoint: token,
     stillWanted: () => true,
+    desiredRelays: () => {_relayA, _relayB},
   ))!;
 
   test('first enrollment, a second relay, reuse and renewal', () async {
@@ -487,6 +488,7 @@ void main() {
         relayPubkey: _keyA,
         endpoint: 'token-1',
         stillWanted: () => wanted,
+        desiredRelays: () => {_relayA},
       );
       await pumpEventQueue();
       wanted = false;
@@ -506,6 +508,7 @@ void main() {
       endpoint: 'token-1',
       // Wanted until the installation exists.
       stillWanted: () => gateway.installations.isEmpty,
+      desiredRelays: () => {_relayA},
     );
 
     expect(await enrolling, isNull);
