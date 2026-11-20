@@ -255,6 +255,28 @@ void main() {
         'StateError',
         "wanted List<String?> or (int?, String?), got 'int?'",
       ),
+      (
+        'a bad state naming providers',
+        StateError(
+          'The provider `NotifierProvider<Foo, Bar>#1a2b3` depends on '
+          '`Provider<Baz?>#c0ffe`, which may be scoped.',
+        ),
+        'StateError',
+        'The provider `NotifierProvider<Foo, Bar>` depends on '
+            '`Provider<Baz?>`, which may be scoped.',
+      ),
+      (
+        'a render box that was not laid out',
+        StateError('RenderBox was not laid out: RenderFlex#1a2b3'),
+        'StateError',
+        'RenderBox was not laid out: RenderFlex',
+      ),
+      (
+        'a bad state quoting a null-aware condition',
+        StateError("'(link ?? false) || linkUrl == null': is it null? no."),
+        'StateError',
+        "'(link ?? false) || linkUrl == null': is it null? no.",
+      ),
       ('a failed cast', _failedCast(), 'TypeError', 'is not a subtype of'),
     ];
     for (final (name, error, type, text) in kept) {
@@ -277,6 +299,31 @@ void main() {
       ('a URL inside a word', 'open id_https://e.org/f?private-marker'),
       ('a mail link', 'open mailto:a@e.org?subject=private-marker'),
       ('a fragment', 'open page#private-marker'),
+      (
+        'a mail link whose query starts with a quote',
+        "open mailto:a@e.org?'subject=private-marker",
+      ),
+      (
+        'a mail link whose query starts with a comma',
+        'open mailto:a@e.org?,tag=private-marker',
+      ),
+      (
+        'a phone link whose query starts with a bracket',
+        'open tel:+1555?>private-marker',
+      ),
+      (
+        'a path whose fragment starts with a quote',
+        "open /settings#'private-marker",
+      ),
+      ('a word whose query starts with a quote', "open page?'private-marker"),
+      (
+        'a fragment that starts like an identity hash',
+        'open /settings#abcde-private-marker',
+      ),
+      (
+        'a provider with an argument',
+        'The provider FutureProvider<int>#1a2b3(private-marker) was disposed',
+      ),
       ('a long line', 'state ${'x' * 200} private-marker'),
     ];
     for (final (name, text) in replaced) {

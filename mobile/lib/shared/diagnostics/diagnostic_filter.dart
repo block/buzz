@@ -137,22 +137,32 @@ abstract final class DiagnosticFilter {
 
   /// The first line of a kept error's [text], or [removedText] when that line
   /// may hold a URL or is long. Where a URL ends in free text is ambiguous, so
-  /// none is kept: a `://`, or a `?` or `#` that could start a query or
-  /// fragment (a `mailto:` link has no `//`), replaces the line. A `?` or `#`
-  /// followed by a space, quote, closing bracket or the end stays, so nullable
-  /// types such as `List<String?>` keep a type error readable. A long line,
-  /// or the lines after the first, usually quote other text, such as a
+  /// none is kept: a `://`, a `?` or `#` after a `:` in the same word (a
+  /// `mailto:` link has no `//`), or any other `?` or `#` followed by anything
+  /// but closing punctuation before the next space replaces the line. So
+  /// nullable types such as `List<String?>` keep a type error readable.
+  /// Object identity hashes (`RenderFlex#1a2b3`) are removed first, so
+  /// Flutter and Riverpod messages that name an object stay readable. A long
+  /// line, or the lines after the first, usually quote other text, such as a
   /// response body or a wrapped error.
   static String _keptText(String text) {
     final lineEnd = text.indexOf(_lineBreak);
-    final line = lineEnd < 0 ? text : text.substring(0, lineEnd);
+    final line = (lineEnd < 0 ? text : text.substring(0, lineEnd)).replaceAll(
+      _identityHash,
+      '',
+    );
     return line.length > _keptTextLimit || line.contains(_mayHoldUrl)
         ? removedText
         : line;
   }
 
   static final _lineBreak = RegExp('[\r\n]');
-  static final _mayHoldUrl = RegExp(r'''://|[?#](?![\s'">,)\]}]|$)''');
+  static final _identityHash = RegExp(
+    r'''(?<=[\w>])#[0-9a-f]{5}(?=[?'"`>,.:;)\]}]*(?:\s|$))''',
+  );
+  static final _mayHoldUrl = RegExp(
+    r'''://|:\S*[?#]|[?#](?![?'"`>,.:;)\]}]*(?:\s|$))''',
+  );
 
   static final _urlTail = RegExp(
     r'''(\b[a-z][a-z0-9+.-]*://[^\s?#'"]*)[?#][^\s'"]*''',
