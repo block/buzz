@@ -86,6 +86,8 @@ Future<void> _confirmRemoveCommunity(
   final messenger = ScaffoldMessenger.of(context);
   final account = ref.read(builderlabAccountProvider);
   final sync = ref.read(knownCommunitySyncProvider);
+  // The switcher may close while the key saves; the removal still runs.
+  final communities = ref.read(communityListProvider.notifier);
   try {
     final subject = sync == null ? null : await account.localEditSubject();
     if (!context.mounted) return;
@@ -102,10 +104,10 @@ Future<void> _confirmRemoveCommunity(
       context: context,
       title: 'Remove community?',
       message: subject == null
-          ? 'Are you sure you want to remove “${community.pickerName}”? You can pair with it again later.'
+          ? 'Are you sure you want to remove “${community.pickerName}”? Its identity stays saved on this device, so you can use it again when you rejoin.'
           : retainsDestination
-          ? 'Remove this identity for “${community.pickerName}” from this device? Another saved identity still uses this community, so it stays in your account list.'
-          : 'Remove “${community.pickerName}” from this device and request removal from your Builder Lab community list? Account removal syncs when connected.',
+          ? 'Remove “${community.pickerName}” from this device? Its identity stays saved here. Another saved identity still uses this community, so it stays in your account list.'
+          : 'Remove “${community.pickerName}” from this device and request removal from your Builder Lab community list? Its identity stays saved here. Account removal syncs when connected.',
       confirmLabel: 'Remove',
     );
     if (!confirmed ||
@@ -113,13 +115,12 @@ Future<void> _confirmRemoveCommunity(
         (sync != null && await account.localEditSubject() != subject)) {
       return;
     }
-    await ref
-        .read(communityListProvider.notifier)
-        .removeCommunity(
-          community.id,
-          confirmedSubject: subject,
-          accountConfirmed: true,
-        );
+    await keepCommunityKey(community);
+    await communities.removeCommunity(
+      community.id,
+      confirmedSubject: subject,
+      accountConfirmed: true,
+    );
     if (closeSheetAfterRemoval && context.mounted) {
       Navigator.of(context).pop();
     }

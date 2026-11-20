@@ -481,6 +481,7 @@ void main() {
       sync = _sync(account, storage, journal: journal);
       await sync.synchronize();
       expect(backend.edits, isEmpty);
+      final shown = ValueNotifier(true);
       await tester.pumpWidget(
         WidgetHelpers.testable(
           enableAccountCommunitySync: true,
@@ -493,7 +494,12 @@ void main() {
               (_) async => false,
             ),
           ],
-          child: const AccountCommunitySyncStatus(),
+          child: ValueListenableBuilder<bool>(
+            valueListenable: shown,
+            builder: (_, visible, _) => visible
+                ? const AccountCommunitySyncStatus()
+                : const SizedBox.shrink(),
+          ),
         ),
       );
       await tester.pumpAndSettle();
@@ -501,11 +507,29 @@ void main() {
         find.text('Finish removing private.example from this device'),
       );
       await tester.pumpAndSettle();
+      // Hold saved-identity writes so the status closes mid-save; the
+      // removal must still finish.
+      final gate = Completer<void>();
+      final held = AccountIdentityStore(
+        storage: _HeldReadAllStorage(gate.future),
+      ).identities();
       await tester.tap(find.text('Remove').last);
+      await tester.pump();
+      shown.value = false;
+      await tester.pumpAndSettle();
+      gate.complete();
+      await held;
       await tester.pumpAndSettle();
       await sync.synchronize();
       expect((await storage.loadAll()).single.id, 'B');
       expect((await storage.loadAll()).single.nsec, b.nsec);
+      // The removed identity's key stays saved for a later rejoin.
+      expect(
+        (await AccountIdentityStore().identities()).map(
+          (saved) => saved.pubkey,
+        ),
+        [nostr.Keys('1'.padLeft(64, '0')).public],
+      );
       expect(await sync.pendingRemovals('A'), isEmpty);
       expect(
         backend.edits.every(
@@ -661,4 +685,22 @@ void main() {
       account.dispose();
     },
   );
+}
+
+class _HeldReadAllStorage extends FlutterSecureStorage {
+  _HeldReadAllStorage(this.gate);
+  final Future<void> gate;
+
+  @override
+  Future<Map<String, String>> readAll({
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    await gate;
+    return {};
+  }
 }

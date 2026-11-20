@@ -46,12 +46,14 @@ void main() {
     String? nsec,
     String? savedPubkey,
     bool create = false,
+    bool alongsideSaved = false,
   }) => entry.prepare(
     relay: address,
     name: 'Community',
     nsec: nsec,
     savedPubkey: savedPubkey,
     create: create,
+    alongsideSaved: alongsideSaved,
     isCurrent: () => current,
   );
 
@@ -111,7 +113,8 @@ void main() {
     () async {
       refuseProbe = true;
       await expectLater(prepare(create: true), throwsStateError);
-      expect(storage.writes, 1);
+      // The key, then the marker that Create generated it.
+      expect(storage.writes, 2);
       final persisted = Map<String, String>.of(storage.data);
       final first = probes.single;
       expect(first.pubkey, AccountIdentityStore.publicKeyForNsec(first.nsec!));
@@ -121,7 +124,7 @@ void main() {
       expect(retried.pubkey, first.pubkey);
       expect(retried.nsec, first.nsec);
       expect(storage.data, persisted);
-      expect(storage.writes, 1);
+      expect(storage.writes, 2);
       expect(probes, hasLength(2));
     },
   );
@@ -129,7 +132,7 @@ void main() {
   for (final brokenEnumeration in [false, true]) {
     for (final source in ['legacy', 'community', 'account']) {
       test(
-        '$source identity with broken enumeration=$brokenEnumeration forbids generation; explicit reuse preserves saved keys',
+        '$source identity with broken enumeration=$brokenEnumeration still permits a new identity; explicit reuse preserves saved keys',
         () async {
           if (source == 'account') {
             await AccountIdentityStore(storage: storage).create(key.nsec);
@@ -152,6 +155,8 @@ void main() {
               contains(key.public),
             );
           }
+          // Unprompted creation, as an organization's first join, defers to
+          // the member's choice of a saved identity.
           await expectLater(
             prepare(create: true),
             throwsA(
@@ -163,6 +168,12 @@ void main() {
           expect(storage.writes, writesBefore);
           expect(probes, isEmpty);
           expect(storage.data, before);
+          final created = await prepare(create: true, alongsideSaved: true);
+          expect(created.pubkey, isNot(anyOf(key.public, other.public)));
+          expect(storage.writes, greaterThan(writesBefore));
+          for (final saved in before.entries) {
+            expect(storage.data[saved.key], saved.value);
+          }
           final community = await prepare(savedPubkey: key.public);
           expect(community.nsec, key.nsec);
           expect(community.pubkey, key.public);
@@ -170,7 +181,14 @@ void main() {
           for (final saved in before.entries) {
             expect(storage.data[saved.key], saved.value);
           }
-          expect(probes, [community]);
+          // Leaving the created key for a saved one keeps it recoverable.
+          expect(
+            await AccountIdentityStore(
+              storage: storage,
+            ).forPairing(created.pubkey!).withKeys((keys) async => keys.public),
+            created.pubkey,
+          );
+          expect(probes, [created, community]);
         },
       );
     }
@@ -187,7 +205,7 @@ void main() {
     },
   );
 
-  test('unreadable account key never permits new generation', () async {
+  test('unreadable account key never permits unprompted generation', () async {
     storage.data[AccountIdentityStore.storageKey] = 'broken';
     await expectLater(
       prepare(create: true),
@@ -195,6 +213,87 @@ void main() {
     );
     expectUntouched();
   });
+
+  test('unreadable account key still permits a chosen new identity', () async {
+    storage.data[AccountIdentityStore.storageKey] = 'broken';
+    final created = await prepare(create: true, alongsideSaved: true);
+    expect(storage.data[AccountIdentityStore.storageKey], 'broken');
+    expect(probes, [created]);
+  });
+
+  test(
+    'create after a refused saved identity generates a new key and keeps the saved one',
+    () async {
+      await AccountIdentityStore(storage: storage).create(key.nsec);
+      refuseProbe = true;
+      await expectLater(prepare(savedPubkey: key.public), throwsStateError);
+      refuseProbe = false;
+      final created = await prepare(create: true, alongsideSaved: true);
+      expect(created.pubkey, isNot(key.public));
+      expect(
+        (await entry.choices()).choices.map((choice) => choice.pubkey),
+        contains(key.public),
+      );
+    },
+  );
+
+  test(
+    'chosen create retries its own interrupted key even when saved identities are unreadable',
+    () async {
+      await AccountIdentityStore(storage: storage).create(key.nsec);
+      refuseProbe = true;
+      final first = prepare(create: true, alongsideSaved: true);
+      await expectLater(first, throwsStateError);
+      refuseProbe = false;
+      storage.failEnumeration = true;
+      entry = makeEntry();
+      final retried = await prepare(create: true, alongsideSaved: true);
+      expect(retried.pubkey, probes.first.pubkey);
+      expect(retried.pubkey, isNot(key.public));
+    },
+  );
+
+  test(
+    'chosen create never reuses a retained imported key, and keeps it saved',
+    () async {
+      refuseProbe = true;
+      await expectLater(prepare(nsec: other.nsec), throwsStateError);
+      refuseProbe = false;
+      final created = await prepare(create: true, alongsideSaved: true);
+      expect(created.pubkey, isNot(other.public));
+      expect(
+        await AccountIdentityStore(
+          storage: storage,
+        ).forPairing(other.public).withKeys((keys) async => keys.public),
+        other.public,
+      );
+      // Its own key is the one a later Create retries.
+      refuseProbe = true;
+      await expectLater(
+        prepare(create: true, alongsideSaved: true),
+        throwsStateError,
+      );
+      expect(probes.last.pubkey, created.pubkey);
+    },
+  );
+
+  test(
+    'create with an unreadable inventory saves an unconfirmed retained key before replacing it',
+    () async {
+      refuseProbe = true;
+      await expectLater(prepare(nsec: key.nsec), throwsStateError);
+      refuseProbe = false;
+      storage.failEnumeration = true;
+      final created = await prepare(create: true, alongsideSaved: true);
+      expect(created.pubkey, isNot(key.public));
+      expect(
+        await AccountIdentityStore(
+          storage: storage,
+        ).forPairing(key.public).withKeys((keys) async => keys.public),
+        key.public,
+      );
+    },
+  );
 
   test(
     'explicit replacement preserves refused key and retries the chosen key',

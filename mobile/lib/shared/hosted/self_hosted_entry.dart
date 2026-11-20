@@ -66,6 +66,7 @@ class SelfHostedEntry {
     String? nsec,
     String? savedPubkey,
     bool create = false,
+    bool alongsideSaved = false,
     required bool Function() isCurrent,
   }) {
     final result = _queue.run(() async {
@@ -85,6 +86,7 @@ class SelfHostedEntry {
 
       check();
       final key = _pendingKey(relay);
+      final generatedKey = _generatedKey(relay);
       final retained = await _storage.read(key: key);
       String? candidate = nsec;
       // A retained key for this exact identity is the one an interrupted
@@ -115,25 +117,46 @@ class SelfHostedEntry {
           // Preserve the previous key before changing the relay's retry slot.
           await _accountStore.forPairing(retainedPubkey).create(retained);
           check();
+        } else if (candidate == null && create && alongsideSaved) {
+          // The member asked for a new identity, so reuse only a key an
+          // interrupted Create generated here. Any other retained key (a saved
+          // or imported one) stays saved, and a fresh key is generated.
+          if (await _storage.read(key: generatedKey) == retainedPubkey) {
+            candidate = retained;
+          } else {
+            await _accountStore.forPairing(retainedPubkey).create(retained);
+          }
+          check();
+        } else {
+          candidate ??= retained;
         }
-        candidate ??= retained;
       }
+      var generated = false;
       if (candidate == null) {
         if (!create) throw AccountIdentityFailure.absent;
-        final inventory = await choices();
-        if (!inventory.complete) throw AccountIdentityFailure.unreadable;
-        if (inventory.choices.isNotEmpty) {
-          throw AccountIdentityFailure.absent;
+        if (!alongsideSaved) {
+          // Unprompted creation: saved identities need the member's choice.
+          final inventory = await choices();
+          if (!inventory.complete) throw AccountIdentityFailure.unreadable;
+          if (inventory.choices.isNotEmpty) {
+            throw AccountIdentityFailure.absent;
+          }
         }
         candidate = nostr.Keys.generate().nsec;
+        generated = true;
       }
       final pubkey = AccountIdentityStore.publicKeyForNsec(candidate);
       check();
       if (retained != candidate) {
+        if (!generated && await _storage.read(key: generatedKey) != null) {
+          await _storage.delete(key: generatedKey);
+        }
         await _storage.write(key: key, value: candidate);
         if (await _storage.read(key: key) != candidate) {
           throw AccountIdentityFailure.unreadable;
         }
+        // Written after the key: a missing marker only costs a fresh key.
+        if (generated) await _storage.write(key: generatedKey, value: pubkey);
       }
       check();
       final community = Community.create(
@@ -152,10 +175,15 @@ class SelfHostedEntry {
   static String _pendingKey(String relay) =>
       'buzz_pending_self_hosted_${base64Url.encode(utf8.encode(relay))}';
 
+  /// The public key of a pending key that Create generated for this relay.
+  static String _generatedKey(String relay) =>
+      '${_pendingKey(relay)}_generated';
+
   /// Retire this exact pending key only after its community is durably saved.
   Future<void> complete(Community community) => _queue.run(() async {
     final key = _pendingKey(community.relayUrl);
     if (await _storage.read(key: key) != community.nsec) return;
+    await _storage.delete(key: _generatedKey(community.relayUrl));
     await _storage.delete(key: key);
     if (await _storage.read(key: key) != null) {
       throw AccountIdentityFailure.unreadable;

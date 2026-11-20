@@ -23,6 +23,7 @@ import '../../shared/hosted/known_community_address.dart';
 import '../../shared/hosted/account_community_sync_status.dart';
 import '../../shared/hosted/organization_environment.dart';
 import '../../shared/hosted/organization_sign_in.dart';
+import '../../shared/hosted/sign_out.dart' show keepCommunityKey;
 
 import 'dart:async';
 import 'dart:convert';
