@@ -298,6 +298,7 @@ Widget _buildTestable({
   List<ChannelMember> huddleMembers = const [],
   _MutableHuddleMembersNotifier? huddleMembersNotifier,
   Set<String>? huddleRecordAgentPubkeys,
+  Set<String> Function()? readHuddleRecordAgentPubkeys,
   Channel? channel,
   ChannelDetails Function()? channelDetails,
   List<Channel>? channels,
@@ -449,11 +450,14 @@ Widget _buildTestable({
       ),
       if (huddleMembersNotifier != null)
         _mutableHuddleMembersProvider.overrideWith(() => huddleMembersNotifier),
-      if (huddleRecordAgentPubkeys != null)
+      if (huddleRecordAgentPubkeys != null ||
+          readHuddleRecordAgentPubkeys != null)
         huddleManagedAgentRecordPubkeysProvider(_huddleChannelId).overrideWith(
           (ref) async => (
             scope: ref.watch(huddleManagedAgentRecordScopeProvider),
-            agents: huddleRecordAgentPubkeys,
+            agents:
+                readHuddleRecordAgentPubkeys?.call() ??
+                huddleRecordAgentPubkeys!,
           ),
         ),
       if (!watchChannelMembershipUpdates)
@@ -9900,6 +9904,82 @@ void main() {
               const ValueKey('huddle-participant-spotlight-avatar-agent'),
             ),
           ).isAgent,
+          isTrue,
+        );
+      },
+    );
+
+    testWidgets(
+      'keeps a record-only Huddle agent after minimize and a failed record read',
+      (tester) async {
+        // Minimizing pops the call page. The agents read before that must
+        // still apply when the call returns while records cannot be read.
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final transport = _HuddleTestTransport(
+          peers: const {1: HuddlePeer(pubkey: 'self', peerIndex: 1, epoch: 0)},
+        );
+        var recordReadFails = false;
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [
+              _huddleMsg(
+                id: 'record-only-minimized-agent-call',
+                kind: EventKind.huddleStarted,
+                pubkey: 'self',
+                createdAt: now,
+              ),
+            ],
+            users: const {
+              'agent': UserProfile(pubkey: 'agent', displayName: 'Pollen'),
+              'self': UserProfile(pubkey: 'self', displayName: 'Self'),
+            },
+            huddleMembers: [
+              ChannelMember(
+                pubkey: 'agent',
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+            ],
+            readHuddleRecordAgentPubkeys: () {
+              if (recordReadFails) throw StateError('records not read');
+              return const {'agent'};
+            },
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: _HuddleTestMedia.new,
+            huddleTransportFactory: (_) => transport,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.widgetWithText(FilledButton, 'Join'));
+        await tester.pumpAndSettle();
+        final agentAvatar = find.byKey(
+          const ValueKey('huddle-participant-avatar-agent'),
+        );
+        expect(agentAvatar, findsOneWidget);
+
+        await tester.tap(find.byKey(const ValueKey('huddle-minimize')));
+        await tester.pumpAndSettle();
+        recordReadFails = true;
+        ProviderScope.containerOf(
+          tester.element(find.byType(MobileHuddleShell)),
+        ).invalidate(huddleManagedAgentRecordPubkeysProvider(_huddleChannelId));
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.byKey(const ValueKey('huddle-drawer-expand')));
+        await tester.pumpAndSettle();
+        expect(agentAvatar, findsOneWidget);
+        expect(
+          tester
+              .widget<AvatarImage>(
+                find.descendant(
+                  of: agentAvatar,
+                  matching: find.byType(AvatarImage),
+                ),
+              )
+              .isAgent,
           isTrue,
         );
       },

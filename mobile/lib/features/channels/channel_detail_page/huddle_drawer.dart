@@ -23,6 +23,19 @@ class MobileHuddleShell extends HookConsumerWidget {
     final presentation = ref.watch(mobileHuddlePresentationProvider);
     final session = ref.watch(huddleSessionProvider);
     final relayStatus = ref.watch(relaySessionProvider).status;
+    // Hold the call's agent classification, and the last managed-agent
+    // records it read, while the call lasts. Minimizing pops the call page;
+    // without this, a record-only agent drops when the call comes back
+    // while the records cannot be read.
+    final huddleChannelId = session.isInSession
+        ? session.ephemeralChannelId
+        : null;
+    useEffect(() {
+      if (huddleChannelId == null) return null;
+      return ref
+          .listenManual(huddleAgentPubkeysProvider(huddleChannelId), (_, _) {})
+          .close;
+    }, [huddleChannelId]);
     _useIncomingHuddleReactions(
       context: context,
       ref: ref,
