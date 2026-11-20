@@ -94,6 +94,18 @@ void main() {
     final renewed = await enroll();
     expect(renewed.generation, 2);
     expect(renewed.endpointGrant, isNot(first.endpointGrant));
+
+    // A renewal the gateway accepted, with its response lost, extended the
+    // installation, so the phone keeps signing for it past the last expiry
+    // it saw confirmed rather than enrolling again over the same token.
+    now = renewed.expiresAt - 200;
+    gateway.loseResponseFor.add('/v1/delegations');
+    await expectLater(enroll(), throwsA(isA<Exception>()));
+    now = renewed.expiresAt + 60;
+    final resumed = await enroll();
+    expect(resumed.generation, 4);
+    expect(gateway.installations, hasLength(1));
+    expect(keystore.generated, 1);
   });
 
   test('reading grants does not wait behind a queued enrollment', () async {

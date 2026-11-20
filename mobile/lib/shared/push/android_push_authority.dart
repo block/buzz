@@ -444,9 +444,20 @@ class AndroidPushAuthority {
               delegated: true,
               lastRelayPubkey: relayPubkey,
             );
-    await _save(state.copyWith(relays: {...state.relays, relayOrigin: relay}));
     final notBefore = _nowSeconds - _clockSkewAllowanceSeconds;
     final expiresAt = notBefore + _lifetimeSeconds;
+    await _save(
+      state.copyWith(
+        relays: {...state.relays, relayOrigin: relay},
+        // An accepted delegation extends the installation to the grant's
+        // expiry, and its response may be lost, so the extension is recorded
+        // first. If the gateway never accepted it, the installation's next
+        // refused call resets it instead.
+        installation: installation.copyWith(
+          expiresAt: max(installation.expiresAt, expiresAt),
+        ),
+      ),
+    );
     final response = await _signed(
       '/v1/delegations',
       {
@@ -488,13 +499,7 @@ class AndroidPushAuthority {
       ),
     );
     await _save(
-      state.copyWith(
-        relays: {...state.relays, relayOrigin: granted},
-        installation: state.installation!.copyWith(
-          // A delegation extends the installation to the grant's expiry.
-          expiresAt: max(state.installation!.expiresAt, expiresAt),
-        ),
-      ),
+      state.copyWith(relays: {...state.relays, relayOrigin: granted}),
     );
     return _grantOf(granted)!;
   }

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:buzz/shared/push/android_push_gateway.dart';
@@ -57,7 +58,7 @@ class _Installation {
   final String handle;
   final Uint8List publicKey;
   String token;
-  final int expiresAt;
+  int expiresAt;
   int epoch = 1;
   bool revoked = false;
   final delegations = <String, int>{};
@@ -140,6 +141,10 @@ class FakePushGateway {
         }
         installation.delegations[relay] = generation;
         installation.revokedDelegations.remove('$relay/$generation');
+        installation.expiresAt = max(
+          installation.expiresAt,
+          body['expires_at']! as int,
+        );
         return _json(201, {
           'endpoint_grant':
               'grant:${installation.handle}:$relay:$generation:${installation.epoch}',
