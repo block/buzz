@@ -1,3 +1,5 @@
+import 'package:buzz/shared/read_state/thread_follows_format.dart';
+import 'package:buzz/features/channels/thread_follows/thread_follows_storage.dart';
 import 'package:buzz/shared/widgets/sheet_action_section.dart';
 import 'package:buzz/shared/widgets/app_list_card.dart';
 import 'dart:ui' as ui;
@@ -100,6 +102,7 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
     String contextId,
     int unixTimestamp, {
     bool clearForcedMessages = false,
+    bool explicit = false,
   }) {
     markedRead[contextId] = unixTimestamp;
     var forced = {
@@ -116,9 +119,36 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
   }
 
   @override
-  void markContextUnread(String contextId, {required String channelId}) {
+  bool markContextUnread(
+    String contextId, {
+    required String channelId,
+    String? threadRootId,
+    bool channelCatchUp = false,
+  }) {
     markedUnread.add(contextId);
     state = _withForced({...state.forcedUnreadContexts, contextId: channelId});
+    return true;
+  }
+
+  @override
+  Future<bool> setThreadFollow(
+    String channelId,
+    String rootId,
+    bool follow,
+  ) async {
+    state = ReadStateState(
+      isReady: state.isReady,
+      pubkey: state.pubkey,
+      contexts: state.contexts,
+      version: state.version + 1,
+      forcedUnreadContexts: state.forcedUnreadContexts,
+      threadFollows: {
+        ...state.threadFollows,
+        threadFollowKey(channelId, rootId): (follow: follow, at: 1),
+      },
+      threadFollowsIncomplete: false,
+    );
+    return true;
   }
 
   ReadStateState _withForced(Map<String, String> forced) => ReadStateState(
@@ -1190,6 +1220,47 @@ void main() {
       await tester.pumpAndSettle();
       expect(container.read(threadFollowsProvider).followedRootIds, isEmpty);
     });
+  });
+
+  test('an unimported pre-sync follow still shows, and a synced choice '
+      'wins', () async {
+    final prefs = await _mockPrefs();
+    final legacyRoot = 'b' * 64;
+    final syncedRoot = 'c' * 64;
+    ProviderContainer open(Map<String, ThreadFollowChoice> synced) {
+      final container = ProviderContainer(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          myPubkeyProvider.overrideWithValue('self'),
+          readStateProvider.overrideWith(
+            () => _FakeReadStateNotifier(
+              ReadStateState(
+                isReady: true,
+                pubkey: 'self',
+                contexts: const {},
+                version: 1,
+                threadFollows: synced,
+              ),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      return container;
+    }
+
+    final relayUrl = open(const {}).read(relayConfigProvider).baseUrl;
+    ThreadFollowsStorage(prefs).write('self', relayUrl, [
+      ThreadFollowEntry(rootId: legacyRoot, followedAt: 1),
+      ThreadFollowEntry(rootId: syncedRoot, followedAt: 1),
+    ]);
+    final follows = open({
+      threadFollowKey(_channelId, syncedRoot): (follow: false, at: 2),
+    }).read(threadFollowsProvider);
+    expect(follows.followedRootIds, {legacyRoot});
+    expect(follows.unfollowedRootIds, {syncedRoot});
+    // A synced choice names its channel; the pre-sync one has none known.
+    expect(follows.channelByRoot, {syncedRoot: _channelId});
   });
 
   group('showImageActions', () {

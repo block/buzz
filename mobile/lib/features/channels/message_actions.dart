@@ -148,7 +148,10 @@ Future<void> showMessageActions({
                           channelId: channelId,
                           currentPubkey: currentPubkey,
                         ),
-                        _FollowThreadTile(message: message),
+                        _FollowThreadTile(
+                          message: message,
+                          channelId: channelId,
+                        ),
                       ],
                     ),
                     SheetActionSection(
@@ -622,20 +625,37 @@ class _MarkReadUnreadTile extends ConsumerWidget {
         if (!_selectMessageAction(context)) return;
         final notifier = ref.read(readStateProvider.notifier);
         if (unread) {
-          // Advances the `msg:` marker and clears this message's own forced
-          // flag — a channel-level forced unread (channel tile) is a separate
-          // choice and stays untouched.
+          // Advances and publishes the `msg:` marker and clears this
+          // message's own forced flag — a channel-level manual unread
+          // (channel tile) is a separate choice and stays untouched.
           notifier.markContextRead(
             msgContextKey(message.id),
             message.createdAt,
+            explicit: true,
           );
         } else {
           // Read markers are monotonic and cannot move backward, so mark
-          // unread forces this message unread locally (session-local, does
-          // not survive relaunch). The channel surfaces it as unread too.
+          // unread forces this message unread on this device only (not
+          // synced, session-local). It ends when the message is read here
+          // or any device reads past it. The channel surfaces it as unread.
+          final readerPubkey = ref.read(myPubkeyProvider);
+          final channel = ref
+              .read(channelsProvider.notifier)
+              .channelById(channelId);
           notifier.markContextUnread(
             msgContextKey(message.id),
             channelId: channelId,
+            threadRootId: message.parentId == null
+                ? null
+                : message.rootId ?? message.parentId,
+            channelCatchUp:
+                readerPubkey != null &&
+                channel != null &&
+                readByChannelCatchUp(
+                  isDm: channel.isDm,
+                  isReply: message.parentId != null,
+                  highPriority: isHighPriorityEvent(message.tags, readerPubkey),
+                ),
           );
         }
       },
@@ -645,8 +665,9 @@ class _MarkReadUnreadTile extends ConsumerWidget {
 
 class _FollowThreadTile extends ConsumerWidget {
   final TimelineMessage message;
+  final String channelId;
 
-  const _FollowThreadTile({required this.message});
+  const _FollowThreadTile({required this.message, required this.channelId});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -659,13 +680,18 @@ class _FollowThreadTile extends ConsumerWidget {
     return ListTile(
       leading: Icon(following ? BuzzIcons.bellOff : BuzzIcons.bellRing),
       title: Text(following ? 'Unfollow thread' : 'Follow thread'),
-      onTap: () {
+      onTap: () async {
         if (!_selectMessageAction(context)) return;
+        final messenger = ScaffoldMessenger.maybeOf(context);
         final notifier = ref.read(threadFollowsProvider.notifier);
-        if (following) {
-          notifier.unfollowThread(rootId);
-        } else {
-          notifier.followThread(rootId);
+        final saved = await (following
+            ? notifier.unfollowThread(channelId, rootId)
+            : notifier.followThread(channelId, rootId));
+        if (!saved) {
+          messenger?.showFeedbackSnackBar(
+            SnackBar(content: Text(notifier.failureMessage)),
+            kind: ToastKind.error,
+          );
         }
       },
     );

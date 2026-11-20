@@ -12,8 +12,12 @@ use super::sidebar_doc::{self, Codec, Edit, Stamp, Tree};
 use crate::client::BuzzClient;
 use crate::error::CliError;
 
-/// Relay event size ceiling shared with desktop's sidebar blobs.
+/// Existing byte budget for the other sidebar documents.
 const MAX_CIPHERTEXT_BYTES: usize = 65_535;
+/// A 500-entry channel flag record can exceed the old ciphertext budget
+/// after millisecond timestamps, NIP-44 padding, and base64. The relay
+/// accepts the full short-form NIP-44 envelope for these records.
+const FLAG_MAX_CIPHERTEXT_BYTES: usize = 87_472;
 
 /// One synced document: its `d` tag and the name used in messages.
 #[derive(Clone, Copy)]
@@ -66,7 +70,8 @@ async fn head_event(client: &BuzzClient, lane: Lane) -> Result<Option<nostr::Eve
         .into_iter()
         .filter_map(|event| serde_json::from_value::<nostr::Event>(event).ok())
         .filter(|event| {
-            event.pubkey == me
+            event.kind.as_u16() == KIND_READ_STATE as u16
+                && event.pubkey == me
                 && event.tags.identifier() == Some(lane.d_tag)
                 && event.verify().is_ok()
         })
@@ -152,7 +157,11 @@ pub(crate) async fn publish(
         .nip44_encrypt(&me, &plaintext)
         .await
         .map_err(|e| CliError::Other(format!("failed to encrypt {}: {e}", lane.label)))?;
-    if content.len() > MAX_CIPHERTEXT_BYTES {
+    let ciphertext_limit = match lane.d_tag {
+        "channel-stars" | "channel-mutes" => FLAG_MAX_CIPHERTEXT_BYTES,
+        _ => MAX_CIPHERTEXT_BYTES,
+    };
+    if content.len() > ciphertext_limit {
         return Err(too_large());
     }
     let created_at = now().as_secs().max(head_created_at + 1);

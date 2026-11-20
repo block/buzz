@@ -1,7 +1,11 @@
+import 'package:buzz/shared/read_state/thread_follows_format.dart';
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
+
 import 'package:flutter/rendering.dart';
 import 'package:buzz/shared/widgets/ios_message_create_button.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
@@ -186,6 +190,58 @@ void main() {
               )
             : ActivityPage(tabReselection: tabReselection),
       ),
+    );
+  }
+
+  for (final hasRail in [true, false]) {
+    testWidgets(
+      'expanded iOS Activity Close is in the rail only when present ($hasRail)',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(951, 669);
+        tester.view.viewPadding = FakeViewPadding(right: hasRail ? 76 : 0);
+        addTearDown(tester.view.reset);
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        await tester.pumpWidget(await buildTestable(withPane: true));
+        await tester.pumpAndSettle();
+        final railClose = find.byKey(
+          const ValueKey('duo-toolbar-Close activity'),
+        );
+        final inlineClose = find.byTooltip('Close activity');
+        final nativeHeader = find.byType(FrostedAppBar);
+        final title = find.text('Activity');
+        expect(title, findsOneWidget);
+        if (hasRail) {
+          expect(railClose, findsOneWidget);
+          final bar = tester.widget<IosNavigationBar>(
+            find.descendant(
+              of: railClose,
+              matching: find.byType(IosNavigationBar),
+            ),
+          );
+          expect(bar.leading!.label, 'Close activity');
+          expect(bar.leading!.symbol, 'xmark');
+          expect(inlineClose, findsNothing);
+          final header = tester.widget<FrostedAppBar>(nativeHeader);
+          expect(header.railOnly, isTrue);
+          expect(header.nativeTitle, isEmpty);
+          expect(tester.getRect(title).left, Grid.gutter);
+        } else {
+          expect(railClose, findsNothing);
+          expect(nativeHeader, findsNothing);
+          expect(inlineClose, findsOneWidget);
+          expect(
+            tester.getRect(title).left,
+            greaterThan(tester.getRect(inlineClose).right),
+          );
+        }
+        final titleStyle = tester.widget<Text>(title).style!;
+        expect(titleStyle.fontSize, 22);
+        expect(titleStyle.fontWeight, FontWeight.w600);
+        await tester.pumpWidget(const SizedBox());
+        debugDefaultTargetPlatformOverride = null;
+      },
     );
   }
 
@@ -1217,6 +1273,37 @@ void main() {
     expect(find.byKey(const ValueKey('inbox-unread-dot-m1')), findsOneWidget);
   });
 
+  testWidgets('reading one row keeps another row\'s mark unread in the same '
+      'channel', (tester) async {
+    await tester.pumpWidget(
+      await buildTestable(
+        readContexts: {'ch1': now, 'ch2': now, 'thread:$threadIdRoot1': now},
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    Future<void> rowAction(String id, String action) async {
+      await tester.longPress(find.byKey(ValueKey('inbox-row-$id')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.descendant(
+          of: find.byType(BottomSheet),
+          matching: find.text(action),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    // Two top-level rows in ch1, both already read through the channel.
+    await rowAction('m1', 'Mark unread');
+    await rowAction('ag1', 'Mark unread');
+    expect(find.byKey(const ValueKey('inbox-unread-dot-ag1')), findsOneWidget);
+
+    await rowAction('m1', 'Mark as read');
+    expect(find.byKey(const ValueKey('inbox-unread-dot-m1')), findsNothing);
+    expect(find.byKey(const ValueKey('inbox-unread-dot-ag1')), findsOneWidget);
+  });
+
   testWidgets('long-press follows a thread and sets a reminder', (
     tester,
   ) async {
@@ -1710,8 +1797,30 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
     String contextId,
     int unixTimestamp, {
     bool clearForcedMessages = false,
+    bool explicit = false,
   }) {
     state = state.copyWithContext(contextId, unixTimestamp);
+  }
+
+  @override
+  Future<bool> setThreadFollow(
+    String channelId,
+    String rootId,
+    bool follow,
+  ) async {
+    state = ReadStateState(
+      isReady: state.isReady,
+      pubkey: state.pubkey,
+      contexts: state.contexts,
+      version: state.version + 1,
+      forcedUnreadContexts: state.forcedUnreadContexts,
+      threadFollows: {
+        ...state.threadFollows,
+        threadFollowKey(channelId, rootId): (follow: follow, at: 1),
+      },
+      threadFollowsIncomplete: false,
+    );
+    return true;
   }
 }
 

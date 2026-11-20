@@ -23,9 +23,9 @@ import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart';
 import 'package:buzz/features/channels/channel_unread.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
-import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
@@ -36,12 +36,14 @@ import 'package:buzz/features/activity/inbox_read_state.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 part 'channels_provider_live_cases.dart';
+part 'channels_provider_huddle_cases.dart';
 part 'channels_provider_deletion_cases.dart';
 part 'channels_provider_terminal_cases.dart';
 part 'channels_provider_readiness_cases.dart';
 part 'channels_provider_request_path_cases.dart';
 part 'channels_provider_activity_cases.dart';
 part 'channels_provider_join_cases.dart';
+part 'channels_provider_follow_cases.dart';
 part 'channels_provider_saved_directory_cases.dart';
 part 'channels_provider_thread_interest_cases.dart';
 
@@ -58,11 +60,13 @@ part 'channels_provider_thread_interest_cases.dart';
 /// records [subscribe] calls so we can assert filter shapes and emit live
 /// events on demand.
 void main() {
+  _huddleNavigationCases();
   _unreadReadinessCases();
   _unreadDeletionCases();
   _requestPathCases();
   _threadActivityCases();
   _confirmedJoinCases();
+  _threadFollowCases();
   _savedDirectoryCases();
   _threadInterestCases();
   const myPk = 'me';
@@ -3761,13 +3765,14 @@ void main() {
           memberships: [_membership(_channelA, myPk)],
           metadata: [_meta(id: _channelA, name: 'general')],
         );
-        final container = _buildContainer(session: session);
+        final follows = _TestFollows();
+        final container = _buildContainer(session: session, follows: follows);
         addTearDown(container.dispose);
         await container.read(channelsProvider.future);
         await _waitUntil(() => session.queryBatches.any(isUnread));
         await _settle();
         if (follow) {
-          container.read(threadFollowsProvider.notifier).followThread(root);
+          follows.choose(followed: {root}, channelByRoot: {root: _channelA});
         }
         setup.forEach(session.emit);
         final broadcast = post(
@@ -3889,6 +3894,8 @@ NostrEvent _meta({
   String visibility = 'open',
   int createdAt = 1,
   int? ttlSeconds,
+  String? creator,
+  String? description,
   bool archived = false,
   bool unlisted = false,
   List<String> participants = const [],
@@ -3900,6 +3907,8 @@ NostrEvent _meta({
   tags: [
     ['d', id],
     ['name', name],
+    if (creator != null) ['P', creator],
+    if (description != null) ['about', description],
     ['t', channelType],
     [visibility == 'private' ? 'private' : 'public'],
     if (ttlSeconds != null) ['ttl', '$ttlSeconds'],
@@ -3914,6 +3923,7 @@ NostrEvent _meta({
 ProviderContainer _buildContainer({
   required _FakeRelaySession session,
   _TestMutes? mutes,
+  _TestFollows? follows,
   List<Override> overrides = const [],
 }) {
   return ProviderContainer(
@@ -3921,6 +3931,7 @@ ProviderContainer _buildContainer({
     overrides: [
       ...overrides,
       if (mutes != null) channelMutesProvider.overrideWith(() => mutes),
+      if (follows != null) threadFollowsProvider.overrideWith(() => follows),
       appLifecycleProvider.overrideWith(() => _FakeAppLifecycleNotifier()),
       relaySessionProvider.overrideWith(() => session),
       // Route the pubkey through a mutable notifier so tests can switch the
@@ -3999,6 +4010,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     this.maxMetadataPageRequests,
     this.hiddenDmEvents = const [],
     this.huddleStarts = const [],
+    this.creations = const [],
     this.recentMessages = const [],
     this.deletionChannels = const {},
     this.enforceHistoryLimits = false,
@@ -4016,6 +4028,10 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final int? maxMetadataPageRequests;
   final List<NostrEvent> hiddenDmEvents;
   final List<NostrEvent> huddleStarts;
+  final List<NostrEvent> creations;
+  Completer<void>? creationGate;
+  int creationReads = 0;
+  bool failCreations = false;
   List<NostrEvent> recentMessages;
   final Map<String, String> deletionChannels;
   final bool enforceHistoryLimits;
@@ -4286,6 +4302,13 @@ class _FakeRelaySession extends RelaySessionNotifier {
         await paused.future;
       }
       return hiddenDmEvents;
+    }
+    if (filter.kinds.contains(9007)) {
+      creationReads++;
+      await creationGate?.future;
+      if (failCreations) throw Exception('receipt unavailable');
+      final ids = filter.tags['#h'] ?? const <String>[];
+      return creations.where((e) => ids.contains(e.getTagValue('h'))).toList();
     }
     if (filter.kinds.contains(EventKind.huddleStarted)) {
       // Claim the parked slot so the newer refresh's own Huddle query runs

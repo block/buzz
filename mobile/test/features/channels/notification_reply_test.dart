@@ -440,6 +440,7 @@ class _ReadState extends ReadStateNotifier {
     String contextId,
     int unixTimestamp, {
     bool clearForcedMessages = false,
+    bool explicit = false,
   }) {
     state = state.copyWithContext(contextId, unixTimestamp);
   }
@@ -478,6 +479,8 @@ class _RecordingSender implements SendMessage {
     List<String>? mentionPubkeys,
     Channel? channel,
     List<List<String>> mediaTags = const [],
+    FutureOr<void> Function(NostrEvent)? beforePublish,
+    void Function()? validateDelivery,
     Future<bool> Function()? mayPublish,
   }) async {
     if (mayPublish != null && !await mayPublish()) {

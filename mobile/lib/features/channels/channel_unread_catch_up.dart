@@ -140,6 +140,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
           continue;
         }
         final readAt = readAtByChannel[channelId];
+        _noteThreadChannel(event, channelId);
         if (event.pubkey.toLowerCase() == myPk.toLowerCase()) continue;
         if (readAt != null && event.createdAt <= readAt) continue;
         if (!shouldNotifyForEvent(
@@ -148,6 +149,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
           participatedRootIds: _participatedRootIds,
           followedRootIds: _followedRootIds(),
           authoredRootIds: _authoredRootIds,
+          mutedRootIds: _unfollowedRootIds(channel),
           mutedChannelIds: mutedChannelIds,
           channelId: channel.id,
         )) {

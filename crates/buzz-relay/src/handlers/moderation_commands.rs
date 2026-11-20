@@ -251,7 +251,7 @@ async fn handle_ban(
         info!(error = %e, "ban notice DM delivery failed (ban still enforced)");
     }
 
-    info!(target = %hex::encode(&target), "community ban applied");
+    info!(target_pubkey = %hex::encode(&target), "community ban applied");
     revoked
         .map(|_| ())
         .map_err(|e| format!("error: ban applied but live revoke incomplete: {e}"))
@@ -290,7 +290,7 @@ async fn handle_unban(
 
     insert_audit(state, tenant, actor, "unban", Some(&target), None, None).await?;
 
-    info!(target = %hex::encode(&target), "community ban lifted");
+    info!(target_pubkey = %hex::encode(&target), "community ban lifted");
     Ok(())
 }
 
@@ -360,7 +360,7 @@ async fn handle_timeout(
         info!(error = %e, "timeout notice DM delivery failed (timeout still enforced)");
     }
 
-    info!(target = %hex::encode(&target), "community timeout applied");
+    info!(target_pubkey = %hex::encode(&target), "community timeout applied");
     Ok(())
 }
 
@@ -397,7 +397,7 @@ async fn handle_untimeout(
 
     insert_audit(state, tenant, actor, "untimeout", Some(&target), None, None).await?;
 
-    info!(target = %hex::encode(&target), "community timeout cleared");
+    info!(target_pubkey = %hex::encode(&target), "community timeout cleared");
     Ok(())
 }
 

@@ -47,6 +47,19 @@ double nativeFilterWidth(String label) =>
     32;
 
 void main() {
+  final binding = TestWidgetsFlutterBinding.ensureInitialized();
+  setUp(() {
+    binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform_views,
+      (_) async => null,
+    );
+  });
+  tearDown(() {
+    binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform_views,
+      null,
+    );
+  });
   Future<Widget> buildHome({
     bool longSolo = false,
     bool inboxUnread = false,
@@ -367,30 +380,26 @@ void main() {
     await tester.pumpAndSettle();
     expect(
       tester
-          .widget<IgnorePointer>(
-            find
-                .ancestor(
-                  of: find.byTooltip('Search'),
-                  matching: find.byType(IgnorePointer),
-                )
-                .first,
+          .widgetList<IgnorePointer>(
+            find.ancestor(
+              of: find.byTooltip('Search'),
+              matching: find.byType(IgnorePointer),
+            ),
           )
-          .ignoring,
+          .any((widget) => widget.ignoring),
       isTrue,
     );
     create.onMenuVisibilityChanged!(false);
     await tester.pumpAndSettle();
     expect(
       tester
-          .widget<IgnorePointer>(
-            find
-                .ancestor(
-                  of: find.byTooltip('Search'),
-                  matching: find.byType(IgnorePointer),
-                )
-                .first,
+          .widgetList<IgnorePointer>(
+            find.ancestor(
+              of: find.byTooltip('Search'),
+              matching: find.byType(IgnorePointer),
+            ),
           )
-          .ignoring,
+          .any((widget) => widget.ignoring),
       isFalse,
     );
 
@@ -443,6 +452,15 @@ void main() {
     openCreate.onMenuVisibilityChanged!(false);
     await tester.pumpAndSettle();
     tester.widget<MessagesNavigationBar>(openNavigation).onSearch();
+    await tester.pump();
+    expect(
+      find.descendant(
+        of: find.byType(MessagesFilters, skipOffstage: false),
+        matching: find.byType(UiKitView, skipOffstage: false),
+      ),
+      findsWidgets,
+      reason: 'Home filters remain mounted behind the Search sheet',
+    );
     await tester.pumpAndSettle();
     expect(tester.getSize(find.byType(SearchPage)).width, 375);
     tester.view.physicalSize = const Size(466, 678);
@@ -459,7 +477,7 @@ void main() {
     tester.view.physicalSize = const Size(951, 669);
     await tester.pumpAndSettle();
     expect(tester.getSize(find.byType(SearchPage)).width, 375);
-    expect(tester.getRect(searchField).top, Grid.half);
+    expect(tester.getRect(searchField).top, Grid.twelve);
     Navigator.of(tester.element(find.byType(SearchPage))).pop();
     await tester.pumpAndSettle();
     tester.view.physicalSize = const Size(669, 951);
@@ -503,6 +521,27 @@ void main() {
     (tester) async {
       await tester.pumpWidget(await buildHome());
       await tester.pumpAndSettle();
+      final navigation = find.byType(MessagesNavigationBar);
+      final mountedNavigation = tester.element(navigation);
+      final focus = find.byKey(const ValueKey('voice-recording-focus'));
+      expect(tester.widget<ImageFiltered>(focus).enabled, isFalse);
+      tester.widget<MessagesNavigationBar>(navigation).onRecordingChanged!(
+        true,
+      );
+      await tester.pump();
+      expect(tester.widget<ImageFiltered>(focus).enabled, isTrue);
+      expect(
+        tester
+            .widget<MessagesFilters>(find.byType(MessagesFilters))
+            .useNativeGlass,
+        isFalse,
+      );
+      expect(tester.element(navigation), same(mountedNavigation));
+      tester.widget<MessagesNavigationBar>(navigation).onRecordingChanged!(
+        false,
+      );
+      await tester.pump();
+      expect(tester.widget<ImageFiltered>(focus).enabled, isFalse);
       expect(find.byTooltip('Messages'), findsNothing);
       expect(find.byTooltip('Solo'), findsNothing);
       expect(find.text('Personal workspace'), findsOneWidget);
@@ -1171,6 +1210,15 @@ void main() {
         lessThan(tester.getRect(communityTrigger).left),
       );
       inboxButton.onPressed!();
+      await tester.pump();
+      expect(
+        find.descendant(
+          of: find.byType(MessagesFilters, skipOffstage: false),
+          matching: find.byType(UiKitView, skipOffstage: false),
+        ),
+        findsWidgets,
+        reason: 'Home filters remain mounted behind the Activity sheet',
+      );
       await tester.pumpAndSettle();
       expect(find.byType(ActivityPage), findsOneWidget);
       expect(
@@ -1178,7 +1226,7 @@ void main() {
           (w) => w is IosGlassNavigationButton && w.semanticLabel == 'Activity',
           skipOffstage: false,
         ),
-        findsNothing,
+        findsOneWidget,
       );
       Navigator.of(tester.element(find.byType(ActivityPage))).pop();
       await tester.pumpAndSettle();

@@ -1,9 +1,9 @@
+import 'ios_composition_layer.dart';
 import 'dart:async';
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show PlatformViewHitTestBehavior;
 import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../theme/theme.dart';
@@ -44,7 +44,7 @@ void showBuzzToast(
   coordinator.active?.remove();
   late final _ToastHandle handle;
   final entry = OverlayEntry(
-    builder: (_) => _ToastLayer(
+    builder: (_) => IosCompositionLayer(
       child: _ToastBubble(
         message: message,
         islandOrigin: islandOrigin,
@@ -69,42 +69,6 @@ void showBuzzToast(
   coordinator.value = true;
   overlay.insert(entry);
   unawaited(toastHaptic(kind));
-}
-
-// iOS applies a platform view's rounded clip to the Flutter overlay slice
-// painted after it. Start an unclipped native slice so a sheet's close button
-// cannot clip this toast back underneath earlier native navigation views.
-class _ToastLayer extends HookWidget {
-  const _ToastLayer({required this.child});
-
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    final ready = useState(false);
-    if (defaultTargetPlatform != TargetPlatform.iOS) return child;
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        // A single point in the window corner establishes the composition
-        // slice without a native hit-test surface over any app controls.
-        Positioned(
-          top: 0,
-          left: 0,
-          width: 1,
-          height: 1,
-          child: ExcludeSemantics(
-            child: UiKitView(
-              viewType: 'buzz/toast_layer',
-              hitTestBehavior: PlatformViewHitTestBehavior.transparent,
-              onPlatformViewCreated: (_) => ready.value = true,
-            ),
-          ),
-        ),
-        if (ready.value) child,
-      ],
-    );
-  }
 }
 
 class _ToastHandle {

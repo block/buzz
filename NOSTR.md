@@ -315,7 +315,9 @@ out unless they ask for it:
   channel with this label".
 
 Push notifications use the same rule: a lease filter pushes events from a
-system channel only when its `#h` names that channel. Every kind:44100/44101
+system channel only when its `#h` names that channel. Push also requires
+membership, except that a message in a listed channel wakes a non-member it
+`p`-tags (see `docs/buzz-push.md`). Every kind:44100/44101
 membership notification carries its channel type as `t`, and a filter without
 `#t` sees only the legacy types, so system channel notices reach only a filter
 with `#t:["system"]` (see NIP-CL).

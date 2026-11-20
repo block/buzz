@@ -1,5 +1,5 @@
 CREATE TABLE community_deletion_checkpoints (
-    request_id UUID NOT NULL REFERENCES community_deletion_requests(id) ON DELETE RESTRICT,
+    request_id UUID NOT NULL,
     sequence BIGINT GENERATED ALWAYS AS IDENTITY,
     stage TEXT NOT NULL,
     unit_key TEXT NOT NULL,

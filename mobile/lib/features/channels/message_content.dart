@@ -1,8 +1,10 @@
 import 'message_reply_drag_target.dart';
+
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'dart:async';
 import 'dart:convert';
+
 import '../../shared/widgets/ios_media_carousel.dart';
 import '../../shared/widgets/message_attachment_corners.dart';
 
@@ -232,7 +234,13 @@ class MessageContent extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final markdownTheme = GptMarkdownTheme.of(context);
-    final chatColors = ChatColors.of(context);
+    final resolvedChatColors = ChatColors.of(context);
+    // The fallback palette is newly allocated; keep the nested theme stable so
+    // unchanged messages do not reparse their Markdown on parent rebuilds.
+    final chatColors = useMemoized(() => resolvedChatColors, [
+      resolvedChatColors.outgoing,
+      resolvedChatColors.foreground,
+    ]);
     final ownTextColor = chatColors.foreground;
     // Own-bubble links share the bubble ink; markdown marks them by underline.
     final linkColor = ownMessage ? ownTextColor : context.colors.tertiary;
@@ -396,6 +404,7 @@ class MessageContent extends HookConsumerWidget {
     }, [markdownContent, mentionPresentationKey]);
 
     final inlinePatterns = _useMessageInlinePatterns(
+      ownBubble: bubble && ownMessage,
       content: content,
       finalContent: finalContent,
       mentionNames: resolvedMentionNames,
@@ -554,6 +563,10 @@ class MessageContent extends HookConsumerWidget {
                             ),
                             child: Theme(
                               data: Theme.of(context).copyWith(
+                                extensions: [
+                                  ...Theme.of(context).extensions.values,
+                                  chatColors,
+                                ],
                                 colorScheme: context.colors.copyWith(
                                   primary: linkColor,
                                 ),
@@ -1051,6 +1064,8 @@ class _MediaPreviewFallback extends StatelessWidget {
   }
 }
 
+const _codeCopyButtonSize = 28.0;
+
 class _MessageCodeBlock extends HookWidget {
   final String name;
   final String code;
@@ -1099,6 +1114,14 @@ class _MessageCodeBlock extends HookWidget {
           : [TextSpan(text: shownCode)],
       [code, name, isDark, ink],
     );
+    // Opaque, so the copy button can share it and hide code scrolled beneath.
+    // An inked block sits on the outgoing fill, so its tint is blended there.
+    final surface = ink == null
+        ? CodeStyle.background(context.colors)
+        : Color.alphaBlend(
+            chatCodeTint(ink, 0.14),
+            ChatColors.of(context).outgoing,
+          );
     return Container(
       // In a bubble, the vertical margin brings the bubble's 8px vertical
       // padding up to its 16px side padding, so the block is inset evenly and
@@ -1107,9 +1130,7 @@ class _MessageCodeBlock extends HookWidget {
           ? const EdgeInsets.symmetric(vertical: Grid.xs - Grid.xxs)
           : const EdgeInsets.only(top: Grid.half),
       decoration: BoxDecoration(
-        color: ink == null
-            ? CodeStyle.background(context.colors)
-            : chatCodeTint(ink, 0.14),
+        color: surface,
         borderRadius: BorderRadius.circular(
           bubble ? Radii.container - Grid.xs : 12,
         ),
@@ -1120,50 +1141,55 @@ class _MessageCodeBlock extends HookWidget {
       ),
       child: Stack(
         children: [
-          // Even 12px insets; the right side also reserves the copy button.
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              Grid.twelve,
-              Grid.twelve,
-              Grid.twelve + 28,
-              Grid.twelve,
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (name.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: Grid.half),
-                    child: Text(
-                      name,
-                      style: context.textTheme.labelSmall?.copyWith(
-                        color: ink ?? context.colors.onSurfaceVariant,
-                      ),
+          // As on desktop, the code scrolls under the copy button rather than
+          // beside it, and its end padding keeps every line end reachable.
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (name.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    Grid.twelve,
+                    Grid.twelve,
+                    Grid.twelve + _codeCopyButtonSize,
+                    Grid.half,
+                  ),
+                  child: Text(
+                    name,
+                    style: context.textTheme.labelSmall?.copyWith(
+                      color: ink ?? context.colors.onSurfaceVariant,
                     ),
                   ),
-                SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: RichText(
-                    softWrap: false,
-                    text: TextSpan(style: codeBaseStyle, children: codeSpans),
-                  ),
                 ),
-              ],
-            ),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                padding: EdgeInsets.fromLTRB(
+                  Grid.twelve,
+                  name.isEmpty ? Grid.twelve : 0,
+                  Grid.twelve + _codeCopyButtonSize,
+                  Grid.twelve,
+                ),
+                child: RichText(
+                  softWrap: false,
+                  text: TextSpan(style: codeBaseStyle, children: codeSpans),
+                ),
+              ),
+            ],
           ),
           Positioned(
             top: Grid.half + Grid.quarter,
             right: Grid.half + Grid.quarter,
             child: SizedBox(
-              width: 28,
-              height: 28,
+              width: _codeCopyButtonSize,
+              height: _codeCopyButtonSize,
               child: IconButton(
                 onPressed: handleCopy,
                 padding: EdgeInsets.zero,
                 visualDensity: VisualDensity.compact,
                 style: IconButton.styleFrom(
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  backgroundColor: surface,
                 ),
                 icon: Icon(
                   isCopied.value ? BuzzIcons.check : BuzzIcons.copy,

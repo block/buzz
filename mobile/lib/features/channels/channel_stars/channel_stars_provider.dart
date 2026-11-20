@@ -26,7 +26,7 @@ class ChannelStarsNotifier extends Notifier<ChannelStarsState> {
 
   @override
   ChannelStarsState build() {
-    _manager?.dispose(flushPending: false);
+    _manager?.dispose();
     _manager = null;
     _isInitialized = false;
 

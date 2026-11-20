@@ -20,11 +20,13 @@ class ChannelListSnapshot {
   const ChannelListSnapshot({
     required this.channels,
     required this.hiddenDmIds,
+    this.verifiedHuddleIds = const {},
   });
 
   /// Member channel JSON in the shape of `Channel.toJson`.
   final List<Map<String, dynamic>> channels;
   final Set<String> hiddenDmIds;
+  final Set<String> verifiedHuddleIds;
 }
 
 /// Permission to write one scope's snapshot, captured before a network fetch.
@@ -86,6 +88,11 @@ class ChannelListSnapshotStorage {
         channels: [
           for (final channel in channels) channel as Map<String, dynamic>,
         ],
+        verifiedHuddleIds: {
+          for (final id
+              in (json['verified_huddle_ids'] as List<dynamic>? ?? []))
+            id as String,
+        },
         hiddenDmIds: {
           for (final id in json['hidden_dm_ids'] as List<dynamic>) id as String,
         },
@@ -117,6 +124,7 @@ class ChannelListSnapshotStorage {
             'v': _version,
             'channels': snapshot.channels,
             'hidden_dm_ids': snapshot.hiddenDmIds.toList()..sort(),
+            'verified_huddle_ids': snapshot.verifiedHuddleIds.toList()..sort(),
           });
     if (raw == null || utf8.encode(raw).length > maxChannelListSnapshotBytes) {
       // An older, smaller snapshot no longer describes this list.

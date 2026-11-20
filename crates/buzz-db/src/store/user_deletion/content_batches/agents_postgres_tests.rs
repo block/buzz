@@ -371,6 +371,7 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
                     "subscriptions" => !owned("owner_pubkey"),
                     "delivery_log" => {
                         !["sub-0", "sub-1"].contains(&row["subscription_id"].as_str().unwrap())
+                            && !selected.contains(&hex_field("event_id"))
                     }
                     "push_leases" | "push_wake_outbox" => !owned("author"),
                     "operator_listener_outbox" => {
@@ -441,7 +442,7 @@ async fn target_discovery_handles_no_agents_and_rejects_overflow_without_output(
             .run_message_batches(&options, mode, None, &mut output)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("target key limit"));
+        assert!(error.to_string().contains("ownership exceeds target limit"));
         assert!(output.is_empty());
     }
     assert_eq!(snapshot_rows(&pool, community, "users").await.len(), 10001);

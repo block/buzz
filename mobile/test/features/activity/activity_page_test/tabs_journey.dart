@@ -10,8 +10,9 @@ void _activityTabJourneys(
   testWidgets('Activity type and sender menus work at phone width', (
     tester,
   ) async {
-    await tester.binding.setSurfaceSize(const Size(390, 844));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
     const directory = String.fromEnvironment('ACTIVITY_CAPTURE_DIR');
     if (directory.isNotEmpty) {
       await tester.runAsync(() async {
@@ -100,8 +101,9 @@ void _activityTabJourneys(
   testWidgets('iOS renders both Activity menus as glass controls', (
     tester,
   ) async {
-    await tester.binding.setSurfaceSize(const Size(390, 844));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
     await tester.pumpWidget(
       await buildTestable(knownAgentPubkeys: const {'bob_pk'}),
     );
@@ -199,8 +201,9 @@ void _activityTabJourneys(
   testWidgets('Activity filter controls remain usable with large phone text', (
     tester,
   ) async {
-    await tester.binding.setSurfaceSize(const Size(390, 844));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.reset);
     await tester.pumpWidget(
       await buildTestable(textScaler: const TextScaler.linear(3)),
     );

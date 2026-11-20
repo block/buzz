@@ -1175,7 +1175,10 @@ class _FakeChannelActions extends ChannelActions {
   String? unarchivedChannelId;
 
   @override
-  Future<void> leaveChannel(String channelId) async {}
+  Future<void> leaveChannel(
+    String channelId, {
+    Future<bool> Function()? mayPublish,
+  }) async {}
 
   @override
   Future<void> archiveChannel(String channelId) async {}
@@ -1224,5 +1227,6 @@ class _RecordingReadState extends ReadStateNotifier {
     String contextId,
     int unixTimestamp, {
     bool clearForcedMessages = false,
+    bool explicit = false,
   }) => marks.add((contextId, unixTimestamp, clearForcedMessages));
 }

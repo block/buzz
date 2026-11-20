@@ -95,9 +95,9 @@ void main() {
           bottom: bottom,
           now: now,
         );
-    expect(marks([bottom, end], 200)['activity:$_channel'], 100);
-    expect(marks([bottom, end], 125)['activity:$_channel'], 100);
-    expect(marks([bottom, end], 90)['activity:$_channel'], 90);
+    expect(marks([bottom, end], 200)[_channel], 100);
+    expect(marks([bottom, end], 125)[_channel], 100);
+    expect(marks([bottom, end], 90)[_channel], 90);
     expect(marks([bottom, _msg('unseen', 120), end], 200), isEmpty);
     final late = _msg('late', 120);
     expect(
@@ -139,7 +139,7 @@ void main() {
     ]) {
       expect(
         _marks(loaded: [bottom, hidden], visible: [bottom], bottom: bottom),
-        {'activity:$_channel': 100},
+        {_channel: 100},
       );
     }
   });
@@ -149,7 +149,7 @@ void main() {
       final a = _msg('a', 100);
       final b = _msg('b', 200);
       expect(_marks(loaded: [a, b], visible: [a, b], bottom: b), {
-        'activity:$_channel': 200,
+        _channel: 200,
       });
     });
 
@@ -159,7 +159,7 @@ void main() {
       final a = _msg('a', 100);
       final reply = _msg('r', 300, parentId: 'a', rootId: 'a');
       expect(_marks(loaded: [a, reply], visible: [a], bottom: a), {
-        'activity:$_channel': 100,
+        _channel: 100,
       });
     });
 
@@ -169,7 +169,7 @@ void main() {
       final future = _msg('f', 20000);
       expect(
         _marks(loaded: [future], visible: [future], bottom: future, now: 10000),
-        {'activity:$_channel': 10000, 'msg:f': 20000},
+        {_channel: 10000, 'msg:f': 20000},
       );
     });
 
@@ -195,7 +195,7 @@ void main() {
       });
     });
 
-    test('mentions and broadcasts keep their own marks at the bottom', () {
+    test('catch-up reads mentions at or below the bottom', () {
       final mention = _msg(
         'm',
         100,
@@ -205,8 +205,7 @@ void main() {
       );
       final b = _msg('b', 200);
       expect(_marks(loaded: [mention, b], visible: [mention, b], bottom: b), {
-        'activity:$_channel': 200,
-        'msg:m': 100,
+        _channel: 200,
       });
     });
 
@@ -254,7 +253,7 @@ void main() {
       );
       final b = _msg('b', 200);
       expect(_marks(loaded: [mention, broadcast, b], visible: [b], bottom: b), {
-        'activity:$_channel': 200,
+        _channel: 200,
       });
     });
 
@@ -273,7 +272,7 @@ void main() {
           loaded: [_msg('a', 100), mention],
           bottom: mention,
         ),
-        {'activity:$_channel': 200, 'msg:m': 200},
+        {_channel: 200},
       );
       final forced = _msg(
         'forced',
@@ -288,7 +287,7 @@ void main() {
           loaded: [forced],
           bottom: forced,
         ),
-        {'activity:$_channel': 200},
+        {_channel: 200},
       );
     });
 
@@ -329,7 +328,8 @@ void main() {
         flat: true,
         now: 10000,
       );
-      expect(marks(b), {'activity:$_channel': 200, 'msg:b': 200});
+      // No top-level message is loaded, so only the newest reply is read.
+      expect(marks(b), {'msg:b': 200});
       // A newer inline reply means the bottom is not live.
       expect(marks(reply), isEmpty);
     });
@@ -340,7 +340,7 @@ void main() {
       final c = _msg('c', 300);
       expect(
         _marks(
-          readState: _state({'activity:$_channel': 150}),
+          readState: _state({_channel: 150}),
           loaded: [a, b, c],
           visible: [a, b],
         ),
@@ -348,10 +348,14 @@ void main() {
       );
     });
 
-    test('never writes the channel mark', () {
+    test('writes the channel mark only at the live bottom', () {
       final a = _msg('a', 100);
-      final marks = _marks(loaded: [a], visible: [a], bottom: a);
-      expect(marks.containsKey(_channel), isFalse);
+      final b = _msg('b', 200);
+      expect(
+        _marks(loaded: [a, b], visible: [a]).containsKey(_channel),
+        isFalse,
+      );
+      expect(_marks(loaded: [a], visible: [a], bottom: a), {_channel: 100});
     });
 
     test('writes nothing when existing marks already read everything', () {
@@ -367,7 +371,7 @@ void main() {
       );
       expect(
         _marks(
-          readState: _state({'activity:$_channel': 100}),
+          readState: _state({_channel: 100}),
           loaded: [a],
           visible: [a],
           bottom: a,
@@ -396,7 +400,7 @@ void main() {
       );
     });
 
-    test('in a DM, catch-up does not mark mentions above the bottom', () {
+    test('in a DM, catch-up reads mentions above the bottom', () {
       final mention = _msg(
         'mention',
         100,
@@ -406,18 +410,15 @@ void main() {
       );
       final b = _msg('b', 200);
       expect(_marks(isDm: true, loaded: [mention, b], bottom: b), {
-        'activity:$_channel': 200,
-        'msg:b': 200,
+        _channel: 200,
       });
     });
 
-    test('in a DM, catch-up does not read messages', () {
+    test('in a DM, catch-up reads every message', () {
       final a = _msg('a', 100);
       final b = _msg('b', 200);
       expect(_marks(isDm: true, loaded: [a, b], visible: [a, b], bottom: b), {
-        'activity:$_channel': 200,
-        'msg:a': 100,
-        'msg:b': 200,
+        _channel: 200,
       });
     });
   });
@@ -492,7 +493,7 @@ void main() {
         ),
         // Thread catch-up reads a reply only while its root is loaded, so
         // each visible reply keeps its own mark, as in `buzz-app`.
-        {'thread-activity:root': 200, 'msg:r1': 100, 'msg:r2': 200},
+        {'thread:root': 200, 'msg:r1': 100, 'msg:r2': 200},
       );
     });
 
@@ -506,7 +507,7 @@ void main() {
           bottom: r1,
           threadRootId: 'root',
         ),
-        {'thread-activity:root': 100, 'msg:r1': 100},
+        {'thread:root': 100, 'msg:r1': 100},
       );
     });
 
@@ -545,7 +546,7 @@ void main() {
       );
       expect(
         _marks(loaded: [root, mention], bottom: mention, threadRootId: 'root'),
-        {'thread-activity:root': 100, 'msg:r1': 100},
+        {'thread:root': 100, 'msg:r1': 100},
       );
       // Away from the live tail it waits until it fills the screen.
       expect(

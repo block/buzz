@@ -108,3 +108,90 @@ async fn gate_then_media_requires_delete_and_retries_storage_failure_before_comm
     assert_eq!(fixture.requests.load(Ordering::SeqCst), calls);
     store.release(&lease).await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn workflow_media_retry_refetches_agent_ownership_before_deleting() {
+    let fixture = fixture().await;
+    let human: String =
+        sqlx::query_scalar("SELECT encode(pubkey, 'hex') FROM media_uploaders WHERE sha256 = $1")
+            .bind("a".repeat(64))
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    let agent = nostr::Keys::generate().public_key().to_hex();
+    let bob = nostr::Keys::generate().public_key().to_hex();
+    for key in [&human, &bob] {
+        sqlx::query("INSERT INTO users(community_id, pubkey) VALUES ($1, decode($2, 'hex'))")
+            .bind(Uuid::from_u128(11))
+            .bind(key)
+            .execute(&fixture.pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO users(community_id, pubkey, agent_owner_pubkey) VALUES ($1, decode($2, 'hex'), decode($3, 'hex'))")
+        .bind(Uuid::from_u128(11)).bind(&agent).bind(&human).execute(&fixture.pool).await.unwrap();
+    // Retain ownership elsewhere on retry: flattening agent keys would still
+    // select the upload in community 11 after that community changes owner.
+    sqlx::query("INSERT INTO users(community_id, pubkey) VALUES ($1, decode($2, 'hex'))")
+        .bind(Uuid::from_u128(12))
+        .bind(&human)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users(community_id, pubkey, agent_owner_pubkey) VALUES ($1, decode($2, 'hex'), decode($3, 'hex'))")
+        .bind(Uuid::from_u128(12)).bind(&agent).bind(&human).execute(&fixture.pool).await.unwrap();
+    sqlx::query("UPDATE media_uploaders SET pubkey = decode($1, 'hex') WHERE sha256 = $2")
+        .bind(&agent)
+        .bind("a".repeat(64))
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    fixture.fail_listing.store(true, Ordering::SeqCst);
+    run(
+        &fixture.store,
+        fixture.id,
+        "worker-a",
+        &fixture.options(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap_err();
+    let failed = fixture.store.inspect(fixture.id).await.unwrap();
+    assert_eq!(failed.stage_history[1].status, "failed");
+    assert!(!fixture.deleted.load(Ordering::SeqCst));
+    sqlx::query(
+        "UPDATE users SET agent_owner_pubkey = decode($1, 'hex') WHERE pubkey = decode($2, 'hex') AND community_id = $3",
+    )
+    .bind(&bob)
+    .bind(&agent)
+    .bind(Uuid::from_u128(11))
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE entity_deletion_requests SET next_attempt_at = clock_timestamp() - interval '1 second' WHERE id = $1")
+        .bind(fixture.id).execute(&fixture.pool).await.unwrap();
+    fixture.fail_listing.store(false, Ordering::SeqCst);
+    run(
+        &fixture.store,
+        fixture.id,
+        "worker-b",
+        &RunOptions {
+            next_step: true,
+            ..fixture.options()
+        },
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let after = fixture.store.inspect(fixture.id).await.unwrap();
+    assert_eq!(after.stage_history[1].id, failed.stage_history[1].id);
+    assert_eq!(after.stage_history[1].status, "completed");
+    assert_eq!(
+        after.stage_history[1].metadata_json["result"]["selected_files"],
+        0
+    );
+    assert_eq!(after.stage_history[2].stage, "purge_content");
+    assert!(!fixture.deleted.load(Ordering::SeqCst));
+    assert_eq!(fixture.uploader_count().await, 1);
+}

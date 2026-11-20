@@ -84,7 +84,38 @@ async fn req(f: &Fixture, reader: &Keys, filter: Value) -> Vec<String> {
 
 /// [`req`] with several filters in one REQ.
 async fn req_all(f: &Fixture, reader: &Keys, filters: Value) -> Vec<String> {
-    let (conn, mut rx) = test_conn(&f.tenant, reader);
+    req_all_scoped(f, reader, filters, None).await
+}
+
+/// A test connection for `reader`, scoped to `channels` like a token when
+/// given.
+fn scoped_conn(
+    f: &Fixture,
+    reader: &Keys,
+    channels: Option<Vec<Uuid>>,
+) -> (
+    Arc<crate::connection::ConnectionState>,
+    tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+) {
+    let (conn, rx) = test_conn(&f.tenant, reader);
+    if channels.is_some() {
+        let mut auth = conn.auth_state.lock().expect("auth state");
+        let crate::connection::AuthState::Authenticated(ctx) = &mut *auth else {
+            panic!("test connection is authenticated");
+        };
+        ctx.channel_ids = channels;
+    }
+    (conn, rx)
+}
+
+/// [`req_all`] on a connection scoped to `channels` when given.
+async fn req_all_scoped(
+    f: &Fixture,
+    reader: &Keys,
+    filters: Value,
+    channels: Option<Vec<Uuid>>,
+) -> Vec<String> {
+    let (conn, mut rx) = scoped_conn(f, reader, channels);
     let filters: Vec<nostr::Filter> = serde_json::from_value(filters).expect("filters");
     let before = vec![None; filters.len()];
     crate::handlers::req::handle_req("s".into(), filters, before, conn, f.state.clone()).await;
@@ -110,7 +141,17 @@ async fn count(f: &Fixture, reader: &Keys, filter: Value) -> u64 {
 
 /// [`count`] with several filters in one COUNT.
 async fn count_all(f: &Fixture, reader: &Keys, filters: Value) -> u64 {
-    let (conn, mut rx) = test_conn(&f.tenant, reader);
+    count_all_scoped(f, reader, filters, None).await
+}
+
+/// [`count_all`] on a connection scoped to `channels` when given.
+async fn count_all_scoped(
+    f: &Fixture,
+    reader: &Keys,
+    filters: Value,
+    channels: Option<Vec<Uuid>>,
+) -> u64 {
+    let (conn, mut rx) = scoped_conn(f, reader, channels);
     let filters: Vec<nostr::Filter> = serde_json::from_value(filters).expect("filters");
     crate::handlers::count::handle_count("c".into(), filters, conn, f.state.clone()).await;
     while let Ok(frame) = rx.try_recv() {
@@ -1769,12 +1810,12 @@ async fn named_channels_missing_from_a_stale_cache_still_route_live() {
     let reader_hex = reader.public_key().to_hex();
     // This pod cached the reader's access set before the join.
     let stale = || {
-        f.state.member_channels_cache.insert(
+        f.state.seed_member_channels(
             (
                 f.tenant.community(),
                 reader.public_key().to_bytes().to_vec(),
             ),
-            Vec::new(),
+            Default::default(),
         );
     };
 
@@ -1814,4 +1855,108 @@ async fn named_channels_missing_from_a_stale_cache_still_route_live() {
     by_d.close(&f).await;
     mixed.close(&f).await;
     assert_eq!(refcount(&f, EventTopic::Channel(channel)).await, 0);
+}
+
+/// A token scoped to one of two readable system channels reads only that one
+/// through WebSocket REQ and COUNT, whether the request's named-only access
+/// comes from the access caches (discovery alone) or from the database (a
+/// sibling filter names a channel outside the cached sets).
+/// Mutation: pass `None` instead of the token scope to
+/// `readable_named_only_channels_for_filters` in `req.rs` or `count.rs` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn a_token_scope_narrows_system_channels_on_both_access_paths() {
+    let f = fixture().await;
+    let owner = Keys::generate();
+    let owner_hex = owner.public_key().to_hex();
+    let allowed = create_channel(&f.state, &f.tenant, &owner, &[&["channel_type", "system"]]).await;
+    let other = create_channel(&f.state, &f.tenant, &owner, &[&["channel_type", "system"]]).await;
+    // A stranger's unlisted open channel: readable by name, but in neither
+    // cached set for the owner, so naming it takes the database path.
+    let stranger = Keys::generate();
+    let unlisted = create_channel(&f.state, &f.tenant, &stranger, &[]).await;
+    edit_channel(
+        &f.state,
+        &f.tenant,
+        &stranger,
+        unlisted,
+        &[&["visibility", "open"], &["unlisted", "true"]],
+    )
+    .await
+    .expect("open the channel unlisted");
+    let discovery = json!({"kinds": [39002], "#p": [owner_hex], "#t": ["system"]});
+    let by_name = json!({"kinds": [9], "#h": [unlisted.to_string()]});
+
+    // Unscoped, discovery finds both, so the scoped results below are the
+    // token's doing.
+    assert_eq!(
+        sorted(req(&f, &owner, discovery.clone()).await),
+        sorted(vec![
+            group_state_id(&f, allowed, 39002).await,
+            group_state_id(&f, other, 39002).await,
+        ]),
+        "unscoped discovery"
+    );
+    let token = || Some(vec![allowed, unlisted]);
+    let roster = vec![group_state_id(&f, allowed, 39002).await];
+    for (path, filters) in [
+        ("cache", json!([discovery.clone()])),
+        ("database", json!([discovery.clone(), by_name.clone()])),
+    ] {
+        assert_eq!(
+            req_all_scoped(&f, &owner, filters.clone(), token()).await,
+            roster,
+            "REQ via {path}"
+        );
+        assert_eq!(
+            count_all_scoped(&f, &owner, filters, token()).await,
+            1,
+            "COUNT via {path}"
+        );
+    }
+}
+
+/// A strong `POST /query` sees a system channel its caller just created even
+/// when this pod's cached member set predates the create (a peer pod that has
+/// not yet seen the membership invalidation). This is buzz-app's
+/// create-then-look-up-by-label sequence.
+/// Mutation: pass the cached access for strong reads in
+/// `query_member_events` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn a_strong_query_sees_a_just_created_system_channel_past_a_stale_cache() {
+    let f = fixture().await;
+    let owner = Keys::generate();
+    let owner_hex = owner.public_key().to_hex();
+    let label = "agent-config";
+    let channel = create_channel(
+        &f.state,
+        &f.tenant,
+        &owner,
+        &[&["channel_type", "system"], &["t", label]],
+    )
+    .await;
+    let stale = || {
+        f.state.seed_member_channels(
+            (f.tenant.community(), owner.public_key().to_bytes().to_vec()),
+            Default::default(),
+        );
+    };
+    let lookup = json!({"kinds": [39000], "#P": [owner_hex], "#t": [label]});
+    let mut strong = lookup.clone();
+    strong["consistency"] = json!("strong");
+
+    // The stale entry is in effect: a default read answers from it.
+    stale();
+    assert_eq!(
+        bridge_ids(bridge(&f, &owner, "/query", json!([lookup])).await),
+        Vec::<String>::new(),
+        "default read answers from the stale cache"
+    );
+    stale();
+    assert_eq!(
+        bridge_ids(bridge(&f, &owner, "/query", json!([strong])).await),
+        [group_state_id(&f, channel, 39000).await],
+        "strong read takes named-only access from the database"
+    );
 }

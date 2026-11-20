@@ -3,6 +3,7 @@ part of '../channels_page.dart';
 class _ChannelTile extends ConsumerWidget {
   final Channel channel;
   final bool isUnread;
+  final bool boldUnread;
 
   /// Whether unread thread replies or mentions need attention, including
   /// replies also sent to the channel from the reader's threads. They show as
@@ -19,6 +20,7 @@ class _ChannelTile extends ConsumerWidget {
     super.key,
     required this.channel,
     required this.isUnread,
+    required this.boldUnread,
     required this.currentPubkey,
     this.hasAttention = false,
     required this.onTap,
@@ -28,6 +30,14 @@ class _ChannelTile extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final showAttention =
+        hasAttention &&
+        (!isMuted ||
+            !ref.watch(
+              channelMutesProvider.select(
+                (state) => state.confirmedMutedChannelIds.contains(channel.id),
+              ),
+            ));
     final contentColor = isMuted
         ? navigationMetadataForeground(context)
         : channelNavigationForeground(context);
@@ -41,6 +51,7 @@ class _ChannelTile extends ConsumerWidget {
       ),
       child: Semantics(
         selected: selected,
+        value: hasAttention ? 'Needs your attention' : null,
         child: InkWell(
           borderRadius: BorderRadius.circular(Radii.md),
           onTap: onTap,
@@ -104,9 +115,9 @@ class _ChannelTile extends ConsumerWidget {
                               ? contentColor
                               : channelNavigationForeground(
                                   context,
-                                  unread: isUnread,
+                                  unread: boldUnread,
                                 ),
-                          fontWeight: isUnread
+                          fontWeight: boldUnread
                               ? FontWeight.w600
                               : FontWeight.w400,
                         ),
@@ -114,23 +125,6 @@ class _ChannelTile extends ConsumerWidget {
                     ],
                   ),
                 ),
-                if (hasAttention) ...[
-                  const SizedBox(width: Grid.xxs),
-                  // The dot is the only sign of this state, so name it for
-                  // screen readers; it merges into the row's label.
-                  Semantics(
-                    label: 'Needs your attention',
-                    child: Container(
-                      key: ValueKey('channel-attention-dot-${channel.id}'),
-                      width: 6,
-                      height: 6,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: context.colors.primary,
-                      ),
-                    ),
-                  ),
-                ],
                 if (channel.isEphemeral) ...[
                   const SizedBox(width: Grid.xxs),
                   _EphemeralBadge(channel: channel),
@@ -144,6 +138,23 @@ class _ChannelTile extends ConsumerWidget {
                         BuzzIcons.bellOff,
                         size: 12,
                         color: navigationMetadataForeground(context),
+                      ),
+                    ),
+                  ),
+                ],
+                if (showAttention) ...[
+                  const SizedBox(width: Grid.xxs),
+                  SizedBox(
+                    width: _kChannelIconSize,
+                    child: Center(
+                      child: Container(
+                        key: ValueKey('channel-attention-dot-${channel.id}'),
+                        width: 6,
+                        height: 6,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: context.colors.primary,
+                        ),
                       ),
                     ),
                   ),

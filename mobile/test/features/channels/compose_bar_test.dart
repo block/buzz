@@ -1416,6 +1416,127 @@ void main() {
       });
     }
 
+    const unsentEvent = NostrEvent(
+      id: 'event-1',
+      pubkey: 'pubkey-1',
+      createdAt: 0,
+      kind: 9,
+      tags: [],
+      content: 'hello',
+      sig: 'sig-1',
+    );
+
+    // Each failure runs against the real relay session. `socket` records
+    // published EVENTs and never acknowledges them unless the case says so.
+    for (final (name, fail, message, publishes)
+        in <
+          (
+            String,
+            Future<void> Function(RelaySessionNotifier session),
+            String,
+            bool,
+          )
+        >[
+          (
+            'a disconnected relay',
+            (session) {
+              session.debugPauseNow();
+              return session.publish(unsentEvent);
+            },
+            'Not sent. No connection.',
+            false,
+          ),
+          (
+            'a timeout before anything was published',
+            // A pre-send roster lookup that times out, like the Solo chat
+            // recipients refresh, before the message EVENT is signed.
+            (session) => session
+                .fetchHistory(
+                  const NostrFilter(kinds: [39002]),
+                  timeout: const Duration(milliseconds: 1),
+                )
+                .then((_) => session.publish(unsentEvent)),
+            "Not sent. The relay didn't respond.",
+            false,
+          ),
+          (
+            'an unacknowledged publish',
+            (session) => session.publish(
+              unsentEvent,
+              timeout: const Duration(milliseconds: 1),
+            ),
+            "Not confirmed. The relay didn't respond.",
+            true,
+          ),
+          (
+            'a connection lost before acknowledgement',
+            (session) {
+              final delivery = session.publish(unsentEvent);
+              session.debugPauseNow();
+              return delivery;
+            },
+            'Not confirmed. Connection lost.',
+            true,
+          ),
+          (
+            'a relay rejection',
+            (_) => Future.error(Exception('restricted: not a member')),
+            'Not sent: restricted: not a member',
+            false,
+          ),
+          (
+            'any other state error',
+            (_) => Future.error(StateError('Relay session is disposed')),
+            'Not sent: Relay session is disposed',
+            false,
+          ),
+        ]) {
+      testWidgets('reports $name as itself, not a community switch', (
+        tester,
+      ) async {
+        final publishedEvents = <Map<String, dynamic>>[];
+        late final RelaySessionNotifier session;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) => fail(session),
+          ),
+        );
+        session = ProviderScope.containerOf(
+          tester.element(find.byType(ComposeBar)),
+        ).read(relaySessionProvider.notifier);
+        session.debugAttachSocketForTest(
+          _RecordingRelaySocket(
+            publishedEvents,
+            session.debugHandleSocketMessageForTest,
+            beforeAcknowledged: (_) => Completer<void>().future,
+          ),
+        );
+
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), 'hello');
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        await tester.pump(const Duration(milliseconds: 10));
+        await tester.pumpAndSettle();
+
+        expect(find.widgetWithText(SnackBar, message), findsOneWidget);
+        expect(
+          publishedEvents.where((event) => event['id'] == unsentEvent.id),
+          hasLength(publishes ? 1 : 0),
+        );
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          'hello',
+        );
+      });
+    }
+
     testWidgets('smoothly resizes the text field when a new line is added', (
       tester,
     ) async {
@@ -3641,7 +3762,7 @@ void main() {
 
       await _expandComposer(tester);
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-      await tester.pump();
+      await _pumpUntilUpload(tester, () => sentContent != null);
       await tester.pumpAndSettle();
 
       expect(sentContent, '\n![image](https://relay.example/media/test.png)');
@@ -3712,6 +3833,7 @@ void main() {
 
       await _expandComposer(tester);
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await _pumpUntilUpload(tester, () => sentContent != null);
       await tester.pumpAndSettle();
 
       expect(
@@ -4134,12 +4256,16 @@ void main() {
       tester,
     ) async {
       final uploadResponse = Completer<http.Response>();
+      var requestReceived = false;
       Rect? submittedOrigin;
       var sent = false;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
         nsec: nostr.Keys.generate().nsec,
-        httpClient: http_testing.MockClient((_) => uploadResponse.future),
+        httpClient: http_testing.MockClient((_) {
+          requestReceived = true;
+          return uploadResponse.future;
+        }),
         pickGalleryVideo: () async => null,
         pickGalleryImage: () async => null,
         pickGalleryImages: () async => [
@@ -4175,6 +4301,7 @@ void main() {
             .hitTestable(),
       );
       await tester.pump(const Duration(seconds: 5));
+      await _pumpUntilUpload(tester, () => requestReceived);
       expect(sent, isFalse);
       // Layout changes during upload must not replace the submitted geometry.
       tester.view.physicalSize = Size(
@@ -4245,7 +4372,10 @@ void main() {
 
         await _expandComposer(tester);
         await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-        await tester.pump();
+        await _pumpUntilUpload(
+          tester,
+          () => find.text('100%').evaluate().isNotEmpty,
+        );
 
         expect(
           find.byKey(const ValueKey('compose-upload-progress')),
@@ -5215,9 +5345,7 @@ void main() {
       );
 
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-      for (var frame = 0; frame < 100 && sentContent == null; frame++) {
-        await tester.pump();
-      }
+      await _pumpUntilUpload(tester, () => sentContent != null);
       expect(sentContent, isNotNull);
 
       expect(busy, isTrue);
@@ -5658,6 +5786,10 @@ void main() {
       await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), 'Keep this draft');
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await _pumpUntilUpload(
+        tester,
+        () => find.textContaining('upload failed').evaluate().isNotEmpty,
+      );
       await tester.pumpAndSettle();
 
       expect(find.textContaining('upload failed'), findsOneWidget);
@@ -5703,12 +5835,11 @@ void main() {
         await tester.pumpAndSettle();
         await _expandComposer(tester);
         await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        final error = find.text("We couldn't prepare this image for upload.");
+        await _pumpUntilUpload(tester, () => error.evaluate().isNotEmpty);
         await tester.pumpAndSettle();
 
-        expect(
-          find.text("We couldn't prepare this image for upload."),
-          findsOneWidget,
-        );
+        expect(error, findsOneWidget);
         expect(find.textContaining('media contains metadata'), findsNothing);
         expect(find.textContaining('$statusCode'), findsNothing);
       });
@@ -7682,6 +7813,21 @@ Future<void> _expandComposer(WidgetTester tester) async {
   if (find.byType(TextField).evaluate().isNotEmpty) return;
   await tester.tap(find.text('Message\u2026'));
   await tester.pumpAndSettle();
+}
+
+Future<void> _pumpUntilUpload(
+  WidgetTester tester,
+  bool Function() isReady,
+) async {
+  final stopwatch = Stopwatch()..start();
+  while (!isReady()) {
+    if (stopwatch.elapsed >= const Duration(seconds: 5)) {
+      fail('Timed out waiting for attachment upload');
+    }
+    // Let the hash isolate reply on the real event loop before pumping a frame.
+    await tester.runAsync(() => Future<void>(() {}));
+    await tester.pump();
+  }
 }
 
 Future<void> _openAttachmentMenu(WidgetTester tester) async {

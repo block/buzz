@@ -28,6 +28,8 @@ import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/duo_toolbar.dart';
+import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/channel.dart';
@@ -156,7 +158,8 @@ class ActivityPage extends HookConsumerWidget {
     bool isDone(InboxItem item) => isInboxItemDone(
       item,
       markerOf: markerOf,
-      localUnreadOverrides: localState.unreadIds,
+      rawMarkerOf: (contextId) => readState.contexts[contextId],
+      localUnreadOverrides: localState.unreadBaselines,
       localDoneSet: localState.doneIds,
     );
 
@@ -264,21 +267,38 @@ class ActivityPage extends HookConsumerWidget {
         notifier.markContextRead(
           rootId == null ? channelId : threadContextKey(rootId),
           watermark,
+          explicit: true,
         );
       }
       for (final e in shown.values) {
         if (inContext(e) && watermark != null && e.createdAt <= watermark) {
           continue;
         }
-        notifier.markContextRead(msgContextKey(e.id), e.createdAt);
+        notifier.markContextRead(
+          msgContextKey(e.id),
+          e.createdAt,
+          explicit: true,
+        );
       }
+    }
+
+    // The catch-up scope covering a row: its thread, or its whole channel
+    // for a DM or top-level row.
+    String? scopeOf(InboxItem item) {
+      final threadRootId = item.conversationId.startsWith('dm:')
+          ? null
+          : item.threadRootId;
+      return threadRootId != null
+          ? threadContextKey(threadRootId)
+          : item.item.channelId;
     }
 
     void markItemRead(InboxItem item) {
       final notifier = ref.read(readStateProvider.notifier);
-      ref
-          .read(inboxLocalStateProvider.notifier)
-          .clearUnread(groupedInboxItemIds(item));
+      final inbox = ref.read(inboxLocalStateProvider.notifier);
+      // Only this row's own marks. A scope-wide clear belongs to catch-up
+      // and to an explicit channel or thread mark read.
+      inbox.clearUnread(groupedInboxItemIds(item));
       final isDmRow = item.conversationId.startsWith('dm:');
       final partialChannelId = rowsArePartial ? item.item.channelId : null;
       if (partialChannelId != null) {
@@ -295,7 +315,12 @@ class ActivityPage extends HookConsumerWidget {
         int? latest;
         for (final e in events) {
           if (readsByOwnMark(e)) {
-            notifier.markContextRead(msgContextKey(e.id), e.createdAt);
+            // A user's read, so it syncs like the partial row's marks.
+            notifier.markContextRead(
+              msgContextKey(e.id),
+              e.createdAt,
+              explicit: true,
+            );
           } else if (latest == null || e.createdAt > latest) {
             latest = e.createdAt;
           }
@@ -332,9 +357,17 @@ class ActivityPage extends HookConsumerWidget {
     }
 
     void markItemUnread(InboxItem item) {
+      final readState = ref.read(readStateProvider);
       ref
           .read(inboxLocalStateProvider.notifier)
-          .markUnread(groupedInboxItemIds(item));
+          .markUnread(
+            groupedInboxItemIds(item),
+            baseline: inboxItemReadAt(
+              item,
+              markerOf: (contextId) => readState.contexts[contextId],
+            ),
+            scope: scopeOf(item),
+          );
     }
 
     Future<void> openItem(InboxItem item) async {
@@ -556,6 +589,16 @@ class ActivityPage extends HookConsumerWidget {
       );
     }
 
+    final strip = DuoToolbarScope.maybeStripOf(context);
+    final closeInRail =
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        strip != null &&
+        usesConversationPanes(
+          context,
+          strip: strip,
+          windowSize:
+              View.of(context).physicalSize / View.of(context).devicePixelRatio,
+        );
     return IosScrollToTop(
       child: Scaffold(
         backgroundColor: context.colors.surface,
@@ -564,36 +607,62 @@ class ActivityPage extends HookConsumerWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: Grid.gutter,
-                  vertical: Grid.xxs,
-                ),
-                child: Row(
-                  children: [
-                    defaultTargetPlatform == TargetPlatform.iOS
-                        ? Padding(
-                            padding: const EdgeInsets.only(right: Grid.twelve),
-                            child: IosGlassNavigationButton(
-                              icon: IosGlassNavigationIcon.close,
-                              semanticLabel: 'Close activity',
-                              width: 44,
-                              height: 44,
-                              controlSize: 44,
-                              foregroundColor: navigationPrimaryForeground(
-                                context,
-                              ),
-                              onPressed: () => Navigator.of(context).pop(),
-                            ),
-                          )
-                        : IconButton(
-                            tooltip: 'Close activity',
-                            icon: const Icon(BuzzIcons.x),
-                            onPressed: () => Navigator.of(context).pop(),
+              Stack(
+                children: [
+                  if (closeInRail)
+                    FrostedAppBar(
+                      nativeTitle: '',
+                      railOnly: true,
+                      automaticallyImplyLeading: false,
+                      nativeLeading: IosNavigationAction(
+                        label: 'Close activity',
+                        symbol: 'xmark',
+                        onPressed: () => Navigator.of(context).pop(),
+                      ),
+                    ),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(
+                      minHeight: 44 + Grid.xxs * 2,
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: Grid.gutter,
+                        vertical: Grid.xxs,
+                      ),
+                      child: Row(
+                        children: [
+                          if (!closeInRail)
+                            defaultTargetPlatform == TargetPlatform.iOS
+                                ? Padding(
+                                    padding: const EdgeInsets.only(
+                                      right: Grid.twelve,
+                                    ),
+                                    child: IosGlassNavigationButton(
+                                      icon: IosGlassNavigationIcon.close,
+                                      semanticLabel: 'Close activity',
+                                      width: 44,
+                                      height: 44,
+                                      controlSize: 44,
+                                      foregroundColor:
+                                          navigationPrimaryForeground(context),
+                                      onPressed: () =>
+                                          Navigator.of(context).pop(),
+                                    ),
+                                  )
+                                : IconButton(
+                                    tooltip: 'Close activity',
+                                    icon: const Icon(BuzzIcons.x),
+                                    onPressed: () =>
+                                        Navigator.of(context).pop(),
+                                  ),
+                          Expanded(
+                            child: Text('Activity', style: headerTitleStyle),
                           ),
-                    Expanded(child: Text('Activity', style: headerTitleStyle)),
-                  ],
-                ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ),
               SizedBox(
                 height: filterHeight,

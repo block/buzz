@@ -354,7 +354,7 @@ async fn execute_relay_admin_command(
 
             info!(
                 sender = %sender_hex,
-                target = %target_hex,
+                target_pubkey = %target_hex,
                 role = %role,
                 was_inserted,
                 "relay member add attempted"
@@ -424,7 +424,7 @@ async fn execute_relay_admin_command(
 
             info!(
                 sender = %sender_hex,
-                target = %target_hex,
+                target_pubkey = %target_hex,
                 "relay member removed"
             );
 
@@ -503,7 +503,7 @@ async fn execute_relay_admin_command(
 
             info!(
                 sender = %sender_hex,
-                target = %target_hex,
+                target_pubkey = %target_hex,
                 new_role = %new_role,
                 "relay member role changed"
             );

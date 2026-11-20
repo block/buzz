@@ -70,8 +70,7 @@ pub const CONTROL_PLANE_TABLES: &[&str] = &[
 /// Each entry is `(table, row source)`; the row source binds the community as
 /// `$1` and is prefixed with `DELETE`, `SELECT count(*)`, or `SELECT EXISTS`.
 /// Rows go child before parent: outbox rows before their actions, and both
-/// before `moderation_reports`. That order also satisfies the foreign keys
-/// while they exist; it is not needed once they are dropped.
+/// before `moderation_reports`.
 pub const RELAY_ADMIN_TABLES: &[(&str, &str)] = &[
     (
         "relay_admin_outbox",
@@ -171,10 +170,9 @@ const EXCLUDED_SCOPED_TABLES: &[&str] = &[
     "operator_listener_outbox",
 ];
 
-/// Tables the PostgreSQL purge deletes from, child before parent. The order
-/// satisfies the foreign keys while they exist; once they are dropped it does
-/// not matter, but the list must stay complete ([`EXPECTED_SCOPED_TABLES`]
-/// gates it).
+/// Tables the PostgreSQL purge deletes from, child before parent. No foreign
+/// key needs the order, but the list must stay complete
+/// ([`EXPECTED_SCOPED_TABLES`] gates it).
 pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "nip_fi_profile_heads",
     "personal_read_frontiers",
@@ -917,7 +915,7 @@ impl DeletionStore {
         }
         let mut tx = self.pool.begin().await?;
         // Keep resolution and admission together, including when a caller pins
-        // the immutable ID. NO KEY UPDATE permits the legacy request FK check.
+        // the immutable ID. NO KEY UPDATE permits `FOR KEY SHARE` reference checks.
         let target: Option<Uuid> = sqlx::query_scalar(
             "SELECT id FROM communities
              WHERE ($1::text IS NULL OR lower(host) = lower($1))
@@ -7461,20 +7459,6 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         assert_eq!(current_schema.scoped_tables, inventory.schema.scoped_tables);
         assert_eq!(current_schema.fenced_tables, inventory.schema.fenced_tables);
 
-        let mismatched_insert = sqlx::query(
-            "INSERT INTO community_deletion_approvals \
-             (request_id, community_id, inventory_digest, approved_by) \
-             VALUES ($1, $2, $3, 'tampered')",
-        )
-        .bind(request.id)
-        .bind(*request.community_id.as_uuid())
-        .bind(vec![0_u8; 32])
-        .execute(&db.pool)
-        .await;
-        assert!(
-            mismatched_insert.is_err(),
-            "a mismatched approval must be unrepresentable"
-        );
         let approved = store
             .approve(request.id, "approver-a", Some("reviewed"))
             .await
@@ -7494,43 +7478,81 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             approved.inventory_digest,
             Some(hex::encode(inventory.digest().unwrap()))
         );
-        let mismatched_approval = sqlx::query(
+        // No foreign key binds the approval to the request digest. Every claim
+        // and lease check joins on it instead, so a tampered digest on either
+        // side grants nothing.
+        let digest = inventory.digest().unwrap();
+        let tampers = [
             "UPDATE community_deletion_approvals SET inventory_digest = $2 WHERE request_id = $1",
-        )
-        .bind(request.id)
-        .bind(vec![0_u8; 32])
-        .execute(&db.pool)
-        .await;
-        assert!(
-            mismatched_approval.is_err(),
-            "approval digest must remain database-bound to the frozen request digest"
-        );
-        // PostgreSQL sends this rejection before it rolls the statement back
-        // and releases the request row lock, and sqlx returns on the error.
-        // The claim below uses SKIP LOCKED on another pooled connection, so
-        // finish a round trip on this connection before claiming.
-        let mut tamper_conn = db.pool.acquire().await.expect("acquire tamper connection");
-        let mismatched_request = sqlx::query(
             "UPDATE community_deletion_requests SET inventory_digest = $2 WHERE id = $1",
-        )
-        .bind(request.id)
-        .bind(vec![1_u8; 32])
-        .execute(&mut *tamper_conn)
-        .await;
-        assert!(
-            mismatched_request.is_err(),
-            "the frozen request digest must remain bound to its approval"
-        );
-        sqlx::query("SELECT 1")
-            .execute(&mut *tamper_conn)
-            .await
-            .expect("rejected update has rolled back");
-        drop(tamper_conn);
-        assert!(store
+        ];
+        let set_digest = |sql: &'static str, value: Vec<u8>| {
+            sqlx::query(sql)
+                .bind(request.id)
+                .bind(value)
+                .execute(&db.pool)
+        };
+        for sql in tampers {
+            set_digest(sql, vec![0_u8; 32])
+                .await
+                .expect("tamper digest");
+            assert!(
+                store
+                    .claim_specific(request.id, "executor-a", DEFAULT_LEASE_DURATION)
+                    .await
+                    .expect("claim with a mismatched digest")
+                    .is_none(),
+                "a mismatched digest must not authorize a claim: {sql}"
+            );
+            set_digest(sql, digest.clone())
+                .await
+                .expect("restore digest");
+        }
+        let claim = store
             .claim_specific(request.id, "executor-a", DEFAULT_LEASE_DURATION)
             .await
             .expect("claim approved")
-            .is_some());
+            .expect("matching digests authorize a claim");
+
+        // An executor that already holds the lease loses it the same way, and
+        // the failed calls leave the lease and stage as they were.
+        for sql in tampers {
+            let held = store.get(request.id).await.expect("held lease");
+            set_digest(sql, vec![0_u8; 32])
+                .await
+                .expect("tamper digest");
+            assert!(
+                store
+                    .heartbeat(&claim.lease, "worker", DEFAULT_LEASE_DURATION, false)
+                    .await
+                    .is_err(),
+                "a mismatched digest must not renew a lease: {sql}"
+            );
+            assert!(
+                store
+                    .verify_execution_token(&claim.lease, DeletionStage::Approved)
+                    .await
+                    .is_err(),
+                "a mismatched digest must not keep a lease valid: {sql}"
+            );
+            let after = store.get(request.id).await.expect("lease after rejection");
+            assert_eq!(
+                (after.stage, after.lease_generation, after.lease_until),
+                (held.stage, held.lease_generation, held.lease_until),
+                "{sql}"
+            );
+            set_digest(sql, digest.clone())
+                .await
+                .expect("restore digest");
+            store
+                .verify_execution_token(&claim.lease, DeletionStage::Approved)
+                .await
+                .expect("restored digest keeps the lease valid");
+            store
+                .heartbeat(&claim.lease, "worker", DEFAULT_LEASE_DURATION, false)
+                .await
+                .expect("restored digest renews the lease");
+        }
     }
 
     #[tokio::test]
@@ -8947,7 +8969,6 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
     #[ignore = "requires Postgres"]
     async fn manifest_key_chunks_bind_freeze_execution_and_cleanup() {
         let (db, store) = store().await;
-        crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
         let (request, inventory) = inventoried_request(&db, &store).await;
         store
             .approve(request.id, "approver", None)
@@ -9080,7 +9101,6 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
     #[ignore = "requires Postgres"]
     async fn purge_removes_fk_children_explicitly_without_fk_actions() {
         let (db, store) = store().await;
-        crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
         let (request, inventory) = inventoried_request(&db, &store).await;
         let community = request.community_id;
         let owner = vec![7_u8; 32];
