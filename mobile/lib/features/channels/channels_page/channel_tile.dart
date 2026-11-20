@@ -16,6 +16,7 @@ class _ChannelTile extends ConsumerWidget {
   final String? sectionId;
 
   const _ChannelTile({
+    super.key,
     required this.channel,
     required this.isUnread,
     required this.boldUnread,
@@ -42,143 +43,158 @@ class _ChannelTile extends ConsumerWidget {
 
     final selected =
         ConversationPaneScope.maybeOf(context)?.selectedId == channel.id;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: selected ? context.colors.primaryContainer : null,
-        borderRadius: BorderRadius.circular(Radii.container),
-      ),
-      child: Semantics(
-        selected: selected,
-        value: hasAttention ? 'Needs your attention' : null,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(Radii.container),
-          onTap: onTap,
-          onLongPress: () => _showChannelActions(context, ref),
-          child: Padding(
-            padding: const EdgeInsets.only(
-              left: Grid.xxs,
-              right: Grid.xxs,
-              top: _kChannelRowVerticalPadding,
-              bottom: _kChannelRowVerticalPadding,
-            ),
-            child: Row(
-              children: [
-                if (channel.isDm) ...[
-                  SizedBox(
-                    width: _kChannelLeadingWidth,
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: _DmAvatar(
-                        channel: channel,
-                        currentPubkey: currentPubkey,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: _kChannelLabelGap),
-                ] else ...[
-                  SizedBox(
-                    width: _kChannelLeadingWidth,
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: Icon(
-                        channel.visibility == 'private'
-                            ? BuzzIcons.lock
-                            : BuzzIcons.hash,
-                        key: ValueKey('channel-icon-${channel.id}'),
-                        size: _kChannelIconSize,
-                        color: contentColor,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: _kChannelLabelGap),
-                ],
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        ref.watch(
-                          identityNameSourcesProvider.select(
-                            (names) => resolveDmChannelDisplayLabel(
-                              channel,
-                              currentPubkey: currentPubkey,
-                              names: names,
-                            ),
+    // The gutter insets only the selection paint; the whole row width
+    // still opens the channel and its actions.
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      excludeFromSemantics: true,
+      onTap: onTap,
+      onLongPress: () => _showChannelActions(context, ref),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: Grid.gutter - Grid.xxs),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: selected ? context.colors.primaryContainer : null,
+            borderRadius: BorderRadius.circular(Radii.container),
+          ),
+          child: Semantics(
+            selected: selected,
+            value: hasAttention ? 'Needs your attention' : null,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(Radii.container),
+              onTap: onTap,
+              onLongPress: () => _showChannelActions(context, ref),
+              child: Padding(
+                padding: const EdgeInsets.only(
+                  left: Grid.xxs,
+                  right: Grid.xxs,
+                  top: _kChannelRowVerticalPadding,
+                  bottom: _kChannelRowVerticalPadding,
+                ),
+                child: Row(
+                  children: [
+                    if (channel.isDm) ...[
+                      SizedBox(
+                        width: _kChannelLeadingWidth,
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: _DmAvatar(
+                            channel: channel,
+                            currentPubkey: currentPubkey,
                           ),
                         ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: navigationChatTitleTextStyle.copyWith(
-                          color: isMuted
-                              ? contentColor
-                              : channelNavigationForeground(
-                                  context,
-                                  unread: boldUnread,
+                      ),
+                      const SizedBox(width: _kChannelLabelGap),
+                    ] else ...[
+                      SizedBox(
+                        width: _kChannelLeadingWidth,
+                        child: Align(
+                          alignment: Alignment.centerLeft,
+                          child: Icon(
+                            channel.visibility == 'private'
+                                ? BuzzIcons.lock
+                                : BuzzIcons.hash,
+                            key: ValueKey('channel-icon-${channel.id}'),
+                            size: _kChannelIconSize,
+                            color: contentColor,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: _kChannelLabelGap),
+                    ],
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            ref.watch(
+                              identityNameSourcesProvider.select(
+                                (names) => resolveDmChannelDisplayLabel(
+                                  channel,
+                                  currentPubkey: currentPubkey,
+                                  names: names,
                                 ),
-                          fontWeight: boldUnread
-                              ? FontWeight.w600
-                              : FontWeight.w400,
+                              ),
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: navigationChatTitleTextStyle.copyWith(
+                              color: isMuted
+                                  ? contentColor
+                                  : channelNavigationForeground(
+                                      context,
+                                      unread: boldUnread,
+                                    ),
+                              fontWeight: boldUnread
+                                  ? FontWeight.w600
+                                  : FontWeight.w400,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (channel.isEphemeral) ...[
+                      const SizedBox(width: Grid.xxs),
+                      _EphemeralBadge(channel: channel),
+                    ],
+                    if (isMuted) ...[
+                      const SizedBox(width: Grid.xxs),
+                      SizedBox(
+                        width: _kChannelIconSize,
+                        child: Center(
+                          child: Icon(
+                            BuzzIcons.bellOff,
+                            size: 12,
+                            color: navigationMetadataForeground(context),
+                          ),
                         ),
                       ),
                     ],
-                  ),
+                    if (showAttention) ...[
+                      const SizedBox(width: Grid.xxs),
+                      SizedBox(
+                        width: _kChannelIconSize,
+                        child: Center(
+                          child: Container(
+                            key: ValueKey(
+                              'channel-attention-dot-${channel.id}',
+                            ),
+                            width: 6,
+                            height: 6,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: context.colors.primary,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                    if (!channel.isMember && !channel.isDm)
+                      Padding(
+                        padding: const EdgeInsets.only(right: Grid.xxs),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: Grid.half + 2,
+                            vertical: 3,
+                          ),
+                          decoration: BoxDecoration(
+                            color: context.colors.primary.withValues(
+                              alpha: 0.1,
+                            ),
+                            borderRadius: BorderRadius.circular(Radii.sm),
+                          ),
+                          child: Text(
+                            'Open',
+                            style: context.textTheme.labelSmall?.copyWith(
+                              color: context.colors.primary,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
-                if (channel.isEphemeral) ...[
-                  const SizedBox(width: Grid.xxs),
-                  _EphemeralBadge(channel: channel),
-                ],
-                if (isMuted) ...[
-                  const SizedBox(width: Grid.xxs),
-                  SizedBox(
-                    width: _kChannelIconSize,
-                    child: Center(
-                      child: Icon(
-                        BuzzIcons.bellOff,
-                        size: 12,
-                        color: navigationMetadataForeground(context),
-                      ),
-                    ),
-                  ),
-                ],
-                if (showAttention) ...[
-                  const SizedBox(width: Grid.xxs),
-                  SizedBox(
-                    width: _kChannelIconSize,
-                    child: Center(
-                      child: Container(
-                        key: ValueKey('channel-attention-dot-${channel.id}'),
-                        width: 6,
-                        height: 6,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: context.colors.primary,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-                if (!channel.isMember && !channel.isDm)
-                  Padding(
-                    padding: const EdgeInsets.only(right: Grid.xxs),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: Grid.half + 2,
-                        vertical: 3,
-                      ),
-                      decoration: BoxDecoration(
-                        color: context.colors.primary.withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(Radii.sm),
-                      ),
-                      child: Text(
-                        'Open',
-                        style: context.textTheme.labelSmall?.copyWith(
-                          color: context.colors.primary,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
+              ),
             ),
           ),
         ),
