@@ -62,19 +62,7 @@ class _WorkspaceIcon extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     Widget display(Widget child) {
       if (!inHeader) return ExcludeSemantics(child: child);
-      const sideInset = (_kChannelIconSize - _kWorkspaceIconSize) / 2;
-      return Padding(
-        padding: const EdgeInsets.only(right: Grid.xxs - sideInset),
-        child: SizedBox.square(
-          dimension: _kChannelIconSize,
-          child: Center(
-            child: SizedBox.square(
-              dimension: _kWorkspaceIconSize,
-              child: ExcludeSemantics(child: child),
-            ),
-          ),
-        ),
-      );
+      return _SectionLeadingIcon(child);
     }
 
     if (!(icon.length > 2 && icon.startsWith(':') && icon.endsWith(':'))) {
@@ -111,6 +99,28 @@ class _WorkspaceIcon extends ConsumerWidget {
 }
 
 const _kWorkspaceIconSize = 16.0;
+
+class _SectionLeadingIcon extends StatelessWidget {
+  const _SectionLeadingIcon(this.child);
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    const sideInset = (_kChannelIconSize - _kWorkspaceIconSize) / 2;
+    return Padding(
+      padding: const EdgeInsets.only(right: Grid.xxs - sideInset),
+      child: SizedBox.square(
+        dimension: _kChannelIconSize,
+        child: Center(
+          child: SizedBox.square(
+            dimension: _kWorkspaceIconSize,
+            child: ExcludeSemantics(child: child),
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 class _CustomSectionHeader extends StatelessWidget {
   final WorkspaceSection section;
@@ -540,6 +550,15 @@ class _SectionHeader extends StatelessWidget {
             Expanded(
               child: _SectionLabel(
                 label: label,
+                icon: group == 'starred'
+                    ? _SectionLeadingIcon(
+                        TablerStarIcon(
+                          color: sectionColor,
+                          filled: true,
+                          size: _kWorkspaceIconSize,
+                        ),
+                      )
+                    : null,
                 expanded: expanded,
                 color: sectionColor,
               ),

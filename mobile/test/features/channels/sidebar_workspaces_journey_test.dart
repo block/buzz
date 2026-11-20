@@ -16,6 +16,7 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/app_list.dart';
+import 'package:buzz/shared/widgets/tabler_star_icon.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -222,6 +223,14 @@ void main() {
     );
     final channelIcon = tester.getRect(
       find.byKey(const ValueKey('channel-icon-general')),
+    );
+    final star = find.byType(TablerStarIcon);
+    expect(tester.widget<TablerStarIcon>(star).filled, isTrue);
+    expect(tester.getCenter(star).dx, channelIcon.center.dx);
+    expect(tester.getCenter(star).dy, tester.getCenter(inList('Starred')).dy);
+    expect(
+      tester.getTopLeft(inList('Starred')).dx,
+      tester.getTopLeft(inList('Launch')).dx,
     );
     expect(emoji.center.dx, channelIcon.center.dx);
     expect(emoji.center.dy, tester.getCenter(inList('Launch')).dy);
