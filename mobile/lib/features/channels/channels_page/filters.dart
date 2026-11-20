@@ -27,6 +27,7 @@ Future<String?> showSectionViewSheet(
   required ChannelSortMode sortMode,
   required ValueChanged<ChannelSortMode> onSort,
   bool custom = false,
+  String? deleteLabel,
 }) async {
   final orderScope = context
       .getElementForInheritedWidgetOfExactType<SectionOrderScope>();
@@ -60,6 +61,7 @@ Future<String?> showSectionViewSheet(
           initialSort: sortMode,
           onSort: onSort,
           custom: custom,
+          deleteLabel: deleteLabel,
         );
       },
     );
@@ -79,6 +81,7 @@ class _SectionViewSheet extends HookConsumerWidget {
   final ChannelSortMode initialSort;
   final ValueChanged<ChannelSortMode> onSort;
   final bool custom;
+  final String? deleteLabel;
 
   const _SectionViewSheet({
     required this.onReorder,
@@ -87,6 +90,7 @@ class _SectionViewSheet extends HookConsumerWidget {
     required this.initialSort,
     required this.onSort,
     required this.custom,
+    required this.deleteLabel,
   });
 
   @override
@@ -103,6 +107,7 @@ class _SectionViewSheet extends HookConsumerWidget {
     final layoutEditable = ref.watch(
       channelSectionsProvider.select((state) => state.editable),
     );
+    final deleteLabel = this.deleteLabel;
     final originalManager = useRef(manager);
     final sort = useState(initialSort);
     final mode = useState(
@@ -327,7 +332,8 @@ class _SectionViewSheet extends HookConsumerWidget {
                                   },
                             child: const Text('Retry loading preferences'),
                           ),
-                        if (custom && layoutEditable || onReorder != null)
+                        if (layoutEditable && (custom || deleteLabel != null) ||
+                            onReorder != null)
                           AppListCard(
                             children: [
                               if (custom && layoutEditable)
@@ -344,9 +350,9 @@ class _SectionViewSheet extends HookConsumerWidget {
                                   icon: BuzzIcons.arrowUpDown,
                                   onTap: saving.value ? null : onReorder,
                                 ),
-                              if (custom && layoutEditable)
+                              if (layoutEditable && deleteLabel != null)
                                 AppListRow(
-                                  title: 'Delete section',
+                                  title: deleteLabel,
                                   icon: BuzzIcons.trash2,
                                   titleColor: context.colors.error,
                                   onTap: saving.value

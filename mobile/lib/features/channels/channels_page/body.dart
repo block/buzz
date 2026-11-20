@@ -383,8 +383,8 @@ class _SliverChannelsList extends HookConsumerWidget {
       );
     }
 
-    // Only the team sections record can be edited, and only until desktop's
-    // unified workspaces exist. The mobile display order is stored separately.
+    // Legacy edits stop once desktop's unified workspaces exist.
+    // The mobile display order is stored separately.
     final teamSections = sectionsState.editable
         ? (sectionsState.store.sections.toList()
             ..sort((a, b) => a.order.compareTo(b.order)))
@@ -485,6 +485,45 @@ class _SliverChannelsList extends HookConsumerWidget {
       },
     );
 
+    Future<void> deleteSoloWorkspace(WorkspaceSection section) async {
+      final sync = ref.read(meSyncProvider);
+      final container = ProviderScope.containerOf(context, listen: false);
+      bool mayFile() => container.read(channelSectionsProvider).editable;
+      if (!mayFile()) return;
+      try {
+        final confirmed = await showDestructiveConfirmation(
+          context: context,
+          title: 'Delete “${section.name}”?',
+          message: 'Chats in this workspace will move back to Solo.',
+          confirmLabel: 'Delete workspace',
+        );
+        if (!confirmed || !context.mounted) return;
+        if (!mayFile()) throw const MeFilingClosed();
+        try {
+          await sync.update(
+            (groups) => groups.removeWorkspace(section.id),
+            mayFile: mayFile,
+          );
+        } on MeRecoveryConflict {
+          if (context.mounted && !sync.disposed) {
+            await offerMeRecovery(context, sync);
+          }
+        }
+        if (context.mounted && !sync.disposed) {
+          ref.invalidate(meGroupsProvider);
+        }
+      } catch (error) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showFeedbackSnackBar(
+            SnackBar(
+              content: Text(error.toString().replaceFirst('Bad state: ', '')),
+            ),
+            kind: ToastKind.error,
+          );
+        }
+      }
+    }
+
     Widget? sectionFor(String key) {
       final rows = buckets[key] ?? const <Channel>[];
       final group = sidebarGroupKey(key);
@@ -531,6 +570,9 @@ class _SliverChannelsList extends HookConsumerWidget {
         expanded: sectionExpanded(section.id),
         onToggle: () => toggleSection(section.id),
         edits: team == null ? null : editsFor(team, section.id),
+        onDeleteWorkspace: sectionsState.editable && section.teamId == null
+            ? () => deleteSoloWorkspace(section)
+            : null,
         sortMode: mode(),
         onSortModeChange: sortSetter(group),
       );

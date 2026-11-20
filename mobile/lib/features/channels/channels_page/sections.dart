@@ -1,7 +1,6 @@
 part of '../channels_page.dart';
 
-/// A workspace. Edit actions are null where mobile can't write it: always
-/// for desktop's unified workspaces, and for legacy Solo workspaces.
+/// A workspace. Desktop's unified workspaces have no edit actions on mobile.
 class _CustomChannelSection extends StatelessWidget {
   final WorkspaceSection section;
   final List<Channel> channels;
@@ -10,6 +9,7 @@ class _CustomChannelSection extends StatelessWidget {
   final bool expanded;
   final VoidCallback onToggle;
   final _SectionEdits? edits;
+  final VoidCallback? onDeleteWorkspace;
   final ChannelSortMode sortMode;
   final ValueChanged<ChannelSortMode>? onSortModeChange;
 
@@ -22,6 +22,7 @@ class _CustomChannelSection extends StatelessWidget {
     required this.expanded,
     required this.onToggle,
     required this.edits,
+    required this.onDeleteWorkspace,
     required this.sortMode,
     required this.onSortModeChange,
   });
@@ -35,6 +36,7 @@ class _CustomChannelSection extends StatelessWidget {
           expanded: expanded,
           onToggle: onToggle,
           edits: edits,
+          onDeleteWorkspace: onDeleteWorkspace,
           sortMode: sortMode,
           onSortModeChange: onSortModeChange,
         ),
@@ -127,6 +129,7 @@ class _CustomSectionHeader extends StatelessWidget {
   final bool expanded;
   final VoidCallback onToggle;
   final _SectionEdits? edits;
+  final VoidCallback? onDeleteWorkspace;
   final ChannelSortMode sortMode;
   final ValueChanged<ChannelSortMode>? onSortModeChange;
 
@@ -135,6 +138,7 @@ class _CustomSectionHeader extends StatelessWidget {
     required this.expanded,
     required this.onToggle,
     required this.edits,
+    required this.onDeleteWorkspace,
     required this.sortMode,
     required this.onSortModeChange,
   });
@@ -143,6 +147,12 @@ class _CustomSectionHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final label = section.name;
     final edits = this.edits;
+    final onDelete = edits?.onDelete ?? onDeleteWorkspace;
+    final deleteLabel = onDelete == null
+        ? null
+        : edits != null
+        ? 'Delete section'
+        : 'Delete workspace';
     final onSortModeChange = this.onSortModeChange;
     Future<void> openOptions(BuildContext buttonContext) async {
       final action = await showSectionViewSheet(
@@ -152,13 +162,14 @@ class _CustomSectionHeader extends StatelessWidget {
         sortMode: sortMode,
         onSort: (mode) => onSortModeChange?.call(mode),
         custom: edits != null,
+        deleteLabel: deleteLabel,
       );
-      if (!buttonContext.mounted || edits == null) return;
+      if (!buttonContext.mounted) return;
       switch (action) {
         case 'rename':
-          edits.onRename();
+          edits?.onRename();
         case 'delete':
-          edits.onDelete();
+          onDelete?.call();
       }
     }
 
@@ -176,8 +187,8 @@ class _CustomSectionHeader extends StatelessWidget {
         symbol: 'line.3.horizontal.decrease',
         onPressed: () => openOptions(context),
       ),
-      if (edits != null)
-        (label: 'Delete section', symbol: 'trash', onPressed: edits.onDelete),
+      if (deleteLabel != null)
+        (label: deleteLabel, symbol: 'trash', onPressed: onDelete),
     ];
     final sortAt = edits == null ? 1 : 2;
 
@@ -231,9 +242,9 @@ class _CustomSectionHeader extends StatelessWidget {
                     : sortAt + (sortMode == ChannelSortMode.recent ? 0 : 1),
                 dividerBefore: {
                   if (edits != null) sortAt,
-                  if (edits != null) menu.length - 1,
+                  if (deleteLabel != null) menu.length - 1,
                 },
-                destructiveIndices: {if (edits != null) menu.length - 1},
+                destructiveIndices: {if (deleteLabel != null) menu.length - 1},
                 actions: menu,
               )
             else
