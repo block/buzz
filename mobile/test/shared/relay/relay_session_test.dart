@@ -2433,7 +2433,13 @@ void main() {
         throwsA(
           isA<RelayAckTimeoutError>()
               .having((error) => error.call, 'call', RelayCall.publish)
-              .having((error) => error.duration, 'duration', Duration.zero),
+              .having((error) => error.duration, 'duration', Duration.zero)
+              .having(
+                (error) => error.toString(),
+                'text',
+                'TimeoutException: Event event-1 not acknowledged '
+                    'within 0:00:00.000000',
+              ),
         ),
       );
     });
@@ -2449,7 +2455,13 @@ void main() {
         throwsA(
           isA<RelayTimeoutException>()
               .having((error) => error.call, 'call', RelayCall.history)
-              .having((error) => error.reason, 'reason', RelayReason.timeout),
+              .having((error) => error.reason, 'reason', RelayReason.timeout)
+              .having(
+                (error) => error.toString(),
+                'text',
+                'TimeoutException: Relay history request timed out after '
+                    '0:00:00.001000',
+              ),
         ),
       );
     });
