@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
@@ -79,6 +80,7 @@ final class SavedMessageStore {
   final int payloadBudget;
   final _scopeEpochs = <String, int>{};
   final _channelEpochs = <(String, String), int>{};
+  final _pendingEventRemovals = <(String, String), Set<String>>{};
   Future<void> _tail = Future.value();
 
   SavedMessageTicket capture(SavedMessageScope scope, SavedMessagePage page) {
@@ -126,34 +128,82 @@ final class SavedMessageStore {
     final key = _scopeKey(scope);
     _scopeEpochs.update(key, (epoch) => epoch + 1, ifAbsent: () => 1);
     _channelEpochs.removeWhere((entry, _) => entry.$1 == key);
+    _pendingEventRemovals.removeWhere((entry, _) => entry.$1 == key);
     return _enqueue((directory) => _sweep(directory, removedScope: key));
   }
 
   /// Retires every page of a channel that was deleted, left or denied.
   Future<void> removeChannel(SavedMessageScope scope, String channelId) {
     final key = _scopeKey(scope);
-    _channelEpochs.update(
-      (key, channelId),
-      (epoch) => epoch + 1,
-      ifAbsent: () => 1,
-    );
-    return _enqueue((directory) async {
-      try {
-        final result = await _runDisk(
-          _DiskRequest(
-            path: _path(directory, key),
-            action: _DiskAction.removeChannel,
-            page: (channelId: channelId, rootId: ''),
-          ),
-        );
-        if (result != null && !result.reset) return;
-        if (result?.reset ?? false) _reportReset();
-      } catch (error, stackTrace) {
-        _report(error, stackTrace);
+    _retireChannel((key, channelId));
+    _pendingEventRemovals.remove((key, channelId));
+    return _enqueue((directory) => _removeFromDisk(directory, key, channelId));
+  }
+
+  /// Drops changed events and keeps the rest of the saved conversation.
+  void removeChannelEvents(
+    SavedMessageScope scope,
+    String channelId,
+    Set<String> targets,
+  ) {
+    if (targets.isEmpty) return;
+    final key = (_scopeKey(scope), channelId);
+    _retireChannel(key);
+    final waiting = _pendingEventRemovals[key];
+    if (waiting != null) {
+      for (final target in targets) {
+        if (waiting.length > _maxWindowEvents) break;
+        waiting.add(target);
       }
-      // If SQL cannot remove that channel, discard the disposable scope.
-      await _sweep(directory, removedScope: key);
-    });
+      return;
+    }
+    final batch = targets.take(_maxWindowEvents + 1).toSet();
+    _pendingEventRemovals[key] = batch;
+    void clearBatch() {
+      if (identical(_pendingEventRemovals[key], batch)) {
+        _pendingEventRemovals.remove(key);
+      }
+    }
+
+    unawaited(
+      _enqueue((directory) {
+        clearBatch();
+        return _removeFromDisk(
+          directory,
+          key.$1,
+          channelId,
+          targets: batch.length > _maxWindowEvents ? null : batch,
+        );
+      }).whenComplete(clearBatch),
+    );
+  }
+
+  void _retireChannel((String, String) key) {
+    _channelEpochs.update(key, (epoch) => epoch + 1, ifAbsent: () => 1);
+  }
+
+  Future<void> _removeFromDisk(
+    String directory,
+    String key,
+    String channelId, {
+    Set<String>? targets,
+  }) async {
+    try {
+      final result = await _runDisk(
+        _DiskRequest(
+          path: _path(directory, key),
+          action: _DiskAction.removeChannel,
+          page: (channelId: channelId, rootId: ''),
+          targets: targets,
+        ),
+      );
+      if (result != null && !result.reset) return;
+      if (result?.reset ?? false) _reportReset();
+    } catch (error, stackTrace) {
+      _report(error, stackTrace);
+    }
+    // If SQL cannot remove that channel's data, discard the disposable scope.
+    await _sweep(directory, removedScope: key);
   }
 
   /// Removes retired identity databases from interrupted account cleanup and

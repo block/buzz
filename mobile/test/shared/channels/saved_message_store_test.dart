@@ -223,6 +223,31 @@ void main() {
     },
   );
 
+  test('coalesces live removals while retaining other saved rows', () async {
+    var rootReads = 0;
+    final cache = SavedMessageStore(
+      root: () async {
+        rootReads++;
+        return temp;
+      },
+      diagnostics: diagnostics,
+    );
+    final original = cache.capture(_identity, _channel);
+    final first = _message(_channel, 'first removed row');
+    final second = _message(_channel, 'second removed row');
+    final retained = _message(_channel, 'unchanged');
+    await cache.save(original, [first, second, retained], relayAuthor: null);
+    rootReads = 0;
+
+    cache.removeChannelEvents(_identity, _channel.channelId, {first.id});
+    cache.removeChannelEvents(_identity, _channel.channelId, {second.id});
+
+    expect(cache.isCurrent(original), isFalse);
+    expect(await cache.read(cache.capture(_identity, _channel)), [retained]);
+    expect(rootReads, 2); // One removal batch and one read.
+    expect(diagnostics.operations, isEmpty);
+  });
+
   test(
     'discards an unreadable or incompatible file and refills on the next save',
     () async {

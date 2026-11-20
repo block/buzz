@@ -253,13 +253,15 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
           (event) {
             if (cacheScope != null &&
                 _isCurrentInit(initVersion) &&
-                event.channelId == channelId &&
+                (event.channelId == null || event.channelId == channelId) &&
                 (event.kind == EventKind.deletion ||
                     event.kind == EventKind.nip29DeleteEvent ||
                     event.kind == EventKind.streamMessageEdit)) {
-              // A snapshot predating a live delete or edit must never be
-              // shown again. Retire any in-flight save of that snapshot too.
-              unawaited(cache.removeChannel(cacheScope, channelId));
+              // Remove stale rows and retire a pending save of the old page.
+              cache.removeChannelEvents(cacheScope, channelId, {
+                for (final tag in event.tags)
+                  if (tag.length > 1 && tag[0] == 'e') tag[1],
+              });
             }
             _handleLiveEvent(event);
           },

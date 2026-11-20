@@ -15,6 +15,7 @@ final class _DiskRequest {
     this.events = const [],
     this.relayAuthor,
     this.payloadBudget = 0,
+    this.targets,
   });
 
   final String path;
@@ -23,6 +24,7 @@ final class _DiskRequest {
   final List<NostrEvent> events;
   final String? relayAuthor;
   final int payloadBudget;
+  final Set<String>? targets;
 }
 
 final class _DiskResult {
@@ -101,6 +103,7 @@ _DiskResult? _accessDatabase(
         db,
         lease,
         request.page.channelId,
+        request.targets,
       ),
     };
   } on SqliteException catch (error) {
@@ -392,10 +395,32 @@ _DiskResult _removeChannel(
   Database db,
   SavedMessageCacheLease lease,
   String channel,
+  Set<String>? targets,
 ) {
   db.execute('BEGIN IMMEDIATE');
   try {
-    _deletePage(db, channel, null);
+    if (targets == null) {
+      _deletePage(db, channel, null);
+    } else if (_deleteEventReferences(
+      db,
+      'channel_id = ? AND event_id IN (SELECT value FROM json_each(?))',
+      [channel, jsonEncode(targets.toList())],
+    )) {
+      db.execute(
+        '''
+        UPDATE pages SET byte_size = (
+          SELECT COALESCE(SUM(length(CAST(wire AS BLOB))), 0)
+          FROM page_events JOIN events ON events.id = page_events.event_id
+          WHERE page_events.channel_id = pages.channel_id
+            AND page_events.root_id = pages.root_id
+        ) WHERE channel_id = ?;
+      ''',
+        [channel],
+      );
+      db.execute('DELETE FROM pages WHERE channel_id = ? AND byte_size = 0', [
+        channel,
+      ]);
+    }
     _checkLease(lease);
     db.execute('COMMIT');
   } catch (_) {
@@ -410,11 +435,16 @@ void _deletePage(Database db, String channel, String? root) {
   final match = root == null
       ? 'channel_id = ?'
       : 'channel_id = ? AND root_id = ?';
+  _deleteEventReferences(db, match, key);
+  db.execute('DELETE FROM pages WHERE $match', key);
+}
+
+bool _deleteEventReferences(Database db, String match, List<Object?> key) {
   final removed = db.select(
     'DELETE FROM page_events WHERE $match RETURNING event_id',
     key,
   );
-  db.execute('DELETE FROM pages WHERE $match', key);
+  if (removed.isEmpty) return false;
   final deleteEvent = db.prepare('''
     DELETE FROM events WHERE id = ?
     AND NOT EXISTS (SELECT 1 FROM page_events WHERE event_id = events.id)
@@ -426,6 +456,7 @@ void _deletePage(Database db, String channel, String? root) {
   } finally {
     deleteEvent.close();
   }
+  return true;
 }
 
 void _deleteDatabase(String path) {

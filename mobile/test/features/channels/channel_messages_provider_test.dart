@@ -91,8 +91,8 @@ void main() {
     expect(relay.historyFilters, isEmpty);
   });
 
-  for (final kind in [EventKind.deletion, EventKind.streamMessageEdit]) {
-    flutter_test.test('live mutation $kind retires the offline page', () async {
+  for (final mutation in ['delete', 'edit', 'unreact']) {
+    flutter_test.test('offline page after live $mutation', () async {
       const scope = (
         communityId: 'cache-test-community',
         pubkey: 'cache-test-user',
@@ -118,20 +118,31 @@ void main() {
 
       final online = makeContainer(relay);
       final store = online.read(savedMessageStoreProvider);
-      final event = NostrEvent.fromJson(
+      NostrEvent signed(
+        int kind,
+        String content, {
+        String? target,
+      }) => NostrEvent.fromJson(
         signNostrEvent(
           secretKey:
               '0000000000000000000000000000000000000000000000000000000000000001',
-          kind: EventKind.streamMessage,
-          content: 'Saved before the live mutation',
+          kind: kind,
+          content: content,
           tags: [
             ['h', _channelId],
+            if (target != null) ['e', target],
           ],
         ).toMap(),
       );
+      final event = signed(EventKind.streamMessage, 'Original message');
+      final untouched = signed(EventKind.streamMessage, 'Another message');
+      final reaction = signed(EventKind.reaction, '+', target: event.id);
+      final unreact = mutation == 'unreact';
+      final oldPage = [event, untouched, if (unreact) reaction];
+      final expected = [untouched, if (unreact) event];
       final ticket = store.capture(scope, page);
-      await store.save(ticket, [event], relayAuthor: null);
-      expect(await store.read(ticket), [event]);
+      await store.save(ticket, oldPage, relayAuthor: null);
+      expect(await store.read(ticket), oldPage);
       final messages = channelMessagesProvider(_channelId);
       online.listen(messages, (_, _) {});
       await relay.subscribed;
@@ -139,20 +150,25 @@ void main() {
         NostrEvent(
           id: 'live-mutation',
           pubkey: event.pubkey,
-          kind: kind,
+          kind: mutation == 'edit'
+              ? EventKind.streamMessageEdit
+              : EventKind.deletion,
           createdAt: event.createdAt + 1,
           tags: [
-            ['h', _channelId],
-            ['e', event.id],
+            if (!unreact) ['h', _channelId],
+            ['e', unreact ? reaction.id : event.id],
           ],
           content: '',
           sig: '',
         ),
       );
-      expect(await store.read(store.capture(scope, page)), isNull);
+      expect(
+        await store.read(store.capture(scope, page)),
+        unorderedEquals(expected),
+      );
 
       // An initial relay query already in flight cannot restore the old page.
-      query.complete([event, _bounds()]);
+      query.complete([...oldPage, _bounds()]);
       await _pumpEventQueue();
       expect(store.isCurrent(ticket), isFalse);
 
@@ -163,7 +179,10 @@ void main() {
       offline.listen(messages, (_, _) {});
       final preview = savedChannelPreviewProvider(_channelId);
       offline.listen(preview, (_, _) {});
-      expect(await offline.read(preview.future), isNull);
+      expect(
+        (await offline.read(preview.future))?.events,
+        unorderedEquals(expected),
+      );
       expect(offlineRelay.queryFilters, isEmpty);
     });
   }
