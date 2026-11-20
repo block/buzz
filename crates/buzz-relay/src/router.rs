@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::{
     body::Body,
     extract::{ConnectInfo, FromRequest, State, WebSocketUpgrade},
-    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode, Uri},
     middleware,
     response::{IntoResponse, Json},
     routing::{get, post, put},
@@ -1262,9 +1262,8 @@ async fn mesh_status_handler(State(state): State<Arc<AppState>>) -> impl IntoRes
 
 /// Build a CORS layer from the configured origins list.
 ///
-/// Rejected origins are logged at `warn` with the received `Origin` and the
-/// configured allowlist — silent CORS failures are otherwise very hard to
-/// diagnose on self-hosted relays (#3636).
+/// Log rejected cross-origin preflights at debug level to help
+/// self-hosted operators diagnose CORS configuration (#3636).
 fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
     if cors_origins.is_empty() {
         return CorsLayer::permissive();
@@ -1284,35 +1283,45 @@ fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
         return CorsLayer::new();
     }
 
-    let allowed_display: Vec<String> = origins
-        .iter()
-        .map(|o| String::from_utf8_lossy(o.as_bytes()).into_owned())
-        .collect();
-    let allowed: std::collections::HashSet<axum::http::HeaderValue> = origins.into_iter().collect();
+    let allowed: std::collections::HashSet<HeaderValue> = origins.into_iter().collect();
 
     CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(move |origin, _parts| {
-            cors_origin_is_allowed(origin, &allowed, &allowed_display)
+        .allow_origin(AllowOrigin::predicate(move |origin, parts| {
+            let is_allowed = allowed.contains(origin);
+            if !is_allowed && should_log_cors_rejection(origin, parts) {
+                tracing::debug!(?origin, "CORS rejected origin — not in BUZZ_CORS_ORIGINS");
+            }
+            is_allowed
         }))
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any)
 }
 
-/// Returns whether `origin` is in the allowlist, logging a warning on reject.
-fn cors_origin_is_allowed(
-    origin: &axum::http::HeaderValue,
-    allowed: &std::collections::HashSet<axum::http::HeaderValue>,
-    allowed_display: &[String],
-) -> bool {
-    if allowed.contains(origin) {
-        return true;
+/// Only a cross-origin preflight is evidence of a CORS configuration failure.
+fn should_log_cors_rejection(origin: &HeaderValue, parts: &axum::http::request::Parts) -> bool {
+    if parts.method != Method::OPTIONS
+        || !parts
+            .headers
+            .contains_key(header::ACCESS_CONTROL_REQUEST_METHOD)
+        || parts.headers.contains_key(header::UPGRADE)
+    {
+        return false;
     }
-    tracing::warn!(
-        origin = %String::from_utf8_lossy(origin.as_bytes()),
-        allowed = ?allowed_display,
-        "CORS rejected origin — not in BUZZ_CORS_ORIGINS"
-    );
-    false
+
+    let origin_uri = origin
+        .to_str()
+        .ok()
+        .and_then(|origin| origin.parse::<Uri>().ok());
+    let origin_authority = origin_uri.as_ref().and_then(Uri::authority);
+    let request_authority = parts
+        .uri
+        .authority()
+        .map(|authority| authority.as_str())
+        .or_else(|| parts.headers.get(header::HOST)?.to_str().ok());
+
+    !origin_authority
+        .zip(request_authority)
+        .is_some_and(|(origin, request)| origin.as_str().eq_ignore_ascii_case(request))
 }
 
 #[cfg(test)]
@@ -1429,27 +1438,61 @@ mod tests {
         assert!(!should_serve_spa("/arbitrary", true));
     }
 
+    #[tokio::test]
+    async fn cors_origin_allowlist_accepts_configured_origins_only() {
+        let app = Router::new()
+            .route("/", get(|| async { StatusCode::OK }))
+            .layer(build_cors_layer(&["http://tauri.localhost".to_owned()]));
+
+        for (origin, expected) in [
+            ("http://tauri.localhost", Some("http://tauri.localhost")),
+            ("https://external.example", None),
+        ] {
+            let request = Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/")
+                .header(header::ORIGIN, origin)
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .body(Body::empty())
+                .expect("preflight request");
+            let response = app.clone().oneshot(request).await.expect("router response");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .and_then(|value| value.to_str().ok()),
+                expected
+            );
+        }
+    }
+
     #[test]
-    fn cors_origin_allowlist_accepts_configured_origins_only() {
-        let allowed: std::collections::HashSet<axum::http::HeaderValue> =
-            ["https://buzz.example.com", "http://tauri.localhost"]
-                .into_iter()
-                .map(|o| o.parse().unwrap())
-                .collect();
-        let display: Vec<String> = allowed
-            .iter()
-            .map(|o: &axum::http::HeaderValue| String::from_utf8_lossy(o.as_bytes()).into_owned())
-            .collect();
-        assert!(cors_origin_is_allowed(
-            &"http://tauri.localhost".parse().unwrap(),
-            &allowed,
-            &display
-        ));
-        assert!(!cors_origin_is_allowed(
-            &"https://evil.example".parse().unwrap(),
-            &allowed,
-            &display
-        ));
+    fn cors_rejection_diagnostic_requires_cross_origin_preflight() {
+        let origin = HeaderValue::from_static("https://community.example");
+        let mut parts = Request::builder()
+            .uri("/")
+            .header(header::HOST, "COMMUNITY.EXAMPLE")
+            .method(Method::POST)
+            .body(Body::empty())
+            .expect("request")
+            .into_parts()
+            .0;
+        assert!(!should_log_cors_rejection(&origin, &parts));
+
+        parts.method = Method::OPTIONS;
+        assert!(!should_log_cors_rejection(&origin, &parts));
+        parts.headers.insert(
+            header::ACCESS_CONTROL_REQUEST_METHOD,
+            HeaderValue::from_static("GET"),
+        );
+        assert!(!should_log_cors_rejection(&origin, &parts));
+
+        let cross_origin = HeaderValue::from_static("http://tauri.localhost");
+        assert!(should_log_cors_rejection(&cross_origin, &parts));
+        parts
+            .headers
+            .insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+        assert!(!should_log_cors_rejection(&cross_origin, &parts));
     }
 
     /// Relay state serving both bundles: the admin SPA on `admin.example` and
