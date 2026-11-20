@@ -251,6 +251,31 @@ void _threadActivityCases() {
         hasLength(2),
       );
 
+      // The addressed feed keeps its own copy of a mention; the deletion
+      // removes that row too, not only the channel registry's.
+      session.emit(
+        NostrEvent(
+          id: 'delete-mention',
+          pubkey: 'alice',
+          createdAt: 61,
+          kind: 5,
+          tags: const [
+            ['h', _channelA],
+            ['e', 'mention'],
+          ],
+          content: '',
+          sig: '',
+        ),
+      );
+      expect(
+        container.read(activityProvider).requireValue.all.map((e) => e.id),
+        ['mention'],
+      );
+      expect(
+        container.read(inboxItemsProvider).single.groupItems.map((e) => e.id),
+        ['cold'],
+      );
+
       // Identity changes reset the same registry, not an independent feed cache.
       container.read(_testPubkeyProvider.notifier).set('other-user');
       await container.read(channelsProvider.future);

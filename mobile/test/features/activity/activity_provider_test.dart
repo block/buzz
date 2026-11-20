@@ -12,6 +12,7 @@ import 'package:buzz/features/activity/feed_item.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -26,6 +27,8 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
   Completer<void>? mentionFetchGate;
   bool failNextMentionFetch = false;
   bool failNextQueryRelay = false;
+  // Both history transports fail while set, as when the relay is unreachable.
+  bool failHistory = false;
   int mentionFetchCount = 0;
   int activeMentionFetches = 0;
   int maxActiveMentionFetches = 0;
@@ -47,6 +50,7 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    if (failHistory) throw StateError('relay unavailable');
     final h = filter.tags['#h'];
     if (h != null) dmQueries.add(h);
     final isMentionFetch =
@@ -77,6 +81,7 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     queryFilterCounts.add(filters.length);
+    if (failHistory) throw StateError('relay unavailable');
     if (failNextQueryRelay) {
       failNextQueryRelay = false;
       throw StateError('transient HTTP query failure');
@@ -220,6 +225,18 @@ class _FixedRelayConfigNotifier extends RelayConfigNotifier {
   RelayConfig build() =>
       const RelayConfig(baseUrl: 'https://relay.example', nsec: null);
 }
+
+Channel _streamChannel(String id) => Channel(
+  id: id,
+  name: id,
+  channelType: 'stream',
+  visibility: 'open',
+  description: '',
+  createdBy: 'x',
+  createdAt: DateTime(2025),
+  memberCount: 2,
+  isMember: true,
+);
 
 Channel _dmChannel(String id) => Channel(
   id: id,
@@ -371,6 +388,86 @@ void main() {
     expect(session.queryFilterCounts, [3]);
     expect(session.mentionFetchCount, 1);
     expect(feed.mentions.map((item) => item.id), ['fallback-mention']);
+  });
+
+  test('a feed whose history reads fail is marked incomplete', () async {
+    final session = _RecordingSessionNotifier()
+      ..seed(_mentionEvent('mention', 1_700_000_001));
+    final container = ProviderContainer(
+      retry: (_, _) => null,
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue('me_pk'),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(
+          () => _FixedChannelsNotifier(const <Channel>[]),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    final sub = container.listen(activityProvider, (_, _) {});
+    addTearDown(sub.close);
+
+    await container.read(channelsProvider.future);
+    final loaded = await container.read(activityProvider.future);
+    expect(loaded.complete, isTrue);
+    expect(loaded.mentions.map((item) => item.id), ['mention']);
+
+    session.failHistory = true;
+    container.invalidate(activityProvider);
+    final failed = await container.read(activityProvider.future);
+
+    expect(failed.complete, isFalse);
+    expect(failed.isEmpty, isTrue);
+  });
+
+  test('reads again when the channel list records a live mention', () async {
+    final session = _RecordingSessionNotifier();
+    final channels = _ObservingChannelsNotifier([_streamChannel('channel-1')]);
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue('me_pk'),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(() => channels),
+      ],
+    );
+    addTearDown(container.dispose);
+    final sub = container.listen(activityProvider, (_, _) {});
+    addTearDown(sub.close);
+
+    await container.read(channelsProvider.future);
+    await container.read(activityProvider.future);
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    final reads = session.mentionFetchCount;
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+
+    // A mention from before this read is already in its results.
+    channels.record(_mentionEvent('older', now - 3600));
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(session.mentionFetchCount, reads);
+
+    // The relay sends channel events only to `#h` subscriptions, so the
+    // addressed `#p` subscription never sees this one. Only the channel
+    // list's subscription does.
+    final mention = _mentionEvent('live-channel-mention', now);
+    session.seed(mention);
+    channels.record(mention);
+    await _waitFor(
+      () =>
+          container
+              .read(activityProvider)
+              .value
+              ?.mentions
+              .any((item) => item.id == mention.id) ??
+          false,
+    );
+    expect(session.mentionFetchCount, reads + 1);
+
+    // Once in the feed, later channel list updates do not read it again.
+    channels.record(mention);
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(session.mentionFetchCount, reads + 1);
   });
 
   test('a workflow owner attribution is not a mention of the owner', () async {
@@ -1497,6 +1594,32 @@ class _FixedChannelsNotifier extends ChannelsNotifier {
 
   @override
   Future<List<Channel>> build() async => channels;
+}
+
+/// Channels whose unread registry a test fills, as live channel events do.
+class _ObservingChannelsNotifier extends _FixedChannelsNotifier {
+  _ObservingChannelsNotifier(super.channels);
+
+  final Map<String, Map<String, ObservedUnreadEvent>> _observed = {};
+
+  @override
+  Map<String, Map<String, ObservedUnreadEvent>>
+  get observedUnreadEventsByChannel => _observed;
+
+  /// Records [event] as a top-level mention and publishes the list.
+  void record(NostrEvent event) {
+    _observed.putIfAbsent(
+      event.channelId!,
+      () => {},
+    )[event.id] = ObservedUnreadEvent(
+      id: event.id,
+      createdAt: event.createdAt,
+      rootId: null,
+      highPriority: true,
+      countsTowardBadge: true,
+    );
+    state = AsyncData(List.of(channels));
+  }
 }
 
 class _DeferredChannelsNotifier extends ChannelsNotifier {

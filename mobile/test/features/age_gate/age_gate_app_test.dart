@@ -199,6 +199,81 @@ void main() {
     expect(find.byType(HomePage), findsNothing);
   });
 
+  for (final (name, badge, expected) in [
+    ('pending badge writes nothing', UnreadBadge.pending, <int>[]),
+    ('clear badge writes 0', UnreadBadge.clear, [0]),
+  ]) {
+    testWidgets(name, (tester) async {
+      final counts = <int>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(appBadgeChannel, (call) async {
+            if (call.method == 'updateBadge') {
+              counts.add(
+                (call.arguments as Map<Object?, Object?>)['count']! as int,
+              );
+            }
+            return null;
+          });
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            authProvider.overrideWith(_UnauthenticatedAuthNotifier.new),
+            ageSignalProvider.overrideWith(_MutableAgeSignalNotifier.new),
+            unreadBadgeProvider.overrideWithValue(badge),
+            savedPrefsProvider.overrideWithValue(prefs),
+          ],
+          child: const App(),
+        ),
+      );
+      await tester.pump();
+      expect(counts, expected);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('community loading holds the last platform badge value', (
+    tester,
+  ) async {
+    final counts = <int>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(appBadgeChannel, (call) async {
+          if (call.method == 'updateBadge') {
+            counts.add(
+              (call.arguments as Map<Object?, Object?>)['count']! as int,
+            );
+          }
+          return null;
+        });
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final auth = _UnauthenticatedAuthNotifier();
+    final age = _MutableAgeSignalNotifier();
+    overrides(UnreadBadge badge) => [
+      authProvider.overrideWith(() => auth),
+      ageSignalProvider.overrideWith(() => age),
+      unreadBadgeProvider.overrideWithValue(badge),
+      savedPrefsProvider.overrideWithValue(prefs),
+    ];
+    final container = ProviderContainer(
+      overrides: overrides(UnreadBadge.unread),
+    );
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(container: container, child: const App()),
+    );
+    await tester.pump();
+    expect(counts, [1]);
+    container.updateOverrides(overrides(UnreadBadge.pending));
+    await tester.pump();
+    expect(counts, [1]);
+    container.updateOverrides(overrides(UnreadBadge.clear));
+    await tester.pump();
+    expect(counts, [1, 0]);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('clears the app badge only after a confirmed restriction', (
     tester,
   ) async {
@@ -221,9 +296,7 @@ void main() {
         overrides: [
           authProvider.overrideWith(() => _UnauthenticatedAuthNotifier()),
           ageSignalProvider.overrideWith(() => ageSignal),
-          unreadBadgeProvider.overrideWithValue(
-            const UnreadBadgeState(highPriorityCount: 7),
-          ),
+          unreadBadgeProvider.overrideWithValue(UnreadBadge.unread),
           savedPrefsProvider.overrideWithValue(prefs),
         ],
         child: const App(),
@@ -232,11 +305,11 @@ void main() {
     await tester.pump();
 
     expect(badgeCounts, isNotEmpty);
-    expect(badgeCounts.last, 7);
+    expect(badgeCounts.last, 1);
 
     ageSignal.setState(AgeSignalState.allowed);
     await tester.pump();
-    expect(badgeCounts.last, 7);
+    expect(badgeCounts.last, 1);
 
     ageSignal.setState(AgeSignalState.restricted);
     await tester.pump();

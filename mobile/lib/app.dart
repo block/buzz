@@ -412,14 +412,9 @@ class App extends HookConsumerWidget {
     // notification reply, and no later frame may come to rebuild this.
     ref.listen(notificationReplySenderProvider, (_, _) {});
 
-    void applyBadge(UnreadBadgeState state) {
-      if (state.highPriorityCount > 0) {
-        AppBadgePlus.updateBadge(state.highPriorityCount);
-      } else if (state.generalUnreadCount > 0) {
-        AppBadgePlus.updateBadge(1);
-      } else {
-        AppBadgePlus.updateBadge(0);
-      }
+    void applyBadge(UnreadBadge badge) {
+      final count = badge.platformCount;
+      if (count != null) AppBadgePlus.updateBadge(count);
     }
 
     useEffect(() {
@@ -431,7 +426,7 @@ class App extends HookConsumerWidget {
       return null;
     }, [ageSignalState]);
     if (ageSignalState != AgeSignalState.restricted) {
-      ref.listen<UnreadBadgeState>(unreadBadgeProvider, (_, next) {
+      ref.listen<UnreadBadge>(unreadBadgeProvider, (_, next) {
         applyBadge(next);
       });
     }

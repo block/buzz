@@ -9,7 +9,6 @@ class ObservedUnreadEvent {
   final String? rootId;
   final bool highPriority;
   final bool countsTowardBadge;
-  final bool countsTowardAppBadge;
 
   /// `activity:<channel>` reads this event (see `readByChannelCatchUp`).
   final bool channelCatchUp;
@@ -28,7 +27,6 @@ class ObservedUnreadEvent {
     required this.rootId,
     required this.highPriority,
     required this.countsTowardBadge,
-    required this.countsTowardAppBadge,
     this.channelCatchUp = false,
     this.threadReply,
   });
@@ -81,7 +79,6 @@ ObservedUnreadEvent makeObservedUnreadEvent({
     rootId: rootId,
     highPriority: highPriority,
     countsTowardBadge: isDm || isThreadedReply || highPriority,
-    countsTowardAppBadge: isDm || (!isThreadedReply && highPriority),
     channelCatchUp: readByChannelCatchUp(
       isDm: isDm,
       // A broadcast is read only by its own mark, like any reply, even when
@@ -117,61 +114,6 @@ bool recordObservedUnreadEvent(
     eventsById.remove(oldestId);
   }
   return true;
-}
-
-int countUnreadObservedEvents(
-  Map<String, ObservedUnreadEvent>? eventsById,
-  int? Function(ObservedUnreadEvent event) getReadAt,
-) {
-  if (eventsById == null) return 0;
-  var count = 0;
-  for (final event in eventsById.values) {
-    final readAt = getReadAt(event);
-    if (readAt == null || event.createdAt > readAt) count++;
-  }
-  return count;
-}
-
-int countUnreadBadgeObservedEvents(
-  Map<String, ObservedUnreadEvent>? eventsById,
-  int? Function(ObservedUnreadEvent event) getReadAt,
-) {
-  if (eventsById == null) return 0;
-  var count = 0;
-  for (final event in eventsById.values) {
-    if (!event.countsTowardBadge) continue;
-    final readAt = getReadAt(event);
-    if (readAt == null || event.createdAt > readAt) count++;
-  }
-  return count;
-}
-
-int countUnreadAppBadgeObservedEvents(
-  Map<String, ObservedUnreadEvent>? eventsById,
-  int? Function(ObservedUnreadEvent event) getReadAt,
-) {
-  if (eventsById == null) return 0;
-  var count = 0;
-  for (final event in eventsById.values) {
-    if (!event.countsTowardAppBadge) continue;
-    final readAt = getReadAt(event);
-    if (readAt == null || event.createdAt > readAt) count++;
-  }
-  return count;
-}
-
-int countUnreadHighPriorityObservedEvents(
-  Map<String, ObservedUnreadEvent>? eventsById,
-  int? Function(ObservedUnreadEvent event) getReadAt,
-) {
-  if (eventsById == null) return 0;
-  var count = 0;
-  for (final event in eventsById.values) {
-    if (!event.highPriority) continue;
-    final readAt = getReadAt(event);
-    if (readAt == null || event.createdAt > readAt) count++;
-  }
-  return count;
 }
 
 /// The newest marker that reads `event` in `channelId`. `markerOf` looks up
