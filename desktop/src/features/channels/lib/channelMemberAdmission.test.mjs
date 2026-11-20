@@ -22,8 +22,8 @@ test("open channels accept adds from anyone, member or not", () => {
   );
 });
 
-test("private channels accept adds from every active member role", () => {
-  for (const selfRole of ["owner", "admin", "member", "bot", "guest"]) {
+test("private channels accept adds from every active role that can post", () => {
+  for (const selfRole of ["owner", "admin", "member", "bot"]) {
     assert.equal(
       canAddChannelMembers({
         channelType: "stream",
@@ -44,6 +44,20 @@ test("private channels accept adds from every active member role", () => {
     false,
     "a non-member must not be able to add",
   );
+});
+
+test("guests never add anyone, as the relay's decide_member_put refuses", () => {
+  for (const visibility of ["open", "private"]) {
+    assert.equal(
+      canAddChannelMembers({
+        channelType: "stream",
+        visibility,
+        selfRole: "guest",
+      }),
+      false,
+      `a guest must not be offered adds (${visibility} channel)`,
+    );
+  }
 });
 
 test("DMs never accept adds, even from an owner", () => {
