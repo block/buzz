@@ -188,6 +188,60 @@ void shareDeliveryTests() {
     );
   });
 
+  testWidgets('a shared document joins the draft as a named file', (
+    tester,
+  ) async {
+    final shares = Directory.systemTemp.createTempSync('pending-shares-');
+    addTearDown(() => shares.deleteSync(recursive: true));
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(
+      const MethodChannel('buzz/app_group'),
+      (call) async => shares.path,
+    );
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(
+        const MethodChannel('buzz/app_group'),
+        null,
+      ),
+    );
+    await tester.pumpWidget(
+      _buildComposeBar(
+        uploadService: _testUploadService(nostr.Keys.generate().nsec),
+        onSend:
+            (content, mentions, {mediaTags = const <List<String>>[]}) async {},
+      ),
+    );
+    await _expandComposer(tester);
+
+    const id = '66666666-6666-4666-8666-666666666666';
+    final directory = Directory('${shares.path}/$id')..createSync();
+    final stored = File('${directory.path}/0A1B.pdf')
+      ..writeAsBytesSync(utf8.encode('%PDF-1.7'));
+    ProviderScope.containerOf(tester.element(find.byType(ComposeBar)))
+        .read(composerShareInboxProvider.notifier)
+        .deliver(
+          'channel-1',
+          PendingShare(
+            id: id,
+            target: null,
+            text: const [],
+            files: const [],
+            documents: [(path: stored.path, name: 'Quarterly report.pdf')],
+          ),
+        );
+    for (var i = 0; i < 100 && directory.existsSync(); i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+    expect(directory.existsSync(), isFalse);
+    expect(find.byTooltip('Remove attachment'), findsOneWidget);
+    expect(find.textContaining('Quarterly report.pdf'), findsOneWidget);
+  });
+
   testWidgets('a share to the open conversation joins the composer on screen', (
     tester,
   ) async {

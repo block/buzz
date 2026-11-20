@@ -58,6 +58,7 @@ Future<void> _deliverShare(
   ValueNotifier<String?> uploadError,
 ) async {
   var files = const <XFile>[];
+  var documents = const <XFile>[];
   // Items the extension already failed to load count as failed too.
   var filesFailed = share.missed > 0;
   try {
@@ -67,6 +68,7 @@ Future<void> _deliverShare(
     files = await retainTemporaryImages([
       for (final path in share.files) XFile(path),
     ]);
+    documents = await _retainSharedDocuments(share.documents);
   } catch (error) {
     debugPrint('share: could not copy shared files: $error');
     filesFailed = true;
@@ -74,7 +76,7 @@ Future<void> _deliverShare(
     unawaited(deletePendingShare(share.id));
   }
   final text = share.composerText;
-  if (text.isEmpty && files.isEmpty) {
+  if (text.isEmpty && files.isEmpty && documents.isEmpty) {
     // Nothing survived, so the draft stays as it was.
     if (context.mounted && filesFailed) {
       uploadError.value = 'Couldn’t add some of what you shared.';
@@ -86,7 +88,7 @@ Future<void> _deliverShare(
   final replace =
       context.mounted && hasDraft && await _confirmReplaceDraft(context);
   if (!context.mounted) {
-    for (final file in files) {
+    for (final file in [...files, ...documents]) {
       await _deleteXFile(file);
     }
     return;
@@ -118,10 +120,26 @@ Future<void> _deliverShare(
         draftRevision,
         true,
       )) {
-    for (final file in files) {
+    for (final file in [...files, ...documents]) {
       await _deleteXFile(file);
     }
     return;
+  }
+  for (final (index, document) in documents.indexed) {
+    if (!_queueComposerAttachment(
+      document,
+      _PendingAttachmentKind.file,
+      voiceNote,
+      attachments,
+      uploadError,
+      draftRevision,
+      deleteAfterUse: true,
+    )) {
+      for (final file in documents.skip(index)) {
+        await _deleteXFile(file);
+      }
+      return;
+    }
   }
   // After queueing, which clears any earlier upload error.
   if (filesFailed) uploadError.value = 'Couldn’t add some of what you shared.';
@@ -151,3 +169,30 @@ Future<bool> _confirmReplaceDraft(BuildContext context) async =>
       ),
     ) ??
     false;
+
+/// Copies shared documents out of the app group under their shared names.
+///
+/// An [XFile] on disk is named by its path, so each copy gets its own
+/// directory to keep the name it was shared under.
+Future<List<XFile>> _retainSharedDocuments(
+  List<({String path, String name})> documents,
+) async {
+  final retained = <XFile>[];
+  try {
+    for (final document in documents) {
+      final directory = await Directory.systemTemp.createTemp('buzz-share-');
+      final safe = document.name.replaceAll(RegExp(r'[/\\:\x00]'), '_');
+      final name = safe == '.' || safe == '..' ? 'File' : safe;
+      final copy = await File(
+        document.path,
+      ).copy('${directory.path}${Platform.pathSeparator}$name');
+      retained.add(XFile(copy.path));
+    }
+    return retained;
+  } catch (_) {
+    for (final file in retained) {
+      await _deleteXFile(file);
+    }
+    rethrow;
+  }
+}

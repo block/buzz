@@ -21,6 +21,7 @@ final class ShareViewController: UIViewController {
     let target = (extensionContext?.intent as? INSendMessageIntent)?.conversationIdentifier
     var text: [String] = []
     var files: [String] = []
+    var documents: [[String: String]] = []
     // Items that couldn't be loaded, so the app can say some didn't arrive.
     var missed = 0
     let items = (extensionContext?.inputItems as? [NSExtensionItem]) ?? []
@@ -28,11 +29,12 @@ final class ShareViewController: UIViewController {
       switch await load(provider, into: directory) {
       case .text(let value): text.append(value)
       case .file(let name): files.append(name)
+      case .document(let file, let name): documents.append(["file": file, "name": name])
       case nil: missed += 1
       }
     }
     var manifest: [String: Any] = [
-      "version": 1, "text": text, "files": files, "missed": missed,
+      "version": 1, "text": text, "files": files, "documents": documents, "missed": missed,
     ]
     if let target { manifest["target"] = target }
     let data = try! JSONSerialization.data(withJSONObject: manifest)
@@ -51,6 +53,8 @@ final class ShareViewController: UIViewController {
   private enum Loaded {
     case text(String)
     case file(String)
+    /// Any other file, stored as the first value and named by the second.
+    case document(String, String)
   }
 
   private func load(_ provider: NSItemProvider, into directory: URL) async -> Loaded? {
@@ -60,15 +64,47 @@ final class ShareViewController: UIViewController {
     {
       return await copyFile(provider, type: type, into: directory)
     }
-    for type in [UTType.url, .plainText] where provider.hasItemConformingToTypeIdentifier(type.identifier) {
+    // A file URL is a document (a PDF from Files, say), not a link to paste.
+    if !provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier),
+      let type = [UTType.url, .plainText]
+        .first(where: { provider.hasItemConformingToTypeIdentifier($0.identifier) })
+    {
       let item = try? await provider.loadItem(forTypeIdentifier: type.identifier)
       if let url = item as? URL { return .text(url.absoluteString) }
       if let string = item as? String { return .text(string) }
       NSLog("[BuzzShare] %@ item had unexpected type %@", type.identifier, String(describing: item.map { Swift.type(of: $0) }))
       return nil
     }
+    if let type = provider.registeredTypeIdentifiers.lazy.compactMap(UTType.init)
+      .first(where: { $0.conforms(to: .data) && $0 != .fileURL })
+    {
+      return await copyDocument(provider, type: type, into: directory)
+    }
     NSLog("[BuzzShare] skipped unsupported item %@", provider.registeredTypeIdentifiers)
     return nil
+  }
+
+  private func copyDocument(_ provider: NSItemProvider, type: UTType, into directory: URL) async -> Loaded? {
+    await withCheckedContinuation { continuation in
+      provider.loadFileRepresentation(forTypeIdentifier: type.identifier) { url, error in
+        guard let url else {
+          NSLog("[BuzzShare] couldn't load %@: %@", type.identifier, String(describing: error))
+          return continuation.resume(returning: nil)
+        }
+        // The copy gets a safe unique name; the original name rides along.
+        let ext = url.pathExtension.isEmpty ? (type.preferredFilenameExtension ?? "") : url.pathExtension
+        let file = ext.isEmpty ? UUID().uuidString : "\(UUID().uuidString).\(ext)"
+        var name = provider.suggestedName ?? url.deletingPathExtension().lastPathComponent
+        if !ext.isEmpty, (name as NSString).pathExtension.isEmpty { name += ".\(ext)" }
+        do {
+          try FileManager.default.copyItem(at: url, to: directory.appendingPathComponent(file))
+          continuation.resume(returning: .document(file, name))
+        } catch {
+          NSLog("[BuzzShare] couldn't copy %@: %@", type.identifier, String(describing: error))
+          continuation.resume(returning: nil)
+        }
+      }
+    }
   }
 
   private func copyFile(_ provider: NSItemProvider, type: UTType, into directory: URL) async -> Loaded? {

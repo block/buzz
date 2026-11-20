@@ -27,6 +27,7 @@ class PendingShare {
     required this.target,
     required this.text,
     required this.files,
+    this.documents = const [],
     this.missed = 0,
   });
 
@@ -42,8 +43,12 @@ class PendingShare {
   /// Paths of the shared images and videos copied into the app group.
   final List<String> files;
 
+  /// Other shared files (PDFs, archives, anything not an image or video),
+  /// copied into the app group, each with the name it was shared under.
+  final List<({String path, String name})> documents;
+
   /// Shared items the extension couldn't load or copy, so they are absent
-  /// from [text] and [files].
+  /// from [text], [files] and [documents].
   final int missed;
 
   /// The composer text the share adds: each URL or text item on its own line.
@@ -84,10 +89,12 @@ Future<PendingShare> loadPendingShare(
   }
   final text = json['text'];
   final files = json['files'];
+  final documents = json['documents'] ?? const [];
   final target = json['target'];
   final missed = json['missed'] ?? 0;
   if (text is! List ||
       files is! List ||
+      documents is! List ||
       missed is! int ||
       (target != null && target is! String)) {
     throw PendingShareUnavailable('share $shareId has a malformed manifest');
@@ -97,7 +104,25 @@ Future<PendingShare> loadPendingShare(
     target: target == null ? null : parseShareConversationIdentifier(target),
     text: [for (final item in text) item as String],
     files: [for (final name in files) '${directory.path}/${_fileName(name)}'],
+    documents: [
+      for (final document in documents) _document(directory, shareId, document),
+    ],
     missed: missed,
+  );
+}
+
+({String path, String name}) _document(
+  Directory directory,
+  String shareId,
+  Object? document,
+) {
+  if (document is! Map) {
+    throw PendingShareUnavailable('share $shareId has a malformed document');
+  }
+  final name = document['name'];
+  return (
+    path: '${directory.path}/${_fileName(document['file'])}',
+    name: name is String && name.trim().isNotEmpty ? name : 'File',
   );
 }
 
