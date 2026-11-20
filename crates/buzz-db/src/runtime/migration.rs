@@ -879,7 +879,10 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 104);
+        assert_eq!(migrations.len(), 105);
+        assert_eq!(migrations[104].version, 105);
+        assert!(strip_sql_comments(migrations[104].sql.as_str())
+            .contains("WHERE participant_hash IS NOT NULL AND deleted_at IS NULL;"));
         assert_eq!(migrations[103].version, 104);
         let event_table_drops = strip_sql_comments(migrations[103].sql.as_str());
         assert!(event_table_drops
