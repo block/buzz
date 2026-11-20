@@ -249,7 +249,9 @@ class CommunitySwitcherPage extends HookConsumerWidget {
           Navigator.of(context).pop();
           return;
         }
-        if (animate) {
+        // Without a measured header avatar (Duo moves it to the rail), the
+        // flight would hold the avatar still at the center, so reveal at once.
+        if (animate && landingBounds.value != null) {
           await controller.forward(from: 0).orCancel;
           if (!context.mounted) return;
           // Reveal the settled page only after the avatar stops moving.

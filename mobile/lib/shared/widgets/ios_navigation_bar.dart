@@ -82,7 +82,6 @@ class IosNavigationAction {
     'avatarArtwork': avatarIsAgent && usesInsetAgentArtwork(imageUrl),
     'activityColor': activityColor?.toARGB32(),
     'activityLabel': activityLabel,
-    'imageUrl': imageUrl,
     'enabled': onPressed != null || children.isNotEmpty,
     'selected': selected,
     'tracksAvatarBounds': onAvatarBoundsChanged != null,
@@ -107,6 +106,14 @@ class IosNavigationAction {
     }
   }
 }
+
+/// Identifies the inputs of an action's rendered native avatar.
+typedef _AvatarImageKey = (
+  String? identity,
+  String? imageUrl,
+  String? initial,
+  bool isAgent,
+);
 
 /// Scroll position of the route whose UIKit navigation bar is visible.
 class IosNavigationScrollScope extends InheritedWidget {
@@ -231,17 +238,17 @@ class IosNavigationBar extends HookConsumerWidget {
     final client = ref.watch(mediaHttpClientProvider);
     final diskCache = ref.watch(mediaDiskCacheProvider);
     final colors = Theme.of(context).colorScheme;
-    String imageKey(IosNavigationAction action) => jsonEncode([
+    // Compare by value without serializing the URL, which can be a large
+    // `data:` URI, on every build.
+    _AvatarImageKey imageKey(IosNavigationAction action) => (
       action.avatarIdentity,
       action.imageUrl,
       action.avatarInitial,
       action.avatarIsAgent,
-    ]);
-    final avatarImages = useState(<String, ({String key, String data})>{});
-    final avatarKey = jsonEncode([
-      for (final entry in avatarActions.entries)
-        [entry.key, imageKey(entry.value)],
-    ]);
+    );
+    final avatarImages = useState(
+      <String, ({_AvatarImageKey key, String data})>{},
+    );
     useEffect(
       () {
         var active = true;
@@ -284,7 +291,10 @@ class IosNavigationBar extends HookConsumerWidget {
         return () => active = false;
       },
       [
-        avatarKey,
+        for (final entry in avatarActions.entries) ...[
+          entry.key,
+          imageKey(entry.value),
+        ],
         auth,
         client,
         diskCache,
@@ -531,25 +541,36 @@ class IosNavigationBar extends HookConsumerWidget {
       return () => active = false;
     }, [channel.value, signature]);
 
-    useEffect(() {
-      // UIKit owns its collapse range. Send real page depth so a changed native
-      // inset cannot leave a deeply scrolled page short of the collapse point.
-      void sync() {
-        final current = channel.value;
-        if (current != null) {
-          unawaited(
-            current.invokeMethod<void>(
-              'scroll',
-              (offset?.value ?? 0).clamp(0.0, double.infinity),
-            ),
-          );
+    useEffect(
+      () {
+        // Standalone controls have no scroll edge; UIKit ignores their offset.
+        if (standaloneControl || standaloneLargeTitle) return null;
+        // UIKit owns its collapse range. Send real page depth so a changed native
+        // inset cannot leave a deeply scrolled page short of the collapse point.
+        void sync() {
+          final current = channel.value;
+          if (current != null) {
+            unawaited(
+              current.invokeMethod<void>(
+                'scroll',
+                (offset?.value ?? 0).clamp(0.0, double.infinity),
+              ),
+            );
+          }
         }
-      }
 
-      sync();
-      offset?.addListener(sync);
-      return () => offset?.removeListener(sync);
-    }, [channel.value, offset, collapseRange]);
+        sync();
+        offset?.addListener(sync);
+        return () => offset?.removeListener(sync);
+      },
+      [
+        channel.value,
+        offset,
+        collapseRange,
+        standaloneControl,
+        standaloneLargeTitle,
+      ],
+    );
 
     final route = ModalRoute.of(context);
     useEffect(() {

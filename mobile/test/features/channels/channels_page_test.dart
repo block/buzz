@@ -2556,13 +2556,28 @@ void main() {
     );
   });
 
-  for (final reduceMotion in [false, true]) {
+  for (final (duo, reduceMotion) in [
+    (false, false),
+    (false, true),
+    (true, false),
+  ]) {
     testWidgets(
-      'paired community waits then uses the community landing (reduced motion: $reduceMotion)',
+      'paired community waits then uses the community landing (Duo: $duo, reduced motion: $reduceMotion)',
       (tester) async {
-        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        // Duo moves Home's header avatar into the rail, so there is no
+        // destination to fly to.
+        debugDefaultTargetPlatformOverride = duo
+            ? TargetPlatform.iOS
+            : TargetPlatform.android;
         addTearDown(() => debugDefaultTargetPlatformOverride = null);
-        tester.view.physicalSize = const Size(390, 844);
+        final screen = duo ? const Size(466, 678) : const Size(390, 844);
+        tester.view.physicalSize = screen;
+        if (duo) {
+          tester.view.viewPadding = const FakeViewPadding(right: 76);
+          tester.view.padding = const FakeViewPadding(right: 76);
+          addTearDown(tester.view.resetViewPadding);
+          addTearDown(tester.view.resetPadding);
+        }
         tester.view.devicePixelRatio = 1;
         addTearDown(tester.view.resetPhysicalSize);
         addTearDown(tester.view.resetDevicePixelRatio);
@@ -2574,10 +2589,14 @@ void main() {
         );
         final notifier = _FakeCommunityListNotifier([community]);
         final loaded = Completer<List<Channel>>();
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
         await tester.pumpWidget(
           buildTestable(
             disableAnimations: reduceMotion,
+            realHome: duo,
             overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
               pairingProvider.overrideWith(_CompletedPairingNotifier.new),
               channelsProvider.overrideWith(
                 () => _FakeNotifier(testChannels, load: () => loaded.future),
@@ -2613,7 +2632,7 @@ void main() {
         await tester.pump();
         final avatar = find.byKey(const Key('community-flying-avatar'));
         expect(avatar, findsOneWidget);
-        expect(tester.getCenter(avatar), const Offset(195, 422));
+        expect(tester.getCenter(avatar), screen.center(Offset.zero));
         expect(
           find.byKey(const Key('community-switch-loading')),
           findsOneWidget,
@@ -2626,11 +2645,22 @@ void main() {
         for (var i = 0; i < 12; i++) {
           await tester.pump();
         }
-        await tester.pump(const Duration(milliseconds: 450));
-        for (var i = 0; i < 6; i++) {
-          await tester.pump();
+        if (duo) {
+          // The avatar leaves with its loading indicator. A departure toward
+          // the missing header avatar would hold it still at the center.
+          final loading = find.byKey(const Key('community-switch-loading'));
+          for (var i = 0; i < 200 && avatar.evaluate().isNotEmpty; i++) {
+            expect(loading, findsOneWidget);
+            await tester.pump(const Duration(milliseconds: 10));
+          }
+          expect(avatar, findsNothing);
+        } else {
+          await tester.pump(const Duration(milliseconds: 450));
+          for (var i = 0; i < 6; i++) {
+            await tester.pump();
+          }
         }
-        if (!reduceMotion) {
+        if (!duo && !reduceMotion) {
           await tester.pump(const Duration(milliseconds: 260));
           expect(tester.getCenter(avatar).dy, lessThan(422));
         }
