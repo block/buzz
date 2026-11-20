@@ -143,11 +143,7 @@ pub async fn run(
         ));
     }
     let timeout_ms = effective_timeout_ms(p.timeout_ms);
-    let workdir: PathBuf = p
-        .workdir
-        .as_deref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| state.cwd.clone());
+    let workdir = crate::paths::workspace_root(&state.cwd, p.workdir.as_deref());
 
     if !workdir.is_dir() {
         return Err(ErrorData::invalid_params(
@@ -1083,6 +1079,58 @@ mod tests {
                 || stdout.contains(sub.file_name().unwrap().to_str().unwrap()),
             "stdout: {stdout}"
         );
+    }
+
+    /// `workdir` is a path the agent writes the way it would for bash, so a
+    /// bare `~` names the home directory rather than a directory called `~`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn workdir_expands_tilde() {
+        let dir = tempdir().expect("tempdir");
+        let state = make_state(dir.path());
+        let r = run(
+            &state,
+            ShellParams {
+                command: "echo ok".into(),
+                workdir: Some("~".into()),
+                timeout_ms: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("~ workdir accepted");
+        let v = body(r);
+        assert_eq!(v["exit_code"], 0);
+        assert_eq!(v["stdout"], "ok\n");
+    }
+
+    /// On Windows the agent copies `pwd` output (`/c/Users/...`) into
+    /// `workdir`; it must name that directory, as it does in bash.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn workdir_translates_msys_path() {
+        let dir = tempdir().expect("tempdir");
+        let native = dir.path().to_str().expect("utf-8 path");
+        let (drive, rest) = native.split_once(":\\").expect("drive-absolute path");
+        let msys = format!(
+            "/{}/{}",
+            drive.to_ascii_lowercase(),
+            rest.replace('\\', "/")
+        );
+        let state = make_state(dir.path());
+        let r = run(
+            &state,
+            ShellParams {
+                command: "echo ok".into(),
+                workdir: Some(msys),
+                timeout_ms: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("MSYS workdir accepted");
+        let v = body(r);
+        assert_eq!(v["exit_code"], 0);
+        assert_eq!(v["stdout"], "ok\n");
     }
 
     // --- is_windows_apps_alias predicate tests (cross-host) ---
