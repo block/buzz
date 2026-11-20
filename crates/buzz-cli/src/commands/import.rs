@@ -892,6 +892,9 @@ mod tests {
                     [{"type":"raw_text","text":"Name"},{"type":"raw_text","text":"Role"}],
                     [{"type":"raw_text","text":"Ada"},{"type":"rich_text","elements":[
                         {"type":"rich_text_section","elements":[{"type":"text","text":"Lead"}]}]}]]},
+                {"type":"context","elements":[
+                    {"type":"image","image_url":"https://example.test/i.png","alt_text":"ci"},
+                    {"type":"mrkdwn","text":"by <@U1>"}]},
                 {"type":"actions","elements":[
                     {"type":"button","text":{"type":"plain_text","text":"Approve"}}]}]"#,
         )
@@ -900,7 +903,7 @@ mod tests {
             render_slack_blocks(&card, &names),
             "Build\n**Status:** ok\nmain\nonly fields\n[chart](https://example.test/a.png)\n\
              [upload](https://example.test/f)\n[Demo](https://example.test/v)\n\
-             Name | Role\nAda | Lead"
+             Name | Role\nAda | Lead\n[ci](https://example.test/i.png) by @Alice"
         );
 
         let attachment: export::SlackAttachment = serde_json::from_str(

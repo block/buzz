@@ -274,10 +274,11 @@ fn render_slack_block(value: &serde_json::Value, names: &HashMap<String, String>
                         .unwrap_or_else(|| render_slack_block(text, names)),
                 );
             } else {
-                let separator = if matches!(block_type, "rich_text" | "section") {
-                    "\n"
-                } else {
-                    ""
+                let separator = match block_type {
+                    "rich_text" | "section" => "\n",
+                    // A context row sets small images and text side by side.
+                    "context" => " ",
+                    _ => "",
                 };
                 parts.push(
                     child_elements(object)
