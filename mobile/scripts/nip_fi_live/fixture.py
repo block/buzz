@@ -30,6 +30,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import signal
 import socket
@@ -54,7 +55,7 @@ from cryptography.x509.oid import NameOID
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # The names the app sees. `*.localhost` is not resolved by the app under test:
-# the Dart test maps these names to the TLS front (see `fixture_support.dart`),
+# the Dart test maps these names to the TLS front (see `nip_fi_live_fixture.dart`),
 # so the app's own relay-URL checks run unchanged on `https://<name>` URLs.
 RELAY_HOST = "relay.nipfi.localhost"
 SECOND_HOST = "second.nipfi.localhost"
@@ -118,6 +119,8 @@ class Issuer:
         self.lifetime_secs = lifetime_secs
         self.key = ec.generate_private_key(ec.SECP256R1())
         self.kid = "nip-fi-live-" + secrets.token_hex(4)
+        # Every assertion minted, for the oracle's expiry-path precondition.
+        self.mints = []
 
     def jwks(self):
         numbers = self.key.public_key().public_numbers()
@@ -150,6 +153,14 @@ class Issuer:
             _b64url(json.dumps(header, separators=(",", ":")).encode())
             + "."
             + _b64url(json.dumps(claims, separators=(",", ":")).encode())
+        )
+        self.mints.append(
+            {
+                "t": time.time(),
+                "aud": audience,
+                "iat": claims["iat"],
+                "exp": claims["exp"],
+            }
         )
         der = self.key.sign(signing_input.encode(), ec.ECDSA(hashes.SHA256()))
         r, s = decode_dss_signature(der)
@@ -474,8 +485,67 @@ def free_port():
         return probe.getsockname()[1]
 
 
-def reset_database(database_url: str, psql: str):
+LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def check_throwaway_database(database_url: str):
+    """Refuse to reset anything that is not clearly a throwaway database.
+
+    The reset drops the `public` schema, so the target must be on this machine
+    and its name must say it is for this check. Returns the parsed URL.
+    """
     parsed = urllib.parse.urlparse(database_url)
+    name = parsed.path.lstrip("/")
+    if (parsed.hostname or "localhost") not in LOOPBACK_HOSTS:
+        sys.exit(
+            f"refusing to reset a database on {parsed.hostname}: "
+            "the NIP-FI check only resets a database on this machine"
+        )
+    if not re.fullmatch(r"[A-Za-z0-9_]*nip_fi[A-Za-z0-9_]*", name):
+        sys.exit(
+            f"refusing to reset database `{name}`: its name must contain "
+            "`nip_fi` (the reset drops the whole public schema). "
+            "Set NIP_FI_DATABASE_URL to a dedicated database such as "
+            "`postgres://<user>:<password>@localhost:5432/buzz_nip_fi`."
+        )
+    return parsed
+
+
+def ensure_database(parsed, psql: str):
+    """Creates the throwaway database when it does not exist yet."""
+    name = parsed.path.lstrip("/")
+    env = {
+        **os.environ,
+        "PGHOST": parsed.hostname or "localhost",
+        "PGPORT": str(parsed.port or 5432),
+        "PGUSER": urllib.parse.unquote(parsed.username or ""),
+        "PGPASSWORD": urllib.parse.unquote(parsed.password or ""),
+        "PGDATABASE": "postgres",
+    }
+    exists = subprocess.run(
+        [
+            psql,
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-tAc",
+            f"SELECT 1 FROM pg_database WHERE datname = '{name}'",
+        ],
+        check=True,
+        env=env,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if not exists:
+        subprocess.run(
+            [psql, "-v", "ON_ERROR_STOP=1", "-qc", f'CREATE DATABASE "{name}"'],
+            check=True,
+            env=env,
+        )
+
+
+def reset_database(database_url: str, psql: str):
+    parsed = check_throwaway_database(database_url)
+    ensure_database(parsed, psql)
     env = {
         **os.environ,
         "PGHOST": parsed.hostname or "localhost",
@@ -673,10 +743,10 @@ def wait_ready(relay, health_port, timeout=120):
 
 
 def main():
-    # The throwaway local-dev database of docker-compose.yml, not a secret.
-    default_db = (
-        "postgres://buzz:buzz_dev@localhost:5471/buzz"  # sadscan:disable np.postgres.1
-    )
+    # A dedicated database on the docker-compose.yml local-dev server (same
+    # throwaway user, not a secret). It is created on first use and reset on
+    # every run; any other database name is refused.
+    default_db = "postgres://buzz:buzz_dev@localhost:5471/buzz_nip_fi"  # sadscan:disable np.postgres.1
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--workdir", required=True, type=Path)
     parser.add_argument(
@@ -705,7 +775,14 @@ def main():
     parser.add_argument("--assertion-lifetime-secs", type=int, default=20)
     args = parser.parse_args()
 
-    workdir: Path = args.workdir
+    workdir: Path = args.workdir.resolve()
+    if workdir == REPO_ROOT or REPO_ROOT in workdir.parents:
+        sys.exit(
+            f"refusing work directory {workdir}: it is inside the repository, "
+            "and it holds a test member key. Use a directory outside the repo."
+        )
+    # Fail on an unsafe database before anything is created or started.
+    check_throwaway_database(args.database_url)
     workdir.mkdir(parents=True, exist_ok=True)
     workdir.chmod(0o700)
     for stale in ("fixture.json", "fixture-result.json", "markers.jsonl", "relay.log"):
@@ -792,6 +869,7 @@ def main():
                     "relay_alive_at_stop": alive,
                     "relay_returncode": returncode,
                     "account_requests": account_requests,
+                    "mints": list(issuer.mints),
                 },
                 indent=2,
             )
@@ -801,6 +879,13 @@ def main():
         account_server.shutdown()
         for secret_file in ("front-key.pem", "front-chain.pem"):
             (workdir / secret_file).unlink(missing_ok=True)
+        # The run is over: the test member key is no longer needed on disk.
+        # The oracle reads the rest of fixture.json afterwards.
+        fixture_file = workdir / "fixture.json"
+        if fixture_file.exists():
+            kept = json.loads(fixture_file.read_text())
+            kept["nsec"] = "removed at teardown"
+            fixture_file.write_text(json.dumps(kept, indent=2))
     return 0
 
 

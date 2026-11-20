@@ -8,14 +8,22 @@
 # S3-compatible store reachable at the NIP_FI_* addresses in fixture.py (the
 # defaults match scripts/start-isolated-test-relay.sh), `uv`, `psql`, and the
 # Hermit toolchain (`. bin/activate-hermit`). It resets the database it is
-# pointed at. Exit status 0 means the oracle passed.
+# pointed at, and only if its name contains `nip_fi` and it is on this machine
+# (the default is `buzz_nip_fi`, created on first use). The work directory
+# must be outside the repository. Exit status 0 means the oracle passed.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo="$(cd "$here/../../.." && pwd)"
+repo="$(cd "$here/../../.." && pwd -P)"
 work="${1:-$(mktemp -d "${TMPDIR:-/tmp}/nip-fi-live.XXXXXX")}"
 mkdir -p "$work"
-work="$(cd "$work" && pwd)"
+work="$(cd "$work" && pwd -P)"
+case "$work/" in
+  "$repo"/*)
+    echo "refusing work directory $work: it is inside the repository and holds a test key" >&2
+    exit 2
+    ;;
+esac
 
 fixture_pid=""
 cleanup() {

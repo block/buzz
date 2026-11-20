@@ -12,7 +12,12 @@ The check fails when:
   never wrote its step markers (no vacuous pass);
 * a `method=nip_fi` denial happens outside the negative-control window;
 * the negative control produced no denial (enforcement was never proven);
-* a required route class never shows a success.
+* any journey step marker is missing (the journey did not run to its end);
+* a required route class does not show a success inside the step it belongs
+  to (a success elsewhere in the log does not count);
+* the expiry path did not actually run: the relay session was not quiet while
+  the cached assertion aged out, that assertion had not expired by the time of
+  the read, or no newer assertion was minted for the read after expiry.
 
 Usage: oracle.py <workdir>   (exit 0 pass, 1 fail)
 """
@@ -25,14 +30,52 @@ from pathlib import Path
 
 DENIED = {"denied", "failed"}
 
-# Route classes the journey must reach with a success. Each is a predicate over
-# one parsed access line; `community` is filled in from the fixture.
+# Every marker the journey writes, in order. A missing one means the journey
+# stopped early or the test no longer matches this oracle.
+JOURNEY_STEPS = (
+    "control_start",
+    "control_end",
+    "sign_in",
+    "connect",
+    "query",
+    "upload",
+    "media",
+    "native_media",
+    "expiry_wait",
+    "native_media_after_expiry",
+    "expiry_end",
+    "query_after_expiry",
+    "tombstone",
+    "journey_end",
+)
+
+# Route classes the journey must reach with a success, each bound to the step
+# whose window it must fall in: (class, step, what it means).
 REQUIRED = (
-    ("ws auth", "WebSocket authentication succeeded for the first community"),
-    ("/query", "POST /query answered 2xx"),
-    ("/upload", "PUT /upload answered 2xx"),
-    ("/media/*", "GET /media/{sha256_ext} answered 2xx"),
-    ("second ws auth", "WebSocket authentication succeeded for the second community"),
+    (
+        "ws auth",
+        "connect",
+        "WebSocket authentication succeeded for the first community",
+    ),
+    ("/query", "query", "POST /query answered 2xx"),
+    ("/upload", "upload", "PUT /upload answered 2xx"),
+    ("/media/*", "media", "GET /media/{sha256_ext} answered 2xx (app HTTP client)"),
+    (
+        "/media/*",
+        "native_media",
+        "GET /media/{sha256_ext} answered 2xx (native headers)",
+    ),
+    (
+        "/media/*",
+        "native_media_after_expiry",
+        "GET /media/{sha256_ext} answered 2xx with a renewed assertion",
+    ),
+    ("/query", "query_after_expiry", "POST /query answered 2xx after expiry"),
+    (
+        "second ws auth",
+        "tombstone",
+        "WebSocket authentication succeeded for the second community",
+    ),
 )
 
 
@@ -96,8 +139,101 @@ def is_success(line):
     return line.get("outcome") == "success"
 
 
+def marker_times(markers):
+    """First time of each step marker."""
+    times = {}
+    for marker in markers:
+        times.setdefault(marker["step"], marker["t"])
+    return times
+
+
+def window(markers, step):
+    """The span of one step: its marker to the next marker (or the end)."""
+    times = marker_times(markers)
+    if step not in times:
+        return None
+    start = times[step]
+    later = [t for t in times.values() if t > start]
+    return start, (min(later) if later else float("inf"))
+
+
+def in_window(line, span):
+    return span is not None and span[0] <= line["_t"] < span[1]
+
+
+def classify(line, first, second):
+    """The route class of a successful line, or None."""
+    if not is_success(line):
+        return None
+    if line["event"] == "auth":
+        if line.get("community") == first:
+            return "ws auth"
+        if line.get("community") == second:
+            return "second ws auth"
+    elif line["event"] == "http" and line.get("http_method") != "HEAD":
+        route = line.get("route", "")
+        if route == "/query":
+            return "/query"
+        if route in ("/upload", "/media/upload"):
+            return "/upload"
+        if route.startswith("/media/{"):
+            return "/media/*"
+    return None
+
+
+def check_expiry_path(lines, markers, fixture, result):
+    """The read after the assertion expired must have been a real expiry.
+
+    Without this a pass could be vacuous: a live relay session reconnects at
+    lease expiry and refreshes the cached assertion, and then the read after
+    the wait succeeds without the fresh-assertion path ever running.
+    """
+    failures = []
+    times = marker_times(markers)
+    wait = times.get("expiry_wait")
+    read = times.get("native_media_after_expiry")
+    end = times.get("expiry_end")
+    if wait is None or read is None or end is None:
+        return failures  # reported as missing markers
+    quiet = (wait, end)
+    for line in lines:
+        if not quiet[0] <= line["_t"] < quiet[1]:
+            continue
+        if line["event"] == "auth" or line.get("route") == "/query":
+            failures.append(
+                "the relay session was not down during the expiry wait, so the "
+                f"cached assertion may have been renewed behind the read: {describe(line)}"
+            )
+    mints = [
+        mint
+        for mint in (result or {}).get("mints", [])
+        if mint.get("aud") == fixture["relay_origin"]
+    ]
+    before = [mint for mint in mints if mint["t"] < wait]
+    if not before:
+        failures.append("no assertion was minted before the expiry wait")
+        return failures
+    previous = max(before, key=lambda mint: mint["iat"])
+    if previous["exp"] > read:
+        failures.append(
+            "the cached assertion had not expired when the read after expiry "
+            f"started (exp {previous['exp']}, read at {read:.0f})"
+        )
+    renewed = [
+        mint
+        for mint in mints
+        if read <= mint["t"] < end and mint["iat"] > previous["iat"]
+    ]
+    if not renewed:
+        failures.append(
+            "no newer assertion (larger iat) was minted for the read after "
+            "expiry: it went out with the expired cached one or none at all"
+        )
+    return failures
+
+
 def evaluate(lines, markers, fixture, result):
-    """Returns (failures, coverage) for one run."""
+    """Returns (failures, coverage, controls) for one run."""
     failures = []
     names = {marker["step"] for marker in markers}
     if not lines:
@@ -110,7 +246,7 @@ def evaluate(lines, markers, fixture, result):
         failures.append(
             f"the relay was not running at the end of the run (exit code {result.get('relay_returncode')})"
         )
-    for needed in ("control_start", "control_end", "journey_end"):
+    for needed in JOURNEY_STEPS:
         if needed not in names:
             failures.append(
                 f"step marker `{needed}` is missing: the journey did not run to its end"
@@ -118,20 +254,20 @@ def evaluate(lines, markers, fixture, result):
 
     starts = [m["t"] for m in markers if m["step"] == "control_start"]
     ends = [m["t"] for m in markers if m["step"] == "control_end"]
-    window = (starts[0], ends[-1]) if starts and ends else None
+    control_window = (starts[0], ends[-1]) if starts and ends else None
 
     controls = []
     for line in lines:
         if line.get("method") != "nip_fi" or line.get("outcome") not in DENIED:
             continue
-        if window and window[0] <= line["_t"] <= window[1]:
+        if control_window and control_window[0] <= line["_t"] <= control_window[1]:
             controls.append(line)
         else:
             failures.append(
                 f"NIP-FI denial outside the negative control, during step "
                 f"`{step_at(markers, line['_t'])}`: {describe(line)}"
             )
-    if window and not any(
+    if control_window and not any(
         line.get("route") == "/query" and line.get("status") == 401 for line in controls
     ):
         failures.append(
@@ -141,27 +277,20 @@ def evaluate(lines, markers, fixture, result):
 
     first, second = fixture["community_id"], fixture["second_community_id"]
     coverage = {}
-    for name, _meaning in REQUIRED:
-        coverage[name] = 0
-    for line in lines:
-        if not is_success(line):
-            continue
-        if line["event"] == "auth":
-            if line.get("community") == first:
-                coverage["ws auth"] += 1
-            elif line.get("community") == second:
-                coverage["second ws auth"] += 1
-        elif line["event"] == "http" and line.get("http_method") != "HEAD":
-            route = line.get("route", "")
-            if route == "/query":
-                coverage["/query"] += 1
-            elif route in ("/upload", "/media/upload"):
-                coverage["/upload"] += 1
-            elif route.startswith("/media/{"):
-                coverage["/media/*"] += 1
-    for name, meaning in REQUIRED:
-        if coverage[name] == 0:
-            failures.append(f"required route class never appeared: {name} ({meaning})")
+    for name, step, meaning in REQUIRED:
+        span = window(markers, step)
+        count = sum(
+            1
+            for line in lines
+            if in_window(line, span) and classify(line, first, second) == name
+        )
+        coverage[(name, step)] = count
+        if count == 0 and span is not None:
+            failures.append(
+                f"required route class never appeared in step `{step}`: "
+                f"{name} ({meaning})"
+            )
+    failures.extend(check_expiry_path(lines, markers, fixture, result))
     return failures, coverage, controls
 
 
@@ -185,8 +314,11 @@ def main():
     for line in controls:
         print(f"  control: {describe(line)}")
     print("required route classes:")
-    for name, count in coverage.items():
-        print(f"  {'ok     ' if count else 'MISSING'} {name}: {count} success line(s)")
+    for (name, step), count in coverage.items():
+        print(
+            f"  {'ok     ' if count else 'MISSING'} {name} in `{step}`: "
+            f"{count} success line(s)"
+        )
     if failures:
         print("\nFAIL")
         for failure in failures:
