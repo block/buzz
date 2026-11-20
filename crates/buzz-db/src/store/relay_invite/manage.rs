@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use super::{lock_admission, principal_restricted};
 use crate::error::Result;
+use crate::relay_members::{is_admin, lock_member_role};
 use crate::{CommunityId, Db};
 
 /// Largest page [`list_relay_invites`] returns.
@@ -93,28 +94,6 @@ pub struct RevokedInvite {
     pub id: Uuid,
     /// When it was first revoked.
     pub revoked_at: DateTime<Utc>,
-}
-
-/// The actor's role, read `FOR SHARE` so a concurrent demotion, removal or
-/// ownership transfer waits for the caller's commit or lands first. Call
-/// after [`lock_admission`].
-pub(super) async fn lock_actor_role(
-    conn: &mut sqlx::PgConnection,
-    community: CommunityId,
-    actor: &str,
-) -> Result<Option<String>> {
-    Ok(sqlx::query_scalar(
-        "SELECT role FROM relay_members \
-         WHERE community_id = $1 AND pubkey = $2 FOR SHARE",
-    )
-    .bind(community.as_uuid())
-    .bind(actor)
-    .fetch_optional(conn)
-    .await?)
-}
-
-pub(super) fn is_admin(role: Option<String>) -> bool {
-    matches!(role.as_deref(), Some("owner" | "admin"))
 }
 
 /// List `community`'s v2 invites, newest first. `before` is the
@@ -210,7 +189,7 @@ pub async fn revoke_relay_invite(
         return Ok(None);
     }
     lock_admission(tx.conn(), community).await?;
-    let role = lock_actor_role(tx.conn(), community, actor).await?;
+    let role = lock_member_role(tx.conn(), community, actor).await?;
     if role.is_none() {
         return Err(crate::DbError::InviteRevokeForbidden);
     }

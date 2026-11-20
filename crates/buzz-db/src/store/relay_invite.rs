@@ -85,8 +85,8 @@ pub(crate) mod test_hook {
         }
     }
 }
+use crate::relay_members::{is_admin, lock_member_role};
 pub use claim_owner::{claim_relay_membership_with_owner, MembershipClaimResult};
-use manage::lock_actor_role;
 pub use manage::{
     list_relay_invites, revoke_relay_invite, InviteSelector, InviteStatus, InviteSummary,
     RevokedInvite, MAX_INVITE_LIST_LIMIT,
@@ -267,8 +267,7 @@ async fn mint(
     )
     .await?;
     lock_admission(tx.conn(), community).await?;
-    if require_admin && !manage::is_admin(lock_actor_role(tx.conn(), community, created_by).await?)
-    {
+    if require_admin && !is_admin(lock_member_role(tx.conn(), community, created_by).await?) {
         return Err(crate::DbError::InviteIssuerNotAdmin);
     }
     if principal_restricted(tx.conn(), community, created_by).await? {

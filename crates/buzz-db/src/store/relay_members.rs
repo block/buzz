@@ -53,6 +53,30 @@ pub(crate) async fn is_relay_member_on(
     Ok(row.is_some())
 }
 
+/// `pubkey`'s role in `community`, read `FOR SHARE` on `conn` so a
+/// concurrent demotion, removal or ownership transfer either lands first or
+/// waits for the caller's commit. Callers take their community and admission
+/// locks first; this takes no other lock.
+pub(crate) async fn lock_member_role(
+    conn: &mut sqlx::PgConnection,
+    community: CommunityId,
+    pubkey: &str,
+) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT role FROM relay_members \
+         WHERE community_id = $1 AND pubkey = $2 FOR SHARE",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .fetch_optional(conn)
+    .await?)
+}
+
+/// Whether a role from [`lock_member_role`] is owner or admin.
+pub(crate) fn is_admin(role: Option<String>) -> bool {
+    matches!(role.as_deref(), Some("owner" | "admin"))
+}
+
 /// Returns `true` if any member of `community` holds the `admin` or `owner`
 /// role. Open relays don't *enforce* the roster, but startup
 /// (`bootstrap_owner`) and operator provisioning still populate it — this is
