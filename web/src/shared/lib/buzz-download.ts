@@ -183,7 +183,10 @@ export async function resolveBuzzDownloadUrlForPlatform(
 
   try {
     const response = await fetch(BUZZ_RELEASES_API_URL, {
-      headers: { Accept: "application/vnd.github+json" },
+      headers: {
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2026-03-10",
+      },
     });
     if (!response.ok) return BUZZ_RELEASES_URL;
     const url = selectBuzzDownloadUrl(
