@@ -220,6 +220,7 @@ void main() {
       content: '',
       reactions: [_reaction()],
     );
+    late VoidCallback toggle;
     await tester.pumpWidget(
       WidgetHelpers.testable(
         overrides: [
@@ -229,18 +230,18 @@ void main() {
           ),
         ],
         child: Consumer(
-          builder: (context, ref, _) => TextButton(
-            onPressed: () => toggleReaction(context, ref, message, _fire),
-            child: const Text('Toggle'),
-          ),
+          builder: (context, ref, _) {
+            toggle = () => toggleReaction(context, ref, message, _fire);
+            return const SizedBox();
+          },
         ),
       ),
     );
+    // The zone only starts the toggle, so the publish's uncaught error
+    // lands in it while nothing here awaits the zone itself.
     final escaped = <Object>[];
-    await runZonedGuarded(() async {
-      await tester.tap(find.text('Toggle'));
-      await tester.pump();
-    }, (error, _) => escaped.add(error));
+    runZonedGuarded(toggle, (error, _) => escaped.add(error));
+    await tester.pump();
     expect(escaped, [signerFailure]);
     expect(find.text('Couldn’t add reaction. Try again.'), findsOneWidget);
   });
