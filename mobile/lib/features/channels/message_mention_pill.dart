@@ -93,15 +93,27 @@ class MessageMentionPill extends ConsumerWidget {
   }
 }
 
+/// [label] as a pill shows it: a full-key namesake qualifier, `(<64 hex>)`,
+/// shortened to its first eight and last four digits.
+String mentionVisibleLabel(String label) => label.replaceAllMapped(
+  RegExp(r'\(([0-9a-f]{64})\)'),
+  (m) => '(${m[1]!.substring(0, 8)}…${m[1]!.substring(60)})',
+);
+
 /// The pill for an identity link, `[@Name](nostr:npub1…)`: the mention an
 /// edit writes into the body. The link names its own key, so it needs no
-/// tag, shows the name as written and opens that person. It takes the self
-/// highlight and the own-bubble tint as a tagged mention's pill does. Null
-/// for any other link.
+/// tag and opens that person. Like buzz-app, it shows the name that key
+/// resolves to, from [mentionLabels] then [mentionNames], so a label written
+/// into the link can't pass one person off as another; the written label
+/// shows only when the key is unknown here. It takes the self highlight and
+/// the own-bubble tint as a tagged mention's pill does. Null for any other
+/// link.
 InlineSpan? identityMentionSpan(
   LinkBuildDetails link,
   String url,
   TextStyle style,
+  Map<String, String> mentionLabels,
+  Map<String, String> mentionNames,
   Set<String> agentMentionPubkeys,
   void Function(String pubkey)? onMentionTap, {
   bool ownBubble = false,
@@ -117,8 +129,10 @@ InlineSpan? identityMentionSpan(
   });
   final label = text.replaceAll('\u00A0', ' ');
   if (!isMentionIdentityLabel(label)) return null;
+  final name = mentionLabels[pubkey] ?? mentionNames[pubkey];
   final pill = MessageMentionPill(
-    label: label.substring(1),
+    label: name == null ? label.substring(1) : mentionVisibleLabel(name),
+    semanticsLabel: name,
     pubkey: pubkey,
     ownBubble: ownBubble,
     isAgent: agentMentionPubkeys.any((key) => key.toLowerCase() == pubkey),

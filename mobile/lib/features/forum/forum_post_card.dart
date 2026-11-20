@@ -5,6 +5,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/mentions/agent_identity_provider.dart';
+import '../../shared/mentions/mention_identity_links.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/avatar_image.dart';
@@ -42,6 +43,11 @@ class ForumPostCard extends HookConsumerWidget {
             ..remove(post.pubkey.toLowerCase()),
       [post],
     );
+    // Identity links name their own keys: resolve those for display only.
+    final linkedPubkeys = useMemoized(
+      () => mentionIdentityLinkKeys(post.content),
+      [post.content],
+    );
     final mentionPubkeysKey = (mentionPubkeys.toList()..sort()).join('\u0000');
 
     useEffect(() {
@@ -67,7 +73,7 @@ class ForumPostCard extends HookConsumerWidget {
     final profileOwnedMentionPubkeys = ref.watch(
       userCacheProvider.select(
         (cache) =>
-            (post.mentionPubkeys
+            ([...post.mentionPubkeys, ...linkedPubkeys]
                     .where(
                       (pubkey) =>
                           cache[pubkey.toLowerCase()]?.ownerPubkey != null,
@@ -90,11 +96,10 @@ class ForumPostCard extends HookConsumerWidget {
       directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
       agentMentionPubkeys: agentMentionPubkeys,
     );
-    final mentionLabels = watchChannelIdentityLabels(
-      ref,
-      post.channelId,
-      post.mentionPubkeys,
-    );
+    final mentionLabels = watchChannelIdentityLabels(ref, post.channelId, {
+      ...post.mentionPubkeys,
+      ...linkedPubkeys,
+    });
     final preview = post.content.length > 200
         ? '${post.content.substring(0, 200)}...'
         : post.content;

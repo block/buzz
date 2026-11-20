@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/mentions/agent_identity_provider.dart';
+import '../../shared/mentions/mention_identity_links.dart';
 import '../../shared/relay/relay_closed_policy.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/sheet_action_section.dart';
@@ -367,7 +368,8 @@ class _OriginalPost extends ConsumerWidget {
     final mentionLabels = watchChannelIdentityLabels(
       ref,
       post.channelId,
-      post.mentionPubkeys,
+      // Identity links name their own keys: resolve those for display only.
+      {...post.mentionPubkeys, ...mentionIdentityLinkKeys(post.content)},
     );
 
     return Padding(
@@ -487,7 +489,8 @@ class _ReplyRow extends ConsumerWidget {
     final mentionLabels = watchChannelIdentityLabels(
       ref,
       channelId,
-      reply.mentionPubkeys,
+      // Identity links name their own keys: resolve those for display only.
+      {...reply.mentionPubkeys, ...mentionIdentityLinkKeys(reply.content)},
     );
 
     return Padding(

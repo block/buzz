@@ -20,6 +20,7 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
+import '../../shared/mentions/mention_identity_links.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/relay/thread_reference.dart';

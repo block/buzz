@@ -772,24 +772,37 @@ void exactMentionTests() {
   testWidgets('ambiguous typed names fail visibly without clearing the draft', (
     tester,
   ) async {
-    var sent = false;
-    await mountComposer(tester, members(), (
-      _,
-      _, {
-      mediaTags = const [],
-    }) async {
-      sent = true;
-    });
-    await tester.enterText(find.byType(TextField), '@Scout hello');
-    await tester.pumpAndSettle();
-    await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-    await tester.pumpAndSettle();
-    expect(sent, isFalse);
-    expect(
-      tester.widget<TextField>(find.byType(TextField)).controller!.text,
-      '@Scout hello',
+    ChannelMember named(String key, String name) => ChannelMember(
+      pubkey: key,
+      displayName: name,
+      role: 'member',
+      joinedAt: DateTime(2025),
     );
-    expect(find.textContaining('is ambiguous'), findsOneWidget);
+    // Names the text scan reads alike are one name here, in either roster
+    // order: `ſ` folds with `s`, though toLowerCase keeps them apart.
+    for (final (roster, typed) in [
+      (members(), '@Scout hello'),
+      ([named(first, 'Sam'), named(second, 'ſam')], '@ſam hello'),
+      ([named(second, 'ſam'), named(first, 'Sam')], '@ſam hello'),
+    ]) {
+      var sent = false;
+      await mountComposer(tester, roster, (_, _, {mediaTags = const []}) async {
+        sent = true;
+      });
+      await tester.enterText(find.byType(TextField), typed);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+      expect(sent, isFalse, reason: typed);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        typed,
+      );
+      expect(find.textContaining('is ambiguous'), findsOneWidget);
+      // Let this composer's timers end before the next one mounts.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(minutes: 1));
+    }
   });
 
   testWidgets('closing punctuation never selects a shared name', (

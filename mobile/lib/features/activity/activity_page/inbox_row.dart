@@ -40,7 +40,9 @@ class _InboxRow extends HookConsumerWidget {
     final labelHapticFired = useRef(false);
     final senderPubkey = item.item.pubkey.toLowerCase();
     final mentionPubkeys = mentionedPubkeysFromTags(item.item.tags);
-    final relevantPubkeys = {senderPubkey, ...mentionPubkeys};
+    // Identity links name their own keys: resolve those for display only.
+    final linkedPubkeys = mentionIdentityLinkKeys(item.item.displayContent);
+    final relevantPubkeys = {senderPubkey, ...mentionPubkeys, ...linkedPubkeys};
     final profiles = <String, UserProfile?>{
       for (final pubkey in relevantPubkeys)
         pubkey: ref.watch(userCacheProvider.select((cache) => cache[pubkey])),
@@ -82,7 +84,7 @@ class _InboxRow extends HookConsumerWidget {
     final agentMentionPubkeys = agentPubkeysWithProfileOwners(
       knownAgentPubkeys: knownAgentPubkeys,
       profileOwnedAgentPubkeys: [
-        for (final pubkey in mentionPubkeys)
+        for (final pubkey in {...mentionPubkeys, ...linkedPubkeys})
           if (profiles[pubkey]?.ownerPubkey != null) pubkey,
       ],
     );

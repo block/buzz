@@ -84,17 +84,21 @@ class _ThreadMessage extends HookConsumerWidget {
         agentMentionPubkeys.add(normalizedPubkey);
       }
     }
+    // Identity links name their own keys: resolve those for display only.
+    final linkedPubkeys = mentionIdentityLinkKeys(message.content);
+    for (final pubkey in linkedPubkeys) {
+      if (knownAgentPubkeys.contains(pubkey)) agentMentionPubkeys.add(pubkey);
+    }
     final resolvedMentionNames = mentionNamesWithDirectoryLabels(
       mentionPubkeys: message.mentionPubkeys,
       profileMentionNames: mentionNames,
       directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
       agentMentionPubkeys: agentMentionPubkeys,
     );
-    final mentionLabels = watchChannelIdentityLabels(
-      ref,
-      channelId,
-      message.mentionPubkeys,
-    );
+    final mentionLabels = watchChannelIdentityLabels(ref, channelId, {
+      ...message.mentionPubkeys,
+      ...linkedPubkeys,
+    });
 
     void openMessageActions(MessageLongPressDetails details) {
       showMessageActions(

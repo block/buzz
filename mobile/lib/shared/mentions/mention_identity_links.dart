@@ -53,3 +53,11 @@ List<({int start, int end, String label, String pubkey})> mentionIdentityLinks(
         case (final label, final pubkey?) when isMentionIdentityLabel(label))
       (start: match.start, end: match.end, label: label, pubkey: pubkey),
 ];
+
+/// The lowercase keys that identity links in [content] name, so a message
+/// row can resolve their names and agent icons as it does for tagged keys.
+/// Most messages carry no link, and a substring check skips the scan.
+Set<String> mentionIdentityLinkKeys(String content) =>
+    content.contains('](nostr:npub1')
+    ? {for (final link in mentionIdentityLinks(content)) link.pubkey}
+    : const {};

@@ -30,9 +30,14 @@ class _MessageTile extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final mentionedPubkeys = hit.content.length > _richSearchPreviewLimit
-        ? <String>{}
-        : mentionedPubkeysFromTags(hit.tags);
+    final rich = hit.content.length <= _richSearchPreviewLimit;
+    // Identity links name their own keys: resolve those for display only.
+    final mentionedPubkeys = rich
+        ? {
+            ...mentionedPubkeysFromTags(hit.tags),
+            ...mentionIdentityLinkKeys(hit.content),
+          }
+        : <String>{};
     // A hit is labelled within its channel, as it would be there.
     final hitChannelId = channel?.id ?? hit.channelId;
     final labelPubkeys = {hit.pubkey.toLowerCase(), ...mentionedPubkeys};

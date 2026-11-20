@@ -85,8 +85,11 @@ class _MessageBubble extends HookConsumerWidget {
     final normalizedMentionPubkeys = {
       for (final pubkey in message.mentionPubkeys) pubkey.toLowerCase(),
     };
+    // Identity links name their own keys: resolve those for display only.
+    final linkedPubkeys = mentionIdentityLinkKeys(message.content);
+    final displayedPubkeys = {...normalizedMentionPubkeys, ...linkedPubkeys};
     final mentionProfiles = <String, UserProfile?>{
-      for (final pubkey in normalizedMentionPubkeys)
+      for (final pubkey in displayedPubkeys)
         pubkey: ref.watch(userCacheProvider.select((cache) => cache[pubkey])),
     };
     final knownAgentPubkeys = agentPubkeysWithProfileOwners(
@@ -110,6 +113,9 @@ class _MessageBubble extends HookConsumerWidget {
         agentMentionPubkeys.add(normalizedPubkey);
       }
     }
+    for (final pubkey in linkedPubkeys) {
+      if (knownAgentPubkeys.contains(pubkey)) agentMentionPubkeys.add(pubkey);
+    }
     final resolvedMentionNames = mentionNamesWithDirectoryLabels(
       mentionPubkeys: message.mentionPubkeys,
       profileMentionNames: mentionNames,
@@ -119,7 +125,7 @@ class _MessageBubble extends HookConsumerWidget {
     final mentionLabels = watchChannelIdentityLabels(
       ref,
       currentChannelId,
-      normalizedMentionPubkeys,
+      displayedPubkeys,
     );
 
     void openMessageActions(MessageLongPressDetails details) {

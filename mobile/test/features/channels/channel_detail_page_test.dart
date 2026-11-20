@@ -84,6 +84,7 @@ import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/features/channels/message_mention_pill.dart';
+import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
@@ -14823,6 +14824,63 @@ void main() {
   });
 
   group('Edits', () {
+    testWidgets('an identity link pill names the key it opens', (tester) async {
+      // An edit carries no p tag, so the row resolves the keys its links
+      // name: a label written into the link can't pass Mallory off as Wes,
+      // and two edited namesakes keep their qualifiers.
+      final wes = '1' * 64;
+      final mallory = '2' * 64;
+      final scoutA = '3' * 64;
+      final scoutB = '4' * 64;
+      String link(String label, String key) =>
+          '[@$label](nostr:${fullNpub(key)})';
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'linked',
+              pubkey: 'alice',
+              content: 'Draft',
+              createdAt: 1000,
+            ),
+            _edit(
+              id: 'linked-edit',
+              targetId: 'linked',
+              content:
+                  'ok ${link('Wes', mallory)} '
+                  '${link('Scout', scoutA)} ${link('Scout', scoutB)}',
+              createdAt: 1100,
+            ),
+          ],
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            wes: UserProfile(pubkey: wes, displayName: 'Wes'),
+            mallory: UserProfile(pubkey: mallory, displayName: 'Mallory'),
+            scoutA: UserProfile(pubkey: scoutA, displayName: 'Scout'),
+            scoutB: UserProfile(pubkey: scoutB, displayName: 'Scout'),
+          },
+          members: [
+            for (final key in ['alice', wes, scoutA, scoutB])
+              ChannelMember(
+                pubkey: key,
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final pills = tester
+          .widgetList<MessageMentionPill>(find.byType(MessageMentionPill))
+          .map((pill) => pill.label)
+          .toList();
+      expect(pills, hasLength(3));
+      expect(pills.first, 'Mallory');
+      expect(pills.skip(1).toSet(), hasLength(2));
+      expect(pills.skip(1), everyElement(startsWith('Scout ')));
+    });
+
     testWidgets('edited messages show updated content and (edited) label', (
       tester,
     ) async {

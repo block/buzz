@@ -17,6 +17,7 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 import '../../shared/identity_archives/identity_archives.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
+import '../../shared/mentions/mention_identity_links.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';

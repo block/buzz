@@ -54,10 +54,7 @@ class _MentionMd {
     final isAgent =
         pubkey != null && agentMentionPubkeys.contains(pubkey.toLowerCase());
     final fullLabel = displayName ?? raw.substring(1);
-    final visibleLabel = fullLabel.replaceAllMapped(
-      RegExp(r'\(([0-9a-f]{64})\)'),
-      (m) => '(${m[1]!.substring(0, 8)}…${m[1]!.substring(60)})',
-    );
+    final visibleLabel = mentionVisibleLabel(fullLabel);
     final pill = MessageMentionPill(
       label: visibleLabel,
       pubkey: pubkey,
@@ -97,6 +94,8 @@ extension _MentionLinks on MessageContent {
         link,
         url,
         fallbackStyle ?? link.style,
+        mentionLabels,
+        mentionNames,
         agentMentionPubkeys,
         onMentionTap,
         ownBubble: bubble && ownMessage,
