@@ -518,10 +518,8 @@ class ThreadDetailPage extends HookConsumerWidget {
     useEffect(
       () {
         final messageId = initialMessageId;
-        // Wait for either the authoritative thread query or a terminal query
-        // error before consuming the one-shot jump. During loading, the fallback
-        // main-timeline list can contain only the linked reply; after an error,
-        // that hydrated snapshot is the best available target list.
+        // Wait for relay history or the settled fallback after a terminal
+        // query error before consuming the one-shot jump.
         if (messageId == null ||
             !canUseMessagesForInitialTarget ||
             headHeight.value == null) {

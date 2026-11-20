@@ -236,12 +236,12 @@ _watchThreadMessages(
     accessDenied: accessDenied,
     liveDeletionHidesHead: headDeleted,
     hasFetchedReplies: replyEvents != null,
-    // A terminal query error may settle a target from the pushed route.
-    // Saved replies remain provisional until the relay query succeeds.
+    // After a terminal error, let the saved-page read settle before resolving
+    // the target index in the fallback timeline.
     canUseMessagesForInitialTarget:
         !accessDenied &&
         (relayRepliesAvailable ||
-            (saved == null &&
+            (preview?.isLoading != true &&
                 relayReplyState.hasError &&
                 !relayReplyState.retrying)),
   );

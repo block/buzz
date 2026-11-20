@@ -46,7 +46,7 @@ void threadReplyRefreshTests() {
     return (Navigator.of(context), ProviderScope.containerOf(context));
   }
 
-  void open(NavigatorState navigator) {
+  void open(NavigatorState navigator, {String? initialMessageId}) {
     final head = formatTimeline([root]).single;
     navigator.push(
       MaterialPageRoute<void>(
@@ -57,6 +57,7 @@ void threadReplyRefreshTests() {
           currentPubkey: 'self',
           isMember: true,
           isArchived: false,
+          initialMessageId: initialMessageId,
         ),
       ),
     );
@@ -295,6 +296,49 @@ void threadReplyRefreshTests() {
     expect(find.text('This thread is unavailable'), findsOneWidget);
     expect(findRichText('Cached reply'), findsNothing);
   });
+
+  for (final diskArrivesFirst in [true, false]) {
+    testWidgets(
+      'offline thread highlights a saved target (disk first: $diskArrivesFirst)',
+      (tester) async {
+        final query = Completer<List<NostrEvent>>();
+        final disk = Completer<List<NostrEvent>?>();
+        final (navigator, _) = await mount(
+          tester,
+          () => query.future,
+          savedThreadPreview: disk.future,
+        );
+        open(navigator, initialMessageId: reply.id);
+        await tester.pumpAndSettle();
+
+        if (diskArrivesFirst) {
+          disk.complete([reply]);
+        } else {
+          query.completeError(Exception('offline'));
+        }
+        await tester.pumpAndSettle();
+        final target = find.byKey(ValueKey('thread-message-${reply.id}'));
+        if (diskArrivesFirst) {
+          final before =
+              tester.widget<DecoratedBox>(target).decoration as BoxDecoration;
+          expect(before.color, Colors.transparent);
+          query.completeError(Exception('offline'));
+        } else {
+          expect(target, findsNothing);
+          disk.complete([reply]);
+        }
+
+        for (var i = 0; i < 8; i++) {
+          await tester.pump();
+        }
+        await tester.pump(const Duration(milliseconds: 50));
+        await tester.pump(const Duration(milliseconds: 150));
+        final highlight =
+            tester.widget<DecoratedBox>(target).decoration as BoxDecoration;
+        expect(highlight.color!.a, greaterThan(0));
+      },
+    );
+  }
 
   testWidgets('thread loads an edit made to a reply before it opened', (
     tester,
