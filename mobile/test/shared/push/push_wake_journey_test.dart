@@ -21,6 +21,18 @@ void main() {
   });
   tearDown(() => directory.deleteSync(recursive: true));
 
+  // Records a message as shown [age] ago, as an earlier wake would have.
+  Future<void> shownAgo(FakePushRelay relay, Duration age) async {
+    expect(
+      await fixture.openStore().claim(
+        relay.communityId,
+        age.inSeconds.toRadixString(16).padLeft(64, '0'),
+        pushWakeClock.subtract(age),
+      ),
+      isTrue,
+    );
+  }
+
   test('a DM and a mention notify, and nothing else does', () async {
     final relay = fixture.addCommunity();
     final dm = relay.dmChannel();
@@ -120,6 +132,28 @@ void main() {
       older.id,
     ]);
     expect((await fixture.wake()).notifications, isEmpty);
+
+    // After a long quiet spell, every message since the last shown one
+    // notifies, however far apart they arrived.
+    final quiet = fixture.addCommunity();
+    await shownAgo(quiet, const Duration(hours: 2));
+    final quietDm = quiet.dmChannel();
+    final quietFriend = quiet.person('Friend');
+    final earlier = quiet.message(
+      quietDm,
+      quietFriend,
+      'while you were away',
+      age: const Duration(minutes: 50),
+    );
+    final latest = quiet.message(quietDm, quietFriend, 'and now');
+    final caughtUp = await fixture.wake();
+    expect(caughtUp.incomplete, isFalse);
+    expect(
+      caughtUp.notifications
+          .where((n) => n.target.communityId == quiet.communityId)
+          .map((n) => n.eventId),
+      [latest.id, earlier.id],
+    );
   });
 
   test('every community notifies, each from its own relay', () async {
@@ -140,17 +174,27 @@ void main() {
 
     // Storage fails midway through one community. The other community's
     // message and the one claimed before the failure still show, and the
-    // failing community is reported so the next wake finishes it.
-    final [healthy, failing] = relays;
+    // failing community is reported so the next wake finishes it, even
+    // when the message left over arrived long after the one claimed.
+    final [healthy, _] = relays;
+    // A community whose last shown message is old, so the one left over is
+    // also far from the one claimed.
+    final failing = fixture.addCommunity();
     final newer = healthy.message(
       healthy.dmChannel(),
       healthy.person('A'),
       'a',
     );
+    await shownAgo(failing, const Duration(hours: 2));
     final failingDm = failing.dmChannel();
     final friend = failing.person('B');
-    final skipped = failing.message(failingDm, friend, 'older');
-    final claimed = failing.message(failingDm, friend, 'newer');
+    final claimed = failing.message(
+      failingDm,
+      friend,
+      'older',
+      age: const Duration(minutes: 40),
+    );
+    final skipped = failing.message(failingDm, friend, 'newer');
     final partial = await fixture.wake(
       store: FailingShownMessageStore(
         fixture.openStore(),
@@ -340,7 +384,7 @@ void main() {
         unorderedEquals(sent),
       );
 
-      relay.slowProfiles = const Duration(seconds: 30);
+      relay.slowProfiles = true;
       final late = relay.message(relay.dmChannel(), friend, 'late names');
       final lookup = Stopwatch()..start();
       final unnamed = await fixture.wake(timeouts: tight);
@@ -441,15 +485,16 @@ void main() {
       }
 
       // All passes share one budget: when the first pass leaves too little
-      // of it, a wake mid-run does not start another pass, and the run
-      // returns what it found.
+      // of it, a wake mid-run does not start another pass. The run returns
+      // what it found, and is incomplete, since the later wake's message was
+      // never looked for and the caller must fall back for it.
       final short = PushWakeRunner(
         (budget) {
           passes++;
           return fixture.wake(timeouts: PushWakeTimeouts(total: budget));
         },
-        budget: const Duration(milliseconds: 800),
-        minimumPass: const Duration(milliseconds: 400),
+        budget: const Duration(seconds: 5),
+        minimumPass: const Duration(seconds: 10),
       );
       final late = relay.message(dm, friend, 'during a slow pass');
       final slow = relay.hold = Completer<void>();
@@ -457,12 +502,12 @@ void main() {
       final fourth = short.wake();
       await untilQueries(relay, queries + 1);
       final fifth = short.wake();
-      await Future<void>.delayed(const Duration(milliseconds: 500));
       slow.complete();
       relay.hold = null;
 
       for (final result in await Future.wait([fourth, fifth])) {
         expect(result.notifications.map((n) => n.eventId), [late.id]);
+        expect(result.incomplete, isTrue);
       }
       expect(passes, 3);
 

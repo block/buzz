@@ -73,7 +73,9 @@ class PushWakeRunner {
     return PushWakeResult(
       notifications: capPushWakeNotifications(notifications),
       failedCommunityIds: failed.toList()..sort(),
-      interrupted: interrupted,
+      // A wake that arrived during the last pass and got no rerun for lack of
+      // budget was never looked up, so the caller must fall back for it.
+      interrupted: interrupted || _rerun,
     );
   }
 }

@@ -92,8 +92,9 @@ class FakePushRelay {
   /// hostile relay would.
   http.Response Function()? hostileResponse;
 
-  /// Delays answers to queries for profiles, as a slow metadata lookup.
-  Duration? slowProfiles;
+  /// Never answers queries for profiles, as a metadata lookup slower than
+  /// any budget.
+  bool slowProfiles = false;
 
   String get host => 'relay-$index.example.org';
   String get communityId => 'community-$index';
@@ -212,9 +213,9 @@ class FakePushRelay {
     await hold?.future;
     final hostile = hostileResponse;
     if (hostile != null) return hostile();
-    if (slowProfiles != null &&
+    if (slowProfiles &&
         filters.any((f) => (f['kinds'] as List?)?.contains(0) ?? false)) {
-      await Future<void>.delayed(slowProfiles!);
+      await Completer<void>().future;
     }
     final result = <String, NostrEvent>{};
     for (final filter in filters) {

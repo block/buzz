@@ -6,6 +6,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../community/community.dart';
 import '../community/community_storage.dart';
+import '../crypto/event_signing.dart' show verifySchnorrHex;
 import '../relay/nostr_models.dart';
 import '../relay/relay_client.dart' show RelayException;
 import '../relay/relay_http_query_client.dart';
@@ -343,16 +344,17 @@ Future<void> _resolveCommunity(
   final selected = <({NostrEvent event, PushWakeCategory category})>[];
   final seen = <String>{};
   for (final event in fetched) {
-    if (!seen.add(event.id) ||
-        event.pubkey.toLowerCase() == mine ||
-        !_hasValidIdAndSignature(event)) {
-      continue;
-    }
+    if (!seen.add(event.id) || event.pubkey.toLowerCase() == mine) continue;
     final matching = [
       for (final subscription in subscriptions)
         if (pushSubscriptionMatches(subscription, event)) subscription,
     ];
-    if (matching.isEmpty || event.channelId == null) continue;
+    // Verify last, so events this wake discards cost no signature check.
+    if (matching.isEmpty ||
+        event.channelId == null ||
+        !_hasValidIdAndSignature(event)) {
+      continue;
+    }
     selected.add((
       event: event,
       category: matching.any((s) => s.filter.hTags != null)
@@ -360,9 +362,14 @@ Future<void> _resolveCommunity(
           : PushWakeCategory.mention,
     ));
   }
+  // Claim oldest first. Each claim can advance the store's watermark, and a
+  // claim below the watermark's reorder window is rejected, so claiming a
+  // newer message first would reject older unshown ones fetched in the same
+  // wake. Oldest first also means a wake cut short leaves only messages newer
+  // than everything it claimed, which the next wake's fetch still covers.
   selected.sort(
     (a, b) => a.event.createdAt != b.event.createdAt
-        ? b.event.createdAt.compareTo(a.event.createdAt)
+        ? a.event.createdAt.compareTo(b.event.createdAt)
         : a.event.id.compareTo(b.event.id),
   );
 
@@ -472,9 +479,9 @@ bool _hasValidIdAndSignature(NostrEvent event) {
   try {
     final signed = nostr.Event.fromMap(event.toJson(), verify: false);
     return signed.getEventId() == event.id &&
-        nostr.Schnorr.verify(
+        verifySchnorrHex(
           publicKey: event.pubkey,
-          message: event.id,
+          messageHex: event.id,
           signature: event.sig,
         );
   } on Object {
