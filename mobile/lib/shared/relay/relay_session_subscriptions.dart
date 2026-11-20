@@ -6,6 +6,10 @@ class _HistorySubscription {
   final Timer timeout;
   final DateTime startedAt;
 
+  /// Where the call was made. Errors completed later, from a timer or a
+  /// socket callback, carry it, so an escaped error's stack reaches the caller.
+  final StackTrace callSite = StackTrace.current;
+
   /// The filter of a request held until the socket authenticates.
   NostrFilter? heldFilter;
 
@@ -25,6 +29,11 @@ class _LiveSubscription {
   /// Whether a replay narrows [filter] with a `since` from what this
   /// subscription last saw.
   final bool resumeSince;
+
+  /// Where the call was made. Errors completed later, from a timer or a
+  /// socket callback, carry it, so an escaped error's stack reaches the caller.
+  final StackTrace callSite = StackTrace.current;
+
   Completer<void>? readyCompleter;
   int? lastSeenCreatedAt;
 
@@ -77,6 +86,10 @@ class _PendingEvent {
   final Completer<NostrEvent> completer;
   final Timer timeout;
   final DateTime startedAt;
+
+  /// Where the call was made. Errors completed later, from a timer or a
+  /// socket callback, carry it, so an escaped error's stack reaches the caller.
+  final StackTrace callSite = StackTrace.current;
 
   _PendingEvent({
     required this.completer,

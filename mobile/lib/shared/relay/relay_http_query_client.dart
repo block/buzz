@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'package:buzz/shared/http/app_http_client.dart';
+import 'relay_call_error.dart';
 
 /// The default transport. On iOS and Android, the app-wide native session
 /// inflates gzip natively, off the Dart isolate. `dart:io` would inflate on
@@ -36,6 +37,15 @@ class RelayHttpQueryClient {
   _ClientGeneration? _currentGeneration;
   final Set<_ClientGeneration> _generations = {};
 
+  /// The error for a request that outlived [timeout]. Its stack is the
+  /// caller's, since the timer that raises it has no frames from the app.
+  static RelayTimeoutException _timedOut(Duration timeout) =>
+      RelayTimeoutException(
+        RelayCall.query,
+        'Relay query timed out after $timeout',
+        timeout,
+      );
+
   Future<http.Response> post(
     Uri url, {
     required Map<String, String> headers,
@@ -43,6 +53,7 @@ class RelayHttpQueryClient {
     required Duration timeout,
     http.Client Function(http.Client, bool Function())? decorate,
   }) async {
+    final callSite = StackTrace.current;
     final generation = _injectedClient == null
         ? (_currentGeneration ??= _createGeneration())
         : null;
@@ -71,7 +82,7 @@ class RelayHttpQueryClient {
         _currentGeneration = null;
       }
       generation?.retire();
-      rethrow;
+      Error.throwWithStackTrace(_timedOut(timeout), callSite);
     } finally {
       active = false;
       generation?.release();
@@ -86,6 +97,7 @@ class RelayHttpQueryClient {
     required Duration timeout,
     http.Client Function(http.Client, bool Function())? decorate,
   }) async {
+    final callSite = StackTrace.current;
     // As in [post], a timed-out request on a shared session is aborted.
     final abort = Completer<void>();
     final sent =
@@ -141,7 +153,7 @@ class RelayHttpQueryClient {
         _currentGeneration = null;
       }
       generation?.retire();
-      rethrow;
+      Error.throwWithStackTrace(_timedOut(timeout), callSite);
     } finally {
       finished = true;
       // Cancelling an iterator that never listened leaves the body

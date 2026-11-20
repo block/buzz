@@ -4,6 +4,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../diagnostics/diagnostic_reporter.dart';
 import 'nostr_models.dart';
+import 'relay_call_error.dart';
 import 'relay_closed_policy.dart';
 import 'relay_session.dart';
 import 'relay_socket.dart';
@@ -141,7 +142,14 @@ Future<NostrEvent> submitSignedEventOnce({
   );
   socket.headers = headers;
   socket.diagnostics = reporter;
-  final resultFuture = result.future.timeout(timeout);
+  final resultFuture = result.future.timeout(
+    timeout,
+    onTimeout: () => throw RelayTimeoutException(
+      RelayCall.publish,
+      'Relay did not answer within $timeout',
+      timeout,
+    ),
+  );
   try {
     await socket.connect();
     return await resultFuture;
