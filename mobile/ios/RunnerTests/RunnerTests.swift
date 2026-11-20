@@ -459,6 +459,7 @@ class RunnerTests: XCTestCase {
     XCTAssertNil(portraitControlRow(row.offsetBy(dx: 800, dy: 0), in: bar.bounds))
   }
 
+  @MainActor
   func testDmPortraitFloatsAboveGlassTitleAndClearsForChannels() throws {
     let parent = UIViewController()
     let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 393, height: 852))
