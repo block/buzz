@@ -640,7 +640,7 @@ Future<void> _showMoveSectionSheet(
   BuildContext? sheet;
   void close() {
     final open = sheet;
-    if (open != null && open.mounted) Navigator.of(open).pop();
+    if (open != null) _closeOwnRoute(open);
   }
 
   // Desktop's unified layout can lock legacy filing while this is open.
@@ -661,9 +661,9 @@ Future<void> _showMoveSectionSheet(
       // to close.
       if (sheet == null &&
           (!container.read(channelSectionsProvider).editable || !inScope())) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (sheetContext.mounted) Navigator.of(sheetContext).pop();
-        });
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _closeOwnRoute(sheetContext),
+        );
       }
       sheet = sheetContext;
       return SafeArea(
@@ -727,6 +727,21 @@ Future<void> _showMoveSectionSheet(
   });
 }
 
+/// Closes the route that [context] belongs to, once. Later calls, such as a
+/// second community switch, find it already leaving and never pop the page
+/// underneath.
+void _closeOwnRoute(BuildContext context) {
+  if (!context.mounted) return;
+  final route = ModalRoute.of(context);
+  if (route == null || !route.isActive) return;
+  final navigator = Navigator.of(context);
+  if (route.isCurrent) {
+    navigator.pop();
+  } else {
+    navigator.removeRoute(route);
+  }
+}
+
 Future<String?> _showSectionNameDialog(
   BuildContext context, {
   required bool Function() inScope,
@@ -746,14 +761,14 @@ class _SectionNameDialog extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = useTextEditingController();
     ref.listen(relayConfigProvider, (_, _) {
-      if (!inScope()) Navigator.of(context).pop();
+      if (!inScope()) _closeOwnRoute(context);
     });
     // A switch that landed before this first frame found no dialog to close.
     useEffect(() {
       if (!inScope()) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (context.mounted) Navigator.of(context).pop();
-        });
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _closeOwnRoute(context),
+        );
       }
       return null;
     }, const []);

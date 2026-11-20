@@ -766,12 +766,27 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Move to section…'));
       await tester.pumpAndSettle();
-      void switchCommunity() =>
-          (container.read(relayConfigProvider.notifier) as _SignedInConfig)
-              .signInAs(
-                newKey ? other.nsec : keys.nsec,
-                baseUrl: newKey ? relayUrl : otherRelayUrl,
-              );
+      final config =
+          container.read(relayConfigProvider.notifier) as _SignedInConfig;
+      void switchToThird() => config.signInAs(
+        nostr.Keys.generate().nsec,
+        baseUrl: 'https://third.example',
+      );
+      // A second switch follows, so a stale route is asked to close more
+      // than once. Before the dialog builds, it lands just after the first
+      // frame builds the dialog.
+      void switchCommunity() {
+        config.signInAs(
+          newKey ? other.nsec : keys.nsec,
+          baseUrl: newKey ? relayUrl : otherRelayUrl,
+        );
+        if (beforeDialog) {
+          tester.binding.addPostFrameCallback((_) => switchToThird());
+        } else {
+          switchToThird();
+        }
+      }
+
       if (beforeDialog) {
         await tester.tap(find.text(pick));
       } else if (pick == 'New section…') {
@@ -786,6 +801,8 @@ void main() {
       // that would be dropped.
       expect(find.text(pick), findsNothing);
       expect(find.text('Create'), findsNothing);
+      // Only the stale route closes; the page under it stays.
+      expect(find.text('Open actions'), findsOneWidget);
 
       expect(tester.takeException(), isNull);
       expect(
