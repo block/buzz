@@ -606,7 +606,7 @@ impl AuthorityStore for MemoryAuthorityStore {
             *quota = (now, 0);
         }
         if quota.1 >= quota_max_deliveries {
-            return Err(AuthorityError::Rejected);
+            return Err(AuthorityError::RateLimited);
         }
         quota.1 += 1;
         s.delivery_auth_replays.insert(auth_key, request_expires_at);
@@ -757,6 +757,51 @@ mod tests {
             })
             .await
             .expect("quota reopens after the rolling window");
+    }
+
+    #[tokio::test]
+    async fn exhausted_delivery_quota_is_rate_limited_without_consuming_fences() {
+        let store = store().await;
+        let deliver = |event: String, request: Uuid, now: i64| {
+            let store = &store;
+            async move {
+                store
+                    .authorize_delivery(
+                        Uuid::from_u128(2),
+                        &"11".repeat(32),
+                        1,
+                        1,
+                        &event,
+                        request,
+                        now + 100,
+                        60,
+                        2,
+                        now,
+                    )
+                    .await
+            }
+        };
+        deliver("22".repeat(32), Uuid::new_v4(), 1_000)
+            .await
+            .unwrap();
+        deliver("33".repeat(32), Uuid::new_v4(), 1_000)
+            .await
+            .unwrap();
+
+        let (event, request) = ("44".repeat(32), Uuid::new_v4());
+        assert_eq!(
+            deliver(event.clone(), request, 1_000).await.err(),
+            Some(AuthorityError::RateLimited)
+        );
+        {
+            let s = store.0.lock().unwrap();
+            assert_eq!(s.delivery_auth_replays.len(), 2);
+            assert_eq!(s.delivery_request_replays.len(), 2);
+            assert_eq!(s.endpoint_quotas.values().next().unwrap().1, 2);
+        }
+        deliver(event, request, 1_060)
+            .await
+            .expect("the rate-limited attempt left its auth event and request id unused");
     }
 
     #[tokio::test]

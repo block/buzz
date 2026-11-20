@@ -496,7 +496,7 @@ impl AuthorityStore for PostgresAuthorityStore {
         let quota = sqlx::query("INSERT INTO push_gateway_endpoint_quotas(token_fingerprint,window_started_at,admitted) VALUES($1,$2,1) ON CONFLICT(token_fingerprint) DO UPDATE SET window_started_at=CASE WHEN push_gateway_endpoint_quotas.window_started_at <= $2 - make_interval(secs => $3::double precision) THEN $2 ELSE push_gateway_endpoint_quotas.window_started_at END, admitted=CASE WHEN push_gateway_endpoint_quotas.window_started_at <= $2 - make_interval(secs => $3::double precision) THEN 1 ELSE push_gateway_endpoint_quotas.admitted + 1 END, updated_at=now() WHERE push_gateway_endpoint_quotas.window_started_at <= $2 - make_interval(secs => $3::double precision) OR push_gateway_endpoint_quotas.admitted < $4")
             .bind(fingerprint).bind(at(now)?).bind(quota_window_seconds).bind(quota_max_deliveries).execute(&mut *tx).await.map_err(db)?;
         if quota.rows_affected() != 1 {
-            return Err(AuthorityError::Rejected);
+            return Err(AuthorityError::RateLimited);
         }
         let auth_inserted = sqlx::query("INSERT INTO push_gateway_delivery_auth_replays(relay_pubkey,auth_event_id,expires_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
             .bind(&relay_bytes).bind(event_bytes).bind(at(request_expires_at)?).execute(&mut *tx).await.map_err(db)?;
@@ -1296,8 +1296,8 @@ mod postgres_tests {
     // txns before either commits) would admit BOTH and burn the ceiling; the
     // correct behavior relies on Postgres re-checking the ON CONFLICT DO UPDATE
     // predicate against the row it just locked, so the loser sees admitted=1,
-    // fails `1 < 1`, updates zero rows, and rejects. Exactly one Ok, and the
-    // persisted counter must never exceed the ceiling.
+    // fails `1 < 1`, updates zero rows, and is rate-limited. Exactly one Ok, and
+    // the persisted counter must never exceed the ceiling.
     #[tokio::test]
     #[ignore = "requires PostgreSQL"]
     async fn concurrent_admissions_never_over_admit_past_quota_ceiling() {
@@ -1315,6 +1315,12 @@ mod postgres_tests {
             [a.is_ok(), b.is_ok()].iter().filter(|ok| **ok).count(),
             1,
             "quota ceiling of 1 admits exactly one of two concurrent attempts"
+        );
+        assert!(
+            [&a, &b]
+                .iter()
+                .any(|r| r.as_ref().err() == Some(&AuthorityError::RateLimited)),
+            "the quota loser is rate-limited, not rejected"
         );
 
         let admitted: i64 = sqlx::query_scalar("SELECT admitted FROM push_gateway_endpoint_quotas")

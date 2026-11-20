@@ -408,6 +408,28 @@ async fn invalid_event_id_and_signature_are_rejected() {
 }
 
 #[tokio::test]
+async fn exhausted_endpoint_quota_answers_429_rate_limited() {
+    let (app, keys, body, sends) = fixture().await;
+    let mut delivery: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let mut deliver = || {
+        delivery["request_id"] = serde_json::json!(Uuid::new_v4());
+        let body = serde_json::to_vec(&delivery).unwrap();
+        let auth = signed_header(&keys, DIRECT_URL, "POST", &body);
+        app.clone().oneshot(request(DIRECT_URL, None, auth, body))
+    };
+    for _ in 0..10 {
+        assert_eq!(deliver().await.unwrap().status(), StatusCode::OK);
+    }
+    let response = deliver().await.unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(&bytes[..], br#"{"error":"rate_limited"}"#);
+    assert_eq!(sends.load(Ordering::SeqCst), 10);
+}
+
+#[tokio::test]
 async fn grant_signer_and_replay_checks_remain_enforced() {
     let (app, keys, body, sends) = fixture().await;
     let wrong_signer = signed_header(&Keys::generate(), DIRECT_URL, "POST", &body);
