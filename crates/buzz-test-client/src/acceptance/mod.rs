@@ -285,8 +285,10 @@ async fn relay_info(cfg: &Config) -> (CheckReport, Option<String>) {
             let response = nip11_request(cfg)?
                 .header("Accept", "application/nostr+json")
                 .send()
-                .await?
-                .error_for_status()?;
+                .await?;
+            if !response.status().is_success() {
+                bail!("NIP-11 request answered {}", response.status());
+            }
             let info: serde_json::Value = response.json().await?;
             if !info["supported_nips"].is_array() {
                 bail!("not a NIP-11 document: no supported_nips");
@@ -678,16 +680,22 @@ async fn open(cfg: &Config) -> anyhow::Result<NostrWsConnection> {
 
 /// The NIP-11 request for the relay. With `cfg.connect_addr` it goes to that
 /// address over plain HTTP, with the relay URL's host as the `Host` header,
-/// so the relay serves the same community's document.
+/// so the relay serves the same community's document. Like the WebSocket
+/// connections, it then uses no proxy and follows no redirect: either could
+/// reach another deployment and report its version.
 fn nip11_request(cfg: &Config) -> anyhow::Result<reqwest::RequestBuilder> {
     let url = http_url(&cfg.relay_url)?;
-    let client = reqwest::Client::new();
     let Some(addr) = &cfg.connect_addr else {
-        return Ok(client.get(url));
+        return Ok(reqwest::Client::new().get(url));
     };
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
     let host = &url[url::Position::BeforeHost..url::Position::AfterPort];
+    let target = &url[url::Position::BeforePath..url::Position::AfterQuery];
     Ok(client
-        .get(format!("http://{addr}{}", url.path()))
+        .get(format!("http://{addr}{target}"))
         .header(reqwest::header::HOST, host))
 }
 
@@ -845,15 +853,27 @@ mod tests {
     /// AUTH still names the relay URL, so the relay serves that community.
     #[tokio::test]
     async fn connect_addr_dials_the_address_and_keeps_the_relay_url() {
+        let dir = std::env::temp_dir().join(format!("acceptance-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let assertion = dir.join("assertion");
+        std::fs::write(&assertion, "header.payload.signature").unwrap();
         let relay = fake_relay::start(fake_relay::Script::default()).await;
         let mut cfg = config("wss://relay.invalid".into());
         cfg.connect_addr = Some(relay.url.trim_start_matches("ws://").to_owned());
+        cfg.assertion_file = Some(assertion);
         let report = run(&cfg).await;
+        std::fs::remove_dir_all(dir).unwrap();
 
         assert_all_pass_but_relay_info(&report);
-        let hosts = relay.hosts();
-        assert!(!hosts.is_empty());
-        assert!(hosts.iter().all(|h| h == "relay.invalid"), "{hosts:?}");
+        let upgrades = relay.upgrades();
+        assert!(!upgrades.is_empty());
+        for headers in &upgrades {
+            assert_eq!(headers["host"], "relay.invalid", "{headers:?}");
+            assert_eq!(
+                headers["nostr-federated-identity"], "Bearer header.payload.signature",
+                "{headers:?}"
+            );
+        }
         let relays = relay.auth_relays();
         assert!(!relays.is_empty());
         assert!(
@@ -862,10 +882,12 @@ mod tests {
         );
     }
 
-    /// With a connect address the NIP-11 fetch goes to it over plain HTTP,
-    /// with the relay URL's host and port as the `Host` header.
-    #[tokio::test]
-    async fn nip11_goes_to_the_connect_addr_with_the_relay_host() {
+    /// Serves one HTTP request with `head` (status line and headers) and
+    /// `body`. Returns the address and the request it received, lowercased.
+    async fn one_http_response(
+        head: &'static str,
+        body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<String>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -878,27 +900,64 @@ mod tests {
                 tcp.read_exact(&mut byte).await.unwrap();
                 request.push(byte[0]);
             }
-            let body = r#"{"supported_nips":[1,11],"version":"1.2.3"}"#;
             let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/nostr+json\r\n\
-                 content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                "{head}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
             );
             tcp.write_all(response.as_bytes()).await.unwrap();
             String::from_utf8(request).unwrap().to_ascii_lowercase()
         });
-        let mut cfg = config("wss://relay.invalid:8443".into());
+        (addr, server)
+    }
+
+    /// With a connect address the NIP-11 fetch goes to it over plain HTTP,
+    /// with the relay URL's path and query, and its host and port as the
+    /// `Host` header.
+    #[tokio::test]
+    async fn nip11_goes_to_the_connect_addr_with_the_relay_host() {
+        let (addr, server) = one_http_response(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/nostr+json",
+            r#"{"supported_nips":[1,11],"version":"1.2.3"}"#,
+        )
+        .await;
+        let mut cfg = config("wss://relay.invalid:8443/relay?route=probe".into());
         cfg.connect_addr = Some(addr);
         let (report, version) = relay_info(&cfg).await;
 
         assert_eq!(report.result, Outcome::Success, "{report:?}");
         assert_eq!(version.as_deref(), Some("1.2.3"));
         let request = server.await.unwrap();
-        assert!(request.starts_with("get / http/1.1\r\n"), "{request}");
+        assert!(
+            request.starts_with("get /relay?route=probe http/1.1\r\n"),
+            "{request}"
+        );
         assert!(
             request.contains("\r\nhost: relay.invalid:8443\r\n"),
             "{request}"
         );
+    }
+
+    /// With a connect address the NIP-11 fetch follows no redirect: one to
+    /// another host fails the check and reports no version.
+    #[tokio::test]
+    async fn nip11_at_the_connect_addr_does_not_follow_a_redirect() {
+        let (addr, server) = one_http_response(
+            "HTTP/1.1 301 Moved Permanently\r\nlocation: http://127.0.0.1:9/",
+            "",
+        )
+        .await;
+        let mut cfg = config("wss://relay.invalid".into());
+        cfg.connect_addr = Some(addr);
+        let (report, version) = relay_info(&cfg).await;
+
+        assert_eq!(report.result, Outcome::Failure, "{report:?}");
+        assert_eq!(report.failed_stage, Some("nip11"));
+        assert!(
+            report.error.as_deref().unwrap().contains("301"),
+            "{report:?}"
+        );
+        assert_eq!(version, None);
+        server.await.unwrap();
     }
 
     #[test]

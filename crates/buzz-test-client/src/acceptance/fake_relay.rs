@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+use tokio_tungstenite::tungstenite::http::HeaderMap;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::{AUTH_REQUIRED, PUBKEY_MISMATCH};
@@ -73,8 +74,8 @@ struct Shared {
     events: Mutex<Vec<Event>>,
     /// Live subscriptions: subscription id and the connection to send to.
     live: Mutex<Vec<(String, Outbox)>>,
-    /// The `Host` header of every WebSocket upgrade, in order.
-    hosts: Mutex<Vec<String>>,
+    /// The headers of every WebSocket upgrade, in order.
+    upgrades: Mutex<Vec<HeaderMap>>,
     /// The `relay` tag of every AUTH event, in order.
     auth_relays: Mutex<Vec<String>>,
 }
@@ -92,9 +93,9 @@ impl FakeRelay {
         self.shared.events.lock().unwrap().clone()
     }
 
-    /// The `Host` header of every WebSocket upgrade so far, in order.
-    pub fn hosts(&self) -> Vec<String> {
-        self.shared.hosts.lock().unwrap().clone()
+    /// The headers of every WebSocket upgrade so far, in order.
+    pub fn upgrades(&self) -> Vec<HeaderMap> {
+        self.shared.upgrades.lock().unwrap().clone()
     }
 
     /// The `relay` tag of every AUTH event so far, in order.
@@ -111,7 +112,7 @@ pub async fn start(script: Script) -> FakeRelay {
         script,
         events: Mutex::new(Vec::new()),
         live: Mutex::new(Vec::new()),
-        hosts: Mutex::new(Vec::new()),
+        upgrades: Mutex::new(Vec::new()),
         auth_relays: Mutex::new(Vec::new()),
     });
     let accept = shared.clone();
@@ -129,9 +130,8 @@ async fn serve(tcp: tokio::net::TcpStream, shared: Arc<Shared>) {
     // A plain HTTP request (the NIP-11 fetch) fails the upgrade; that is fine.
     let upgrade =
         tokio_tungstenite::accept_hdr_async(tcp, |request: &Request, response: Response| {
-            let host = request.headers().get("host").and_then(|h| h.to_str().ok());
-            let host = host.unwrap_or_default().to_owned();
-            shared.hosts.lock().unwrap().push(host);
+            let headers = request.headers().clone();
+            shared.upgrades.lock().unwrap().push(headers);
             Ok(response)
         });
     let Ok(ws) = upgrade.await else {
