@@ -9,6 +9,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:buzz/shared/http/app_http_client.dart';
 
+import '../diagnostics/diagnostic_reporter.dart';
 import '../storage/secure_storage.dart';
 
 import 'hosted_environment.dart';
@@ -64,11 +65,16 @@ class BuilderlabAccountClient {
     FlutterSecureStorage? storage,
     Uri? accountOrigin,
     this.onSessionChanged,
+    DiagnosticReporter diagnostics = const NoopDiagnosticReporter(),
     DateTime Function() now = DateTime.now,
   }) : _now = now,
+       _diagnostics = diagnostics,
        _http = httpClient ?? newAppHttpClient(),
        _storage = storage ?? defaultStorage,
        accountOrigin = accountOrigin ?? origin;
+
+  /// Where a response body this client can't understand is reported.
+  final DiagnosticReporter _diagnostics;
 
   /// Device-only: the session never syncs or restores onto another device.
   @visibleForTesting
@@ -248,7 +254,7 @@ class BuilderlabAccountClient {
       if (credential is! String ||
           credential.isEmpty ||
           credential.length > 512) {
-        throw AccountFailure.invalidResponse;
+        _invalidResponse('exchange response has no usable credential');
       }
       final verified = await _verify(credential);
       if (DateTime.tryParse(
@@ -257,7 +263,7 @@ class BuilderlabAccountClient {
                 : '',
           ) !=
           verified.expiresAt) {
-        throw AccountFailure.invalidResponse;
+        _invalidResponse('exchange and session expiry differ');
       }
       if (stored != null && stored.subject != verified.subject) {
         throw AccountFailure.differentAccount;
@@ -367,7 +373,7 @@ class BuilderlabAccountClient {
     final expiry = result['expires_at'];
     final parsed = expiry is String ? DateTime.tryParse(expiry) : null;
     if (subject is! String || subject.isEmpty || parsed == null) {
-      throw AccountFailure.invalidResponse;
+      _invalidResponse('session response lacks a subject or expiry');
     }
     if (!parsed.isAfter(DateTime.now().toUtc())) throw AccountFailure.signedOut;
     final needsSetup =
@@ -501,6 +507,7 @@ class BuilderlabAccountClient {
           '/v1/buzz/nostr-identities/current',
           credential: signedOut.credential,
           body: {},
+          signer: pubkey,
         );
         final identity = current['identity'];
         if (identity is! Map || identity['pubkey_hex'] != pubkey) {
@@ -590,12 +597,22 @@ class BuilderlabAccountClient {
     }
   }
 
+  /// [signer], or the key behind [signingKey], is the identity the request
+  /// is made for. Its reports go out only while that identity, or no one, is
+  /// the member reports name: the outbox may ask for a removed community.
   Future<Map<String, dynamic>> _request(
     String path, {
     String? credential,
     Map<String, dynamic>? body,
     String? signingKey,
+    String? signer,
   }) async {
+    signer ??= signingKey == null
+        ? null
+        : AccountIdentityStore.publicKeyForNsec(signingKey);
+    final diagnostics = signer == null
+        ? _diagnostics
+        : SignerDiagnosticReporter(_diagnostics, signer: signer);
     try {
       final request =
           http.Request(
@@ -653,8 +670,21 @@ class BuilderlabAccountClient {
           _unavailable(path, 'http$status');
         },
       );
-      final value = jsonDecode(utf8.decode(response.bodyBytes));
-      if (value is! Map<String, dynamic>) throw AccountFailure.invalidResponse;
+      final Object? value;
+      try {
+        value = jsonDecode(utf8.decode(response.bodyBytes));
+        if (value is! Map<String, dynamic>) {
+          // Not const: Sentry drops a repeat of the last error object.
+          throw FormatException('account response is not an object');
+        }
+      } on FormatException catch (error, stackTrace) {
+        diagnostics.reportError(
+          error,
+          stackTrace,
+          operation: DiagnosticOperation.accountResponse,
+        );
+        throw AccountFailure.invalidResponse;
+      }
       return value;
     } on AccountFailure {
       rethrow;
@@ -665,6 +695,17 @@ class BuilderlabAccountClient {
     } catch (error) {
       _unavailable(path, transportFailure(error)?.name ?? 'network');
     }
+  }
+
+  /// A 2xx response whose required fields are missing or unreadable: the
+  /// caller sees an invalid response, and it is reported.
+  Never _invalidResponse(String what) {
+    _diagnostics.reportError(
+      FormatException(what),
+      StackTrace.current,
+      operation: DiagnosticOperation.accountResponse,
+    );
+    throw AccountFailure.invalidResponse;
   }
 
   Never _unavailable(String path, String cause) {

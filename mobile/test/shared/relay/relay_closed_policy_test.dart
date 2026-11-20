@@ -28,6 +28,33 @@ void main() {
     }
   });
 
+  group('isInvalidRequestRejection', () {
+    const cases = {
+      'invalid: bad signature': true,
+      'INVALID: malformed filter': true,
+      'invalid: channel is archived': false,
+      'invalid: channel is not archived': false,
+      'invalid: an open channel named "general" already exists': false,
+      'invalid: event timestamp too far from server time': false,
+      'invalid: policy:nobody \u2014 this agent has disabled external channel additions':
+          false,
+      'invalid: policy:owner_only': false,
+      'invalid: cannot remove the last owner': false,
+      'invalid: only members can add people in this channel': false,
+      'duplicate: channel already exists': false,
+      'restricted: access revoked': false,
+      'rate-limited: quota exceeded; retry in 4s': false,
+      'error: query timed out': false,
+      '': false,
+    };
+
+    for (final entry in cases.entries) {
+      test(entry.key.isEmpty ? '(empty)' : entry.key, () {
+        expect(isInvalidRequestRejection(entry.key), entry.value);
+      });
+    }
+  });
+
   test('parseRateLimitRetrySeconds handles canonical and absent hints', () {
     expect(
       parseRateLimitRetrySeconds('rate-limited: quota exceeded; retry in 17s'),
