@@ -239,7 +239,7 @@
         "assertionFile": { "type": "string" },
         "statsdAddr": { "type": "string" },
         "metricPrefix": { "type": "string", "minLength": 1 },
-        "tags": { "type": "array", "items": { "type": "string", "pattern": "^[a-z]([a-z0-9_./-]*[a-z0-9./-])?:.+$" } },
+        "tags": { "type": "array", "items": { "type": "string", "pattern": "^[a-z](_?[a-z0-9./-])*:.+$" } },
         "serviceAccountName": { "type": "string" },
         "podLabels": { "type": "object" },
         "podAnnotations": { "type": "object" },

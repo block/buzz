@@ -367,3 +367,26 @@ tests:
         tags: ["env_:staging"]
     asserts:
       - failedTemplate: {}
+
+  # Datadog collapses "__" to "_": relay__version would become relay_version.
+  - it: rejects a tag key with a double underscore that maps to a probe-owned key
+    set:
+      image.tag: "1.2.3"
+      acceptance:
+        enabled: true
+        privateKeySecret:
+          name: buzz-acceptance-key
+        tags: ["relay__version:x"]
+    asserts:
+      - failedTemplate: {}
+
+  - it: rejects tag keys that collide once Datadog collapses "__"
+    set:
+      image.tag: "1.2.3"
+      acceptance:
+        enabled: true
+        privateKeySecret:
+          name: buzz-acceptance-key
+        tags: ["target_name:a", "target__name:b"]
+    asserts:
+      - failedTemplate: {}

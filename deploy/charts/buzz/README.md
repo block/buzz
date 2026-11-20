@@ -541,8 +541,9 @@ image predates the probe.
   probe's own image (`image.digest`, else `image.tag`), not the relay build the
   run reached: during a rollout, or with `acceptance.relayUrl` set, the probe
   can reach pods of another build. `acceptance.tags` keys must be lowercase
-  (`a-z`, `0-9`, `_`, `.`, `/`, `-`, starting with a letter and not ending in
-  `_`), because Datadog lowercases keys and trims `_`. They can't reuse the
+  (`a-z`, `0-9`, `_`, `.`, `/`, `-`, starting with a letter, with no `__` and
+  no trailing `_`), because Datadog lowercases keys, collapses `__` and trims
+  `_`. They can't reuse the
   probe-owned keys `probe_revision`, `relay_version`, `check`, `stage` or
   `result`, and each key may appear once.
 - The Pod runs with `acceptance.serviceAccountName`, or the namespace default
@@ -552,8 +553,8 @@ image predates the probe.
   hide a failed run. `acceptance.activeDeadlineSeconds` bounds the whole run,
   including image pull and init containers. The probe sends metrics only when
   the run ends, so a run killed at the deadline sends none. A run has 13
-  stages, each capped at `acceptance.stageTimeoutSeconds`, plus about 30 s to
-  close and send metrics. Keep the deadline above 13 ×
+  serial stage timeouts, each `acceptance.stageTimeoutSeconds`, plus about
+  30 s to close and send metrics. Keep the deadline above 13 ×
   `stageTimeoutSeconds` + 30 s plus pull and init time.
 
 On a relay that enforces NIP-FI, the probe needs a fresh assertion for its
