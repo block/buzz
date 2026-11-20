@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_activity.dart';
@@ -14,7 +15,6 @@ import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
-import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -28,6 +28,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 
 import 'sidebar_sync_fixture.dart';
+
+const _legacyChatId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+const _otherChatId = 'bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee';
 
 /// Home renders desktop's unified sidebar once its records arrive: its
 /// order, its filings across team and Solo rows, and no edits mobile can't
@@ -63,6 +66,27 @@ void main() {
         'assignments': {'design-crit': 'old'},
       }, now - 60),
     );
+    const community = 'https://relay.example';
+    final soloCoordinate = MeGroups.coordinate(community);
+    const savedGroups = MeGroups(
+      groups: [
+        // Shares Newer's ID, so Newer projects under another.
+        {'id': 'newer', 'name': 'Focus', 'defaultTemplateId': ''},
+        {'id': 'spare', 'name': 'Spare', 'defaultTemplateId': ''},
+      ],
+      assignments: {_legacyChatId: 'newer', _otherChatId: 'spare'},
+      channels: [_legacyChatId],
+    );
+    relay.stored.add(
+      relay.event(
+        soloCoordinate,
+        jsonDecode(savedGroups.encode(community)) as Object,
+        now - 60,
+        tags: [
+          ['t', MeGroups.tag],
+        ],
+      ),
+    );
 
     await tester.pumpWidget(
       ProviderScope(
@@ -86,16 +110,6 @@ void main() {
             }
             return now - 8 * 86400;
           }),
-          meGroupsProvider.overrideWith(
-            (ref) => Stream.value(
-              const MeGroups(
-                groups: [
-                  // Shares Newer's ID, so Newer projects under another.
-                  {'id': 'newer', 'name': 'Focus', 'defaultTemplateId': ''},
-                ],
-              ),
-            ),
-          ),
           defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
           meAssistantsProvider.overrideWith((ref) async => []),
           channelStarsProvider.overrideWith(_Stars.new),
@@ -148,6 +162,11 @@ void main() {
       await tester.tap(find.byTooltip('$header options'));
       await tester.pumpAndSettle();
       expect(find.text('Rename section'), team ? findsOneWidget : findsNothing);
+      expect(find.text('Delete section'), team ? findsOneWidget : findsNothing);
+      expect(
+        find.text('Delete workspace'),
+        team ? findsNothing : findsOneWidget,
+      );
       await tester.tap(find.byTooltip('Discard changes'));
       await tester.pumpAndSettle();
     }
@@ -166,7 +185,48 @@ void main() {
       isSemantics(isButton: true, hasExpandedState: true, isExpanded: false),
     );
     semantics.dispose();
+    await tester.tap(inList('Focus'));
+    await tester.pumpAndSettle();
+    expect(top('legacy-solo-chat'), greaterThan(top('Focus')));
+    expect(top('legacy-solo-chat'), lessThan(top('Spare')));
 
+    Future<void> askToDelete(String workspace) async {
+      await tester.tap(find.byTooltip('$workspace options'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete workspace'));
+      await tester.pumpAndSettle();
+      expect(find.text('Delete “$workspace”?'), findsOneWidget);
+    }
+
+    await askToDelete('Focus');
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(inList('Focus'), findsOneWidget);
+    expect(relay.published, isEmpty);
+
+    await askToDelete('Focus');
+    await tester.tap(find.text('Delete workspace'));
+    await tester.pumpAndSettle();
+    expect(inList('Focus'), findsNothing);
+    expect(inList('Newer'), findsOneWidget);
+    expect(inList('Spare'), findsOneWidget);
+    expect(top('legacy-solo-chat'), greaterThan(top('Solo')));
+    final saved = relay.published.single;
+    expect(saved.getTagValue('d'), soloCoordinate);
+    expect(relay.decrypt(saved), {
+      'version': 1,
+      'community': community,
+      'deleted': false,
+      'value': {
+        'type': 'groups',
+        'id': 'me',
+        'groups': [savedGroups.groups.last],
+        'assignments': {_otherChatId: 'spare'},
+        'channels': [_legacyChatId],
+      },
+    });
+
+    await askToDelete('Spare');
     // Desktop saves its unified records; they arrive live.
     for (final head in [
       relay.event('channel-workspaces', {
@@ -191,8 +251,15 @@ void main() {
         ..emit(head);
     }
     await tester.pumpAndSettle();
+    await tester.tap(find.text('Delete workspace'));
+    await tester.pumpAndSettle();
+    expect(relay.published, [saved]);
+    expect(
+      find.text('Workspaces are now organized on desktop. Make changes there.'),
+      findsOneWidget,
+    );
     expect(inList('Old'), findsNothing);
-    expect(inList('Focus'), findsNothing);
+    expect(inList('Spare'), findsNothing);
 
     final order = [
       'Starred',
@@ -267,6 +334,7 @@ void main() {
     expect(find.text('Show'), findsOneWidget);
     expect(find.text('Rename section'), findsNothing);
     expect(find.text('Delete section'), findsNothing);
+    expect(find.text('Delete workspace'), findsNothing);
     final sortChoice = find.byKey(const ValueKey('section-menu-Sort'));
     expect(tester.widget<AppListRow>(sortChoice).onTap, isNull);
     // Unreads keeps the unread Solo chat its row shows as unread.
@@ -279,9 +347,11 @@ void main() {
     expect(inList('solo-plan'), findsOneWidget);
     expect(inList('design-crit'), findsNothing);
 
-    // Only the filter choice was saved; no layout or sort record desktop
-    // would have to reconcile.
-    expect(relay.published.map((e) => e.getTagValue('d')), ['channel-filter']);
+    // After desktop took over, only the filter choice was saved.
+    expect(relay.published.map((e) => e.getTagValue('d')), [
+      soloCoordinate,
+      'channel-filter',
+    ]);
     final soloSection = find.byKey(const ValueKey('me-ungrouped-chats'));
     Finder soloDisclosure(String label) =>
         find.descendant(of: soloSection, matching: find.text(label));
@@ -303,6 +373,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(inList('solo-scratch'), findsNothing);
     expect(relay.published.map((e) => e.getTagValue('d')), [
+      soloCoordinate,
       'channel-filter',
       'channel-filter',
     ]);
@@ -467,19 +538,20 @@ void main() {
 
 late String _viewer;
 
-Channel _channel(String id, {bool solo = false, int day = 1}) => Channel(
-  id: id,
-  name: id,
-  channelType: 'stream',
-  visibility: 'private',
-  labels: solo ? const ['buzz.solo'] : const [],
-  description: '',
-  createdBy: solo ? _viewer : 'other',
-  createdAt: DateTime(2026),
-  lastMessageAt: DateTime(2026, 1, day),
-  memberCount: 2,
-  isMember: true,
-);
+Channel _channel(String id, {String? name, bool solo = false, int day = 1}) =>
+    Channel(
+      id: id,
+      name: name ?? id,
+      channelType: 'stream',
+      visibility: 'private',
+      labels: solo ? const ['buzz.solo'] : const [],
+      description: '',
+      createdBy: solo ? _viewer : 'other',
+      createdAt: DateTime(2026),
+      lastMessageAt: DateTime(2026, 1, day),
+      memberCount: 2,
+      isMember: true,
+    );
 
 class _Channels extends ChannelsNotifier {
   @override
@@ -490,6 +562,7 @@ class _Channels extends ChannelsNotifier {
     // Newest in Launch, so Recent puts it above design-crit.
     _channel('solo-plan', solo: true, day: 9),
     _channel('solo-scratch', solo: true),
+    _channel(_legacyChatId, name: 'legacy-solo-chat'),
   ];
 }
 
