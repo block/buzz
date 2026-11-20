@@ -1852,9 +1852,16 @@ pub async fn cmd_add_channel_member(
 
     // Chunks go out in order: concurrent kind:9000 writes race on the relay.
     let mut report = AddMembersReport::default();
-    for chunk in pubkeys.chunks(buzz_sdk::MAX_MEMBERS_PER_ADD) {
+    let mut chunks = pubkeys.chunks(buzz_sdk::MAX_MEMBERS_PER_ADD);
+    while let Some(chunk) = chunks.next() {
         let outcome = send_add_members(client, channel_uuid, chunk, typed_role).await;
-        report.record(chunk, outcome);
+        if !report.record(chunk, outcome) {
+            // A relay from before block/buzz#8575 applies only the first
+            // person of a chunk, so sending the rest would only add more
+            // unknowns.
+            report.unknown.extend(chunks.flatten().cloned());
+            break;
+        }
     }
     println!("{}", report.to_json());
     if report.is_ok() {
@@ -1918,9 +1925,11 @@ struct AddMembersReport {
     /// People in a one-person chunk: the relay accepted them without saying
     /// whether they were added, updated or already members.
     accepted: Vec<String>,
-    /// Outcome uncertain: people in a multi-person chunk the relay accepted
-    /// without per-person results (a `duplicate:` reply to a resend), or in a
-    /// chunk whose receipt was lost, so the relay may have applied it.
+    /// Outcome uncertain: people the relay's reply doesn't account for (a
+    /// multi-person chunk accepted without per-person results, a key missing
+    /// from the results, or a reply that isn't JSON), people in a chunk whose
+    /// receipt was lost, and people never sent to a relay too old for
+    /// multi-person adds.
     unknown: Vec<String>,
     rejected: Vec<serde_json::Value>,
     failed: Vec<serde_json::Value>,
@@ -1928,50 +1937,71 @@ struct AddMembersReport {
 
 impl AddMembersReport {
     /// Fold in one chunk's outcome: the relay's raw response, or the error
-    /// that kept the chunk from being applied.
-    fn record(&mut self, chunk: &[String], outcome: Result<String, CliError>) {
+    /// that kept the chunk from being applied. Returns false when the relay
+    /// accepted a multi-person chunk without per-person results, which means
+    /// it is too old to apply more than the first person.
+    fn record(&mut self, chunk: &[String], outcome: Result<String, CliError>) -> bool {
         let raw = match outcome {
             Ok(raw) => raw,
             Err(CliError::DeliveryUnknown(_)) => {
                 self.unknown.extend_from_slice(chunk);
-                return;
+                return true;
             }
             Err(error) => {
-                self.failed
-                    .push(serde_json::json!({ "error": error.to_string(), "pubkeys": chunk }));
-                return;
+                self.fail(chunk, error.to_string());
+                return true;
             }
         };
-        let resp: serde_json::Value =
-            serde_json::from_str(&normalize_write_response(&raw)).unwrap_or_default();
+        let Ok(resp) = serde_json::from_str::<serde_json::Value>(&normalize_write_response(&raw))
+        else {
+            self.unknown.extend_from_slice(chunk);
+            return true;
+        };
         let message = resp["message"].as_str().unwrap_or("");
+        if resp["accepted"] != true {
+            self.fail(chunk, format!("relay rejected the event: {message}"));
+            return true;
+        }
         let Some(members) = message
             .strip_prefix("members: ")
             .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
         else {
             if chunk.len() == 1 {
                 self.accepted.extend_from_slice(chunk);
-            } else {
-                self.unknown.extend_from_slice(chunk);
+                return true;
             }
-            return;
+            self.unknown.extend_from_slice(chunk);
+            return message.starts_with("duplicate:");
+        };
+        let mut reported = HashSet::new();
+        let names = |v: &serde_json::Value| {
+            v.as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect::<Vec<_>>()
         };
         for (key, list) in [
             ("added", &mut self.added),
             ("updated", &mut self.updated),
             ("already_member", &mut self.already_member),
         ] {
-            list.extend(
-                members[key]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|v| v.as_str().map(String::from)),
-            );
+            let found = names(&members[key]);
+            reported.extend(found.iter().cloned());
+            list.extend(found);
         }
-        if let Some(rejected) = members["rejected"].as_array() {
-            self.rejected.extend(rejected.iter().cloned());
+        for rejected in members["rejected"].as_array().into_iter().flatten() {
+            reported.extend(names(&rejected["pubkeys"]));
+            self.rejected.push(rejected.clone());
         }
+        self.unknown
+            .extend(chunk.iter().filter(|p| !reported.contains(*p)).cloned());
+        true
+    }
+
+    fn fail(&mut self, chunk: &[String], error: String) {
+        self.failed
+            .push(serde_json::json!({ "error": error, "pubkeys": chunk }));
     }
 
     fn is_ok(&self) -> bool {
@@ -5431,6 +5461,89 @@ mod add_members_tests {
             !err.to_string().contains("some people were not added"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn refused_reply_is_failed() {
+        let mut report = AddMembersReport::default();
+        report.record(
+            &[pk(1)],
+            Ok(json!({ "event_id": "e", "accepted": false, "message": "blocked: no" }).to_string()),
+        );
+        let out = report.to_json();
+        assert_eq!(out["status"], "partial");
+        assert_eq!(out["accepted"], json!([]));
+        assert_eq!(
+            out["failed"],
+            json!([{ "error": "relay rejected the event: blocked: no", "pubkeys": [pk(1)] }])
+        );
+    }
+
+    #[test]
+    fn keys_missing_from_the_results_are_unknown() {
+        let mut report = AddMembersReport::default();
+        report.record(&[pk(1), pk(2)], Ok(ok_response(json!({}))));
+        report.record(
+            &[pk(3), pk(4), pk(5)],
+            Ok(ok_response(json!({
+                "added": [pk(3)],
+                "rejected": [{ "reason": "archived", "pubkeys": [pk(4)] }],
+            }))),
+        );
+        let out = report.to_json();
+        assert_eq!(out["status"], "partial");
+        assert_eq!(out["unknown"], json!([pk(1), pk(2), pk(5)]));
+    }
+
+    #[test]
+    fn non_json_reply_is_unknown_not_accepted() {
+        let mut report = AddMembersReport::default();
+        report.record(&[pk(1)], Ok("<html>oops</html>".into()));
+        let out = report.to_json();
+        assert_eq!(out["status"], "partial");
+        assert_eq!(out["accepted"], json!([]));
+        assert_eq!(out["unknown"], json!([pk(1)]));
+    }
+
+    /// A relay that answers a multi-person chunk without per-person results
+    /// is too old for them: later chunks are marked unknown, not sent.
+    #[tokio::test]
+    async fn stops_sending_to_a_relay_too_old_for_multi_person_adds() {
+        use axum::routing::post;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let sends = Arc::new(AtomicUsize::new(0));
+        let counter = sends.clone();
+        let app = axum::Router::new().route(
+            "/events",
+            post(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { axum::Json(json!({ "event_id": "e", "accepted": true, "message": "" })) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = crate::client::BuzzClient::new(
+            format!("http://{addr}"),
+            crate::credentials::Credentials::from_keys(nostr::Keys::generate()),
+        )
+        .unwrap();
+        let keys: Vec<String> = (0..250).map(pk).collect();
+        let err = cmd_add_channel_member(
+            &client,
+            "326d56bc-c96c-4af0-86a1-5e804cd1b467",
+            &keys,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("some people were not added"),
+            "{err}"
+        );
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
     }
 
     #[test]
