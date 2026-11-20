@@ -144,14 +144,18 @@ abstract final class DiagnosticFilter {
   /// Object identity hashes (`RenderFlex#1a2b3`) are removed first, so
   /// Flutter and Riverpod messages that name an object stay readable. A long
   /// line, or the lines after the first, usually quote other text, such as a
-  /// response body or a wrapped error.
+  /// response body or a wrapped error. A line holding a key-like token (a run
+  /// of 24 or more letters, digits or `+/=._-` that includes a digit, such as
+  /// an `nsec1` key, a hex public key or a bearer token) is replaced too.
   static String _keptText(String text) {
     final lineEnd = _lineBreak.firstMatch(text)?.start ?? text.length;
     // Replaced without scanning: only a line made mostly of identity hashes
     // could come under the limit after their removal.
     if (lineEnd > 2 * _keptTextLimit) return removedText;
     final line = text.substring(0, lineEnd).replaceAll(_identityHash, '');
-    return line.length > _keptTextLimit || line.contains(_mayHoldUrl)
+    return line.length > _keptTextLimit ||
+            line.contains(_mayHoldUrl) ||
+            line.contains(_mayHoldKey)
         ? removedText
         : line;
   }
@@ -163,6 +167,8 @@ abstract final class DiagnosticFilter {
   static final _mayHoldUrl = RegExp(
     r'''://|:\S*[?#]|[?#](?![?'"`>,.:;)\]}]*(?:\s|$))''',
   );
+
+  static final _mayHoldKey = RegExp(r'(?=[\w+/=.-]*\d)[\w+/=.-]{24,}');
 
   static final _urlTail = RegExp(
     r'''(\b[a-z][a-z0-9+.-]*://[^\s?#'"]*)[?#][^\s'"]*''',
