@@ -25,10 +25,16 @@ void threadReplyRefreshTests() {
     Future<List<NostrEvent>> Function() load, {
     bool retry = false,
     TextScaler textScaler = TextScaler.noScaling,
+    Future<List<NostrEvent>?>? savedThreadPreview,
+    _FakeMessagesNotifier? messagesNotifier,
+    ReadStateNotifier? readStateNotifier,
   }) async {
     await tester.pumpWidget(
       _buildTestable(
         messages: [root],
+        savedThreadPreview: savedThreadPreview,
+        messagesNotifier: messagesNotifier,
+        readStateNotifier: readStateNotifier,
         textScaler: textScaler,
         threadReplyLoaders: {args.rootId: load},
         providerRetry: (_, _) =>
@@ -195,6 +201,101 @@ void threadReplyRefreshTests() {
     expect(find.text('Loading replies…'), findsNothing);
     expect(find.text('Couldn’t load replies'), findsNothing);
   });
+
+  testWidgets(
+    'saved replies stay provisional until relay history replaces them',
+    (tester) async {
+      final query = Completer<List<NostrEvent>>();
+      final readState = _SynchronousReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'self',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final (navigator, _) = await mount(
+        tester,
+        () => query.future,
+        savedThreadPreview: Future.value([reply]),
+        readStateNotifier: readState,
+      );
+      open(navigator);
+      await tester.pumpAndSettle();
+      expect(find.text('Showing saved replies.'), findsOneWidget);
+      expect(find.text('1 reply'), findsNothing);
+      expect(findRichText('Cached reply'), findsOneWidget);
+      expect(readState.markedContexts, isNot(contains(args.rootId)));
+
+      query.complete([]);
+      await tester.pumpAndSettle();
+      expect(find.text('0 replies'), findsOneWidget);
+      expect(findRichText('Cached reply'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'a live deletion hides a saved reply before relay history arrives',
+    (tester) async {
+      final query = Completer<List<NostrEvent>>();
+      final notifier = _FakeMessagesNotifier([root]);
+      final (navigator, _) = await mount(
+        tester,
+        () => query.future,
+        savedThreadPreview: Future.value([reply]),
+        messagesNotifier: notifier,
+      );
+      open(navigator);
+      await tester.pumpAndSettle();
+      expect(findRichText('Cached reply'), findsOneWidget);
+
+      notifier.setMessages([
+        root,
+        NostrEvent(
+          id: 'deletion',
+          pubkey: reply.pubkey,
+          createdAt: 1002,
+          kind: EventKind.deletion,
+          tags: [
+            ['e', reply.id],
+          ],
+          content: '',
+          sig: '',
+        ),
+      ]);
+      await tester.pumpAndSettle();
+      expect(findRichText('Cached reply'), findsNothing);
+      expect(find.text('Showing saved replies.'), findsOneWidget);
+
+      query.completeError(Exception('offline'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Showing saved replies. Refresh failed.'),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('Retry'), findsOneWidget);
+    },
+  );
+
+  testWidgets('a channel refusal clears a displayed saved reply', (
+    tester,
+  ) async {
+    final query = Completer<List<NostrEvent>>();
+    final (navigator, _) = await mount(
+      tester,
+      () => query.future,
+      savedThreadPreview: Future.value([reply]),
+    );
+    open(navigator);
+    await tester.pumpAndSettle();
+    expect(findRichText('Cached reply'), findsOneWidget);
+
+    query.completeError(Exception('restricted: not a channel member'));
+    await tester.pumpAndSettle();
+    expect(find.text('This thread is unavailable'), findsOneWidget);
+    expect(findRichText('Cached reply'), findsNothing);
+  });
+
   testWidgets('thread loads an edit made to a reply before it opened', (
     tester,
   ) async {

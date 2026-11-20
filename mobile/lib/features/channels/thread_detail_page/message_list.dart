@@ -15,6 +15,8 @@ class _ThreadMessageList extends HookWidget {
   final List<TypingEntry> inlineTyping;
   final Set<String> knownAgents;
   final AsyncValue<List<NostrEvent>> relayReplyState;
+  final bool showingSavedReplies;
+  final bool accessDenied;
   final VoidCallback onRetryReplies;
   final Map<String, DateTime> localSendAnimations;
   final Widget Function(Widget child) trackActiveScrollPosition;
@@ -47,6 +49,8 @@ class _ThreadMessageList extends HookWidget {
     required this.inlineTyping,
     required this.knownAgents,
     required this.relayReplyState,
+    required this.showingSavedReplies,
+    required this.accessDenied,
     required this.onRetryReplies,
     required this.localSendAnimations,
     required this.trackActiveScrollPosition,
@@ -66,6 +70,11 @@ class _ThreadMessageList extends HookWidget {
   });
 
   String get _replySummary {
+    if (showingSavedReplies) {
+      return relayReplyState.hasError && !relayReplyState.isLoading
+          ? 'Showing saved replies. Refresh failed.'
+          : 'Showing saved replies.';
+    }
     if (!relayReplyState.hasValue && replies.isEmpty) {
       return relayReplyState.isLoading
           ? 'Loading replies…'
@@ -83,6 +92,12 @@ class _ThreadMessageList extends HookWidget {
   );
 
   Widget _buildHeadContent(BuildContext context) {
+    if (accessDenied) {
+      return const Padding(
+        padding: EdgeInsets.only(bottom: Grid.xs),
+        child: Text('This thread is unavailable'),
+      );
+    }
     if (headIsDeleted) {
       return const Padding(
         key: ValueKey('thread-message-deleted'),
@@ -278,7 +293,9 @@ class _ThreadMessageList extends HookWidget {
                             nextReply.createdAt - reply.createdAt > 300;
 
                         // Check if this reply itself has children (nested thread).
-                        final nestedChildren = childrenByParent[reply.id];
+                        final nestedChildren = showingSavedReplies
+                            ? null
+                            : childrenByParent[reply.id];
                         final nestedSummary =
                             nestedChildren != null && nestedChildren.isNotEmpty
                             ? _buildNestedSummary(reply.id, nestedChildren)

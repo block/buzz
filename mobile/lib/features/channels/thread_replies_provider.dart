@@ -3,16 +3,20 @@ import 'dart:async';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart' show KeepAliveLink;
 
+import '../../shared/channels/saved_message_store.dart';
 import '../../shared/relay/relay.dart';
 import 'channel_event_order.dart';
 import 'channel_messages_provider.dart';
 import 'pending_local_messages_provider.dart';
+import 'saved_channel_page.dart';
 
 class ThreadRepliesArgs {
   final String channelId;
   final String rootId;
 
   const ThreadRepliesArgs({required this.channelId, required this.rootId});
+
+  SavedMessagePage get savedPage => (channelId: channelId, rootId: rootId);
 
   @override
   bool operator ==(Object other) =>
@@ -50,6 +54,11 @@ final threadRepliesProvider = FutureProvider.autoDispose
         }
       });
       final session = ref.read(relaySessionProvider.notifier);
+      final scope = ref.watch(savedMessageScopeProvider);
+      final cache = ref.read(savedMessageStoreProvider);
+      final ticket = scope == null
+          ? null
+          : cache.capture(scope, args.savedPage);
       final channelProvider = channelMessagesProvider(args.channelId);
       final channelMessages = ref.exists(channelProvider)
           ? ref.read(channelProvider.notifier)
@@ -120,8 +129,24 @@ final threadRepliesProvider = FutureProvider.autoDispose
             );
           }
         }
-        return [...replies, ...aux];
-      } catch (_) {
+        final events = [...replies, ...aux];
+        if (ref.mounted && ticket != null) {
+          unawaited(
+            saveMessagePage(
+              ref,
+              cache,
+              ticket,
+              events,
+              isCurrent: () => ref.mounted,
+            ),
+          );
+        }
+        return events;
+      } catch (error) {
+        if (ref.mounted && scope != null && isRelayChannelAccessDenied(error)) {
+          unawaited(cache.removeChannel(scope, args.channelId));
+          invalidateSavedMessagePreviews(ref, args.channelId);
+        }
         if (queryVersion != null) {
           channelMessages?.failThreadQuery(args.rootId, queryVersion);
         }

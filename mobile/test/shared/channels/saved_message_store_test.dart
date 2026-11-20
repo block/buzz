@@ -241,10 +241,13 @@ void main() {
       diagnostics: diagnostics,
     );
     final original = cache.capture(_identity, _channel);
+    final threadPage = (channelId: _channel.channelId, rootId: 'outer-root');
+    final thread = cache.capture(_identity, threadPage);
     final first = _message(_channel, 'first removed row');
     final second = _message(_channel, 'second removed row');
     final retained = _message(_channel, 'unchanged');
     await cache.save(original, [first, second, retained], relayAuthor: null);
+    await cache.save(thread, [first, second, retained], relayAuthor: null);
     final file = Directory(
       '${temp.path}/saved_messages',
     ).listSync().whereType<File>().single;
@@ -258,7 +261,8 @@ void main() {
     cache.removeChannelEvents(_identity, _channel.channelId, {second.id});
 
     expect(cache.isCurrent(original), isFalse);
-    expect(await cache.read(cache.capture(_identity, _channel)), [retained]);
+    expect(cache.isCurrent(thread), isFalse);
+    expect(await cache.read(cache.capture(_identity, threadPage)), [retained]);
     expect(
       latin1.decode(file.readAsBytesSync()).contains(first.content),
       isFalse,

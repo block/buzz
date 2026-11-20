@@ -1,5 +1,7 @@
 import 'message_author_visibility.dart';
+
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+
 import 'message_swipe_reply.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
@@ -67,6 +69,7 @@ import 'send_message_provider.dart';
 import 'sticky_date_header.dart';
 import 'date_header_scroll_activity.dart';
 import 'reading_marks.dart';
+import 'saved_channel_page.dart';
 import 'timeline_message.dart';
 
 part 'thread_detail_page/nested_thread_summary_row.dart';
@@ -149,53 +152,22 @@ class ThreadDetailPage extends HookConsumerWidget {
       channelId: channelId,
       rootId: queryRootId,
     );
-    final relayReplyState = ref.watch(threadRepliesProvider(repliesArgs));
-    final repliesState = ref.watch(threadRepliesWithLocalProvider(repliesArgs));
-    final relayRepliesAvailable = relayReplyState.value != null;
-    // The thread query is one-shot: it carries the reactions, edits, and
-    // deletions that existed when it ran, but one that lands while the thread
-    // is open never reaches it. The channel socket already receives those
-    // events, so union the two sources and format once.
-    final liveChannelEvents =
-        ref.watch(channelMessagesProvider(channelId)).value ??
-        const <NostrEvent>[];
-    // Loading/error states can still carry replies from the last query.
-    // whenData drops that retained value during retries.
-    final replyEvents = repliesState.value;
-    final fetchedReplies = replyEvents == null
-        ? null
-        : formatTimeline(
-            mergeThreadEvents(replyEvents, liveChannelEvents),
-            currentPubkey: currentPubkey,
-          );
-    final hasFetchedReplies = fetchedReplies != null;
-    // A terminal query error cannot produce a more authoritative list. Keep
-    // loading states provisional, but let the hydrated route snapshot drive
-    // the one-shot target jump when the relay query has definitively failed.
-    final canUseMessagesForInitialTarget =
-        relayReplyState.value != null ||
-        (relayReplyState.hasError && !relayReplyState.retrying);
-    final liveDeletionHidesHead = _isDeletedBy(
-      liveChannelEvents,
-      threadHead.id,
+    final (
+      :relayReplyState,
+      :allMsgs,
+      :showingSavedReplies,
+      :accessDenied,
+      :liveDeletionHidesHead,
+      :hasFetchedReplies,
+      :canUseMessagesForInitialTarget,
+    ) = _watchThreadMessages(
+      ref,
+      repliesArgs,
+      threadHead,
+      allMessages,
+      currentPubkey,
     );
-    final allMsgs = fetchedReplies == null || !relayRepliesAvailable
-        ? _provisionalThreadMessages(
-            allMessages,
-            fetchedReplies ??
-                formatTimeline(liveChannelEvents, currentPubkey: currentPubkey),
-            liveChannelEvents,
-          )
-        : [
-            // Only fall back to the pushed-route snapshot when neither source
-            // carries the head, and no live deletion has suppressed it. That
-            // keeps a temporarily unavailable head visible without restoring
-            // a head that was deleted while this page was open.
-            if (!liveDeletionHidesHead &&
-                !fetchedReplies.any((message) => message.id == threadHead.id))
-              threadHead,
-            ...fetchedReplies,
-          ];
+    final relayRepliesAvailable = relayReplyState.value != null;
     final routeAnimation = ModalRoute.of(context)?.animation;
     final reducedLandingHighlightMotion = MediaQuery.disableAnimationsOf(
       context,
@@ -596,7 +568,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         initialMessageId,
         headHeight.value,
         canUseMessagesForInitialTarget,
-        fetchedReplies,
+        allMsgs,
         replies.length,
       ],
     );
@@ -738,6 +710,8 @@ class ThreadDetailPage extends HookConsumerWidget {
     );
     final readingActive =
         threadViewportVisible &&
+        !showingSavedReplies &&
+        !accessDenied &&
         readStateReady &&
         appInUse &&
         (ModalRoute.of(context)?.isCurrent ?? true) &&
@@ -1063,6 +1037,8 @@ class ThreadDetailPage extends HookConsumerWidget {
                         ? threadTyping
                         : const [],
                     relayReplyState: relayReplyState,
+                    showingSavedReplies: showingSavedReplies,
+                    accessDenied: accessDenied,
                     onRetryReplies: () =>
                         ref.invalidate(threadRepliesProvider(repliesArgs)),
                     localSendAnimations: localSendAnimations,
@@ -1086,7 +1062,7 @@ class ThreadDetailPage extends HookConsumerWidget {
               ),
             ],
           ),
-          if (canReply)
+          if (canReply && !accessDenied)
             AndroidImeLift(
               child: Align(
                 alignment: Alignment.bottomCenter,

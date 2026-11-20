@@ -389,7 +389,7 @@ class ChannelActions {
       final recorded = _ref
           .read(savedMessageStoreProvider)
           .removeChannel(scope, channelId, deferDisk: true);
-      _ref.invalidate(savedChannelPreviewProvider(channelId));
+      invalidateSavedMessagePreviews(_ref, channelId);
       await recorded;
     }
     _ensureCommunityValid();
