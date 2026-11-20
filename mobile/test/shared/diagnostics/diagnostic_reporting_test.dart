@@ -134,6 +134,14 @@ void main() {
         })).keys.toSet(),
         {'backend', 'user.id'},
       ),
+      (
+        'a count keeps the install ID',
+        () async => (await metric({
+          'backend': SentryAttribute.string('relay.example.org'),
+          'install.id': SentryAttribute.string('i'),
+        })).keys.toSet(),
+        {'backend', 'install.id'},
+      ),
     ];
 
     for (final (name, input, expected) in rows) {
@@ -220,6 +228,56 @@ void main() {
       await transport.first();
 
       expect(transport.events.single['user']['id'], 'a' * 64);
+    });
+
+    test('a member change drops the previous member\'s trail', () async {
+      DiagnosticBreadcrumb trail(String host) => DiagnosticBreadcrumb(
+        NetworkEvent(
+          backend: host,
+          endpoint: NetworkEndpoint.relayConnection,
+          outcome: NetworkOutcome.failure,
+          failure: NetworkFailure.serverError,
+        ),
+      );
+      List<Object?> backends(Map<String, dynamic> event) => [
+        for (final crumb in (event['breadcrumbs'] as List? ?? const []))
+          (crumb as Map)['data']?['backend'],
+      ];
+      final reporter = SentryDiagnosticReporter(hub: hub)
+        ..leaveBreadcrumb(trail('before.example.org'))
+        ..setMember('a' * 64)
+        ..leaveBreadcrumb(trail('a.example.org'))
+        ..reportError(
+          StateError('failed'),
+          StackTrace.current,
+          operation: DiagnosticOperation.relayFrame,
+        );
+      await transport.first();
+      reporter
+        ..setMember('b' * 64)
+        ..leaveBreadcrumb(trail('b.example.org'))
+        ..reportError(
+          StateError('failed'),
+          StackTrace.current,
+          operation: DiagnosticOperation.relayFrame,
+        );
+      await transport.count(2);
+      reporter
+        ..setMember(null)
+        ..reportError(
+          StateError('failed'),
+          StackTrace.current,
+          operation: DiagnosticOperation.relayFrame,
+        );
+      await transport.count(3);
+
+      // Signing in keeps what came before it.
+      expect(backends(transport.events[0]), [
+        'before.example.org',
+        'a.example.org',
+      ]);
+      expect(backends(transport.events[1]), ['b.example.org']);
+      expect(backends(transport.events[2]), isEmpty);
     });
 
     test('a test report is a test error from the test operation', () async {

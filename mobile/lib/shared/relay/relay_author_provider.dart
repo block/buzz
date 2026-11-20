@@ -30,12 +30,23 @@ final relayAuthorProvider = FutureProvider.autoDispose.family<String?, String>((
   final abort = Completer<void>();
   final bytes = <int>[];
   try {
+    final request = http.AbortableRequest(
+      'GET',
+      uri,
+      abortTrigger: abort.future,
+    )..headers['Accept'] = 'application/nostr+json';
     final response = await client
-        .send(
-          http.AbortableRequest('GET', uri, abortTrigger: abort.future)
-            ..headers['Accept'] = 'application/nostr+json',
-        )
-        .timeout(const Duration(seconds: 3));
+        .send(request)
+        .timeout(
+          const Duration(seconds: 3),
+          onTimeout: () {
+            noteHttpDeadline(request);
+            throw TimeoutException(
+              'Future not completed',
+              const Duration(seconds: 3),
+            );
+          },
+        );
     if (response.statusCode != 200) return null;
     final chunks = StreamIterator(
       response.stream.timeout(const Duration(seconds: 3)),

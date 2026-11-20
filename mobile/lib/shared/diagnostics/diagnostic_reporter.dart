@@ -28,6 +28,10 @@ abstract interface class DiagnosticReporter {
   /// The member later reports and counts name, as last given to [setMember].
   String? get member;
 
+  /// How many times [member] has changed. Work started before a change
+  /// belongs to nobody after it, even when the same member is back.
+  int get memberChanges;
+
   /// Whether this build has a reporting destination. Only then does Settings
   /// offer the checks below.
   bool get reporting;
@@ -62,8 +66,45 @@ enum DiagnosticOperation {
   testReport,
 }
 
-/// The operation a networking event belongs to.
-enum NetworkEndpoint { relayConnection, relayQuery, relayPublish }
+/// The operation a networking event belongs to, from a fixed list: never a
+/// raw path.
+enum NetworkEndpoint {
+  /// A relay WebSocket connecting, or an open one being lost.
+  relayConnection,
+
+  /// A relay WebSocket connection being started again after a loss.
+  relayReconnect,
+
+  /// A request for stored events over the relay's WebSocket.
+  relayQuery,
+
+  /// An event published over the relay's WebSocket.
+  relayPublish,
+
+  /// A live subscription the relay closed.
+  relaySubscription,
+
+  /// The relay's HTTP query bridge: `/query`, `/count` and `/profiles/search`.
+  relayHttpQuery,
+
+  /// A server's information document: a GET of its root.
+  relayInfo,
+
+  /// A download through the media connection pool.
+  mediaDownload,
+
+  /// An upload through the media connection pool.
+  mediaUpload,
+
+  /// Joining a community: invites, join policy and admission.
+  communityAdmission,
+
+  /// The Builderlab account service.
+  builderlabAccount,
+
+  /// Any other request through the shared HTTP client.
+  otherHttp,
+}
 
 /// How a networking event ended.
 enum NetworkOutcome { success, failure }
@@ -80,6 +121,13 @@ enum NetworkFailure {
   serverError,
   relayError,
   relayRefused,
+
+  /// A request the server refused as invalid or for a missing resource: any
+  /// 4xx other than 401, 403, 408 and 429.
+  clientError,
+
+  /// A transport failure that fits no other kind.
+  other,
 }
 
 /// One counted networking event. [backend] is the server's host name.
@@ -138,6 +186,9 @@ class NoopDiagnosticReporter implements DiagnosticReporter {
   String? get member => null;
 
   @override
+  int get memberChanges => 0;
+
+  @override
   bool get reporting => false;
 
   @override
@@ -189,6 +240,9 @@ class SignerDiagnosticReporter implements DiagnosticReporter {
 
   @override
   String? get member => reporter.member;
+
+  @override
+  int get memberChanges => reporter.memberChanges;
 
   @override
   bool get reporting => reporter.reporting;
