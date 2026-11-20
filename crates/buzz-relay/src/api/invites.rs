@@ -324,8 +324,9 @@ pub(crate) enum InviteGate {
 }
 
 /// Admission shared by the invite-management routes, in order: tenant bind,
-/// NIP-98 through NIP-FI admission for `method` and `path_and_query`, replay,
-/// relay membership and ban, the NIP-OA owner link, then `gate`.
+/// NIP-98 through NIP-FI admission for `method` and `path_and_query`, the
+/// shared API rate limit, replay, relay membership and ban, the NIP-OA owner
+/// link, then `gate`. Claim has its own limiter and does not come here.
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 pub(crate) async fn admit_invite_caller(
     state: &Arc<AppState>,
@@ -370,9 +371,10 @@ pub(crate) async fn admit_invite_caller(
     let mut caller = bridge::ProvenCaller::new(admission, slot, &tenant);
     let pubkey = caller.pubkey;
 
-    // Replay detection runs after NIP-98+assertion admission (both proofs verified).
+    // The shared per-pubkey API limit, then replay detection, after
+    // NIP-98+assertion admission (both proofs verified).
     caller
-        .replay(state, &tenant)
+        .rate_limit_and_replay(state, &tenant)
         .await
         .map_err(|e| e.into_response())?;
 
@@ -917,6 +919,13 @@ mod postgres_tests {
             media_storage,
         );
         state.nip98_replay = Arc::new(AlwaysFreshReplayGuard);
+        // Real Redis for the shared API rate limit, which fails closed.
+        let limiter = buzz_pubsub::redis_connection(
+            &std::env::var("REDIS_URL").unwrap_or("redis://127.0.0.1:6379".into()),
+        )
+        .ok()?;
+        state.admission_rate_limiter =
+            Arc::new(buzz_pubsub::rate_limiter::RedisRateLimiter::new(limiter));
         Some(Arc::new(state))
     }
 
