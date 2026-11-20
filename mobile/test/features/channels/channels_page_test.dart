@@ -1521,7 +1521,8 @@ void main() {
         addTearDown(() => messenger.setMockMethodCallHandler(editor, null));
         nativeMenu().actions.first.onPressed!();
         await tester.pumpAndSettle();
-        expect(rename?.method, 'present');
+        expect(rename?.method, 'presentSection');
+        expect(rename?.arguments.containsKey('icon'), isTrue);
         expect(rename?.arguments['title'], 'Rename section');
         expect(rename?.arguments['initialValue'], 'Design');
         expect(rename?.arguments['requireNonEmpty'], isTrue);

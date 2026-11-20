@@ -1,5 +1,5 @@
 import '../../shared/widgets/native_route_controls.dart';
-import '../../shared/widgets/text_editor.dart';
+import '../../shared/emoji/emoji_picker.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
@@ -111,6 +111,7 @@ import '../../shared/read_state/read_state_time.dart';
 
 part 'channels_page/body.dart';
 part 'channels_page/sections.dart';
+part 'channels_page/rename_section.dart';
 
 part 'channels_page/channel_tile.dart';
 part 'channels_page/sheets.dart';

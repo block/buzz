@@ -264,7 +264,7 @@ class ChannelSectionsManager {
     markDirty();
   }
 
-  void renameSection(String sectionId, String newName) {
+  void renameSection(String sectionId, String newName, {String? icon}) {
     if (!_editable) return;
     _store = ChannelSectionStore(
       sections: [
@@ -273,7 +273,7 @@ class ChannelSectionsManager {
             ChannelSection(
               id: s.id,
               name: newName.trim(),
-              icon: s.icon,
+              icon: icon ?? s.icon,
               order: s.order,
             )
           else

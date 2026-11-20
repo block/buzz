@@ -420,44 +420,21 @@ class _SliverChannelsList extends HookConsumerWidget {
     // section's ID when a Solo project shares that ID.
     _SectionEdits editsFor(ChannelSection section, String layoutId) => (
       onRename: () async {
-        if (defaultTargetPlatform == TargetPlatform.iOS) {
-          final config = ref.read(relayConfigProvider);
-          await showTextEditor(
-            context: context,
-            title: 'Rename section',
-            initialValue: section.name,
-            hintText: 'Section name',
-            requireNonEmpty: true,
-            onSave: (value) async {
-              if (!context.mounted) return;
-              final current = ref.read(relayConfigProvider);
-              if (current.storedOrigin != config.storedOrigin ||
-                  current.nsec != config.nsec) {
-                return;
-              }
-              final name = value.trim();
-              if (name.isNotEmpty) {
-                ref
-                    .read(channelSectionsProvider.notifier)
-                    .renameSection(section.id, name);
-              }
-            },
-          );
+        final config = ref.read(relayConfigProvider);
+        final edit = await showSectionRenameEditor(context, section);
+        if (!context.mounted || edit == null) return;
+        final current = ref.read(relayConfigProvider);
+        if (current.storedOrigin != config.storedOrigin ||
+            current.nsec != config.nsec) {
           return;
         }
-        final name = await showBuzzDialog<String>(
-          context: context,
-          builder: (_) => _SectionNameDialog(
-            title: 'Rename Section',
-            confirmLabel: 'Rename',
-            initialValue: section.name,
-          ),
-        );
-        if (name != null && name.isNotEmpty) {
-          ref
-              .read(channelSectionsProvider.notifier)
-              .renameSection(section.id, name);
-        }
+        ref
+            .read(channelSectionsProvider.notifier)
+            .renameSection(
+              section.id,
+              edit.name,
+              icon: edit.icon == section.icon ? null : edit.icon,
+            );
       },
       onDelete: () async {
         final confirmed = await showBuzzDialog<bool>(
