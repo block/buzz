@@ -408,7 +408,7 @@ async fn bound_row_policy_wins_when_required_host_becomes_serving_after_initial_
                         .await
                         .unwrap();
                     // The initial primary query already observed no serving row.
-                    // Make that SAME required row serving before its result reaches
+                    // Make that same row serving before its result reaches
                     // mode selection and the authoritative row-zero binding.
                     sqlx::query("UPDATE communities SET archived_at = NULL WHERE id = $1")
                         .bind(community.id.as_uuid())
