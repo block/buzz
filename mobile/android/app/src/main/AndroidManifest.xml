@@ -64,6 +64,11 @@
                 android:name="flutter_deeplinking_enabled"
                 android:value="false" />
         </activity>
+        <!-- No FCM token until the app enrolls for push, so a configured build
+             never registers with Firebase for a user who hasn't opted in. -->
+        <meta-data
+            android:name="firebase_messaging_auto_init_enabled"
+            android:value="false" />
         <!-- Receives the push gateway's wake from FCM. -->
         <service
             android:name=".PushWakeService"
