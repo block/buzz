@@ -399,6 +399,9 @@ class AndroidPushAuthority {
         grant.installationHandle != installation.handle ||
         grant.relayPubkey != relayPubkey ||
         grant.endpointEpoch != installation.endpointEpoch ||
+        // A higher journaled generation is a delegation that has not
+        // finished, after a revocation or a change this grant predates.
+        grant.generation != relay.generation ||
         grant.expiresAt <= _nowSeconds + _renewWindowSeconds) {
       return null;
     }

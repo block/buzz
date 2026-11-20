@@ -277,6 +277,14 @@ void main() {
       expect(installation.revokedDelegations, {'$_keyB/1'});
       expect(installation.revoked, isFalse);
 
+      // The community comes back, and its first delegation's response is
+      // lost: the retry delegates again instead of reusing the revoked grant.
+      gateway.loseResponseFor.add('/v1/delegations');
+      await expectLater(enroll(relay: _relayB), throwsA(isA<Exception>()));
+      final b = await enroll(relay: _relayB);
+      expect(b.generation, 3);
+      expect(installation.delegations[_keyB], 3);
+
       // The last community goes: the installation is revoked, the key deleted.
       gateway.loseResponseFor.add('/v1/installations/revoke');
       await expectLater(
