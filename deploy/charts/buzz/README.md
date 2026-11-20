@@ -527,6 +527,11 @@ image predates the probe.
 
 - The probe connects to `acceptance.relayUrl`, or to `relayUrl` when that is
   empty. Each run creates one private channel with a 1 h TTL and deletes it.
+- `acceptance.connectAddr` is a plaintext `host:port` the probe dials instead
+  of the URL's host, for a probe that runs where the public host is not
+  reachable, such as inside the relay's cluster. The URL still sets the `Host`
+  header, the NIP-42 relay tag and the NIP-11 request's `Host`, so the relay
+  serves the same community.
 - `acceptance.privateKeySecret.name` names a Secret with the probe's key
   (hex or nsec), or `acceptance.privateKeyFile` names a file an init
   container writes. Set exactly one: the chart fails to render with neither.

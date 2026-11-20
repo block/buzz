@@ -24,6 +24,7 @@ fn relay_url() -> String {
 async fn every_acceptance_check_passes_against_a_live_relay() {
     let report = acceptance::run(&Config {
         relay_url: relay_url(),
+        connect_addr: None,
         keys: Keys::generate(),
         assertion_file: None,
         stage_timeout: Duration::from_secs(10),

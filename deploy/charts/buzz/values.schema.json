@@ -227,6 +227,7 @@
         "successfulJobsHistoryLimit": { "type": "integer", "minimum": 0 },
         "failedJobsHistoryLimit": { "type": "integer", "minimum": 0 },
         "relayUrl": { "type": "string" },
+        "connectAddr": { "type": "string" },
         "stageTimeoutSeconds": { "type": "integer", "minimum": 1 },
         "privateKeySecret": {
           "type": "object",

@@ -72,6 +72,11 @@ tests:
           content:
             name: BUZZ_ACCEPTANCE_STATSD_ADDR
           any: true
+      - notContains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_ACCEPTANCE_CONNECT_ADDR
+          any: true
       - contains:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
@@ -111,6 +116,7 @@ tests:
       acceptance:
         enabled: true
         relayUrl: wss://probe.example.com
+        connectAddr: relay.internal:80
         schedule: "*/10 * * * *"
         activeDeadlineSeconds: 120
         stageTimeoutSeconds: 5
@@ -183,6 +189,11 @@ tests:
           content:
             name: BUZZ_RELAY_URL
             value: wss://probe.example.com
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_ACCEPTANCE_CONNECT_ADDR
+            value: relay.internal:80
       - contains:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:

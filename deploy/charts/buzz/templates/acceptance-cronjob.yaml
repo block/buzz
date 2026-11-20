@@ -77,6 +77,9 @@ spec:
                     fieldRef:
                       fieldPath: status.hostIP
                 - { name: BUZZ_RELAY_URL, value: {{ default .Values.relayUrl $a.relayUrl | quote }} }
+                {{- with $a.connectAddr }}
+                - { name: BUZZ_ACCEPTANCE_CONNECT_ADDR, value: {{ . | quote }} }
+                {{- end }}
                 {{- with $a.statsdAddr }}
                 - { name: BUZZ_ACCEPTANCE_STATSD_ADDR, value: {{ . | quote }} }
                 {{- end }}

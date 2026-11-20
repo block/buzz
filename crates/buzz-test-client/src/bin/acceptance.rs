@@ -5,6 +5,7 @@
 //!
 //! Usage:
 //!   buzz-acceptance --relay-url wss://relay.example
+//!       [--connect-addr relay.internal:80]
 //!       [--private-key <key> | --private-key-file <path>] [--assertion-file <path>]
 //!       [--statsd-addr 127.0.0.1:8125] [--tag env:staging]...
 
@@ -32,6 +33,11 @@ struct Cli {
     /// The relay's WebSocket URL.
     #[arg(long, env = "BUZZ_RELAY_URL")]
     relay_url: String,
+    /// Plaintext `host:port` to dial instead of the relay URL's host, such as
+    /// the relay's in-cluster service. The URL still sets the `Host` header
+    /// and the NIP-42 relay tag.
+    #[arg(long, env = "BUZZ_ACCEPTANCE_CONNECT_ADDR")]
+    connect_addr: Option<String>,
     /// Secret key (hex or nsec) to authenticate and sign as. Without this or
     /// a key file the probe uses a new key, which works only on a relay that
     /// admits any key.
@@ -112,6 +118,7 @@ async fn probe(cli: Cli) -> anyhow::Result<bool> {
     };
     let cfg = Config {
         relay_url: cli.relay_url,
+        connect_addr: cli.connect_addr,
         keys,
         assertion_file: cli.assertion_file,
         stage_timeout: Duration::from_secs(cli.stage_timeout_secs),
