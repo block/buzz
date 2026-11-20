@@ -466,7 +466,7 @@ class MessageContent extends HookConsumerWidget {
           ),
           // Chips, media links and taps are handled in _buildLink, so the
           // package's own tap is not used.
-          inlineLinkBuilder: (link) => _buildLink(
+          inlineLinkBuilder: (link) => _buildMentionOrLink(
             link,
             ref,
             unmaskInlinePatterns(link.url),

@@ -284,6 +284,56 @@ void main() {
       },
     );
 
+    test('an empty search never stops the search for a longer query', () async {
+      var opening = 1;
+
+      /// Opens [query] and answers its directory search with nobody. The
+      /// recipient pickers (New DM, Add members) search through
+      /// [recipientSearchPendingProvider].
+      Future<void> searchesAndFindsNobody(String query) async {
+        final args = (channelId: _channelId, query: query, opening: opening++);
+        final close = open(args);
+        final recipients = container.listen(
+          recipientSearchPendingProvider(query),
+          (_, _) {},
+        );
+        expect(
+          container.read(mentionSearchPendingProvider(args)),
+          isTrue,
+          reason: query,
+        );
+        expect(recipients.read(), isTrue, reason: query);
+        final before = session.queries.length;
+        await passTypingPause();
+        expect(session.queries, hasLength(before + 1), reason: query);
+        expect(session.queries.last, query);
+        session.searchFor(query).complete(const []);
+        await container.pump();
+        recipients.close();
+        close();
+        await container.pump();
+      }
+
+      await passTypingPause();
+      session.searchFor('al').complete(const []);
+      await container.pump();
+
+      // The device cannot tell which longer queries the relay could still
+      // match. Postgres' `simple` parser reads `alpha-beta` as the lexemes
+      // `alpha-beta`, `alpha` and `beta`, and `alpha-beta.com` as the one
+      // lexeme `alpha-beta.com`, so the person named `alpha-beta.com` is
+      // found by the longer query and not by the shorter one.
+      for (final query in [
+        'alb',
+        'albx',
+        'alpha-beta',
+        'alpha-beta.com',
+        'alpha-beta.com please',
+      ]) {
+        await searchesAndFindsNobody(query);
+      }
+    });
+
     test('a longer query starts from the people its prefix found', () async {
       await passTypingPause();
       session.searches.first.complete([

@@ -78,3 +78,37 @@ class _MentionMd {
 }
 
 String _markdownMentionName(String name) => name.replaceAll(' ', '\u00A0');
+
+/// Where a message's links are built: an identity link,
+/// `[@Name](nostr:npub1…)`, is that person's pill, and every other link goes
+/// to [MessageContent._buildLink].
+extension _MentionLinks on MessageContent {
+  InlineSpan _buildMentionOrLink(
+    LinkBuildDetails link,
+    WidgetRef ref,
+    String url,
+    TextStyle? fallbackStyle,
+    void Function(String channelId) resolvedChannelTap,
+    Map<String, String> resolvedChannelNames,
+    _LinkTextRecognizers recognizers,
+    Map<String, ImetaEntry> imetaByUrl,
+  ) =>
+      identityMentionSpan(
+        link,
+        url,
+        fallbackStyle ?? link.style,
+        agentMentionPubkeys,
+        onMentionTap,
+        ownBubble: bubble && ownMessage,
+      ) ??
+      _buildLink(
+        link,
+        ref,
+        url,
+        fallbackStyle,
+        resolvedChannelTap,
+        resolvedChannelNames,
+        recognizers,
+        imetaByUrl,
+      );
+}

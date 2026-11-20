@@ -63,6 +63,82 @@ void main() {
     },
   );
 
+  test('label-keyed bindings migrate in one longest-match pass', () {
+    final scout = 'a' * 64;
+    final marie = 'b' * 64;
+    ComposeDraft read(String text, Object? keys) => ComposeDraft.fromJson({
+      'key': 'ch1',
+      'channel_id': 'ch1',
+      'text': text,
+      'mention_keys': keys,
+      'updated_at': 1,
+    })!;
+    ComposeDraftMention bound(int start, int end, String key) =>
+        ComposeDraftMention(start: start, end: end, pubkey: key, legacy: true);
+
+    for (final (text, keys, mentions) in [
+      // The shorter label never takes the longer label's occurrence.
+      (
+        '@Scout @Scout Marie',
+        {'Scout': scout, 'Scout Marie': marie},
+        [bound(0, 6, scout), bound(7, 19, marie)],
+      ),
+      (
+        '@Scout Marie and @scout',
+        {'Scout Marie': marie, 'Scout': scout},
+        [bound(0, 12, marie), bound(17, 23, scout)],
+      ),
+      // Review of #9699: backticks read as spaces, as the old saver read
+      // them, so a label inside code keeps its key. The composer holds the
+      // binding dormant while the code is there.
+      ('`@Scout` now', {'Scout': scout}, [bound(1, 7, scout)]),
+      (
+        '`@Scout` and @Scout',
+        {'Scout': scout},
+        [bound(1, 7, scout), bound(13, 19, scout)],
+      ),
+      ('`@Scout now`', {'Scout': scout}, [bound(1, 7, scout)]),
+      ('`ping @Scout now`', {'Scout': scout}, [bound(6, 12, scout)]),
+      ('```\n@Scout\n```', {'Scout': scout}, [bound(4, 10, scout)]),
+      ('```@Scout\n```', {'Scout': scout}, [bound(3, 9, scout)]),
+      // The longest label still wins inside the backticks.
+      (
+        '`@Scout Marie`',
+        {'Scout': scout, 'Scout Marie': marie},
+        [bound(1, 13, marie)],
+      ),
+      // An unclosed backtick is not code. The label's key is read here all
+      // the same; the composer drops it when it takes the draft, since the
+      // old send notified nobody after a backtick (exact_mention_tests).
+      ('`@Scout hi', {'Scout': scout}, [bound(1, 7, scout)]),
+      // A label no longer in the text binds nothing.
+      ('hello', {'Scout': scout}, <ComposeDraftMention>[]),
+    ]) {
+      final draft = read(text, keys);
+      expect(draft.mentionsInvalid, isFalse, reason: text);
+      expect(draft.mentions, mentions, reason: text);
+      // The migrated record is saved as positions, still marked until the
+      // composer has read the roster.
+      expect(
+        ComposeDraft.fromJson(draft.toJson())!.mentions,
+        mentions,
+        reason: text,
+      );
+    }
+
+    // Labels that differ only by case never said which key was meant.
+    for (final keys in <Object?>[
+      {'Scout': scout, 'scout': marie},
+      {'Scout': 'not-a-key'},
+      {'': scout},
+      'Scout',
+    ]) {
+      final draft = read('@Scout', keys);
+      expect(draft.mentionsInvalid, isTrue, reason: '$keys');
+      expect(draft.mentions, isEmpty);
+    }
+  });
+
   test('composeDraftKey separates channel and thread composers', () {
     expect(composeDraftKey('ch1'), 'ch1');
     expect(composeDraftKey('ch1', threadHeadId: 't1'), 'ch1:t1');

@@ -390,7 +390,7 @@ class HostedRelayAuth extends ChangeNotifier {
         return _token(value, pubkey).token;
       }
       final session = account.account!;
-      final current = await account.currentIdentity();
+      final current = await account.currentIdentity(signer: pubkey);
       if (!identical(session, account.account)) throw AccountFailure.denied;
       final identity = current['identity'];
       if (current['error'] != null) throw AccountFailure.invalidResponse;

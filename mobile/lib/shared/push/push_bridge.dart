@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import '../community/community.dart';
 import '../deeplink/deep_link.dart';
+import '../diagnostics/diagnostic_reporter.dart';
 import '../relay/relay_provider.dart';
 import 'android_push_authority.dart';
 import 'android_push_gateway.dart';
@@ -18,6 +19,10 @@ const _channel = MethodChannel('buzz/push');
 /// notification-open handler already owns `buzz/push`, and a channel has one
 /// native handler.
 const _registrationChannel = MethodChannel('buzz/push_registration');
+
+/// The code native enrollment fails with when the push gateway's reply does
+/// not match its protocol.
+const _gatewayResponseInvalid = 'gateway_response_invalid';
 
 /// Latest APNs registration state, including callbacks replayed by iOS after
 /// the Flutter method channel attaches.
@@ -401,6 +406,7 @@ Future<BuzzPushEndpointGrant> enrollBuzzPush(
   List<Community>? communitiesForSnapshotRefresh,
   String? relayOrigin,
   String? relayPubkey,
+  DiagnosticReporter diagnostics = const NoopDiagnosticReporter(),
 }) async {
   final BuzzPushEndpointGrant grant;
   if (defaultTargetPlatform == TargetPlatform.android) {
@@ -422,10 +428,25 @@ Future<BuzzPushEndpointGrant> enrollBuzzPush(
     }
     pushUnavailableReason.value = null;
   } else {
-    final raw = await _channel.invokeMapMethod<dynamic, dynamic>('enrollPush', {
-      'relayUrl': relayUrl,
-      'gatewayUrl': gatewayUrl,
-    });
+    final Map<dynamic, dynamic>? raw;
+    try {
+      raw = await _channel.invokeMapMethod<dynamic, dynamic>('enrollPush', {
+        'relayUrl': relayUrl,
+        'gatewayUrl': gatewayUrl,
+      });
+    } on PlatformException catch (error, stackTrace) {
+      // The gateway is called from native code. It has its own code for a
+      // reply the app cannot read; every other failure (offline, refused,
+      // expired, server errors) is routine and not reported.
+      if (error.code == _gatewayResponseInvalid) {
+        diagnostics.reportError(
+          error,
+          stackTrace,
+          operation: DiagnosticOperation.pushGatewayResponse,
+        );
+      }
+      rethrow;
+    }
     if (raw == null) {
       throw StateError('Native push enrollment returned no grant.');
     }

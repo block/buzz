@@ -43,7 +43,6 @@ void _useAgentMentionPrefill({
   required List<TimelineMessage>? scopeMessages,
   required String draftKey,
   required _MarkdownEditingController controller,
-  required ObjectRef<Map<String, MentionCandidate>> mentionMap,
   required ObjectRef<String?> prefillText,
   required ObjectRef<bool> isModifyingText,
   required bool hasAttachments,
@@ -106,10 +105,9 @@ void _useAgentMentionPrefill({
     if (noAgents) {
       if (prefill != null && controller.text == prefill) {
         prefillText.value = null;
-        mentionMap.value.clear();
         isModifyingText.value = true;
         try {
-          controller.value = TextEditingValue.empty;
+          controller.replaceDraft(TextEditingValue.empty, mentions: const []);
         } finally {
           isModifyingText.value = false;
         }
@@ -122,30 +120,40 @@ void _useAgentMentionPrefill({
         (controller.text.isNotEmpty && controller.text != prefill)) {
       return null;
     }
-    final labels = <String>[];
-    final bindings = <String, MentionCandidate>{};
+    // Each agent is one chip bound to its key; namesakes both read their
+    // plain name and are told apart on the wire at send.
+    final buffer = StringBuffer();
+    final bindings = <_ComposerMention>[];
     for (final agent in agents) {
-      final label = selectedMentionLabel(agent.label, agent.pubkey, {
-        // A later namesake qualifies this agent as well as itself.
-        for (final other in agents)
-          if (other.pubkey.toLowerCase() != agent.pubkey.toLowerCase())
-            other.label: other.pubkey,
-        for (final entry in bindings.entries) entry.key: entry.value.pubkey,
-      });
-      bindings[label] = agent;
-      labels.add('@$label ');
+      final start = buffer.length;
+      buffer.write('@${agent.label} ');
+      bindings.add(
+        _ComposerMention(
+          start: start,
+          end: start + 1 + agent.label.length,
+          candidate: agent,
+        ),
+      );
     }
-    final text = labels.join();
-    if (text == controller.text) return null;
+    final text = buffer.toString();
+    // Namesake agents read the same text, so the same text is not the same
+    // prefill: the keys and their places must match too.
+    if (text == controller.text &&
+        listEquals(
+          [for (final m in controller.bindings) (m.start, m.end, m.pubkey)],
+          [for (final m in bindings) (m.start, m.end, m.pubkey)],
+        )) {
+      return null;
+    }
     prefillText.value = text;
-    mentionMap.value
-      ..clear()
-      ..addAll(bindings);
     isModifyingText.value = true;
     try {
-      controller.value = TextEditingValue(
-        text: text,
-        selection: TextSelection.collapsed(offset: text.length),
+      controller.replaceDraft(
+        TextEditingValue(
+          text: text,
+          selection: TextSelection.collapsed(offset: text.length),
+        ),
+        mentions: bindings,
       );
     } finally {
       isModifyingText.value = false;

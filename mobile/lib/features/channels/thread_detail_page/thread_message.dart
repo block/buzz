@@ -198,8 +198,12 @@ class _ThreadMessage extends HookConsumerWidget {
                                 messageId: message.id,
                                 channelId: channelId,
                                 reactions: message.reactions,
-                                onToggle: (emoji) =>
-                                    toggleReaction(ref, message, emoji),
+                                onToggle: (emoji) => toggleReaction(
+                                  context,
+                                  ref,
+                                  message,
+                                  emoji,
+                                ),
                                 showAddButton: isMember && !isArchived,
                                 onAddReaction: () => showAddReactionPicker(
                                   context: context,
