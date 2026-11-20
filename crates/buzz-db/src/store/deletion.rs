@@ -175,9 +175,11 @@ pub const PENDING_SCOPED_TABLES: &[&str] = &[
 /// `PENDING_SCOPED_TABLES`, so a request approved before its migration still
 /// runs on the release that requires it.
 pub const APPROVAL_FORWARD_TABLES: &[&str] = &[
+    "channel_heads",
     "identity_retirement_actions",
     "identity_retirement_holds",
     "identity_retirement_workflows",
+    "thread_heads",
 ];
 
 /// Control-plane tables with community provenance that the tenant purge does
