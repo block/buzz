@@ -1308,6 +1308,72 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     }
   }
 
+  func testMalformedGatewayReplyIsContractDrift() async throws {
+    let error = try await challengeFailure { request in
+      let response = HTTPURLResponse(
+        url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1",
+        headerFields: ["Content-Type": "application/json"])!
+      return (response, Data("not json".utf8))
+    }
+    XCTAssertEqual(error, .invalidGatewayResponse(route: "v1/installations/challenges"))
+  }
+
+  func testUnexpectedGatewaySuccessStatusIsContractDrift() async throws {
+    let error = try await challengeFailure { request in
+      Self.response(request, status: 201, json: Self.challengeJSON(expiresAt: Self.expiresAt))
+    }
+    XCTAssertEqual(error, .invalidGatewayResponse(route: "v1/installations/challenges"))
+  }
+
+  func testGatewayRefusalIsRoutineStatusMismatch() async throws {
+    let error = try await challengeFailure { request in
+      Self.response(request, status: 503, json: ["error": "unavailable"])
+    }
+    XCTAssertEqual(
+      error,
+      .unexpectedStatus(
+        route: "v1/installations/challenges", expected: 200, actual: 503,
+        body: "{\"error\":\"unavailable\"}"))
+  }
+
+  func testExpiredLookingChallengeFromFastClockIsNotContractDrift() async throws {
+    let error = try await challengeFailure { request in
+      // The driver's clock reads `now` plus the skew allowance, past this expiry.
+      Self.response(request, status: 200, json: Self.challengeJSON(expiresAt: Self.now))
+    }
+    XCTAssertEqual(error, .invalidResponse(route: "v1/installations/challenges"))
+  }
+
+  private func challengeFailure(
+    _ gateway: @escaping (URLRequest) -> (HTTPURLResponse, Data)
+  ) async throws -> BuzzDevPushEnrollmentError {
+    let driver = try makeDriver(store: MemoryGrantStore(), appAttest: RecordingAppAttest())
+    URLProtocolStub.handler = { request in
+      if request.httpMethod == "GET" {
+        return Self.response(
+          request,
+          status: 200,
+          json: [
+            "self": Self.relayPubkey,
+            "push": ["keys": [["pubkey": Self.relayPubkey, "current": true]]],
+          ]
+        )
+      }
+      return gateway(request)
+    }
+    do {
+      _ = try await driver.enroll(deviceToken: Data([1]), relayURL: Self.relayURL)
+    } catch let error as BuzzDevPushEnrollmentError {
+      return error
+    }
+    XCTFail("Expected enrollment to fail at the challenge")
+    throw CancellationError()
+  }
+
+  private static func challengeJSON(expiresAt: Int64) -> [String: Any] {
+    ["challenge_id": firstChallengeId, "challenge": challenge, "expires_at": expiresAt]
+  }
+
   private func makeDriver(
     gatewayBaseURL: URL = BuzzDevPushEnrollmentDriverTests.gatewayURL,
     store: BuzzPushEndpointGrantStore,

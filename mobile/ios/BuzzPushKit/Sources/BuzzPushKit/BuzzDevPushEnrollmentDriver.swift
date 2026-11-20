@@ -867,10 +867,14 @@ public final class BuzzDevPushEnrollmentDriver {
     )
     guard let id = UUID(uuidString: response.challengeId),
       response.challengeId == id.uuidString.lowercased(),
-      Self.isBase64URLChallenge(response.challenge),
-      response.expiresAt > Int64(now().timeIntervalSince1970)
+      Self.isBase64URLChallenge(response.challenge)
     else {
       throw BuzzDevPushEnrollmentError.invalidGatewayResponse(route: "v1/installations/challenges")
+    }
+    // A challenge that already looks expired usually means the phone's clock
+    // runs fast, not that the gateway broke its contract.
+    guard response.expiresAt > Int64(now().timeIntervalSince1970) else {
+      throw BuzzDevPushEnrollmentError.invalidResponse(route: "v1/installations/challenges")
     }
     return Challenge(id: id, value: response.challenge)
   }
@@ -976,6 +980,13 @@ public final class BuzzDevPushEnrollmentDriver {
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.httpBody = try JSONEncoder().encode(body)
     let (data, response) = try await session.data(for: request)
+    // The gateway answers each route with exactly one success status, so any
+    // other 2xx means its contract drifted rather than a routine refusal.
+    if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+      http.statusCode != expectedStatus
+    {
+      throw BuzzDevPushEnrollmentError.invalidGatewayResponse(route: route)
+    }
     try Self.expectStatus(response, data: data, route: route, expected: expectedStatus)
     do {
       return try JSONDecoder().decode(Response.self, from: data)
