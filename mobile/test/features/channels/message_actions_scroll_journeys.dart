@@ -126,6 +126,59 @@ void _messageActionsScrollTests() {
     );
   }
 
+  for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
+    testWidgets('overflowing message actions keep keyboard and screen-reader '
+        'scrolling: $platform', (tester) async {
+      final semantics = tester.ensureSemantics();
+      debugDefaultTargetPlatformOverride = platform;
+      tester.view.physicalSize = const Size(375, 667);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      try {
+        await _pumpMessageActionsPopover(
+          tester,
+          message: _message(rootId: threadIdRootDash1),
+          prefs: await _mockPrefs(),
+          canManageMessage: true,
+          allMessages: [_message()],
+          reminderService: _stubReminderService(),
+          textScaler: TextScaler.linear(2),
+        );
+        final sheet = find.byType(BottomSheet);
+        final body = find
+            .descendant(of: sheet, matching: find.byType(Scrollable))
+            .first;
+        final position = tester.state<ScrollableState>(body).position;
+        expect(position.maxScrollExtent, greaterThan(0));
+        // Page Down from the initial focus on the modal scope scrolls the body.
+        await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
+        await tester.pumpAndSettle();
+        expect(position.pixels, greaterThan(0));
+        // A screen-reader scroll toward the top only scrolls content, even
+        // when its fixed step overshoots the top by more than half the sheet.
+        position.jumpTo(16);
+        await tester.pumpAndSettle();
+        final scrollNode = find.semantics
+            .byAction(ui.SemanticsAction.scrollDown)
+            .evaluate()
+            .single;
+        tester.binding.performSemanticsAction(
+          ui.SemanticsActionEvent(
+            type: ui.SemanticsAction.scrollDown,
+            viewId: tester.view.viewId,
+            nodeId: scrollNode.id,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(sheet, findsOneWidget);
+        expect(position.pixels, 0);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+        semantics.dispose();
+      }
+    });
+  }
+
   for (final outcome in [
     'cancel',
     'unfocused',
@@ -168,7 +221,10 @@ void _messageActionsScrollTests() {
       final position = tester.state<ScrollableState>(body).position;
       // Exact raw release policy uses the production position and Drag wrapper,
       // independent of platform velocity-estimator heuristics.
-      final drag = position.drag(DragStartDetails(), () {});
+      final drag = position.drag(
+        DragStartDetails(kind: PointerDeviceKind.touch),
+        () {},
+      );
       final height = tester.getSize(sheet).height;
       final distance = ['slow', 'upward', 'cancel'].contains(outcome)
           ? height * 0.65

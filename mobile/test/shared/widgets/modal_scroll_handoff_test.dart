@@ -129,7 +129,7 @@ class _ScrollPolicy extends MaterialScrollBehavior {
 }
 
 Drag _start(ScrollPosition position) =>
-    position.drag(DragStartDetails(), () {});
+    position.drag(DragStartDetails(kind: PointerDeviceKind.touch), () {});
 
 void _move(Drag drag, double dy) => drag.update(
   DragUpdateDetails(
