@@ -32,13 +32,16 @@ pub struct ChannelMissingDiscovery {
 
 // One probe per kind on `idx_events_addressable`. A channel's discovery
 // events are written after its row, so `created_at` bounds them from below
-// and prunes the monthly `events` partitions to the ones since the channel
-// was created. The hour of slack covers a relay clock behind the database's:
-// events carry the relay's time, the channel row the database's.
+// and, at run time, prunes the monthly `events` partitions to the ones since
+// the channel was created. The hour of slack covers a relay clock behind the
+// database's: events carry the relay's time, the channel row the database's.
+// `$also` adds further conditions on `e`, such as a constant floor the
+// planner can prune with whatever join it picks.
+//
 // Expands to the probe as a string literal, with the kinds array and relay
 // pubkey as the given bind parameters, so each query stays static SQL.
 macro_rules! missing_kind_probe {
-    ($kinds:literal, $relay:literal) => {
+    ($kinds:literal, $relay:literal, $also:literal) => {
         concat!(
             "SELECT 1 FROM unnest(",
             $kinds,
@@ -53,6 +56,9 @@ macro_rules! missing_kind_probe {
                    AND e.channel_id = ch.id
                    AND e.deleted_at IS NULL
                    AND e.created_at >= ch.created_at - INTERVAL '1 hour'
+                   ",
+            $also,
+            "
              )"
         )
     };
@@ -63,7 +69,7 @@ const CHANNEL_MISSING_DISCOVERY_SQL: &str = concat!(
         SELECT 1 FROM channels ch
         WHERE ch.community_id = $1 AND ch.id = $2 AND ch.deleted_at IS NULL
           AND EXISTS (",
-    missing_kind_probe!("$4", "$3"),
+    missing_kind_probe!("$4", "$3", ""),
     "))"
 );
 
@@ -80,7 +86,11 @@ const LIST_CHANNELS_MISSING_DISCOVERY_SQL: &str = concat!(
        AND ch.created_at < $2
        AND (ch.created_at, ch.id) > ($3, $4)
        AND EXISTS (",
-    missing_kind_probe!("$6", "$5"),
+    missing_kind_probe!(
+        "$6",
+        "$5",
+        "AND e.created_at >= $1::timestamptz - INTERVAL '1 hour'"
+    ),
     ")
      ORDER BY ch.created_at, ch.id
      LIMIT $7"

@@ -63,6 +63,26 @@ async fn drop_discovery(state: &AppState, tenant: &TenantContext, channel: Uuid,
     .expect("drop discovery");
 }
 
+/// Mark `channel`'s discovery events of `kinds` deleted, as a replacement
+/// leaves the events it supersedes.
+async fn soft_delete_discovery(
+    state: &AppState,
+    tenant: &TenantContext,
+    channel: Uuid,
+    kinds: &[i32],
+) {
+    sqlx::query(
+        "UPDATE events SET deleted_at = NOW()
+         WHERE community_id = $1 AND channel_id = $2 AND kind = ANY($3)",
+    )
+    .bind(tenant.community().as_uuid())
+    .bind(channel)
+    .bind(kinds)
+    .execute(state.db.pool())
+    .await
+    .expect("soft-delete discovery");
+}
+
 /// Date `channel` `minutes` ago, so the sweep's in-flight grace and lookback
 /// apply to it.
 async fn backdate(state: &AppState, tenant: &TenantContext, channel: Uuid, minutes: i32) {
@@ -155,10 +175,11 @@ async fn reopening_a_dm_republishes_its_missing_roster() {
 /// The sweep republishes every channel in its window that lacks any
 /// discovery kind, across pages, and leaves healthy, too-old and in-flight
 /// channels alone.
-/// Mutations: check only kind:39000 → the partial channel stays without a
-/// roster → RED; stop after the first page → a later channel stays broken →
-/// RED; drop the lookback or the grace bound → the old or the in-flight
-/// channel is republished → RED.
+/// Mutations: check only kind:39000, or count deleted events as live → the
+/// partial channel stays without a roster → RED; stop after the first page →
+/// a later channel stays broken → RED; start the scan before the lookback or
+/// drop the grace bound → the old or the in-flight channel is republished →
+/// RED.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn the_sweep_republishes_recent_channels_missing_any_discovery_kind() {
@@ -176,7 +197,8 @@ async fn the_sweep_republishes_recent_channels_missing_any_discovery_kind() {
     }
     backdate(&state, &tenant, too_old, 120).await;
 
-    drop_discovery(&state, &tenant, partial, &[39001, 39002]).await;
+    // Deleted rows don't count as live.
+    soft_delete_discovery(&state, &tenant, partial, &[39001, 39002]).await;
     drop_discovery(&state, &tenant, bare, &[39000, 39001, 39002]).await;
     drop_discovery(&state, &tenant, too_old, &[39002]).await;
     drop_discovery(&state, &tenant, in_flight, &[39002]).await;
