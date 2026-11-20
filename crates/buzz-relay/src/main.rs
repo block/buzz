@@ -957,6 +957,39 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     }
     step.finish();
 
+    // Republish discovery events (kinds 39000–39002) that a failed
+    // post-commit emission left missing, for channels created in the last
+    // BUZZ_DISCOVERY_REPAIR_LOOKBACK_HOURS (default 72; 0 turns it off). It
+    // runs in the background so startup does not wait on it; replicas that
+    // race on one channel are fenced by its replacement locks.
+    let discovery_lookback_hours: i64 = std::env::var("BUZZ_DISCOVERY_REPAIR_LOOKBACK_HOURS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(72)
+        .min(24 * 366);
+    if discovery_lookback_hours > 0 {
+        let repair_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            match buzz_relay::handlers::discovery_repair::reconcile_missing_channel_discovery(
+                &repair_state,
+                chrono::Duration::hours(discovery_lookback_hours),
+            )
+            .await
+            {
+                Ok(summary) if summary.repaired > 0 || summary.failed > 0 => info!(
+                    count = summary.repaired,
+                    failed = summary.failed,
+                    lookback_hours = discovery_lookback_hours,
+                    "missing channel discovery events republished on startup"
+                ),
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "missing channel discovery startup repair failed")
+                }
+            }
+        });
+    }
+
     // Emit kind:39000/39002 discovery events for channels that exist in the DB
     // but don't have corresponding events (e.g. seeded via direct SQL inserts).
     // Only runs when BUZZ_RECONCILE_CHANNELS=true (dev/CI environments).

@@ -50,6 +50,8 @@ mod event_floor_postgres_tests;
 pub mod feed;
 /// Git repository name registry (NIP-34 kind:30617).
 pub mod git_repo;
+/// Channels missing their relay-signed discovery events (kinds 39000–39002).
+pub mod group_discovery;
 /// Deployment-wide leader election over session advisory locks.
 pub mod leader_lock;
 /// Compact viewer membership projections.

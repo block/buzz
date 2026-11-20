@@ -29,6 +29,7 @@ use buzz_workflow::executor::TriggerContext;
 use crate::state::AppState;
 use crate::webhook_secret;
 
+use super::discovery_repair::republish_missing_discovery;
 use super::ingest::{extract_channel_id, IngestAuth, IngestError, IngestResult};
 use super::side_effects::{
     emit_group_discovery_events, emit_membership_notification, emit_system_message,
@@ -581,6 +582,16 @@ async fn handle_dm_open(
         // their NIP-DV snapshot so the DM reappears in the sidebar.
         if let Err(e) = publish_dm_visibility_snapshot(tenant, state, &self_bytes).await {
             warn!("DM re-open: visibility snapshot failed: {e}");
+        }
+        if added.is_empty() {
+            // Additions publish discovery anyway. Otherwise a retry repairs
+            // discovery that a failed post-commit emission left missing,
+            // which clients need to confirm the DM's members.
+            if let Err(e) =
+                republish_missing_discovery(tenant, state, channel.id, "dm_reopen").await
+            {
+                warn!(channel = %channel.id, "DM re-open: discovery repair failed: {e}");
+            }
         }
         announce_dm_additions(tenant, state, channel.id, &self_bytes, &added).await;
     }

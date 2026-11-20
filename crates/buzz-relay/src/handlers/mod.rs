@@ -22,6 +22,10 @@ pub mod count;
 mod create_with_members_postgres_tests;
 #[cfg(test)]
 mod deletion_postgres_tests;
+/// Republishing channel discovery events a failed emission left missing.
+pub mod discovery_repair;
+#[cfg(test)]
+mod discovery_repair_postgres_tests;
 #[cfg(test)]
 mod dm_growth_postgres_tests;
 #[cfg(test)]
