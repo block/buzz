@@ -155,17 +155,21 @@ class _RecordingReactionActions implements ChannelActions {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-/// Reaction actions whose publish fails as the relay does while offline.
-class _OfflineReactionActions implements ChannelActions {
+/// Reaction actions whose every publish fails with [error].
+class _FailingReactionActions implements ChannelActions {
+  _FailingReactionActions(this.error);
+
+  final Object error;
+
   @override
   Future<void> removeReaction(String eventId, String emoji) async =>
-      throw RelayNotConnectedError();
+      throw error;
   @override
   Future<void> addReaction(
     String eventId,
     String emoji, {
     required String targetAuthor,
-  }) async => throw RelayNotConnectedError();
+  }) async => throw error;
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
@@ -174,9 +178,71 @@ void main() {
   combinedReactionTests();
   shortcodeReactionTests();
 
-  for (final mine in [false, true]) {
-    final verb = mine ? 'remove' : 'add';
-    testWidgets('an offline tap to $verb a reaction says so', (tester) async {
+  testWidgets('an unexpected local failure still escapes after its notice', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final signerFailure = StateError('secp256k1_schnorrsig_sign32 failed');
+    final message = TimelineMessage(
+      id: 'message',
+      pubkey: _alice,
+      createdAt: 1,
+      content: '',
+      reactions: [_reaction()],
+    );
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          channelActionsProvider.overrideWithValue(
+            _FailingReactionActions(signerFailure),
+          ),
+        ],
+        child: Consumer(
+          builder: (context, ref, _) => TextButton(
+            onPressed: () => toggleReaction(context, ref, message, _fire),
+            child: const Text('Toggle'),
+          ),
+        ),
+      ),
+    );
+    final escaped = <Object>[];
+    await runZonedGuarded(() async {
+      await tester.tap(find.text('Toggle'));
+      await tester.pump();
+    }, (error, _) => escaped.add(error));
+    expect(escaped, [signerFailure]);
+    expect(find.text('Couldn’t add reaction. Try again.'), findsOneWidget);
+  });
+
+  for (final (name, mine, error, notice) in [
+    (
+      'an offline add',
+      false,
+      RelayNotConnectedError(),
+      'Couldn’t add reaction. No connection.',
+    ),
+    (
+      'an offline remove',
+      true,
+      RelayNotConnectedError(),
+      'Couldn’t remove reaction. No connection.',
+    ),
+    (
+      'an add whose acknowledgement was lost',
+      false,
+      RelayAckLostError(),
+      'Reaction not confirmed. Connection lost.',
+    ),
+    (
+      'an add the relay already has',
+      false,
+      const RelayEventRejectedException('duplicate: reaction already exists'),
+      null,
+    ),
+  ]) {
+    testWidgets('$name reports ${notice ?? 'nothing'}', (tester) async {
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
       final message = TimelineMessage(
@@ -198,7 +264,9 @@ void main() {
         WidgetHelpers.testable(
           overrides: [
             savedPrefsProvider.overrideWithValue(prefs),
-            channelActionsProvider.overrideWithValue(_OfflineReactionActions()),
+            channelActionsProvider.overrideWithValue(
+              _FailingReactionActions(error),
+            ),
           ],
           child: Consumer(
             builder: (context, ref, _) => TextButton(
@@ -211,10 +279,8 @@ void main() {
       await tester.tap(find.text('Toggle'));
       await tester.pump();
       expect(tester.takeException(), isNull);
-      expect(
-        find.text('Couldn’t $verb reaction. No connection.'),
-        findsOneWidget,
-      );
+      expect(find.byType(SnackBar), notice == null ? findsNothing : findsOne);
+      if (notice != null) expect(find.text(notice), findsOneWidget);
     });
   }
 

@@ -16,6 +16,7 @@ import '../../shared/hosted/hosted_relay_auth.dart';
 import '../../shared/hosted/native_media_headers.dart';
 import '../../shared/relay/relay_provider.dart';
 import '../../shared/relay/relay_session_types.dart';
+import '../../shared/relay/relay_socket.dart';
 import '../../shared/widgets/feedback_snackbar.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
@@ -86,6 +87,10 @@ void toggleReaction(
 /// relay. Reaction taps don't wait for the publish, so every caller hands its
 /// publish here; otherwise a failure (most often tapping while offline) is an
 /// uncaught error and the pill just doesn't change.
+///
+/// Only the relay's own outcomes are handled here. Anything else, such as the
+/// signer failing before the event goes out, still escapes as an uncaught
+/// error after its toast, so diagnostics see it with its stack.
 void reportReactionFailure(
   BuildContext context,
   Future<void> publish, {
@@ -93,20 +98,45 @@ void reportReactionFailure(
 }) {
   final messenger = ScaffoldMessenger.of(context);
   unawaited(
-    publish.catchError((Object error) {
-      final verb = adding ? 'add' : 'remove';
-      messenger.showFeedbackSnackBar(
-        SnackBar(
-          content: Text(
-            error is RelayNotConnectedError
-                ? 'Couldn’t $verb reaction. No connection.'
-                : 'Couldn’t $verb reaction. Try again.',
-          ),
-        ),
-        kind: ToastKind.error,
-      );
+    publish.catchError((Object error, StackTrace stackTrace) {
+      final message = _reactionFailureMessage(error, adding: adding);
+      if (message != null) {
+        messenger.showFeedbackSnackBar(
+          SnackBar(content: Text(message)),
+          kind: ToastKind.error,
+        );
+      }
+      if (!_isRelayOutcome(error)) {
+        Error.throwWithStackTrace(error, stackTrace);
+      }
     }),
   );
+}
+
+bool _isRelayOutcome(Object error) =>
+    error is RelayNotConnectedError ||
+    error is RelayAckTimeoutError ||
+    error is RelayAckLostError ||
+    error is RelayEventRejectedException;
+
+/// What to tell the user about a failed reaction publish, or null when it
+/// isn't a failure. A lost or late acknowledgement may follow the relay
+/// accepting it, so those say "not confirmed": "Try again" there could have
+/// the user undo a reaction that landed.
+String? _reactionFailureMessage(Object error, {required bool adding}) {
+  final verb = adding ? 'add' : 'remove';
+  return switch (error) {
+    // The relay already has this exact reaction, as after a double tap or
+    // re-picking one of your reactions from the picker.
+    RelayEventRejectedException(:final message)
+        when message.startsWith('duplicate:') =>
+      null,
+    RelayNotConnectedError() => 'Couldn’t $verb reaction. No connection.',
+    RelayAckTimeoutError() =>
+      "Reaction not confirmed. The relay didn't respond.",
+    RelayAckLostError() => 'Reaction not confirmed. Connection lost.',
+    _ => 'Couldn’t $verb reaction. Try again.',
+  };
 }
 
 /// Arm a burst for a reaction that is about to be added from somewhere the pill
