@@ -357,6 +357,11 @@ void main() {
     expect(headerBell, findsNothing);
     expect(headerMenu, findsNothing);
     expect(tester.getCenter(railActivity).dx, greaterThan(390));
+    // The bottom Search / New / Bestie group shares the rail's center line.
+    expect(
+      tester.getCenter(find.byTooltip('Search')).dx,
+      tester.getCenter(railActivity).dx,
+    );
     expect(tester.getCenter(railMenu).dx, tester.getCenter(railActivity).dx);
     expect(
       tester.getCenter(railActivity).dy,

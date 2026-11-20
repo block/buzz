@@ -28,6 +28,10 @@ class MessagesNavigationBar extends HookWidget {
     this.axis = Axis.horizontal,
   });
   final Axis axis;
+
+  /// Side of each control in the vertical layout, which keeps them on the
+  /// right edge of its 256-point width.
+  static const double railControlSize = _railControlSize;
   final VoidCallback onSearch;
   final Widget agent;
   final ValueChanged<bool>? onRecordingChanged;
