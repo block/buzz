@@ -344,12 +344,20 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
       :memberPubkey,
       :descriptor,
     ) = inputs;
+    final optedIn =
+        Env.pushGatewayConfigured &&
+        community?.pushNotificationsEnabled == true &&
+        _signedIn(config, community, memberPubkey);
     final shouldRegister =
-        _ready(session, config, community, memberPubkey) &&
-        buzzPushLifecycleEnabled(community: community, descriptor: descriptor);
-    // Read by the resume listener, which outlives a build.
-    final registering = useRef(shouldRegister);
-    registering.value = shouldRegister;
+        session.status == SessionStatus.connected &&
+        optedIn &&
+        descriptor != null;
+    // Read by the resume listener, which outlives a build. It leaves out the
+    // relay session and its descriptor: a resume often lands while the relay
+    // reconnects, and the registration attempt after reconnecting reuses its
+    // key, so it would not refresh the token either.
+    final registering = useRef(optedIn);
+    registering.value = optedIn;
     final enablementEpoch = useRef(0);
     useEffect(() {
       // Each opt-in needs a fresh active lease even when endpoint, executor,
@@ -510,16 +518,11 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     final token = apnsDeviceToken.value ?? fcmDeviceToken.value;
     useEffect(
       () {
-        if (!_ready(session, config, community, memberPubkey) ||
-            !buzzPushLifecycleEnabled(
-              community: community,
-              descriptor: descriptor,
-            ) ||
-            token == null) {
+        if (!shouldRegister || token == null) {
           return null;
         }
         final activeCommunity = community!;
-        final activeDescriptor = descriptor!;
+        final activeDescriptor = descriptor;
         final state = activeCommunity.pushSubscriptionState;
         if (state.desired.isEmpty) return null;
         final publicationKey = buzzPushPublicationAttemptKey(
@@ -609,13 +612,11 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     );
   }
 
-  static bool _ready(
-    SessionState session,
+  static bool _signedIn(
     RelayConfig config,
     Community? community,
     String? memberPubkey,
   ) =>
-      session.status == SessionStatus.connected &&
       community != null &&
       config.nsec != null &&
       config.nsec!.isNotEmpty &&

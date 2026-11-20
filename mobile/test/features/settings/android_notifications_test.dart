@@ -195,6 +195,7 @@ void main() {
     required TargetPlatform platform,
     required String relayUrl,
     required bool enabled,
+    _Connected? session,
   }) async {
     debugDefaultTargetPlatformOverride = platform;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -247,7 +248,7 @@ void main() {
           buzzPushLeaseRevocationStorageProvider.overrideWithValue(
             BuzzPushLeaseRevocationStorage(secure: FakeSecureStorage()),
           ),
-          relaySessionProvider.overrideWith(_Connected.new),
+          relaySessionProvider.overrideWith(() => session ?? _Connected()),
           myPubkeyProvider.overrideWithValue(nostr.Keys('1' * 64).public),
           buzzPushDescriptorFetcherProvider.overrideWithValue(
             (_) async => _descriptor,
@@ -312,6 +313,31 @@ void main() {
       },
     );
   }
+
+  testWidgets('resuming while the relay reconnects refreshes the FCM token', (
+    tester,
+  ) async {
+    fcmDeviceToken.value = 'test-fcm-token';
+    addTearDown(() => fcmDeviceToken.value = null);
+    final session = _Connected();
+    final calls = await pumpBootstrap(
+      tester,
+      platform: TargetPlatform.android,
+      relayUrl: 'https://relay.example',
+      enabled: true,
+      session: session,
+    );
+    session.setStatus(SessionStatus.reconnecting);
+    await tester.pumpAndSettle();
+    calls.clear();
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pumpAndSettle();
+
+    expect(calls, contains('refreshToken'));
+    await unmount(tester);
+  });
 }
 
 class _MemoryStore implements AndroidPushStateStore {
