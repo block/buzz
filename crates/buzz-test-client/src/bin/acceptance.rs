@@ -32,8 +32,9 @@ struct Cli {
     /// The relay's WebSocket URL.
     #[arg(long, env = "BUZZ_RELAY_URL")]
     relay_url: String,
-    /// Secret key (hex or nsec) to authenticate and sign as. Without one the
-    /// probe uses a new key, which works only on a relay that admits any key.
+    /// Secret key (hex or nsec) to authenticate and sign as. Without this or
+    /// a key file the probe uses a new key, which works only on a relay that
+    /// admits any key.
     #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     private_key: Option<String>,
     /// File holding the secret key (hex or nsec), for a key another process

@@ -415,14 +415,15 @@ acceptance:
   # above 13 × stageTimeoutSeconds + 30 s plus pull and init time: a run killed
   # at the deadline sends no metrics.
   stageTimeoutSeconds: 10
-  # Secret holding the probe's key (hex or nsec). Required when enabled. On a
-  # members-only relay the key must be a relay member.
+  # Secret holding the probe's key (hex or nsec). Set this or privateKeyFile
+  # (exactly one) when enabled. On a members-only relay the key must be a
+  # relay member.
   privateKeySecret:
     name: ""
     key: BUZZ_PRIVATE_KEY
   # Key file path in the probe container, for a key an init container writes
-  # with its assertion (for example one new identity per run). Use this or
-  # privateKeySecret, not both.
+  # with its assertion (for example one new identity per run, which needs an
+  # agent assertion; see README). Set this or privateKeySecret, not both.
   privateKeyFile: ""
   # NIP-FI assertion path in the probe container. Pair with extraInitContainers,
   # extraVolumes and extraVolumeMounts to mint it before the run.
