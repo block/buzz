@@ -652,6 +652,142 @@ void main() {
     expect(find.byType(UiKitView), findsOneWidget);
     debugDefaultTargetPlatformOverride = null;
   });
+
+  for (final (name, platform, size, viewPadding, nativeHeight, actionTop) in [
+    (
+      'iOS Duo cover',
+      TargetPlatform.iOS,
+      const Size(466, 678),
+      const FakeViewPadding(right: 84, bottom: 34),
+      null,
+      24.0,
+    ),
+    (
+      'iOS Duo wide',
+      TargetPlatform.iOS,
+      const Size(951, 669),
+      const FakeViewPadding(right: 84, bottom: 34),
+      null,
+      24.0,
+    ),
+    (
+      'iOS Duo wide with a taller native bar',
+      TargetPlatform.iOS,
+      const Size(951, 669),
+      const FakeViewPadding(right: 84, bottom: 34),
+      58.0,
+      24.0,
+    ),
+    (
+      'iOS phone',
+      TargetPlatform.iOS,
+      const Size(402, 874),
+      const FakeViewPadding(top: 62, bottom: 34),
+      null,
+      62.0 + 6,
+    ),
+    (
+      'Android with a side inset',
+      TargetPlatform.android,
+      const Size(466, 678),
+      const FakeViewPadding(right: 84, bottom: 34),
+      null,
+      6.0,
+    ),
+  ]) {
+    testWidgets('Flutter bar controls clear the top edge on $name', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = platform;
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = size;
+      tester.view.viewPadding = viewPadding;
+      tester.view.padding = viewPadding;
+      addTearDown(tester.view.reset);
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      const action = ValueKey('bar-action');
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            builder: (context, child) =>
+                IosNavigationMetricsHost(child: child!),
+            home: const Stack(
+              children: [
+                FrostedAppBar(
+                  useNativeNavigation: false,
+                  automaticallyImplyLeading: false,
+                  title: Text('Messages'),
+                  actions: [SizedBox(key: action, width: 44, height: 44)],
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      if (nativeHeight != null) {
+        IosNavigationMetrics.update(
+          tester.element(find.byType(FrostedAppBar)),
+          {'compactHeight': nativeHeight},
+        );
+        await tester.pump();
+      }
+      final top = tester.getRect(find.byKey(action)).top;
+      expect(top, actionTop);
+      expect(tester.getRect(find.text('Messages')).center.dy, top + 22);
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
+
+  for (final suppressed in [false, true]) {
+    testWidgets('Duo bar lays out at the largest text size (suppressed: '
+        '$suppressed)', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(466, 678);
+      const padding = FakeViewPadding(right: 84, bottom: 34);
+      tester.view.viewPadding = padding;
+      tester.view.padding = padding;
+      addTearDown(tester.view.reset);
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final suppression = ValueNotifier(true);
+      addTearDown(suppression.dispose);
+      const action = ValueKey('bar-action');
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            // iOS's largest accessibility text size.
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: const TextScaler.linear(47 / 17)),
+              child: child!,
+            ),
+            home: Stack(
+              children: [
+                FrostedAppBar(
+                  useNativeNavigation: suppressed,
+                  nativeViewSuppressed: suppressed ? suppression : null,
+                  automaticallyImplyLeading: false,
+                  title: const Text('Messages'),
+                  actions: const [SizedBox(key: action, width: 44, height: 44)],
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      expect(tester.takeException(), isNull);
+      expect(
+        tester.getRect(find.byKey(action)).top,
+        greaterThanOrEqualTo(duoHeaderTopClearance),
+      );
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
 }
 
 Future<void> _nativeAction(
