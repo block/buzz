@@ -113,6 +113,7 @@ export function AppShell() {
   useTauriWindowDrag();
   useWebviewScrollBoundaryLock();
   const communitiesHook = useCommunities();
+
   const {
     handleHuddleCompanionOpen,
     handleHuddleEnded,
@@ -193,6 +194,27 @@ export function AppShell() {
     : DEFAULT_SETTINGS_SECTION;
   const startupReady = useDeferredStartup();
   const identityQuery = useIdentityQuery();
+  // Each committed community and signer lifetime gets a distinct token.
+  const createScopeRef = React.useRef<{
+    active: boolean;
+    expectedRelayUrl?: string;
+    expectedSignerPubkey?: string;
+  }>({ active: false });
+  React.useLayoutEffect(() => {
+    const scope = {
+      active: true,
+      expectedRelayUrl: communitiesHook.activeCommunity?.relayUrl,
+      expectedSignerPubkey: identityQuery.data?.pubkey,
+    };
+    createScopeRef.current = scope;
+    return () => {
+      scope.active = false;
+    };
+  }, [
+    communitiesHook.activeCommunity?.id,
+    communitiesHook.activeCommunity?.relayUrl,
+    identityQuery.data?.pubkey,
+  ]);
   const { mutedChannelIds, muteChannel, unmuteChannel } = useChannelMutes(
     identityQuery.data?.pubkey,
     communitiesHook.activeCommunity?.relayUrl,
@@ -556,20 +578,34 @@ export function AppShell() {
       },
       onCreated?: (channelId: string) => void,
     ) => {
+      const scope = createScopeRef.current;
+      const isCurrent = () => scope.active && createScopeRef.current === scope;
+      if (!isCurrent()) return;
       const createdChannel = await createChannelMutation.mutateAsync({
         name,
         description,
         channelType: "stream",
         visibility,
         ttlSeconds,
+        expectedRelayUrl: scope.expectedRelayUrl,
+        expectedSignerPubkey: scope.expectedSignerPubkey,
       });
+      if (!isCurrent()) return;
 
-      await applyCanvas(templateId, createdChannel.id, name);
+      await applyCanvas(templateId, createdChannel.id, name, scope);
+      if (!isCurrent()) return;
       await goChannel(createdChannel.id);
+      if (!isCurrent()) return;
       onCreated?.(createdChannel.id);
+      if (!isCurrent()) return;
       void applyAgents(templateId, createdChannel.id);
     },
-    [applyAgents, applyCanvas, createChannelMutation, goChannel],
+    [
+      applyAgents,
+      applyCanvas,
+      createChannelMutation,
+      goChannel,
+    ],
   );
   const handleCreateForum = React.useCallback(
     async ({
@@ -585,19 +621,32 @@ export function AppShell() {
       ttlSeconds?: number;
       templateId?: string;
     }) => {
+      const scope = createScopeRef.current;
+      const isCurrent = () => scope.active && createScopeRef.current === scope;
+      if (!isCurrent()) return;
       const createdForum = await createForumMutation.mutateAsync({
         name,
         description,
         channelType: "forum",
         visibility,
         ttlSeconds,
+        expectedRelayUrl: scope.expectedRelayUrl,
+        expectedSignerPubkey: scope.expectedSignerPubkey,
       });
+      if (!isCurrent()) return;
 
-      await applyCanvas(templateId, createdForum.id, name);
+      await applyCanvas(templateId, createdForum.id, name, scope);
+      if (!isCurrent()) return;
       await goChannel(createdForum.id);
+      if (!isCurrent()) return;
       void applyAgents(templateId, createdForum.id);
     },
-    [applyAgents, applyCanvas, createForumMutation, goChannel],
+    [
+      applyAgents,
+      applyCanvas,
+      createForumMutation,
+      goChannel,
+    ],
   );
 
   // The channel browser can create either a stream or a forum depending on
