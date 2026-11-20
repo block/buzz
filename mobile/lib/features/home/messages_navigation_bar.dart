@@ -13,11 +13,8 @@ import '../../shared/widgets/navigation_button_surface.dart';
 import '../../shared/widgets/android_expanding_menu_button.dart';
 import '../../shared/widgets/ios_message_create_button.dart';
 
-/// Separate glass shortcuts for search and creation.
-/// Size and spacing of Duo's native rail controls (`DuoToolbarPortal`).
-const double _railControlSize = 48;
-const double _railControlGap = 12;
-
+/// Separate glass shortcuts for search and creation, along the bottom edge.
+/// A Duo rail uses `MessagesRailControls` instead.
 class MessagesNavigationBar extends HookWidget {
   const MessagesNavigationBar({
     super.key,
@@ -25,13 +22,7 @@ class MessagesNavigationBar extends HookWidget {
     required this.creationActions,
     required this.agent,
     this.onRecordingChanged,
-    this.axis = Axis.horizontal,
   });
-  final Axis axis;
-
-  /// Side of each control in the vertical layout, which keeps them on the
-  /// right edge of its 256-point width.
-  static const double railControlSize = _railControlSize;
   final VoidCallback onSearch;
   final Widget agent;
   final ValueChanged<bool>? onRecordingChanged;
@@ -49,11 +40,6 @@ class MessagesNavigationBar extends HookWidget {
       menuOpen.value = visible;
     }
 
-    useEffect(() {
-      menuOpen.value = false;
-      menuMoving.value = false;
-      return null;
-    }, [axis]);
     final overlay = useState(false);
     Widget hideDuringVoice(Widget child) => ExcludeSemantics(
       excluding: overlay.value,
@@ -62,98 +48,12 @@ class MessagesNavigationBar extends HookWidget {
         child: Opacity(opacity: overlay.value ? 0 : 1, child: child),
       ),
     );
-    // Duo's rail stacks these at the size and spacing of its native rail
-    // controls.
-    final vertical = axis == Axis.vertical;
-    final controlSize = vertical
-        ? _railControlSize
-        : AgentNavigationOverlay.defaultControlSize;
     return AgentNavigationOverlay(
       active: overlay,
       menuOpen: menuOpen.value || menuMoving.value,
       onRecordingChanged: onRecordingChanged,
-      controlSize: controlSize,
       child: Builder(
         builder: (context) {
-          if (vertical) {
-            const height = _railControlSize * 3 + _railControlGap * 2;
-            return SizedBox(
-              width: 256,
-              height: height,
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  Positioned(
-                    right: 0,
-                    child: hideDuringVoice(
-                      IosMessageCreateButton(
-                        key: const ValueKey('vertical-create-menu'),
-                        mergingNavigation: true,
-                        navigationAxis: Axis.vertical,
-                        onMenuVisibilityChanged: menuVisibilityChanged,
-                        actions: creationActions,
-                        dividerBefore: const {2},
-                        sectionTitles: const {0: 'Solo', 2: 'Team'},
-                        accessibilityLabel: 'New',
-                        width: _railControlSize,
-                        height: height,
-                        navigationControlSize: _railControlSize,
-                        navigationGap: _railControlGap,
-                        plain: false,
-                      ),
-                    ),
-                  ),
-                  Positioned(
-                    right: 0,
-                    top: 0,
-                    width: _railControlSize,
-                    height: _railControlSize + _railControlGap / 2,
-                    child: ClipRect(
-                      child: Align(
-                        alignment: Alignment.topCenter,
-                        child: _MenuNudge(
-                          axis: Axis.vertical,
-                          offset: menuOpen.value
-                              ? _railControlSize + _railControlGap
-                              : 0,
-                          menuOpen: menuOpen.value,
-                          alignment: Alignment.center,
-                          child: hideDuringVoice(
-                            _search(context, _railControlSize),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                  Positioned(
-                    bottom: 0,
-                    right: 0,
-                    width: 256,
-                    height: _railControlSize,
-                    child: OverflowBox(
-                      alignment: Alignment.centerRight,
-                      minWidth: 0,
-                      maxWidth: 256,
-                      child: Align(
-                        widthFactor: 1,
-                        alignment: Alignment.centerRight,
-                        child: _MenuNudge(
-                          axis: Axis.vertical,
-                          offset: menuOpen.value
-                              ? -_railControlSize - _railControlGap
-                              : 0,
-                          menuOpen: menuOpen.value,
-                          alignment: Alignment.center,
-                          onEnd: () => menuMoving.value = false,
-                          child: NavigationGlassGroup(child: agent),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            );
-          }
           if (defaultTargetPlatform == TargetPlatform.iOS) {
             return SizedBox(
               width: 256,
@@ -254,11 +154,8 @@ class MessagesNavigationBar extends HookWidget {
     );
   }
 
-  Widget _search(
-    BuildContext context, [
-    double size = AgentNavigationOverlay.defaultControlSize,
-  ]) => SizedBox.square(
-    dimension: size,
+  Widget _search(BuildContext context) => SizedBox.square(
+    dimension: 56,
     child: IconButton(
       tooltip: 'Search',
       onPressed: () {
@@ -274,7 +171,6 @@ class MessagesNavigationBar extends HookWidget {
 class _MenuNudge extends StatelessWidget {
   const _MenuNudge({
     required this.offset,
-    this.axis = Axis.horizontal,
     required this.menuOpen,
     required this.alignment,
     required this.child,
@@ -282,7 +178,6 @@ class _MenuNudge extends StatelessWidget {
   });
   final VoidCallback? onEnd;
   final double offset;
-  final Axis axis;
   final bool menuOpen;
   final Alignment alignment;
   final Widget child;
@@ -302,11 +197,8 @@ class _MenuNudge extends StatelessWidget {
           duration: duration,
           curve: Curves.easeOutCubic,
           transformAlignment: alignment,
-          transform: Matrix4.translationValues(
-            axis == Axis.horizontal ? offset : 0,
-            axis == Axis.vertical ? offset : 0,
-            0,
-          )..scaleByDouble(scale, scale, 1, 1),
+          transform: Matrix4.translationValues(offset, 0, 0)
+            ..scaleByDouble(scale, scale, 1, 1),
           child: child,
         ),
       ),

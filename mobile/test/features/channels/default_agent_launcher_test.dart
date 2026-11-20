@@ -14,6 +14,8 @@ import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+import 'package:buzz/shared/widgets/agent_navigation_overlay.dart';
+import 'package:buzz/shared/widgets/agent_rail_link.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -23,9 +25,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../shared/me/me_sync_test.dart' show FakeRelay;
 
 void main() {
+  // A Duo rail control stands in for the Flutter button and must follow the
+  // same guards, so the journey runs once through each.
+  final railVariant = ValueVariant<bool>({false, true});
   testWidgets(
     'community switch cannot launch a retained default while loading',
     (tester) async {
+      final onRail = railVariant.currentValue!;
       const secret =
           '0000000000000000000000000000000000000000000000000000000000000001';
       final nsec = nostr.Nip19.encode(
@@ -46,6 +52,7 @@ void main() {
       final pending = Completer<List<NostrEvent>>();
       relayB.pendingRead = pending.future;
       var choices = 0;
+      final rail = AgentRailLink();
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
       Widget app(MeSync scope) => ProviderScope(
@@ -58,20 +65,41 @@ void main() {
         child: MaterialApp(
           theme: AppTheme.light(),
           home: Scaffold(
-            body: DefaultAgentLauncher(onChooseAgent: () => choices++),
+            body: AgentNavigationOverlay(
+              active: ValueNotifier(false),
+              railLink: onRail ? rail : null,
+              child: DefaultAgentLauncher(onChooseAgent: () => choices++),
+            ),
           ),
         ),
       );
       await tester.pumpWidget(app(a));
       await tester.pumpAndSettle();
       final button = find.byType(IconButton);
-      final staleAction = tester.widget<IconButton>(button).onPressed!;
+      VoidCallback? current() => onRail
+          ? rail.action.value?.onPressed
+          : tester.widget<IconButton>(button).onPressed;
+      // Hidden behind the native control, the Flutter button takes no touch.
+      Future<void> press() async {
+        if (onRail) {
+          current()!();
+        } else {
+          await tester.tap(button);
+        }
+      }
+
+      final staleAction = current()!;
+      if (onRail) {
+        expect(rail.action.value!.label, 'Chat with your Bestie');
+        expect(rail.action.value!.onLongPress, isNotNull);
+      }
       await tester.pumpWidget(app(b));
       await tester.pumpAndSettle();
       final container = ProviderScope.containerOf(tester.element(button));
       expect(container.read(defaultAgentProvider).isLoading, isTrue);
       // Riverpod can keep A's previous data while B's first read is pending.
-      expect(tester.widget<IconButton>(button).onPressed, isNull);
+      expect(current(), isNull);
+      if (onRail) expect(rail.action.value!.onLongPress, isNull);
       staleAction();
       await tester.pumpAndSettle();
       expect(choices, 0);
@@ -83,15 +111,16 @@ void main() {
       expect(container.read(defaultAgentProvider).hasError, isTrue);
       expect(prefs.getBool(firstAgentCalloutKey(b)), isNot(true));
       relayB.pendingRead = null;
-      await tester.tap(button);
+      await press();
       await tester.pumpAndSettle();
       expect(choices, 0);
       expect(prefs.getBool(firstAgentCalloutKey(b)), isNot(true));
-      await tester.tap(button);
+      await press();
       expect(choices, 1);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
     },
+    variant: railVariant,
   );
 
   final paneVariant = ValueVariant<bool>({false, true});

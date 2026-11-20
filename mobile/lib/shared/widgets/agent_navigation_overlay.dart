@@ -1,5 +1,7 @@
 import 'package:flutter/widgets.dart';
 
+import 'agent_rail_link.dart';
+
 /// Coordinates the expanded agent control with the shortcuts it covers.
 class AgentNavigationOverlay extends InheritedWidget {
   const AgentNavigationOverlay({
@@ -8,6 +10,7 @@ class AgentNavigationOverlay extends InheritedWidget {
     this.onRecordingChanged,
     this.menuOpen = false,
     this.controlSize = defaultControlSize,
+    this.railLink,
     required super.child,
   });
   final ValueNotifier<bool> active;
@@ -24,6 +27,13 @@ class AgentNavigationOverlay extends InheritedWidget {
           .dependOnInheritedWidgetOfExactType<AgentNavigationOverlay>()
           ?.controlSize ??
       defaultControlSize;
+
+  /// Set when a native Duo rail control stands in for the agent shortcut.
+  final AgentRailLink? railLink;
+
+  static AgentRailLink? railLinkOf(BuildContext context) => context
+      .dependOnInheritedWidgetOfExactType<AgentNavigationOverlay>()
+      ?.railLink;
 
   static bool menuOpenOf(BuildContext context) =>
       context
@@ -45,5 +55,6 @@ class AgentNavigationOverlay extends InheritedWidget {
       active != oldWidget.active ||
       menuOpen != oldWidget.menuOpen ||
       controlSize != oldWidget.controlSize ||
+      railLink != oldWidget.railLink ||
       onRecordingChanged != oldWidget.onRecordingChanged;
 }

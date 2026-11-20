@@ -17,6 +17,9 @@ import 'package:buzz/features/channels/voice_note_waveform.dart';
 import 'package:buzz/features/channels/bestie_transcription_status.dart';
 import 'package:buzz/features/channels/bestie_transcription_job.dart';
 import 'package:buzz/features/channels/bestie_transcription_surface.dart';
+import 'package:buzz/shared/widgets/agent_navigation_overlay.dart';
+import 'package:buzz/shared/widgets/agent_rail_link.dart';
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/shared/widgets/app_route_observer.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:buzz/shared/transcription/device_transcription.dart';
@@ -155,7 +158,7 @@ void main() {
     );
   }
 
-  Future<void> mount(WidgetTester tester) async {
+  Future<void> mount(WidgetTester tester, {AgentRailLink? rail}) async {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -198,31 +201,34 @@ void main() {
             body: Center(
               child: ConversationPaneScope(
                 controller: pane,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const BestieTranscriptionStatus(
-                      channelId: '11111111-1111-4111-8111-111111111111',
-                    ),
-                    ValueListenableBuilder<bool>(
-                      valueListenable: showControl,
-                      builder: (_, visible, _) => !visible
-                          ? const SizedBox()
-                          : BestieTranscriptionControl(
-                              scope: sync.cacheKey,
-                              recipient: 'a' * 64,
-                              child: SizedBox(
-                                width: 56,
-                                height: 56,
-                                child: IconButton(
-                                  tooltip: 'Chat with your Bestie',
-                                  onPressed: () {},
-                                  icon: const Text('Bestie'),
+                child: _RailHost(
+                  rail: rail,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const BestieTranscriptionStatus(
+                        channelId: '11111111-1111-4111-8111-111111111111',
+                      ),
+                      ValueListenableBuilder<bool>(
+                        valueListenable: showControl,
+                        builder: (_, visible, _) => !visible
+                            ? const SizedBox()
+                            : BestieTranscriptionControl(
+                                scope: sync.cacheKey,
+                                recipient: 'a' * 64,
+                                child: SizedBox(
+                                  width: 56,
+                                  height: 56,
+                                  child: IconButton(
+                                    tooltip: 'Chat with your Bestie',
+                                    onPressed: () {},
+                                    icon: const Text('Bestie'),
+                                  ),
                                 ),
                               ),
-                            ),
-                    ),
-                  ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -252,6 +258,85 @@ void main() {
     }
     return gesture;
   }
+
+  testWidgets('a hold forwarded by the Duo rail control records like a touch', (
+    tester,
+  ) async {
+    reset();
+    final rail = AgentRailLink();
+    await mount(tester, rail: rail);
+    // Idle, the native control is the only button: this one is unseen, inert
+    // and absent from the semantics tree.
+    final hidden = find.ancestor(
+      of: find.text('Bestie'),
+      matching: find.byType(Opacity),
+    );
+    expect(tester.widget<Opacity>(hidden.last).opacity, 0);
+    expect(
+      tester
+          .widgetList<IgnorePointer>(
+            find.ancestor(
+              of: find.text('Bestie'),
+              matching: find.byType(IgnorePointer),
+            ),
+          )
+          .any((widget) => widget.ignoring),
+      isTrue,
+    );
+    expect(find.bySemanticsLabel('Chat with your Bestie'), findsNothing);
+
+    // Sliding up past the threshold cancels on release, however it arrives.
+    rail.hold(IosNavigationLongPressPhase.start, Offset.zero);
+    await tester.pumpAndSettle();
+    expect(recorder.starts, 1);
+    expect(find.byType(VoiceNoteWaveform), findsOneWidget);
+    expect(tester.widget<Opacity>(hidden.last).opacity, 1);
+    rail.hold(IosNavigationLongPressPhase.move, const Offset(0, -80));
+    await tester.pump();
+    expect(
+      tester
+          .widget<AnimatedScale>(
+            find.byKey(const ValueKey('voice-cancel-target')),
+          )
+          .scale,
+      1.15,
+    );
+    rail.hold(IosNavigationLongPressPhase.end, const Offset(0, -80));
+    // Let cancellation's stream teardown settle outside the fake clock.
+    await tester.runAsync(() => Future<void>(() {}));
+    await tester.pumpAndSettle();
+    expect(recorder.cancelled, isTrue);
+    expect(relay.events, isEmpty);
+    expect(find.byType(VoiceNoteWaveform), findsNothing);
+    expect(tester.widget<Opacity>(hidden.last).opacity, 0);
+
+    // UIKit tearing the touch down discards the recording.
+    recorder.cancelled = false;
+    rail.hold(IosNavigationLongPressPhase.start, Offset.zero);
+    await tester.pumpAndSettle();
+    expect(recorder.starts, 2);
+    rail.hold(IosNavigationLongPressPhase.cancel, Offset.zero);
+    await tester.runAsync(() => Future<void>(() {}));
+    await tester.pumpAndSettle();
+    expect(recorder.cancelled, isTrue);
+    expect(recorder.stops, 0);
+    expect(relay.events, isEmpty);
+
+    // A hold released in place sends its transcript.
+    recorder.cancelled = false;
+    rail.hold(IosNavigationLongPressPhase.start, Offset.zero);
+    await tester.pumpAndSettle();
+    expect(recorder.starts, 3);
+    rail.hold(IosNavigationLongPressPhase.move, const Offset(0, -10));
+    rail.hold(IosNavigationLongPressPhase.end, const Offset(0, -10));
+    await tester.pump();
+    speech.result.complete('Open the rail.');
+    await tester.pumpAndSettle();
+    expect(relay.events.single.content, 'Open the rail.');
+    expect(recorder.cancelled, isFalse);
+
+    await tester.pumpWidget(const SizedBox());
+  });
 
   testWidgets(
     'release sends finalized text with no media and retries the identical signed event',
@@ -665,6 +750,24 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     },
   );
+}
+
+/// Hosts the control as a Duo rail does: beside a native control that owns the
+/// touch and forwards its hold through [rail].
+class _RailHost extends StatelessWidget {
+  const _RailHost({required this.rail, required this.child});
+
+  final AgentRailLink? rail;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => rail == null
+      ? child
+      : AgentNavigationOverlay(
+          active: ValueNotifier(false),
+          railLink: rail,
+          child: child,
+        );
 }
 
 class _NoChannels extends ChannelsNotifier {

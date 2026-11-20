@@ -630,6 +630,7 @@ void main() {
       );
       var selected = 0;
       var callbackVersion = 1;
+      final held = <String>[];
       Widget page() {
         final version = callbackVersion;
         return _testApp(
@@ -648,6 +649,13 @@ void main() {
                       onPressed: () => selected = version,
                     ),
                   ],
+                ),
+                IosNavigationAction(
+                  label: 'Hold',
+                  symbol: 'agent',
+                  onPressed: () {},
+                  onLongPress: (phase, offset) =>
+                      held.add('$version ${phase.name} ${offset.dy}'),
                 ),
               ],
             ),
@@ -675,6 +683,33 @@ void main() {
         (_) {},
       );
       expect(selected, 2);
+      // A native press-and-hold reaches the current callback with its travel,
+      // and the native side is told which action can be held.
+      expect(
+        [
+          for (final action in (view.creationParams! as Map)['actions'] as List)
+            (action as Map)['longPress'],
+        ],
+        [false, true],
+      );
+      Future<void> hold(String phase, double dy) =>
+          tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+            channel.name,
+            channel.codec.encodeMethodCall(
+              MethodCall('actionLongPress', {
+                'id': '1',
+                'phase': phase,
+                'dx': 0.0,
+                'dy': dy,
+              }),
+            ),
+            (_) {},
+          );
+      await hold('start', 0);
+      await hold('move', -30);
+      await hold('unknown', 0);
+      await hold('end', -30);
+      expect(held, ['2 start 0.0', '2 move -30.0', '2 end -30.0']);
       await tester.drag(find.byType(ListView), const Offset(0, -180));
       await tester.pumpAndSettle();
       expect(
