@@ -406,6 +406,49 @@ void main() {
     expect(diagnostics.operations, isEmpty);
   });
 
+  test('keeps the restart marker until both queued purges finish', () async {
+    final first = Completer<void>();
+    final second = Completer<void>();
+    final secondStarted = Completer<void>();
+    var opens = 0;
+    final queued = SavedMessageStore(
+      root: () async {
+        switch (++opens) {
+          case 1:
+            await first.future;
+          case 2:
+            secondStarted.complete();
+            await second.future;
+        }
+        return temp;
+      },
+      purgeRoot: () async => temp,
+      diagnostics: diagnostics,
+    );
+    final marker = File('${temp.path}/saved_message_purge');
+    try {
+      await queued.removeChannel(
+        _identity,
+        _channel.channelId,
+        deferDisk: true,
+      );
+      await queued.removeChannel(
+        _identity,
+        _otherChannel.channelId,
+        deferDisk: true,
+      );
+      expect(marker.existsSync(), isTrue);
+      first.complete();
+      await secondStarted.future;
+      expect(marker.existsSync(), isTrue);
+    } finally {
+      if (!first.isCompleted) first.complete();
+      second.complete();
+      await queued.read(queued.capture(_identity, _channel));
+    }
+    expect(marker.existsSync(), isFalse);
+  });
+
   test(
     'discards an unreadable or incompatible file and refills on the next save',
     () async {

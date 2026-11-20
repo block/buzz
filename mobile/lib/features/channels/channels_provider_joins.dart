@@ -33,10 +33,12 @@ extension ChannelsNotifierJoins on ChannelsNotifier {
 
   /// Records [channelId] as a membership this client itself ended (a
   /// confirmed leave or delete), so the next list read doesn't treat its
-  /// absence as a loss that needs a writer read. The caller already purged
-  /// its saved pages.
-  void noteConfirmedRemoval(String channelId) =>
-      _confirmedRemovals.add(channelId);
+  /// absence as a loss that needs a writer read. The saved-page purge has
+  /// already been recorded.
+  void noteConfirmedRemoval(String channelId) {
+    _confirmedJoins.remove(channelId);
+    _confirmedRemovals.add(channelId);
+  }
 
   void _forgetConfirmedMemberships() {
     _confirmedJoins.clear();

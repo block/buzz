@@ -10,6 +10,7 @@ import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/channels/saved_message_store.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 
 import 'package:buzz/shared/verified_profiles/verified_profile.dart';
 
@@ -83,12 +84,31 @@ void main() {
   test('leave completes without waiting for the saved-page purge', () async {
     final relay = FakeRelay();
     final scope = (communityId: 'cache-test-community', pubkey: relay.pubkey);
+    const page = (channelId: _channelId, rootId: '');
+    final dir = await Directory.systemTemp.createTemp('buzz-leave-unblocked');
+    addTearDown(() => dir.delete(recursive: true));
     final root = Completer<Directory>();
+    var blockPurge = false;
+    const diagnostics = NoopDiagnosticReporter();
+    final store = SavedMessageStore(
+      root: () async => blockPurge ? await root.future : dir,
+      purgeRoot: () async => dir,
+      diagnostics: diagnostics,
+    );
+    final event = relay.sign(
+      kind: EventKind.streamMessage,
+      content: 'Saved history',
+      createdAt: 1700000000,
+      tags: [
+        ['h', _channelId],
+      ],
+    );
+    await store.save(store.capture(scope, page), [event], relayAuthor: null);
     final container = ProviderContainer(
       overrides: [
         ...relay.overrides,
         channelsProvider.overrideWith(_ChannelsAfterLeave.new),
-        savedMessageRootProvider.overrideWith((ref) => root.future),
+        savedMessageStoreProvider.overrideWithValue(store),
         savedMessageScopeProvider.overrideWithValue(scope),
       ],
     );
@@ -101,21 +121,26 @@ void main() {
     }, fireImmediately: true);
     await connected.future;
 
-    // The store can't open its directory yet, so a purge it waited for
-    // would never finish.
-    await container
-        .read(channelActionsProvider)
-        .leaveChannel(_channelId)
-        .timeout(const Duration(seconds: 5));
-    expect(relay.published.single.kind, 9022);
-    expect(root.isCompleted, isFalse);
-    final dir = await Directory.systemTemp.createTemp('buzz-leave-unblocked');
-    addTearDown(() => dir.delete(recursive: true));
-    root.complete(dir);
-    // Let the queued purge finish before teardown deletes the directory.
-    await container
-        .read(savedMessageStoreProvider)
-        .removeChannel(scope, _channelId);
+    blockPurge = true;
+    try {
+      await container
+          .read(channelActionsProvider)
+          .leaveChannel(_channelId)
+          .timeout(const Duration(seconds: 5));
+      expect(relay.published.single.kind, 9022);
+      expect(root.isCompleted, isFalse);
+      expect(File('${dir.path}/saved_message_purge').existsSync(), isTrue);
+      final restarted = SavedMessageStore(
+        root: () async => dir,
+        purgeRoot: () async => dir,
+        diagnostics: diagnostics,
+      );
+      expect(await restarted.read(restarted.capture(scope, page)), isNull);
+    } finally {
+      root.complete(dir);
+      // Let the queued purge finish before teardown deletes the directory.
+      await store.read(store.capture(scope, page));
+    }
   });
 
   test('shortcut selects only an active exact DM using current membership', () {

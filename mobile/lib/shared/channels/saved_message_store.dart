@@ -100,6 +100,8 @@ final class SavedMessageStore {
   final _channelEpochs = <(String, String), int>{};
   final _pendingEventRemovals = <(String, String), Set<String>>{};
   Future<void> _tail = Future.value();
+  Future<void> _purgeMarkerTail = Future.value();
+  int _activePurgeMarkers = 0;
   // Read the marker once per app session. This store owns all its mutations.
   bool? _needsReset;
   Directory? _purgeDirectory;
@@ -154,11 +156,19 @@ final class SavedMessageStore {
   }
 
   /// Retires every page of a channel that was deleted, left or denied.
-  Future<void> removeChannel(SavedMessageScope scope, String channelId) {
+  /// With [deferDisk], returns once the durable marker is written.
+  Future<void> removeChannel(
+    SavedMessageScope scope,
+    String channelId, {
+    bool deferDisk = false,
+  }) {
     final key = _scopeKey(scope);
     _retireChannel((key, channelId));
     _pendingEventRemovals.remove((key, channelId));
-    return _purge((directory) => _removeFromDisk(directory, key, channelId));
+    return _purge(
+      (directory) => _removeFromDisk(directory, key, channelId),
+      deferDisk: deferDisk,
+    );
   }
 
   /// Drops changed events and keeps the rest of the saved conversation.
@@ -208,34 +218,86 @@ final class SavedMessageStore {
   Future<void> _purge(
     Future<void> Function(String directory) remove, {
     bool Function()? shouldRun,
-  }) => _enqueue((directory) async {
-    if (shouldRun?.call() == false) return;
-    late final File marker;
-    var reset = _needsReset ?? false;
-    try {
-      marker = await _purgeMarker(directory);
-      reset = _needsReset ?? await _purgePending(marker);
-      if (!reset) {
-        await marker.parent.create(recursive: true);
-        await marker.writeAsString('pending', flush: true);
-      }
-    } finally {
-      // Attempt the removal even if writing the marker fails.
-      if (reset) {
-        await _sweep(directory, retained: const {});
-      } else {
-        await remove(directory);
-      }
-    }
-    await _clearPurgeMarker(marker);
-    _needsReset = false;
-  }, onFailure: () => _needsReset = true);
+    bool deferDisk = false,
+  }) async {
+    final ready = deferDisk ? _reservePurgeMarker() : null;
+    var entered = false;
+    final completed =
+        _enqueue((directory) async {
+          entered = true;
+          if (shouldRun?.call() == false) return;
+          final marker = await (ready ?? _reservePurgeMarker(directory));
+          var removed = false;
+          try {
+            if (_needsReset ?? false) {
+              await _sweep(directory, retained: const {});
+            } else {
+              await remove(directory);
+            }
+            _needsReset = false;
+            removed = true;
+          } finally {
+            if (marker != null) {
+              await _releasePurgeMarker(marker, removed: removed);
+            }
+          }
+        }, onFailure: () => _needsReset = true).then((_) async {
+          // The cache root can fail before the queued operation enters.
+          if (!entered && ready != null) {
+            final marker = await ready;
+            if (marker != null) {
+              await _releasePurgeMarker(marker, removed: false);
+            }
+          }
+        });
+    // A confirmed action may return once a cold launch can detect the purge.
+    // If recording fails, still wait for the queued removal attempt.
+    if (ready == null || await ready == null) await completed;
+  }
 
-  Future<File> _purgeMarker(String directory) async {
+  Future<T> _withPurgeMarker<T>(Future<T> Function() action) {
+    final next = _purgeMarkerTail.then((_) => action());
+    _purgeMarkerTail = next.then<void>((_) {}, onError: (Object _) {});
+    return next;
+  }
+
+  Future<File?> _reservePurgeMarker([String? cacheDirectory]) =>
+      _withPurgeMarker(() async {
+        try {
+          final marker = await _purgeMarker(cacheDirectory);
+          if (marker == null) return null;
+          if (_needsReset == null) {
+            final interrupted = await _purgePending(marker);
+            _needsReset ??= interrupted;
+          }
+          if (_activePurgeMarkers == 0) {
+            await marker.parent.create(recursive: true);
+            await marker.writeAsString('pending', flush: true);
+          }
+          _activePurgeMarkers++;
+          return marker;
+        } catch (error, stackTrace) {
+          _needsReset = true;
+          _report(error, stackTrace);
+          return null;
+        }
+      });
+
+  Future<void> _releasePurgeMarker(File marker, {required bool removed}) =>
+      _withPurgeMarker(() async {
+        _activePurgeMarkers--;
+        if (!removed) _needsReset = true;
+        if (_activePurgeMarkers == 0 && _needsReset == false) {
+          await _clearPurgeMarker(marker);
+        }
+      });
+
+  Future<File?> _purgeMarker(String? directory) async {
     final root = _purgeDirectory ??= await _purgeRoot?.call();
-    return File(
-      p.join(root?.path ?? p.dirname(directory), 'saved_message_purge'),
-    );
+    final base =
+        root?.path ??
+        (directory == null ? (await _root())?.path : p.dirname(directory));
+    return base == null ? null : File(p.join(base, 'saved_message_purge'));
   }
 
   Future<bool> _purgePending(File marker) async {
@@ -300,14 +362,17 @@ final class SavedMessageStore {
     String? relayAuthor,
   }) => _enqueue<_DiskResult?>((directory) async {
     if (!isCurrent(ticket)) return null;
-    final needsReset = _needsReset ??= await _purgePending(
-      await _purgeMarker(directory),
+    final marker = (await _purgeMarker(directory))!;
+    final needsReset = await _withPurgeMarker(
+      () async => _needsReset ??= await _purgePending(marker),
     );
     if (needsReset) {
       if (action != _DiskAction.save) return null;
       await _sweep(directory, retained: const {});
-      await _clearPurgeMarker(await _purgeMarker(directory));
-      _needsReset = false;
+      await _withPurgeMarker(() async {
+        if (_activePurgeMarkers == 0) await _clearPurgeMarker(marker);
+        _needsReset = false;
+      });
     }
     if (!isCurrent(ticket)) return null;
     final result = await _runDisk(

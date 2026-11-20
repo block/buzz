@@ -323,9 +323,7 @@ class ChannelActions {
       mayPublish: mayPublish,
     );
     _ensureCommunityValid();
-    _removeSavedChannel(channelId, scope);
-    _ref.read(channelsProvider.notifier).noteConfirmedRemoval(channelId);
-    await _refreshChannelState(channelId);
+    await _finishConfirmedRemoval(channelId, scope);
   }
 
   /// Updates the user-editable channel metadata and refreshes cached details.
@@ -380,19 +378,23 @@ class ChannelActions {
       tags: buildDeleteChannelTags(channelId),
     );
     _ensureCommunityValid();
-    _removeSavedChannel(channelId, scope);
-    _ref.read(channelsProvider.notifier).noteConfirmedRemoval(channelId);
-    await _refreshChannelState(channelId);
+    await _finishConfirmedRemoval(channelId, scope);
   }
 
-  /// Retires the channel's saved pages now; the disk purge runs behind any
-  /// queued cache work without holding up the confirmed action.
-  void _removeSavedChannel(String channelId, SavedMessageScope? scope) {
-    if (scope == null) return;
-    unawaited(
-      _ref.read(savedMessageStoreProvider).removeChannel(scope, channelId),
-    );
-    _ref.invalidate(savedChannelPreviewProvider(channelId));
+  Future<void> _finishConfirmedRemoval(
+    String channelId,
+    SavedMessageScope? scope,
+  ) async {
+    if (scope != null) {
+      final recorded = _ref
+          .read(savedMessageStoreProvider)
+          .removeChannel(scope, channelId, deferDisk: true);
+      _ref.invalidate(savedChannelPreviewProvider(channelId));
+      await recorded;
+    }
+    _ensureCommunityValid();
+    _ref.read(channelsProvider.notifier).noteConfirmedRemoval(channelId);
+    await _refreshChannelState(channelId);
   }
 
   Future<void> setCanvas({
