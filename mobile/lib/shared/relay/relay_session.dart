@@ -292,7 +292,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         response.headers['content-type'],
       );
       _activateRateLimitGateFromHttpError(body);
-      throw RelayException(response.statusCode, body);
+      throw RelayQueryException(response.statusCode, body);
     }
     // Decoding runs off the UI isolate, so the session can retire meanwhile.
     // A retired session reports that, not whatever its bytes decoded to.

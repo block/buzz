@@ -52,6 +52,16 @@ enum RelayReason {
     if (colon < 0) return other;
     return _prefixes[message.substring(0, colon).trim().toLowerCase()] ?? other;
   }
+
+  /// The class of an HTTP error [status] from the relay's `/query`. Its body
+  /// is not read: the status alone says rate limit, refusal or server error.
+  static RelayReason fromHttpStatus(int status) => switch (status) {
+    429 => rateLimited,
+    401 => authRequired,
+    403 => restricted,
+    >= 500 && < 600 => error,
+    _ => other,
+  };
 }
 
 /// An error from a relay call that says which call and why.
