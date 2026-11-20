@@ -623,34 +623,44 @@ Future<void> _showMoveSectionSheet(
   // WidgetRef is disposed with it. Use the page's container throughout.
   final container = ProviderScope.containerOf(context, listen: false);
   // A notification can switch communities while the picker or name dialog is
-  // open; edit only the community that opened it.
+  // open. Both close then, and only the community that opened them is edited.
   final config = container.read(relayConfigProvider);
-  void edit(void Function(ChannelSectionsNotifier sections) change) {
+  bool inScope() {
     final current = container.read(relayConfigProvider);
-    if (current.storedOrigin != config.storedOrigin ||
-        current.nsec != config.nsec) {
-      return;
-    }
-    change(container.read(channelSectionsProvider.notifier));
+    return current.storedOrigin == config.storedOrigin &&
+        current.nsec == config.nsec;
+  }
+
+  void edit(void Function(ChannelSectionsNotifier sections) change) {
+    if (inScope()) change(container.read(channelSectionsProvider.notifier));
   }
 
   final sections = [...container.read(channelSectionsProvider).store.sections]
     ..sort((a, b) => a.order.compareTo(b.order));
   BuildContext? sheet;
+  void close() {
+    final open = sheet;
+    if (open != null && open.mounted) Navigator.of(open).pop();
+  }
+
   // Desktop's unified layout can lock legacy filing while this is open.
   final lock = container.listen(
     channelSectionsProvider.select((state) => state.editable),
     (_, editable) {
-      final open = sheet;
-      if (!editable && open != null && open.mounted) Navigator.of(open).pop();
+      if (!editable) close();
     },
   );
+  final scope = container.listen(relayConfigProvider, (_, _) {
+    if (!inScope()) close();
+  });
   await showBuzzModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
     builder: (sheetContext) {
-      // A lock that landed before this first frame found no sheet to close.
-      if (sheet == null && !container.read(channelSectionsProvider).editable) {
+      // A lock or switch that landed before this first frame found no sheet
+      // to close.
+      if (sheet == null &&
+          (!container.read(channelSectionsProvider).editable || !inScope())) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (sheetContext.mounted) Navigator.of(sheetContext).pop();
         });
@@ -688,7 +698,10 @@ Future<void> _showMoveSectionSheet(
                   title: const Text('New section…'),
                   onTap: () async {
                     Navigator.of(sheetContext).pop();
-                    final name = await _showSectionNameDialog(context);
+                    final name = await _showSectionNameDialog(
+                      context,
+                      inScope: inScope,
+                    );
                     if (name == null || name.isEmpty) return;
                     edit((s) => s.createSection(name, channelId: channel.id));
                   },
@@ -708,22 +721,33 @@ Future<void> _showMoveSectionSheet(
         ),
       );
     },
-  ).whenComplete(lock.close);
+  ).whenComplete(() {
+    lock.close();
+    scope.close();
+  });
 }
 
-Future<String?> _showSectionNameDialog(BuildContext context) =>
-    showBuzzDialog<String>(
-      context: context,
-      builder: (_) => const _SectionNameDialog(),
-    );
+Future<String?> _showSectionNameDialog(
+  BuildContext context, {
+  required bool Function() inScope,
+}) => showBuzzDialog<String>(
+  context: context,
+  builder: (_) => _SectionNameDialog(inScope: inScope),
+);
 
 /// Owns its controller so the field outlives the dialog's exit animation.
-class _SectionNameDialog extends HookWidget {
-  const _SectionNameDialog();
+class _SectionNameDialog extends HookConsumerWidget {
+  const _SectionNameDialog({required this.inScope});
+
+  /// False once the community that opened the dialog is no longer active.
+  final bool Function() inScope;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final controller = useTextEditingController();
+    ref.listen(relayConfigProvider, (_, _) {
+      if (!inScope()) Navigator.of(context).pop();
+    });
     return AlertDialog(
       title: const Text('New Section'),
       content: TextField(controller: controller, autofocus: true),

@@ -716,8 +716,10 @@ void main() {
     ('New section…', true),
     ('New section…', false),
   ]) {
-    testWidgets('Move to section: $pick files nothing once the community '
-        'changes behind the picker (new signing key: $newKey)', (tester) async {
+    testWidgets('Move to section: $pick closes and files nothing once the '
+        'community changes behind it (new signing key: $newKey)', (
+      tester,
+    ) async {
       tester.view.physicalSize = const Size(1200, 3000);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
@@ -772,15 +774,14 @@ void main() {
         await tester.tap(find.text(pick));
         await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField), 'Later');
-        switchCommunity();
-        await tester.pump();
-        await tester.tap(find.text('Create'));
-      } else {
-        switchCommunity();
-        await tester.pump();
-        await tester.tap(find.text(pick));
       }
+      switchCommunity();
       await tester.pumpAndSettle();
+
+      // The stale picker or name dialog closes rather than offering a pick
+      // that would be dropped.
+      expect(find.text(pick), findsNothing);
+      expect(find.text('Create'), findsNothing);
 
       expect(tester.takeException(), isNull);
       expect(
