@@ -99,6 +99,7 @@ extension _MentionLinks on MessageContent {
         fallbackStyle ?? link.style,
         agentMentionPubkeys,
         onMentionTap,
+        ownBubble: bubble && ownMessage,
       ) ??
       _buildLink(
         link,

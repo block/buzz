@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/features/channels/message_content.dart';
+import 'package:buzz/features/channels/message_mention_pill.dart';
+import 'package:buzz/shared/relay/relay_provider.dart';
+import 'package:nostr/nostr.dart' as nostr;
 
 import '../../helpers/widget_helpers.dart';
 
@@ -143,6 +146,79 @@ void main() {
     expect(taps, [bob, bobBot]);
     expect(find.textContaining('-bot and', findRichText: true), findsOneWidget);
     expect(find.textContaining(bob, findRichText: true), findsNothing);
+  });
+
+  // Review of #9699: an edit saves a mention as an identity link, and its
+  // pill is highlighted and tinted exactly as the tagged mention it replaced.
+  testWidgets('an identity link pill is highlighted and tinted as a tagged '
+      'mention is', (tester) async {
+    final me = 'a' * 64;
+    final bob = 'b' * 64;
+    String link(String name, String key) =>
+        '[@$name](nostr:'
+        '${nostr.Nip19.encode(prefix: nostr.Nip19Prefix.npub, data: key)})';
+    Future<(Color?, Color?)> pill(
+      String content,
+      String key, {
+      required bool own,
+      required bool tagged,
+    }) async {
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [myPubkeyProvider.overrideWithValue(me)],
+          child: MessageContent(
+            key: UniqueKey(),
+            content: content,
+            bubble: true,
+            ownMessage: own,
+            mentionNames: {me: 'Me', bob: 'Bob'},
+            tags: [
+              if (tagged) ['p', key],
+            ],
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final found = find.byType(MessageMentionPill);
+      expect(found, findsOneWidget, reason: content);
+      final fill = tester.widget<Container>(
+        find.descendant(of: found, matching: find.byType(Container)),
+      );
+      final at = tester.widget<Text>(
+        find.descendant(of: found, matching: find.text('@')),
+      );
+      return ((fill.decoration! as BoxDecoration).color, at.style?.color);
+    }
+
+    final looks = <String, (Color?, Color?)>{};
+    for (final (name, key, own) in [
+      // The viewer mentioned in someone else's bubble: the self highlight.
+      ('Me', me, false),
+      // A mention in the viewer's own bubble: the own-bubble tint.
+      ('Bob', bob, true),
+      ('Me', me, true),
+      ('Bob', bob, false),
+    ]) {
+      final reason = '$name, own bubble: $own';
+      final tagged = await pill('hi @$name', key, own: own, tagged: true);
+      final linked = await pill(
+        'hi ${link(name, key)}',
+        key,
+        own: own,
+        tagged: false,
+      );
+      expect(linked, tagged, reason: reason);
+      looks[reason] = linked;
+    }
+    // The cases differ, so the comparison above is not of one default look.
+    expect(
+      looks['Me, own bubble: false'],
+      isNot(looks['Bob, own bubble: false']),
+    );
+    expect(
+      looks['Bob, own bubble: true'],
+      isNot(looks['Bob, own bubble: false']),
+    );
   });
 
   for (final tagged in [false, true]) {

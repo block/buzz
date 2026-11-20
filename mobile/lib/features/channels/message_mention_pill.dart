@@ -95,15 +95,17 @@ class MessageMentionPill extends ConsumerWidget {
 
 /// The pill for an identity link, `[@Name](nostr:npub1…)`: the mention an
 /// edit writes into the body. The link names its own key, so it needs no
-/// tag, shows the name as written and opens that person. Null for any other
-/// link.
+/// tag, shows the name as written and opens that person. It takes the self
+/// highlight and the own-bubble tint as a tagged mention's pill does. Null
+/// for any other link.
 InlineSpan? identityMentionSpan(
   LinkBuildDetails link,
   String url,
   TextStyle style,
   Set<String> agentMentionPubkeys,
-  void Function(String pubkey)? onMentionTap,
-) {
+  void Function(String pubkey)? onMentionTap, {
+  bool ownBubble = false,
+}) {
   final pubkey = mentionIdentityLinkKey(url);
   if (pubkey == null) return null;
   var text = '';
@@ -117,6 +119,8 @@ InlineSpan? identityMentionSpan(
   if (!isMentionIdentityLabel(label)) return null;
   final pill = MessageMentionPill(
     label: label.substring(1),
+    pubkey: pubkey,
+    ownBubble: ownBubble,
     isAgent: agentMentionPubkeys.any((key) => key.toLowerCase() == pubkey),
     textStyle: style,
   );
