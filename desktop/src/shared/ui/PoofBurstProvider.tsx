@@ -145,15 +145,6 @@ export function PoofBurstProvider({ children }: { children: React.ReactNode }) {
       const image = new Image();
       image.src = frame.src;
     }
-
-    void loadPoofAudioBuffer();
-    try {
-      poofAudio ??= new Audio(POOF_SOUND_URL);
-      poofAudio.preload = "auto";
-      poofAudio.load();
-    } catch {
-      // Best-effort only.
-    }
   }, []);
 
   useEffect(() => {
