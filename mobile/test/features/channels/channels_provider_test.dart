@@ -2759,20 +2759,29 @@ void main() {
     expect(notifier.activityFor(_channelA).at, live.createdAt);
 
     // Deleting the latest post re-reads the channel's newest one.
-    session.recentMessages = [old];
-    session.emit(
-      NostrEvent.fromJson(
-        signNostrEvent(
-          kind: EventKind.deletion,
-          content: '',
-          secretKey: _activityKey,
-          tags: [
-            ['h', _channelA],
-            ['e', live.id],
-          ],
-        ).toMap(),
-      ),
+    NostrEvent deletionOf(NostrEvent post) => NostrEvent.fromJson(
+      signNostrEvent(
+        kind: EventKind.deletion,
+        content: '',
+        secretKey: _activityKey,
+        tags: [
+          ['h', _channelA],
+          ['e', post.id],
+        ],
+      ).toMap(),
     );
+    session.recentMessages = [old];
+    session.emit(deletionOf(live));
+    await _waitUntil(() => notifier.activityFor(_channelA).at == old.createdAt);
+
+    // So does a deletion made while offline, which the catch-up returns.
+    final gone = message('gone', now - 4);
+    session.emit(gone);
+    await _waitUntil(
+      () => notifier.activityFor(_channelA).at == gone.createdAt,
+    );
+    session.recentMessages = [old, deletionOf(gone)];
+    await reconnect();
     await _waitUntil(() => notifier.activityFor(_channelA).at == old.createdAt);
 
     // A channel no Active section shows skips its gap read, and reads as
