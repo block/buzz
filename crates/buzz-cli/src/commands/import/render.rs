@@ -204,24 +204,54 @@ fn render_slack_block(value: &serde_json::Value, names: &HashMap<String, String>
             format!("```\n{body}\n```")
         }
         "divider" => "---".to_string(),
-        _ => {
-            if let Some(text) = object.get("text") {
-                text.as_str()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| render_slack_block(text, names))
+        "image" => {
+            let url = object
+                .get("image_url")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let label = object
+                .get("alt_text")
+                .and_then(serde_json::Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or("image");
+            if url.is_empty() {
+                String::new()
             } else {
-                let children = child_elements(object);
+                format!("[{label}]({url})")
+            }
+        }
+        _ => {
+            let mut parts = Vec::new();
+            if let Some(text) = object.get("text") {
+                parts.push(
+                    text.as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| render_slack_block(text, names)),
+                );
+            } else {
                 let separator = if matches!(block_type, "rich_text" | "section") {
                     "\n"
                 } else {
                     ""
                 };
-                children
-                    .iter()
-                    .map(|child| render_slack_block(child, names))
-                    .collect::<Vec<_>>()
-                    .join(separator)
+                parts.push(
+                    child_elements(object)
+                        .iter()
+                        .map(|child| render_slack_block(child, names))
+                        .collect::<Vec<_>>()
+                        .join(separator),
+                );
             }
+            // A section lists its label/value pairs in `fields`, beside or
+            // instead of `text`.
+            let fields = object
+                .get("fields")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            parts.extend(fields.iter().map(|field| render_slack_block(field, names)));
+            parts.retain(|part| !part.trim().is_empty());
+            parts.join("\n")
         }
     };
 

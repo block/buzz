@@ -878,6 +878,20 @@ mod tests {
         .expect("section");
         assert_eq!(render_slack_blocks(&section, &names), "@Alice said a & b");
 
+        // A section's fields and an image block are visible content too.
+        let card: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[{"type":"section","text":{"type":"mrkdwn","text":"Build"},
+                 "fields":[{"type":"mrkdwn","text":"*Status:* ok"},
+                           {"type":"plain_text","text":"main"}]},
+                {"type":"section","fields":[{"type":"mrkdwn","text":"only fields"}]},
+                {"type":"image","image_url":"https://example.test/a.png","alt_text":"chart"}]"#,
+        )
+        .expect("card");
+        assert_eq!(
+            render_slack_blocks(&card, &names),
+            "Build\n**Status:** ok\nmain\nonly fields\n[chart](https://example.test/a.png)"
+        );
+
         let attachment: export::SlackAttachment = serde_json::from_str(
             r#"{"fallback":"fallback only","original_url":"https://example.test/source"}"#,
         )
