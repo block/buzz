@@ -330,7 +330,12 @@ void main() {
         semanticsLabel: 'Current',
       ),
     ]);
-    // Unknown here: the label written into the link, escapes removed.
+    // Unknown here (a nameless agent's compact npub is no name): the label
+    // written into the link, escapes removed.
+    expect(
+      _pieces('hi $link'),
+      _pieces('hi $link', mentionNames: {_alice: shortPubkey(_alice)}),
+    );
     expect(_pieces('hi $link'), [
       const PreviewText('hi '),
       const PreviewMention(

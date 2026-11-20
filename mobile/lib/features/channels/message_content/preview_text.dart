@@ -457,7 +457,10 @@ class _PreviewBuilder {
         .replaceAllMapped(_escapedPunctuation, (m) => m[1]!)
         .replaceAll('\u00A0', ' ');
     if (!isMentionIdentityLabel(written)) return null;
-    final name = mentionLabels[pubkey] ?? mentionNames[pubkey];
+    final name = mentionIdentityLinkName(
+      pubkey,
+      mentionLabels[pubkey] ?? mentionNames[pubkey],
+    );
     final fullLabel = name ?? written.substring(1);
     return PreviewMention(
       pubkey: pubkey,
