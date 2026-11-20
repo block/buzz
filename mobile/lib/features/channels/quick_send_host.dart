@@ -187,7 +187,8 @@ void _keepDraft(ComposeDraftsNotifier drafts, Channel dm, String content) {
     key: key,
     channelId: dm.id,
     text: before == null ? content : '${before.text}\n\n$content',
-    mentionKeys: before?.mentionKeys ?? const {},
+    mentions: before?.mentions ?? const [],
+    mentionsInvalid: before?.mentionsInvalid ?? false,
   );
 }
 

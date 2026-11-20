@@ -29,6 +29,7 @@ import '../../shared/reminders/reminder_service.dart';
 import 'channel_management_provider.dart';
 import 'me/me_page.dart';
 import 'channels_provider.dart';
+import 'compose_bar.dart';
 import '../../shared/emoji/emoji_picker.dart';
 import 'reaction_row.dart';
 import '../../shared/emoji/recent_emoji_provider.dart';
@@ -199,9 +200,8 @@ Future<void> showMessageActions({
                           title: const Text('Edit message'),
                           onTap: () {
                             if (!_selectMessageAction(sheetContext)) return;
-                            _showEditSheet(
+                            showMessageEditSheet(
                               context: context,
-                              ref: ref,
                               message: message,
                               channelId: channelId,
                             );
@@ -928,73 +928,6 @@ class _QuickReactionCircle extends StatelessWidget {
       ),
     );
   }
-}
-
-void _showEditSheet({
-  required BuildContext context,
-  required WidgetRef ref,
-  required TimelineMessage message,
-  required String channelId,
-}) {
-  final controller = TextEditingController(text: message.content);
-  showBuzzModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
-    showDragHandle: true,
-    builder: (sheetContext) => Padding(
-      padding: EdgeInsets.fromLTRB(
-        Grid.gutter,
-        0,
-        Grid.gutter,
-        MediaQuery.viewInsetsOf(sheetContext).bottom,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: controller,
-            autofocus: true,
-            minLines: 1,
-            maxLines: 5,
-            decoration: const InputDecoration(hintText: 'Edit message'),
-          ),
-          const SizedBox(height: Grid.xxs),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              TextButton(
-                onPressed: () => Navigator.of(sheetContext).pop(),
-                child: const Text('Cancel'),
-              ),
-              const SizedBox(width: Grid.half),
-              FilledButton(
-                onPressed: () {
-                  final text = controller.text.trim();
-                  if (text.isEmpty || text == message.content) {
-                    Navigator.of(sheetContext).pop();
-                    return;
-                  }
-                  ref
-                      .read(channelActionsProvider)
-                      .editMessage(
-                        channelId: channelId,
-                        eventId: message.id,
-                        content: text,
-                        mediaTags: buildCustomEmojiTags(
-                          text,
-                          ref.read(customEmojiListProvider),
-                        ),
-                      );
-                  Navigator.of(sheetContext).pop();
-                },
-                child: const Text('Save'),
-              ),
-            ],
-          ),
-        ],
-      ),
-    ),
-  );
 }
 
 void _confirmDelete({

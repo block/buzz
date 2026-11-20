@@ -305,7 +305,7 @@ void main() {
       key: _Relay.dmId,
       channelId: _Relay.dmId,
       text: 'Half a @Sam',
-      mentionKeys: {'Sam': 'sam-pubkey'},
+      mentions: [ComposeDraftMention(start: 7, end: 11, pubkey: 'a' * 64)],
     );
 
     // A second quick send goes to the same DM.
@@ -337,7 +337,9 @@ void main() {
     );
     final kept = drafts.draftFor(_Relay.dmId)!;
     expect(kept.text, 'Half a @Sam\n\nCall back');
-    expect(kept.mentionKeys, {'Sam': 'sam-pubkey'});
+    expect(kept.mentions, [
+      ComposeDraftMention(start: 7, end: 11, pubkey: 'a' * 64),
+    ]);
 
     // A socket that drops just before the message goes out keeps it too.
     relay.dropBeforeNextMessage = true;

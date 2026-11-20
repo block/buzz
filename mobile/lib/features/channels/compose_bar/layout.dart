@@ -396,11 +396,17 @@ class _ComposeBarLayout extends HookWidget {
   }
 
   Widget _buildTextField(BuildContext context) {
-    return Focus(
-      canRequestFocus: false,
-      skipTraversal: true,
-      onKeyEvent: onKeyEvent,
-      child: _buildEditableField(context),
+    return Actions(
+      actions: {
+        UndoTextIntent: _ComposerHistoryAction<UndoTextIntent>(controller),
+        RedoTextIntent: _ComposerHistoryAction<RedoTextIntent>(controller),
+      },
+      child: Focus(
+        canRequestFocus: false,
+        skipTraversal: true,
+        onKeyEvent: onKeyEvent,
+        child: _buildEditableField(context),
+      ),
     );
   }
 
