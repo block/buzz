@@ -235,7 +235,8 @@ pub trait AuthorityStore: Send + Sync {
     /// id as finished (later replays are `Rejected`), retryable outcomes
     /// release it. The one-use auth event admitted by `authorize_delivery` is
     /// always retained. If the gateway dies before finishing, the id stays in
-    /// flight until its request expires, so the relay keeps retrying until then.
+    /// flight until its request expires, so the relay keeps retrying until its
+    /// attempt limit or the request expiry, whichever comes first.
     async fn finish_delivery(
         &self,
         permit: DeliveryPermit,
