@@ -3037,21 +3037,21 @@ mod postgres_tests {
             .sql
             .as_str();
         assert!(through_message.contains("DROP COLUMN threads_through_timestamp"));
-        // 0089 adds the activity columns and lets a frontier have no position.
+        // 0105 adds the activity columns and lets a frontier have no position.
         let activity = MIGRATOR
             .iter()
-            .find(|m| m.version == 89)
+            .find(|m| m.version == 105)
             .expect("activity migration")
             .sql
             .as_str();
         assert!(activity.contains("ALTER COLUMN through_timestamp DROP NOT NULL"));
         assert!(activity.contains("ADD COLUMN engaged_at TIMESTAMPTZ"));
         let account_seq_column = "seq bigint not null default 0, ";
-        // 0091 records when the NIP-RS read state was carried over.
+        // 0107 records when the NIP-RS read state was carried over.
         let account_imported_column = "imported_at timestamptz, ";
         assert!(MIGRATOR
             .iter()
-            .find(|m| m.version == 91)
+            .find(|m| m.version == 107)
             .expect("per-message read migration")
             .sql
             .as_str()
