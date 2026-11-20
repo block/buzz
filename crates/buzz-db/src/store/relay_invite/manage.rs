@@ -3,8 +3,9 @@
 //! Listing never returns a code or its hash. Revocation runs the same
 //! transaction gate as an owner/admin mint: the admission lock, then the
 //! actor's role row `FOR SHARE`, then the restriction check, all before the
-//! invite row is locked. Owners and admins may revoke any invite; any other
-//! member only one they created.
+//! invite row is locked. An unknown invite is answered before the admission
+//! lock, so it never queues behind claims. Owners and admins may revoke any
+//! invite; any other member only one they created.
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row as _};
@@ -154,6 +155,27 @@ pub async fn list_relay_invites(
         .collect()
 }
 
+async fn invite_exists(
+    conn: &mut sqlx::PgConnection,
+    community: CommunityId,
+    selector: InviteSelector<'_>,
+) -> Result<bool> {
+    let query = match selector {
+        InviteSelector::Id(id) => sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM relay_invites WHERE community_id = $1 AND id = $2)",
+        )
+        .bind(community.as_uuid())
+        .bind(id),
+        InviteSelector::TokenHash(hash) => sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM relay_invites \
+             WHERE community_id = $1 AND token_hash = $2)",
+        )
+        .bind(community.as_uuid())
+        .bind(hash.as_slice()),
+    };
+    Ok(query.fetch_one(conn).await?)
+}
+
 /// Revoke one invite in `community` on behalf of `actor`.
 ///
 /// `Ok(None)` when no invite in `community` matches. Revoking a revoked
@@ -174,6 +196,19 @@ pub async fn revoke_relay_invite(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    // An unknown selector is answered without queueing behind claims on the
+    // admission lock. These unlocked reads only refuse; the locked path
+    // below re-reads everything it authorizes a write on.
+    if !invite_exists(tx.conn(), community, selector).await? {
+        if !crate::relay_members::is_relay_member_on(tx.conn(), community, actor).await? {
+            return Err(crate::DbError::InviteRevokeForbidden);
+        }
+        if principal_restricted(tx.conn(), community, actor).await? {
+            return Err(crate::DbError::InviteRestricted);
+        }
+        tx.rollback().await?;
+        return Ok(None);
+    }
     lock_admission(tx.conn(), community).await?;
     let role = lock_actor_role(tx.conn(), community, actor).await?;
     if role.is_none() {
