@@ -398,6 +398,49 @@ storageAccounting:
       cpu: "1"
       memory: 20Gi
 
+# Relay acceptance probe: a CronJob that runs `buzz-acceptance` from the relay
+# image, checks the relay's core jobs once per run, and exits (see README
+# "Acceptance probe").
+acceptance:
+  enabled: false
+  schedule: "*/5 * * * *"
+  # Bounds the whole run, including init containers. backoffLimit is 0: a
+  # retry would hide a failed run.
+  activeDeadlineSeconds: 240
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  relayUrl: ""                   # empty → relayUrl
+  stageTimeoutSeconds: 10
+  # Secret holding the probe's key (hex or nsec). Empty name → a new key per
+  # run, which works only on a relay that admits any key.
+  privateKeySecret:
+    name: ""
+    key: BUZZ_PRIVATE_KEY
+  # NIP-FI assertion path in the probe container. Pair with extraInitContainers,
+  # extraVolumes and extraVolumeMounts to mint it before the run.
+  assertionFile: ""
+  # DogStatsD address. `$(HOST_IP)` expands to the node IP, e.g.
+  # "$(HOST_IP):8125" for a node-local agent. Empty → no metrics.
+  statsdAddr: ""
+  metricPrefix: buzz.acceptance
+  # Extra `key:value` metric tags. The chart always adds
+  # `image_revision:<deployed image identity>`.
+  tags: []
+  serviceAccountName: ""         # empty → the main Buzz service account
+  # tags.datadoghq.com/version is chart-owned; see README "Datadog version label".
+  podLabels: {}
+  podAnnotations: {}
+  extraInitContainers: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
 # Typed, one-shot operator jobs. The chart intentionally exposes no generic
 # command or environment registry: each job has a reviewed executable and
 # least-privilege environment contract.

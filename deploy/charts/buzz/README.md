@@ -514,6 +514,63 @@ from the deployed image identity (`image.digest` when set, otherwise
 `image.tag`, otherwise `Chart.AppVersion`). The value is never hashed or
 sanitized.
 
+## Acceptance probe
+
+`acceptance.enabled=true` adds a CronJob that runs `buzz-acceptance` from the
+relay image. Each run checks the relay's core jobs once (NIP-11, connect and
+NIP-42 auth, channel create, publish, fan-out, history, access control and
+cleanup), prints a JSON report and exits: 0 when every check passed, 1 when
+one failed, 2 when the probe could not run or report. Because the probe ships
+in the relay image, a run always matches the relay build it checks.
+
+- The probe connects to `acceptance.relayUrl`, or to `relayUrl` when that is
+  empty. Each run creates one private channel with a 1 h TTL and deletes it.
+- `acceptance.privateKeySecret.name` names a Secret with the probe's key. Left
+  empty, every run uses a new key, which works only on a relay that admits
+  any key.
+- `acceptance.statsdAddr` sends DogStatsD metrics under
+  `acceptance.metricPrefix` (`<prefix>.runs`, `<prefix>.run.seconds`,
+  `<prefix>.check.runs`, `<prefix>.check.seconds`, `<prefix>.stage.seconds`).
+  `$(HOST_IP)` expands to the node IP, for example `$(HOST_IP):8125` for a
+  node-local agent. Every series carries `image_revision` (the deployed image
+  identity: `image.digest`, else `image.tag`, else `Chart.AppVersion`), the
+  relay's NIP-11 `relay_version`, and each `acceptance.tags` entry.
+- `concurrencyPolicy` is `Forbid` and `backoffLimit` is 0: a retry would
+  hide a failed run. `acceptance.activeDeadlineSeconds` bounds the whole run,
+  including init containers.
+
+On a relay that enforces NIP-FI, the probe needs a fresh assertion for its
+key. Minting one is deployment-specific, so the chart takes it as a file: an
+init container writes it to a shared volume and `acceptance.assertionFile`
+points the probe at it. The probe re-reads the file before every connection.
+
+```yaml
+acceptance:
+  enabled: true
+  privateKeySecret:
+    name: buzz-acceptance-key
+  statsdAddr: "$(HOST_IP):8125"
+  tags: ["env:staging"]
+  assertionFile: /var/run/assertion/token
+  extraInitContainers:
+    - name: mint-assertion
+      image: example.com/assertion-minter:v1
+      args: [--out, /var/run/assertion/token]
+      volumeMounts:
+        - name: assertion
+          mountPath: /var/run/assertion
+  extraVolumes:
+    - name: assertion
+      emptyDir: {}
+  extraVolumeMounts:
+    - name: assertion
+      mountPath: /var/run/assertion
+      readOnly: true
+```
+
+The extension values follow the same rules as the relay Pod extensions above.
+Keep the assertion's lifetime longer than `acceptance.activeDeadlineSeconds`.
+
 ## Datadog version label
 
 Every Pod the chart renders — relay, pairing relay, storage accounting, and the
