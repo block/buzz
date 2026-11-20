@@ -130,6 +130,13 @@ private final class NavigationClipView: UIView {
   }
 }
 
+/// Recognizes a press-and-hold on a rail control and remembers where it began,
+/// so Flutter can read the finger's travel (for slide-to-cancel).
+private final class NavigationLongPressRecognizer: UILongPressGestureRecognizer {
+  var actionID = ""
+  var origin = CGPoint.zero
+}
+
 private final class NavigationContentController: UIViewController {
   let scrollView = UIScrollView()
   override func loadView() {
@@ -553,8 +560,10 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       navigation.navigationBar.tintColor = Self.color(args["foreground"])
       trackedAvatar = nil
       reportedAvatarFrame = nil
-      if let leading = args["leading"] as? [String: Any],
-         let surface = makeControlGroup([leading]).customView {
+      // A rail slot holds one control, or several sharing one glass capsule.
+      let shared = args["actions"] as? [[String: Any]] ?? []
+      let group = shared.isEmpty ? (args["leading"] as? [String: Any]).map { [$0] } : shared
+      if let group, let surface = makeControlGroup(group).customView {
         standaloneSurface = surface
         container.addSubview(surface)
       }
@@ -884,6 +893,38 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     }
   }
 
+  /// A tap still activates the button. Holding for Flutter's long-press delay
+  /// cancels that touch and reports the hold instead. The touch must outlive
+  /// the hold, so Flutter keeps the native configuration stable meanwhile.
+  private func addLongPress(to button: UIButton, id: String) {
+    let recognizer = NavigationLongPressRecognizer(target: self, action: #selector(longPressChanged(_:)))
+    recognizer.actionID = id
+    recognizer.minimumPressDuration = 0.5
+    button.addGestureRecognizer(recognizer)
+  }
+
+  @objc private func longPressChanged(_ recognizer: UILongPressGestureRecognizer) {
+    guard let recognizer = recognizer as? NavigationLongPressRecognizer else { return }
+    let point = recognizer.location(in: container.window ?? container)
+    let phase: String
+    switch recognizer.state {
+    case .began:
+      recognizer.origin = point
+      phase = "start"
+    case .changed: phase = "move"
+    case .ended: phase = "end"
+    // A recognizer that never began has nothing for Flutter to cancel.
+    case .cancelled: phase = "cancel"
+    default: return
+    }
+    channel.invokeMethod("actionLongPress", arguments: [
+      "id": recognizer.actionID,
+      "phase": phase,
+      "dx": point.x - recognizer.origin.x,
+      "dy": point.y - recognizer.origin.y
+    ])
+  }
+
   private func makeControlGroup(_ actions: [[String: Any]]) -> UIBarButtonItem {
     if actions.count == 1 && !standaloneControl {
       let item = makeItem(actions[0])
@@ -908,7 +949,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     surface.layer.cornerCurve = .circular
     surface.clipsToBounds = true
     let stack = UIStackView()
-    stack.axis = .horizontal
+    // Duo's rail is a vertical column, so its shared capsules stack downward.
+    stack.axis = standaloneControl ? .vertical : .horizontal
     stack.translatesAutoresizingMaskIntoConstraints = false
     surface.contentView.addSubview(stack)
     for data in actions {
@@ -936,6 +978,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
         button.isEnabled = item.isEnabled
         button.accessibilityLabel = item.accessibilityLabel
         button.accessibilityValue = item.accessibilityValue
+      }
+      if data["longPress"] as? Bool == true {
+        addLongPress(to: button, id: data["id"] as? String ?? "")
       }
       button.tintColor = navigation.navigationBar.tintColor
       let slot = UIView()

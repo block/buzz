@@ -1163,6 +1163,47 @@ class RunnerTests: XCTestCase {
   }
 
   @MainActor
+  func testStandaloneRailGroupSharesOneVerticalCapsule() throws {
+    let parent = UIViewController()
+    let bar = IosNavigationBarFactory(
+      messenger: NavigationTestMessenger(), parent: parent
+    ).create(withFrame: CGRect(x: 0, y: 0, width: 76, height: 156),
+             viewIdentifier: 999988,
+             arguments: ["standaloneControl": true, "actions": [
+               ["id": "0", "label": "Search", "symbol": "magnifyingglass", "enabled": true],
+               ["id": "1", "label": "New", "symbol": "plus", "enabled": true,
+                "children": [["id": "1.0", "label": "Settings", "symbol": "gearshape",
+                              "enabled": true]]],
+               ["id": "2", "label": "Bestie", "symbol": "agent", "enabled": true,
+                "longPress": true],
+             ]])
+    bar.view().setNeedsLayout()
+    bar.view().layoutIfNeeded()
+    let surfaces = bar.view().subviews.compactMap { $0 as? UIVisualEffectView }
+      .filter { !$0.isHidden }
+    XCTAssertEqual(surfaces.count, 1, "Grouped rail actions share one glass capsule")
+    let surface = try XCTUnwrap(surfaces.first)
+    XCTAssertEqual(surface.frame.size, CGSize(width: 48, height: 144))
+    let buttons = descendants(of: surface).compactMap { $0 as? UIButton }
+    let search = try XCTUnwrap(buttons.first { $0.accessibilityLabel == "Search" })
+    let menu = try XCTUnwrap(buttons.first { $0.accessibilityLabel == "New" })
+    let searchFrame = search.convert(search.bounds, to: surface)
+    let menuFrame = menu.convert(menu.bounds, to: surface)
+    XCTAssertEqual(searchFrame.midX, menuFrame.midX, accuracy: 0.5)
+    XCTAssertLessThanOrEqual(searchFrame.maxY, menuFrame.minY + 0.5)
+    XCTAssertTrue(menu.showsMenuAsPrimaryAction)
+    // Only an action Flutter marked holdable recognizes a press-and-hold, after
+    // Flutter's own long-press delay; a tap on any control is left alone.
+    let bestie = try XCTUnwrap(buttons.first { $0.accessibilityLabel == "Bestie" })
+    let holds = (bestie.gestureRecognizers ?? []).compactMap { $0 as? UILongPressGestureRecognizer }
+    XCTAssertEqual(holds.count, 1)
+    XCTAssertEqual(holds.first?.minimumPressDuration, 0.5)
+    for plain in [search, menu] {
+      XCTAssertFalse((plain.gestureRecognizers ?? []).contains { $0 is UILongPressGestureRecognizer })
+    }
+  }
+
+  @MainActor
   func testNavigationIgnoresNonFiniteScrollOffsets() throws {
     let parent = UIViewController()
     let window = UIWindow(frame: UIScreen.main.bounds)

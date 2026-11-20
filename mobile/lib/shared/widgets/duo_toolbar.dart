@@ -150,7 +150,7 @@ class DuoToolbarPortal extends HookConsumerWidget {
                       (strip.rect.height -
                               topClearance -
                               strip.bottomClearance -
-                              220)
+                              duoRailCapsuleExtent(duoRailBottomControls))
                           .clamp(0.0, double.infinity),
                 ),
                 child: SingleChildScrollView(
@@ -179,6 +179,15 @@ class DuoToolbarPortal extends HookConsumerWidget {
     );
   }
 }
+
+/// Rail height of [controls] that share one glass capsule: 48 points for each
+/// control, plus the 12-point margin that every rail capsule has.
+double duoRailCapsuleExtent(int controls) =>
+    controls > 0 ? 12 + controls * 48.0 : 0;
+
+/// Controls in the capsule that Home pins to the bottom of the rail: Search,
+/// New and Bestie. Other rail controls leave this much room below them.
+const int duoRailBottomControls = 3;
 
 /// Marks sheets whose default Close action is supplied by the Duo rail.
 class DuoSheetCloseScope extends InheritedWidget {
