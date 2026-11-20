@@ -263,31 +263,36 @@ void main() {
         findsOneWidget,
       );
       expect(tester.getTopLeft(bar).dy, 0);
-      // The header keeps its native title; its controls move into the rail.
+      // Duo keeps main's Flutter header: "Messages" stays large on the
+      // leading edge, at main's position and header height. Only the header's
+      // controls move into the rail. The rects below were measured on main.
+      final title = find.text('Messages');
       final menu = find.byWidgetPredicate(
         (widget) =>
             widget is IosMessageCreateButton &&
             widget.accessibilityLabel == 'Community menu',
       );
       final rail = find.byKey(const ValueKey('duo-toolbar-Community menu'));
-      IosNavigationBar header() => tester
-          .widgetList<IosNavigationBar>(
-            find.descendant(of: bar, matching: find.byType(IosNavigationBar)),
-          )
-          .singleWhere((navigation) => !navigation.standaloneControl);
-      expect(menu, findsNothing);
-      expect(header().title, 'Messages');
-      expect(header().actions, isEmpty);
-      expect(tester.getCenter(rail).dx, greaterThan(951 - 76));
+      void expectLeadingTitle(Rect titleRect, double headerHeight) {
+        expect(tester.widget<FrostedAppBar>(bar).useNativeNavigation, isFalse);
+        expect(tester.getRect(title), titleRect);
+        expect(tester.getSize(bar).height, headerHeight);
+        expect(menu, findsNothing);
+        expect(rail, findsOneWidget);
+      }
+
+      const wideTitle = Rect.fromLTRB(20, 19.5, 196, 48.5);
+      expectLeadingTitle(wideTitle, 76);
       final originalHeaderRect = tester.getRect(bar);
       final scrollable = find.byType(Scrollable).first;
       await tester.drag(scrollable, const Offset(0, -250));
       await tester.pumpAndSettle();
       expect(tester.getRect(bar), originalHeaderRect);
-      expect(tester.getCenter(rail).dx, greaterThan(951 - 76));
+      expectLeadingTitle(wideTitle, 76);
       tester.view.physicalSize = const Size(466, 678);
       await tester.pumpAndSettle();
       expect(tester.widget<FrostedAppBar>(bar).nativeLargeTitle, isFalse);
+      expectLeadingTitle(const Rect.fromLTRB(20, 13.5, 196, 42.5), 64);
       final closedHeaderRect = tester.getRect(bar);
       expect(closedHeaderRect.left, 0);
       expect(closedHeaderRect.right, 466);
@@ -303,7 +308,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.getRect(bar).left, 0);
       expect(tester.getSize(bar).width, 375 + 76);
-      expect(header().titleInsets.left, 76);
+      expectLeadingTitle(wideTitle.shift(const Offset(76, 0)), 76);
       expect(tester.getCenter(rail).dx, lessThan(76));
       expect(tester.takeException(), isNull);
     },

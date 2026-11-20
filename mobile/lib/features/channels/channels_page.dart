@@ -210,20 +210,22 @@ class ChannelsPage extends HookConsumerWidget {
       color: navigationPrimaryForeground(context),
     );
     final messages = messagesActionsBuilder != null;
-    // Duo's Messages header is native so its actions can move into the rail.
-    final duoNativeHeader =
+    final nativeDuoTitle =
         messages &&
-        messagesNativeActionsBuilder != null &&
         defaultTargetPlatform == TargetPlatform.iOS &&
         (DuoToolbarScope.maybeStripOf(context) ??
                 FoldGeometry.of(context).strip) !=
             null;
+    // Duo keeps the Flutter Messages header, with its leading title, and
+    // moves only the header's actions into the rail as native controls.
+    final duoRailActions =
+        nativeDuoTitle && messagesNativeActionsBuilder != null;
     final topSectionHeight = frostedAppBarHeight(
       context,
       titleStyle: headerTitleStyle,
 
       bottomHeight: _kTopSectionBottomPadding,
-      useNativeNavigation: !messages || duoNativeHeader,
+      useNativeNavigation: !messages,
       alignWithStatusRegion: messages,
     );
     // A sheet's dim barrier can't composite over Home's native soft edge, so
@@ -649,8 +651,8 @@ class ChannelsPage extends HookConsumerWidget {
         appBar: FrostedAppBar(
           key: headerKey,
           onNativeReadyChanged: (ready) => nativeHeaderReady.value = ready,
-          nativeTitle: duoNativeHeader ? 'Messages' : '',
-          useNativeNavigation: !messages || duoNativeHeader,
+          nativeTitle: nativeDuoTitle ? 'Messages' : '',
+          useNativeNavigation: !messages,
           alignWithStatusRegion: messages,
           nativeViewSuppressed: headerNativeSuppressed,
           nativeLeading: messages
@@ -675,9 +677,7 @@ class ChannelsPage extends HookConsumerWidget {
                       : communityName.substring(0, 1).toUpperCase(),
                   onPressed: openCommunitySwitcher,
                 ),
-          nativeActions: duoNativeHeader
-              ? messagesNativeActionsBuilder!(openCommunityGrid)
-              : messages
+          nativeActions: messages
               ? const []
               : [
                   if (onSearch != null)
@@ -733,9 +733,7 @@ class ChannelsPage extends HookConsumerWidget {
                   child: Text('Messages', style: headerTitleStyle),
                 )
               : const SizedBox.shrink(),
-          // While a route covers Home, Duo's header falls back to Flutter. The
-          // rail hides its controls then, so the header does not repeat them.
-          actions: duoNativeHeader
+          actions: duoRailActions
               ? const []
               : messages
               ? messagesActionsBuilder?.call(
@@ -752,7 +750,14 @@ class ChannelsPage extends HookConsumerWidget {
           bottomHeight: _kTopSectionBottomPadding,
           bottom: const SizedBox.expand(),
         ),
-        body: child!,
+        body: messages
+            ? _DuoRailActions(
+                actions: duoRailActions
+                    ? messagesNativeActionsBuilder!(openCommunityGrid)
+                    : const [],
+                child: child!,
+              )
+            : child!,
       ),
     );
     return _RouteCurrencySync(
@@ -879,4 +884,29 @@ BoxConstraints _quickActionSheetConstraints(BuildContext context) {
   return BoxConstraints(
     maxHeight: mediaQuery.size.height - mediaQuery.viewPadding.top,
   );
+}
+
+/// Projects Home's Messages actions into Duo's rail while the page is current.
+/// Its own build reads the pane state, so route changes do not rebuild the
+/// page.
+class _DuoRailActions extends StatelessWidget {
+  const _DuoRailActions({required this.actions, required this.child});
+
+  final List<IosNavigationAction> actions;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final toolbarScope = DuoToolbarScope.maybeOf(context);
+    return DuoToolbarPortal(
+      strip: toolbarScope == null
+          ? FoldGeometry.of(context).strip
+          : toolbarScope.strip,
+      active:
+          (toolbarScope?.active ?? true) &&
+          (ModalRoute.isCurrentOf(context) ?? true),
+      actions: actions,
+      child: child,
+    );
+  }
 }
