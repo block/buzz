@@ -94,7 +94,18 @@ double frostedAppBarHeight(
   double titleContentHeight = 0,
   bool nativeLargeTitle = false,
   bool useNativeNavigation = true,
+  bool alignWithStatusRegion = false,
 }) {
+  final portraitHeader =
+      alignWithStatusRegion && defaultTargetPlatform == TargetPlatform.iOS
+      ? IosNavigationMetrics.of(context).portraitHeaderFor(
+          View.of(context).physicalSize / View.of(context).devicePixelRatio,
+        )
+      : null;
+  if (portraitHeader != null && useNativeNavigation && !nativeLargeTitle) {
+    return max(MediaQuery.paddingOf(context).top, portraitHeader.bottom) +
+        bottomHeight;
+  }
   if (useNativeNavigation && defaultTargetPlatform == TargetPlatform.iOS) {
     return MediaQuery.paddingOf(context).top +
         _nativeCompactHeight(context, titleContentHeight) +
@@ -192,6 +203,9 @@ class FrostedAppBar extends StatelessWidget {
   /// use the native soft backdrop on iOS.
   final bool useNativeNavigation;
 
+  /// Places the chat header beside the unfolded portrait status cluster.
+  final bool alignWithStatusRegion;
+
   /// Duration for coordinated native header and overlapping control movement.
   final Duration nativeLayoutDuration;
 
@@ -224,6 +238,7 @@ class FrostedAppBar extends StatelessWidget {
     this.nativeLargeTitle = false,
     this.nativeTitleInsets = EdgeInsets.zero,
     this.useNativeNavigation = true,
+    this.alignWithStatusRegion = false,
     this.nativeLayoutDuration = Duration.zero,
     this.nativeLeading,
     this.nativeActions,
@@ -357,10 +372,17 @@ class FrostedAppBar extends StatelessWidget {
             ? (IosNavigationMetrics.of(context).largeTitleHeight - scrollOffset)
                   .clamp(0.0, IosNavigationMetrics.of(context).largeTitleHeight)
             : 0.0;
-        final barHeight =
-            MediaQuery.paddingOf(context).top +
-            _nativeCompactHeight(context, titleContentHeight) +
-            extra;
+        final portraitHeader = alignWithStatusRegion && !nativeLargeTitle
+            ? IosNavigationMetrics.of(context).portraitHeaderFor(
+                View.of(context).physicalSize /
+                    View.of(context).devicePixelRatio,
+              )
+            : null;
+        final barHeight = portraitHeader == null
+            ? MediaQuery.paddingOf(context).top +
+                  _nativeCompactHeight(context, titleContentHeight) +
+                  extra
+            : max(MediaQuery.paddingOf(context).top, portraitHeader.bottom);
         return AnimatedPositioned(
           duration: layoutDuration,
           curve: Curves.easeInOutCubic,

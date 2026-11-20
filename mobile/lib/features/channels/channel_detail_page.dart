@@ -180,7 +180,11 @@ enum InitialThreadRouteBehavior {
 double _conversationHeaderHeight(
   BuildContext context, {
   double titleContentHeight = 0,
-}) => frostedAppBarHeight(context, titleContentHeight: titleContentHeight);
+}) => frostedAppBarHeight(
+  context,
+  titleContentHeight: titleContentHeight,
+  alignWithStatusRegion: true,
+);
 
 class _ResolvedChannelDetailPage extends HookConsumerWidget {
   final Channel channel;
@@ -714,6 +718,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
         nativeTitleInsets: duoContentInsetsOf(context),
+        alignWithStatusRegion: true,
         automaticallyImplyLeading:
             !ConversationPaneScope.isBaseRouteOf(context) ||
             !usesConversationPanes(

@@ -503,6 +503,17 @@ class RunnerTests: XCTestCase {
     }
     let paneMaterial = try XCTUnwrap(bar.view().subviews.first as? UIVisualEffectView)
     XCTAssertEqual(paneMaterial.frame, bar.view().bounds, "Portrait panes retain the full native navigation backdrop")
+    var chipArguments = arguments
+    chipArguments["inlinePortrait"] = true
+    chipArguments["horizontalControls"] = true
+    chipArguments["back"] = true
+    messenger.configure(chipArguments)
+    bar.view().layoutIfNeeded()
+    let chip = try XCTUnwrap(bar.view().subviews.compactMap { $0 as? NavigationTitleView }.first)
+    let back = try XCTUnwrap(bar.view().subviews.last { $0 !== chip && $0.frame.minX == 16 })
+    XCTAssertNotNil(chip.portraitSlot)
+    XCTAssertEqual(chip.frame.minX, back.frame.maxX + 16, accuracy: 0.5)
+    XCTAssertEqual(chip.frame.midY, back.frame.midY, accuracy: 0.5)
     var animatedArguments = arguments
     animatedArguments["titleHasAnimatedPortrait"] = true
     messenger.configure(animatedArguments)

@@ -16,6 +16,61 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 void main() {
+  testWidgets('unfolded portrait places the live avatar in the native chip', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(669, 951);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    const channel = MethodChannel('${IosNavigationBar.viewType}/847');
+    final messenger = tester.binding.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (_) async => null);
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    await tester.pumpWidget(
+      _testApp(
+        home: const IosNavigationBar(
+          title: 'Alice',
+          subtitle: '',
+          titleAvatars: [IosNavigationAction(label: 'Alice')],
+        ),
+      ),
+    );
+    final bar = find.byType(UiKitView);
+    tester.widget<UiKitView>(bar).onPlatformViewCreated!(847);
+    await tester.pump();
+    Future<void> report(String method, List<int> values) async {
+      await messenger.handlePlatformMessage(
+        channel.name,
+        channel.codec.encodeMethodCall(MethodCall(method, values)),
+        (_) {},
+      );
+      await tester.pump();
+    }
+
+    await report('portraitHeaderGeometry', [669, 951, 0, 20, 535, 56]);
+    await report('portraitSlot', [82, 28, 40, 40]);
+    expect(
+      tester.widget<UiKitView>(bar).creationParams,
+      containsPair('inlinePortrait', true),
+    );
+    expect(
+      tester.getCenter(find.byType(DmHeaderPortrait)),
+      const Offset(102, 48),
+    );
+    tester.view.physicalSize = const Size(951, 669);
+    await report('portraitHeaderGeometry', [951, 669, 0, 0, 0, 0]);
+    expect(
+      tester.widget<UiKitView>(bar).creationParams,
+      containsPair('inlinePortrait', false),
+    );
+    expect(tester.getCenter(find.byType(DmHeaderPortrait)).dx, 951 / 2);
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets(
     'animated DM portrait opens the same settings as the native title',
     (tester) async {

@@ -205,6 +205,11 @@ class IosNavigationBar extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final channel = useState<MethodChannel?>(null);
     final viewKey = useMemoized(GlobalKey.new);
+    final portraitSlot = useState<Rect?>(null);
+    final portraitHeader = IosNavigationMetrics.of(context).portraitHeaderFor(
+      View.of(context).physicalSize / View.of(context).devicePixelRatio,
+    );
+    final inlinePortrait = portraitHeader != null && titleAvatars.isNotEmpty;
     final latest = useRef(this)..value = this;
     final offset = IosNavigationScrollScope.maybeOf(context);
     final collapseRange = IosNavigationMetrics.of(context).largeTitleHeight;
@@ -355,6 +360,7 @@ class IosNavigationBar extends HookConsumerWidget {
     final portraitTopPadding = centerTitleInPane ? 12.0 : 0.0;
     final payload = <String, Object?>{
       'title': title,
+      'inlinePortrait': inlinePortrait,
       'titleMaxWidth': titleMaxWidth,
       'portraitTopPadding': portraitTopPadding,
       'titleHasAnimatedPortrait':
@@ -381,7 +387,7 @@ class IosNavigationBar extends HookConsumerWidget {
       'backdropOnly': backdropOnly,
       'standaloneControl': standaloneControl,
       'standaloneLargeTitle': standaloneLargeTitle,
-      'horizontalControls': horizontalControls,
+      'horizontalControls': horizontalControls || inlinePortrait,
       'centerTitleInPane': centerTitleInPane,
       'titleInsetLeft': titleInsets.left,
       'titleInsetRight': titleInsets.right,
@@ -403,6 +409,27 @@ class IosNavigationBar extends HookConsumerWidget {
       final current = channel.value;
       if (current == null) return null;
       current.setMethodCallHandler((call) async {
+        if (call.method == 'portraitHeaderGeometry') {
+          if (context.mounted) {
+            IosNavigationMetrics.updatePortraitHeader(
+              context,
+              call.arguments as List<Object?>,
+            );
+          }
+          return;
+        }
+        if (call.method == 'portraitSlot') {
+          final v = (call.arguments as List).cast<num>();
+          if (v.length == 4 && v.every((n) => n.isFinite) && context.mounted) {
+            portraitSlot.value = Rect.fromLTWH(
+              v[0].toDouble(),
+              v[1].toDouble(),
+              v[2].toDouble(),
+              v[3].toDouble(),
+            );
+          }
+          return;
+        }
         if (call.method == 'railGeometry') {
           if (context.mounted) {
             IosNavigationMetrics.updateRail(
@@ -475,7 +502,8 @@ class IosNavigationBar extends HookConsumerWidget {
           try {
             await current.invokeMethod<void>('configure', payload);
             if (!active) return;
-            if (latest.value.onReadyChanged != null) {
+            if (latest.value.onReadyChanged != null ||
+                latest.value.titleAvatars.isNotEmpty) {
               await current.invokeMethod<void>('prepareForReveal');
             }
             report(true);
@@ -570,15 +598,20 @@ class IosNavigationBar extends HookConsumerWidget {
       fit: StackFit.expand,
       children: [
         nativeBar,
-        if (titleAvatars.isNotEmpty)
+        if (titleAvatars.isNotEmpty &&
+            (!inlinePortrait || portraitSlot.value != null))
           Positioned(
-            top:
-                MediaQuery.viewPaddingOf(context).top +
-                portraitTopPadding -
-                (payload['titleHasAnimatedPortrait'] == true ? 4 : 0),
-            left: titleInsets.left,
-            right: titleInsets.right,
-            child: Center(
+            top: inlinePortrait
+                ? portraitSlot.value!.top
+                : MediaQuery.viewPaddingOf(context).top +
+                      portraitTopPadding -
+                      (payload['titleHasAnimatedPortrait'] == true ? 4 : 0),
+            left: inlinePortrait ? portraitSlot.value!.left : titleInsets.left,
+            right: inlinePortrait ? null : titleInsets.right,
+            width: inlinePortrait ? portraitSlot.value!.width : null,
+            height: inlinePortrait ? portraitSlot.value!.height : 64,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
               child: ExcludeSemantics(
                 child: GestureDetector(
                   key: const ValueKey('navigation-header-avatar-settings'),
@@ -591,7 +624,7 @@ class IosNavigationBar extends HookConsumerWidget {
                       isAgent: titleAvatars[i].avatarIsAgent,
                       initial: titleAvatars[i].avatarInitial ?? '?',
                       size: size,
-                      standalone: titleAvatars.length == 1,
+                      standalone: titleAvatars.length == 1 && !inlinePortrait,
                     ),
                   ),
                 ),
