@@ -86,7 +86,10 @@ class _MessageBubble extends HookConsumerWidget {
       for (final pubkey in message.mentionPubkeys) pubkey.toLowerCase(),
     };
     // Identity links name their own keys: resolve those for display only.
-    final linkedPubkeys = mentionIdentityLinkKeys(message.content);
+    final linkedPubkeys = useMemoized(
+      () => mentionIdentityLinkKeys(message.content),
+      [message.content],
+    );
     final displayedPubkeys = {...normalizedMentionPubkeys, ...linkedPubkeys};
     final mentionProfiles = <String, UserProfile?>{
       for (final pubkey in displayedPubkeys)

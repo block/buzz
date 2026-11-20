@@ -805,6 +805,44 @@ void exactMentionTests() {
     }
   });
 
+  testWidgets('picked names that fold alike are both qualified on send', (
+    tester,
+  ) async {
+    ChannelMember named(String key, String name) => ChannelMember(
+      pubkey: key,
+      displayName: name,
+      role: 'member',
+      joinedAt: DateTime(2025),
+    );
+    String? sentText;
+    await mountComposer(tester, [named(first, 'Sam'), named(second, 'ſam')], (
+      text,
+      _, {
+      mediaTags = const [],
+    }) async {
+      sentText = text;
+    });
+    Finder rows(String name) => find.descendant(
+      of: find.byKey(const ValueKey('mention-suggestions-popover')),
+      matching: find.textContaining(name),
+    );
+    await tester.enterText(find.byType(TextField), '@Sa');
+    await tester.pumpAndSettle();
+    await tester.tap(rows('Sam').first);
+    await tester.pumpAndSettle();
+    final controller = tester
+        .widget<TextField>(find.byType(TextField))
+        .controller!;
+    await tester.enterText(find.byType(TextField), '${controller.text}@ſa');
+    await tester.pumpAndSettle();
+    await tester.tap(rows('ſam').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+    await tester.pumpAndSettle();
+    // The scan reads both as one name, so each carries its key.
+    expect(sentText, '@Sam ($first) @ſam ($second)');
+  });
+
   testWidgets('closing punctuation never selects a shared name', (
     tester,
   ) async {

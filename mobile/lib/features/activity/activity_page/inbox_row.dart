@@ -41,7 +41,10 @@ class _InboxRow extends HookConsumerWidget {
     final senderPubkey = item.item.pubkey.toLowerCase();
     final mentionPubkeys = mentionedPubkeysFromTags(item.item.tags);
     // Identity links name their own keys: resolve those for display only.
-    final linkedPubkeys = mentionIdentityLinkKeys(item.item.displayContent);
+    final linkedPubkeys = useMemoized(
+      () => mentionIdentityLinkKeys(item.item.displayContent),
+      [item.item.displayContent],
+    );
     final relevantPubkeys = {senderPubkey, ...mentionPubkeys, ...linkedPubkeys};
     final profiles = <String, UserProfile?>{
       for (final pubkey in relevantPubkeys)

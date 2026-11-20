@@ -6,6 +6,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/identity_names/identity_names.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
+import '../../shared/profile/user_cache_provider.dart';
 import 'channel_management_provider.dart';
 import 'channels_provider.dart';
 
@@ -56,9 +57,11 @@ String watchChannelIdentityLabel(
 /// Watches contextual labels for [pubkeys] in [channelId], keyed by
 /// lowercase pubkey. Rebuilds only when one of these labels changes.
 ///
-/// [linkedPubkeys] are keys only an identity link names: each gets a label
-/// only once it has a real name ([IdentityNames.hasName]), so an unknown key
-/// keeps the label written into its link instead of a compact npub.
+/// [linkedPubkeys] are keys an identity link names, tagged or not: each gets
+/// a label only once it has a real name ([IdentityNames.hasName]), so an
+/// unknown key keeps the label written into its link instead of a compact
+/// npub. Their uncached profiles are requested after this build, so a link's
+/// written label gives way to its key's name once that loads.
 Map<String, String> watchChannelIdentityLabels(
   WidgetRef ref,
   String channelId,
@@ -66,10 +69,22 @@ Map<String, String> watchChannelIdentityLabels(
   Iterable<String> linkedPubkeys = const [],
 }) {
   final keys = {for (final pubkey in pubkeys) pubkey.toLowerCase()};
-  final linked = {
-    for (final pubkey in linkedPubkeys) pubkey.toLowerCase(),
-  }.difference(keys);
+  final linked = {for (final pubkey in linkedPubkeys) pubkey.toLowerCase()};
   if (keys.isEmpty && linked.isEmpty) return const {};
+  if (linked.isNotEmpty) {
+    final cache = ref.read(userCacheProvider);
+    final missing = [
+      for (final key in linked)
+        if (!cache.containsKey(key)) key,
+    ];
+    if (missing.isNotEmpty) {
+      Future.microtask(() {
+        if (ref.context.mounted) {
+          ref.read(userCacheProvider.notifier).preload(missing);
+        }
+      });
+    }
+  }
   return ref.watch(
     channelIdentityNamesProvider(
       channelId,
@@ -77,16 +92,16 @@ Map<String, String> watchChannelIdentityLabels(
   );
 }
 
-/// Labels for [pubkeys], plus [linkedPubkeys] that have a real name; see
-/// [watchChannelIdentityLabels].
+/// Labels for [pubkeys] and [linkedPubkeys], leaving out a linked key with
+/// no real name; see [watchChannelIdentityLabels].
 Map<String, String> identityLabels(
   IdentityNames names,
   Iterable<String> pubkeys, [
-  Iterable<String> linkedPubkeys = const [],
+  Set<String> linkedPubkeys = const {},
 ]) => {
-  for (final key in linkedPubkeys)
-    if (names.hasName(key)) key: names.labelFor(key),
-  for (final key in pubkeys) key: names.labelFor(key),
+  for (final key in {...pubkeys, ...linkedPubkeys})
+    if (!linkedPubkeys.contains(key) || names.hasName(key))
+      key: names.labelFor(key),
 };
 
 class _LabelMap extends UnmodifiableMapView<String, String> {

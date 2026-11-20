@@ -85,7 +85,10 @@ class _ThreadMessage extends HookConsumerWidget {
       }
     }
     // Identity links name their own keys: resolve those for display only.
-    final linkedPubkeys = mentionIdentityLinkKeys(message.content);
+    final linkedPubkeys = useMemoized(
+      () => mentionIdentityLinkKeys(message.content),
+      [message.content],
+    );
     for (final pubkey in linkedPubkeys) {
       if (knownAgentPubkeys.contains(pubkey)) agentMentionPubkeys.add(pubkey);
     }

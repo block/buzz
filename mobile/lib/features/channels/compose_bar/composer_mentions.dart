@@ -301,11 +301,13 @@ String _qualifiedMentionContent(
 }) {
   final keysByName = <String, Set<String>>{};
   for (final mention in mentions) {
-    (keysByName[mention.label(text).toLowerCase()] ??= {}).add(mention.pubkey);
+    (keysByName[foldMentionLabel(mention.label(text))] ??= {}).add(
+      mention.pubkey,
+    );
   }
   var content = text;
   for (final mention in mentions.reversed) {
-    if (keysByName[mention.label(text).toLowerCase()]!.length < 2 &&
+    if (keysByName[foldMentionLabel(mention.label(text))]!.length < 2 &&
         (nameEnds[mention.start] ?? 0) <= mention.end) {
       continue;
     }

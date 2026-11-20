@@ -14833,6 +14833,7 @@ void main() {
       final scoutA = '3' * 64;
       final scoutB = '4' * 64;
       final unknown = '5' * 64;
+      final taggedUnknown = '6' * 64;
       String link(String label, String key) =>
           '[@$label](nostr:${fullNpub(key)})';
       await tester.pumpWidget(
@@ -14852,6 +14853,16 @@ void main() {
                   '${link('Scout', scoutA)} ${link('Scout', scoutB)} '
                   '${link('Previous', unknown)}',
               createdAt: 1100,
+            ),
+            // buzz-app writes a tagged mention as a link too.
+            _textMsg(
+              id: 'tagged-link',
+              pubkey: 'alice',
+              content: 'cc ${link('Tagged', taggedUnknown)}',
+              createdAt: 1200,
+              extraTags: [
+                ['p', taggedUnknown],
+              ],
             ),
           ],
           users: {
@@ -14877,12 +14888,14 @@ void main() {
           .widgetList<MessageMentionPill>(find.byType(MessageMentionPill))
           .map((pill) => pill.label)
           .toList();
-      expect(pills, hasLength(4));
-      expect(pills.first, 'Mallory');
-      expect(pills.skip(1).take(2).toSet(), hasLength(2));
-      expect(pills.skip(1).take(2), everyElement(startsWith('Scout ')));
-      // A key with no name here keeps the label written into its link.
-      expect(pills.last, 'Previous');
+      // The newest row, the tagged link, draws first.
+      expect(pills, hasLength(5));
+      expect(pills[1], 'Mallory');
+      expect(pills.sublist(2, 4).toSet(), hasLength(2));
+      expect(pills.sublist(2, 4), everyElement(startsWith('Scout ')));
+      // A key with no name here, tagged or not, keeps the label written
+      // into its link.
+      expect([pills.first, pills.last], ['Tagged', 'Previous']);
     });
 
     testWidgets('edited messages show updated content and (edited) label', (
