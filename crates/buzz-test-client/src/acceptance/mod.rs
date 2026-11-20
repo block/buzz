@@ -777,31 +777,21 @@ mod tests {
     /// `relay_info` reports the build SHA from the NIP-11 document it fetched.
     #[tokio::test]
     async fn relay_info_reports_the_served_source_sha() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let sha = "0123456789abcdef0123456789abcdef01234567";
-        let body =
-            serde_json::json!({"supported_nips": [1], "version": "0.1.0", "source_sha": sha})
-                .to_string();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = tokio::spawn(async move {
-            let (mut tcp, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 4096];
-            let _ = tcp.read(&mut buf).await.unwrap();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/nostr+json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            tcp.write_all(response.as_bytes()).await.unwrap();
-        });
+        let (addr, server) = one_http_response(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/nostr+json",
+            r#"{"supported_nips":[1],"version":"0.1.0","source_sha":"0123456789abcdef0123456789abcdef01234567"}"#,
+        )
+        .await;
 
         // The probe's stage timeout bounds this call, so check its result
         // first: a probe that never sends the request fails here, not in a
         // server still waiting in `accept`.
-        let (report, version) = relay_info(&config(format!("ws://127.0.0.1:{port}"))).await;
+        let (report, version) = relay_info(&config(format!("ws://{addr}"))).await;
         assert_eq!(report.result, Outcome::Success, "{:?}", report.error);
-        assert_eq!(version.as_deref(), Some(sha));
+        assert_eq!(
+            version.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
         tokio::time::timeout(Duration::from_secs(5), server)
             .await
             .expect("server finished")
