@@ -1,3 +1,4 @@
+import '../../shared/text/initial.dart';
 import '../../shared/widgets/native_route_controls.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
@@ -652,9 +653,7 @@ class ChannelsPage extends HookConsumerWidget {
                   avatarIdentity: activeCommunity?.id,
                   symbol: 'building.2.crop.circle',
                   imageUrl: communityAvatar,
-                  avatarInitial: communityName.isEmpty
-                      ? '?'
-                      : communityName.substring(0, 1).toUpperCase(),
+                  avatarInitial: avatarInitial(communityName),
                   onPressed: openCommunitySwitcher,
                 ),
           nativeActions: messages
