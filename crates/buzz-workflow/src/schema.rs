@@ -313,13 +313,69 @@ fn validate_cron(expr: &str) -> Result<(), WorkflowError> {
 /// - 5 fields (`min hour dom month dow`) → prepend `0` (sec), append `*` (year)
 /// - 6 fields → append `*` (year)
 /// - 7 fields → unchanged
+///
+/// Numeric days of the week use standard cron numbering in every shape:
+/// `0` (or `7`) is Sunday through `6` for Saturday, matching the Desktop
+/// schedule picker. The `cron` crate numbers Sunday as `1` and Saturday as `7`,
+/// so numeric weekdays are rewritten to day names, which it reads unambiguously.
 pub(crate) fn normalize_cron(expr: &str) -> String {
-    let field_count = expr.split_whitespace().count();
-    match field_count {
-        5 => format!("0 {expr} *"),
-        6 => format!("{expr} *"),
-        _ => expr.to_owned(),
+    let mut fields: Vec<String> = expr.split_whitespace().map(str::to_owned).collect();
+    match fields.len() {
+        5 => {
+            fields.insert(0, "0".to_owned());
+            fields.push("*".to_owned());
+        }
+        6 => fields.push("*".to_owned()),
+        7 => {}
+        _ => return expr.to_owned(),
     }
+    fields[5] = standard_weekdays_to_names(&fields[5]);
+    fields.join(" ")
+}
+
+/// Day names indexed by standard cron weekday number (`0` = Sunday).
+const WEEKDAY_NAMES: [&str; 7] = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+
+/// Rewrite each numeric item of a day-of-week field (`5`, `1-5`, `1-5/2`,
+/// `0,6`) to day names. Wildcards, names, and anything that is not a valid
+/// standard weekday item are left untouched, so the `cron` crate still
+/// accepts or rejects them exactly as before.
+fn standard_weekdays_to_names(field: &str) -> String {
+    field
+        .split(',')
+        .map(|item| standard_weekday_item_to_names(item).unwrap_or_else(|| item.to_owned()))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn standard_weekday_item_to_names(item: &str) -> Option<String> {
+    let (base, step) = match item.split_once('/') {
+        Some((base, step)) => (base, step.parse::<usize>().ok().filter(|s| *s > 0)?),
+        None => (item, 1),
+    };
+    let parse_day = |s: &str| s.parse::<usize>().ok().filter(|d| *d <= 7);
+    let (start, end) = match base.split_once('-') {
+        Some((start, end)) => (parse_day(start)?, parse_day(end)?),
+        // `*` and `*/n` already agree: both numberings start at Sunday.
+        None if base == "*" => return None,
+        // A single day with a step (`3/2`) runs to the end of the week.
+        None if item.contains('/') => {
+            let day = parse_day(base)?;
+            (day, day.max(6))
+        }
+        None => {
+            let day = parse_day(base)?;
+            (day, day)
+        }
+    };
+    if start > end {
+        return None;
+    }
+    let names: Vec<&str> = (start..=end)
+        .step_by(step)
+        .map(|day| WEEKDAY_NAMES[day % 7])
+        .collect();
+    Some(names.join(","))
 }
 
 /// Parse a YAML workflow definition, validate it, and return the canonical JSON.
@@ -938,22 +994,79 @@ mod tests {
         );
     }
 
+    fn schedule_yaml(cron: &str) -> String {
+        format!(
+            "name: Weekly\ntrigger:\n  on: schedule\n  cron: '{cron}'\nsteps:\n  - id: s1\n    action: send_message\n    text: hi\n"
+        )
+    }
+
+    #[test]
+    fn sunday_as_weekday_zero_or_seven_is_accepted() {
+        // The Desktop schedule picker emits 0 for Sunday.
+        for cron in ["0 9 * * 0", "0 9 * * 7", "0 9 * * 0-6", "0 9 * * 5-7"] {
+            assert!(
+                parse_yaml(&schedule_yaml(cron)).is_ok(),
+                "'{cron}' rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_numeric_weekdays_are_still_rejected() {
+        for cron in ["0 9 * * 8", "0 9 * * 0-8", "0 9 * * 6-1", "0 9 * * 1-"] {
+            assert!(
+                parse_yaml(&schedule_yaml(cron)).is_err(),
+                "'{cron}' accepted"
+            );
+        }
+    }
+
     #[test]
     fn normalize_cron_5_fields_prepends_sec_appends_year() {
         let result = normalize_cron("0 9 * * 1-5");
-        assert_eq!(result, "0 0 9 * * 1-5 *");
+        assert_eq!(result, "0 0 9 * * MON,TUE,WED,THU,FRI *");
     }
 
     #[test]
     fn normalize_cron_6_fields_appends_year() {
         let result = normalize_cron("0 0 9 * * 1-5");
-        assert_eq!(result, "0 0 9 * * 1-5 *");
+        assert_eq!(result, "0 0 9 * * MON,TUE,WED,THU,FRI *");
     }
 
     #[test]
-    fn normalize_cron_7_fields_unchanged() {
+    fn normalize_cron_7_fields_only_rewrites_numeric_weekdays() {
+        let result = normalize_cron("0 0 9 * * MON-FRI *");
+        assert_eq!(result, "0 0 9 * * MON-FRI *");
         let result = normalize_cron("0 0 9 * * 1-5 *");
-        assert_eq!(result, "0 0 9 * * 1-5 *");
+        assert_eq!(result, "0 0 9 * * MON,TUE,WED,THU,FRI *");
+    }
+
+    #[test]
+    fn normalize_cron_rewrites_standard_numeric_weekdays_to_names() {
+        for (dow, names) in [
+            ("0", "SUN"),
+            ("7", "SUN"),
+            ("5", "FRI"),
+            ("0,6", "SUN,SAT"),
+            ("5-7", "FRI,SAT,SUN"),
+            ("1-5/2", "MON,WED,FRI"),
+            ("4/2", "THU,SAT"),
+            ("MON,5", "MON,FRI"),
+            ("*", "*"),
+            ("*/2", "*/2"),
+            ("MON-FRI", "MON-FRI"),
+            // Not valid standard weekday items: passed through for the parser to reject.
+            ("8", "8"),
+            ("6-1", "6-1"),
+            ("1-", "1-"),
+            ("1/0", "1/0"),
+        ] {
+            assert_eq!(
+                normalize_cron(&format!("0 9 * * {dow}")),
+                format!("0 0 9 * * {names} *"),
+                "weekday field {dow}"
+            );
+        }
     }
 
     #[test]
