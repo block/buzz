@@ -2,6 +2,45 @@ part of '../channel_detail_page_test.dart';
 
 void bubbleLayoutTests() {
   messageAuthorVisibilityTests();
+  testWidgets('agent activity opens from a small channel member preview', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: const [],
+        members: [
+          ChannelMember(
+            pubkey: 'self',
+            role: 'owner',
+            joinedAt: DateTime(2025),
+          ),
+          ChannelMember(
+            pubkey: 'alice',
+            role: 'bot',
+            joinedAt: DateTime(2025),
+            displayName: 'Alice',
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('channel-header-settings-trigger')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Member actions'));
+    await tester.pumpAndSettle();
+
+    final members = find.byKey(const ValueKey('members-sheet-list'));
+    await tester.tap(
+      find.descendant(of: members, matching: find.byIcon(BuzzIcons.ellipsis)),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('View activity'));
+    await tester.pumpAndSettle();
+    expect(find.text('Showing live activity from this point.'), findsOneWidget);
+  });
+
   testWidgets('reply footer does not add reaction padding inside the bubble', (
     tester,
   ) async {
