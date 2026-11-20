@@ -226,6 +226,12 @@ void main() {
         'Bad state: ref used after dispose',
       ),
       (
+        'a bad state split by a carriage return',
+        StateError('ref used after dispose\rprivate-marker'),
+        'StateError',
+        'Bad state: ref used after dispose',
+      ),
+      (
         'a failed assertion',
         AssertionError('list is sorted'),
         'AssertionError',
@@ -243,6 +249,12 @@ void main() {
         'Unimpl',
         'no export',
       ),
+      (
+        'a bad state naming nullable types',
+        StateError("wanted List<String?> or (int?, String?), got 'int?'"),
+        'StateError',
+        "wanted List<String?> or (int?, String?), got 'int?'",
+      ),
       ('a failed cast', _failedCast(), 'TypeError', 'is not a subtype of'),
     ];
     for (final (name, error, type, text) in kept) {
@@ -254,6 +266,7 @@ void main() {
         expect(exception['type'], contains(type));
         expect(exception['value'], contains(text));
         expect(exception['value'], isNot(contains('\n')));
+        expect(exception['value'], isNot(contains('\r')));
         expect(jsonEncode(sent), isNot(contains('private-marker')));
       });
     }
@@ -262,6 +275,8 @@ void main() {
       ('a URL', 'open https://e.org/f?token=private-marker'),
       ('a URL with a quote', "open https://e.org/O'Brien?private-marker#x"),
       ('a URL inside a word', 'open id_https://e.org/f?private-marker'),
+      ('a mail link', 'open mailto:a@e.org?subject=private-marker'),
+      ('a fragment', 'open page#private-marker'),
       ('a long line', 'state ${'x' * 200} private-marker'),
     ];
     for (final (name, text) in replaced) {
