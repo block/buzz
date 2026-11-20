@@ -147,12 +147,54 @@ class NetworkEvent {
   final Duration? duration;
 }
 
-/// One entry in the trail of recent networking events.
-class DiagnosticBreadcrumb {
-  const DiagnosticBreadcrumb(this.event);
+/// A screen the person can be on, from a fixed list the app writes. Only
+/// these names ever leave the device for navigation, never a channel or
+/// community name, an ID, or anything else a route could carry.
+enum DiagnosticScreen {
+  channelList,
+  channel,
+  thread,
+  forumPost,
+  channelDetails,
+  search,
+  activity,
+  settings,
+  appearance,
+  profile,
+  agents,
+  invites,
+  communitySwitcher,
+  addCommunity,
+  mediaViewer,
+  onboarding,
 
-  /// Breadcrumbs from the fixed list are networking events.
+  /// Any page the app does not name.
+  other,
+}
+
+/// One entry in the trail of recent events: a networking event or the screen
+/// the person moved to.
+sealed class DiagnosticBreadcrumb {
+  const DiagnosticBreadcrumb._();
+
+  /// A networking event.
+  const factory DiagnosticBreadcrumb(NetworkEvent event) = NetworkBreadcrumb;
+
+  /// The person moved to [screen].
+  const factory DiagnosticBreadcrumb.screen(DiagnosticScreen screen) =
+      ScreenBreadcrumb;
+}
+
+class NetworkBreadcrumb extends DiagnosticBreadcrumb {
+  const NetworkBreadcrumb(this.event) : super._();
+
   final NetworkEvent event;
+}
+
+class ScreenBreadcrumb extends DiagnosticBreadcrumb {
+  const ScreenBreadcrumb(this.screen) : super._();
+
+  final DiagnosticScreen screen;
 }
 
 /// Used when the build has no reporting destination.

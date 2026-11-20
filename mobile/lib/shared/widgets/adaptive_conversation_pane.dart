@@ -4,6 +4,8 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:duo_kit/duo_kit.dart';
 
+import '../diagnostics/diagnostic_navigation_observer.dart';
+import '../diagnostics/diagnostic_reporter.dart';
 import 'duo_toolbar.dart';
 import 'app_route_observer.dart';
 import 'covered_route_keyboard_insets.dart';
@@ -206,6 +208,9 @@ class AdaptiveConversationPane extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final routeObserver = useMemoized(appRouteObserver.createNestedObserver);
+    final screenObserver = useMemoized(
+      () => DiagnosticNavigationObserver(ref.read(diagnosticReporterProvider)),
+    );
     final navigator = useMemoized(() => GlobalKey<NavigatorState>());
     final ownerRoute = ModalRoute.of(context);
     useEffect(() {
@@ -369,7 +374,10 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                                     child: Navigator(
                                       requestFocus: selected != null,
                                       key: navigator,
-                                      observers: [routeObserver],
+                                      observers: [
+                                        routeObserver,
+                                        screenObserver,
+                                      ],
                                       pages: [
                                         if (!(wide &&
                                             persistentSelection &&
