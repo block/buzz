@@ -33,8 +33,16 @@ Future<List<NostrEvent>> _decodeInIsolate(
 ///
 /// Throws a [FormatException] for a body that is not JSON, is not an array,
 /// or holds an element that is not a well-formed event.
-List<NostrEvent> parseRelayQueryEvents(Uint8List bytes, String? contentType) {
-  final decoded = jsonDecode(relayResponseText(bytes, contentType));
+///
+/// With [maxInflatedBytes], see [relayResponseText].
+List<NostrEvent> parseRelayQueryEvents(
+  Uint8List bytes,
+  String? contentType, {
+  int? maxInflatedBytes,
+}) {
+  final decoded = jsonDecode(
+    relayResponseText(bytes, contentType, maxInflatedBytes: maxInflatedBytes),
+  );
   if (decoded is! List) {
     throw const FormatException('relay returned malformed query response');
   }
