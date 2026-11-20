@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 use futures_util::{future::BoxFuture, stream::FuturesUnordered, StreamExt};
+use nostr::EventId;
 use uuid::Uuid;
 
 use crate::{check_sibling_via_profile, relay, OwnerCache, SiblingVerdict};
@@ -9,10 +10,16 @@ use crate::{check_sibling_via_profile, relay, OwnerCache, SiblingVerdict};
 const MAX_PENDING_SENDERS: usize = 16;
 const MAX_PENDING_PER_SENDER: usize = 8;
 const MAX_ATTEMPTS: u8 = 4;
+const MAX_RECOVERED_IDS: usize = MAX_PENDING_SENDERS * MAX_PENDING_PER_SENDER;
 
 struct PendingSender {
     events: VecDeque<relay::BuzzEvent>,
     attempts: u8,
+}
+
+struct RecoveredEvent {
+    id: EventId,
+    admitted: bool,
 }
 
 /// One bounded profile lookup per sender. The listener polls these alongside
@@ -22,6 +29,7 @@ pub(super) struct SiblingRetries {
     pending: HashMap<String, PendingSender>,
     checks: FuturesUnordered<BoxFuture<'static, (String, SiblingVerdict)>>,
     ready: VecDeque<relay::BuzzEvent>,
+    recovered: VecDeque<RecoveredEvent>,
 }
 
 impl SiblingRetries {
@@ -102,7 +110,12 @@ impl SiblingRetries {
             };
             cache.record_sibling_verdict(&author, verdict);
             match verdict {
-                SiblingVerdict::Sibling => self.ready.append(&mut pending.events),
+                SiblingVerdict::Sibling => {
+                    for event in &pending.events {
+                        self.remember_recovery(event.event.id);
+                    }
+                    self.ready.append(&mut pending.events);
+                }
                 SiblingVerdict::NotSibling => {
                     for event in pending.events {
                         tracing::info!(event_id = %event.event.id, kind = %event.event.kind, "dropping event from an agent without the same owner");
@@ -124,6 +137,28 @@ impl SiblingRetries {
                     }
                 }
             }
+        }
+    }
+
+    fn remember_recovery(&mut self, id: EventId) {
+        if self.recovered.iter().any(|event| event.id == id) {
+            return;
+        }
+        if self.recovered.len() == MAX_RECOVERED_IDS {
+            self.recovered.pop_front();
+        }
+        self.recovered.push_back(RecoveredEvent {
+            id,
+            admitted: false,
+        });
+    }
+
+    /// The ready queue and live relay input share this admission record. Keep
+    /// recent IDs after admission so late replays cannot restart the same turn.
+    pub(super) fn admit_once(&mut self, id: EventId) -> bool {
+        match self.recovered.iter_mut().find(|event| event.id == id) {
+            Some(event) => !std::mem::replace(&mut event.admitted, true),
+            None => true,
         }
     }
 

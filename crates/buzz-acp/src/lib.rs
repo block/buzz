@@ -750,10 +750,16 @@ mod inbound_author_gate {
                 )
                 .await;
             match decision.verdict {
-                AuthorVerdict::Allow => Some(AuthorizedListenerEvent {
-                    buzz_event,
-                    effective_author: decision.effective_author,
-                }),
+                AuthorVerdict::Allow => {
+                    if !self.sibling_retries.admit_once(buzz_event.event.id) {
+                        tracing::debug!(event_id = %buzz_event.event.id, "dropping replay of an admitted recovered event");
+                        return None;
+                    }
+                    Some(AuthorizedListenerEvent {
+                        buzz_event,
+                        effective_author: decision.effective_author,
+                    })
+                }
                 AuthorVerdict::VerifySibling => {
                     if let Some(owner) = owner_cache.get() {
                         let retry_at = owner_cache.sibling_retry_at(&decision.effective_author);
@@ -8740,9 +8746,10 @@ mod author_gate_tests {
             Duration::from_millis(400),
         );
         let channel_id = Uuid::new_v4();
+        let queued_channel_id = Uuid::new_v4();
         let removed_channel_id = Uuid::new_v4();
         let channel_info = pool::ChannelInfoResolver::new(
-            [channel_id, removed_channel_id]
+            [channel_id, queued_channel_id, removed_channel_id]
                 .into_iter()
                 .map(|id| {
                     (
@@ -8759,8 +8766,14 @@ mod author_gate_tests {
         );
         let message = sibling_mention(&sender, &agent, channel_id);
         let event_id = message.event.id;
+        let queued_message = sibling_mention(&sender, &agent, queued_channel_id);
         let removed_message = sibling_mention(&sender, &agent, removed_channel_id);
-        for event in [message.clone(), message.clone(), removed_message] {
+        for event in [
+            message.clone(),
+            message.clone(),
+            queued_message.clone(),
+            removed_message,
+        ] {
             let admitted = authorize_normal_listener_event(
                 &mut gate,
                 event,
@@ -8839,6 +8852,41 @@ mod author_gate_tests {
             requests.load(Ordering::SeqCst),
             2,
             "Buzz should retry the original message without a new event from the sibling"
+        );
+        let authorize = async |gate: &mut InboundAuthorGate, event| {
+            authorize_normal_listener_event(
+                gate,
+                event,
+                &RespondTo::OwnerOnly,
+                &HashSet::new(),
+                &cache,
+                &channel_info,
+                &rest,
+            )
+            .await
+        };
+        // Simulate relay replays that escape the relay's bounded event-ID cache.
+        // One races an event still in `ready`; the other follows an admission.
+        for (message, first_admission) in [(queued_message.clone(), true), (admitted, false)] {
+            let replay = relay::BuzzEvent {
+                connection_generation: 1,
+                ..message
+            };
+            assert_eq!(
+                authorize(&mut gate, replay).await.is_some(),
+                first_admission,
+                "a recovered event may be authorized once whichever copy reaches the gate first"
+            );
+        }
+        let queued_original = gate
+            .next_listener_event(std::future::pending(), &cache, &rest)
+            .now_or_never()
+            .flatten()
+            .expect("the other recovered event should already be ready");
+        assert_eq!(queued_original.event.id, queued_message.event.id);
+        assert!(
+            authorize(&mut gate, queued_original).await.is_none(),
+            "the queued original cannot be authorized after its live replay"
         );
         assert!(
             gate.next_listener_event(std::future::pending(), &cache, &rest)
