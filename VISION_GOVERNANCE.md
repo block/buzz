@@ -42,7 +42,7 @@ agents            grants name their repos, last at most 7 days
 
 **Labels** are how one rule reaches many repos. An admin puts `payments` on a repo and every `payments` rule applies to it immediately. New repos can start with default labels, so nothing is ungoverned on day one. Anyone on Nostr can write a label; only labels accepted from community admins or integrations they explicitly authorize affect this community's rules. The relay signs the current set, meaning "this community accepted this label," not "the universe agrees this repo is compliant."
 
-**Trusted checks** are named, not assumed. The community decides which CI identities count. A green check from anyone else is just a message.
+**Trusted checks** are named, not assumed. The community decides which CI identities count. A green check from anyone else is just a message. A trusted check counts as a check, never as a human review.
 
 **Agent limits** cap what any member can hand to an agent or integration: which repos, which actions, how long, and whether widening a grant needs an admin.
 
