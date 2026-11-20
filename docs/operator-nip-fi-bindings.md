@@ -203,10 +203,12 @@ rollout; a malformed or out-of-range value refuses startup.
 
 - It acts only in `shadow`. In `off` it has no effect, and `enforce` ignores it
   because every community already enforces.
-- A community stored as Optional enforces when its bucket, SHA-256 of the
-  community ID mod 100, is below the percentage. The bucket never changes for a
-  community, so raising the percentage only adds communities, and lowering it
-  removes the most recently added ones.
+- A community stored as Optional enforces when its bucket is below the
+  percentage. The bucket is the SHA-256 digest of the community UUID's 16
+  RFC 4122 bytes, with the digest's first 8 bytes read as a big-endian `u64`,
+  mod 100. The bucket never changes for a community, so raising the
+  percentage only adds communities, and lowering it removes the most recently
+  added ones.
 - A community stored as Required enforces at any percentage.
 - An enforcing community gets the same treatment as a stored-Required one:
   logins without valid evidence are refused, its NIP-11 document reports
@@ -222,8 +224,8 @@ Raise the percentage in steps, holding each one for normal traffic.
 
 ### Enforce
 
-Set `BUZZ_NIP_FI_MODE=enforce` and unset `BUZZ_NIP_FI_ENFORCE_PERCENT`. Watch the same signals, plus the rate of 503
-responses on login.
+Set `BUZZ_NIP_FI_MODE=enforce` and unset `BUZZ_NIP_FI_ENFORCE_PERCENT`.
+Watch the same signals, plus the rate of 503 responses on login.
 
 - Go: the shadow signals keep holding, and 503s stay at their shadow baseline.
 - No-go: logins return 503 or are refused unexpectedly. Set `mode=off` (below).
