@@ -20,8 +20,10 @@ Set<String> computeUnreadChannelIds({
 /// `docs/unread.md`). Ordinary unread backlog bolds a channel (`rowUnread`)
 /// unless a synced `seen:<channel>` mark covers it. `unread` keeps the
 /// underlying evidence for read actions.
-/// Unread thread replies, mentions and broadcasts only add an attention dot
-/// ([attention]), so a channel the reader caught up on stays regular. An
+/// Unread thread replies and mentions only add an attention dot
+/// ([attention]), so a channel the reader caught up on stays regular. A reply
+/// also sent to the channel dots only in one of the reader's threads;
+/// elsewhere it bolds, like a top-level post. An
 /// unread DM bolds and dots. Marking a channel unread bolds it without
 /// fabricating attention, but keeps any real attention's dot.
 ({Set<String> unread, Set<String> rowUnread, Set<String> attention})
@@ -147,14 +149,14 @@ int _channelHighlights({
       readState.effectiveTimestamp,
     );
     if (readAt != null && event.createdAt <= readAt) continue;
-    if (!separateAttention || channel.isDm || event.channelCatchUp) {
+    if (!separateAttention || channel.isDm || !event.attention) {
       flags |= _unread;
       if (separateAttention &&
           (channel.isDm || seenAt == null || event.createdAt > seenAt)) {
         flags |= _rowUnread;
       }
     }
-    if (separateAttention && (channel.isDm || !event.channelCatchUp)) {
+    if (separateAttention && (channel.isDm || event.attention)) {
       flags |= _attention;
     }
     if (flags == decided) break;

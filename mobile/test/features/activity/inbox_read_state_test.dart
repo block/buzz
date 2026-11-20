@@ -226,5 +226,37 @@ void main() {
       expect(result?.channelId, 'ch1');
       expect(result?.timestamp, 10);
     });
+
+    test('skips an unmentioned reply also sent to the channel', () {
+      final sentToChannel = [
+        ...replyTags(threadIdInboxRoot1, threadIdInboxRoot1),
+        ['broadcast', '1'],
+      ];
+      List<FeedItem> group(String category) => [
+        item(
+          id: threadIdInboxA,
+          createdAt: 30,
+          category: category,
+          tags: sentToChannel,
+        ),
+        item(
+          id: threadIdInboxB,
+          createdAt: 10,
+          tags: replyTags(threadIdInboxRoot1, threadIdInboxRoot1),
+        ),
+      ];
+      // Its own mark reads it; the channel marker would read the channel.
+      expect(
+        groupedChannelReadTimestamp(buildInboxItems(group('activity')).single),
+        isNull,
+      );
+      // A mention keeps the channel marker it had before.
+      expect(
+        groupedChannelReadTimestamp(
+          buildInboxItems(group('mention')).single,
+        )?.timestamp,
+        30,
+      );
+    });
   });
 }

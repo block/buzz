@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:buzz/shared/http/app_http_client.dart';
 
+import '../diagnostics/diagnostic_reporter.dart';
 import '../relay/relay_provider.dart';
 import 'builderlab_account.dart';
 import 'account_identity_store.dart';
@@ -18,6 +19,7 @@ import '../push/push_bridge.dart';
 
 final builderlabAccountProvider = Provider<BuilderlabAccountClient>((ref) {
   final account = BuilderlabAccountClient(
+    diagnostics: ref.read(diagnosticReporterProvider),
     // Hosted communities that enforce NIP-FI need the extension to mint too.
     // A build without hosted relay auth still clears a copy an earlier build
     // shared, so the extension cannot keep minting after sign-out.
@@ -41,6 +43,7 @@ final organizationAccountProvider = Provider<BuilderlabAccountClient?>((ref) {
   if (origin == null) return null;
   final account = BuilderlabAccountClient(
     accountOrigin: origin,
+    diagnostics: ref.read(diagnosticReporterProvider),
     // The notification extension mints its own assertions for these relays.
     onSessionChanged: (credential) => shareOrganizationSessionWithNotifications(
       origin: origin,

@@ -5,8 +5,9 @@ class _ChannelTile extends ConsumerWidget {
   final bool isUnread;
   final bool boldUnread;
 
-  /// Whether unread thread replies, mentions or broadcasts need attention.
-  /// They show as a dot without bolding the label.
+  /// Whether unread thread replies or mentions need attention, including
+  /// replies also sent to the channel from the reader's threads. They show as
+  /// a dot without bolding the label.
   final bool hasAttention;
   final bool isMuted;
   final String? currentPubkey;
@@ -58,7 +59,7 @@ class _ChannelTile extends ConsumerWidget {
           child: Padding(
             padding: const EdgeInsets.only(
               left: _kChannelSectionInset,
-              right: _kChannelSectionInset,
+              right: _kChannelSectionInset + Grid.half,
               top: _kChannelRowVerticalPadding,
               bottom: _kChannelRowVerticalPadding,
             ),
@@ -124,61 +125,76 @@ class _ChannelTile extends ConsumerWidget {
                     ],
                   ),
                 ),
-                if (channel.isEphemeral) ...[
-                  const SizedBox(width: Grid.xxs),
-                  _EphemeralBadge(channel: channel),
-                ],
-                if (isMuted) ...[
-                  const SizedBox(width: Grid.xxs),
-                  SizedBox(
-                    width: _kChannelIconSize,
-                    child: Center(
-                      child: Icon(
-                        BuzzIcons.bellOff,
-                        size: 12,
-                        color: navigationMetadataForeground(context),
-                      ),
-                    ),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(
+                    minWidth: Grid.inventoryAccessoryWidth,
                   ),
-                ],
-                if (showAttention) ...[
-                  const SizedBox(width: Grid.xxs),
-                  SizedBox(
-                    width: _kChannelIconSize,
-                    child: Center(
-                      child: Container(
-                        key: ValueKey('channel-attention-dot-${channel.id}'),
-                        width: 6,
-                        height: 6,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: context.colors.primary,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      if (channel.isEphemeral) ...[
+                        const SizedBox(width: Grid.xxs),
+                        _EphemeralBadge(channel: channel),
+                      ],
+                      if (isMuted) ...[
+                        const SizedBox(width: Grid.xxs),
+                        SizedBox(
+                          width: _kChannelIconSize,
+                          child: Center(
+                            child: Icon(
+                              BuzzIcons.bellOff,
+                              size: 12,
+                              color: navigationMetadataForeground(context),
+                            ),
+                          ),
                         ),
-                      ),
-                    ),
-                  ),
-                ],
-                if (!channel.isMember && !channel.isDm)
-                  Padding(
-                    padding: const EdgeInsets.only(right: Grid.xxs),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: Grid.half + 2,
-                        vertical: 3,
-                      ),
-                      decoration: BoxDecoration(
-                        color: context.colors.primary.withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(Radii.sm),
-                      ),
-                      child: Text(
-                        'Open',
-                        style: context.textTheme.labelSmall?.copyWith(
-                          color: context.colors.primary,
-                          fontWeight: FontWeight.w600,
+                      ],
+                      if (showAttention) ...[
+                        const SizedBox(width: Grid.xxs),
+                        SizedBox(
+                          width: _kChannelIconSize,
+                          child: Center(
+                            child: Container(
+                              key: ValueKey(
+                                'channel-attention-dot-${channel.id}',
+                              ),
+                              width: 6,
+                              height: 6,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: context.colors.primary,
+                              ),
+                            ),
+                          ),
                         ),
-                      ),
-                    ),
+                      ],
+                      if (!channel.isMember && !channel.isDm)
+                        Padding(
+                          padding: const EdgeInsets.only(right: Grid.xxs),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: Grid.half + 2,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: context.colors.primary.withValues(
+                                alpha: 0.1,
+                              ),
+                              borderRadius: BorderRadius.circular(Radii.sm),
+                            ),
+                            child: Text(
+                              'Open',
+                              style: context.textTheme.labelSmall?.copyWith(
+                                color: context.colors.primary,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
+                ),
               ],
             ),
           ),

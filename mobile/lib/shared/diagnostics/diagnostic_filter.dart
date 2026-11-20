@@ -160,6 +160,9 @@ abstract final class DiagnosticFilter {
         SentryRuntime.fromJson(_only(runtime.toJson(), _runtime)),
     ];
     event.tags?.removeWhere((key, _) => !_allowsTag(key));
+    // Nothing sets additional data today; drop it so nothing later can.
+    // ignore: deprecated_member_use
+    event.extra = null;
     event.message = switch (event.message) {
       final message? => SentryMessage(stripUrlTails(message.formatted)),
       null => null,

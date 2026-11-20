@@ -209,6 +209,28 @@ void main() {
       });
     });
 
+    test('broadcasts keep their own marks past the catch-up mark', () {
+      // The channel registry reads a broadcast only by its own mark, with or
+      // without a parent, so `activity:` must not stand in for it.
+      const broadcastTag = ['broadcast', '1'];
+      final reply = _msg(
+        'bcr',
+        110,
+        parentId: 'root',
+        rootId: 'root',
+        tags: const [broadcastTag],
+      );
+      final topLevel = _msg('bct', 120, tags: const [broadcastTag]);
+      expect(
+        _marks(
+          readState: _state({'activity:$_channel': 300}),
+          loaded: [reply, topLevel],
+          visible: [reply, topLevel],
+        ),
+        {'msg:bcr': 110, 'msg:bct': 120},
+      );
+    });
+
     test('the bottom does not read mentions above it', () {
       // Only a mention that showed is read. Reaching the bottom past one that
       // never filled the screen leaves it unread.

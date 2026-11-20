@@ -47,7 +47,7 @@ digest=$(printf 'ab%.0s' {1..32})
 helm template push "$chart" --set android.enabled=true \
   --set "android.signingCertDigests[0]=$digest" >"$out/android.yaml"
 for needle in BUZZ_PUSH_ANDROID_PACKAGE_NAME "$digest" BUZZ_PUSH_ANDROID_BOOT_KEY_DIGESTS \
-  BUZZ_PUSH_ANDROID_REVOCATION_GRACE_SECONDS BUZZ_PUSH_FCM_SERVICE_ACCOUNT_PATH; do
+  BUZZ_PUSH_ANDROID_REVOCATION_GRACE_SECONDS BUZZ_PUSH_FCM_CREDENTIALS_PATH; do
   grep -q "$needle" "$out/android.yaml" || { echo "Android render lacks $needle" >&2; exit 1; }
 done
 if grep -q 'ATTESTATION_ROOTS\|android-attestation' "$out/android.yaml"; then

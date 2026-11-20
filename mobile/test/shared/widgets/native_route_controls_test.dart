@@ -1,5 +1,8 @@
+import 'package:buzz/features/channels/channels_page/filters.dart';
+import 'package:buzz/features/channels/channel_sort/channel_sort_storage.dart';
 import 'dart:async';
 
+import 'package:buzz/shared/widgets/app_route_observer.dart';
 import 'package:buzz/shared/widgets/bottom_up_page_route.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_action.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
@@ -364,6 +367,80 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     debugDefaultTargetPlatformOverride = null;
   });
+
+  testWidgets(
+    'section options keep Home controls mounted through the scrim transition',
+    (tester) async {
+      final nav = GlobalKey<NavigatorState>();
+      late BuildContext home;
+      final observer = AppRouteObserver();
+      var restores = 0;
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            navigatorKey: nav,
+            navigatorObservers: [observer],
+            home: Scaffold(
+              body: HookBuilder(
+                builder: (context) {
+                  home = context;
+                  return useNativeRouteControlsVisible(context)
+                      ? IosGlassNavigationButton(
+                          icon: IosGlassNavigationIcon.more,
+                          semanticLabel: 'Home actions',
+                          onPressed: () {},
+                        )
+                      : const SizedBox();
+                },
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final control = find.byTooltip('Home actions');
+      final original = tester.element(control);
+      observer.addRevealListener(ModalRoute.of(home)!, () => restores++);
+      unawaited(
+        showSectionViewSheet(
+          home,
+          title: 'Team',
+          group: 'channels',
+          sortMode: ChannelSortMode.alpha,
+          onSort: (_) {},
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 80));
+      final scrim = find.byWidgetPredicate(
+        (w) => w is UiKitView && w.viewType == 'buzz/toast_layer',
+      );
+      double scrimOpacity() => tester
+          .widget<FadeTransition>(
+            find
+                .ancestor(of: scrim, matching: find.byType(FadeTransition))
+                .first,
+          )
+          .opacity
+          .value;
+      expect(tester.getRect(scrim).contains(tester.getCenter(control)), isTrue);
+      expect(scrimOpacity(), allOf(greaterThan(0), lessThan(1)));
+      expect(tester.element(control), same(original));
+      await tester.pumpAndSettle();
+      expect(tester.element(control), same(original));
+      expect(scrimOpacity(), 1);
+      nav.currentState!.pop();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 80));
+      expect(tester.element(control), same(original));
+      await tester.pumpAndSettle();
+      expect(tester.element(control), same(original));
+      expect(scrim, findsNothing);
+      expect(restores, 0);
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
 
   testWidgets('route visibility rebuilds only when it changes', (tester) async {
     final navigator = GlobalKey<NavigatorState>();
