@@ -198,6 +198,9 @@ void main() {
           await _nativeGet(url, headers),
         );
       });
+      // The oracle checks the relay saw no session or query traffic, and that
+      // a newer assertion was minted, between `expiry_wait` and here.
+      fixture.mark('expiry_end');
     }
 
     session.onAppResumed();
