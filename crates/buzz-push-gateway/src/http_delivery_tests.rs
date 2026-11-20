@@ -47,6 +47,12 @@ fn now() -> i64 {
 }
 
 async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
+    let sends = Arc::new(AtomicUsize::new(0));
+    let (app, keys, body) = fixture_with(Arc::new(TestTransport(sends.clone()))).await;
+    (app, keys, body, sends)
+}
+
+async fn fixture_with(transport: Arc<dyn PushTransport>) -> (axum::Router, Keys, Vec<u8>) {
     let keys = Keys::generate();
     let authority = Arc::new(MemoryAuthorityStore::default());
     let token_keyring =
@@ -97,7 +103,6 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
             expires_at: now() + 600,
         })
         .unwrap();
-    let sends = Arc::new(AtomicUsize::new(0));
     let (app, _) = router(AppState {
         grant_keyring,
         authority,
@@ -110,7 +115,7 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
                 )
                 .unwrap(),
             ),
-            transport: Arc::new(TestTransport(sends.clone())),
+            transport,
             android: None,
         }),
         max_grant_lifetime_seconds: 600,
@@ -127,10 +132,22 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
         "v": 1, "endpoint_grant": grant, "request_id": Uuid::new_v4(), "expires_at": now() + 60,
     }))
     .unwrap();
-    (app, keys, body, sends)
+    (app, keys, body)
 }
 
 fn signed_header(keys: &Keys, url: &str, method: &str, body: &[u8]) -> String {
+    signed_header_at(keys, url, method, body, Timestamp::now())
+}
+
+/// A distinct `created_at` gives each retry attempt its own NIP-98 event id,
+/// as the relay's per-attempt signing does.
+fn signed_header_at(
+    keys: &Keys,
+    url: &str,
+    method: &str,
+    body: &[u8],
+    created_at: Timestamp,
+) -> String {
     let hash = hex::encode(Sha256::digest(body));
     let event = EventBuilder::new(Kind::HttpAuth, "")
         .tags([
@@ -138,6 +155,7 @@ fn signed_header(keys: &Keys, url: &str, method: &str, body: &[u8]) -> String {
             Tag::parse(["method", method]).unwrap(),
             Tag::parse(["payload", &hash]).unwrap(),
         ])
+        .custom_created_at(created_at)
         .sign_with_keys(keys)
         .unwrap();
     format!(
@@ -437,4 +455,118 @@ async fn grant_signer_and_replay_checks_remain_enforced() {
         StatusCode::NOT_FOUND
     );
     assert_eq!(sends.load(Ordering::SeqCst), 1);
+}
+
+/// Holds its first send open until the test releases it, then answers each
+/// send with the next scripted outcome.
+struct GatedTransport {
+    sends: AtomicUsize,
+    first_send_entered: tokio::sync::Notify,
+    release_first_send: tokio::sync::Semaphore,
+    outcomes: std::sync::Mutex<std::collections::VecDeque<DeliveryOutcome>>,
+}
+
+#[async_trait::async_trait]
+impl PushTransport for GatedTransport {
+    async fn send(&self, _: DeliveryAttempt, _: &str) -> DeliveryOutcome {
+        if self.sends.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.first_send_entered.notify_one();
+            self.release_first_send.acquire().await.unwrap().forget();
+        }
+        self.outcomes.lock().unwrap().pop_front().unwrap()
+    }
+}
+
+async fn status_and_body(
+    app: &axum::Router,
+    auth: String,
+    body: Vec<u8>,
+) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .clone()
+        .oneshot(request(DIRECT_URL, None, auth, body))
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+// The relay times out a slow gateway call and retries the same request id with
+// a fresh NIP-98 event. While the first attempt is still sending, the retry
+// must be told to retry later, not answered with the 404 the relay reads as
+// "already delivered": the first attempt can still fail retryably.
+#[tokio::test]
+async fn replay_while_first_attempt_is_in_flight_is_retried_not_dropped() {
+    let transport = Arc::new(GatedTransport {
+        sends: AtomicUsize::new(0),
+        first_send_entered: tokio::sync::Notify::new(),
+        release_first_send: tokio::sync::Semaphore::new(0),
+        outcomes: std::sync::Mutex::new(
+            [
+                DeliveryOutcome::Retry {
+                    retry_after_seconds: None,
+                },
+                DeliveryOutcome::Accepted,
+            ]
+            .into(),
+        ),
+    });
+    let (app, keys, body) = fixture_with(transport.clone()).await;
+    let at = |seconds_ago: u64| {
+        signed_header_at(
+            &keys,
+            DIRECT_URL,
+            "POST",
+            &body,
+            Timestamp::from(Timestamp::now().as_secs() - seconds_ago),
+        )
+    };
+
+    let entered = transport.first_send_entered.notified();
+    let first = tokio::spawn({
+        let (app, auth, body) = (app.clone(), at(4), body.clone());
+        async move { status_and_body(&app, auth, body).await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered)
+        .await
+        .expect("first attempt reaches the transport");
+
+    let replay = status_and_body(&app, at(3), body.clone()).await;
+    assert_eq!(
+        replay,
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({"status": "retry", "retry_after_seconds": 5})
+        )
+    );
+    assert_eq!(
+        transport.sends.load(Ordering::SeqCst),
+        1,
+        "the replay sends nothing"
+    );
+
+    transport.release_first_send.add_permits(1);
+    let (status, _) = first.await.unwrap();
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "first attempt failed retryably"
+    );
+
+    let (status, _) = status_and_body(&app, at(2), body.clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the released request id is sent again"
+    );
+    let (status, _) = status_and_body(&app, at(1), body).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a finished request id stays burned"
+    );
+    assert_eq!(transport.sends.load(Ordering::SeqCst), 2);
 }
