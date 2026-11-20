@@ -341,6 +341,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    expect(find.byKey(const Key('video')), findsNothing);
     expect(posterOpacity(), 1);
 
     // A new character covers with its own poster, never the previous one
