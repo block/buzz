@@ -1424,7 +1424,7 @@ fn validate_approved_schema(
     // The approved catalog binds exactly, with two bounded exceptions. An
     // expand migration between approval and execution may add a table listed
     // in APPROVAL_FORWARD_TABLES, which this binary purges and verifies. And an
-    // approval from before migration 0105 may freeze a table listed in
+    // approval from before migration 0106 may freeze a table listed in
     // DROPPED_SCOPED_TABLES, which that migration dropped. The frozen manifest
     // and its digest are never rewritten.
     let frozen_tables = frozen
@@ -1895,7 +1895,7 @@ mod postgres_tests {
         assert!(resolve_submit_host(None, Some("not a URL")).is_err());
     }
 
-    /// An approval from before migration 0105 froze the tables it dropped, and
+    /// An approval from before migration 0106 froze the tables it dropped, and
     /// its catalog tolerates exactly those being gone: any other frozen table
     /// that is gone, or a table live now that the approval did not freeze and
     /// that is not forward-listed, is still drift.
@@ -2598,7 +2598,7 @@ mod postgres_tests {
         validate_approved_schema(&live, &decoded)
             .expect("legacy fence list is no longer structural");
 
-        // An approval from before migration 0105 froze the tables it dropped.
+        // An approval from before migration 0106 froze the tables it dropped.
         let mut approved_before_drop = decoded.clone();
         approved_before_drop.schema.scoped_tables.extend(
             buzz_db::deletion::DROPPED_SCOPED_TABLES
@@ -2606,7 +2606,7 @@ mod postgres_tests {
                 .map(|table| (*table).to_owned()),
         );
         validate_approved_schema(&live, &approved_before_drop)
-            .expect("a table dropped by migration 0105 is not drift");
+            .expect("a table dropped by migration 0106 is not drift");
 
         // Only a listed forward table may appear after approval. A required
         // table the approval lacks is drift, and so is a removed frozen table.
@@ -2941,7 +2941,7 @@ mod postgres_tests {
     /// runs to completion through the executor: the target's rows in the added
     /// tables are purged and verified and a bystander's survive. A table added
     /// after approval that is not listed still stops the request before fencing.
-    /// An approval from before migration 0105 still executes after it.
+    /// An approval from before migration 0106 still executes after it.
     async fn approval_before_an_expand_migration_completes() {
         let redis_url = std::env::var("BUZZ_TEST_REDIS_URL")
             .or_else(|_| std::env::var("REDIS_URL"))
@@ -3071,7 +3071,7 @@ mod postgres_tests {
             .expect("load request");
         assert!(request.fence_generation.is_none());
 
-        // An approval from before migration 0105 froze `delivery_log` and
+        // An approval from before migration 0106 froze `delivery_log` and
         // `subscriptions`, which are gone now. The executor still advances
         // through the Approved stage on the original digest.
         let (db, services, claim) = claimed_test_deletion_freezing(

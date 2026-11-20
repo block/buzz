@@ -425,7 +425,7 @@ async fn apply_pgschema_to_existing_database(pool: &PgPool) {
     // parent (Postgres refuses with 2BP01) and schedules a replacement check
     // before dropping its same-named copy. It also drops the fence function
     // before the delivery tables whose triggers still use it, so drop those
-    // tables first, as a deployment applies migration 0105 before pgschema
+    // tables first, as a deployment applies migration 0106 before pgschema
     // (docs/database.md Rule 5).
     // Remove only those stale objects in this disposable fixture; pgschema
     // still applies desired state; historical repair is a separate reviewed

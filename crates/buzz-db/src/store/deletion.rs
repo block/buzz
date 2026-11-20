@@ -127,16 +127,16 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "workflows",
 ];
 
-/// Tenant tables that migration 0105 dropped, kept only for frozen approvals.
+/// Tenant tables that migration 0106 dropped, kept only for frozen approvals.
 ///
 /// No database has these tables at this version: deployments apply migrations
 /// before code, and auto-migration runs before the relay serves. A live table
 /// with one of these names is an unknown scoped table, so the catalog check
 /// fails closed and deletion refuses it. The one use is
 /// `validate_approved_schema` in `buzz-deletion`: a deletion request approved
-/// before migration 0105 froze an inventory that lists these tables, and its
+/// before migration 0106 froze an inventory that lists these tables, and its
 /// executor must still accept that they are gone. Remove this list once no
-/// approval from before migration 0105 can remain.
+/// approval from before migration 0106 can remain.
 pub const DROPPED_SCOPED_TABLES: &[&str] = &["delivery_log", "subscriptions"];
 
 /// Tenant tables that a later release's expand migration adds.
@@ -4832,13 +4832,13 @@ pub(crate) mod postgres_tests {
         crate::migration::run_migrations_through(&db.pool, 89)
             .await
             .expect("migrate with fence objects present");
-        // Migration 0105 drops the delivery tables, and the deletion catalog no
+        // Migration 0106 drops the delivery tables, and the deletion catalog no
         // longer accepts them as tenant tables. Drop them by hand so the
         // catalog is the current one; their triggers go with them.
         sqlx::raw_sql("DROP TABLE delivery_log, subscriptions")
             .execute(&db.pool)
             .await
-            .expect("drop the tables migration 0105 drops");
+            .expect("drop the tables migration 0106 drops");
         let store = db.deletion_store();
         let community = db
             .ensure_configured_community("optional-fences.example")
@@ -4977,13 +4977,13 @@ DROP FUNCTION community_deletion_lock_key(UUID);
         crate::migration::run_migrations_through(&db.pool, 86)
             .await
             .expect("phase-one schema");
-        // Migration 0105 drops the delivery tables, and the deletion catalog no
+        // Migration 0106 drops the delivery tables, and the deletion catalog no
         // longer accepts them as tenant tables. Drop them by hand so the
         // catalog is the current one.
         sqlx::raw_sql("DROP TABLE delivery_log, subscriptions")
             .execute(&db.pool)
             .await
-            .expect("drop the tables migration 0105 drops");
+            .expect("drop the tables migration 0106 drops");
         let community = db
             .ensure_configured_community("optional-guards.example")
             .await
@@ -9658,7 +9658,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         }
     }
 
-    /// Migration 0105 dropped `delivery_log` and `subscriptions`. A live table
+    /// Migration 0106 dropped `delivery_log` and `subscriptions`. A live table
     /// with either name is no longer accepted: it is an unknown tenant table, so
     /// the catalog check fails closed and deletion refuses to proceed.
     #[tokio::test]

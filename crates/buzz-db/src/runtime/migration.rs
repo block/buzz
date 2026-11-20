@@ -1567,7 +1567,7 @@ mod postgres_tests {
             "media_publications",
         ];
         // 0090 is immutable and also retired the fences on the two tables
-        // migration 0105 later drops, so list them here.
+        // migration 0106 later drops, so list them here.
         let dropped_later = ["delivery_log", "subscriptions"];
         for table in crate::deletion::EXPECTED_SCOPED_TABLES
             .iter()
@@ -4200,7 +4200,7 @@ mod postgres_tests {
         );
     }
 
-    /// Before migration 0105 the delivery tables are live, and the deletion
+    /// Before migration 0106 the delivery tables are live, and the deletion
     /// catalog check refuses exactly them as unknown tenant tables and nothing
     /// else. Migrations apply before code, so no deployment runs this binary
     /// against such a catalog. Asserting the whole drift keeps the check as
@@ -4209,7 +4209,7 @@ mod postgres_tests {
         let error = store
             .validate_catalog()
             .await
-            .expect_err("deletion refuses the delivery tables before migration 0105");
+            .expect_err("deletion refuses the delivery tables before migration 0106");
         assert!(
             error
                 .to_string()
@@ -4323,19 +4323,19 @@ mod postgres_tests {
             .expect("deletion must accept the catalog after the drop");
     }
 
-    /// Migration 0105 discards any rows in the delivery tables. No Buzz
+    /// Migration 0106 discards any rows in the delivery tables. No Buzz
     /// release ever wrote them, but an operator copy (for example one made by
     /// the legacy cutover script) may hold rows. The drop must not depend on
     /// the tables being empty.
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn migration_0105_drops_populated_delivery_tables() {
+    async fn migration_0106_drops_populated_delivery_tables() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
         MIGRATOR
-            .run_to(104, &pool)
+            .run_to(105, &pool)
             .await
-            .expect("apply migrations through 0104");
+            .expect("apply migrations through 0105");
         let community = uuid::Uuid::new_v4();
         for statement in [
             "INSERT INTO subscriptions (community_id, id, owner_pubkey) \
@@ -4348,7 +4348,7 @@ mod postgres_tests {
                 .await
                 .expect("seed delivery table");
         }
-        run_migrations(&pool).await.expect("apply 0105");
+        run_migrations(&pool).await.expect("apply 0106");
         let present: (bool, bool, bool, bool, bool) = sqlx::query_as(
             "SELECT to_regclass('delivery_log') IS NOT NULL, \
              to_regclass('subscriptions') IS NOT NULL, \

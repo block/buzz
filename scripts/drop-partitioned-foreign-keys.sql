@@ -5,8 +5,8 @@
 -- drop already removed (SQLSTATE 42704). This file runs migration 0104's drop
 -- for a database that pgschema brings up to date instead.
 --
--- Migration 0105 dropped delivery_log and the schema no longer declares it, so
--- a fresh database, or one migrated through 0105, has only events. A reused
+-- Migration 0106 dropped delivery_log and the schema no longer declares it, so
+-- a fresh database, or one migrated through 0106, has only events. A reused
 -- database from before the drop may still have delivery_log; its key is
 -- dropped too, only while the table exists.
 --

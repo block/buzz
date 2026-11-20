@@ -65,7 +65,7 @@ A deployment that applies `schema/` with pgschema follows the same order.
 Apply the migrations first, or first drop the triggers on the partitioned
 parents: `events_created_at_floor`, `community_write_fence_events` and
 `trg_events_guard_channel_roster_snapshot` on `events`, and, while the table
-still exists (migration 0105 drops it), `community_write_fence_delivery_log` on
+still exists (migration 0106 drops it), `community_write_fence_delivery_log` on
 `delivery_log`.
 Otherwise pgschema plans the partition copies' drops before the parent's, and
 PostgreSQL refuses with `2BP01`.

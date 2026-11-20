@@ -176,10 +176,10 @@ and operator CLI before the next starts.
    does not know the drop migration's version, so run it with auto-migration
    off once the drop has applied.
 
-Migration `0105` dropped `delivery_log` and `subscriptions` this way, after
+Migration `0106` dropped `delivery_log` and `subscriptions` this way, after
 #9746 removed their code. It discards any rows in them, including rows the
-legacy cutover script copied in; export those before `0105` if you need them.
-Deployments that apply `schema/` with pgschema apply `0105` first.
+legacy cutover script copied in; export those before `0106` if you need them.
+Deployments that apply `schema/` with pgschema apply `0106` first.
 
 #### Checklist: adding a provenance-only table
 
@@ -452,7 +452,7 @@ which the parent's drop already removed (`42704`). A deployment that applies
 `schema/` with pgschema applies the dropping migration first, under that
 migration's lock budgets, then runs pgschema. For the trigger drops see
 [trigger-retirement-deployment.md](trigger-retirement-deployment.md); for the
-foreign keys on `events` and, before `0105` dropped it, `delivery_log`, apply
+foreign keys on `events` and, before `0106` dropped it, `delivery_log`, apply
 `0104`.
 
 ### 6. Bound every lock and statement

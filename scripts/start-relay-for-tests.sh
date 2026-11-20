@@ -113,7 +113,7 @@ docker exec -i -e PGPASSWORD="${PGPASSWORD}" buzz-postgres \
 # Apply the table-dropping migration first, as deployments do: pgschema drops
 # the fence function before the tables whose triggers still use it.
 docker exec -i -e PGPASSWORD="${PGPASSWORD}" buzz-postgres \
-  psql -U "${PGUSER}" -d "${PGDATABASE}" -v ON_ERROR_STOP=1 -1 -f - < migrations/0105_drop_delivery_tables.sql
+  psql -U "${PGUSER}" -d "${PGDATABASE}" -v ON_ERROR_STOP=1 -1 -f - < migrations/0106_drop_delivery_tables.sql
 ./bin/pgschema apply --file schema/schema.sql --auto-approve
 docker exec -i -e PGPASSWORD="${PGPASSWORD}" buzz-postgres \
   psql -U "${PGUSER}" -d "${PGDATABASE}" -v ON_ERROR_STOP=1 < scripts/reconcile-schema-after-pgschema.sql
