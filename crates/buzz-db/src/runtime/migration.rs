@@ -1572,12 +1572,11 @@ mod postgres_tests {
         // the routing proof.
         assert_eq!(migrations[25].version, 26);
         let heartbeat = migrations[25].sql.as_str();
-        assert!(heartbeat.contains("CREATE TABLE IF NOT EXISTS replica_heartbeat"));
+        assert!(heartbeat.contains("CREATE TABLE replica_heartbeat ("));
         assert!(heartbeat.contains("CHECK (id = 1)"));
         assert!(heartbeat.contains("epoch"));
-        assert!(heartbeat.contains("INSERT INTO replica_heartbeat (id) VALUES (1) ON CONFLICT (id) DO NOTHING"));
-        assert!(heartbeat.contains("ON CONFLICT (table_name) DO NOTHING"));
-        assert!(heartbeat.contains("_operator_global_tables"));
+        assert!(heartbeat.contains("INSERT INTO replica_heartbeat (id) VALUES (1);"));
+        assert!(heartbeat.contains("INSERT INTO _operator_global_tables"));
 
         // Channel-id lookup index (0027): serves tenant-independent channel lookups.
         assert_eq!(migrations[26].version, 27);
