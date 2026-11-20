@@ -24,13 +24,17 @@ export 'channel_metadata_updates.dart';
 part 'channel_huddle_actions.dart';
 part 'channel_management_actions.dart';
 
-/// The text of [error] without a leading `Exception: `, which a plain
-/// [Exception] adds. Only the prefix goes: `TimeoutException: ...` keeps its
-/// whole name.
+/// The text of [error] without the `Exception: ` a plain [Exception] adds,
+/// both leading and after a wrapping error's `: ` (such as a
+/// [RelayAckLostError] cause). Named types keep their whole name:
+/// `TimeoutException: ...` stays as is.
 String _relayErrorMessage(Object error) {
   const prefix = 'Exception: ';
   final text = error.toString();
-  return text.startsWith(prefix) ? text.substring(prefix.length) : text;
+  final stripped = text.startsWith(prefix)
+      ? text.substring(prefix.length)
+      : text;
+  return stripped.replaceAll(': $prefix', ': ');
 }
 
 /// Raised when one or more kind:9000 adds were rejected, keyed by pubkey.

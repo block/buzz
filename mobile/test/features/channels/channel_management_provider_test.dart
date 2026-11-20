@@ -494,10 +494,12 @@ void main() {
     final keys = nostr.Keys.generate();
     final timedOut = 'a' * 64;
     final rejected = 'b' * 64;
+    final lost = 'c' * 64;
     final session = _RecordingPublishRelaySession()
       ..publishErrors.addAll({
         timedOut: RelayAckTimeoutError('Event e not acknowledged'),
-        rejected: Exception('restricted: not allowed'),
+        rejected: const RelayEventRejectedException('restricted: not allowed'),
+        lost: RelayAckLostError(Exception('App moved to background')),
       });
     final actionsProvider = Provider<ChannelActions>((ref) {
       return ChannelActions(
@@ -515,13 +517,16 @@ void main() {
           .read(actionsProvider)
           .addMembers(
             channelId: _channelId,
-            pubkeys: [timedOut, rejected],
+            pubkeys: [timedOut, rejected, lost],
             role: 'member',
           ),
       throwsA(
         isA<AddMembersException>().having((e) => e.failures, 'failures', {
           timedOut: 'TimeoutException: Event e not acknowledged',
           rejected: 'restricted: not allowed',
+          lost:
+              'Connection lost before the relay acknowledged the event: '
+              'App moved to background',
         }),
       ),
     );
