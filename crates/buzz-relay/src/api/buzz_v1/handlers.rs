@@ -337,18 +337,11 @@ pub(super) async fn write(
     }
     let mut body = json!({ "outcomes": outcomes });
     // Committed outcomes stand even when their rows cannot be read in the
-    // remaining budget: omit them. The person's other devices then learn of
-    // the change from their next `since` read.
+    // remaining budget: omit them. The person's other devices learn of the
+    // change from their next `since` read.
     if let Ok(Ok(rows)) =
         tokio::time::timeout_at(deadline, refreshed(&state, &headers, &principal, &applied)).await
     {
-        if !rows.is_empty() {
-            state.push_personal_activity(
-                &principal.tenant,
-                &principal.actor.to_bytes(),
-                json!(["BUZZ", "activity", { "rows": rows }]).to_string(),
-            );
-        }
         body["rows"] = json!(rows);
     }
     auth::response(body)

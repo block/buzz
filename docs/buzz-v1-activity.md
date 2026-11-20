@@ -162,8 +162,8 @@ The feed is read when a person opens it, and paged as they scroll. It has no
 `marker`, no `totals` and no `since`. A mention is a message, and a
 connected client already receives it as an event; whether it is unread changes
 only when a read position moves, which the client that moved it knows and
-other devices learn from the row push below. To refresh the feed, read its
-first page again.
+other devices learn from their next `since` read. To refresh the feed, read
+its first page again.
 
 A page examines at most 2,000 of the person's mentions. With `unread=true`, or
 when many of them cannot be shown (deleted, or in a channel the person left),
@@ -213,16 +213,10 @@ A `since` read costs what the person's own list costs, not what the community
 did meanwhile: it walks the person's memberships and thread rows, looks each
 shared row up by its key, and then reads only the rows that changed.
 
-A WebSocket connection admitted as you also receives your own changes as
-they commit, from any of your devices:
-
-```json
-["BUZZ","activity",{"rows":[ ... ]}]
-```
-
-The rows are the ones the `POST` below returned. The push is best effort and
-unordered relative to reads; treat it as a hint and let `since` correct it.
-New messages are not pushed this way: they already arrive as events.
+Read-state changes are not pushed: the device that makes one gets its rows in
+the `POST` response below, and your other devices see the change on their next
+`since` read. A per-connection opt-in push may come later,
+with the first client that reads it.
 
 ### What a client does
 
@@ -235,8 +229,7 @@ New messages are not pushed this way: they already arrive as events.
   makes the row unread when it is top-level or a reply broadcast to the
   channel, is not yours, is not tagged `["audience","agents"]`, and the
   conversation is not muted. A reply that is not yours does the same for its
-  thread's row, whatever its audience. The
-  relay pushes only the changes you made (below).
+  thread's row, whatever its audience.
 - **After joining a channel, read `since`** to get its row.
 - **Keep the list and its marker across restarts**, so a start is a `since`
   read, not a first page.
@@ -245,7 +238,7 @@ New messages are not pushed this way: they already arrive as events.
   from the event that carries it.
 - **When you mark a row read, mark its mention rows read locally**: those in
   the same channel timeline, or the same thread, that arrived at or before the
-  message you marked through. Do the same for the rows of a `BUZZ` push.
+  message you marked through.
 - **Mute through this API.** `state` is where a mute is read and `set_state`
   where it is written, on every device. A client that still keeps mutes in its
   own synced preferences moves them here once: one `set_state` per muted
@@ -531,8 +524,8 @@ time.
 
 Clients must ignore unknown response fields and unknown row kinds. Requests
 are strict: unknown parameters and intent types are rejected, so send a new one
-only after the relay advertises a version that has it. The WebSocket frame is
-additive: a client that does not know `BUZZ` frames ignores them.
+only after the relay advertises a version that has it. The relay sends no new
+WebSocket frames.
 
 The intents `mark_read`, `import_through` and `finish_import`, `mark_unread`
 with a `message_id`, and the `imported` field were added to version 2 before
