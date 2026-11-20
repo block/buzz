@@ -51,7 +51,16 @@ final readNotificationClearerProvider = Provider<void>((ref) {
     }
   }
 
-  ref.listen(readStateProvider, (_, _) => unawaited(clear()));
+  // Read state is re-emitted every minute even when unchanged.
+  ref.listen(readStateProvider, (previous, next) {
+    if (previous != null &&
+        previous.isReady == next.isReady &&
+        mapEquals(previous.contexts, next.contexts) &&
+        mapEquals(previous.forcedUnreadContexts, next.forcedUnreadContexts)) {
+      return;
+    }
+    unawaited(clear());
+  });
   ref.listen(appForegroundProvider, (_, foreground) {
     if (foreground) unawaited(clear());
   }, fireImmediately: true);

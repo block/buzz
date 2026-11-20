@@ -54,9 +54,11 @@ void main() {
       // Another community's read state isn't loaded.
       _notification('4', communityId: 'elsewhere', createdAt: 500),
     ];
+    var queries = 0;
     messenger.setMockMethodCallHandler(_push, (call) async {
       switch (call.method) {
         case 'deliveredMessageNotifications':
+          queries++;
           return [...delivered];
         case 'removeDeliveredNotifications':
           final ids = (call.arguments as List).cast<String>();
@@ -96,6 +98,12 @@ void main() {
     readState.sync('forum', 1200);
     await pumpEventQueue();
     expect(ids(), ['2', '4']);
+
+    // An unchanged re-emit doesn't ask iOS again.
+    final asked = queries;
+    readState.reemit();
+    await pumpEventQueue();
+    expect(queries, asked);
   });
 }
 
@@ -110,6 +118,13 @@ class _ReadState extends ReadStateNotifier {
 
   void sync(String contextId, int timestamp) =>
       state = state.copyWithContext(contextId, timestamp);
+
+  void reemit() => state = ReadStateState(
+    isReady: state.isReady,
+    pubkey: state.pubkey,
+    contexts: {...state.contexts},
+    version: state.version + 1,
+  );
 }
 
 class _Foreground extends AppForegroundNotifier {
