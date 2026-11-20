@@ -50,8 +50,7 @@ struct Cli {
     tags: Vec<String>,
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     let _ = rustls::crypto::CryptoProvider::install_default(
         rustls::crypto::aws_lc_rs::default_provider(),
     );
@@ -60,7 +59,19 @@ async fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
 
-    match probe(Cli::parse()).await {
+    let cli = Cli::parse();
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("buzz-acceptance: start runtime: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let result = runtime.block_on(probe(cli));
+    // A timed-out hostname lookup keeps running on a blocking thread; do not
+    // let it hold the exit.
+    runtime.shutdown_timeout(Duration::from_secs(1));
+    match result {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
         Err(e) => {

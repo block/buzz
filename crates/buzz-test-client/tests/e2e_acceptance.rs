@@ -8,8 +8,8 @@
 //! ```
 
 use std::net::UdpSocket;
-use std::process::{Command, Output};
-use std::time::Duration;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use buzz_test_client::acceptance::{self, Config, Outcome, CHECKS};
 use nostr::Keys;
@@ -47,13 +47,24 @@ fn probe(args: &[&str]) -> (Output, Vec<String>) {
         .set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
     let addr = agent.local_addr().unwrap().to_string();
-    let output = Command::new(env!("CARGO_BIN_EXE_buzz-acceptance"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_buzz-acceptance"))
         .args(args)
         .args(["--statsd-addr", &addr, "--tag", "env:test"])
         .env_remove("BUZZ_PRIVATE_KEY")
         .env_remove("BUZZ_RELAY_URL")
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("buzz-acceptance did not exit within 120 s");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().unwrap();
     let mut lines = Vec::new();
     let mut buf = [0u8; 2048];
     while let Ok(n) = agent.recv(&mut buf) {

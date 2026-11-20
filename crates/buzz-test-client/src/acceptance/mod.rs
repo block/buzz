@@ -15,6 +15,7 @@ mod fake_relay;
 pub mod metrics;
 
 use std::future::Future;
+use std::io::Read;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -627,18 +628,31 @@ async fn wait_for_eose(
 fn upgrade_headers(cfg: &Config) -> anyhow::Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     if let Some(path) = &cfg.assertion_file {
-        // Check before reading: a FIFO or device could block the read, which
-        // no async timeout can interrupt.
-        let meta = std::fs::metadata(path)
-            .with_context(|| format!("read assertion file {}", path.display()))?;
-        if !meta.is_file() || meta.len() > MAX_ASSERTION_BYTES {
-            bail!(
+        let invalid = || {
+            anyhow!(
                 "assertion file {} must be a regular file of at most {MAX_ASSERTION_BYTES} bytes",
                 path.display()
-            );
-        }
-        let assertion = std::fs::read_to_string(path)
-            .with_context(|| format!("read assertion file {}", path.display()))?;
+            )
+        };
+        let read = || -> std::io::Result<Option<String>> {
+            // Check before opening: opening a FIFO blocks until a writer
+            // appears, and no async timeout can interrupt that.
+            if !std::fs::metadata(path)?.is_file() {
+                return Ok(None);
+            }
+            let file = std::fs::File::open(path)?;
+            if !file.metadata()?.is_file() {
+                return Ok(None);
+            }
+            // Cap the read on the open file: it may grow after the check.
+            let mut assertion = String::new();
+            file.take(MAX_ASSERTION_BYTES + 1)
+                .read_to_string(&mut assertion)?;
+            Ok((assertion.len() as u64 <= MAX_ASSERTION_BYTES).then_some(assertion))
+        };
+        let assertion = read()
+            .with_context(|| format!("read assertion file {}", path.display()))?
+            .ok_or_else(invalid)?;
         let assertion = assertion.trim();
         if assertion.is_empty() {
             bail!("assertion file {} is empty", path.display());
@@ -770,6 +784,21 @@ mod tests {
         assert!(upgrade_headers(&cfg).is_err(), "oversized file must fail");
         cfg.assertion_file = Some(dir.clone());
         assert!(upgrade_headers(&cfg).is_err(), "a directory must fail");
+
+        // A FIFO with no writer must fail at once, not block the open.
+        let fifo = dir.join("fifo");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        cfg.assertion_file = Some(fifo);
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || done.send(upgrade_headers(&cfg).is_err()).unwrap());
+        assert!(
+            result.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "a FIFO must fail"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
