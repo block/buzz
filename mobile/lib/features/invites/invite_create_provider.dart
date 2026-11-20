@@ -34,6 +34,7 @@ const communityInviteTtlOptions = [
   CommunityInviteOption(label: '3 days', value: 3 * 24 * 60 * 60),
   CommunityInviteOption(label: '7 days', value: 7 * 24 * 60 * 60),
   CommunityInviteOption(label: '30 days', value: 30 * 24 * 60 * 60),
+  CommunityInviteOption(label: '90 days', value: 90 * 24 * 60 * 60),
 ];
 
 /// Supported usage limits for a community invite link.

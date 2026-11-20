@@ -51,7 +51,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// Default invite lifetime: 72 hours.
 pub use buzz_core::invite::DEFAULT_INVITE_TTL_SECS;
 
-/// Maximum invite lifetime a mint request may ask for: 30 days.
+/// Maximum invite lifetime a mint request may ask for: 90 days.
 pub use buzz_core::invite::MAX_INVITE_TTL_SECS;
 
 /// Maximum accepted code length (defense against absurd inputs before any

@@ -169,7 +169,7 @@ mod postgres_tests {
         // Same bounds as /api/invites.
         for (limits, message) in [
             (
-                serde_json::json!({ "ttl_secs": 30 * 24 * 60 * 60 + 1 }),
+                serde_json::json!({ "ttl_secs": 90 * 24 * 60 * 60 + 1 }),
                 "ttl_secs must be between",
             ),
             (
