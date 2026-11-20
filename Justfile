@@ -679,9 +679,10 @@ test-unit:
         # relay events and agent prompts. They are infra-free; ignored lifecycle
         # tests remain excluded and run in their dedicated integration lanes.
         cargo nextest run -p buzz-acp --lib
-        # Load generator scenario, identity, shard and stats unit tests; all
-        # infra-free. Keep scripts/run-tests.sh in step.
-        cargo nextest run -p buzz-test-client --lib -E 'test(/^loadgen::/)'
+        # Load generator and acceptance probe unit tests; all infra-free (the
+        # probe's run against a scripted in-process relay). Keep
+        # scripts/run-tests.sh in step.
+        cargo nextest run -p buzz-test-client --lib -E 'test(/^(loadgen|acceptance)::/)'
     else
         ./scripts/run-tests.sh unit
     fi
