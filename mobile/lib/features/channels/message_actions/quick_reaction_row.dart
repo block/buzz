@@ -8,21 +8,21 @@ class _QuickReactionRow extends ConsumerWidget {
   /// The sheet's context, popped before the reaction fires.
   final BuildContext sheetContext;
 
-  /// The long-pressed message's page context — survives the sheet pop, so the
-  /// picker opened from "+" isn't torn down with the sheet.
-  final BuildContext pageContext;
+  /// The page navigator's context. The picker opened from "+" outlives both
+  /// this sheet and the long-pressed row, which a new message can rebuild away.
+  final BuildContext pickerContext;
 
-  /// The long-pressed message's page ref. The picker callback outlives this
-  /// bottom sheet, so it must not read through the sheet's disposed ref.
-  final WidgetRef pageRef;
+  /// The page's container. Reactions outlive this sheet and the long-pressed
+  /// row, so they must not read through either one's disposed ref.
+  final ProviderContainer pageContainer;
 
   const _QuickReactionRow({
     required this.message,
     required this.reactions,
     this.onToggleReaction,
     required this.sheetContext,
-    required this.pageContext,
-    required this.pageRef,
+    required this.pickerContext,
+    required this.pageContainer,
   });
 
   @override
@@ -44,23 +44,23 @@ class _QuickReactionRow extends ConsumerWidget {
         if (onToggleReaction != null) {
           onToggleReaction!(value);
         } else {
-          toggleReaction(pageContext, pageRef, message, value);
+          toggleReaction(pickerContext, pageContainer, message, value);
         }
         return;
       }
       // The generic picker is also used for composing and statuses. Record
       // recency here, at the reaction call site, so only reactions drive the
       // quick-reaction row.
-      pageRef.read(recentEmojiProvider.notifier).record(value);
+      pageContainer.read(recentEmojiProvider.notifier).record(value);
       // The sheet is on its way out, so the burst can't come from this tile —
       // hand it to the pill that's about to appear in the timeline.
-      armReactionBurst(pageRef, message, value);
+      armReactionBurst(pageContainer, message, value);
       if (onToggleReaction != null) {
         onToggleReaction!(value);
       } else {
         reportReactionFailure(
-          pageContext,
-          pageRef
+          pickerContext,
+          pageContainer
               .read(channelActionsProvider)
               .addReaction(message.id, value, targetAuthor: message.pubkey),
           adding: true,
@@ -109,7 +109,13 @@ class _QuickReactionRow extends ConsumerWidget {
               label: 'Add reaction',
               onTap: () {
                 if (!_selectMessageAction(context)) return;
-                showEmojiPicker(context: pageContext, onSelect: react);
+                final stillCurrent = captureReactionCommunity(pageContainer);
+                showEmojiPicker(
+                  context: pickerContext,
+                  onSelect: (value) {
+                    if (stillCurrent()) react(value);
+                  },
+                );
               },
               child: Icon(
                 BuzzIcons.plus,

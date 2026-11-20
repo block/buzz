@@ -88,6 +88,10 @@ Future<void> showMessageActions({
   EdgeInsets popoverSpotlightPadding = const EdgeInsets.all(Grid.xxs),
 }) async {
   if (!context.mounted) return;
+  // A new message can rebuild the long-pressed row away while the sheet is
+  // up, so reactions go through the page rather than the row.
+  final pageContainer = ProviderScope.containerOf(context, listen: false);
+  final pickerContext = Navigator.of(context).context;
   unawaited(HapticFeedback.mediumImpact());
   final restoreFocusOnCancel = composerFocusNode?.hasFocus ?? false;
   composerFocusNode?.unfocus();
@@ -125,8 +129,8 @@ Future<void> showMessageActions({
                     reactions: reactions ?? message.reactions,
                     onToggleReaction: onToggleReaction,
                     sheetContext: sheetContext,
-                    pageContext: context,
-                    pageRef: ref,
+                    pickerContext: pickerContext,
+                    pageContainer: pageContainer,
                   ),
                   SizedBox(height: message.isSystem ? Grid.xxs : Grid.xs),
                   if (!message.isSystem) ...[

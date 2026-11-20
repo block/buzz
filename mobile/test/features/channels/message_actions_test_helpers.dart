@@ -279,9 +279,14 @@ class _MessageActionsPopoverHarness {
   final ProviderContainer container;
   final ValueNotifier<bool> sourceHidden;
 
+  /// Set to false to unmount the row that opened the actions, as a new
+  /// message shifting the timeline does.
+  final ValueNotifier<bool> launcherMounted;
+
   const _MessageActionsPopoverHarness({
     required this.container,
     required this.sourceHidden,
+    required this.launcherMounted,
   });
 }
 
@@ -306,51 +311,59 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
   Rect anchorRect = const Rect.fromLTWH(32, 260, 300, 72),
   String? currentPubkey = 'self',
   bool listChannel = false,
+  List<Override> overrides = const [],
 }) async {
   final sourceHidden = ValueNotifier(false);
+  final launcherMounted = ValueNotifier(true);
   final draftController = composerDraft == null
       ? null
       : TextEditingController(text: composerDraft);
   if (draftController != null) addTearDown(draftController.dispose);
 
+  Widget launcherRow() => Consumer(
+    builder: (context, ref, _) {
+      // The channel page keeps the channel list alive.
+      if (listChannel) ref.watch(channelsProvider);
+      return Column(
+        children: [
+          if (composerFocusNode != null)
+            TextField(
+              focusNode: composerFocusNode,
+              controller: draftController,
+            ),
+          TextButton(
+            key: const ValueKey('open-message-actions-popover'),
+            onPressed: () => showMessageActions(
+              context: context,
+              ref: ref,
+              message: message,
+              channelId: _channelId,
+              canManageMessage: canManageMessage,
+              allMessages: allMessages,
+              currentPubkey: currentPubkey,
+              isMember: true,
+              anchorRect: anchorRect,
+              captureAnchorSnapshot:
+                  captureAnchorSnapshot ?? _testMessageSnapshot,
+              onPopoverPreviewVisibilityChanged: (visible) =>
+                  sourceHidden.value = visible,
+              onPopoverDismissed: () => sourceHidden.value = false,
+              composerFocusNode: composerFocusNode,
+              restoreComposerFocus: composerFocusNode?.requestFocus,
+            ),
+            child: const Text('open message actions'),
+          ),
+        ],
+      );
+    },
+  );
+
   Widget launcherPage() => Scaffold(
     key: const ValueKey('message-actions-underlying-page'),
-    body: Consumer(
-      builder: (context, ref, _) {
-        // The channel page keeps the channel list alive.
-        if (listChannel) ref.watch(channelsProvider);
-        return Column(
-          children: [
-            if (composerFocusNode != null)
-              TextField(
-                focusNode: composerFocusNode,
-                controller: draftController,
-              ),
-            TextButton(
-              key: const ValueKey('open-message-actions-popover'),
-              onPressed: () => showMessageActions(
-                context: context,
-                ref: ref,
-                message: message,
-                channelId: _channelId,
-                canManageMessage: canManageMessage,
-                allMessages: allMessages,
-                currentPubkey: currentPubkey,
-                isMember: true,
-                anchorRect: anchorRect,
-                captureAnchorSnapshot:
-                    captureAnchorSnapshot ?? _testMessageSnapshot,
-                onPopoverPreviewVisibilityChanged: (visible) =>
-                    sourceHidden.value = visible,
-                onPopoverDismissed: () => sourceHidden.value = false,
-                composerFocusNode: composerFocusNode,
-                restoreComposerFocus: composerFocusNode?.requestFocus,
-              ),
-              child: const Text('open message actions'),
-            ),
-          ],
-        );
-      },
+    body: ValueListenableBuilder<bool>(
+      valueListenable: launcherMounted,
+      builder: (_, mounted, _) =>
+          mounted ? launcherRow() : const SizedBox.shrink(),
     ),
   );
 
@@ -372,6 +385,7 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
           channelActionsProvider.overrideWith(createChannelActions),
         if (listChannel)
           channelsProvider.overrideWith(_ListedChannelsNotifier.new),
+        ...overrides,
       ],
       child: MaterialApp(
         theme: AppTheme.light(),
@@ -419,5 +433,6 @@ Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
   return _MessageActionsPopoverHarness(
     container: container,
     sourceHidden: sourceHidden,
+    launcherMounted: launcherMounted,
   );
 }
