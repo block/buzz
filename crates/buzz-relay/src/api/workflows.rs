@@ -106,7 +106,11 @@ async fn authorize_workflow_read(
         .map_err(|e| e.into_response())?;
 
     // A workflow the caller cannot read answers exactly like a missing one, so
-    // the response never reveals which workflow IDs exist.
+    // this response tells a caller who holds an ID nothing about the workflow,
+    // not even whether it still exists. That is a property of this response
+    // only. IDs are not secret, because workflow messages publish them in
+    // `buzz:workflow-id`, and a save under a held ID is refused, which does
+    // reveal that the workflow exists (NOSTR.md, "Workflow Identity").
     let not_found = || api_error(StatusCode::NOT_FOUND, "workflow not found").into_response();
     let workflow = match state.db.get_workflow(tenant.community(), workflow_id).await {
         Ok(workflow) => workflow,

@@ -1171,8 +1171,10 @@ async fn handle_workflow_trigger(
         })?;
 
     // Persist the command event under the workflow channel even though the
-    // trigger event itself only carries the workflow UUID. Storing channel
-    // triggers as global events leaks workflow IDs to unrelated relay members.
+    // trigger event itself only carries the workflow UUID. Stored as a global
+    // event, a trigger would show unrelated relay members when the owner ran
+    // the workflow and with what input. The ID itself is not secret: workflow
+    // messages publish it in `buzz:workflow-id`.
     let tx = match persist_command_event(&state.db, tenant, event, workflow.channel_id).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
