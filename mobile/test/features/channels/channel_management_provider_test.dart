@@ -112,6 +112,10 @@ void main() {
     final dir = await Directory.systemTemp.createTemp('buzz-leave-unblocked');
     addTearDown(() => dir.delete(recursive: true));
     root.complete(dir);
+    // Let the queued purge finish before teardown deletes the directory.
+    await container
+        .read(savedMessageStoreProvider)
+        .removeChannel(scope, _channelId);
   });
 
   test('shortcut selects only an active exact DM using current membership', () {
