@@ -291,6 +291,24 @@ void mentionChipTests() {
         ('[@Alice](https://example.org/a) wrote', <String>[]),
         ("@Alice's idea", <String>[]),
         ('_@Bob_ and (@Alice)', [bob, alice]),
+        // Review of #9699 (typed names in links): a typed name the bubble
+        // reads as part of a URL, a link or code notifies nobody, and one
+        // in the prose beside it still does.
+        ('see https://example.org/(@Bob) now', <String>[]),
+        ('[docs](https://example.org/(@Bob)) here', <String>[]),
+        ('[docs](https://example.org/b "(@Bob)") here', <String>[]),
+        ('![chart (@Bob)](https://example.org/c.png)', <String>[]),
+        ('<https://example.org/(@Bob)>', <String>[]),
+        ('see [@Bob]\n\n[@Bob]: https://example.org/bob', <String>[]),
+        ('`` ` (@Bob) ``', <String>[]),
+        ('~~~\n(@Bob)\n~~~', <String>[]),
+        ('https://example.org/(@Bob) and @Alice', [alice]),
+        ('https://example.org/ (@Bob) and `x` @Alice', [bob, alice]),
+        ('[docs](https://example.org/b) @Bob', [bob]),
+        (
+          '[@bob] says (@Alice)\n\n[other]: https://example.org/o',
+          [bob, alice],
+        ),
       ]) {
         sent = null;
         await tester.pump(mentionSearchDebounce * 2);

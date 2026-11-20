@@ -163,7 +163,12 @@ bool _startsSelectedMention(List<_ComposerMention> mentions, int start) =>
 /// needs a pick rather than borrowing the surviving chip's key. A typed
 /// name inside [code], the spans and blocks the composer styles as code, is
 /// literal text and notifies nobody; a binding there is dormant and is not
-/// among [mentions].
+/// among [mentions]. Nor does a typed name the bubble does not read as prose
+/// ([mentionsInsideMarkdownLinks], the filter a chip passes): one inside a
+/// bare URL such as `https://example.org/(@Bob)`, a link's label, destination
+/// or title, an image, an autolink, a reference link, or code of any form
+/// the bubble's parser reads, including double backticks and `~~~` fences.
+/// Such a name is not refused as ambiguous either.
 ///
 /// The text is scanned once, against the chips' names, the names their
 /// recipients go by now and the [members] index. `nameEnds` is that scan:
@@ -209,6 +214,7 @@ _resolveComposerMentions(
         mention.candidate;
   }
   final nameEnds = <int, int>{};
+  final typed = <({int start, int end, String label})>[];
   for (final range in mentionOccurrences(text, {
     ...byName.keys,
     for (final (_, candidate) in found) candidate.label.toLowerCase(),
@@ -217,6 +223,14 @@ _resolveComposerMentions(
     if (mentions.any((m) => m.start == range.start)) continue;
     if (!typedMentionNotifies(text, range.start, range.end)) continue;
     if (code.any((c) => c.start < range.start && range.end < c.end)) continue;
+    typed.add(range);
+  }
+  // One parse for the whole draft, and none without code or link syntax.
+  final literal = mentionsInsideMarkdownLinks(text, [
+    for (final range in typed) (start: range.start, end: range.end),
+  ]);
+  for (final (i, range) in typed.indexed) {
+    if (literal.contains(i)) continue;
     final identities = {
       ...?members.byName[range.label],
       ...?byName[range.label],
