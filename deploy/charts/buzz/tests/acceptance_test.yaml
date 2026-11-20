@@ -291,11 +291,22 @@ tests:
         privateKeyFile: /var/run/assertion/key
         assertionFile: /var/run/assertion/token
     asserts:
-      - contains:
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].args
+          value:
+            - --stage-timeout-secs
+            - "10"
+            - --metric-prefix
+            - buzz.acceptance
+            - --tag
+            - probe_revision:1.2.3
+            - --private-key-file
+            - /var/run/assertion/key
+      - notContains:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
             name: BUZZ_PRIVATE_KEY_FILE
-            value: /var/run/assertion/key
+          any: true
       - notContains:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:

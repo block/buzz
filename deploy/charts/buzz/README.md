@@ -539,7 +539,9 @@ image predates the probe.
   container writes. Set exactly one: the chart fails to render with neither.
   Without a key the probe would sign with a new key each run, which a
   members-only relay refuses and an open relay joins to every auto-join
-  channel. On a members-only relay, make the key a relay member first.
+  channel. On a members-only relay, make the key a relay member first. The
+  chart passes `privateKeyFile` as `--private-key-file`, so a probe without
+  that flag exits with an error instead of running with a new key.
 - `acceptance.statsdAddr` sends DogStatsD metrics under
   `acceptance.metricPrefix` (`<prefix>.runs`, `<prefix>.run.seconds`,
   `<prefix>.check.runs`, `<prefix>.check.seconds`, `<prefix>.stage.seconds`).

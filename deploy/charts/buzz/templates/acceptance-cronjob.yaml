@@ -66,10 +66,14 @@ spec:
                 - {{ $a.metricPrefix | quote }}
                 - --tag
                 - {{ printf "probe_revision:%s" (include "buzz.imageRevision" .) | quote }}
+                # Newer options are flags, not env vars: a probe older than an
+                # option rejects the unknown flag instead of ignoring it.
                 {{- with $a.connectAddr }}
-                # A flag, not an env var: a probe older than this option
-                # rejects the unknown flag instead of dialing the public URL.
                 - --connect-addr
+                - {{ . | quote }}
+                {{- end }}
+                {{- with $a.privateKeyFile }}
+                - --private-key-file
                 - {{ . | quote }}
                 {{- end }}
                 {{- range $a.tags }}
@@ -85,9 +89,6 @@ spec:
                 - { name: BUZZ_RELAY_URL, value: {{ default .Values.relayUrl $a.relayUrl | quote }} }
                 {{- with $a.statsdAddr }}
                 - { name: BUZZ_ACCEPTANCE_STATSD_ADDR, value: {{ . | quote }} }
-                {{- end }}
-                {{- with $a.privateKeyFile }}
-                - { name: BUZZ_PRIVATE_KEY_FILE, value: {{ . | quote }} }
                 {{- end }}
                 {{- with $a.assertionFile }}
                 - { name: BUZZ_ACCEPTANCE_ASSERTION_FILE, value: {{ . | quote }} }
