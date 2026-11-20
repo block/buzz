@@ -17896,73 +17896,120 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    testWidgets('replaces a temporary channel route for an initial thread', (
+    for (final inPane in [true, false]) {
+      testWidgets('Activity opens the channel from a thread, pane=$inPane', (
+        tester,
+      ) async {
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(400, 800);
+        addTearDown(tester.view.reset);
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final root = _textMsg(
+          id: threadIdRoot,
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: now - 60,
+        );
+        final reply = _textMsg(
+          id: 'target',
+          pubkey: 'bob',
+          content: 'Target reply',
+          createdAt: now,
+          extraTags: const [
+            ['e', threadIdRoot, '', 'reply'],
+            ['p', 'reader'],
+          ],
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [root, reply],
+            signingPubkey: 'reader',
+            relaySessionNotifier: _ActivityFeedRelaySession(reply),
+            threadReplies: {
+              threadIdRoot: [reply],
+            },
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+            home: inPane
+                ? const AdaptiveConversationDestination(child: ActivityPage())
+                : const ActivityPage(),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final row = find.byKey(const ValueKey('inbox-row-target'));
+        final thread = find.byType(ThreadDetailPage);
+        final channel = find.byType(ChannelDetailPage);
+        Future<void> back() async {
+          await tester.tap(find.byTooltip('Back'));
+          await tester.pumpAndSettle();
+        }
+
+        await tester.tap(row);
+        await tester.pumpAndSettle();
+        expect(thread, findsOneWidget);
+        await back();
+        if (inPane) {
+          expect(channel, findsOneWidget);
+          await back();
+        }
+        expect(row, findsOneWidget);
+
+        await tester.tap(row);
+        await tester.pumpAndSettle();
+        final underneath = find.byType(ChannelDetailPage, skipOffstage: false);
+        final previousChannel = inPane ? tester.element(underneath) : null;
+        await tester.tap(find.bySemanticsLabel('Thread, open channel general'));
+        await tester.pumpAndSettle();
+
+        expect(thread, findsNothing);
+        expect(find.text('Thread root'), findsOneWidget);
+        if (inPane) {
+          expect(tester.element(channel), same(previousChannel));
+        } else {
+          expect(
+            tester.widget<ChannelDetailPage>(channel).initialMessageId,
+            root.id,
+          );
+        }
+
+        await back();
+        if (!inPane) {
+          expect(thread, findsOneWidget);
+          await back();
+        }
+        expect(row, findsOneWidget);
+      });
+    }
+
+    testWidgets('thread header returns to the existing channel route', (
       tester,
     ) async {
-      final root = _textMsg(
-        id: threadIdRoot,
-        pubkey: 'alice',
-        content: 'Thread root',
-      );
-      final target = _textMsg(
-        id: 'target',
-        pubkey: 'bob',
-        content: 'Target reply',
-        createdAt: 1100,
-        extraTags: const [
-          ['e', threadIdRoot, '', 'reply'],
-        ],
-      );
-      final relaySession = _TrackingRelaySession();
-
       await tester.pumpWidget(
         _buildTestable(
-          messages: [root, target],
-          relaySessionNotifier: relaySession,
-          threadReplies: {
-            threadIdRoot: [target],
-          },
-          users: const {
-            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
-          },
-          home: Builder(
-            builder: (context) => Scaffold(
-              body: Center(
-                child: TextButton(
-                  onPressed: () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => ChannelDetailPage(
-                        channel: _testChannel,
-                        initialMessageId: 'target',
-                        initialThreadRootId: threadIdRoot,
-                        initialThreadRouteBehavior:
-                            InitialThreadRouteBehavior.replaceCurrentRoute,
-                      ),
-                    ),
-                  ),
-                  child: const Text('Open activity thread'),
-                ),
-              ),
-            ),
-          ),
+          messages: [
+            _textMsg(id: threadIdRoot, pubkey: 'alice', content: 'Thread root'),
+          ],
+          initialThreadRootId: threadIdRoot,
+          threadReplies: const {threadIdRoot: []},
         ),
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Open activity thread'));
+      final channel = tester.element(
+        find.byType(ChannelDetailPage, skipOffstage: false),
+      );
+      final thread = find.byType(ThreadDetailPage);
+      expect(thread, findsOneWidget);
+      await tester.tap(
+        find.descendant(of: thread, matching: find.text('general')),
+      );
       await tester.pumpAndSettle();
 
-      expect(find.byType(ThreadDetailPage), findsOneWidget);
-      expect(find.byType(ChannelDetailPage), findsNothing);
-      expect(relaySession.visibleChannels, [_testChannel.id]);
-
-      await tester.pageBack();
-      await tester.pumpAndSettle();
-
-      expect(find.text('Open activity thread'), findsOneWidget);
-      expect(find.byType(ChannelDetailPage), findsNothing);
-      expect(relaySession.visibleChannels, isEmpty);
+      expect(thread, findsNothing);
+      expect(tester.element(find.byType(ChannelDetailPage)), same(channel));
     });
   });
 
@@ -22004,25 +22051,23 @@ class _TestAppLifecycleNotifier extends AppLifecycleNotifier {
   void setLifecycle(AppLifecycleState value) => state = value;
 }
 
-class _TrackingRelaySession extends RelaySessionNotifier {
-  final visibleChannels = <String>[];
+class _ActivityFeedRelaySession extends RelaySessionNotifier {
+  _ActivityFeedRelaySession(this.reply);
+
+  final NostrEvent reply;
 
   @override
   SessionState build() =>
       const SessionState(status: SessionStatus.disconnected);
 
   @override
-  void Function() registerVisibleChannel(String channelId) {
-    final release = super.registerVisibleChannel(channelId);
-    visibleChannels.add(channelId);
-    var released = false;
-    return () {
-      if (released) return;
-      released = true;
-      visibleChannels.remove(channelId);
-      release();
-    };
-  }
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => [
+    if (filters.any((filter) => filter.tags['#p']?.contains('reader') ?? false))
+      reply,
+  ];
 }
 
 class _VoiceDmRelaySession extends _IdentityUpdateRelaySession {

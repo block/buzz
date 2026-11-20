@@ -245,6 +245,16 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
     acceptsTitleTouch(in: touch.view)
   }
 
+  func showSubtitleNavigationIndicator() {
+    let chevron = UIImageView(image: UIImage(
+      systemName: "chevron.forward",
+      withConfiguration: UIImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
+    ))
+    chevron.tintColor = .secondaryLabel
+    chevron.setContentCompressionResistancePriority(.required, for: .horizontal)
+    subtitleStack.addArrangedSubview(chevron)
+  }
+
   // UIKit can wrap titleView in a UIControl. Only controls inside our title
   // should consume the title tap.
   func acceptsTitleTouch(in touchedView: UIView?) -> Bool {
@@ -756,10 +766,12 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       button.accessibilityIdentifier = "channel-navigation-title"
       let enabled = args["titleEnabled"] as? Bool == true
       let accessibleTitle = [item.title ?? "", subtitle].filter { !$0.isEmpty }.joined(separator: ", ")
-      button.accessibilityLabel = enabled ? "Open settings for \(accessibleTitle)" : accessibleTitle
+      let navigationLabel = args["subtitleNavigationLabel"] as? String
+      button.accessibilityLabel = enabled ? (navigationLabel ?? "Open settings for \(accessibleTitle)") : accessibleTitle
       button.accessibilityTraits = enabled ? .button : .header
       button.isUserInteractionEnabled = enabled
       if enabled {
+        if navigationLabel != nil { button.showSubtitleNavigationIndicator() }
         button.onActivate = { [weak self] in self?.channel.invokeMethod("action", arguments: "title") }
       }
       if let avatar = args["titleAvatar"] as? [String: Any] {

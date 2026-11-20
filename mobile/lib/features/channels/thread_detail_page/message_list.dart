@@ -185,6 +185,7 @@ class _ThreadMessageList extends HookWidget {
       }
     });
 
+    final appBarHeight = _threadAppBarHeight(context);
     final content = LaidOutViewportReporter(
       viewport: viewport,
       child: KeyboardDismissOnDrag(
@@ -211,7 +212,7 @@ class _ThreadMessageList extends HookWidget {
                       padding: EdgeInsets.only(
                         left: Grid.gutter,
                         right: Grid.gutter,
-                        top: frostedAppBarHeight(context),
+                        top: appBarHeight,
                         bottom: Grid.xs + bottomInset,
                       ),
                       // Head + replies + a stable zero-content tail target. The
@@ -366,7 +367,7 @@ class _ThreadMessageList extends HookWidget {
                 Positioned(
                   left: Grid.gutter,
                   right: Grid.gutter,
-                  top: frostedAppBarHeight(context),
+                  top: appBarHeight,
                   child: CompositedTransformTarget(
                     link: loadingHeadLink,
                     child: const SizedBox(),
@@ -385,8 +386,7 @@ class _ThreadMessageList extends HookWidget {
                       onUserScrollEnd: onUserScrollEnd,
                       scrollPosition: () => headScrollPosition.value,
                       positions: itemPositionsListener.itemPositions,
-                      viewportTopEdge:
-                          frostedAppBarHeight(context) / constraints.maxHeight,
+                      viewportTopEdge: appBarHeight / constraints.maxHeight,
                       child: ConstrainedBox(
                         constraints: BoxConstraints(
                           maxHeight: visible
@@ -394,7 +394,7 @@ class _ThreadMessageList extends HookWidget {
                               : math.max(
                                   0,
                                   constraints.maxHeight -
-                                      frostedAppBarHeight(context) -
+                                      appBarHeight -
                                       Grid.xs -
                                       bottomInset,
                                 ),

@@ -133,6 +133,7 @@ class IosNavigationBar extends HookConsumerWidget {
     super.key,
     required this.title,
     this.subtitle,
+    this.subtitleNavigationLabel,
     this.ephemeralLabel,
     this.titleAvatar,
     this.titleAvatars = const [],
@@ -160,6 +161,10 @@ class IosNavigationBar extends HookConsumerWidget {
 
   final String title;
   final String? subtitle;
+
+  /// Accessible name for a destination with a disclosure icon by [subtitle].
+  final String? subtitleNavigationLabel;
+
   final String? ephemeralLabel;
   final IosNavigationAction? titleAvatar;
 
@@ -365,6 +370,7 @@ class IosNavigationBar extends HookConsumerWidget {
           ),
       'safeTop': MediaQuery.viewPaddingOf(context).top,
       'subtitle': subtitle,
+      'subtitleNavigationLabel': subtitleNavigationLabel,
       'ephemeralLabel': ephemeralLabel,
       'titleAvatar': titleAvatar == null
           ? null

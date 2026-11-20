@@ -30,6 +30,7 @@ void threadTitleCapsuleTests() {
       await tester.pumpWidget(
         _buildTestable(
           messages: [root],
+          textScaler: const TextScaler.linear(3),
           channel: channel,
           channelsNotifier: channels,
           users: const {
@@ -46,28 +47,42 @@ void threadTitleCapsuleTests() {
         ),
       );
       await tester.pumpAndSettle();
+      final nativeBar = find.byWidgetPredicate(
+        (widget) =>
+            widget is UiKitView && widget.viewType == 'buzz/ios_navigation_bar',
+      );
       Map params() =>
-          tester
-                  .widget<UiKitView>(
-                    find.byWidgetPredicate(
-                      (widget) =>
-                          widget is UiKitView &&
-                          widget.viewType == 'buzz/ios_navigation_bar',
-                    ),
-                  )
-                  .creationParams!
-              as Map;
+          tester.widget<UiKitView>(nativeBar).creationParams! as Map;
+      expect(tester.getSize(nativeBar).height, 44);
+      final list = tester.widget<ScrollablePositionedList>(
+        find.byKey(const ValueKey('thread-message-list')),
+      );
+      expect(list.padding!.resolve(TextDirection.ltr).top, 44);
       expect(params()['title'], 'Thread');
       expect(params()['subtitle'], dm ? 'Alice' : 'engineering');
-      expect(params()['titleEnabled'], false);
+      expect(params()['titleEnabled'], true);
+      expect(
+        params()['subtitleNavigationLabel'],
+        dm
+            ? 'Thread, open conversation with Alice'
+            : 'Thread, open channel engineering',
+      );
       channels.setChannels([channel.copyWith(name: 'Renamed conversation')]);
       await tester.pumpAndSettle();
       expect(params()['subtitle'], 'Renamed conversation');
-      expect(params()['titleEnabled'], false);
+      expect(params()['titleEnabled'], true);
+      expect(
+        params()['subtitleNavigationLabel'],
+        dm
+            ? 'Thread, open conversation with Renamed conversation'
+            : 'Thread, open channel Renamed conversation',
+      );
       channels.setChannels([]);
       await tester.pumpAndSettle();
       // An empty subtitle keeps the shared capsule while metadata is absent.
       expect(params()['subtitle'], '');
+      expect(params()['titleEnabled'], false);
+      expect(params()['subtitleNavigationLabel'], isNull);
       expect(tester.takeException(), isNull);
       debugDefaultTargetPlatformOverride = null;
     });
