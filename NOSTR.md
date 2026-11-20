@@ -404,7 +404,9 @@ accepted those spellings and stored each as a separate definition of the same
 workflow. The relay treats such stored definitions as follows:
 
 - a save retires every definition the owner stored under another spelling of
-  that UUID, in the same transaction that stores the new one;
+  that UUID, in the same transaction that stores the new definition and
+  updates the workflow that runs. A save that fails changes none of the
+  three;
 - a delete through any spelling of the coordinate removes the workflow and the
   definitions under every spelling. Like any deletion, it does nothing when a
   live definition is newer than the deletion request;
@@ -452,7 +454,13 @@ old one, whose definition, run history and webhook secret were deleted with
 it. Messages the old workflow sent still pair the ID with its owner, and that
 coordinate now names no definition. A client that reads the definition at the
 full coordinate before it uses the ID anywhere else is therefore never led to
-the new holder's workflow.
+a different owner's workflow.
+
+The same owner can reuse the ID. Deleting a workflow keeps no record of it, so
+its owner can later save a new definition under the same ID, and the
+coordinate on the old messages then returns that new definition. The
+coordinate names the owner's current workflow with that ID, not the one that
+sent the message.
 
 As with `buzz:workflow-owner`, trust the tag only on a message signed by the
 relay key that the community advertises. Any author can put the same tag on an
