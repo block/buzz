@@ -13,6 +13,7 @@
 //! | `BUZZ_NIP_FI_ISSUERS` | If enforce | JSON array of issuer configs (see [`IssuerEnvConfig`]). |
 //! | `BUZZ_NIP_FI_COMMUNITIES` | If enforce | JSON array mapping each community's canonical URI to its authorized issuers (see [`CommunityEnvConfig`]). |
 //! | `BUZZ_NIP_FI_MAX_CONNECTION_LIFETIME_SECS` | If enforce | Per-partition limit on session lifetime. |
+//! | `BUZZ_NIP_FI_ENFORCE_PERCENT` | No | Integer 0-100 (default 0), validated in every mode. In `shadow`, communities whose stable [`rollout_bucket`] is below it are required as if stored Required. |
 //! | `BUZZ_NIP_FI_PROVISION_BINDING` | No | JSON `{"host_suffix", "authorized_issuers"}` binding communities created one label under the suffix; read in every mode (see [`buzz_auth::ProvisionBindingPolicy`]). |
 //!
 //! Each `BUZZ_NIP_FI_ISSUERS` entry also carries the S4 command-API fields.
@@ -295,6 +296,8 @@ pub struct NipFiRelayConfig {
     pub command_configs: Vec<(String, crate::api::nip_fi::CommandIssuerEnvConfig)>,
     /// Output-only publication policies; independent of authorization capabilities.
     pub profile_policies: Vec<buzz_db::verified_profiles::ProfilePolicy>,
+    /// `BUZZ_NIP_FI_ENFORCE_PERCENT`: share of communities required in shadow.
+    pub enforce_percent: u8,
 }
 
 impl NipFiRelayConfig {
@@ -304,6 +307,7 @@ impl NipFiRelayConfig {
     /// missing or invalid (fail-closed: no token is accepted until this passes).
     pub fn from_env() -> Result<Self, ConfigError> {
         let mode = parse_mode()?;
+        let enforce_percent = parse_enforce_percent()?;
         let source = parse_community_source()?;
         if source == CommunitySource::Database
             && !std::env::var("BUZZ_NIP_FI_COMMUNITIES")
@@ -331,6 +335,7 @@ impl NipFiRelayConfig {
                 max_connection_lifetime_secs: 0,
                 command_configs: Vec::new(),
                 profile_policies: Vec::new(),
+                enforce_percent,
             });
         }
 
@@ -548,6 +553,7 @@ impl NipFiRelayConfig {
             max_connection_lifetime_secs,
             command_configs,
             profile_policies,
+            enforce_percent,
         })
     }
 }
@@ -617,6 +623,36 @@ fn parse_mode() -> Result<NipFiMode, ConfigError> {
             "BUZZ_NIP_FI_MODE must be \"enforce\", \"shadow\", \"deny_protected\", or \"off\"; \
              got {other:?}"
         ))),
+    }
+}
+
+fn parse_enforce_percent() -> Result<u8, ConfigError> {
+    let raw = std::env::var("BUZZ_NIP_FI_ENFORCE_PERCENT").unwrap_or_default();
+    match raw.trim() {
+        "" => Ok(0),
+        value => value.parse().ok().filter(|p| *p <= 100).ok_or_else(|| {
+            ConfigError::InvalidValue(format!(
+                "BUZZ_NIP_FI_ENFORCE_PERCENT must be an integer from 0 to 100; got {value:?}"
+            ))
+        }),
+    }
+}
+
+/// Stable rollout bucket in `0..100`: SHA-256 of the UUID's RFC 4122 bytes,
+/// first 8 bytes as a big-endian `u64`, mod 100. Raising the percentage only
+/// adds communities.
+pub(crate) fn rollout_bucket(community_id: uuid::Uuid) -> u8 {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(community_id.as_bytes());
+    let head = u64::from_be_bytes(digest[..8].try_into().expect("8-byte prefix"));
+    (head % 100) as u8
+}
+
+impl NipFiRelayConfig {
+    /// A community's requirement: stored Required, or, in shadow only, inside
+    /// the `BUZZ_NIP_FI_ENFORCE_PERCENT` cohort. Stored policy stays raw.
+    pub(crate) fn policy_required(&self, community_id: uuid::Uuid, stored: bool) -> bool {
+        stored || (self.mode.observes_only() && rollout_bucket(community_id) < self.enforce_percent)
     }
 }
 
@@ -920,6 +956,104 @@ mod tests {
             .join()
             .expect("fixture read must load the restored environment");
         assert!(matches!(mode, NipFiMode::Off));
+    }
+
+    fn rollout_config(mode: NipFiMode, enforce_percent: u8) -> NipFiRelayConfig {
+        NipFiRelayConfig {
+            mode,
+            source: Default::default(),
+            registry: IssuerRegistry::new(),
+            communities: NipFiCommunities::default(),
+            jwks_configs: Vec::new(),
+            max_connection_lifetime_secs: 0,
+            command_configs: Vec::new(),
+            profile_policies: Vec::new(),
+            enforce_percent,
+        }
+    }
+
+    // Frozen: changing the hash reshuffles every rollout cohort.
+    #[test]
+    fn rollout_bucket_golden_vectors() {
+        for (id, bucket) in [
+            ("00000000-0000-0000-0000-000000000000", 69),
+            ("ffffffff-ffff-ffff-ffff-ffffffffffff", 77),
+            ("6ba7b810-9dad-11d1-80b4-00c04fd430c8", 11),
+            ("123e4567-e89b-12d3-a456-426614174000", 22),
+        ] {
+            assert_eq!(rollout_bucket(id.parse().unwrap()), bucket, "{id}");
+        }
+    }
+
+    #[test]
+    fn rollout_cohorts_are_bounded_and_nested() {
+        let ids: Vec<uuid::Uuid> = (0..1000).map(|_| uuid::Uuid::new_v4()).collect();
+        let mut config = rollout_config(NipFiMode::Shadow, 0);
+        let mut previous = Vec::new();
+        for percent in 0..=100 {
+            config.enforce_percent = percent;
+            let cohort: Vec<_> = ids
+                .iter()
+                .filter(|id| config.policy_required(**id, false))
+                .collect();
+            assert!(previous.iter().all(|id| cohort.contains(id)), "{percent}");
+            previous = cohort;
+        }
+        assert_eq!(previous.len(), ids.len(), "100 includes every community");
+        config.enforce_percent = 0;
+        assert!(ids.iter().all(|id| !config.policy_required(*id, false)));
+        assert!(ids.iter().all(|id| config.policy_required(*id, true)));
+    }
+
+    // Only shadow widens the requirement; every other mode keeps stored policy.
+    #[test]
+    fn rollout_only_widens_shadow() {
+        let id = uuid::Uuid::nil();
+        for mode in [
+            NipFiMode::Off,
+            NipFiMode::Shadow,
+            NipFiMode::Enforce,
+            NipFiMode::DenyProtected,
+        ] {
+            for stored in [false, true] {
+                for percent in [69, 70] {
+                    let config = rollout_config(mode, percent);
+                    let cohort = percent == 70;
+                    assert_eq!(
+                        config.policy_required(id, stored),
+                        stored || (mode == NipFiMode::Shadow && cohort),
+                        "{mode:?} stored={stored} cohort={cohort}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_enforce_percent_refuses_startup_in_every_mode() {
+        let _guard = super::NIP_FI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = EnvGuard::new(&["BUZZ_NIP_FI_MODE", "BUZZ_NIP_FI_ENFORCE_PERCENT"]);
+        for mode in ["off", "deny_protected", "shadow", "enforce"] {
+            std::env::set_var("BUZZ_NIP_FI_MODE", mode);
+            for value in ["101", "-1", "abc", "1.5"] {
+                std::env::set_var("BUZZ_NIP_FI_ENFORCE_PERCENT", value);
+                let err = NipFiRelayConfig::from_env().expect_err(value);
+                assert!(
+                    err.to_string().contains("BUZZ_NIP_FI_ENFORCE_PERCENT"),
+                    "{mode} {value}: {err}"
+                );
+            }
+        }
+        std::env::set_var("BUZZ_NIP_FI_MODE", "off");
+        for (value, percent) in [("", 0), (" 100 ", 100), ("0", 0)] {
+            std::env::set_var("BUZZ_NIP_FI_ENFORCE_PERCENT", value);
+            assert_eq!(
+                NipFiRelayConfig::from_env().unwrap().enforce_percent,
+                percent
+            );
+        }
     }
 
     #[test]

@@ -158,7 +158,7 @@ async fn optional_leases_on_another_pod_expire_before_acceptance_with_or_without
             .unwrap();
         let mut h = HeaderMap::new();
         h.insert(header::HOST, host.to_uppercase().parse().unwrap());
-        assert!(!resolve(&pod_b, &h).await.unwrap().stored_required);
+        assert!(!resolve(&pod_b, &h).await.unwrap().policy_required);
         let primed_at = pod_b
             .tenant_host_cache
             .policy_read_started_at(&host)
@@ -263,7 +263,7 @@ async fn optional_leases_on_another_pod_expire_before_acceptance_with_or_without
             headers.insert(header::HOST, candidate.parse().unwrap());
             let serving = candidate == if double_remap { &host } else { &remapped };
             if serving {
-                assert!(resolve(&pod_b, &headers).await.unwrap().stored_required);
+                assert!(resolve(&pod_b, &headers).await.unwrap().policy_required);
                 assert_eq!(
                     crate::nip_fi_http::admit_nip_fi_http_on_state(
                         &pod_b,

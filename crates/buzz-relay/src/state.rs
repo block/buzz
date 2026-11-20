@@ -2705,7 +2705,11 @@ impl AppState {
                         }
                     };
                     let required = policy.as_ref().is_some_and(|policy| {
-                        crate::nip_fi_policy::effective(mode, policy.requires_nip_fi).enforces()
+                        crate::nip_fi_policy::effective(
+                            mode,
+                            self.config.nip_fi.policy_required(policy.community_id, policy.requires_nip_fi),
+                        )
+                        .enforces()
                     });
                     let outcome = if required {
                         "required"

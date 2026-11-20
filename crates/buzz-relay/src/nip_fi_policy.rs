@@ -39,7 +39,8 @@ pub(crate) struct Policy {
     pub community_id: uuid::Uuid,
     pub mode: NipFiMode,
     pub required: bool,
-    pub stored_required: bool,
+    /// Stored Required, or inside the shadow rollout cohort.
+    pub policy_required: bool,
 
     // False only for the guard's legacy rejection scope after an authoritative
     // host miss. Such a scope must never yield an admission proof.
@@ -158,12 +159,15 @@ pub(crate) async fn resolve(
         generation = policy.policy_generation,
         "resolved community auth policy"
     );
+    let policy_required = state
+        .config
+        .nip_fi
+        .policy_required(policy.community_id, policy.requires_nip_fi);
     Ok(Policy {
         community_id: policy.community_id,
-        mode: effective(global, policy.requires_nip_fi),
-        required: !global.is_off() && (policy.requires_nip_fi || global.enforces()),
-
-        stored_required: policy.requires_nip_fi,
+        mode: effective(global, policy_required),
+        required: !global.is_off() && (policy_required || global.enforces()),
+        policy_required,
         mapped: true,
     })
 }
@@ -212,13 +216,16 @@ pub(crate) async fn bind_for_upgrade(
         // failed lookup. Neither outcome can yield a tenant or an upgrade.
         _ => return Err(not_found()),
     };
+    let policy_required = state
+        .config
+        .nip_fi
+        .policy_required(policy.community_id, policy.requires_nip_fi);
     let policy = Policy {
         community_id: policy.community_id,
-        mode: effective(state.config.nip_fi.mode, policy.requires_nip_fi),
+        mode: effective(state.config.nip_fi.mode, policy_required),
         required: !state.config.nip_fi.mode.is_off()
-            && (policy.requires_nip_fi || state.config.nip_fi.mode.enforces()),
-
-        stored_required: policy.requires_nip_fi,
+            && (policy_required || state.config.nip_fi.mode.enforces()),
+        policy_required,
         mapped: true,
     };
     Ok((
@@ -259,7 +266,7 @@ pub(crate) fn required_dependencies_ready(state: &crate::state::AppState) -> boo
 
 fn configured_mode(state: &crate::state::AppState, policy: Policy) -> NipFiMode {
     if !state.config.nip_fi.mode.is_off()
-        && policy.stored_required
+        && policy.policy_required
         && !required_dependencies_ready(state)
     {
         NipFiMode::unavailable()

@@ -25,7 +25,7 @@
 //! | Series | Labels | One increment per |
 //! |---|---|---|
 //! | `buzz_nip_fi_shadow_total` | `route` (`http`, `ws`, `audio`), `stage`, `outcome`, `community` | NIP-FI decision enforce would make: one per HTTP request that reaches admission, one per WebSocket upgrade enforce would refuse, and one per observed session: at the AUTH where enforce would admit or deny it, or `deadline` when its deadline passes first. A request or upgrade whose community binding goes stale before enforce's final re-check also records `deadline`. An agent assertion enforce would refuse for its token owner, banned or not the agent's stored owner, records `owner` |
-//! | `buzz_nip_fi_enforce_total` | as `buzz_nip_fi_shadow_total` | NIP-FI decision enforce made, the same unit: one per HTTP request admitted or denied (an agent token's at its owner step), one per refused upgrade, and one verdict per session: its admission, its NIP-FI refusal (pairing, deny set, `owner`, `deadline`), or none when refused for a non-NIP-FI reason. A denial's line is `nip-fi enforce deny`, written at once; an admit writes none |
+//! | `buzz_nip_fi_enforce_total` | as `buzz_nip_fi_shadow_total` | NIP-FI decision enforce made, the same unit: one per HTTP request admitted or denied (an agent token's at its owner step), one per refused upgrade, and one verdict per session: its admission, its NIP-FI refusal (pairing, deny set, `owner`, `deadline`), or none when refused for a non-NIP-FI reason. A denial's line is `nip-fi enforce deny` on target `buzz_relay::nip_fi_enforce`, written at once; an admit writes none |
 //! | `buzz_nip_fi_enforce_session_end_total` | as `buzz_nip_fi_shadow_session_end_total` | admitted enforce session ended once, `expired` by its deadline or `revoked` by a disconnect (local or cross-pod, however often delivered). Its line is `nip-fi enforce session end`, with the admitted key |
 //! | `buzz_nip_fi_enforce_strict_proof_total` | as `buzz_nip_fi_shadow_strict_proof_total` | strict NIP-98 proof enforce checked on a bridge or Blossom route, recorded from the deciding check; a rejection is the route's 403, or 401 when the proof is missing |
 //! | `buzz_nip_fi_shadow_strict_proof_total` | `route` (`bridge`, `blossom`), `outcome` (`pass`, `rejected`), `community` | strict NIP-98 side check on a route whose proof is stricter in enforce (payload tag, Blossom proof); not every request runs one |
@@ -413,8 +413,9 @@ impl PendingLine {
         if self.written.swap(true, std::sync::atomic::Ordering::AcqRel) {
             return;
         }
-        // Both lines stay in this module: production's log filter admits
-        // `buzz_relay::nip_fi_shadow` at info.
+        // The shadow line stays on this module's target; the enforce line has
+        // its own, `buzz_relay::nip_fi_enforce`, so a filter can keep real
+        // denials while suppressing would-deny volume.
         match self.mode {
             Mode::Shadow => tracing::info!(
                 mode = "shadow",
@@ -427,6 +428,7 @@ impl PendingLine {
                 "nip-fi shadow would-deny"
             ),
             Mode::Enforce => tracing::info!(
+                target: "buzz_relay::nip_fi_enforce",
                 mode = "enforce",
                 route = self.route,
                 stage = self.stage,
@@ -838,9 +840,13 @@ pub(crate) mod tests {
             self.lines_of("nip-fi shadow would-deny")
         }
 
-        /// The enforce denial lines logged so far.
+        /// The enforce denial lines logged so far, each on its own target.
         pub(crate) fn enforce_lines(&self) -> Vec<String> {
-            self.lines_of("nip-fi enforce deny")
+            let lines = self.lines_of("nip-fi enforce deny");
+            for line in &lines {
+                assert!(line.contains(" buzz_relay::nip_fi_enforce: "), "{line}");
+            }
+            lines
         }
 
         fn lines_of(&self, message: &str) -> Vec<String> {

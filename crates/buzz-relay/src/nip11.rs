@@ -438,13 +438,13 @@ pub(crate) async fn nip11_document(
             community_id: *tenant.community().as_uuid(),
             mode: state.config.nip_fi.mode,
             required: false,
-            stored_required: false,
+            policy_required: false,
             mapped: true,
         }
     } else {
         crate::nip_fi_policy::resolve(state, &headers).await?
     };
-    if !state.config.nip_fi.mode.is_off() && policy.stored_required {
+    if !state.config.nip_fi.mode.is_off() && policy.policy_required {
         // Required implies a usable binding and verifier, not merely a bit.
         state
             .nip_fi_communities()
