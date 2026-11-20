@@ -9,7 +9,6 @@ class ObservedUnreadEvent {
   final String? rootId;
   final bool highPriority;
   final bool countsTowardBadge;
-  final bool countsTowardAppBadge;
 
   /// `activity:<channel>` reads this event (see `readByChannelCatchUp`).
   final bool channelCatchUp;
@@ -28,7 +27,6 @@ class ObservedUnreadEvent {
     required this.rootId,
     required this.highPriority,
     required this.countsTowardBadge,
-    required this.countsTowardAppBadge,
     this.channelCatchUp = false,
     this.threadReply,
   });
@@ -81,7 +79,6 @@ ObservedUnreadEvent makeObservedUnreadEvent({
     rootId: rootId,
     highPriority: highPriority,
     countsTowardBadge: isDm || isThreadedReply || highPriority,
-    countsTowardAppBadge: isDm || (!isThreadedReply && highPriority),
     channelCatchUp: readByChannelCatchUp(
       isDm: isDm,
       // A broadcast is read only by its own mark, like any reply, even when

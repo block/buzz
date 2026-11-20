@@ -74,7 +74,8 @@ class _Fixture {
     Map<String, String> forced = const {},
     bool readReady = true,
     ChannelsNotifier? channelNotifier,
-    _ActivityNotifier? activity,
+    ActivityNotifier? activity,
+    RelaySessionNotifier? session,
     _AuthNotifier? auth,
   }) {
     container = ProviderContainer(
@@ -83,6 +84,7 @@ class _Fixture {
         savedPrefsProvider.overrideWithValue(prefs),
         relayConfigProvider.overrideWith(_RelayConfigNotifier.new),
         myPubkeyProvider.overrideWithValue('reader'),
+        if (session != null) relaySessionProvider.overrideWith(() => session),
         authProvider.overrideWith(() => auth ?? _AuthNotifier()),
         channelsProvider.overrideWith(
           () =>
@@ -461,6 +463,42 @@ void main() {
     });
   }
 
+  test(
+    'pending when the real Activity read fails on both transports',
+    () async {
+      final session = _HistorySession([
+        NostrEvent(
+          id: 'mention',
+          pubkey: 'sender',
+          createdAt: 100,
+          kind: 9,
+          tags: const [
+            ['h', 'ch-a'],
+            ['p', 'reader'],
+          ],
+          content: 'An update',
+          sig: '',
+        ),
+      ]);
+      final fixture = _Fixture(activity: ActivityNotifier(), session: session);
+      await fixture.load();
+      expect(fixture.badge, UnreadBadge.unread);
+
+      // The notifier does not report an error: it publishes a feed without the
+      // sources it could not read, which must not clear the icon.
+      session.fail = true;
+      fixture.container.invalidate(activityProvider);
+      final feed = await fixture.container.read(activityProvider.future);
+      expect(feed.isEmpty, isTrue);
+      expect(fixture.badge, UnreadBadge.pending);
+
+      session.fail = false;
+      fixture.container.invalidate(activityProvider);
+      await fixture.container.read(activityProvider.future);
+      expect(fixture.badge, UnreadBadge.unread);
+    },
+  );
+
   test('platformCount maps pending to null, clear to 0, unread to 1', () {
     expect(UnreadBadge.pending.platformCount, isNull);
     expect(UnreadBadge.clear.platformCount, 0);
@@ -522,6 +560,54 @@ class _ActivityNotifier extends ActivityNotifier {
       load(ref.watch(relayConfigProvider).baseUrl);
 
   void fail(Object error) => state = AsyncError(error, StackTrace.current);
+}
+
+/// A connected relay that answers Activity history from [events] until it
+/// fails every read.
+class _HistorySession extends RelaySessionNotifier {
+  _HistorySession(this.events);
+  final List<NostrEvent> events;
+  bool fail = false;
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (fail) throw StateError('relay unavailable');
+    return [for (final filter in filters) ...events.where(_matcher(filter))];
+  }
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (fail) throw StateError('relay unavailable');
+    return events.where(_matcher(filter)).toList();
+  }
+
+  static bool Function(NostrEvent) _matcher(NostrFilter filter) =>
+      (event) =>
+          filter.kinds.contains(event.kind) &&
+          filter.tags.entries.every(
+            (entry) => event.tags.any(
+              (tag) =>
+                  tag.length > 1 &&
+                  '#${tag[0]}' == entry.key &&
+                  entry.value.contains(tag[1]),
+            ),
+          );
+
+  @override
+  Future<void Function()> subscribe(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+  }) async => () {};
 }
 
 class _AuthNotifier extends AuthNotifier {

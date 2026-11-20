@@ -8,6 +8,7 @@ import '../../shared/relay/relay.dart';
 import '../channels/channel.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
+import '../channels/unread_badge/observed_unread_event.dart';
 import '../../shared/agents/is_quiet_agent_message.dart';
 import 'dm_resurface.dart';
 import 'feed_item.dart';
@@ -102,12 +103,65 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
       _clearLiveSubscriptions();
     });
 
+    // The relay sends channel events only to `#h` subscriptions, so the `#p`
+    // subscription below never sees a mention in a channel. The channel list
+    // already subscribes to joined channels: read again when it records a
+    // mention this feed lacks.
+    final mentions = _ChannelMentionWatch(
+      since: DateTime.now().millisecondsSinceEpoch ~/ 1000 - 5,
+    );
+    ref.listen(channelsProvider, (_, _) {
+      if (!state.isLoading) {
+        _refreshForChannelMentions(generation, state.value, mentions);
+      }
+    });
+
     final response = await _fetch();
     if (sessionState.status == SessionStatus.connected &&
         generation == _subscriptionGeneration) {
       unawaited(_subscribeLive(generation));
+      _refreshForChannelMentions(generation, response, mentions);
     }
     return response;
+  }
+
+  /// Schedules a refresh when a joined channel has a top-level mention, seen
+  /// since this build started, that [feed] lacks. Thread replies already reach
+  /// Activity through `observedThreadReplies`, and DMs have their own
+  /// subscription.
+  void _refreshForChannelMentions(
+    int generation,
+    HomeFeedResponse? feed,
+    _ChannelMentionWatch watch,
+  ) {
+    if (generation != _subscriptionGeneration || feed == null) return;
+    final channels = ref.read(channelsProvider).asData?.value;
+    if (channels == null) return;
+    final observed = ref
+        .read(channelsProvider.notifier)
+        .observedUnreadEventsByChannel;
+    final revisionOf = observed is ObservedUnreadSnapshot
+        ? observed.revisionOf
+        : null;
+    final known = {for (final item in feed.all) item.id};
+    var missing = false;
+    for (final channel in channels) {
+      if (!channel.isMember || channel.isArchived || channel.isDm) continue;
+      final revision = revisionOf?.call(channel.id);
+      if (revision != null && watch.revisions[channel.id] == revision) continue;
+      for (final event
+          in observed[channel.id]?.values ?? const <ObservedUnreadEvent>[]) {
+        if (event.highPriority &&
+            event.threadReply == null &&
+            event.createdAt >= watch.since &&
+            !known.contains(event.id) &&
+            watch.requested.add(event.id)) {
+          missing = true;
+        }
+      }
+      if (revision != null) watch.revisions[channel.id] = revision;
+    }
+    if (missing) _scheduleLiveRefresh(generation);
   }
 
   Future<void> _subscribeLive(int generation) async {
@@ -512,10 +566,11 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     // Quiet agent messages (`audience: agents`) are coordination between
     // agents and never become Activity items, even when they tag the reader.
     final fetched = await _queryWithWebSocketFallback(session, filters);
+    final refill = await _refillPastQuiet(session, filters, fetched.events);
     final events = [
-      for (final event in fetched)
+      for (final event in fetched.events)
         if (!isQuietAgentMessage(event.tags)) event,
-      ...await _refillPastQuiet(session, filters, fetched),
+      ...refill.events,
     ];
 
     bool isFromOther(NostrEvent e) =>
@@ -594,6 +649,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
         for (final i in items)
           if (i.category == 'agent_activity') i,
       ],
+      complete: fetched.complete && refill.complete,
     );
   }
 
@@ -602,14 +658,16 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
   /// own window from the batched result (the bridge concatenates every
   /// filter's newest `limit` matches), then pages past a window that lost
   /// items to the quiet filter, a few pages at most, refilling only up to the
-  /// original limit. Returns the non-quiet events found on those pages.
-  Future<List<NostrEvent>> _refillPastQuiet(
+  /// original limit. Returns the non-quiet events found on those pages, and
+  /// whether every page read succeeded.
+  Future<({List<NostrEvent> events, bool complete})> _refillPastQuiet(
     RelaySessionNotifier session,
     List<NostrFilter> filters,
     List<NostrEvent> fetched,
   ) async {
     const maxPages = 3;
     final found = <NostrEvent>[];
+    var complete = true;
     for (final filter in filters) {
       final seen = <String>{};
       // Only the retained window is marked seen: matches past the cap came
@@ -634,17 +692,17 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
         // The relay's composite cursor, so events sharing the boundary
         // second are not skipped.
         final last = page.last;
-        page = window(
-          await _queryWithWebSocketFallback(session, [
-            NostrFilter(
-              kinds: filter.kinds,
-              tags: filter.tags,
-              limit: filter.limit,
-              until: last.createdAt,
-              extensions: {'before_id': last.id},
-            ),
-          ]),
-        );
+        final next = await _queryWithWebSocketFallback(session, [
+          NostrFilter(
+            kinds: filter.kinds,
+            tags: filter.tags,
+            limit: filter.limit,
+            until: last.createdAt,
+            extensions: {'before_id': last.id},
+          ),
+        ]);
+        complete = complete && next.complete;
+        page = window(next.events);
         final kept = page
             .where((e) => !isQuietAgentMessage(e.tags))
             .take(filter.limit - visible)
@@ -653,7 +711,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
         visible += kept.length;
       }
     }
-    return found;
+    return (events: found, complete: complete);
   }
 
   /// Newest first, ties by ascending id: the relay's history order.
@@ -676,12 +734,15 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     return true;
   }
 
-  Future<List<NostrEvent>> _queryWithWebSocketFallback(
+  /// The events for [filters], and whether every filter was read. A filter
+  /// whose HTTP and websocket reads both fail contributes no events.
+  Future<({List<NostrEvent> events, bool complete})>
+  _queryWithWebSocketFallback(
     RelaySessionNotifier session,
     List<NostrFilter> filters,
   ) async {
     try {
-      return await session.queryRelay(filters);
+      return (events: await session.queryRelay(filters), complete: true);
     } catch (error) {
       debugPrint(
         '[ActivityNotifier] batched history query failed; '
@@ -691,6 +752,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
 
     const fallbackConcurrency = 4;
     final events = <NostrEvent>[];
+    var complete = true;
     for (var start = 0; start < filters.length; start += fallbackConcurrency) {
       final end = start + fallbackConcurrency < filters.length
           ? start + fallbackConcurrency
@@ -700,6 +762,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
           try {
             return await session.fetchHistory(filter);
           } catch (_) {
+            complete = false;
             return const <NostrEvent>[];
           }
         }),
@@ -708,7 +771,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
         events.addAll(result);
       }
     }
-    return events;
+    return (events: events, complete: complete);
   }
 
   FeedItem _feedItem(NostrEvent event, {required String category}) {
@@ -728,6 +791,20 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
   Future<void> refresh() async {
     await _queueRefresh(_subscriptionGeneration);
   }
+}
+
+/// One build's channel mentions already checked against its feed.
+class _ChannelMentionWatch {
+  _ChannelMentionWatch({required this.since});
+
+  /// Earlier mentions are in the build's own read.
+  final int since;
+
+  /// Mentions a refresh was already scheduled for.
+  final Set<String> requested = {};
+
+  /// The observed-event revision last checked, by channel.
+  final Map<String, int> revisions = {};
 }
 
 /// A generation-owned, in-flight hidden-DM resurface attempt. `generation` ties
@@ -757,12 +834,12 @@ final inboxItemsProvider = Provider<List<InboxItem>>((ref) {
       if (channel.isDm) channel.id,
   };
   final myPk = ref.watch(myPubkeyProvider);
+  final channelsNotifier = ref.read(channelsProvider.notifier);
   // Channel discovery already catches up and subscribes to eligible replies.
   // Keep that one source of truth for the dots and their Activity destination,
   // rather than opening another set of channel subscriptions here.
   final byId = <String, FeedItem>{
-    for (final event
-        in ref.read(channelsProvider.notifier).observedThreadReplies(channels))
+    for (final event in channelsNotifier.observedThreadReplies(channels))
       event.id: FeedItem(
         id: event.id,
         kind: event.kind,
@@ -777,7 +854,10 @@ final inboxItemsProvider = Provider<List<InboxItem>>((ref) {
             : 'activity',
       ),
     // The addressed feed owns category precedence for overlapping events.
-    for (final item in feed?.all ?? const <FeedItem>[]) item.id: item,
+    // The channel list applies live deletions; the feed does not see them.
+    for (final item in feed?.all ?? const <FeedItem>[])
+      if (!channelsNotifier.isUnreadDeleted(item.id, channelId: item.channelId))
+        item.id: item,
   };
   return buildInboxItems(byId.values, isDmChannel: dmChannelIds.contains);
 });
