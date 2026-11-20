@@ -77,8 +77,13 @@ class RunnerTests: XCTestCase {
       XCTAssertEqual(glass.centerSurface.bounds.width, vertical ? 56 : 112)
       XCTAssertEqual(glass.centerSurface.center, CGPoint(x: glass.bounds.midX, y: glass.bounds.midY))
       glass.setMenuOpen(true, animator: nil)
+      // The values below are set as soon as an animation starts. Also wait
+      // for the animation to finish, so the close that follows starts from a
+      // finished animator, as it does when someone closes the menu.
       await waitUntil("the side surfaces have merged") {
-        glass.leftSurface.alpha == 0 && glass.rightSurface.alpha == 0
+        glass.leftSurface.alpha == 0 && glass.rightSurface.alpha == 0 &&
+          (glass.leftSurface.layer.animationKeys() ?? []).isEmpty &&
+          (glass.rightSurface.layer.animationKeys() ?? []).isEmpty
       }
       XCTAssertEqual(glass.leftSurface.transform.tx, vertical ? 0 : 100, accuracy: 0.01)
       XCTAssertEqual(glass.leftSurface.transform.ty, vertical ? 72 : 0, accuracy: 0.01)
@@ -89,7 +94,9 @@ class RunnerTests: XCTestCase {
       glass.setMenuOpen(false, animator: nil)
       await waitUntil("the side surfaces are restored") {
         glass.leftSurface.alpha == 1 && glass.rightSurface.alpha == 1 &&
-          glass.leftSurface.transform == .identity && glass.rightSurface.transform == .identity
+          glass.leftSurface.transform == .identity && glass.rightSurface.transform == .identity &&
+          (glass.leftSurface.layer.animationKeys() ?? []).isEmpty &&
+          (glass.rightSurface.layer.animationKeys() ?? []).isEmpty
       }
     }
   }
