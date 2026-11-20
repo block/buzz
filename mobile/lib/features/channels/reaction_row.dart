@@ -15,6 +15,9 @@ import '../../shared/hosted/builderlab_account.dart';
 import '../../shared/hosted/hosted_relay_auth.dart';
 import '../../shared/hosted/native_media_headers.dart';
 import '../../shared/relay/relay_provider.dart';
+import '../../shared/relay/relay_session_types.dart';
+import '../../shared/relay/relay_socket.dart';
+import '../../shared/widgets/buzz_toast.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
@@ -53,18 +56,94 @@ const _pillGlyphSize = 16.0;
 ///
 /// Used by channel detail, thread detail, and system message rows to avoid
 /// duplicating the toggle wiring.
-void toggleReaction(WidgetRef ref, TimelineMessage message, String emoji) {
+void toggleReaction(
+  BuildContext context,
+  WidgetRef ref,
+  TimelineMessage message,
+  String emoji,
+) {
   final reaction = message.reactions.where((r) => r.emoji == emoji).firstOrNull;
   if (reaction == null) return;
   final actions = ref.read(channelActionsProvider);
   if (reaction.reactedByCurrentUser && reaction.currentUserReactionId != null) {
-    actions.removeReaction(reaction.currentUserReactionId!, emoji);
+    reportReactionFailure(
+      context,
+      actions.removeReaction(reaction.currentUserReactionId!, emoji),
+      adding: false,
+    );
   } else {
     // Only adding counts as a use — removing a reaction shouldn't promote the
     // emoji in the frequently-used ranking.
     ref.read(recentEmojiProvider.notifier).record(emoji);
-    actions.addReaction(message.id, emoji, targetAuthor: message.pubkey);
+    reportReactionFailure(
+      context,
+      actions.addReaction(message.id, emoji, targetAuthor: message.pubkey),
+      adding: true,
+    );
   }
+}
+
+/// Tells the user when a reaction they just added or removed didn't reach the
+/// relay. Reaction taps don't wait for the publish, so every caller hands its
+/// publish here; otherwise a failure (most often tapping while offline) is an
+/// uncaught error and the pill just doesn't change.
+///
+/// Only the relay's own outcomes are handled here. Anything else, such as the
+/// signer failing before the event goes out, still escapes as an uncaught
+/// error after its toast, so diagnostics see it with its stack.
+void reportReactionFailure(
+  BuildContext context,
+  Future<void> publish, {
+  required bool adding,
+}) {
+  // An async catch rather than `catchError`: a grouped removal's
+  // `Future.wait` is a `Future<List<void>>` at runtime, whose `catchError`
+  // handler would have to return a list.
+  unawaited(() async {
+    try {
+      await publish;
+    } catch (error, stackTrace) {
+      final message = _reactionFailureMessage(error, adding: adding);
+      if (message != null) {
+        // The native reaction sheet covers Flutter's overlay, so it shows the
+        // notice itself; otherwise a toast shows above any route or sheet.
+        final shown = await NativeMessagePresentation.showNotice(message);
+        if (!shown && context.mounted) {
+          showBuzzToast(context, message, kind: ToastKind.error);
+        }
+      }
+      if (!_isRelayOutcome(error)) {
+        Error.throwWithStackTrace(error, stackTrace);
+      }
+    }
+  }());
+}
+
+bool _isRelayOutcome(Object error) =>
+    error is RelayNotConnectedError ||
+    error is RelayAckTimeoutError ||
+    error is RelayAckLostError ||
+    error is RelayEventRejectedException;
+
+/// What to tell the user about a failed reaction publish, or null when it
+/// isn't a failure. A lost or late acknowledgement may follow the relay
+/// accepting it, so those say "not confirmed": "Try again" there could have
+/// the user undo a reaction that landed.
+String? _reactionFailureMessage(Object error, {required bool adding}) {
+  final verb = adding ? 'add' : 'remove';
+  final action = adding ? 'Reaction' : 'Removal';
+  return switch (error) {
+    // The relay already has this exact reaction, as after a double tap or
+    // re-picking one of your reactions from the picker.
+    RelayEventRejectedException(:final message)
+        when message.startsWith('duplicate:') =>
+      null,
+    RelayNotConnectedError() => 'Couldn’t $verb reaction. No connection.',
+    RelayAckTimeoutError() =>
+      "$action not confirmed. The relay didn't respond.",
+    RelayAckLostError() => '$action not confirmed. Connection lost.',
+    _ => 'Couldn’t $verb reaction. Try again.',
+  };
 }
 
 /// Arm a burst for a reaction that is about to be added from somewhere the pill
@@ -96,9 +175,13 @@ void showAddReactionPicker({
     onSelect: (emoji) {
       ref.read(recentEmojiProvider.notifier).record(emoji);
       armReactionBurst(ref, message, emoji);
-      ref
-          .read(channelActionsProvider)
-          .addReaction(message.id, emoji, targetAuthor: message.pubkey);
+      reportReactionFailure(
+        context,
+        ref
+            .read(channelActionsProvider)
+            .addReaction(message.id, emoji, targetAuthor: message.pubkey),
+        adding: true,
+      );
     },
   );
 }

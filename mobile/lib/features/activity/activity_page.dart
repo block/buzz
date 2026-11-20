@@ -610,6 +610,12 @@ class ActivityPage extends HookConsumerWidget {
           windowSize:
               View.of(context).physicalSize / View.of(context).devicePixelRatio,
         );
+    // Duo reports no top safe area beside its strip. Clear the window edge
+    // as the other Duo pane headers do, on the cover and the wide layout.
+    final headerTop =
+        defaultTargetPlatform == TargetPlatform.iOS && strip != null
+        ? duoHeaderTopClearance
+        : Grid.xxs;
     return IosScrollToTop(
       child: Scaffold(
         backgroundColor: context.colors.surface,
@@ -653,7 +659,8 @@ class ActivityPage extends HookConsumerWidget {
                     ),
                     child: ConstrainedBox(
                       constraints: BoxConstraints(
-                        minHeight: portraitHeader?.height ?? 44 + Grid.xxs * 2,
+                        minHeight:
+                            portraitHeader?.height ?? headerTop + 44 + Grid.xxs,
                       ),
                       child: Padding(
                         padding: EdgeInsets.only(
@@ -667,7 +674,7 @@ class ActivityPage extends HookConsumerWidget {
                                       MediaQuery.sizeOf(context).width -
                                           portraitHeader.right,
                                     )),
-                          top: portraitHeader == null ? Grid.xxs : 0,
+                          top: portraitHeader == null ? headerTop : 0,
                           bottom: portraitHeader == null ? Grid.xxs : 0,
                         ),
                         child: Row(

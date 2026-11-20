@@ -1186,6 +1186,90 @@ void main() {
       },
     );
 
+    testWidgets(
+      'an open from an unmounted context does not block later opens',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        final prefs = await _prefs();
+        var presents = 0;
+        _setMockNativeEmojiPickerHandler((call) async {
+          if (call.method == 'present') presents += 1;
+          return true;
+        });
+
+        final showStaleRow = ValueNotifier(true);
+        late BuildContext staleContext;
+        var staleDismissals = 0;
+
+        try {
+          await tester.pumpWidget(
+            ProviderScope(
+              overrides: [
+                savedPrefsProvider.overrideWithValue(prefs),
+                myPubkeyProvider.overrideWithValue('self'),
+                customEmojiPaletteProvider.overrideWith(
+                  () => _FakeCustomEmojiPaletteNotifier(
+                    Future.value(_customEmoji),
+                  ),
+                ),
+              ],
+              child: MaterialApp(
+                theme: AppTheme.light(),
+                home: Scaffold(
+                  body: ValueListenableBuilder<bool>(
+                    valueListenable: showStaleRow,
+                    builder: (context, show, _) => Column(
+                      children: [
+                        if (show)
+                          Builder(
+                            builder: (rowContext) {
+                              staleContext = rowContext;
+                              return const SizedBox.shrink();
+                            },
+                          ),
+                        FilledButton(
+                          onPressed: () => showEmojiPicker(
+                            context: context,
+                            onSelect: (_) {},
+                          ),
+                          child: const Text('Open live'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+
+          // The message row an actions sheet captured is rebuilt away before
+          // its "+" opens the picker.
+          showStaleRow.value = false;
+          await tester.pumpAndSettle();
+          expect(staleContext.mounted, isFalse);
+
+          showEmojiPicker(
+            context: staleContext,
+            onSelect: (_) {},
+            onDismiss: () => staleDismissals += 1,
+          );
+          await tester.pumpAndSettle();
+          expect(staleDismissals, 1);
+          expect(presents, 0);
+
+          await tester.tap(find.text('Open live'));
+          await tester.pumpAndSettle();
+          expect(presents, 1);
+          await _sendNativeEmojiPickerCall(tester, 'dismissed');
+        } finally {
+          _setMockNativeEmojiPickerHandler(null);
+          debugDefaultTargetPlatformOverride = previousPlatform;
+          showStaleRow.dispose();
+        }
+      },
+    );
+
     testWidgets('a reentrant open cannot steal the live sheet callbacks', (
       tester,
     ) async {

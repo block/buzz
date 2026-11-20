@@ -414,7 +414,6 @@ mod postgres_tests {
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ConstraintKind {
-        ForeignKey,
         PrimaryKey,
         Unique,
     }
@@ -721,24 +720,10 @@ mod postgres_tests {
                 description: definition.to_owned(),
                 columns: first_parenthesized_columns(&definition_without_name),
             })
-        } else if definition_without_name.starts_with("foreign key") {
-            Some(ConstraintLint {
-                table: table.to_owned(),
-                kind: ConstraintKind::ForeignKey,
-                description: definition.to_owned(),
-                columns: first_parenthesized_columns(&definition_without_name),
-            })
         } else if normalized.contains(" primary key") {
             column_definition_name(definition).map(|column| ConstraintLint {
                 table: table.to_owned(),
                 kind: ConstraintKind::PrimaryKey,
-                description: definition.to_owned(),
-                columns: vec![column],
-            })
-        } else if normalized.contains(" references ") {
-            column_definition_name(definition).map(|column| ConstraintLint {
-                table: table.to_owned(),
-                kind: ConstraintKind::ForeignKey,
                 description: definition.to_owned(),
                 columns: vec![column],
             })
@@ -874,12 +859,187 @@ mod postgres_tests {
             .collect()
     }
 
+    /// Migrations up to this one created, then dropped, every trigger,
+    /// function and foreign key. docs/database.md Rules 1 and 2 forbid later
+    /// migrations from adding any.
+    const LAST_SCHEMA_OBJECT_RETIREMENT_MIGRATION: i64 = 104;
+
+    /// The words of `sql` as `(line, WORD)`, read the way PostgreSQL reads
+    /// them. `--` and nested `/* */` comments are whitespace. Quoted
+    /// identifiers and string literals are data, except a literal passed to
+    /// `EXECUTE` or `format(`, which is SQL. Dollar-quoted bodies, such as a
+    /// `DO` block, are SQL.
+    fn sql_words(sql: &str, first_line: usize) -> Vec<(usize, String)> {
+        let chars: Vec<char> = sql.chars().collect();
+        let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let mut words: Vec<(usize, String)> = Vec::new();
+        let mut line = first_line;
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            let next = chars.get(i + 1).copied();
+            if c == '\n' {
+                line += 1;
+                i += 1;
+            } else if c == '-' && next == Some('-') {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+            } else if c == '/' && next == Some('*') {
+                let mut depth = 0;
+                while i < chars.len() {
+                    match (chars[i], chars.get(i + 1)) {
+                        ('/', Some('*')) => {
+                            depth += 1;
+                            i += 2;
+                        }
+                        ('*', Some('/')) => {
+                            depth -= 1;
+                            i += 2;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        (ch, _) => {
+                            line += usize::from(ch == '\n');
+                            i += 1;
+                        }
+                    }
+                }
+            } else if c == '\'' || c == '"' {
+                // `E'...'` strings take backslash escapes.
+                let escapes = c == '\''
+                    && i > 0
+                    && chars[i - 1].eq_ignore_ascii_case(&'e')
+                    && words.last().is_some_and(|(_, word)| word == "E");
+                if escapes {
+                    words.pop();
+                }
+                let start_line = line;
+                let mut body = String::new();
+                i += 1;
+                while i < chars.len() {
+                    let ch = chars[i];
+                    line += usize::from(ch == '\n');
+                    if escapes && ch == '\\' {
+                        body.extend(chars.get(i + 1));
+                        i += 2;
+                    } else if ch == c && chars.get(i + 1) == Some(&c) {
+                        body.push(c);
+                        i += 2;
+                    } else if ch == c {
+                        i += 1;
+                        break;
+                    } else {
+                        body.push(ch);
+                        i += 1;
+                    }
+                }
+                let runs_as_sql = c == '\''
+                    && words
+                        .last()
+                        .is_some_and(|(_, word)| word == "EXECUTE" || word == "FORMAT");
+                if runs_as_sql {
+                    words.extend(sql_words(&body, start_line));
+                }
+            } else if c == '$' {
+                // A `$tag$ ... $tag$` body is read as SQL on its own, so a
+                // stray quote inside it cannot hide the rest of the file.
+                let end = chars[i + 1..]
+                    .iter()
+                    .position(|&ch| !is_word(ch))
+                    .map_or(chars.len(), |offset| i + 1 + offset);
+                if chars.get(end) == Some(&'$') {
+                    let delimiter = &chars[i..=end];
+                    let body_start = end + 1;
+                    let body_end = (body_start..chars.len())
+                        .find(|&j| chars[j..].starts_with(delimiter))
+                        .unwrap_or(chars.len());
+                    let body: String = chars[body_start..body_end].iter().collect();
+                    words.extend(sql_words(&body, line));
+                    line += body.matches('\n').count();
+                    i = (body_end + delimiter.len()).min(chars.len());
+                } else {
+                    i += 1;
+                }
+            } else if is_word(c) {
+                let start = i;
+                while i < chars.len() && is_word(chars[i]) {
+                    i += 1;
+                }
+                let word: String = chars[start..i].iter().collect();
+                words.push((line, word.to_ascii_uppercase()));
+            } else {
+                i += 1;
+            }
+        }
+        words
+    }
+
+    /// Each `(line, construct)` in `sql` that creates a trigger, function,
+    /// procedure, rule or foreign key.
+    fn forbidden_schema_objects(sql: &str) -> Vec<(usize, String)> {
+        let tokens = sql_words(sql, 1);
+        let mut found = Vec::new();
+        for (i, (line, token)) in tokens.iter().enumerate() {
+            let rest = tokens[i + 1..].iter().map(|(_, t)| t.as_str());
+            let construct = match token.as_str() {
+                "REFERENCES" => Some("REFERENCES".to_owned()),
+                "FOREIGN" if rest.clone().next() == Some("KEY") => Some("FOREIGN KEY".to_owned()),
+                "CREATE" => {
+                    let mut words = vec!["CREATE"];
+                    words.extend(
+                        rest.take_while(|t| {
+                            matches!(*t, "OR" | "REPLACE" | "CONSTRAINT" | "EVENT")
+                        }),
+                    );
+                    let object = tokens.get(i + words.len()).map(|(_, t)| t.as_str());
+                    object
+                        .filter(|t| matches!(*t, "FUNCTION" | "PROCEDURE" | "TRIGGER" | "RULE"))
+                        .map(|object| {
+                            words.push(object);
+                            words.join(" ")
+                        })
+                }
+                _ => None,
+            };
+            found.extend(construct.map(|construct| (*line, construct)));
+        }
+        found
+    }
+
+    /// Where `file`, a path under `schema/`, breaks docs/database.md Rules 1,
+    /// 2 and 4: only `tables/public/`, `types/`, `partitions/` and `seeds/`
+    /// hold schema files, and no file declares a trigger, function,
+    /// procedure, rule or foreign key.
+    fn desired_state_file_violations(file: &str, text: &str) -> Vec<String> {
+        let allowed = ["tables/public/", "types/", "partitions/", "seeds/"];
+        let misplaced = (file != "schema.sql" && !allowed.iter().any(|dir| file.starts_with(dir)))
+            .then(|| {
+                format!(
+                    "schema/{file}: only {} may hold schema files",
+                    allowed.join(", ")
+                )
+            });
+        misplaced
+            .into_iter()
+            .chain(
+                forbidden_schema_objects(text)
+                    .into_iter()
+                    .map(|(line, construct)| format!("schema/{file}:{line}: {construct}")),
+            )
+            .collect()
+    }
+
     #[test]
     fn embedded_migrator_contains_consolidated_initial_schema() {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 104);
+        assert_eq!(migrations.len(), 105);
+        assert_eq!(migrations[104].version, 105);
+        assert!(strip_sql_comments(migrations[104].sql.as_str())
+            .contains("ADD COLUMN finished BOOLEAN NOT NULL DEFAULT true;"));
         assert_eq!(migrations[103].version, 104);
         let event_table_drops = strip_sql_comments(migrations[103].sql.as_str());
         assert!(event_table_drops
@@ -1951,8 +2111,9 @@ mod postgres_tests {
     /// `schema/schema.sql` includes every desired-state file exactly once, and
     /// `schema/tables/public/` (the SchemaBot schema directory's `public`
     /// namespace) holds only one table per file: its CREATE TABLE plus the
-    /// CREATE INDEX statements on it. Types, functions, partitions, triggers
-    /// and seed rows belong in the sibling directories SchemaBot never reads.
+    /// CREATE INDEX statements on it. Types, partitions and seed rows belong
+    /// in the sibling directories SchemaBot never reads, and no file declares a
+    /// trigger, function, procedure, rule or foreign key.
     #[test]
     fn desired_state_schema_layout_is_complete_and_schemabot_shaped() {
         use std::collections::BTreeSet;
@@ -1991,6 +2152,19 @@ mod postgres_tests {
         assert_eq!(
             on_disk, included_set,
             "every schema/ file must be included by schema/schema.sql exactly once"
+        );
+        let violations: Vec<String> = std::iter::once("schema.sql")
+            .chain(included.iter().map(String::as_str))
+            .flat_map(|file| {
+                let text =
+                    std::fs::read_to_string(schema_dir.join(file)).expect("read schema file");
+                desired_state_file_violations(file, &text)
+            })
+            .collect();
+        assert!(
+            violations.is_empty(),
+            "docs/database.md Rules 1, 2 and 4:\n{}",
+            violations.join("\n")
         );
 
         fn strip_comments(text: &str) -> String {
@@ -2147,14 +2321,11 @@ mod postgres_tests {
             CREATE TABLE widgets (
                 community_id UUID NOT NULL,
                 id UUID PRIMARY KEY,
-                channel_id UUID REFERENCES channels(id),
                 slug TEXT,
-                CONSTRAINT widgets_name_unique UNIQUE (slug),
-                CONSTRAINT widgets_parent_fk FOREIGN KEY (channel_id) REFERENCES channels(id)
+                CONSTRAINT widgets_name_unique UNIQUE (slug)
             );
             CREATE UNIQUE INDEX idx_widgets_slug ON widgets (slug);
             ALTER TABLE widgets ADD CONSTRAINT widgets_alter_slug_unique UNIQUE (slug);
-            ALTER TABLE widgets ADD CONSTRAINT widgets_alter_parent_fk FOREIGN KEY (channel_id) REFERENCES channels(id);
             CREATE TABLE _operator_global_tables (table_name TEXT PRIMARY KEY, reason TEXT NOT NULL);
             INSERT INTO _operator_global_tables (table_name, reason) VALUES
                 ('_operator_global_tables', 'registry');
@@ -2165,13 +2336,6 @@ mod postgres_tests {
         assert!(violations
             .iter()
             .any(|violation| violation.kind == ConstraintKind::PrimaryKey));
-        assert_eq!(
-            violations
-                .iter()
-                .filter(|violation| violation.kind == ConstraintKind::ForeignKey)
-                .count(),
-            3
-        );
         assert_eq!(
             violations
                 .iter()
@@ -2187,21 +2351,152 @@ mod postgres_tests {
             CREATE TABLE widgets (
                 community_id UUID NOT NULL,
                 id UUID NOT NULL,
-                channel_id UUID NOT NULL,
                 slug TEXT NOT NULL,
                 PRIMARY KEY (community_id, id),
-                UNIQUE (community_id, slug),
-                FOREIGN KEY (community_id, channel_id) REFERENCES channels(community_id, id)
+                UNIQUE (community_id, slug)
             );
             CREATE UNIQUE INDEX idx_widgets_slug ON widgets (community_id, slug);
             ALTER TABLE widgets ADD CONSTRAINT widgets_alter_slug_unique UNIQUE (community_id, slug);
-            ALTER TABLE widgets ADD CONSTRAINT widgets_alter_parent_fk FOREIGN KEY (community_id, channel_id) REFERENCES channels(community_id, id);
             CREATE TABLE _operator_global_tables (table_name TEXT PRIMARY KEY, reason TEXT NOT NULL);
             INSERT INTO _operator_global_tables (table_name, reason) VALUES
                 ('_operator_global_tables', 'registry');
         "#;
 
         assert!(scoped_constraint_violations(sql).is_empty());
+    }
+
+    #[test]
+    fn schema_object_lint_reports_each_construct_with_its_line() {
+        let sql = "-- A comment may say REFERENCES or CREATE FUNCTION.\n\
+                   CREATE TABLE widgets (community_id UUID NOT NULL, parent UUID);\n\
+                   CREATE FUNCTION f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;\n\
+                   create or replace\n\
+                   procedure p() LANGUAGE sql AS $$ $$;\n\
+                   CREATE CONSTRAINT TRIGGER t AFTER INSERT ON widgets FOR EACH ROW EXECUTE FUNCTION f();\n\
+                   CREATE EVENT TRIGGER e ON ddl_command_start EXECUTE FUNCTION f();\n\
+                   CREATE RULE r AS ON INSERT TO widgets DO INSTEAD NOTHING;\n\
+                   ALTER TABLE widgets ADD COLUMN owner UUID REFERENCES widgets (parent);\n\
+                   ALTER TABLE widgets ADD CONSTRAINT fk FOREIGN KEY (parent) REFERENCES widgets (parent);\n\
+                   DO $$ BEGIN EXECUTE 'CREATE TRIGGER t2 BEFORE INSERT ON widgets FOR EACH ROW EXECUTE FUNCTION f()'; END $$;\n\
+                   CREATE OR REPLACE VIEW v AS SELECT 1;\n\
+                   CREATE INDEX idx_widgets ON widgets (community_id);\n\
+                   CREATE /* a helper for this migration */ FUNCTION g() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;\n\
+                   ALTER TABLE widgets ADD CONSTRAINT fk2 FOREIGN /* the parent */ KEY (parent)\n\
+                   /* a block comment\n\
+                   over two lines, /* nested */ CREATE FUNCTION h() */ DROP FUNCTION g();\n\
+                   ALTER TABLE widgets ADD COLUMN section text DEFAULT 'references';\n\
+                   COMMENT ON TABLE widgets IS 'Never CREATE TRIGGER here; it''s FOREIGN KEY free';\n\
+                   ALTER TABLE widgets ADD COLUMN \"references\" text;\n\
+                   DO $body$ BEGIN EXECUTE format('CREATE TRIGGER %I AFTER INSERT ON widgets', 't3'); END $body$;\n\
+                   DO $$ BEGIN EXECUTE E'CREATE RULE r2 AS ON INSERT TO widgets DO INSTEAD NOTHING'; END $$;\n\
+                   COMMENT ON COLUMN widgets.owner IS $$Owner's id$$;\n\
+                   ALTER TABLE widgets ADD COLUMN owner2 UUID REFERENCES widgets (parent);\n\
+                   DO $outer$ BEGIN EXECUTE $inner$CREATE FUNCTION i() RETURNS int LANGUAGE sql AS 'SELECT 1'$inner$;\n\
+                   END $outer$;\n\
+                   SELECT $1 FROM widgets; CREATE RULE r3 AS ON INSERT TO widgets DO INSTEAD NOTHING;\n";
+        let found = forbidden_schema_objects(sql);
+        let found: Vec<_> = found.iter().map(|(line, c)| (*line, c.as_str())).collect();
+        assert_eq!(
+            found,
+            [
+                (3, "CREATE FUNCTION"),
+                (4, "CREATE OR REPLACE PROCEDURE"),
+                (6, "CREATE CONSTRAINT TRIGGER"),
+                (7, "CREATE EVENT TRIGGER"),
+                (8, "CREATE RULE"),
+                (9, "REFERENCES"),
+                (10, "FOREIGN KEY"),
+                (10, "REFERENCES"),
+                (11, "CREATE TRIGGER"),
+                (14, "CREATE FUNCTION"),
+                (15, "FOREIGN KEY"),
+                (21, "CREATE TRIGGER"),
+                (22, "CREATE RULE"),
+                (24, "REFERENCES"),
+                (25, "CREATE FUNCTION"),
+                (27, "CREATE RULE"),
+            ]
+        );
+    }
+
+    #[test]
+    fn desired_state_file_check_rejects_forbidden_directories_and_objects() {
+        let cases = [
+            ("functions/placeholder.sql", "-- empty", 1),
+            ("triggers/placeholder.sql", "", 1),
+            (
+                "tables/public/widgets.sql",
+                "CREATE TABLE widgets (\n  parent uuid REFERENCES widgets (id)\n);",
+                1,
+            ),
+            (
+                "seeds/widgets.sql",
+                "CREATE FUNCTION f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;",
+                1,
+            ),
+            (
+                "tables/public/widgets.sql",
+                "CREATE TABLE widgets (id uuid, section text DEFAULT 'references');",
+                0,
+            ),
+            (
+                "types/widget_kind.sql",
+                "CREATE TYPE widget_kind AS ENUM ('a');",
+                0,
+            ),
+            ("schema.sql", "\\i tables/public/widgets.sql", 0),
+        ];
+        for (file, text, expected) in cases {
+            let violations = desired_state_file_violations(file, text);
+            assert_eq!(violations.len(), expected, "{file}: {violations:?}");
+        }
+        assert_eq!(
+            desired_state_file_violations(
+                "tables/public/widgets.sql",
+                "CREATE TABLE widgets (\n  parent uuid REFERENCES widgets (id)\n);"
+            ),
+            ["schema/tables/public/widgets.sql:2: REFERENCES"]
+        );
+    }
+
+    #[test]
+    fn migrations_after_retirement_add_no_triggers_functions_or_foreign_keys() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+        let mut names: Vec<String> = fs::read_dir(&dir)
+            .expect("read migrations/")
+            .map(|entry| entry.expect("migrations/ entry").file_name())
+            .filter_map(|name| name.into_string().ok())
+            .filter(|name| name.ends_with(".sql"))
+            .collect();
+        names.sort();
+        let version = |name: &str| -> i64 {
+            name.split('_')
+                .next()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| panic!("migration file without a version: {name}"))
+        };
+        assert!(
+            names
+                .iter()
+                .any(|name| version(name) == LAST_SCHEMA_OBJECT_RETIREMENT_MIGRATION),
+            "the retirement migration is missing"
+        );
+        let violations: Vec<String> = names
+            .iter()
+            .filter(|name| version(name) > LAST_SCHEMA_OBJECT_RETIREMENT_MIGRATION)
+            .flat_map(|name| {
+                let sql = fs::read_to_string(dir.join(name)).expect("read migration");
+                forbidden_schema_objects(&sql)
+                    .into_iter()
+                    .map(move |(line, construct)| format!("migrations/{name}:{line}: {construct}"))
+            })
+            .collect();
+        assert!(
+            violations.is_empty(),
+            "docs/database.md Rules 1 and 2: a migration may not add a trigger, function, \
+             procedure, rule or foreign key. Do the work in the owning writer's transaction:\n{}",
+            violations.join("\n")
+        );
     }
 
     #[test]
@@ -2224,7 +2519,7 @@ mod postgres_tests {
     }
 
     #[test]
-    fn scoped_primary_key_unique_and_foreign_key_constraints_lead_with_community_id() {
+    fn scoped_primary_key_and_unique_constraints_lead_with_community_id() {
         let sql = migration_sql();
         let sql = sql.as_str();
         let violations = scoped_constraint_violations(sql)
@@ -2239,7 +2534,7 @@ mod postgres_tests {
 
         assert!(
             violations.is_empty(),
-            "tenant-scoped tables are all tables not listed in _operator_global_tables; primary key, unique/FK constraints, and unique indexes on those tables must lead with community_id:\n{}",
+            "tenant-scoped tables are all tables not listed in _operator_global_tables; primary key and unique constraints, and unique indexes, on those tables must lead with community_id:\n{}",
             violations.join("\n")
         );
     }
@@ -3010,6 +3305,29 @@ mod postgres_tests {
             .expect("create public schema");
     }
 
+    /// Every trigger, function, procedure, rule and foreign key in the
+    /// database. Extension members, such as pgcrypto's functions, are not
+    /// the schema's own objects.
+    async fn schema_objects(pool: &PgPool) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT 'trigger ' || tgrelid::regclass::text || '.' || tgname \
+             FROM pg_trigger WHERE NOT tgisinternal \
+             UNION ALL SELECT 'event trigger ' || evtname FROM pg_event_trigger \
+             UNION ALL SELECT 'function ' || p.oid::regprocedure::text FROM pg_proc p \
+             JOIN pg_namespace n ON n.oid = p.pronamespace \
+             WHERE n.nspname = 'public' AND NOT EXISTS (SELECT 1 FROM pg_depend d \
+             WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e') \
+             UNION ALL SELECT 'foreign key ' || conrelid::regclass::text || '.' || conname \
+             FROM pg_constraint WHERE contype = 'f' \
+             UNION ALL SELECT 'rule ' || schemaname || '.' || tablename || '.' || rulename \
+             FROM pg_rules WHERE schemaname NOT IN ('pg_catalog', 'information_schema') \
+             ORDER BY 1",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("read schema objects")
+    }
+
     async fn applied_versions(pool: &PgPool) -> Vec<i64> {
         sqlx::query_scalar::<_, i64>(
             "SELECT version FROM _sqlx_migrations WHERE success ORDER BY version",
@@ -3048,9 +3366,8 @@ mod postgres_tests {
     /// asserted so a resurrected `NULLS FIRST` in a migration that `pgschema`
     /// cannot represent is caught.
     ///
-    /// It also asserts the fully migrated `events` and
-    /// `event_mentions` row triggers match `schema/` exactly, so no
-    /// migration-only trigger survives on the event write path.
+    /// It also asserts that neither path leaves a trigger, function, rule or
+    /// foreign key (docs/database.md Rules 1 and 2).
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn admin_schema_parity_between_desired_state_and_migrations() {
@@ -3130,25 +3447,6 @@ mod postgres_tests {
             .expect("read events key definitions")
         }
 
-        // Row triggers on a parent table (partition clones follow the parent):
-        // name, function, enable mode and the tgtype bitmask.
-        async fn trigger_shapes(pool: &PgPool, table: &str) -> Vec<(String, String, String, i16)> {
-            sqlx::query_as(
-                "SELECT trigger.tgname::text, procedure.proname::text, \
-                 trigger.tgenabled::text, trigger.tgtype \
-                 FROM pg_trigger trigger \
-                 JOIN pg_class c ON c.oid = trigger.tgrelid \
-                 JOIN pg_namespace n ON n.oid = c.relnamespace \
-                 JOIN pg_proc procedure ON procedure.oid = trigger.tgfoid \
-                 WHERE n.nspname = 'public' AND c.relname = $1 AND NOT trigger.tgisinternal \
-                 ORDER BY trigger.tgname",
-            )
-            .bind(table)
-            .fetch_all(pool)
-            .await
-            .expect("read trigger shapes")
-        }
-
         let base_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| TEST_DB_URL.to_owned());
@@ -3219,29 +3517,18 @@ mod postgres_tests {
                  migration and schema.sql must both use a representable shape."
             );
         }
-        // docs/database.md Rule 2: 0102-0104 dropped every foreign key, and
-        // schema/ declares none, so neither bootstrap path has one.
-        async fn foreign_keys(pool: &PgPool) -> Vec<(String, String)> {
-            sqlx::query_as(
-                "SELECT con.conrelid::regclass::text, con.conname::text \
-                 FROM pg_constraint con \
-                 JOIN pg_namespace n ON n.oid = con.connamespace \
-                 WHERE n.nspname = 'public' AND con.contype = 'f' \
-                 ORDER BY 1, 2",
-            )
-            .fetch_all(pool)
-            .await
-            .expect("read foreign keys")
-        }
+        // docs/database.md Rules 1 and 2: migrations through
+        // LAST_SCHEMA_OBJECT_RETIREMENT_MIGRATION dropped every trigger,
+        // function and foreign key, and schema/ declares none.
         assert_eq!(
-            foreign_keys(&desired).await,
-            Vec::new(),
-            "desired state has a foreign key"
+            schema_objects(&desired).await,
+            Vec::<String>::new(),
+            "the desired state has a trigger, function, rule or foreign key"
         );
         assert_eq!(
-            foreign_keys(&migrated).await,
-            Vec::new(),
-            "migrations leave a foreign key"
+            schema_objects(&migrated).await,
+            Vec::<String>::new(),
+            "the migrations leave a trigger, function, rule or foreign key"
         );
         async fn media_edit_index(pool: &PgPool) -> (String, String, String) {
             sqlx::query_as("SELECT pg_get_indexdef(indexrelid),indoption::text,pg_get_expr(indexprs,indrelid) FROM pg_index WHERE indexrelid='public.idx_events_media_edit_target'::regclass AND indisvalid AND indisready AND indislive")
@@ -3301,18 +3588,7 @@ mod postgres_tests {
             );
         }
 
-        // Every migration-only trigger on the event tables is retired, so a
-        // fully migrated database carries exactly the desired-state triggers.
-        for table in ["events", "event_mentions"] {
-            assert_eq!(
-                trigger_shapes(&desired, table).await,
-                trigger_shapes(&migrated, table).await,
-                "trigger parity mismatch for {table}: a migration installs a trigger that \
-                 schema/ does not declare (or the reverse)"
-            );
-        }
-        // Compare columns, keys and remaining triggers on the five guarded tables;
-        // foreign keys must survive 0096 unchanged.
+        // Compare columns and keys on the five tables 0096 unguarded.
         for table in [
             "channels",
             "communities",
@@ -3326,7 +3602,7 @@ mod postgres_tests {
                 "single-table guard column parity: {table}"
             );
             // pgschema rewrites CHECK expressions (e.g. BETWEEN) into an
-            // equivalent tree with different grouping. Compare key/FK shapes
+            // equivalent tree with different grouping. Compare key shapes
             // here; existing CHECK assertions above remain unchanged.
             let desired_keys: Vec<_> = constraints(&desired, table)
                 .await
@@ -3341,22 +3617,6 @@ mod postgres_tests {
             assert_eq!(
                 desired_keys, migrated_keys,
                 "single-table guard key parity: {table}"
-            );
-            let query = "SELECT pg_get_triggerdef(oid) FROM pg_trigger \
-                WHERE tgrelid = $1::regclass AND NOT tgisinternal ORDER BY tgname";
-            let desired_triggers: Vec<String> = sqlx::query_scalar(query)
-                .bind(table)
-                .fetch_all(&desired)
-                .await
-                .expect("desired table triggers");
-            let migrated_triggers: Vec<String> = sqlx::query_scalar(query)
-                .bind(table)
-                .fetch_all(&migrated)
-                .await
-                .expect("migrated table triggers");
-            assert_eq!(
-                desired_triggers, migrated_triggers,
-                "remaining trigger parity: {table}"
             );
         }
         // Shared with the isolated desired-template and migration regressions.

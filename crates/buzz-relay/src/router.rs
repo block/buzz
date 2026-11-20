@@ -526,8 +526,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/operator/communities/invites",
             post(api::operator::mint_community_invite),
         )
-        // Relay invites: mint (owner/admin) + claim (membership-gate exempt)
-        .route("/api/invites", post(api::invites::mint_invite))
+        // Relay invites: mint/list (owner/admin), revoke (admin or creator) + claim (membership-gate exempt)
+        .route(
+            "/api/invites",
+            post(api::invites::mint_invite).get(api::invites::list_invites),
+        )
+        .route("/api/invites/revoke", post(api::invites::revoke_invite))
         .route("/api/join-policy", get(api::invites::join_policy))
         // Policy documents as standalone pages — desktop opens these in the
         // system browser instead of rendering the Markdown in-app.
@@ -3940,6 +3944,10 @@ mod tests {
             !is_exempt("/api/new-feature/data"),
             "newly added unclassified path must default to NOT exempt; \
              if this fails, NIP_FI_EXEMPT_PREFIXES has an overly broad entry"
+        );
+        assert!(
+            !is_exempt("/api/invites/revoke"),
+            "POST /api/invites/revoke must be protected"
         );
         assert!(
             !is_exempt("/api/invites/new-endpoint"),
