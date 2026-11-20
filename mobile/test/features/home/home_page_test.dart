@@ -263,48 +263,36 @@ void main() {
         findsOneWidget,
       );
       expect(tester.getTopLeft(bar).dy, 0);
+      // The header keeps its native title; its controls move into the rail.
       final menu = find.byWidgetPredicate(
         (widget) =>
             widget is IosMessageCreateButton &&
             widget.accessibilityLabel == 'Community menu',
       );
-      expect(
-        tester.getCenter(find.text('Messages')).dy,
-        tester.getCenter(menu).dy,
-      );
-      expect(
-        tester.getCenter(menu).dy,
-        frostedAppBarHeight(tester.element(bar)) / 2,
-      );
+      final rail = find.byKey(const ValueKey('duo-toolbar-Community menu'));
+      IosNavigationBar header() => tester
+          .widgetList<IosNavigationBar>(
+            find.descendant(of: bar, matching: find.byType(IosNavigationBar)),
+          )
+          .singleWhere((navigation) => !navigation.standaloneControl);
+      expect(menu, findsNothing);
+      expect(header().title, 'Messages');
+      expect(header().actions, isEmpty);
+      expect(tester.getCenter(rail).dx, greaterThan(951 - 76));
       final originalHeaderRect = tester.getRect(bar);
       final scrollable = find.byType(Scrollable).first;
       await tester.drag(scrollable, const Offset(0, -250));
       await tester.pumpAndSettle();
       expect(tester.getRect(bar), originalHeaderRect);
-      expect(
-        tester.getCenter(find.text('Messages')).dy,
-        tester.getCenter(menu).dy,
-      );
-      expect(
-        find.byWidgetPredicate(
-          (widget) =>
-              widget is IosMessageCreateButton &&
-              widget.accessibilityLabel == 'Community menu',
-        ),
-        findsOneWidget,
-      );
+      expect(tester.getCenter(rail).dx, greaterThan(951 - 76));
       tester.view.physicalSize = const Size(466, 678);
       await tester.pumpAndSettle();
       expect(tester.widget<FrostedAppBar>(bar).nativeLargeTitle, isFalse);
-      expect(
-        tester.getCenter(find.text('Messages')).dy,
-        tester.getCenter(menu).dy,
-      );
       final closedHeaderRect = tester.getRect(bar);
       expect(closedHeaderRect.left, 0);
       expect(closedHeaderRect.right, 466);
       expect(tester.getRect(scrollable).right, lessThanOrEqualTo(390));
-      expect(tester.getRect(menu).right, lessThanOrEqualTo(466 - 76));
+      expect(tester.getCenter(rail).dx, greaterThan(466 - 76));
 
       await tester.drag(scrollable, const Offset(0, -200));
       await tester.pumpAndSettle();
@@ -315,10 +303,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.getRect(bar).left, 0);
       expect(tester.getSize(bar).width, 375 + 76);
-      expect(
-        tester.getRect(find.text('Messages')).left,
-        greaterThanOrEqualTo(76),
-      );
+      expect(header().titleInsets.left, 76);
+      expect(tester.getCenter(rail).dx, lessThan(76));
       expect(tester.takeException(), isNull);
     },
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
@@ -343,6 +329,46 @@ void main() {
       Axis.vertical,
     );
     expect(tester.getCenter(find.byTooltip('Search')).dx, greaterThan(390));
+
+    // Duo moves the Messages header's Activity and Community menu controls
+    // into the rail as native controls, in header order.
+    final headerBell = find.byWidgetPredicate(
+      (widget) =>
+          widget is IosGlassNavigationButton &&
+          widget.icon == IosGlassNavigationIcon.bell,
+    );
+    final headerMenu = find.byWidgetPredicate(
+      (widget) =>
+          widget is IosMessageCreateButton &&
+          widget.accessibilityLabel == 'Community menu',
+    );
+    final railActivity = find.byKey(const ValueKey('duo-toolbar-Activity'));
+    final railMenu = find.byKey(const ValueKey('duo-toolbar-Community menu'));
+    IosNavigationAction railAction(Finder control) => tester
+        .widget<IosNavigationBar>(
+          find.descendant(of: control, matching: find.byType(IosNavigationBar)),
+        )
+        .leading!;
+    expect(headerBell, findsNothing);
+    expect(headerMenu, findsNothing);
+    expect(tester.getCenter(railActivity).dx, greaterThan(390));
+    expect(tester.getCenter(railMenu).dx, tester.getCenter(railActivity).dx);
+    expect(
+      tester.getCenter(railActivity).dy,
+      lessThan(tester.getCenter(railMenu).dy),
+    );
+    expect(railAction(railActivity).activityColor, isNull);
+    expect(
+      railAction(railMenu).children.map((action) => action.label),
+      containsAllInOrder(['Agents', 'Settings']),
+    );
+    railAction(railActivity).onPressed!();
+    await tester.pumpAndSettle();
+    expect(find.byType(ActivityPage), findsOneWidget);
+    expect(railActivity, findsNothing);
+    Navigator.of(tester.element(find.byType(ActivityPage))).pop();
+    await tester.pumpAndSettle();
+    expect(railActivity, findsOneWidget);
     final create = tester.widget<IosMessageCreateButton>(
       find.descendant(
         of: find.byType(MessagesNavigationBar),
@@ -389,11 +415,15 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Conversation content'), findsOneWidget);
     expect(find.byType(MessagesNavigationBar), findsNothing);
+    expect(railActivity, findsNothing);
     tester.view.physicalSize = const Size(951, 669);
     await tester.pumpAndSettle();
     expect(find.byType(MessagesNavigationBar), findsOneWidget);
     expect(find.text('Conversation content'), findsOneWidget);
     expect(pane.selectedId, 'sample');
+    // The list's rail controls stay above the open conversation's.
+    expect(railActivity, findsOneWidget);
+    expect(railMenu, findsOneWidget);
     final openNavigation = find.byType(MessagesNavigationBar);
     expect(
       tester.widget<MessagesNavigationBar>(openNavigation).axis,
@@ -467,6 +497,10 @@ void main() {
           .axis,
       Axis.horizontal,
     );
+    // An ordinary iPhone keeps the header controls.
+    expect(headerBell, findsOneWidget);
+    expect(headerMenu, findsOneWidget);
+    expect(railActivity, findsNothing);
     expect(tester.takeException(), isNull);
     debugDefaultTargetPlatformOverride = null;
   });

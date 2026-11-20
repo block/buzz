@@ -150,6 +150,7 @@ class ChannelsPage extends HookConsumerWidget {
     required this.settingsPageBuilder,
     this.onSearch,
     this.messagesActionsBuilder,
+    this.messagesNativeActionsBuilder,
     this.soloSliver,
     this.newChannelAction,
     this.newDmAction,
@@ -166,6 +167,11 @@ class ChannelsPage extends HookConsumerWidget {
   /// standalone Channels header.
   final List<Widget> Function(VoidCallback openSwitcher, GlobalKey avatarKey)?
   messagesActionsBuilder;
+
+  /// Builds the same Messages header actions as native controls, which Duo
+  /// projects into its rail instead of the header.
+  final List<IosNavigationAction> Function(VoidCallback openSwitcher)?
+  messagesNativeActionsBuilder;
   final Widget? soloSliver;
   final ValueNotifier<VoidCallback?>? newChannelAction;
   final ValueNotifier<VoidCallback?>? newDmAction;
@@ -204,8 +210,10 @@ class ChannelsPage extends HookConsumerWidget {
       color: navigationPrimaryForeground(context),
     );
     final messages = messagesActionsBuilder != null;
-    final nativeDuoTitle =
+    // Duo's Messages header is native so its actions can move into the rail.
+    final duoNativeHeader =
         messages &&
+        messagesNativeActionsBuilder != null &&
         defaultTargetPlatform == TargetPlatform.iOS &&
         (DuoToolbarScope.maybeStripOf(context) ??
                 FoldGeometry.of(context).strip) !=
@@ -215,7 +223,7 @@ class ChannelsPage extends HookConsumerWidget {
       titleStyle: headerTitleStyle,
 
       bottomHeight: _kTopSectionBottomPadding,
-      useNativeNavigation: !messages,
+      useNativeNavigation: !messages || duoNativeHeader,
       alignWithStatusRegion: messages,
     );
     // A sheet's dim barrier can't composite over Home's native soft edge, so
@@ -641,8 +649,8 @@ class ChannelsPage extends HookConsumerWidget {
         appBar: FrostedAppBar(
           key: headerKey,
           onNativeReadyChanged: (ready) => nativeHeaderReady.value = ready,
-          nativeTitle: nativeDuoTitle ? 'Messages' : '',
-          useNativeNavigation: !messages,
+          nativeTitle: duoNativeHeader ? 'Messages' : '',
+          useNativeNavigation: !messages || duoNativeHeader,
           alignWithStatusRegion: messages,
           nativeViewSuppressed: headerNativeSuppressed,
           nativeLeading: messages
@@ -667,7 +675,9 @@ class ChannelsPage extends HookConsumerWidget {
                       : communityName.substring(0, 1).toUpperCase(),
                   onPressed: openCommunitySwitcher,
                 ),
-          nativeActions: messages
+          nativeActions: duoNativeHeader
+              ? messagesNativeActionsBuilder!(openCommunityGrid)
+              : messages
               ? const []
               : [
                   if (onSearch != null)
@@ -723,7 +733,11 @@ class ChannelsPage extends HookConsumerWidget {
                   child: Text('Messages', style: headerTitleStyle),
                 )
               : const SizedBox.shrink(),
-          actions: messages
+          // While a route covers Home, Duo's header falls back to Flutter. The
+          // rail hides its controls then, so the header does not repeat them.
+          actions: duoNativeHeader
+              ? const []
+              : messages
               ? messagesActionsBuilder?.call(
                       openCommunityGrid,
                       communityAvatarKey,
