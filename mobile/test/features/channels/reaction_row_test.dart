@@ -17,7 +17,6 @@ import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/native_media_headers.dart';
 import 'package:buzz/shared/relay/relay.dart';
-import 'package:buzz/shared/relay/relay_session_types.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
