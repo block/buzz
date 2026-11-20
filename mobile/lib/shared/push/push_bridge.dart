@@ -65,6 +65,7 @@ class BuzzNotificationReply {
     required this.messageCreatedAt,
     required this.deadline,
     this.replyRootId,
+    this.recipientPubkey,
     this.inSolo = false,
     this.recovered = false,
     this.mayHavePublished = false,
@@ -81,6 +82,11 @@ class BuzzNotificationReply {
 
   /// NIP-10 thread root of the notified message; null when it is top-level.
   final String? replyRootId;
+
+  /// The account the notification was for, which the reply must go out as.
+  /// Signing in to the same relay again keeps the community's ID but can
+  /// change its account. Null for a notification an earlier build posted.
+  final String? recipientPubkey;
 
   /// When the notified message was created, in Unix seconds.
   final int messageCreatedAt;
@@ -114,6 +120,7 @@ class BuzzNotificationReply {
     final text = arguments['text'];
     final sender = arguments['senderPubkey'];
     final root = arguments['replyRootId'];
+    final recipient = arguments['recipientPubkey'];
     final createdAt = switch (arguments['messageCreatedAt']) {
       final String value => int.tryParse(value),
       _ => null,
@@ -132,7 +139,8 @@ class BuzzNotificationReply {
         createdAt == null ||
         createdAt <= 0 ||
         deadline == null ||
-        (root != null && (root is! String || root.isEmpty))) {
+        (root != null && (root is! String || root.isEmpty)) ||
+        (recipient != null && (recipient is! String || recipient.isEmpty))) {
       return null;
     }
     return BuzzNotificationReply(
@@ -143,6 +151,7 @@ class BuzzNotificationReply {
       messageCreatedAt: createdAt,
       deadline: DateTime.fromMillisecondsSinceEpoch(deadline),
       replyRootId: root as String?,
+      recipientPubkey: recipient as String?,
       inSolo: arguments['inSolo'] == 'true',
       recovered: arguments['recovered'] == 'true',
       mayHavePublished: arguments['publishing'] == 'true',

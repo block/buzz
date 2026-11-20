@@ -30,6 +30,7 @@ final _community = Community(
   id: 'community',
   name: 'Example',
   relayUrl: 'https://relay.example.org',
+  pubkey: 'me',
   addedAt: DateTime.utc(2026),
 );
 
@@ -37,6 +38,7 @@ final _elsewhere = Community(
   id: 'elsewhere',
   name: 'Elsewhere',
   relayUrl: 'https://other.example.org',
+  pubkey: 'me elsewhere',
   addedAt: DateTime.utc(2026),
 );
 
@@ -67,6 +69,7 @@ Map<String, String> _reply(
   String? replyRootId,
   int createdAt = 1000,
   bool inSolo = false,
+  String? recipientPubkey,
 }) => {
   'id': id,
   'text': 'reply $id',
@@ -75,6 +78,8 @@ Map<String, String> _reply(
   'channelId': channelId,
   'threadRootId': ?threadRootId,
   'senderPubkey': _sender,
+  'recipientPubkey':
+      recipientPubkey ?? (communityId == 'elsewhere' ? 'me elsewhere' : 'me'),
   'replyRootId': ?replyRootId,
   'messageCreatedAt': '$createdAt',
   if (inSolo) 'inSolo': 'true',
@@ -143,6 +148,22 @@ void main() {
 
         // Once iOS has ended a reply as not sent, it never goes out.
         _reply('18'),
+
+        // A community signed in again as another account on the same relay
+        // keeps its ID, but the reply was typed for the earlier account: it
+        // is never sent or kept as the new one's draft, so iOS shows its text
+        // in a notification, as for a gone community.
+        _reply('19', recipientPubkey: 'earlier account'),
+        {
+          ..._reply(
+            '20',
+            communityId: 'elsewhere',
+            recipientPubkey: 'earlier account',
+          ),
+          'recovered': 'true',
+        },
+        // A notification from an earlier build doesn't say whose it was.
+        {..._reply('21')}..remove('recipientPubkey'),
       ];
       // What iOS hears, in order, alongside each message sent.
       final log = <String>[];
@@ -235,6 +256,9 @@ void main() {
         '15': 'unknown',
         '16': 'no draft',
         '18': 'draft in $_message',
+        '19': 'no draft',
+        '20': 'no draft',
+        '21': 'no draft',
       });
       // iOS knows a reply may go out before anything is published.
       expect(log, [
@@ -267,10 +291,13 @@ void main() {
         elsewhere,
         contains('"key":"own","channel_id":"own","text":"reply 13"'),
       );
-      // The gone community's reply is kept nowhere.
-      expect([
-        for (final key in prefs.getKeys()) '${prefs.get(key)}',
-      ], everyElement(isNot(contains('reply 16'))));
+      // The gone community's reply is kept nowhere, nor is another
+      // account's.
+      for (final id in ['16', '19', '20', '21']) {
+        expect([
+          for (final key in prefs.getKeys()) '${prefs.get(key)}',
+        ], everyElement(isNot(contains('reply $id'))));
+      }
       expect(
         drafts.textFor(composeDraftKey('broken', threadHeadId: _message)),
         'reply 5',
