@@ -167,7 +167,10 @@ async fn create_channel(client: &mut BuzzTestClient, keys: &Keys, channel_id: &s
     let create_channel = EventBuilder::new(Kind::Custom(9007), "")
         .tags([
             Tag::parse(["h", channel_id]).expect("channel h tag"),
-            Tag::parse(["name", "workflow-deletion-e2e"]).expect("channel name tag"),
+            // Open channel names are unique per community, and every test in
+            // this binary creates one against the same relay.
+            Tag::parse(["name", &format!("workflow-deletion-e2e-{channel_id}")])
+                .expect("channel name tag"),
             Tag::parse(["channel_type", "stream"]).expect("channel type tag"),
             Tag::parse(["visibility", "open"]).expect("channel visibility tag"),
         ])
@@ -339,6 +342,170 @@ async fn deleting_workflow_removes_definition_and_rejects_manual_trigger() {
     );
 
     assert_trigger_rejected(&mut client, &keys, &workflow_id).await;
+
+    client.disconnect().await.expect("disconnect");
+}
+
+fn definition_event(
+    keys: &Keys,
+    channel_id: &str,
+    d_tag: &str,
+    name: &str,
+    created_at: u64,
+) -> Event {
+    EventBuilder::new(
+        Kind::Custom(KIND_WORKFLOW_DEFINITION),
+        format!("name: {name}\ntrigger:\n  on: message_posted\nsteps:\n  - id: pause\n    action: delay\n    duration: 1s\n"),
+    )
+    .tags([
+        Tag::parse(["d", d_tag]).expect("workflow d tag"),
+        Tag::parse(["h", channel_id]).expect("workflow h tag"),
+    ])
+    .custom_created_at(Timestamp::from(created_at))
+    .sign_with_keys(keys)
+    .expect("sign workflow definition")
+}
+
+/// Store `definition` as a relay did before it required the canonical `d`: a
+/// live kind:30620 row under the event's own `d` spelling, beside the
+/// canonical row `beside`, whose community and channel it shares. The current
+/// relay rejects such a save, so the row is written directly.
+async fn store_definition_as_an_earlier_relay(pool: &PgPool, definition: &Event, beside: &Event) {
+    let d_tag = definition
+        .tags
+        .iter()
+        .find(|tag| tag.kind().to_string() == "d")
+        .and_then(|tag| tag.content())
+        .expect("definition d tag");
+    let stored = sqlx::query(
+        "INSERT INTO events \
+             (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id, d_tag) \
+         SELECT community_id, $1, pubkey, to_timestamp($2), kind, $3, $4, $5, channel_id, $6 \
+         FROM events WHERE id = $7",
+    )
+    .bind(definition.id.as_bytes().as_slice())
+    .bind(definition.created_at.as_secs() as f64)
+    .bind(serde_json::to_value(&definition.tags).expect("tags json"))
+    .bind(&definition.content)
+    .bind(definition.sig.serialize().as_slice())
+    .bind(d_tag)
+    .bind(beside.id.as_bytes().as_slice())
+    .execute(pool)
+    .await
+    .expect("store definition under another spelling");
+    assert_eq!(stored.rows_affected(), 1, "canonical row to copy from");
+}
+
+async fn definition_ids(
+    client: &mut BuzzTestClient,
+    keys: &Keys,
+    d_tag: &str,
+) -> Vec<nostr::EventId> {
+    query_definition(client, keys, d_tag)
+        .await
+        .iter()
+        .map(|event| event.id)
+        .collect()
+}
+
+/// One workflow has one definition, at the coordinate `buzz:workflow-id`
+/// names, whatever spellings of its UUID are stored.
+///
+/// The relay keys the executable workflow by the UUID parsed from `d` and
+/// stores definitions by the exact `d` string. It used to accept every
+/// spelling `Uuid::parse_str` reads, so a lowercase save followed by an
+/// uppercase save left two live definitions while the workflow ran the newer
+/// YAML, and a delete through one spelling left the other definition visible.
+#[tokio::test]
+#[ignore]
+async fn workflow_has_one_definition_whatever_spellings_are_stored() {
+    const NON_CANONICAL: &str = "invalid: workflow_id must be a lowercase hyphenated UUID";
+    let pool = PgPool::connect(&database_url())
+        .await
+        .expect("connect to test database");
+    let keys = Keys::generate();
+    let channel_id = Uuid::new_v4().to_string();
+    let workflow_uuid = Uuid::new_v4();
+    let canonical = workflow_uuid.to_string();
+    let uppercase = canonical.to_uppercase();
+    let unhyphenated = workflow_uuid.simple().to_string();
+    let now = Timestamp::now().as_secs();
+    let mut client = BuzzTestClient::connect(&relay_url(), &keys)
+        .await
+        .expect("connect");
+    create_channel(&mut client, &keys, &channel_id).await;
+
+    // Save path, new saves: only the canonical spelling is accepted.
+    let first = definition_event(&keys, &channel_id, &canonical, "first", now - 40);
+    let saved = client.send_event(first.clone()).await.expect("save");
+    assert!(saved.accepted, "canonical save rejected: {}", saved.message);
+    for other in [&uppercase, &unhyphenated] {
+        let attempt = definition_event(&keys, &channel_id, other, "other-spelling", now - 35);
+        let refused = client.send_event(attempt).await.expect("save");
+        assert!(!refused.accepted, "save under d={other} was accepted");
+        assert_eq!(refused.message, NON_CANONICAL);
+        assert!(definition_ids(&mut client, &keys, other).await.is_empty());
+    }
+    assert_eq!(
+        definition_ids(&mut client, &keys, &canonical).await,
+        [first.id]
+    );
+
+    // Save path, stored spellings: an earlier relay stored a newer uppercase
+    // definition beside the lowercase one. Both are live until the next save.
+    let stored_upper = definition_event(&keys, &channel_id, &uppercase, "stored-upper", now - 30);
+    store_definition_as_an_earlier_relay(&pool, &stored_upper, &first).await;
+    assert_eq!(
+        definition_ids(&mut client, &keys, &uppercase).await,
+        [stored_upper.id],
+        "test premise: the stored uppercase definition is readable"
+    );
+    let second = definition_event(&keys, &channel_id, &canonical, "second", now - 20);
+    let saved = client.send_event(second.clone()).await.expect("save");
+    assert!(saved.accepted, "canonical save rejected: {}", saved.message);
+    assert_eq!(
+        definition_ids(&mut client, &keys, &canonical).await,
+        [second.id],
+        "the tag's coordinate must return the definition the workflow runs"
+    );
+    assert!(
+        definition_ids(&mut client, &keys, &uppercase)
+            .await
+            .is_empty(),
+        "a save must retire the definition stored under another spelling"
+    );
+    let executable_name: String = sqlx::query_scalar("SELECT name FROM workflows WHERE id = $1")
+        .bind(workflow_uuid)
+        .fetch_one(&pool)
+        .await
+        .expect("executable workflow");
+    assert_eq!(executable_name, "second");
+
+    // Delete path: stored spellings again, deleted through the uppercase
+    // coordinate. The workflow and every spelling's definition go together.
+    let stored_upper = definition_event(&keys, &channel_id, &uppercase, "stored-upper-2", now - 10);
+    let stored_plain =
+        definition_event(&keys, &channel_id, &unhyphenated, "stored-plain", now - 10);
+    store_definition_as_an_earlier_relay(&pool, &stored_upper, &second).await;
+    store_definition_as_an_earlier_relay(&pool, &stored_plain, &second).await;
+    let deleted = client
+        .send_event(workflow_deletion(&keys, &uppercase))
+        .await
+        .expect("delete workflow");
+    assert!(deleted.accepted, "deletion rejected: {}", deleted.message);
+    for spelling in [&canonical, &uppercase, &unhyphenated] {
+        assert!(
+            definition_ids(&mut client, &keys, spelling)
+                .await
+                .is_empty(),
+            "definition under d={spelling} survived the deletion"
+        );
+    }
+    assert_eq!(
+        database_representation_counts(&pool, &keys, workflow_uuid).await,
+        (0, 0)
+    );
+    assert_trigger_rejected(&mut client, &keys, &canonical).await;
 
     client.disconnect().await.expect("disconnect");
 }

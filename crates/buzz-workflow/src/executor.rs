@@ -701,6 +701,7 @@ pub async fn dispatch_action(
                         .action_sink()?
                         .send_message(
                             community_id,
+                            workflow.id,
                             &channel_id,
                             text,
                             authored_text,
@@ -773,6 +774,7 @@ pub async fn dispatch_action(
                         .action_sink()?
                         .send_dm(
                             community_id,
+                            workflow.id,
                             to,
                             text,
                             authored_text,

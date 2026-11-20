@@ -416,6 +416,32 @@ pub async fn upsert_workflow(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
+    upsert_workflow_in_transaction(
+        &mut tx,
+        id,
+        channel_id,
+        owner_pubkey,
+        name,
+        definition_json,
+        definition_hash,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// [`upsert_workflow`] in the caller's transaction, in that transaction's
+/// community. The row is written only if the caller commits.
+pub(crate) async fn upsert_workflow_in_transaction(
+    tx: &mut crate::AdmittedTx,
+    id: Uuid,
+    channel_id: Option<Uuid>,
+    owner_pubkey: &[u8],
+    name: &str,
+    definition_json: &str,
+    definition_hash: &[u8],
+) -> Result<()> {
+    let community_id = tx.community();
     require_workflow_parents(tx.conn(), community_id, owner_pubkey, channel_id).await?;
     let row = sqlx::query(
         r#"
@@ -441,7 +467,6 @@ pub async fn upsert_workflow(
     .bind(definition_hash)
     .fetch_optional(tx.conn())
     .await?;
-    tx.commit().await?;
 
     if row.is_none() {
         return Err(DbError::AccessDenied(format!(
@@ -1662,12 +1687,18 @@ impl Db {
         .await
     }
 
-    /// Insert or update a workflow using its NIP-33 `d`-tag UUID.
+    /// Insert or update a workflow at its NIP-33 `d`-tag UUID, in the caller's
+    /// transaction and that transaction's community.
+    ///
+    /// A definition save calls this in the transaction that stores the
+    /// definition event, so the executable workflow and its definition commit
+    /// or roll back together. Updates are allowed only when the existing row
+    /// has the same owner and channel; otherwise this returns
+    /// [`DbError::AccessDenied`].
     #[allow(clippy::too_many_arguments)]
-    #[datastore_span(name = "upsert_workflow", system = "postgresql")]
-    pub async fn upsert_workflow(
+    pub async fn upsert_workflow_in_transaction(
         &self,
-        community_id: CommunityId,
+        tx: &mut crate::AdmittedTx,
         id: Uuid,
         channel_id: Option<Uuid>,
         owner_pubkey: &[u8],
@@ -1675,9 +1706,8 @@ impl Db {
         definition_json: &str,
         definition_hash: &[u8],
     ) -> Result<()> {
-        crate::workflow::upsert_workflow(
-            &self.pool,
-            community_id,
+        crate::workflow::upsert_workflow_in_transaction(
+            tx,
             id,
             channel_id,
             owner_pubkey,

@@ -708,6 +708,7 @@ async fn private_media_revocation_http_journey() {
     let result = sink
         .send_message(
             tenant.community(),
+            Uuid::new_v4(),
             &open.to_string(),
             &text,
             &text,
