@@ -16,8 +16,8 @@ import 'package:buzz/shared/http/app_http_client.dart';
 http.Client _defaultTransport() {
   if (hasNativeHttpSession) return newAppHttpClient();
   final client = http.Client();
-  if (client is! IOClient) return client;
-  return IOClient(HttpClient()..autoUncompress = false);
+  if (client is! IOClient) return countedAppHttpClient(client);
+  return countedAppHttpClient(IOClient(HttpClient()..autoUncompress = false));
 }
 
 /// Owns the reusable HTTP transport used for relay `/query` requests.

@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 import 'package:uuid/uuid.dart';
 
+import '../http/app_http_client.dart';
 import 'diagnostic_filter.dart';
 import 'diagnostic_reporter.dart';
 import 'sentry_diagnostic_reporter.dart';
@@ -40,7 +41,11 @@ Future<void> runWithDiagnostics({
           (scope) => scope.setTag(DiagnosticFilter.installIdTag, installId),
         );
       }
-      return app(SentryDiagnosticReporter());
+      final reporter = SentryDiagnosticReporter();
+      // The shared HTTP client is made outside Riverpod; it counts to the same
+      // reporter, so its counts follow the member like everything else.
+      appHttpDiagnostics = reporter;
+      return app(reporter);
     },
   );
 }
