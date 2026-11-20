@@ -603,6 +603,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   Future<void> _connect(RelayConfig config, {bool renewed = false}) async {
     if (_disposed || _ageRestricted) return;
+    // A backoff still pending from an earlier failure must not replace this
+    // connection once it succeeds.
+    _reconnectTimer?.cancel();
 
     // Whatever connection came before ends here, capped at its last frame.
     _markLiveSubscriptionsClosed();
@@ -618,6 +621,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     );
 
     _socket?.dispose();
+    // Set when this connection's NIP-FI discovery required no assertion.
+    var optional = false;
     late final RelaySocket socket;
     socket = _socketFactory(
       wsUrl: config.wsUrl,
@@ -630,6 +635,15 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         if (_disposed || generation != _connectionGeneration) return;
         final auth = ref.read(hostedRelayAuthProvider);
         if (auth.protects(config) && relayUpgradeRefused(error)) {
+          // A missing-assertion 401 here means discovery and the upgrade
+          // reached relays that disagree, as during a rolling enforcement
+          // change. Retry with backoff and fresh discovery instead of treating
+          // it as an account refusal. A 403 is not a missing assertion, so it
+          // keeps the bounded path below.
+          if (optional && relayUpgradeStatus(error) == 401) {
+            _handleDisconnected(generation, error, closeCode: socket.closeCode);
+            return;
+          }
           auth.rejected(
             config,
             socket.headers['Nostr-Federated-Identity'],
@@ -651,6 +665,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       final auth = ref.read(hostedRelayAuthProvider);
       if (auth.protects(config)) {
         socket.headers = await auth.headers(config, fresh: true);
+        optional = socket.headers.isEmpty && !auth.organizationProtects(config);
       }
       if (_disposed || generation != _connectionGeneration) return;
       await socket.connect();
