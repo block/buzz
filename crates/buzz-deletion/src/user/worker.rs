@@ -15,6 +15,8 @@ pub(super) struct RunOptions {
     pub db: Option<buzz_db::Db>,
     pub media: Option<std::sync::Arc<buzz_media::MediaStorage>>,
     pub delete: bool,
+    pub read_only: bool,
+    pub community_store: Option<buzz_db::deletion::DeletionStore>,
     pub relay_pubkey: Option<String>,
     pub batch_size: u16,
     pub max_items: u32,
@@ -39,8 +41,11 @@ pub(super) async fn run(
             request.entity_type
         );
     }
-    if !request.target.starts_with("demo:") && (!options.delete || options.db.is_none()) {
-        bail!("real workflow execution requires --delete and a database");
+    if !request.target.starts_with("demo:") {
+        validate_mode(&request, options.delete, options.read_only)?;
+        if options.db.is_none() {
+            bail!("real workflow requires a source database");
+        }
     }
     let Some(lease) = store.claim(id, owner, DEFAULT_LEASE_DURATION).await? else {
         if store.get(id).await?.status == "completed" {
@@ -53,6 +58,22 @@ pub(super) async fn run(
     // failure, or takeover. Never leave a background heartbeat running on return.
     let released = store.release(&lease).await;
     finish_claim(result, released)
+}
+
+pub(super) fn validate_mode(
+    request: &buzz_db::entity_deletion::EntityRequest,
+    delete: bool,
+    read_only: bool,
+) -> Result<()> {
+    anyhow::ensure!(
+        delete != read_only,
+        "select exactly one worker mode: --delete or --read-only"
+    );
+    anyhow::ensure!(
+        buzz_db::user_deletion::UserDeletionInventory::is_rehearsal(request)? == read_only,
+        "worker mode differs from request; submit a separate rehearsal/deletion request"
+    );
+    Ok(())
 }
 
 fn finish_claim(result: Result<i32>, released: buzz_db::Result<bool>) -> Result<i32> {
@@ -79,7 +100,15 @@ async fn execute_claim(
     let mut previous_stage_id = None;
     let mut executed = 0;
     // Keep ordinary runs bounded; stepping uses the same transition boundary.
-    let handler_budget = if options.next_step { 1 } else { 100 };
+    let handler_budget = if options.next_step {
+        1
+    } else if options.read_only {
+        // At most 1,000 communities, three handlers each, plus request-wide stages.
+        // Retain a hard bound while allowing one ordinary rehearsal to finish.
+        10_000
+    } else {
+        100
+    };
     loop {
         if shutdown.is_cancelled() {
             return Ok(0);

@@ -5,6 +5,8 @@ use buzz_db::Db;
 mod media_fixture;
 #[path = "worker_postgres_tests/media_retry.rs"]
 mod media_retry_postgres_tests;
+#[path = "worker_postgres_tests/rehearsal_postgres_tests.rs"]
+mod rehearsal_postgres_tests;
 
 async fn fixture() -> (EntityDeletionStore, Uuid, sqlx::PgPool) {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -42,6 +44,8 @@ fn options() -> RunOptions {
         db: None,
         media: None,
         delete: false,
+        read_only: false,
+        community_store: None,
         relay_pubkey: None,
         batch_size: 100,
         max_items: 1_000_000,

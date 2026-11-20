@@ -92,3 +92,7 @@ fn saved_stage(
 #[cfg(test)]
 #[path = "transition_postgres_tests.rs"]
 mod postgres_tests;
+
+#[cfg(test)]
+#[path = "rehearsal_transition_tests.rs"]
+mod rehearsal_tests;

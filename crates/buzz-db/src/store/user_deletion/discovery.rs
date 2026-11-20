@@ -140,6 +140,42 @@ pub(super) async fn generate_inventory_on(
     }))
 }
 
+// Rehearsals inspect every stored community, just like account-scope. Membership
+// alone misses historical content, residual access records and agent-only data.
+// Handlers still discover current, community-scoped agent ownership themselves.
+pub(super) async fn generate_rehearsal_inventory_on(
+    conn: &mut sqlx::PgConnection,
+    subject: &str,
+) -> Result<Value> {
+    sqlx::query("SET LOCAL statement_timeout='30s'")
+        .execute(&mut *conn)
+        .await?;
+    let rows = sqlx::query_as::<_, Membership>(
+        "SELECT c.id AS community_id, c.host, m.role FROM communities c
+         LEFT JOIN relay_members m ON m.community_id=c.id AND m.pubkey=$1
+         ORDER BY c.id LIMIT $2",
+    )
+    .bind(subject)
+    .bind((MAX_COMMUNITIES + 1) as i64)
+    .fetch_all(conn)
+    .await?;
+    if rows.len() > MAX_COMMUNITIES {
+        return Err(DbError::DeletionSafety(
+            "rehearsal community limit exceeded; no partial inventory".into(),
+        ));
+    }
+    let rows = rows.into_iter().map(|row| {
+        let relationship = match row.role.as_deref() {
+            Some("owner") => "owner",
+            Some("admin" | "member") => "participant",
+            None => "stored_community",
+            _ => return Err(DbError::DeletionSafety("unsupported membership role".into())),
+        };
+        Ok(json!({"community_id":row.community_id,"label":row.host,"relationship":relationship}))
+    }).collect::<Result<Vec<_>>>()?;
+    Ok(json!({"communities":rows,"scope":"all_stored_communities"}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

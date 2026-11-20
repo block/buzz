@@ -1,6 +1,8 @@
 # Run and recover a user-deletion workflow
 
-The workflow orders account gating, media cleanup, and per-community content
+For persisted read-only execution, see [Rehearse a user-deletion workflow](operator-user-deletion-rehearsal.md). Each rehearsal has independent approval and history, real handler previews, explicit dummy gate/global stages and a final report. Owned communities are handed off without executing child deletion.
+
+The destructive workflow orders account gating, media cleanup, and per-community content
 cleanup. Real requests stop at the unimplemented account gate; they cannot
 complete through placeholder handlers. Demo requests simulate all stages and
 never delete media or content.
@@ -9,7 +11,7 @@ Direct `media-batches` and `content-batches` commands remain available for
 operator-controlled cleanup. Neither command installs or enforces the account
 gate. Protection against concurrent writes by the target or their agents remains
 unimplemented; neither command proves full account erasure. Use a disposable
-database and versioned storage bucket when testing. Owned-community workflow
+database and versioned storage bucket when testing. Owned-community destructive workflow
 execution is unsupported.
 
 ## Content batches

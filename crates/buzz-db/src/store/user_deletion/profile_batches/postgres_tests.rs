@@ -368,6 +368,25 @@ async fn content_then_profile_cleanup_retains_human_and_agent_repositories() {
         .unwrap()
         .contains("events: content/account cleanup"));
     assert_eq!(before, export(&f.pool).await);
+    let plan = f
+        .store
+        .preview_profile_plan(&opts, &mut Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(plan.record, "preview_with_prerequisites");
+    assert!(plan.prerequisites.iter().any(|p| p.starts_with("events:")));
+    assert!(!plan.account_erasure_complete);
+    assert_eq!(
+        before,
+        export(&f.pool).await,
+        "rehearsal plan mutated source data"
+    );
+    // The direct preview contract remains strict, as does actual deletion above.
+    assert!(f
+        .store
+        .run_profile_batches(&opts, false, None, &mut Vec::new())
+        .await
+        .is_err());
     f.store
         .run_message_batches(
             &ContentBatchOptions {

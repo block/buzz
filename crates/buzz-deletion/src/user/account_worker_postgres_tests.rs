@@ -121,6 +121,8 @@ impl Fixture {
             db: Some(Db::from_pool(self.pool.clone())),
             media: None,
             delete: true,
+            read_only: false,
+            community_store: None,
             relay_pubkey: None,
             batch_size: 2,
             max_items,

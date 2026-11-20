@@ -525,6 +525,8 @@ async fn real_user_requires_gate_then_global_media_before_community_cleanup() {
         batch_size: 100,
         max_items: 1_000_000,
         delete: true,
+        read_only: false,
+        community_store: None,
         next_step: true,
         fail_stage: None,
         stage_delay: Duration::ZERO,

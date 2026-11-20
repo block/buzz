@@ -53,8 +53,43 @@ const RULES: &[Rule] = &[
     Rule {
         name: "purge_account",
         community_scope: true,
-        allowed: &[Decision::Stage("purge_agents")],
-        decide: |_| Ok(Decision::Stage("purge_agents")),
+        allowed: &[
+            Decision::Stage("purge_agents"),
+            Decision::Stage("purge_profile"),
+        ],
+        decide: |result| {
+            Ok(Decision::Stage(
+                if result["execution_mode"] == "rehearsal" {
+                    "purge_profile"
+                } else {
+                    "purge_agents"
+                },
+            ))
+        },
+    },
+    Rule {
+        name: "purge_profile",
+        community_scope: true,
+        allowed: &[Decision::CommunityComplete],
+        decide: |_| Ok(Decision::CommunityComplete),
+    },
+    Rule {
+        name: "delete_owned_community",
+        community_scope: true,
+        allowed: &[Decision::CommunityComplete],
+        decide: |_| Ok(Decision::CommunityComplete),
+    },
+    Rule {
+        name: "global_cleanup",
+        community_scope: false,
+        allowed: &[Decision::Stage("remaining_cleanup")],
+        decide: |_| Ok(Decision::Stage("remaining_cleanup")),
+    },
+    Rule {
+        name: "remaining_cleanup",
+        community_scope: false,
+        allowed: &[Decision::RequestComplete],
+        decide: |_| Ok(Decision::RequestComplete),
     },
     Rule {
         name: "purge_agents",
@@ -114,6 +149,7 @@ pub(super) struct Progress {
     pub current: Option<EntityStage>,
     pub completed_communities: HashSet<Uuid>,
     pub terminal: bool,
+    rehearsal: bool,
 }
 
 impl Progress {
@@ -128,6 +164,7 @@ impl Progress {
             current: None,
             completed_communities: HashSet::new(),
             terminal: false,
+            rehearsal: Inventory::is_rehearsal(request)?,
         };
         let mut successors = HashMap::new();
         for row in history {
@@ -223,9 +260,17 @@ impl Progress {
                     .iter()
                     .find(|(id, _)| !self.completed_communities.contains(id))
                 {
-                    Some((id, _)) => Ok(Some(Step {
-                        name: COMMUNITY_INITIAL_STAGE,
+                    Some((id, attrs)) => Ok(Some(Step {
+                        name: if self.rehearsal && attrs["relationship"] == "owner" {
+                            "delete_owned_community"
+                        } else {
+                            COMMUNITY_INITIAL_STAGE
+                        },
                         community: Some(*id),
+                    })),
+                    None if self.rehearsal => Ok(Some(Step {
+                        name: "global_cleanup",
+                        community: None,
                     })),
                     None => self.apply(inventory, row, Decision::RequestComplete),
                 }

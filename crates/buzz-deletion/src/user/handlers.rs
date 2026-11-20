@@ -16,6 +16,9 @@ pub(super) async fn dispatch(
     row: &EntityStage,
     options: &RunOptions,
 ) -> Result<()> {
+    if options.read_only {
+        return super::rehearsal::dispatch(store, lease, row, options).await;
+    }
     let target = row.metadata_json["inputs"]["target"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("missing target input"))?;

@@ -18,7 +18,35 @@ impl UserDeletionStore {
         requested_by: &str,
         reason: Option<&str>,
     ) -> Result<EntityRequest> {
-        let target = normalize_target(target)?;
+        self.submit_mode(target, requested_by, reason, None).await
+    }
+
+    /// Start an independent rehearsal, or retry submission with the same run ID.
+    /// The ID is generated once by the caller, never by a worker invocation.
+    pub async fn submit_rehearsal(
+        &self,
+        target: &str,
+        requested_by: &str,
+        reason: Option<&str>,
+        run_id: uuid::Uuid,
+    ) -> Result<EntityRequest> {
+        super::normalize_user_deletion_pubkey(target)?;
+        self.submit_mode(target, requested_by, reason, Some(run_id))
+            .await
+    }
+
+    async fn submit_mode(
+        &self,
+        subject: &str,
+        requested_by: &str,
+        reason: Option<&str>,
+        run_id: Option<uuid::Uuid>,
+    ) -> Result<EntityRequest> {
+        let subject = normalize_target(subject)?;
+        let target = match run_id {
+            Some(id) => format!("rehearsal:{id}:{subject}"),
+            None => subject.clone(),
+        };
         validate_operator(requested_by)?;
         if reason.is_some_and(|r| r.len() > 4096) {
             return Err(DbError::DeletionSafety("reason exceeds 4096 bytes".into()));
@@ -47,7 +75,16 @@ impl UserDeletionStore {
             )));
         }
         if request.status == "submitted" {
-            let inventory = super::discovery::generate_inventory_on(&mut tx, &target).await?;
+            let mut inventory = if run_id.is_some() {
+                super::discovery::generate_rehearsal_inventory_on(&mut tx, &subject).await?
+            } else {
+                super::discovery::generate_inventory_on(&mut tx, &subject).await?
+            };
+            if let Some(id) = run_id {
+                inventory["execution_mode"] = "rehearsal".into();
+                inventory["run_id"] = id.to_string().into();
+                inventory["workflow_version"] = 2.into();
+            }
             let digest = inventory_digest(&inventory)?;
             request = sqlx::query_as(sqlx::AssertSqlSafe(format!(
                 "UPDATE entity_deletion_requests

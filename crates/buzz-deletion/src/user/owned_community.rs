@@ -1,5 +1,4 @@
-//! Standalone owned-community handler; deliberately absent from dispatch and
-//! transition rules. The caller owns claim, heartbeat, and release lifecycle.
+//! Owned-community delegation. The caller owns claim, heartbeat and release.
 
 use crate::community::submit_and_prepare;
 use crate::RETRY_DELAY;
@@ -15,6 +14,8 @@ use serde_json::{json, Value};
 pub enum OwnedCommunityOutcome {
     /// The child still needs preparation, approval, execution, or intervention.
     Waiting,
+    /// Rehearsal submitted/adopted the child; deletion remains independent.
+    HandedOff,
     /// Logical community deletion finished; physical retention can remain.
     Completed,
 }
@@ -29,11 +30,39 @@ pub async fn handle(
     community_store: &DeletionStore,
     media: &MediaStorage,
 ) -> Result<OwnedCommunityOutcome> {
+    handle_policy(store, lease, row, community_store, media, false).await
+}
+
+/// Submit/adopt an owned-community child for a rehearsal and continue immediately.
+/// Does not approve or execute the child. Blocked/aborted children remain failures.
+pub async fn handoff(
+    store: &EntityDeletionStore,
+    lease: &EntityLease,
+    row: &EntityStage,
+    community_store: &DeletionStore,
+    media: &MediaStorage,
+) -> Result<OwnedCommunityOutcome> {
+    let request = store.get(lease.request_id).await?;
+    anyhow::ensure!(
+        buzz_db::user_deletion::UserDeletionInventory::is_rehearsal(&request)?,
+        "submit-and-continue is only supported for rehearsals"
+    );
+    handle_policy(store, lease, row, community_store, media, true).await
+}
+
+async fn handle_policy(
+    store: &EntityDeletionStore,
+    lease: &EntityLease,
+    row: &EntityStage,
+    community_store: &DeletionStore,
+    media: &MediaStorage,
+    handoff: bool,
+) -> Result<OwnedCommunityOutcome> {
     if row.request_id != lease.request_id || row.stage != "delete_owned_community" {
         bail!("expected this request's delete_owned_community stage");
     }
     let row = store.start_stage(lease, row.id).await?;
-    match observe(store, lease, &row, community_store, media).await {
+    match observe(store, lease, &row, community_store, media, handoff).await {
         Ok(outcome) => Ok(outcome),
         Err(error) => {
             if let Err(save_error) = store
@@ -53,6 +82,7 @@ async fn observe(
     row: &EntityStage,
     community_store: &DeletionStore,
     media: &MediaStorage,
+    handoff: bool,
 ) -> Result<OwnedCommunityOutcome> {
     let request = store.get(lease.request_id).await?;
     let community_id = row
@@ -103,7 +133,22 @@ async fn observe(
     let completed = child.stage == DeletionStage::RetentionPending
         && child.completed_at.is_some()
         && child.blocked_reason.is_none();
-    let observation = observation(&child, completed);
+    let mut observation = observation(&child, completed);
+    if handoff {
+        // A recorded observation survives even when operator intervention is needed.
+        if child.stage == DeletionStage::Aborted || child.blocked_reason.is_some() {
+            store.save_stage_waiting(lease, row.id, observation).await?;
+            bail!(
+                "community child {} needs operator intervention; inspect the saved observation",
+                child.id
+            );
+        }
+        observation["execution_mode"] = "rehearsal".into();
+        observation["delegated"] = true.into();
+        observation["account_erasure_complete"] = false.into();
+        store.save_stage_success(lease, row.id, observation).await?;
+        return Ok(OwnedCommunityOutcome::HandedOff);
+    }
     if completed {
         store.save_stage_success(lease, row.id, observation).await?;
         Ok(OwnedCommunityOutcome::Completed)

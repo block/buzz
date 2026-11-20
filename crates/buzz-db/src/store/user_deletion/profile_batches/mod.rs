@@ -32,7 +32,7 @@ pub struct ProfileBatchOptions {
 /// Result for this profile scope, never a claim of complete account erasure.
 #[derive(Debug, Serialize)]
 pub struct ProfileBatchSummary {
-    /// preview_complete or delete_complete, emitted only on success.
+    /// preview_complete, preview_with_prerequisites, or delete_complete.
     pub record: &'static str,
     /// Proposed or committed row mutations.
     pub items: usize,
@@ -42,6 +42,8 @@ pub struct ProfileBatchSummary {
     pub target_pubkeys: Vec<String>,
     /// Always false; the independent final verifier owns that claim.
     pub account_erasure_complete: bool,
+    /// Observed prerequisites, still present because prior previews do not mutate data.
+    pub prerequisites: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -70,6 +72,30 @@ impl UserDeletionStore {
         options: &ProfileBatchOptions,
         delete: bool,
         relay_secret: Option<&str>,
+        writer: &mut impl Write,
+    ) -> Result<ProfileBatchSummary> {
+        self.profile_batches(options, delete, relay_secret, false, writer)
+            .await
+    }
+
+    /// Inspect the same profile plan while reporting unmet prerequisites as data.
+    /// This cannot delete, sign replacements, or certify erasure. Query and planning
+    /// errors still fail; only successfully inspected prerequisites are reported.
+    pub async fn preview_profile_plan(
+        &self,
+        options: &ProfileBatchOptions,
+        writer: &mut impl Write,
+    ) -> Result<ProfileBatchSummary> {
+        self.profile_batches(options, false, None, true, writer)
+            .await
+    }
+
+    async fn profile_batches(
+        &self,
+        options: &ProfileBatchOptions,
+        delete: bool,
+        relay_secret: Option<&str>,
+        report_prerequisites: bool,
         writer: &mut impl Write,
     ) -> Result<ProfileBatchSummary> {
         if !(1..=100).contains(&options.batch_size) || !(1..=1_000_000).contains(&options.max_items)
@@ -195,7 +221,7 @@ impl UserDeletionStore {
             }
             batches += 1;
         }
-        if !plan.blockers.is_empty() {
+        if !plan.blockers.is_empty() && !report_prerequisites {
             return Err(invalid(
                 "preview has unresolved prerequisites; no completion marker",
             ));
@@ -217,13 +243,16 @@ impl UserDeletionStore {
         let summary = ProfileBatchSummary {
             record: if delete {
                 "delete_complete"
-            } else {
+            } else if plan.blockers.is_empty() {
                 "preview_complete"
+            } else {
+                "preview_with_prerequisites"
             },
             items,
             batches,
             target_pubkeys: plan.scope.targets,
             account_erasure_complete: false,
+            prerequisites: plan.blockers,
         };
         line(writer, &summary)?;
         conn.close().await?;

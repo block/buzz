@@ -84,7 +84,11 @@ pub async fn summarize_request(
         .cloned()
         .collect();
     let complete = saved.request.status == "completed" && unfinished_stages.is_empty();
-    let explanation = if complete {
+    let explanation = if complete
+        && buzz_db::user_deletion::UserDeletionInventory::is_rehearsal(&saved.request)?
+    {
+        "The rehearsal finished. No user data was deleted. Delegated community requests require separate approval and execution; prerequisites and unsupported work remain in the saved report."
+    } else if complete {
         "The parent request is complete and every reached stage is complete. Any retained-copy obligations remain in the saved results."
     } else if unfinished_stages
         .iter()
