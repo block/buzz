@@ -406,4 +406,98 @@ mod postgres_tests {
             }
         }
     }
+
+    /// Mint, list and revoke share the per-pubkey API limit and fail closed
+    /// without it; claim keeps its own limiter.
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires Postgres and Redis"]
+    async fn mint_list_and_revoke_share_the_api_rate_limit() {
+        let (state, host, community, owner) = fixture().await;
+        let invite = mint(&state, &host, &owner).await;
+        let code = invite["code"].as_str().unwrap().to_owned();
+        let revoke_body = serde_json::json!({ "id": invite["invite_id"] }).to_string();
+
+        let mut quota = (*state).clone();
+        let mut auth_config = quota.config.auth.clone();
+        auth_config.rate_limits.human_api_calls_per_min = 0;
+        quota.auth = Arc::new(buzz_auth::AuthService::new(auth_config));
+        let quota = Arc::new(quota);
+        let mut unavailable = (*state).clone();
+        let dead = buzz_pubsub::redis_connection("redis://127.0.0.1:1").unwrap();
+        unavailable.admission_rate_limiter =
+            Arc::new(buzz_pubsub::rate_limiter::RedisRateLimiter::new(dead));
+        let unavailable = Arc::new(unavailable);
+
+        for (state, status, reason) in [
+            (&quota, StatusCode::TOO_MANY_REQUESTS, "quota_exceeded"),
+            (
+                &unavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "admission_unavailable",
+            ),
+        ] {
+            for route in ["mint", "list", "revoke"] {
+                let (_guard, out) = crate::access::tests::capture_scoped();
+                let response = match route {
+                    "mint" => {
+                        post_json(state.clone(), &host, "/api/invites", &owner, "{}".into()).await
+                    }
+                    "list" => {
+                        get_signed(state.clone(), &host, "/api/invites", "/api/invites", &owner)
+                            .await
+                    }
+                    _ => {
+                        post_json(
+                            state.clone(),
+                            &host,
+                            "/api/invites/revoke",
+                            &owner,
+                            revoke_body.clone(),
+                        )
+                        .await
+                    }
+                };
+                assert_eq!(response.status(), status, "{route}");
+                let error = read_json(response).await["error"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                if status == StatusCode::TOO_MANY_REQUESTS {
+                    let secs = error
+                        .strip_prefix("rate-limited: quota exceeded; retry in ")
+                        .and_then(|rest| rest.strip_suffix('s'))
+                        .unwrap_or_else(|| panic!("{route}: {error}"));
+                    assert!(secs.parse::<u64>().is_ok(), "{route}: {error}");
+                } else {
+                    assert_eq!(error, "rate-limited: shared admission unavailable");
+                }
+                let lines = out.lines();
+                assert_eq!(lines.len(), 1, "{route}: {lines:?}");
+                assert_eq!(lines[0]["outcome"], "denied", "{route}");
+                assert_eq!(lines[0]["reason"], reason, "{route}");
+            }
+        }
+
+        // Nothing was minted or revoked, and claim is not on the shared limit.
+        let listed = state
+            .db
+            .list_relay_invites(community, 50, None)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].revoked_at, None);
+        let claim = post_json(
+            quota.clone(),
+            &host,
+            "/api/invites/claim",
+            &Keys::generate(),
+            serde_json::json!({ "code": code }).to_string(),
+        )
+        .await;
+        assert_eq!(
+            claim.status(),
+            StatusCode::OK,
+            "claim keeps its own limiter"
+        );
+    }
 }

@@ -323,6 +323,39 @@ async fn test_invite_mint_and_claim_admits_new_pubkey() {
     );
 }
 
+/// A never-expiring link mints with a null expiry, admits a joiner, and stops
+/// admitting once revoked by its code.
+#[tokio::test]
+#[ignore]
+async fn test_never_expiring_invite_claims_then_revokes() {
+    let owner = test_owner_keys();
+    seed_relay_owner(&owner).await;
+
+    let mint_response = invite_post(&owner, "/api/invites", r#"{"never_expires":true}"#).await;
+    assert_eq!(mint_response.status(), reqwest::StatusCode::OK);
+    let mint_json: serde_json::Value = mint_response.json().await.expect("mint JSON");
+    assert_eq!(mint_json.get("expires_at"), Some(&serde_json::Value::Null));
+    let code = mint_json
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .expect("mint response includes code");
+    let claim_body = serde_json::json!({ "code": code }).to_string();
+
+    let claim_response = invite_post(&Keys::generate(), "/api/invites/claim", &claim_body).await;
+    assert_eq!(claim_response.status(), reqwest::StatusCode::OK);
+    let claim_json: serde_json::Value = claim_response.json().await.expect("claim JSON");
+    assert_eq!(
+        claim_json.get("status").and_then(serde_json::Value::as_str),
+        Some("joined")
+    );
+
+    let revoke_response = invite_post(&owner, "/api/invites/revoke", &claim_body).await;
+    assert_eq!(revoke_response.status(), reqwest::StatusCode::OK);
+
+    let refused = invite_post(&Keys::generate(), "/api/invites/claim", &claim_body).await;
+    assert_eq!(refused.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
 /// Claiming an invite joins the new member to the community's default
 /// channels: the relay owner flags one, the claim puts the claimer on its
 /// kind:39002 roster and stores one relay-signed kind:44100 for them, and a

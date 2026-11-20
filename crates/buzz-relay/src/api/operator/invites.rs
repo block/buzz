@@ -31,6 +31,8 @@ struct Request {
     ttl_secs: Option<u64>,
     #[serde(default)]
     max_uses: Option<i32>,
+    #[serde(default)]
+    never_expires: bool,
 }
 
 /// Mint an invite as the operator-attested `actor_pubkey`, who must be an
@@ -64,9 +66,10 @@ pub async fn mint_community_invite(
             "invalid actor_pubkey: expected 64-char hex pubkey",
         )
     })?;
-    let (ttl, max_uses) = validate_mint_request(&MintInviteRequest {
+    let (expiry, max_uses) = validate_mint_request(&MintInviteRequest {
         ttl_secs: request.ttl_secs,
         max_uses: request.max_uses,
+        never_expires: request.never_expires,
     })
     .map_err(|error| with_code(error, "invalid_request"))?;
     let community = CommunityId::from_uuid(request.community_id);
@@ -96,7 +99,7 @@ pub async fn mint_community_invite(
     // invite minted while an archive lands cannot be claimed while archived.
     let invite = state
         .db
-        .mint_relay_invite_as_admin(community, &actor, ttl, max_uses)
+        .mint_relay_invite_as_admin(community, &actor, expiry, max_uses)
         .await
         .map_err(|error| match error {
             buzz_db::DbError::InviteIssuerNotAdmin => {

@@ -105,9 +105,15 @@ async fn linking_banned_owner_revokes_agent_invites_but_timeout_does_not() {
                 .await
                 .unwrap();
         }
-        let invite = mint_relay_invite(&pool, community, &issuer, 3600, Some(1))
-            .await
-            .unwrap();
+        let invite = mint_relay_invite(
+            &pool,
+            community,
+            &issuer,
+            InviteExpiry::After(3600),
+            Some(1),
+        )
+        .await
+        .unwrap();
         if banned {
             crate::moderation::ban_member(&pool, community, &[4; 32], &[3; 32], None, None)
                 .await
@@ -189,7 +195,7 @@ async fn linking_banned_owner_revokes_agent_invites_but_timeout_does_not() {
 async fn marker_writers_serialize_before_rows_and_commit_revocation_with_marker() {
     for timeout in [false, true] {
         let (pool, community, issuer, _) = fixture().await;
-        let invite = mint_relay_invite(&pool, community, &issuer, 3600, None)
+        let invite = mint_relay_invite(&pool, community, &issuer, InviteExpiry::After(3600), None)
             .await
             .unwrap();
         for key in [[1; 32], [4; 32]] {
@@ -200,9 +206,15 @@ async fn marker_writers_serialize_before_rows_and_commit_revocation_with_marker(
         crate::user::set_agent_owner(&pool, community, &[4; 32], &[1; 32])
             .await
             .unwrap();
-        let agent_invite = mint_relay_invite(&pool, community, &hex::encode([4; 32]), 3600, None)
-            .await
-            .unwrap();
+        let agent_invite = mint_relay_invite(
+            &pool,
+            community,
+            &hex::encode([4; 32]),
+            InviteExpiry::After(3600),
+            None,
+        )
+        .await
+        .unwrap();
         if timeout {
             // A timeout must also repair revocation for an existing active ban,
             // rather than revoking invites for timeout-only principals.
