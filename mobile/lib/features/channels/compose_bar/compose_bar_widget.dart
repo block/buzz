@@ -312,6 +312,7 @@ class ComposeBar extends HookConsumerWidget {
     final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
 
+    _usePlatformUndoBindings(controller, focusNode);
     // The `@` chooser: query, rows and chip insertion, shared with the
     // message edit sheet.
     final mentionChooser = _useMentionChooser(

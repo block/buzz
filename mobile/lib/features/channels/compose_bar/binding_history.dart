@@ -1,8 +1,11 @@
 part of '../compose_bar.dart';
 
 /// The bindings [_MarkdownEditingController] held with each text it has
-/// shown: recorded on every edit, and read back when Undo, Redo or a plain
-/// text change returns the draft to one of those texts.
+/// shown in the current draft: recorded on every edit, and read back only
+/// when a confirmed Undo or Redo returns the draft to one of those texts
+/// ([_ComposerHistoryAction], [_ComposerPlatformUndoClient]). A plain text
+/// change never reads it: a paste or a retyped name that lands on an
+/// earlier text is typed text, not that pick again.
 extension _ComposerBindingHistory on _MarkdownEditingController {
   /// Notes the bindings now held with [text] as the newest history entry,
   /// dropping any entries a Redo could have reached.
@@ -24,70 +27,6 @@ extension _ComposerBindingHistory on _MarkdownEditingController {
     _historyAt = _history.length - 1;
   }
 
-  /// Gives a text change that returns the draft to a text it held before
-  /// the bindings it held then. The system's own Undo and Redo (an iOS shake
-  /// or gesture) arrive as plain text changes and never reach
-  /// [_ComposerHistoryAction]: a chip a name character had unbound, or one
-  /// that was deleted, would come back as `@Name` with no recipient, and a
-  /// send would leave a person outside the channel out without a prompt or
-  /// notify a member of the same name instead.
-  ///
-  /// The nearest entry for [next]'s text is taken when it holds every
-  /// binding carried across the edit and more, so nothing the edit kept is
-  /// contradicted. One character typed inside a name never completes a
-  /// pick: `@Bob` typed by hand after its chip was deleted stays typed
-  /// text. Undo cannot be that edit, since a deletion inside a chip always
-  /// takes the whole chip. False when nothing was recovered.
-  bool _recoverHistory(TextEditingValue old, TextEditingValue next) {
-    final text = next.text;
-    if (!text.contains('@')) return false;
-    bool same(_ComposerMention a, _ComposerMention b) =>
-        a.start == b.start && a.end == b.end && a.pubkey == b.pubkey;
-    final replaced = editReplacedRange(
-      old.text,
-      text,
-      oldSelection: old.selection,
-      newSelection: next.selection,
-    );
-    final inserted = text.length - old.text.length;
-    final typedAt =
-        replaced.isCollapsed &&
-            inserted > 0 &&
-            text
-                    .substring(replaced.start, replaced.start + inserted)
-                    .runes
-                    .length ==
-                1
-        ? replaced.start
-        : null;
-    for (var distance = 0; distance < _history.length; distance++) {
-      for (final i in {_historyAt - distance, _historyAt + distance}) {
-        if (i < 0 || i >= _history.length || _history[i].text != text) {
-          continue;
-        }
-        final held = _history[i].mentions;
-        if (held.length <= _mentions.length ||
-            !_mentions.every((kept) => held.any((m) => same(m, kept)))) {
-          continue;
-        }
-        if (typedAt != null &&
-            held.any(
-              (m) =>
-                  m.start <= typedAt &&
-                  typedAt < m.end &&
-                  !_mentions.any((kept) => same(m, kept)),
-            )) {
-          return false;
-        }
-        _historyAt = i;
-        _mentions = held;
-        _cachedTextSpan = null;
-        return true;
-      }
-    }
-    return false;
-  }
-
   /// Takes the bindings of the nearest entry for [text] in the direction
   /// Undo or Redo is moving. False when the history holds none, as after it
   /// was trimmed; the caller then carries the bindings as for any edit.
@@ -105,4 +44,80 @@ extension _ComposerBindingHistory on _MarkdownEditingController {
     }
     return false;
   }
+}
+
+/// Marks the system's own Undo and Redo (an iOS shake or gesture) for
+/// [_MarkdownEditingController]. The platform reports them to
+/// [UndoManager.client], which calls the field's `UndoHistory` directly and
+/// never passes [_ComposerHistoryAction]; the restored text then reaches
+/// the controller looking like any other edit. This client stands in front
+/// of the field's own and says which way the history is moving while that
+/// one restores the value, exactly as the action does for the intents.
+class _ComposerPlatformUndoClient with UndoManagerClient {
+  final UndoManagerClient field;
+  final _MarkdownEditingController controller;
+
+  _ComposerPlatformUndoClient(this.field, this.controller);
+
+  @override
+  void handlePlatformUndo(UndoDirection direction) {
+    controller._historyDirection = direction == UndoDirection.redo ? 1 : -1;
+    try {
+      field.handlePlatformUndo(direction);
+    } finally {
+      controller._historyDirection = 0;
+    }
+  }
+
+  @override
+  void undo() => field.undo();
+
+  @override
+  void redo() => field.redo();
+
+  @override
+  bool get canUndo => field.canUndo;
+
+  @override
+  bool get canRedo => field.canRedo;
+
+  /// Equal to the client it stands for. `UndoHistory` asks whether
+  /// [UndoManager.client] is itself before it reports its undo state to
+  /// iOS and before it releases the client on blur and dispose.
+  @override
+  bool operator ==(Object other) =>
+      identical(other, this) ||
+      identical(other, field) ||
+      other is _ComposerPlatformUndoClient && identical(other.field, field);
+
+  @override
+  int get hashCode => identityHashCode(field);
+}
+
+/// Puts a [_ComposerPlatformUndoClient] in front of the undo client of the
+/// field that [focusNode] focuses, for as long as it has focus. The field's
+/// `UndoHistory` names itself the client on every focus notification, after
+/// this listener has run, so the wrap waits for the listeners to finish.
+/// Without the wrap a system Undo restores text only, as a plain edit.
+void _usePlatformUndoBindings(
+  _MarkdownEditingController controller,
+  FocusNode focusNode,
+) {
+  useEffect(() {
+    var disposed = false;
+    void wrap() {
+      if (disposed || !focusNode.hasFocus) return;
+      final client = UndoManager.client;
+      if (client == null || client is _ComposerPlatformUndoClient) return;
+      UndoManager.client = _ComposerPlatformUndoClient(client, controller);
+    }
+
+    void onFocus() => scheduleMicrotask(wrap);
+    focusNode.addListener(onFocus);
+    onFocus();
+    return () {
+      disposed = true;
+      focusNode.removeListener(onFocus);
+    };
+  }, [controller, focusNode]);
 }

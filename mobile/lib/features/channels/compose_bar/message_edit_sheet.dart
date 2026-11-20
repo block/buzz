@@ -133,6 +133,7 @@ class _MessageEditSheet extends HookConsumerWidget {
       return null;
     }, [controller, seedBound.join(',')]);
 
+    _usePlatformUndoBindings(controller, focusNode);
     final chooser = _useMentionChooser(
       ref,
       channelId: channelId,

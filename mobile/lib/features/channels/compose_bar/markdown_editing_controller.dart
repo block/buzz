@@ -38,8 +38,9 @@ class _MarkdownEditingController extends TextEditingController {
   /// link. Zero for every other edit.
   int _historyDirection = 0;
 
-  /// The bindings held with each text the editor has shown, oldest first,
-  /// and where the current text sits among them. Undo and Redo restore text
+  /// The bindings held with each text of the current draft, oldest first,
+  /// and where the current text sits among them; a different draft starts
+  /// it again ([replaceDraft]). Undo and Redo restore text
   /// alone, and identical neighbouring text (`@Sam @Sam`) cannot say whose
   /// chip came back, so the restored text takes its bindings from here.
   final List<({String text, List<_ComposerMention> mentions})> _history = [];
@@ -105,9 +106,8 @@ class _MarkdownEditingController extends TextEditingController {
       if (_mentionsInvalid && !text.contains('@')) _mentionsInvalid = false;
       if (_history.isEmpty) _recordHistory(value.text);
       if (_historyDirection == 0) {
-        final old = value;
-        _carryMentions(old, newValue);
-        if (!_recoverHistory(old, newValue)) _recordHistory(text);
+        _carryMentions(value, newValue);
+        _recordHistory(text);
       } else if (!_restoreHistory(text)) {
         _carryMentions(value, newValue);
       }
@@ -191,12 +191,23 @@ class _MarkdownEditingController extends TextEditingController {
   /// no listener sees the text without its bindings: a restored or
   /// recovered draft, a prefill, or a cleared composer. [mentionsInvalid]
   /// marks a draft whose saved bindings could not be read.
+  ///
+  /// The value starts a different draft unless [sameDraft] is set, as a
+  /// command editing the current one sets it: the binding history is
+  /// dropped, so an Undo that brings back the text of a sent, cleared or
+  /// other draft brings back no pick made there.
   void replaceDraft(
     TextEditingValue newValue, {
     required List<_ComposerMention> mentions,
     bool mentionsInvalid = false,
+    bool sameDraft = false,
   }) {
-    if (_history.isEmpty) _recordHistory(value.text);
+    if (!sameDraft) {
+      _history.clear();
+      _historyAt = -1;
+    } else if (_history.isEmpty) {
+      _recordHistory(value.text);
+    }
     _mentions = List.unmodifiable(
       mentions.toList()..sort((a, b) => a.start.compareTo(b.start)),
     );
@@ -268,6 +279,7 @@ class _MarkdownEditingController extends TextEditingController {
         ?added,
       ],
       mentionsInvalid: _mentionsInvalid && next.text.contains('@'),
+      sameDraft: true,
     );
   }
 

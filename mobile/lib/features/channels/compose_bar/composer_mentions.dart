@@ -142,7 +142,12 @@ extension _LegacyMentions on _MarkdownEditingController {
       }
     }
     if (!complete && settled.length == _mentions.length) return;
-    replaceDraft(value, mentions: settled, mentionsInvalid: _mentionsInvalid);
+    replaceDraft(
+      value,
+      mentions: settled,
+      mentionsInvalid: _mentionsInvalid,
+      sameDraft: true,
+    );
   }
 }
 

@@ -339,6 +339,7 @@ void mentionChipTests() {
     List<String>? sent;
     String? sentText;
     List<List<String>>? sentTags;
+    var directoryDown = false;
     await tester.pumpWidget(
       _buildComposeBar(
         uploadService: _testUploadService(signer.nsec),
@@ -364,7 +365,7 @@ void mentionChipTests() {
           CustomEmoji(shortcode: 'meow', url: 'https://example.com/meow.png'),
         ],
         searchPeople: (query) async => [
-          if (query.toLowerCase().startsWith('q')) quinn,
+          if (!directoryDown && query.toLowerCase().startsWith('q')) quinn,
           if (query.toLowerCase().startsWith('ali')) otherAlice,
         ],
         onSend: (text, keys, {mediaTags = const []}) async {
@@ -782,9 +783,9 @@ void mentionChipTests() {
     expect(sent, [both.first.pubkey, both.last.pubkey]);
 
     // Review of #9699 (system Undo): the system's own Undo (an iOS shake or
-    // gesture) restores the text as a plain change and never reaches the
-    // composer's history action. The text that came back is one the editor
-    // held, so each chip returns with its own key.
+    // gesture) never reaches the composer's history action. The platform
+    // reports it to the undo client, which the composer stands in front
+    // of, so it is a confirmed Undo and each chip returns with its own key.
     Future<void> systemHistory(String direction) async {
       await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
         SystemChannels.undoManager.name,
@@ -795,6 +796,14 @@ void mentionChipTests() {
       );
       await tester.pump(const Duration(seconds: 1));
     }
+
+    // The field's own undo client still finds itself behind the composer's:
+    // that is how it reports its undo state to iOS and lets go on blur.
+    final fieldUndo = tester.state<UndoHistoryState<TextEditingValue>>(
+      find.byType(UndoHistory<TextEditingValue>),
+    );
+    expect(UndoManager.client, isNot(same(fieldUndo)));
+    expect(UndoManager.client == fieldUndo, isTrue);
 
     both = await pickBothSams();
     await deleteFirstChip();
@@ -811,10 +820,12 @@ void mentionChipTests() {
     await send();
     expect(sent, [both.first.pubkey, both.last.pubkey]);
 
-    // A name character typed against a chip unbinds it. Taking it back,
-    // by the system Undo or as the raw text change it arrives as, brings
-    // the pick back: a person outside the channel meets the prompt and is
-    // tagged, and one who shares a member's name is never that member.
+    // A name character typed against a chip unbinds it. The system Undo
+    // brings the pick back: a person outside the channel meets the prompt
+    // and is tagged, and one who shares a member's name is never that
+    // member. Deleting the character by hand lands on the same text but is
+    // no Undo: the name stays typed text, as on main, so Quinn is not
+    // notified and `@Alice` is the channel's own Alice, with no prompt.
     final outsideAlice = find
         .descendant(
           of: find.byKey(const ValueKey('mention-suggestions-popover')),
@@ -857,6 +868,15 @@ void mentionChipTests() {
         await systemHistory('undo');
       }
       expect(controller.text, '@$name ', reason: reason);
+      if (raw) {
+        expect(personChip, findsNothing, reason: reason);
+        expect(saved(), isEmpty, reason: reason);
+        await send();
+        expect(find.byType(AlertDialog), findsNothing, reason: reason);
+        expect(sent, name == 'Alice' ? [alice] : isEmpty, reason: reason);
+        expect(sentTags, isEmpty, reason: reason);
+        continue;
+      }
       expect(personChip, findsOneWidget, reason: reason);
       expect(saved(), picked, reason: reason);
       await send();
@@ -902,37 +922,185 @@ void mentionChipTests() {
     expect(controller.text, '@Quinn hi');
     expect(saved(), beforeHi);
 
-    // A name typed by hand where a deleted chip was is typed text, never
-    // that pick again, although the editor held the same text with a chip.
+    // Review of #9699 (an old pick on text nobody picked): only a confirmed
+    // Undo or Redo brings a pick back. Text that lands on what the editor
+    // once held with a chip, typed or pasted, is typed text.
+    Future<void> type(String added) async {
+      for (final rune in added.runes) {
+        final text = controller.text + String.fromCharCode(rune);
+        tester.testTextInput.updateEditingValue(
+          TextEditingValue(
+            text: text,
+            selection: TextSelection.collapsed(offset: text.length),
+          ),
+        );
+        await tester.pump();
+      }
+      await tester.pump(mentionSearchDebounce * 2);
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> paste(String pasted) async {
+      final text = controller.text + pasted;
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: text,
+          selection: TextSelection.collapsed(offset: text.length),
+        ),
+      );
+      await tester.pump(mentionSearchDebounce * 2);
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> expectTypedText(
+      String text, {
+      List<String> to = const [],
+    }) async {
+      expect(controller.text, text, reason: text);
+      expect(personChip, findsNothing, reason: text);
+      expect(saved(), isEmpty, reason: text);
+      sent = sentTags = null;
+      await send();
+      expect(find.byType(AlertDialog), findsNothing, reason: text);
+      expect(sent, to, reason: text);
+      expect(sentTags, isEmpty, reason: text);
+      expect(controller.text, isEmpty, reason: text);
+    }
+
+    // The editor holds `@Quinn `, `@Quinn.` and `@Quinn`, each with the
+    // chip, before the chip is deleted.
     await tester.enterText(field, '');
     await tester.pump(const Duration(seconds: 1));
     await pickRow('@quinn', row('Quinn'));
     await deleteBefore(7);
-    expect(controller.text, '@Quinn');
+    await type('.');
+    expect(controller.text, '@Quinn.');
     expect(saved(), [
       ComposeDraftMention(start: 0, end: 6, pubkey: quinn.pubkey),
     ]);
+    await deleteBefore(7);
     await deleteBefore(6);
     expect(controller.text, '');
-    for (var length = 1; length <= 6; length++) {
-      tester.testTextInput.updateEditingValue(
-        TextEditingValue(
-          text: '@Quinn'.substring(0, length),
-          selection: TextSelection.collapsed(offset: length),
-        ),
-      );
-      await tester.pump();
-    }
-    await tester.pump(mentionSearchDebounce * 2);
-    await tester.pumpAndSettle();
-    expect(controller.text, '@Quinn');
+    // The directory no longer finds Quinn, so the chooser has nobody for
+    // the space or the period to select: what follows is the history alone.
+    directoryDown = true;
+    ProviderScope.containerOf(
+      tester.element(find.byType(ComposeBar)),
+    ).invalidate(mentionSearchCacheProvider);
+    await type('@Quinn');
     expect(personChip, findsNothing);
     expect(saved(), isEmpty);
-    sent = sentTags = null;
+    await type(' ');
+    expect(controller.text, '@Quinn ');
+    expect(personChip, findsNothing);
+    expect(saved(), isEmpty);
+    await deleteBefore(7);
+    await type('.');
+    await expectTypedText('@Quinn.');
+    for (final pasted in ['@Quinn', '@Quinn ']) {
+      await paste(pasted);
+      await expectTypedText(pasted);
+    }
+    // Pick, delete the chip, paste its old label, send: the deleted
+    // recipient gets no tag and there is no outside-channel prompt.
+    directoryDown = false;
+    for (final pasted in ['@Quinn', '@Quinn ']) {
+      await pickRow('@quinn', row('Quinn'));
+      expect(saved(), hasLength(1), reason: pasted);
+      await deleteBefore(7);
+      await deleteBefore(6);
+      expect(controller.text, '', reason: pasted);
+      await paste(pasted);
+      await expectTypedText(pasted);
+    }
+
+    // A sent draft's picks do not come back in the next draft. Alice from
+    // outside the channel picked and sent: `@Alice hi` typed afterwards is
+    // the channel's own Alice, with no prompt.
+    await pickRow('@alice', outsideAlice);
+    expect(saved().single.pubkey, otherAlice.pubkey);
     await send();
-    expect(find.byType(AlertDialog), findsNothing);
-    expect(sentText, '@Quinn');
-    expect(sentTags, isEmpty);
+    await tester.tap(
+      find
+          .descendant(
+            of: find.byType(AlertDialog),
+            matching: find.byType(TextButton),
+          )
+          .first,
+    );
+    await tester.pumpAndSettle();
+    expect(sentTags, contains(orderedEquals(['mention', otherAlice.pubkey])));
+    await _expandComposer(tester);
+    await type('@Alice hi');
+    await expectTypedText('@Alice hi', to: [alice]);
+    // One of two Sams picked and sent: `@Sam hi` typed afterwards is refused as
+    // ambiguous, not sent to the earlier Sam.
+    await pickRow('@sa', samRows.first);
+    expect(saved(), hasLength(1));
+    sent = null;
+    await send();
+    expect(sent, hasLength(1));
+    await type('@Sam hi');
+    expect(personChip, findsNothing);
+    expect(saved(), isEmpty);
+    sent = null;
+    await send();
+    expect(find.textContaining('is ambiguous'), findsOneWidget);
+    expect(sent, isNull);
+    expect(controller.text, '@Sam hi');
+    await tester.pump(const Duration(seconds: 5));
+  });
+
+  // Review of #9699: the binding history belongs to one draft. Undo in
+  // another draft can bring back the earlier draft's text, since the field
+  // is the same, but never a pick made there.
+  testWidgets('a draft switch leaves the earlier draft\'s picks behind', (
+    tester,
+  ) async {
+    final signer = nostr.Keys.generate();
+    Widget build({String? thread}) => _buildComposeBar(
+      threadHeadId: thread,
+      uploadService: _testUploadService(signer.nsec),
+      currentPubkey: signer.public,
+      members: members,
+      channels: [_makeCurrentChannel()],
+      searchPeople: (_) async => const [],
+      onSend: (_, _, {mediaTags = const []}) async {},
+    );
+    await tester.pumpWidget(build());
+    await _expandComposer(tester);
+    final field = find.byType(TextField);
+    final controller = tester.widget<TextField>(field).controller!;
+    await tester.enterText(field, '@bo');
+    await tester.pumpAndSettle();
+    await tester.tap(row('Bob'));
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 1));
+    expect(controller.text, '@Bob ');
+    expect(personChip, findsOneWidget);
+
+    await tester.pumpWidget(build(thread: 'other'));
+    await tester.pumpAndSettle();
+    await _expandComposer(tester);
+    await tester.pump(const Duration(seconds: 1));
+    expect(controller.text, '');
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pump(const Duration(seconds: 1));
+    expect(controller.text, '@Bob ');
+    expect(personChip, findsNothing);
+    final drafts = ProviderScope.containerOf(
+      tester.element(find.byType(ComposeBar)),
+    ).read(composeDraftsProvider.notifier);
+    expect(drafts.draftFor('channel-1')?.mentions, [
+      ComposeDraftMention(start: 0, end: 4, pubkey: bob),
+    ]);
+    // Blur releases the undo client, as the field does by itself.
+    expect(UndoManager.client, isNotNull);
+    FocusManager.instance.primaryFocus?.unfocus();
+    await tester.pump();
+    expect(UndoManager.client, isNull);
     await tester.pump(const Duration(seconds: 5));
   });
 }
