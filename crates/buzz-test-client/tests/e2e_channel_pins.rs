@@ -4,7 +4,7 @@
 //!
 //! # Running
 //!
-//! Start the relay with `BUZZ_PINS_ENABLED=true`, then run:
+//! Start the relay, then run:
 //!
 //! ```text
 //! RELAY_URL=ws://localhost:3000 cargo test -p buzz-test-client --test e2e_channel_pins -- --ignored

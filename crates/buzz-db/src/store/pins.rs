@@ -82,7 +82,7 @@ async fn lock_pins(
 /// Take the replacement lock of `channel_id`'s pin list, then read the pinned
 /// message IDs behind the list head that [`replace_pins`] recorded.
 ///
-/// Every message delete calls this, with pins on or off. Reading the head's
+/// Every message delete calls this. Reading the head's
 /// exact `created_at` first keeps it to the list's own `events` partition, and
 /// to none when the channel has never had a list. Taking the lock before the
 /// read means a pin that commits first is seen.
@@ -357,8 +357,7 @@ impl Db {
     /// and unpin commands that are now an hour old. Returns how many.
     ///
     /// The relay calls this from its leader-only periodic tick, so a record
-    /// goes whether or not its channel sees another command and whether or
-    /// not the relay accepts pins.
+    /// goes whether or not its channel sees another command.
     #[datastore_span(name = "reap_expired_pin_command_records", system = "postgresql")]
     pub async fn reap_expired_pin_command_records(&self) -> Result<u64> {
         let cutoff = Utc::now() - chrono::Duration::seconds(REPLAY_RECORD_SECS);

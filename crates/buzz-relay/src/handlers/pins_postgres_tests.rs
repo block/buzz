@@ -17,28 +17,16 @@ use crate::handlers::ingest::{ingest_event, IngestError, IngestResult};
 use crate::state::AppState;
 
 struct Fixture {
-    /// A relay that accepts the commands.
     state: Arc<AppState>,
-    /// The same relay with `BUZZ_PINS_ENABLED` off.
-    off: Arc<AppState>,
     tenant: TenantContext,
 }
 
 async fn fixture() -> Fixture {
-    let off = crate::api::bridge::postgres_tests::bridge_handler_test_state()
+    let state = crate::api::bridge::postgres_tests::bridge_handler_test_state()
         .await
         .expect("local Postgres and Redis");
-    assert!(!off.config.pins_enabled, "pins are off by default");
-    let mut on = (*off).clone();
-    let mut config = (*on.config).clone();
-    config.pins_enabled = true;
-    on.config = Arc::new(config);
-    let tenant = community(&off, "pins").await;
-    Fixture {
-        state: Arc::new(on),
-        off,
-        tenant,
-    }
+    let tenant = community(&state, "pins").await;
+    Fixture { state, tenant }
 }
 
 fn signed(keys: &Keys, kind: u32, content: &str, tags: &[&[&str]]) -> Event {
@@ -425,8 +413,7 @@ async fn the_list_is_read_like_the_channel() {
 }
 
 /// Each refusal stores nothing and leaves the list alone.
-/// Mutation: drop any one check in `pins::persist`, or the
-/// `pins_enabled` check in ingest → RED for its row.
+/// Mutation: drop any one check in `pins::persist` → RED for its row.
 #[tokio::test]
 #[ignore = "requires Postgres and Redis"]
 async fn refused_commands_change_nothing() {
@@ -527,14 +514,6 @@ async fn refused_commands_change_nothing() {
     );
     refused.push(forged);
 
-    // A relay with the switch off does not know the commands.
-    for kind in [KIND_PIN_MESSAGE, KIND_UNPIN_MESSAGE] {
-        let event = command(&owner, kind, channel, &message);
-        let result = ingest_event(&f.off, &f.tenant, event.clone(), http_auth(&owner)).await;
-        assert_eq!(refusal(result), "restricted: unknown event kind");
-        refused.push(event);
-    }
-
     assert_eq!(f.pin(&owner, channel, &message).await, "");
     sqlx::query("UPDATE channels SET archived_at = NOW() WHERE id = $1")
         .bind(channel)
@@ -566,7 +545,7 @@ async fn refused_commands_change_nothing() {
 
 /// A pinned message deleted by its author (kind:5) or by a channel admin
 /// (kind:9005) leaves the list with the delete, and subscribers get the new
-/// list. A relay with the switch off still serves and prunes its lists.
+/// list.
 /// Mutation: stop dispatching `pin_lists` in `persist_deletion` → RED (no
 /// live list); drop `unpin_deleted_messages` → RED (the list keeps the ID).
 #[tokio::test]
@@ -591,14 +570,13 @@ async fn deleting_a_pinned_message_rewrites_the_list() {
         Some(vec![kept.clone(), by_admin.clone()])
     );
 
-    // The same relay with pins turned off: the delete still prunes.
-    let deletion = signed(&owner, 9005, "", &[&["h", &h], &["e", &by_admin]]);
-    let result = ingest_event(&f.off, &f.tenant, deletion, http_auth(&owner))
-        .await
-        .expect("admin delete");
-    assert!(result.accepted, "{}", result.message);
+    f.accept(
+        &owner,
+        signed(&owner, 9005, "", &[&["h", &h], &["e", &by_admin]]),
+    )
+    .await;
     let by_d = json!({"kinds": [KIND_CHANNEL_PINS], "#d": [h]});
-    let lists = read(&f.off, &f.tenant, &owner, by_d).await;
+    let lists = f.read(&owner, by_d).await;
     assert_eq!(
         lists.iter().map(pinned).collect::<Vec<_>>(),
         [vec![kept.clone()]]

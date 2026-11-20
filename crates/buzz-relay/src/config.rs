@@ -189,10 +189,6 @@ pub struct Config {
     pub membership_snapshot_enabled: bool,
     /// Opt-in NIP-CL public memberships, independent of self discovery.
     pub membership_public_enabled: bool,
-    /// Whether the relay accepts NIP-PM pin and unpin commands. Off by
-    /// default. Stored pin lists are served, and lose deleted messages, either
-    /// way.
-    pub pins_enabled: bool,
     /// Author-time unread tracking duration, independent of NIP-RS retention.
     pub buzz_v1_retention_seconds: u32,
     /// Comma-separated list of allowed CORS origins.
@@ -1556,7 +1552,6 @@ impl Config {
                 .is_ok_and(|v| v == "true"),
             membership_public_enabled: std::env::var("BUZZ_MEMBERSHIP_PUBLIC_ENABLED")
                 .is_ok_and(|v| v == "true"),
-            pins_enabled: parse_bool("BUZZ_PINS_ENABLED", false)?,
             buzz_v1_retention_seconds,
             cors_origins,
             relay_private_key,
