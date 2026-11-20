@@ -7,11 +7,13 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app.dart';
+import 'diagnostic_screens.dart';
 import 'features/age_gate/age_signal_push_bootstrap.dart';
 import 'features/agents/agents_page.dart';
 import 'features/invites/invite_join_provider.dart';
 import 'shared/agents/agents_surface.dart';
 import 'shared/diagnostics/diagnostic_member_binding.dart';
+import 'shared/diagnostics/diagnostic_navigation_observer.dart';
 import 'shared/diagnostics/diagnostic_reporter.dart';
 import 'shared/diagnostics/diagnostic_startup.dart';
 import 'shared/push/push_bridge.dart';
@@ -79,6 +81,7 @@ ProviderScope buildRootProviderScope({
       (context, link) async => unawaited(showAgents(context, draft: link)),
     ),
     diagnosticReporterProvider.overrideWithValue(reporter),
+    diagnosticScreenClassifierProvider.overrideWithValue(diagnosticScreenOf),
     savedPrefsProvider.overrideWithValue(prefs),
     if (mediaCacheRoot != null)
       mediaCacheRootProvider.overrideWith((ref) => mediaCacheRoot()),

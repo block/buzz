@@ -55,7 +55,6 @@ import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/emoji/emoji_burst.dart';
 import 'shared/relay/relay.dart';
 import 'shared/diagnostics/diagnostic_navigation_observer.dart';
-import 'shared/diagnostics/diagnostic_reporter.dart';
 import 'shared/theme/theme.dart';
 import 'shared/widgets/buzz_loading_indicator.dart';
 import 'shared/read_state/failed_clear_notice.dart';
@@ -479,8 +478,9 @@ class App extends HookConsumerWidget {
     );
     final latestHome = useRef<Widget?>(null)..value = home;
     final screenObserver = useMemoized(
-      () => DiagnosticNavigationObserver(ref.read(diagnosticReporterProvider)),
+      ref.read(diagnosticScreenTrailProvider).observer,
     );
+    useEffect(() => screenObserver.dispose, [screenObserver]);
 
     return MaterialApp(
       navigatorKey: _mobileRootNavigatorKey,
