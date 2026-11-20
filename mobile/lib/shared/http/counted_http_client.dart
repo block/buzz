@@ -43,9 +43,11 @@ String httpBackend(String host) {
 /// to get response headers.
 ///
 /// A failure status is counted at its headers. A success is counted once its
-/// body is read to the end or its reader stops early, or as a timeout if the
-/// body fails or is cancelled after the caller's deadline passed
-/// ([noteHttpDeadline]). A body that is never read is not counted.
+/// body is read to the end or its reader stops early. A body that fails or is
+/// cancelled after the caller's deadline passed ([noteHttpDeadline]) is a
+/// timeout, and one that fails before it, other than by the app aborting it,
+/// is a failure of its kind. A body that is never read is not counted. Work
+/// that outlives a member change counts for nobody.
 ///
 /// Counting happens as the request finishes and never changes its result.
 class _CountedClient extends http.BaseClient {
@@ -59,10 +61,11 @@ class _CountedClient extends http.BaseClient {
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
     final stopwatch = Stopwatch()..start();
     // A request can outlive a sign-out or a community switch; what it saw
-    // belongs to the member who started it, not to whoever is next.
-    final member = appHttpDiagnostics.member;
+    // belongs to the member who started it, not to whoever is next, nor to
+    // the same member signed in again.
+    final changes = appHttpDiagnostics.memberChanges;
     void count(NetworkFailure? failure, Duration duration) {
-      if (appHttpDiagnostics.member != member) return;
+      if (appHttpDiagnostics.memberChanges != changes) return;
       _count(request, duration, failure: failure);
     }
 
@@ -90,15 +93,19 @@ class _CountedClient extends http.BaseClient {
       return response;
     }
     var settled = false;
-    void settle({required bool complete}) {
+    void settle({required bool complete, Object? error}) {
       if (settled) return;
       settled = true;
-      count(
-        !complete && (_deadlinePassed[request] ?? false)
-            ? NetworkFailure.timeout
-            : null,
-        headers,
-      );
+      count(switch ((complete, error)) {
+        (true, _) => null,
+        _ when _deadlinePassed[request] ?? false => NetworkFailure.timeout,
+        // A reader that stops early, or an abort or close with no deadline
+        // behind it, is the app done with the body.
+        (false, null) || (false, http.RequestAbortedException()) => null,
+        _ when _closed => null,
+        (false, final Object error) =>
+          classifyTransportError(error) ?? NetworkFailure.other,
+      }, headers);
     }
 
     return _withStream(
@@ -138,10 +145,11 @@ class _CountedClient extends http.BaseClient {
 }
 
 /// [body] unchanged, calling [onEnd] when it ends (complete), or fails or its
-/// listener cancels (not complete). A failure is passed through as it was.
+/// listener cancels (not complete, with the failure if any). A failure is
+/// passed through as it was.
 Stream<List<int>> _settledStream(
   Stream<List<int>> body, {
-  required void Function({required bool complete}) onEnd,
+  required void Function({required bool complete, Object? error}) onEnd,
 }) {
   late final StreamController<List<int>> controller;
   StreamSubscription<List<int>>? subscription;
@@ -151,7 +159,7 @@ Stream<List<int>> _settledStream(
       subscription = body.listen(
         controller.add,
         onError: (Object error, StackTrace stack) {
-          onEnd(complete: false);
+          onEnd(complete: false, error: error);
           controller.addError(error, stack);
         },
         onDone: () {

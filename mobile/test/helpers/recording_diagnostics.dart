@@ -25,7 +25,14 @@ class RecordingDiagnostics extends NoopDiagnosticReporter {
   String? get member => _member;
 
   @override
-  void setMember(String? pubkey) => _member = pubkey;
+  void setMember(String? pubkey) {
+    if (pubkey != _member) _memberChanges++;
+    _member = pubkey;
+  }
+
+  @override
+  int get memberChanges => _memberChanges;
+  var _memberChanges = 0;
 
   @override
   void countNetworkEvent(NetworkEvent event) =>

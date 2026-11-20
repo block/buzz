@@ -367,11 +367,25 @@ void main() {
     expect(diagnostics.breadcrumbs, hasLength(1));
   });
 
+  test('a body that breaks with no deadline behind it is a failure', () async {
+    final client = streamingClient(
+      Stream.error(const SocketException('Connection reset by peer')),
+    );
+    final response = await client.send(
+      http.Request('GET', Uri.parse('https://relay.example.org/')),
+    );
+    await response.stream.drain<void>().then<void>((_) {}, onError: (_) {});
+
+    expect(diagnostics.events.single.outcome, NetworkOutcome.failure);
+    expect(diagnostics.events.single.failure, NetworkFailure.disconnected);
+    expect(diagnostics.breadcrumbs, hasLength(1));
+  });
+
   test(
-    'a body that fails with no deadline behind it stays a success',
+    'a body the app aborts with no deadline behind it stays a success',
     () async {
       final client = streamingClient(
-        Stream.error(http.ClientException('Connection closed')),
+        Stream.error(http.RequestAbortedException()),
       );
       final response = await client.send(
         http.Request('GET', Uri.parse('https://relay.example.org/')),
@@ -416,6 +430,27 @@ void main() {
       ]);
     },
   );
+
+  test('a request that finishes after the member signs back in, or after '
+      'a switch away and back, is not counted', () async {
+    for (final away in [null, 'b' * 64]) {
+      diagnostics.setMember('a' * 64);
+      final answer = Completer<http.Response>();
+      final pending = send(
+        'https://relay.example.org/query',
+        (_) => answer.future,
+      );
+      await pumpEventQueue();
+      diagnostics
+        ..setMember(away)
+        ..setMember('a' * 64);
+      answer.complete(http.Response('', 503));
+      await pending;
+    }
+
+    expect(diagnostics.counts, isEmpty);
+    expect(diagnostics.breadcrumbs, isEmpty);
+  });
 
   test('a request held across a sign-out is not counted, even after the '
       'member signs back in or another member signs in', () async {

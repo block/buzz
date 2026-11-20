@@ -71,9 +71,14 @@ class SentryDiagnosticReporter implements DiagnosticReporter {
   String? _member;
 
   @override
+  int get memberChanges => _memberChanges;
+  var _memberChanges = 0;
+
+  @override
   void setMember(String? pubkey) {
     final previous = _member;
     _member = pubkey;
+    if (pubkey != previous) _memberChanges++;
     _drop(
       () => _hub.configureScope((scope) {
         final user = scope.setUser(

@@ -28,6 +28,10 @@ abstract interface class DiagnosticReporter {
   /// The member later reports and counts name, as last given to [setMember].
   String? get member;
 
+  /// How many times [member] has changed. Work started before a change
+  /// belongs to nobody after it, even when the same member is back.
+  int get memberChanges;
+
   /// Whether this build has a reporting destination. Only then does Settings
   /// offer the checks below.
   bool get reporting;
@@ -182,6 +186,9 @@ class NoopDiagnosticReporter implements DiagnosticReporter {
   String? get member => null;
 
   @override
+  int get memberChanges => 0;
+
+  @override
   bool get reporting => false;
 
   @override
@@ -233,6 +240,9 @@ class SignerDiagnosticReporter implements DiagnosticReporter {
 
   @override
   String? get member => reporter.member;
+
+  @override
+  int get memberChanges => reporter.memberChanges;
 
   @override
   bool get reporting => reporter.reporting;
