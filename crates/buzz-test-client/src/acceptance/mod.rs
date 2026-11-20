@@ -293,13 +293,23 @@ async fn relay_info(cfg: &Config) -> (CheckReport, Option<String>) {
             if !info["supported_nips"].is_array() {
                 bail!("not a NIP-11 document: no supported_nips");
             }
-            Ok(info["version"].as_str().map(str::to_owned))
+            Ok(relay_version(&info))
         })
         .await;
     match result {
         Ok(version) => (check.finish(Ok(())), version),
         Err(e) => (check.finish(Err(e)), None),
     }
+}
+
+/// The relay build a run reached: the NIP-11 `source_sha` when the relay
+/// advertises one, else its software `version`. A deployment gate can then
+/// match runs to the exact build it promoted.
+fn relay_version(info: &serde_json::Value) -> Option<String> {
+    info["source_sha"]
+        .as_str()
+        .or_else(|| info["version"].as_str())
+        .map(str::to_owned)
 }
 
 async fn connect_auth(cfg: &Config) -> (CheckReport, Option<NostrWsConnection>) {
@@ -739,6 +749,19 @@ fn tag<const N: usize>(parts: [&str; N]) -> anyhow::Result<Tag> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_version_prefers_the_build_sha_over_the_software_version() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let both = serde_json::json!({"version": "0.1.0", "source_sha": sha});
+        assert_eq!(relay_version(&both).as_deref(), Some(sha));
+        // Relays without a recorded build, and older relays, keep the version.
+        let version_only = serde_json::json!({"version": "0.1.0"});
+        assert_eq!(relay_version(&version_only).as_deref(), Some("0.1.0"));
+        let non_string = serde_json::json!({"version": "0.1.0", "source_sha": 7});
+        assert_eq!(relay_version(&non_string).as_deref(), Some("0.1.0"));
+        assert_eq!(relay_version(&serde_json::json!({})), None);
+    }
 
     fn config(relay_url: String) -> Config {
         Config {
