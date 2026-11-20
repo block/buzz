@@ -3,8 +3,19 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*};
 
+/// Stdout log directives when `RUST_LOG` is unset.
+///
+/// The relay logs at info (`buzz_relay` also covers `buzz_relay_mesh`, since
+/// targets match by prefix). The workspace crates that run inside the relay
+/// process log warnings and errors, so their failures are visible without
+/// their info-level detail. Dependencies and the per-query `buzz_datastore`
+/// spans stay off.
+const DEFAULT_LOG_FILTER: &str = "buzz_relay=info,buzz_audit=warn,buzz_auth=warn,buzz_db=warn,\
+                                  buzz_media=warn,buzz_pubsub=warn,buzz_search=warn,\
+                                  buzz_workflow=warn";
+
 fn log_filter<S>(rust_log: Option<&str>) -> telemetry::DirectiveFilter<S> {
-    telemetry::directive_filter(rust_log.unwrap_or("buzz_relay=info"))
+    telemetry::directive_filter(rust_log.unwrap_or(DEFAULT_LOG_FILTER))
 }
 
 use buzz_audit::AuditService;
@@ -1710,6 +1721,71 @@ mod env_filter_tests {
                 logs.contains("withheld") && !logs.contains("workflow-noise"),
                 "{logs}"
             );
+        }
+    }
+
+    /// Without `RUST_LOG`, warnings and errors from the workspace crates the
+    /// relay runs in-process are logged (a failing workflow run, a cron claim
+    /// failure), while their info-level detail, dependencies, and per-query
+    /// datastore spans stay quiet.
+    #[test]
+    fn unset_logs_in_process_crate_warnings_and_errors() {
+        const IN_PROCESS: [&str; 8] = [
+            "buzz_audit",
+            "buzz_auth",
+            "buzz_db::store",
+            "buzz_media",
+            "buzz_pubsub",
+            "buzz_search",
+            "buzz_workflow",
+            "buzz_workflow::executor",
+        ];
+        const SILENT: [&str; 3] = ["buzz_datastore", "sqlx::query", "tower_http::trace"];
+        // `tracing` targets must be literals, so emit each target explicitly.
+        let logs = logged(log_filter(None), || {
+            tracing::info!(target: "buzz_relay", "m buzz_relay info");
+            tracing::info!(target: "buzz_relay_mesh", "m buzz_relay_mesh info");
+            tracing::error!(target: "buzz_audit", "m buzz_audit error");
+            tracing::warn!(target: "buzz_audit", "m buzz_audit warn");
+            tracing::info!(target: "buzz_audit", "m buzz_audit info");
+            tracing::error!(target: "buzz_auth", "m buzz_auth error");
+            tracing::warn!(target: "buzz_auth", "m buzz_auth warn");
+            tracing::info!(target: "buzz_auth", "m buzz_auth info");
+            tracing::error!(target: "buzz_db::store", "m buzz_db::store error");
+            tracing::warn!(target: "buzz_db::store", "m buzz_db::store warn");
+            tracing::info!(target: "buzz_db::store", "m buzz_db::store info");
+            tracing::error!(target: "buzz_media", "m buzz_media error");
+            tracing::warn!(target: "buzz_media", "m buzz_media warn");
+            tracing::info!(target: "buzz_media", "m buzz_media info");
+            tracing::error!(target: "buzz_pubsub", "m buzz_pubsub error");
+            tracing::warn!(target: "buzz_pubsub", "m buzz_pubsub warn");
+            tracing::info!(target: "buzz_pubsub", "m buzz_pubsub info");
+            tracing::error!(target: "buzz_search", "m buzz_search error");
+            tracing::warn!(target: "buzz_search", "m buzz_search warn");
+            tracing::info!(target: "buzz_search", "m buzz_search info");
+            tracing::error!(target: "buzz_workflow", "m buzz_workflow error");
+            tracing::warn!(target: "buzz_workflow", "m buzz_workflow warn");
+            tracing::info!(target: "buzz_workflow", "m buzz_workflow info");
+            tracing::error!(target: "buzz_workflow::executor", "m buzz_workflow::executor error");
+            tracing::warn!(target: "buzz_workflow::executor", "m buzz_workflow::executor warn");
+            tracing::info!(target: "buzz_workflow::executor", "m buzz_workflow::executor info");
+            tracing::error!(target: "buzz_datastore", "m buzz_datastore error");
+            tracing::error!(target: "sqlx::query", "m sqlx::query error");
+            tracing::error!(target: "tower_http::trace", "m tower_http::trace error");
+        });
+        let has = |marker: &str| {
+            logs.lines()
+                .any(|line| line.ends_with(&format!("m {marker}")))
+        };
+        assert!(has("buzz_relay info"), "{logs}");
+        assert!(has("buzz_relay_mesh info"), "{logs}");
+        for target in IN_PROCESS {
+            assert!(has(&format!("{target} error")), "{target} error: {logs}");
+            assert!(has(&format!("{target} warn")), "{target} warn: {logs}");
+            assert!(!has(&format!("{target} info")), "{target} info: {logs}");
+        }
+        for target in SILENT {
+            assert!(!has(&format!("{target} error")), "{target}: {logs}");
         }
     }
 
