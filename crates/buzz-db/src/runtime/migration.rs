@@ -864,20 +864,113 @@ mod postgres_tests {
     /// migrations from adding any.
     const LAST_SCHEMA_OBJECT_RETIREMENT_MIGRATION: i64 = 104;
 
+    /// The words of `sql` as `(line, WORD)`, read the way PostgreSQL reads
+    /// them. `--` and nested `/* */` comments are whitespace. Quoted
+    /// identifiers and string literals are data, except a literal passed to
+    /// `EXECUTE` or `format(`, which is SQL. Dollar-quoted bodies, such as a
+    /// `DO` block, are SQL.
+    fn sql_words(sql: &str, first_line: usize) -> Vec<(usize, String)> {
+        let chars: Vec<char> = sql.chars().collect();
+        let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let mut words: Vec<(usize, String)> = Vec::new();
+        let mut line = first_line;
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            let next = chars.get(i + 1).copied();
+            if c == '\n' {
+                line += 1;
+                i += 1;
+            } else if c == '-' && next == Some('-') {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+            } else if c == '/' && next == Some('*') {
+                let mut depth = 0;
+                while i < chars.len() {
+                    match (chars[i], chars.get(i + 1)) {
+                        ('/', Some('*')) => {
+                            depth += 1;
+                            i += 2;
+                        }
+                        ('*', Some('/')) => {
+                            depth -= 1;
+                            i += 2;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        (ch, _) => {
+                            line += usize::from(ch == '\n');
+                            i += 1;
+                        }
+                    }
+                }
+            } else if c == '\'' || c == '"' {
+                // `E'...'` strings take backslash escapes.
+                let escapes = c == '\''
+                    && i > 0
+                    && chars[i - 1].eq_ignore_ascii_case(&'e')
+                    && words.last().is_some_and(|(_, word)| word == "E");
+                if escapes {
+                    words.pop();
+                }
+                let start_line = line;
+                let mut body = String::new();
+                i += 1;
+                while i < chars.len() {
+                    let ch = chars[i];
+                    line += usize::from(ch == '\n');
+                    if escapes && ch == '\\' {
+                        body.extend(chars.get(i + 1));
+                        i += 2;
+                    } else if ch == c && chars.get(i + 1) == Some(&c) {
+                        body.push(c);
+                        i += 2;
+                    } else if ch == c {
+                        i += 1;
+                        break;
+                    } else {
+                        body.push(ch);
+                        i += 1;
+                    }
+                }
+                let runs_as_sql = c == '\''
+                    && words
+                        .last()
+                        .is_some_and(|(_, word)| word == "EXECUTE" || word == "FORMAT");
+                if runs_as_sql {
+                    words.extend(sql_words(&body, start_line));
+                }
+            } else if c == '$' {
+                // Skip a `$tag$` delimiter; its body is read as SQL.
+                let end = chars[i + 1..]
+                    .iter()
+                    .position(|&ch| !is_word(ch))
+                    .map_or(chars.len(), |offset| i + 1 + offset);
+                i = if chars.get(end) == Some(&'$') {
+                    end + 1
+                } else {
+                    i + 1
+                };
+            } else if is_word(c) {
+                let start = i;
+                while i < chars.len() && is_word(chars[i]) {
+                    i += 1;
+                }
+                let word: String = chars[start..i].iter().collect();
+                words.push((line, word.to_ascii_uppercase()));
+            } else {
+                i += 1;
+            }
+        }
+        words
+    }
+
     /// Each `(line, construct)` in `sql` that creates a trigger, function,
-    /// procedure, rule or foreign key. `--` comments are ignored. String and
-    /// dollar-quoted bodies are scanned, so DDL that a `DO` block runs through
-    /// `EXECUTE` is still found.
+    /// procedure, rule or foreign key.
     fn forbidden_schema_objects(sql: &str) -> Vec<(usize, String)> {
-        let tokens: Vec<(usize, String)> = strip_sql_comments(sql)
-            .lines()
-            .enumerate()
-            .flat_map(|(index, line)| {
-                line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                    .filter(|word| !word.is_empty())
-                    .map(move |word| (index + 1, word.to_ascii_uppercase()))
-            })
-            .collect();
+        let tokens = sql_words(sql, 1);
         let mut found = Vec::new();
         for (i, (line, token)) in tokens.iter().enumerate() {
             let rest = tokens[i + 1..].iter().map(|(_, t)| t.as_str());
@@ -904,6 +997,29 @@ mod postgres_tests {
             found.extend(construct.map(|construct| (*line, construct)));
         }
         found
+    }
+
+    /// Where `file`, a path under `schema/`, breaks docs/database.md Rules 1,
+    /// 2 and 4: only `tables/public/`, `types/`, `partitions/` and `seeds/`
+    /// hold schema files, and no file declares a trigger, function,
+    /// procedure, rule or foreign key.
+    fn desired_state_file_violations(file: &str, text: &str) -> Vec<String> {
+        let allowed = ["tables/public/", "types/", "partitions/", "seeds/"];
+        let misplaced = (file != "schema.sql" && !allowed.iter().any(|dir| file.starts_with(dir)))
+            .then(|| {
+                format!(
+                    "schema/{file}: only {} may hold schema files",
+                    allowed.join(", ")
+                )
+            });
+        misplaced
+            .into_iter()
+            .chain(
+                forbidden_schema_objects(text)
+                    .into_iter()
+                    .map(|(line, construct)| format!("schema/{file}:{line}: {construct}")),
+            )
+            .collect()
     }
 
     #[test]
@@ -2024,6 +2140,25 @@ mod postgres_tests {
             on_disk, included_set,
             "every schema/ file must be included by schema/schema.sql exactly once"
         );
+        for retired in ["functions", "triggers"] {
+            assert!(
+                !schema_dir.join(retired).exists(),
+                "docs/database.md Rule 1: schema/{retired}/ must not exist"
+            );
+        }
+        let violations: Vec<String> = std::iter::once("schema.sql")
+            .chain(included.iter().map(String::as_str))
+            .flat_map(|file| {
+                let text =
+                    std::fs::read_to_string(schema_dir.join(file)).expect("read schema file");
+                desired_state_file_violations(file, &text)
+            })
+            .collect();
+        assert!(
+            violations.is_empty(),
+            "docs/database.md Rules 1, 2 and 4:\n{}",
+            violations.join("\n")
+        );
 
         fn strip_comments(text: &str) -> String {
             text.lines()
@@ -2237,7 +2372,16 @@ mod postgres_tests {
                    ALTER TABLE widgets ADD CONSTRAINT fk FOREIGN KEY (parent) REFERENCES widgets (parent);\n\
                    DO $$ BEGIN EXECUTE 'CREATE TRIGGER t2 BEFORE INSERT ON widgets FOR EACH ROW EXECUTE FUNCTION f()'; END $$;\n\
                    CREATE OR REPLACE VIEW v AS SELECT 1;\n\
-                   CREATE INDEX idx_widgets ON widgets (community_id);\n";
+                   CREATE INDEX idx_widgets ON widgets (community_id);\n\
+                   CREATE /* a helper for this migration */ FUNCTION g() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;\n\
+                   ALTER TABLE widgets ADD CONSTRAINT fk2 FOREIGN /* the parent */ KEY (parent)\n\
+                   /* a block comment\n\
+                   over two lines, /* nested */ CREATE FUNCTION h() */ DROP FUNCTION g();\n\
+                   ALTER TABLE widgets ADD COLUMN section text DEFAULT 'references';\n\
+                   COMMENT ON TABLE widgets IS 'Never CREATE TRIGGER here; it''s FOREIGN KEY free';\n\
+                   ALTER TABLE widgets ADD COLUMN \"references\" text;\n\
+                   DO $body$ BEGIN EXECUTE format('CREATE TRIGGER %I AFTER INSERT ON widgets', 't3'); END $body$;\n\
+                   DO $$ BEGIN EXECUTE E'CREATE RULE r2 AS ON INSERT TO widgets DO INSTEAD NOTHING'; END $$;\n";
         let found = forbidden_schema_objects(sql);
         let found: Vec<_> = found.iter().map(|(line, c)| (*line, c.as_str())).collect();
         assert_eq!(
@@ -2252,7 +2396,51 @@ mod postgres_tests {
                 (10, "FOREIGN KEY"),
                 (10, "REFERENCES"),
                 (11, "CREATE TRIGGER"),
+                (14, "CREATE FUNCTION"),
+                (15, "FOREIGN KEY"),
+                (21, "CREATE TRIGGER"),
+                (22, "CREATE RULE"),
             ]
+        );
+    }
+
+    #[test]
+    fn desired_state_file_check_rejects_forbidden_directories_and_objects() {
+        let cases = [
+            ("functions/placeholder.sql", "-- empty", 1),
+            ("triggers/placeholder.sql", "", 1),
+            (
+                "tables/public/widgets.sql",
+                "CREATE TABLE widgets (\n  parent uuid REFERENCES widgets (id)\n);",
+                1,
+            ),
+            (
+                "seeds/widgets.sql",
+                "CREATE FUNCTION f() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;",
+                1,
+            ),
+            (
+                "tables/public/widgets.sql",
+                "CREATE TABLE widgets (id uuid, section text DEFAULT 'references');",
+                0,
+            ),
+            (
+                "types/widget_kind.sql",
+                "CREATE TYPE widget_kind AS ENUM ('a');",
+                0,
+            ),
+            ("schema.sql", "\\i tables/public/widgets.sql", 0),
+        ];
+        for (file, text, expected) in cases {
+            let violations = desired_state_file_violations(file, text);
+            assert_eq!(violations.len(), expected, "{file}: {violations:?}");
+        }
+        assert_eq!(
+            desired_state_file_violations(
+                "tables/public/widgets.sql",
+                "CREATE TABLE widgets (\n  parent uuid REFERENCES widgets (id)\n);"
+            ),
+            ["schema/tables/public/widgets.sql:2: REFERENCES"]
         );
     }
 

@@ -78,10 +78,12 @@ retirement sequence below.
 in `crates/buzz-db/src/runtime/migration.rs` fails CI when a migration numbered
 after `0104` contains `CREATE FUNCTION`, `CREATE PROCEDURE`, `CREATE TRIGGER`,
 `CREATE RULE` (each with or without `OR REPLACE`), `CREATE CONSTRAINT TRIGGER`,
-`CREATE EVENT TRIGGER`, `REFERENCES`, or `FOREIGN KEY` outside a `--` comment.
-It names the file and line. `admin_schema_parity_between_desired_state_and_migrations`
-asserts that both bootstrap paths leave no trigger, function, rule, or foreign
-key.
+`CREATE EVENT TRIGGER`, `REFERENCES`, or `FOREIGN KEY`. It names the file and
+line. Comments, quoted identifiers, and string values are skipped; a string
+passed to `EXECUTE` or `format(` is checked as SQL. The desired-state layout
+test applies the same check to every file under `schema/`.
+`admin_schema_parity_between_desired_state_and_migrations` asserts that both
+bootstrap paths leave no trigger, function, rule, or foreign key.
 
 **No exception for the community write fence.** Migration 0090 dropped the
 universal fence triggers and their helper functions; a new table MUST NOT bring
