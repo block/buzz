@@ -16,6 +16,7 @@ import 'package:http/testing.dart';
 class FakeAndroidKeystore implements AndroidPushKeystore {
   AndroidPushKey? key;
   int generated = 0;
+  int deleted = 0;
   bool attests = true;
 
   @override
@@ -46,7 +47,10 @@ class FakeAndroidKeystore implements AndroidPushKeystore {
   }
 
   @override
-  Future<void> delete() async => key = null;
+  Future<void> delete() async {
+    deleted++;
+    key = null;
+  }
 }
 
 String signatureFor(Uint8List publicKey, List<int> transcript) =>
@@ -273,8 +277,10 @@ class FakePushGateway {
       Iterable.generate(a.length).every((i) => a[i] == b[i]);
 }
 
-AndroidPushGatewayClient fakeGatewayClient(FakePushGateway gateway) =>
-    AndroidPushGatewayClient(
-      baseUrl: Uri.parse('https://push.example'),
-      client: gateway.client,
-    );
+AndroidPushGatewayClient fakeGatewayClient(
+  FakePushGateway gateway, {
+  String baseUrl = 'https://push.example',
+}) => AndroidPushGatewayClient(
+  baseUrl: Uri.parse(baseUrl),
+  client: gateway.client,
+);

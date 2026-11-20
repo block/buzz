@@ -118,6 +118,10 @@ class AndroidPushAuthority {
 
   int get _nowSeconds => _now().millisecondsSinceEpoch ~/ 1000;
 
+  /// The gateway the stored state belongs to. A key and an installation mean
+  /// nothing to any other gateway.
+  String get _gatewayOrigin => gateway.baseUrl.origin;
+
   Future<T> _serialized<T>(Future<T> Function() operation) {
     final result = _tail.then((_) => operation());
     _tail = result.then<void>((_) {}, onError: (Object _, StackTrace _) {});
@@ -149,6 +153,7 @@ class AndroidPushAuthority {
     required String endpoint,
     required bool Function() stillWanted,
   }) => _serialized(() async {
+    await _dropForeignGateway();
     var attemptedReset = false;
     try {
       while (true) {
@@ -189,6 +194,7 @@ class AndroidPushAuthority {
     required Set<String> Function() desiredRelays,
     required bool Function() revokeInstallation,
   }) => _serialized(() async {
+    await _dropForeignGateway();
     var state = await _load();
     final pending = state.pendingEnrollment;
     if (state.installation == null && pending != null && revokeInstallation()) {
@@ -692,17 +698,37 @@ class AndroidPushAuthority {
   // ---- storage ----
 
   Future<_State> _load() async {
-    final raw = await store.read();
-    if (raw == null) return _State.empty;
+    final json = _decode(await store.read());
+    if (json == null || json['gatewayOrigin'] != _gatewayOrigin) {
+      return _State.empty;
+    }
+    return _State.fromJson(json);
+  }
+
+  Map<String, Object?>? _decode(String? raw) {
+    if (raw == null) return null;
     final decoded = jsonDecode(raw);
     if (decoded is! Map<String, Object?>) {
       throw const FormatException('Android push authority state is malformed.');
     }
-    return _State.fromJson(decoded);
+    return decoded;
   }
 
-  Future<void> _save(_State state) =>
-      store.write(state.isEmpty ? null : jsonEncode(state.toJson()));
+  /// State stored for another gateway is dropped: its installation and key
+  /// mean nothing to this one, which enrolls afresh. The old installation
+  /// expires under its own gateway's policy.
+  Future<void> _dropForeignGateway() async {
+    final json = _decode(await store.read());
+    if (json == null || json['gatewayOrigin'] == _gatewayOrigin) return;
+    await keystore.delete();
+    await store.write(null);
+  }
+
+  Future<void> _save(_State state) => store.write(
+    state.isEmpty
+        ? null
+        : jsonEncode({...state.toJson(), 'gatewayOrigin': _gatewayOrigin}),
+  );
 }
 
 bool _always() => true;

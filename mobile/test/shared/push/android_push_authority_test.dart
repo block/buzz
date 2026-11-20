@@ -513,4 +513,31 @@ void main() {
     expect(gateway.bodiesFor('/v1/delegations'), isEmpty);
     expect(await authority.grants(), isEmpty);
   });
+
+  // ---- gateway binding ----
+
+  test('state from another gateway is dropped, not reused', () async {
+    final first = await enroll();
+    final other = FakePushGateway(nowSeconds: () => now);
+    authority = AndroidPushAuthority(
+      keystore: keystore,
+      gateway: fakeGatewayClient(other, baseUrl: 'https://push-b.example'),
+      store: store,
+      now: () => DateTime.fromMillisecondsSinceEpoch(now * 1000),
+      sleep: (_) async {},
+    );
+
+    // Nothing of the first gateway's is readable, and nothing is revoked on
+    // either gateway: its installation just expires there.
+    expect(await authority.grants(), isEmpty);
+    final grant = await enroll();
+
+    expect(keystore.deleted, 1);
+    expect(keystore.generated, 2);
+    expect(other.installations, hasLength(1));
+    expect(other.bodiesFor('/v1/delegations').single['generation'], 1);
+    expect(grant.installationId, isNot(first.installationId));
+    expect(gateway.installations.values.single.revoked, isFalse);
+    expect(store.value, contains('https://push-b.example'));
+  });
 }
