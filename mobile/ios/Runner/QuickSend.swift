@@ -116,16 +116,11 @@ struct MessageBestieIntent: AppIntent {
   var message: String
 
   @MainActor
-  func perform() async throws -> some IntentResult & ProvidesDialog {
+  func perform() async throws -> some IntentResult {
     let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty else { throw QuickSendError("Say a message to send.") }
-    try await QuickSendBridge.shared.send(text) { name in
-      try await requestConfirmation(
-        result: .result(dialog: "Send “\(text)” to \(name ?? "your Bestie")?"),
-        confirmationActionName: .send
-      )
-    }
-    return .result(dialog: "Sent.")
+    try await QuickSendBridge.shared.send(text) { _ in }
+    return .result()
   }
 }
 
