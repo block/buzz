@@ -325,6 +325,8 @@ pub async fn create_channel(
     visibility: String,
     description: Option<String>,
     ttl_seconds: Option<i32>,
+    expected_relay_url: Option<String>,
+    expected_signer_pubkey: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ChannelInfo, String> {
     let channel_uuid = uuid::Uuid::new_v4();
@@ -347,12 +349,13 @@ pub async fn create_channel(
         ttl_seconds,
     )?;
 
-    // Capture the signing identity AND workspace relay together before any
-    // await. `apply_workspace` mutates those under separate mutexes; two
-    // unlocked reads can mix tenant A's signer with tenant B's relay and
-    // publish the create across communities. Pin both for submit + reread.
+    // Validate the initiating workspace against the same coherent snapshot
+    // used for both writes and reads. An IPC call can reach Rust after a
+    // workspace switch, even if the initiating callback was current.
     let (creator_keys, relay_base) = state.signing_and_relay_scope()?;
     let creator_pubkey = creator_keys.public_key().to_hex();
+    assert_expected_relay_scope(expected_relay_url.as_deref(), &relay_base)?;
+    assert_expected_signer(expected_signer_pubkey.as_deref(), &creator_pubkey)?;
     submit_event_at_with_keys(builder, &state, &relay_base, &creator_keys).await?;
 
     // Mark this channel pending-owner: we just created it, so we know we're

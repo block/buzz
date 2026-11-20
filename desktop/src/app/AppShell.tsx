@@ -586,6 +586,8 @@ export function AppShell() {
         channelType: "stream",
         visibility,
         ttlSeconds,
+        expectedRelayUrl: scope.expectedRelayUrl,
+        expectedSignerPubkey: scope.expectedSignerPubkey,
       });
       if (!isCurrent()) return;
 
@@ -627,6 +629,8 @@ export function AppShell() {
         channelType: "forum",
         visibility,
         ttlSeconds,
+        expectedRelayUrl: scope.expectedRelayUrl,
+        expectedSignerPubkey: scope.expectedSignerPubkey,
       });
       if (!isCurrent()) return;
 

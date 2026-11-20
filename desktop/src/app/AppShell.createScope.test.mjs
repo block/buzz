@@ -116,6 +116,8 @@ for (const type of ["stream", "forum"]) {
           useQueryClient,
           async (input) => {
             assert.equal(input.channelType, type);
+            assert.equal(input.expectedRelayUrl, "https://a.example");
+            assert.equal(input.expectedSignerPubkey, "same-signer");
             calls.push("create");
             if (phase === "create") await pending.promise;
             return created;
