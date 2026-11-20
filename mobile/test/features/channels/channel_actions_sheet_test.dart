@@ -24,6 +24,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 
 const _currentPubkey = 'me';
 
@@ -629,8 +630,10 @@ void main() {
       final keys = nostr.Keys.generate();
       const relayUrl = 'https://relay.example';
       final storeKey = channelSectionsKey(keys.public, relayUrl);
-      SharedPreferences.setMockInitialValues({
-        storeKey: jsonEncode(
+      // Records every snapshot saved for this layout, so one pick must be
+      // exactly one write.
+      final saves = _LayoutSaves('flutter.$storeKey', {
+        'flutter.$storeKey': jsonEncode(
           ChannelSectionStore(
             sections: [
               const ChannelSection(id: 'work', name: 'Work', order: 0),
@@ -642,6 +645,13 @@ void main() {
             },
           ).toJson(),
         ),
+      });
+      final previousStore = SharedPreferencesStorePlatform.instance;
+      SharedPreferencesStorePlatform.instance = saves;
+      SharedPreferences.resetStatic();
+      addTearDown(() {
+        SharedPreferencesStorePlatform.instance = previousStore;
+        SharedPreferences.resetStatic();
       });
       final prefs = await SharedPreferences.getInstance();
       await tester.pumpWidget(
@@ -677,11 +687,12 @@ void main() {
       }
 
       expect(tester.takeException(), isNull);
-      // The provider shows the move at once, and it is saved.
+      // The provider shows the move at once, and it is saved in one write.
       final shown = container.read(channelSectionsProvider).store;
       final saved = ChannelSectionStore.fromJson(
-        jsonDecode(prefs.getString(storeKey)!) as Map<String, dynamic>,
+        jsonDecode(saves.snapshots.single) as Map<String, dynamic>,
       );
+      expect(prefs.getString(storeKey), saves.snapshots.single);
       for (final store in [shown, saved]) {
         final filed = store.assignments['channel-id'];
         switch (pick) {
@@ -699,17 +710,26 @@ void main() {
     });
   }
 
-  for (final pick in ['Work', 'New section…']) {
+  for (final (pick, newKey) in [
+    ('Work', true),
+    ('Work', false),
+    ('New section…', true),
+    ('New section…', false),
+  ]) {
     testWidgets('Move to section: $pick files nothing once the community '
-        'changes behind the picker', (tester) async {
+        'changes behind the picker (new signing key: $newKey)', (tester) async {
       tester.view.physicalSize = const Size(1200, 3000);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
       final keys = nostr.Keys.generate();
       final other = nostr.Keys.generate();
       const relayUrl = 'https://relay.example';
+      const otherRelayUrl = 'https://other.example';
       final mine = channelSectionsKey(keys.public, relayUrl);
-      final theirs = channelSectionsKey(other.public, relayUrl);
+      // A portable identity keeps its key in another community's relay.
+      final theirs = newKey
+          ? channelSectionsKey(other.public, relayUrl)
+          : channelSectionsKey(keys.public, otherRelayUrl);
       final workOnly = jsonEncode(
         const ChannelSectionStore(
           sections: [ChannelSection(id: 'work', name: 'Work', order: 0)],
@@ -744,7 +764,10 @@ void main() {
       await tester.pumpAndSettle();
       void switchCommunity() =>
           (container.read(relayConfigProvider.notifier) as _SignedInConfig)
-              .signInAs(other.nsec);
+              .signInAs(
+                newKey ? other.nsec : keys.nsec,
+                baseUrl: newKey ? relayUrl : otherRelayUrl,
+              );
       if (pick == 'New section…') {
         await tester.tap(find.text(pick));
         await tester.pumpAndSettle();
@@ -1339,6 +1362,19 @@ void main() {
   });
 }
 
+class _LayoutSaves extends InMemorySharedPreferencesStore {
+  _LayoutSaves(this.key, Map<String, Object> data) : super.withData(data);
+
+  final String key;
+  final snapshots = <String>[];
+
+  @override
+  Future<bool> setValue(String valueType, String key, Object value) {
+    if (key == this.key) snapshots.add(value as String);
+    return super.setValue(valueType, key, value);
+  }
+}
+
 class _SignedInConfig extends RelayConfigNotifier {
   _SignedInConfig(this.baseUrl, this.nsec);
   final String baseUrl;
@@ -1347,7 +1383,7 @@ class _SignedInConfig extends RelayConfigNotifier {
   @override
   RelayConfig build() => RelayConfig(baseUrl: baseUrl, nsec: nsec);
 
-  void signInAs(String other) =>
+  void signInAs(String other, {required String baseUrl}) =>
       state = RelayConfig(baseUrl: baseUrl, nsec: other);
 }
 
