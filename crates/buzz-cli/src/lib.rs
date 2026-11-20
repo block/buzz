@@ -295,6 +295,9 @@ enum Cmd {
     /// Organize your own sidebar: sections, sort modes, stars, mutes, and project pins
     #[command(subcommand)]
     Sidebar(SidebarCmd),
+    /// Pin, unpin, and list pinned channel messages
+    #[command(subcommand)]
+    Pins(PinsCmd),
     /// Add, remove, and list emoji reactions
     #[command(subcommand)]
     Reactions(ReactionsCmd),
@@ -1322,6 +1325,35 @@ pub enum SidebarSectionsCmd {
         /// Channel UUID (repeatable)
         #[arg(long = "channel", required = true)]
         channels: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PinsCmd {
+    /// List the pinned messages in a channel, newest pin first
+    List {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+    },
+    /// Pin a message in a channel; a message that is already pinned is left alone
+    Add {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Message event ID (64-char hex)
+        #[arg(long)]
+        event: String,
+    },
+    /// Unpin a message; a message that is not pinned is left alone
+    #[command(visible_alias = "remove")]
+    Rm {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Message event ID (64-char hex)
+        #[arg(long)]
+        event: String,
     },
 }
 
@@ -2750,6 +2782,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
         Cmd::Sidebar(sub) => commands::sidebar::dispatch(sub, &client).await,
+        Cmd::Pins(sub) => commands::pins::dispatch(sub, &client).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
         Cmd::Emoji(sub) => commands::emoji::dispatch(sub, &client).await,
         Cmd::Gifs(sub) => commands::gifs::dispatch(sub, &client).await,
@@ -3055,6 +3088,7 @@ mod tests {
             "notes",
             "pack",
             "patches",
+            "pins",
             "pr",
             "projects",
             "raw",
@@ -3156,6 +3190,7 @@ mod tests {
             names(&cmd, "canvas"),
             vec!["get", "history", "restore", "set"]
         );
+        assert_eq!(names(&cmd, "pins"), vec!["add", "list", "rm"]);
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
             names(&cmd, "emoji"),
@@ -3272,6 +3307,7 @@ mod tests {
             ("messages", 9),
             ("pack", 2),
             ("patches", 4),
+            ("pins", 3),
             ("pr", 5),
             ("projects", 8),
             ("raw", 2),
