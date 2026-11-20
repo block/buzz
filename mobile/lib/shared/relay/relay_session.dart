@@ -499,13 +499,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void debugHandleSocketMessageForTest(List<dynamic> data) =>
       _handleMessage(data);
 
-  @visibleForTesting
-  void debugAttachSocketForTest(RelaySocket socket) {
-    _socket?.dispose();
-    _socket = socket;
-    _socketConnected = true;
-  }
-
   /// Registers a visible channel and returns an owner-scoped release callback.
   /// The most recently registered owner is prioritized during reconnect replay.
   void Function() registerVisibleChannel(String channelId) {
