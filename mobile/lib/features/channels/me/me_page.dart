@@ -64,6 +64,7 @@ part 'me_page_helpers.dart';
 part 'me_empty_state.dart';
 part 'new_me_chat.dart';
 part 'me_chat_draft.dart';
+part 'archived_solo_chats.dart';
 
 /// Personal chats and projects shared with the desktop Me workspace.
 class MePage extends HookConsumerWidget {
@@ -227,6 +228,12 @@ class MePage extends HookConsumerWidget {
               );
         Widget row(Channel channel) =>
             SoloChatTile(key: ValueKey(channel.id), channel: channel);
+        final archivedCount = archivedSoloChats(all, legacyChannels).length;
+        final archivedRow = archivedCount == 0
+            ? null
+            : SliverToBoxAdapter(
+                child: _ArchivedSoloChatsRow(count: archivedCount),
+              );
 
         if (sliver) {
           // Home files Solo chats with the rest of the sidebar, as desktop
@@ -266,6 +273,7 @@ class MePage extends HookConsumerWidget {
                   row: row,
                   empty: organization == null ? null : 'No chats yet',
                 ),
+                ?archivedRow,
               ],
             ),
           );
@@ -327,6 +335,7 @@ class MePage extends HookConsumerWidget {
                     visible.where((c) => !assignments.containsKey(c.id)),
                     'No chats yet',
                   ),
+                ?archivedRow,
               ],
             ),
           ),

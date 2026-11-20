@@ -259,6 +259,76 @@ void main() {
     expect(find.text('A place to work with your agents'), findsNothing);
   });
 
+  testWidgets('archived Solo chats open from the Archived row', (tester) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
+          myPubkeyProvider.overrideWithValue('owner'),
+          channelsProvider.overrideWith(LabeledChannels.new),
+          meGroupsProvider.overrideWith(
+            (ref) => Stream.value(const MeGroups(groups: [], assignments: {})),
+          ),
+        ],
+        child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Archived labeled chat'), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('solo-archived-chats')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Archived labeled chat'), findsOneWidget);
+    expect(find.text('Unfiled labeled chat'), findsNothing);
+  });
+
+  testWidgets('Home lists the Archived row after its Solo chats', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          myPubkeyProvider.overrideWithValue('owner'),
+          channelsProvider.overrideWith(LabeledChannels.new),
+          meGroupsProvider.overrideWith(
+            (ref) => Stream.value(const MeGroups(groups: [], assignments: {})),
+          ),
+          defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
+          meAssistantsProvider.overrideWith((ref) async => []),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: HomePage(
+            settingsPageBuilder: (_) => const SizedBox(),
+            onAgents: (_) {},
+            defaultAgentBuilder: (_) => const SizedBox(),
+            openBestieConversation: (_, _, _) async {},
+            mePageBuilder: (_, chat, workspace) => MePage(
+              sliver: true,
+              newChatAction: chat,
+              newWorkspaceAction: workspace,
+            ),
+          ),
+        ),
+      ),
+    );
+    for (var i = 0; i < 10; i++) {
+      await tester.pump(const Duration(milliseconds: 100));
+    }
+    final archived = find.byKey(const ValueKey('solo-archived-chats'));
+    expect(archived, findsOneWidget);
+    expect(
+      find.descendant(of: archived, matching: find.text('1')),
+      findsOneWidget,
+    );
+    expect(find.text('Archived labeled chat'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('long-pressing a chat opens its details as a sheet', (
     tester,
   ) async {
@@ -986,6 +1056,7 @@ void main() {
         failed ? findsNothing : findsOneWidget,
       );
       expect(find.text('No chats yet'), findsNothing);
+      expect(find.byKey(const ValueKey('solo-archived-chats')), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
   }
