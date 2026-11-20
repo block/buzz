@@ -94,7 +94,8 @@ class BuilderlabAccountClient {
 
   /// Remote-agent registry routes, shared with desktop.
   /// Safe request diagnostics: no headers, credentials, bodies or user data.
-  ({String path, int status})? lastRejectedRequest;
+  /// [code] is the service's fixed `error.code`, when the body carries one.
+  ({String path, int status, String? code})? lastRejectedRequest;
 
   /// Why the last request failed as [AccountFailure.unavailable]: a transport
   /// failure (`unreachable`, `insecure`, `timedOut`, `network`) or an
@@ -638,38 +639,55 @@ class BuilderlabAccountClient {
         }
       }
       // Classified from the headers, so a lost, slow or oversized error body
-      // never hides the status.
-      final response = await boundedHttpResponse(
-        _http,
-        request,
-        maxBytes: _responseLimit(path),
-        onHeaders: (headers) {
-          final status = headers.statusCode;
-          if (status >= 200 && status < 300) return;
-          if (status == 403) {
-            final evidence = Zone.current[_RefusalEvidence];
-            if (evidence is _RefusalEvidence) {
-              evidence.clockHint = clockHintMinutes(
-                headers.headers['date'],
-                _now(),
+      // never hides the status. A rejection still reads its body for the
+      // `error.code`, but falls back to the bare status.
+      var rejected = false;
+      final http.Response response;
+      try {
+        response = await boundedHttpResponse(
+          _http,
+          request,
+          maxBytes: _responseLimit(path),
+          onHeaders: (headers) {
+            final status = headers.statusCode;
+            if (status >= 200 && status < 300) return;
+            if (status == 403) {
+              final evidence = Zone.current[_RefusalEvidence];
+              if (evidence is _RefusalEvidence) {
+                evidence.clockHint = clockHintMinutes(
+                  headers.headers['date'],
+                  _now(),
+                );
+              }
+            }
+            if (const {401, 403, 400, 404, 409, 422}.contains(status) &&
+                kDebugMode) {
+              debugPrint(
+                'Builderlab ${accountOrigin.host} ${request.method} $path: HTTP $status contentType=${headers.headers['content-type']?.split(';').first}',
               );
             }
-          }
-          if (const {401, 403, 400, 404, 409, 422}.contains(status) &&
-              kDebugMode) {
-            debugPrint(
-              'Builderlab ${accountOrigin.host} ${request.method} $path: HTTP $status contentType=${headers.headers['content-type']?.split(';').first}',
-            );
-          }
-          if (status == 401) throw AccountFailure.signedOut;
-          if (status == 403) throw AccountFailure.denied;
-          if (const {400, 404, 409, 422}.contains(status)) {
-            lastRejectedRequest = (path: path, status: status);
-            throw AccountFailure.rejected;
-          }
-          _unavailable(path, 'http$status');
-        },
-      );
+            if (status == 401) throw AccountFailure.signedOut;
+            if (status == 403) throw AccountFailure.denied;
+            if (const {400, 404, 409, 422}.contains(status)) {
+              lastRejectedRequest = (path: path, status: status, code: null);
+              rejected = true;
+              return;
+            }
+            _unavailable(path, 'http$status');
+          },
+        );
+      } catch (_) {
+        if (rejected) throw AccountFailure.rejected;
+        rethrow;
+      }
+      if (rejected) {
+        lastRejectedRequest = (
+          path: path,
+          status: response.statusCode,
+          code: _errorCode(response.bodyBytes),
+        );
+        throw AccountFailure.rejected;
+      }
       final Object? value;
       try {
         value = jsonDecode(utf8.decode(response.bodyBytes));
@@ -694,6 +712,18 @@ class BuilderlabAccountClient {
       _unavailable(path, 'timedOut');
     } catch (error) {
       _unavailable(path, transportFailure(error)?.name ?? 'network');
+    }
+  }
+
+  /// Rejections from routes without a JSON `error.code` carry no code.
+  static String? _errorCode(List<int> body) {
+    try {
+      return switch (jsonDecode(utf8.decode(body))) {
+        {'error': {'code': final String code}} => code,
+        _ => null,
+      };
+    } on FormatException {
+      return null;
     }
   }
 
