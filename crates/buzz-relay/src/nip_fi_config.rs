@@ -627,7 +627,16 @@ fn parse_mode() -> Result<NipFiMode, ConfigError> {
 }
 
 fn parse_enforce_percent() -> Result<u8, ConfigError> {
-    let raw = std::env::var("BUZZ_NIP_FI_ENFORCE_PERCENT").unwrap_or_default();
+    let raw = match std::env::var("BUZZ_NIP_FI_ENFORCE_PERCENT") {
+        Ok(raw) => raw,
+        Err(std::env::VarError::NotPresent) => String::new(),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_NIP_FI_ENFORCE_PERCENT must be an integer from 0 to 100; got non-UTF-8"
+                    .to_string(),
+            ))
+        }
+    };
     match raw.trim() {
         "" => Ok(0),
         value => value.parse().ok().filter(|p| *p <= 100).ok_or_else(|| {
@@ -644,7 +653,9 @@ fn parse_enforce_percent() -> Result<u8, ConfigError> {
 pub(crate) fn rollout_bucket(community_id: uuid::Uuid) -> u8 {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(community_id.as_bytes());
-    let head = u64::from_be_bytes(digest[..8].try_into().expect("8-byte prefix"));
+    let mut prefix = [0u8; 8];
+    prefix.copy_from_slice(&digest[..8]);
+    let head = u64::from_be_bytes(prefix);
     (head % 100) as u8
 }
 
@@ -1045,6 +1056,20 @@ mod tests {
                     "{mode} {value}: {err}"
                 );
             }
+        }
+        #[cfg(unix)]
+        for mode in ["off", "deny_protected", "shadow", "enforce"] {
+            use std::os::unix::ffi::OsStrExt;
+            std::env::set_var("BUZZ_NIP_FI_MODE", mode);
+            std::env::set_var(
+                "BUZZ_NIP_FI_ENFORCE_PERCENT",
+                std::ffi::OsStr::from_bytes(b"5\xff"),
+            );
+            let err = NipFiRelayConfig::from_env().expect_err(mode);
+            assert!(
+                err.to_string().contains("BUZZ_NIP_FI_ENFORCE_PERCENT"),
+                "{mode}: {err}"
+            );
         }
         std::env::set_var("BUZZ_NIP_FI_MODE", "off");
         for (value, percent) in [("", 0), (" 100 ", 100), ("0", 0)] {

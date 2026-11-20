@@ -548,6 +548,61 @@ async fn real_required_root_audio_upgrades_retain_policy_during_pending_deletion
         server.abort();
         let _ = server.await;
     }
+
+    // Shadow rollout: the stored-Optional community inside the cohort refuses
+    // an upgrade without evidence; outside the cohort it upgrades.
+    sqlx::query("DELETE FROM community_deletion_requests WHERE community_id = $1")
+        .bind(community.id.as_uuid())
+        .execute(base.db.pool())
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE communities SET requires_nip_fi = false, policy_generation = 2 WHERE id = $1",
+    )
+    .bind(community.id.as_uuid())
+    .execute(base.db.pool())
+    .await
+    .unwrap();
+    let bucket = crate::nip_fi_config::rollout_bucket(*community.id.as_uuid());
+    for (percent, refused) in [(bucket, false), (bucket + 1, true)] {
+        let mut state = (*base).clone();
+        let config = Arc::make_mut(&mut state.config);
+        config.nip_fi.mode = NipFiMode::Shadow;
+        config.nip_fi.enforce_percent = percent;
+        config.nip_fi.max_connection_lifetime_secs = 3600;
+        config.nip_fi.communities = crate::nip_fi_core::test_support::any_host(TEST_COMMUNITY_URI);
+        state.nip_fi_verifier = Some(Arc::new(assertion_verifier(
+            buzz_auth::TokenClass::DedicatedNipFi,
+        )));
+        state.nip_fi_deny_map = Some(Arc::new(buzz_auth::NipFiDenyMap::new(100, vec![])));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = crate::router::build_router(Arc::new(state))
+            .into_make_service_with_connect_info::<std::net::SocketAddr>();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        for path in ["/", "/huddle/00000000-0000-4000-8000-000000000001/audio"] {
+            let mut request = format!("ws://{address}{path}")
+                .into_client_request()
+                .unwrap();
+            request.headers_mut().insert("host", host.parse().unwrap());
+            let result =
+                tokio::time::timeout(std::time::Duration::from_secs(5), connect_async(request))
+                    .await
+                    .unwrap();
+            match (refused, result) {
+                (true, Err(Error::Http(response))) => {
+                    assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}")
+                }
+                (false, Ok((mut socket, response))) => {
+                    assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS, "{path}");
+                    let _ = socket.close(None).await;
+                }
+                (_, other) => panic!("percent={percent} {path}: {other:?}"),
+            }
+        }
+        server.abort();
+        let _ = server.await;
+    }
 }
 
 #[tokio::test]
