@@ -155,12 +155,15 @@ class ComposeDraft {
   /// record from before positions were saved holds `mention_keys`, labels
   /// bound to keys. Those resolve as the old send resolved them: one
   /// longest-match pass over every saved label, so `@Scout @Scout Marie`
-  /// binds Scout once and Scout Marie once. A backtick opens no mention, so
-  /// `` `@Scout` `` binds nobody, as the old send notified nobody for it;
-  /// the composer keeps any other binding inside the code it draws dormant,
-  /// notifying nobody. Member names competed in the old pass too; each
-  /// migrated binding is marked [ComposeDraftMention.legacy] until the
-  /// composer has checked it against the roster.
+  /// binds Scout once and Scout Marie once. Backticks read as spaces here,
+  /// as the old saver read them when it kept a label's key: `` `@Scout` ``
+  /// keeps Scout's binding. The old send opened no mention after a backtick,
+  /// and the composer holds to that when it takes the draft: a binding
+  /// inside the code it draws is dormant, notifying nobody until the code
+  /// goes, and one after a backtick that closes no code is dropped. Member
+  /// names competed in the old pass too; each migrated binding is marked
+  /// [ComposeDraftMention.legacy] until the composer has checked it against
+  /// the roster.
   static (List<ComposeDraftMention>, bool) _readMentions(
     Map<String, dynamic> raw,
     String text,
@@ -190,7 +193,10 @@ class ComposeDraft {
         }
         keys[label] = value.toLowerCase();
       }
-      for (final range in mentionOccurrences(text, keys.keys)) {
+      for (final range in mentionOccurrences(
+        text.replaceAll('`', ' '),
+        keys.keys,
+      )) {
         found.add(
           ComposeDraftMention(
             start: range.start,

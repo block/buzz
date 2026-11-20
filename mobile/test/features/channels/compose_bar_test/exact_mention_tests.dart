@@ -302,8 +302,7 @@ void exactMentionTests() {
 
   // Review of #9699 (mentions in code): a label-keyed draft draws no chip
   // for a name inside code, whether a span or a fenced block, and the send
-  // notifies nobody for it. A backtick opens no mention, so the span binds
-  // nothing; the name in the fenced block keeps a dormant binding. The same
+  // notifies nobody for it. Both names keep a dormant binding. The same
   // name outside the code binds.
   testWidgets('a legacy draft notifies nobody for a mention inside code', (
     tester,
@@ -349,6 +348,7 @@ void exactMentionTests() {
     );
     final saved = jsonDecode(_testPrefs.getString(prefsKey)!) as List;
     expect(saved.single['mentions'], [
+      {'start': 1, 'end': 7, 'pubkey': first},
       {'start': 13, 'end': 19, 'pubkey': first},
       {'start': 29, 'end': 35, 'pubkey': second},
     ]);
@@ -428,6 +428,139 @@ void exactMentionTests() {
     expect(sent, [second]);
   });
 
+  // Review of #9699 (a pre-upgrade pick wrapped in backticks): a
+  // label-keyed draft kept the key of a label inside backticks. The pick is
+  // dormant while the code is there and is that person again, not the
+  // channel member of the same name, once the backticks are deleted. The
+  // label after an unclosed backtick is no code and no mention: it is
+  // dropped, as the old send notified nobody for it.
+  testWidgets('a legacy draft keeps a pick wrapped in backticks dormant', (
+    tester,
+  ) async {
+    final signer = nostr.Keys.generate();
+    final prefsKey = 'compose_drafts_v1:https://relay.example:${signer.public}';
+    const text = '`@Scout` and `@Scout hi';
+    final events = <Map<String, dynamic>>[];
+    late SendMessage sendMessage;
+    // Scout the member is `second`; the saved pick is `first`, a person
+    // outside the channel with the same name.
+    final roster = [members().last];
+    Future<void> mount() async {
+      await _testPrefs.setString(
+        prefsKey,
+        jsonEncode([
+          {
+            'key': 'channel-1',
+            'channel_id': 'channel-1',
+            'text': text,
+            'mention_keys': {'Scout': first},
+            'updated_at': 1700000000,
+          },
+        ]),
+      );
+      await mountComposer(
+        tester,
+        roster,
+        (content, keys, {mediaTags = const []}) => sendMessage(
+          channelId: 'channel-1',
+          content: content,
+          mentionPubkeys: keys,
+          mediaTags: mediaTags,
+        ),
+        signer: signer,
+      );
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      final session = container.read(relaySessionProvider.notifier);
+      session.debugAttachSocketForTest(
+        _RecordingRelaySocket(events, session.debugHandleSocketMessageForTest),
+      );
+      sendMessage = SendMessage(
+        signedEventRelay: SignedEventRelay(session: session, nsec: signer.nsec),
+        fetchMembers: (_) async => roster,
+        readUserCache: () => const {},
+        addLocalMessage: (_, _) {},
+        completeLocalMessage: (_, _) {},
+        removeLocalMessage: (_, _) {},
+      );
+      container
+          .read(userCacheProvider.notifier)
+          .put(UserProfile(pubkey: first, displayName: 'Scout'));
+      await tester.pumpAndSettle();
+    }
+
+    List<List<Object?>> tags(Map<String, dynamic> event, String name) => [
+      for (final tag in event['tags'] as List)
+        if (tag[0] == name) List<Object?>.from(tag as List),
+    ];
+    Iterable<Map<String, dynamic>> messages() =>
+        events.where((e) => e['kind'] == EventKind.streamMessage);
+    final chip = find.byKey(const ValueKey('composer-person-mention-chip'));
+    final prompt = find.textContaining('Scout is not in this channel');
+
+    // In code: no chip, and the send has no recipient, tag or prompt.
+    await mount();
+    final controller = tester
+        .widget<TextField>(find.byType(TextField))
+        .controller!;
+    expect(controller.text, text);
+    expect(chip, findsNothing);
+    await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+    await tester.pumpAndSettle();
+    expect(prompt, findsNothing);
+    expect(messages().single['content'], text);
+    expect(tags(messages().single, 'p'), isEmpty);
+    expect(tags(messages().single, 'mention'), isEmpty);
+
+    // The same draft again, with the backticks around the pick deleted.
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpAndSettle();
+    await mount();
+    final restored = tester
+        .widget<TextField>(find.byType(TextField))
+        .controller!;
+    Future<void> delete(int at) async {
+      restored.selection = TextSelection.collapsed(offset: at + 1);
+      await tester.pump();
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: restored.text.replaceRange(at, at + 1, ''),
+          selection: TextSelection.collapsed(offset: at),
+        ),
+      );
+      await tester.pump();
+    }
+
+    await delete(7);
+    await delete(0);
+    await tester.pumpAndSettle();
+    expect(restored.text, '@Scout and `@Scout hi');
+    // The pick is a chip with its own key; the label after the unclosed
+    // backtick was never bound.
+    expect(chip, findsOneWidget);
+    expect(
+      (jsonDecode(_testPrefs.getString(prefsKey)!) as List).single['mentions'],
+      [
+        {'start': 0, 'end': 6, 'pubkey': first},
+      ],
+    );
+    await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+    await tester.pumpAndSettle();
+    expect(prompt, findsOneWidget);
+    await tester.tap(find.text('Do nothing'));
+    await tester.pumpAndSettle();
+    final event = messages().last;
+    expect(messages(), hasLength(2));
+    expect(event['content'], '@Scout and `@Scout hi');
+    expect(tags(event, 'p'), isEmpty, reason: 'the member Scout is not asked');
+    expect(tags(event, 'mention'), [
+      ['mention', first],
+    ]);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(milliseconds: 250));
+  });
+
   // Review of #9699: a label-keyed draft resolves as the old send did, in
   // one longest-match pass with member names competing.
   testWidgets('a legacy draft leaves a longer member name to its owner', (
@@ -475,6 +608,64 @@ void exactMentionTests() {
     await tester.tap(find.byIcon(BuzzIcons.arrowUp));
     await tester.pumpAndSettle();
     expect(sent, [first, second]);
+  });
+
+  // The same roster check reaches a pick wrapped in backticks: the longer
+  // member name takes the occurrence back while a backtick is still there,
+  // so unwrapping it leaves that member's typed name, not Scout's chip.
+  testWidgets('a legacy draft in backticks leaves a longer member name to '
+      'its owner', (tester) async {
+    final signer = nostr.Keys.generate();
+    await _testPrefs.setString(
+      'compose_drafts_v1:https://relay.example:${signer.public}',
+      jsonEncode([
+        {
+          'key': 'channel-1',
+          'channel_id': 'channel-1',
+          'text': '`@Scout Marie`',
+          'mention_keys': {'Scout': first},
+          'updated_at': 1700000000,
+        },
+      ]),
+    );
+    List<String>? sent;
+    await mountComposer(
+      tester,
+      [
+        for (final (key, name) in [(first, 'Scout'), (second, 'Scout Marie')])
+          ChannelMember(
+            pubkey: key,
+            displayName: name,
+            role: 'member',
+            joinedAt: DateTime(2025),
+          ),
+      ],
+      (_, keys, {mediaTags = const []}) async => sent = keys,
+      signer: signer,
+    );
+    await tester.pumpAndSettle();
+    final controller = tester
+        .widget<TextField>(find.byType(TextField))
+        .controller!;
+    for (final at in [13, 0]) {
+      controller.selection = TextSelection.collapsed(offset: at + 1);
+      await tester.pump();
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: controller.text.replaceRange(at, at + 1, ''),
+          selection: TextSelection.collapsed(offset: at),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+    expect(controller.text, '@Scout Marie');
+    expect(
+      find.byKey(const ValueKey('composer-person-mention-chip')),
+      findsNothing,
+    );
+    await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+    await tester.pumpAndSettle();
+    expect(sent, [second]);
   });
 
   testWidgets(

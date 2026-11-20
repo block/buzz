@@ -108,6 +108,31 @@ _MemberMentions Function() _useMemberMentions(
 }
 
 extension _LegacyMentions on _MarkdownEditingController {
+  /// The bindings [saved] restores. A label-keyed draft kept a label's key
+  /// through backticks, and its send opened no mention directly after one.
+  /// A migrated binding there that sits inside code or a link is dormant
+  /// and stays, so the pick is back once the code goes; one after a
+  /// backtick that closes no code (`` `@Bob hi ``) is dropped, so nobody is
+  /// notified for it, as before the upgrade.
+  List<_ComposerMention> restoredMentions(ComposeDraft? saved) {
+    if (saved == null) return const [];
+    final text = saved.text;
+    final restored = [
+      for (final mention in saved.mentions)
+        _ComposerMention.restored(mention, text),
+    ];
+    bool afterBacktick(_ComposerMention mention) =>
+        mention.legacy &&
+        mention.start > 0 &&
+        text.codeUnitAt(mention.start - 1) == 0x60;
+    if (!restored.any(afterBacktick)) return restored;
+    final live = _inProse(text, restored);
+    return [
+      for (final mention in restored)
+        if (!afterBacktick(mention) || !live.contains(mention)) mention,
+    ];
+  }
+
   /// Gives member names the occurrences the old send gave them. A draft
   /// saved with label-keyed bindings is read without the roster, so its
   /// bindings arrive marked legacy; here a longer name among [members]
@@ -119,7 +144,9 @@ extension _LegacyMentions on _MarkdownEditingController {
     required bool complete,
   }) {
     if (!_mentions.any((mention) => mention.legacy)) return;
-    final occurrences = mentionOccurrences(text, {
+    // Backticks read as spaces, as where the bindings were migrated: a
+    // longer member name inside code claims its occurrence too.
+    final occurrences = mentionOccurrences(text.replaceAll('`', ' '), {
       for (final mention in _mentions)
         if (mention.legacy) mention.label(text).toLowerCase(),
     }, known: members().labels);

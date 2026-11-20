@@ -107,11 +107,7 @@ void _useComposeDraftLifecycle({
     lastDraftIdentity.value = identity;
     final saved = ref.read(composeDraftsProvider.notifier).draftFor(draftKey);
     // Text and bindings restore from one persisted snapshot, together.
-    final restored = [
-      if (saved != null)
-        for (final mention in saved.mentions)
-          _ComposerMention.restored(mention, saved.text),
-    ];
+    final restored = controller.restoredMentions(saved);
     void hydrate(String text) => controller.replaceDraft(
       TextEditingValue(text: text),
       mentions: restored,
@@ -197,10 +193,7 @@ void _useComposeDraftLifecycle({
         lastInvalid = saved.mentionsInvalid;
         controller.replaceDraft(
           TextEditingValue(text: saved.text),
-          mentions: [
-            for (final mention in saved.mentions)
-              _ComposerMention.restored(mention, saved.text),
-          ],
+          mentions: controller.restoredMentions(saved),
           mentionsInvalid: saved.mentionsInvalid,
         );
       },

@@ -88,10 +88,29 @@ void main() {
         {'Scout Marie': marie, 'Scout': scout},
         [bound(0, 12, marie), bound(17, 23, scout)],
       ),
-      // Review of #9699: a name against a backtick is code or broken code,
-      // never a mention; the same name outside it still binds.
-      ('`@Scout` now', {'Scout': scout}, <ComposeDraftMention>[]),
-      ('`@Scout` and @Scout', {'Scout': scout}, [bound(13, 19, scout)]),
+      // Review of #9699: backticks read as spaces, as the old saver read
+      // them, so a label inside code keeps its key. The composer holds the
+      // binding dormant while the code is there.
+      ('`@Scout` now', {'Scout': scout}, [bound(1, 7, scout)]),
+      (
+        '`@Scout` and @Scout',
+        {'Scout': scout},
+        [bound(1, 7, scout), bound(13, 19, scout)],
+      ),
+      ('`@Scout now`', {'Scout': scout}, [bound(1, 7, scout)]),
+      ('`ping @Scout now`', {'Scout': scout}, [bound(6, 12, scout)]),
+      ('```\n@Scout\n```', {'Scout': scout}, [bound(4, 10, scout)]),
+      ('```@Scout\n```', {'Scout': scout}, [bound(3, 9, scout)]),
+      // The longest label still wins inside the backticks.
+      (
+        '`@Scout Marie`',
+        {'Scout': scout, 'Scout Marie': marie},
+        [bound(1, 13, marie)],
+      ),
+      // An unclosed backtick is not code. The label's key is read here all
+      // the same; the composer drops it when it takes the draft, since the
+      // old send notified nobody after a backtick (exact_mention_tests).
+      ('`@Scout hi', {'Scout': scout}, [bound(1, 7, scout)]),
       // A label no longer in the text binds nothing.
       ('hello', {'Scout': scout}, <ComposeDraftMention>[]),
     ]) {
