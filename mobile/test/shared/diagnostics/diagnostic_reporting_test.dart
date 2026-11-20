@@ -303,6 +303,12 @@ void main() {
         'StateError',
         "'(link ?? false) || linkUrl == null': is it null? no.",
       ),
+      (
+        'a bad state naming a long identifier',
+        StateError('_RecordingPublishRelaySessionNotifier was disposed'),
+        'StateError',
+        '_RecordingPublishRelaySessionNotifier was disposed',
+      ),
       ('a failed cast', _failedCast(), 'TypeError', 'is not a subtype of'),
     ];
     for (final (name, error, type, text) in kept) {
@@ -349,6 +355,15 @@ void main() {
       (
         'a provider with an argument',
         'The provider FutureProvider<int>#1a2b3(private-marker) was disposed',
+      ),
+      (
+        'a private key',
+        'Unexpected sign-in failure: nsec1${'q' * 52}7x private-marker',
+      ),
+      ('a hex key', 'no member ${'ab12' * 16} private-marker'),
+      (
+        'a token',
+        'bad token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0 private-marker',
       ),
       ('a long line', 'state ${'x' * 200} private-marker'),
       ('a very long line', 'state ${'x' * 500} private-marker'),
