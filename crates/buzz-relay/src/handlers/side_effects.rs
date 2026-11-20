@@ -14,7 +14,7 @@ use buzz_core::kind::{
     KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION, KIND_THREAD_SUMMARY, KIND_VERIFIED_PROFILE,
 };
 use buzz_core::StoredEvent;
-use buzz_db::channel::{MemberRecord, MemberRole};
+use buzz_db::channel::{group_members_tags, MemberRecord, MemberRole};
 
 use super::channel_authz::{self, ChannelAuthzError, PutUserDecision, RemoveOtherDecision};
 use super::event::dispatch_persistent_event;
@@ -54,7 +54,7 @@ pub fn is_side_effect_kind(kind: u32) -> bool {
 /// 3. `disable_departed_member_workflows` — durably disables any workflows the
 ///    kicked user owned in this channel (SEC-006).
 ///
-/// These are identical to what `handle_remove_user` (kind 9001 path) fires after
+/// These are identical to what `persist_remove_user` (kind 9001 path) fires after
 /// removing a member. Without them a kicked user's live WebSocket session retains
 /// full channel access: the `channel_members.removed_at` write is invisible to
 /// the running subscription and the membership cache until natural expiry, which
@@ -105,7 +105,7 @@ pub(crate) async fn apply_kick_live_side_effects(
         .map_err(|e| {
             warn!(
                 channel = %channel_id,
-                target = %hex::encode(target_pubkey),
+                target_pubkey = %hex::encode(target_pubkey),
                 error = %e,
                 "kick live effects: membership_removal_fence failed; \
                  skipping eviction and workflow-disable"
@@ -120,7 +120,7 @@ pub(crate) async fn apply_kick_live_side_effects(
         // legitimately restored.
         tracing::info!(
             channel = %channel_id,
-            target = %hex::encode(target_pubkey),
+            target_pubkey = %hex::encode(target_pubkey),
             "kick live effects: member re-added before fence acquired; \
              skipping eviction and workflow-disable"
         );
@@ -399,7 +399,7 @@ pub async fn handle_side_effects(
         // kind:9000 belongs to the atomic put-user path in ingest, which
         // reports each person's result.
         9000 => Err(anyhow::anyhow!("kind:9000 requires persist_put_user")),
-        9001 => handle_remove_user(tenant, event, state).await,
+        9001 => Err(anyhow::anyhow!("kind:9001 requires persist_remove_user")),
         // kind:9002 belongs to the atomic persistence path in ingest.
         9002 => Err(anyhow::anyhow!("kind:9002 requires atomic persistence")),
         // kind:9005 belongs to the atomic deletion path in ingest.
@@ -629,6 +629,10 @@ async fn actor_owns_any_owner_agent(
     Ok(false)
 }
 
+/// Why kind:9000, and kind:9001 for anyone but yourself or your own agent,
+/// are refused on a DM.
+const DM_MEMBERSHIP_REFUSAL: &str = "DM members change only through kind:41011";
+
 /// Validate an admin kind event BEFORE storage.
 pub async fn validate_admin_event(
     tenant: &TenantContext,
@@ -683,6 +687,21 @@ pub async fn validate_admin_event(
     if kind != 9002 && channel.archived_at.is_some() && !is_self_departure(event) {
         return Err(anyhow::anyhow!("channel is archived"));
     }
+    // A DM is identified by its people, so people join it only through
+    // kind:41011, which keeps that identity in step. Anyone may leave, and
+    // an owner may remove their own agent: every removal releases the DM's
+    // identity when its people change (`release_dm_identity`).
+    if channel.channel_type == "dm" && kind == 9001 {
+        let target = extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
+        if target != actor_bytes
+            && !state
+                .db
+                .is_agent_owner(tenant.community(), &target, &actor_bytes)
+                .await?
+        {
+            return Err(anyhow::anyhow!(DM_MEMBERSHIP_REFUSAL));
+        }
+    }
 
     match kind {
         // Ingest validates kind:9000 with `validate_put_user`, which keeps
@@ -698,7 +717,7 @@ pub async fn validate_admin_event(
                 channel_authz::decide_self_departure(&members, &actor_bytes)?;
                 Ok(())
             } else {
-                match channel_authz::classify_remove_other(&members, &actor_bytes) {
+                match channel_authz::classify_remove_other(&members, &actor_bytes, &target_pubkey) {
                     RemoveOtherDecision::Allow => Ok(()),
                     RemoveOtherDecision::CheckAgentOwner => {
                         if state
@@ -1211,7 +1230,9 @@ async fn publish_live_thread_summary(
 /// Test-only barrier at the point a membership notice is sent: a test parks
 /// the producer there, reads what a client would read on receipt, then lets
 /// it continue. It can also pin the notices' clock. Keyed by recipient so
-/// parallel tests do not interfere.
+/// parallel tests do not interfere. A DM message parks at its fan-out the
+/// same way, keyed by its signer, and after its hidden-member read, keyed by
+/// its event id.
 #[cfg(test)]
 pub(crate) mod notice_barrier {
     use std::collections::HashMap;
@@ -1278,7 +1299,7 @@ pub(crate) mod notice_barrier {
         pins().lock().unwrap().get(recipient).copied()
     }
 
-    pub(super) async fn reached(channel_id: Uuid, recipient: &[u8]) {
+    pub(crate) async fn reached(channel_id: Uuid, recipient: &[u8]) {
         let waiter = waiters().lock().unwrap().get(recipient).cloned();
         if let Some(waiter) = waiter {
             let (release, released) = oneshot::channel();
@@ -1436,7 +1457,7 @@ async fn emit_typed_membership_notification(
             .invalidate(&(tenant.community(), stored.event.id.to_bytes()));
         warn!(
             channel = %channel_id,
-            target = %target_hex,
+            target_pubkey = %target_hex,
             kind = notification_kind,
             "membership notification Redis publish failed: {e}"
         );
@@ -1449,7 +1470,7 @@ async fn emit_typed_membership_notification(
 
     info!(
         channel = %channel_id,
-        target = %target_hex,
+        target_pubkey = %target_hex,
         kind = notification_kind,
         "membership notification emitted"
     );
@@ -1584,37 +1605,6 @@ async fn emit_addressable_discovery_event(
     Ok(())
 }
 
-/// Tags that identify the channel on every relay-signed group-state event:
-/// the channel type `t` first, then one `t` per label, then the creator `P`.
-fn group_state_identity_tags(
-    identity: &buzz_db::channel::ChannelIdentity,
-) -> anyhow::Result<Vec<Tag>> {
-    Ok(buzz_core::channel::group_state_identity_tags(
-        &identity.channel_type,
-        &identity.labels,
-        &identity.created_by,
-    )?)
-}
-
-fn group_members_tags(
-    group_id: &str,
-    identity: Option<&buzz_db::channel::ChannelIdentity>,
-    members: &[MemberRecord],
-) -> anyhow::Result<Vec<Tag>> {
-    let mut tags: Vec<Tag> = Vec::with_capacity(members.len() + 3);
-    tags.push(Tag::parse(["d", group_id])?);
-    if let Some(identity) = identity {
-        tags.extend(group_state_identity_tags(identity)?);
-    }
-    for member in members {
-        let pubkey_hex = hex::encode(&member.pubkey);
-        // NIP-29 convention: ["p", pubkey, relay_url, role]. Empty relay_url
-        // because the canonical relay is implicit (this event is signed by it).
-        tags.push(Tag::parse(["p", &pubkey_hex, "", &member.role])?);
-    }
-    Ok(tags)
-}
-
 async fn store_group_members_event(
     state: &Arc<AppState>,
     member_snapshot: &mut buzz_db::channel::LockedMemberSnapshot,
@@ -1639,7 +1629,7 @@ async fn store_group_members_event(
     // relay's moderation-DM key participates in the {relay, recipient} DM used
     // for moderation notices) MUST retain the relay's own `p` tag. nostr's
     // default `build_with_ctx` strips any `p` tag matching the signer, which
-    // would drop the relay from the snapshot and fail migration 0032's roster
+    // would drop the relay from the snapshot and fail the roster
     // fence against the canonical two-member DM. `allow_self_tagging` keeps the
     // snapshot faithful to `channel_members`.
     let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_MEMBERS as u16), "")
@@ -1709,14 +1699,11 @@ pub async fn emit_group_discovery_events(
         KIND_NIP29_GROUP_ADMINS,
         &relay_pubkey_hex,
         |channel, members| {
-            let mut tags: Vec<Tag> = vec![Tag::parse(["d", &group_id])?];
-            tags.extend(group_state_identity_tags(&channel.identity())?);
-            // The snapshot already scoped `members` to `GROUP_ADMIN_ROLES`.
-            for m in members {
-                let pubkey_hex = hex::encode(&m.pubkey);
-                tags.push(Tag::parse(["p", &pubkey_hex, &m.role])?);
-            }
-            Ok(tags)
+            Ok(buzz_db::channel::group_admins_tags(
+                &group_id,
+                &channel.identity(),
+                members,
+            )?)
         },
     )
     .await?;
@@ -1937,6 +1924,9 @@ pub(crate) async fn validate_put_user(
         .map_err(|_| anyhow::anyhow!("channel not found"))?;
     if channel.archived_at.is_some() {
         anyhow::bail!("channel is archived");
+    }
+    if channel.channel_type == "dm" {
+        anyhow::bail!(DM_MEMBERSHIP_REFUSAL);
     }
     let targets = put_user_targets(event)?;
 
@@ -2249,31 +2239,32 @@ fn put_refusal_reason(error: buzz_db::DbError) -> String {
     }
 }
 
-async fn handle_remove_user(
+/// Commit a kind:9001 and its removal before running live effects. A locked
+/// refusal stores nothing; a duplicate runs no removal or notifications.
+pub(crate) async fn persist_remove_user(
     tenant: &TenantContext,
     event: &Event,
     state: &Arc<AppState>,
-) -> anyhow::Result<()> {
+    thread_meta: Option<buzz_db::event::ThreadMetadataParams<'_>>,
+) -> anyhow::Result<(buzz_core::StoredEvent, bool)> {
     let channel_id =
         extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
     let target_pubkey = extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
     let actor_bytes = event.pubkey.to_bytes().to_vec();
 
-    // Guard: prevent last-owner orphaning on self-removal (kind 9001).
-    if target_pubkey == actor_bytes {
-        let members = state
-            .db
-            .get_members_for_event_write(tenant.community(), channel_id)
-            .await?;
-        if channel_authz::is_sole_owner(&members, &actor_bytes) {
-            return Err(ChannelAuthzError::LastOwnerRemovalTransferFirst.into());
-        }
-    }
-
-    state
+    let (stored, inserted) = state
         .db
-        .remove_member(tenant.community(), channel_id, &target_pubkey, &actor_bytes)
+        .remove_member_with_event(
+            tenant.community(),
+            channel_id,
+            &target_pubkey,
+            event,
+            thread_meta,
+        )
         .await?;
+    if !inserted {
+        return Ok((stored, false));
+    }
     state.invalidate_membership(tenant, channel_id, &target_pubkey);
     evict_live_channel_subscriptions(tenant, state, channel_id, &target_pubkey).await;
     disable_departed_member_workflows(tenant, state, channel_id, &target_pubkey).await;
@@ -2285,7 +2276,7 @@ async fn handle_remove_user(
     } else {
         "member_removed"
     };
-    emit_system_message(
+    if let Err(e) = emit_system_message(
         tenant,
         state,
         channel_id,
@@ -2296,7 +2287,10 @@ async fn handle_remove_user(
         }),
         chrono::Utc::now(),
     )
-    .await?;
+    .await
+    {
+        warn!(channel = %channel_id, error = %e, "removal system message failed");
+    }
 
     if let Err(e) = emit_group_discovery_events(tenant, state, channel_id).await {
         warn!(channel = %channel_id, error = %e, "NIP-29 group discovery emission failed");
@@ -2315,7 +2309,7 @@ async fn handle_remove_user(
         warn!(channel = %channel_id, error = %e, "membership notification emission failed");
     }
 
-    Ok(())
+    Ok((stored, true))
 }
 
 /// Persist an authorized kind:9002 event and the channel changes it names.
@@ -4195,6 +4189,7 @@ async fn seed_manifest_pointer(
         refs: BTreeMap::new(),
         packs: Vec::new(),
         parent: None,
+        published_at: None,
     };
     empty
         .validate()
@@ -4310,6 +4305,7 @@ async fn emit_initial_ref_state(
         head: DEFAULT_HEAD,
         refs: &empty_refs,
         actor_pubkey_hex: owner_hex,
+        published_at: None,
     };
     let event = build_ref_state_event(&inputs, &state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("build_ref_state_event: {e}"))?;
@@ -4403,7 +4399,7 @@ async fn publish_nip43_delta(
         .await;
 
     info!(
-        target = %target_pubkey_hex,
+        target_pubkey = %target_pubkey_hex,
         relay = %relay_pubkey_hex,
         "NIP-43 {label} event published"
     );
@@ -4649,34 +4645,32 @@ pub async fn publish_nipia_archival_list(
             );
         }
 
-        // NIP-16 resolves same-second replacements by event id. Force this
-        // canonical snapshot strictly past the current head instead of letting a
-        // rapid archive→unarchive randomly preserve the stale archive state.
-        let now = nostr::Timestamp::now().as_secs();
-        let previous = state
-            .db
-            .query_events_for_event_write(&buzz_db::event::EventQuery {
-                kinds: Some(vec![KIND_IA_ARCHIVED_LIST as i32]),
-                pubkey: Some(relay_pubkey.to_bytes().to_vec()),
-                limit: Some(1),
-                global_only: true,
-                ..buzz_db::event::EventQuery::for_community(tenant.community())
-            })
-            .await?;
-        let created_at = previous
-            .first()
-            .map(|event| (event.event.created_at.as_secs() + 1).max(now))
-            .unwrap_or(now);
-
-        let event = EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVED_LIST as u16), "")
-            .tags(tags)
-            .custom_created_at(nostr::Timestamp::from(created_at))
-            .sign_with_keys(&state.relay_keypair)
-            .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_IA_ARCHIVED_LIST}: {e}"))?;
-
+        // NIP-IA: each snapshot's created_at is strictly past the previous
+        // one's, so clients can ask only for a newer list. The head is read
+        // behind the replacement lock: two publishers racing on one head would
+        // otherwise both stamp head + 1 and let a same-second replacement win
+        // by event id.
         let (stored, was_inserted) = state
             .db
-            .replace_addressable_event(tenant.community(), &event, None)
+            .replace_addressable_event_after_head(
+                tenant.community(),
+                KIND_IA_ARCHIVED_LIST as i32,
+                &relay_pubkey.to_bytes(),
+                None,
+                |previous| {
+                    let now = nostr::Timestamp::now().as_secs();
+                    let created_at = previous.map_or(now, |previous| (previous + 1).max(now));
+                    EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVED_LIST as u16), "")
+                        .tags(tags)
+                        .custom_created_at(nostr::Timestamp::from(created_at))
+                        .sign_with_keys(&state.relay_keypair)
+                        .map_err(|e| {
+                            buzz_db::DbError::InvalidData(format!(
+                                "failed to sign kind:{KIND_IA_ARCHIVED_LIST}: {e}"
+                            ))
+                        })
+                },
+            )
             .await
             .map_err(|e| anyhow::anyhow!("archive snapshot write failed: {}", e.kind()))?;
         if !was_inserted {
@@ -4716,21 +4710,87 @@ pub async fn publish_nipia_archival_list(
     )
 }
 
+/// Store message `event` in DM `channel_id` and, when it is new and not
+/// addressed only to agents, resurface the DM for every member who hid it
+/// except its author, as a re-open does. The
+/// message, the cleared hides and each viewer's replaced NIP-DV snapshot
+/// commit together, so a reader who sees the message also sees the DM, and a
+/// hide made after the message is left alone. Returns the stored message,
+/// whether it was new, and the snapshots to dispatch before the message.
+pub async fn persist_dm_message(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    channel_id: Uuid,
+    thread_meta: Option<buzz_db::event::ThreadMetadataParams<'_>>,
+) -> anyhow::Result<(StoredEvent, bool, Vec<StoredEvent>)> {
+    let author = effective_message_author(event, &state.relay_keypair.public_key());
+    let mut tx = state
+        .db
+        .begin_event_write_transaction(tenant.community())
+        .await?;
+    // Agent-only coordination (`audience: agents`) does not resurface a DM.
+    let agents_only = event.tags.iter().any(|tag| {
+        let tag = tag.as_slice();
+        tag.first().map(String::as_str) == Some("audience")
+            && tag.get(1).map(String::as_str) == Some("agents")
+    });
+    let hidden =
+        !agents_only && buzz_db::dm::lock_dm_for_unhide(&mut tx, channel_id, &author).await?;
+    #[cfg(test)]
+    notice_barrier::reached(channel_id, event.id.as_bytes()).await;
+    let (stored, inserted) = buzz_db::event::insert_event_with_thread_metadata_in_transaction(
+        &mut tx,
+        event,
+        Some(channel_id),
+        thread_meta,
+    )
+    .await?;
+    let mut snapshots = Vec::new();
+    if hidden && inserted {
+        for viewer in buzz_db::dm::unhide_dm_for_recipients(&mut tx, channel_id, &author).await? {
+            snapshots.push(write_dm_visibility_snapshot(&mut tx, state, &viewer).await?);
+        }
+    }
+    tx.commit().await?;
+    Ok((stored, inserted, snapshots))
+}
+
 /// NIP-DV: publish the relay-signed, per-viewer DM visibility snapshot for
-/// `viewer`. The event is parameterized-replaceable (`d` = viewer pubkey) and
-/// carries one `h` tag per DM the viewer currently has hidden. Called after any
-/// hide (41012) or unhide (41010 that clears `hidden_at`); the latest event is
-/// always the authoritative hidden set, so no client-side delta merge is needed.
+/// `viewer`. Called after any hide (41012) or unhide (41010 that clears
+/// `hidden_at`); the latest event is always the authoritative hidden set, so
+/// no client-side delta merge is needed.
 pub async fn publish_dm_visibility_snapshot(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     viewer: &[u8],
 ) -> anyhow::Result<()> {
-    let viewer_hex = hex::encode(viewer);
-    let hidden = state.db.list_hidden_dms(tenant.community(), viewer).await?;
-    let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
+    let mut tx = state
+        .db
+        .begin_event_write_transaction(tenant.community())
+        .await?;
+    let stored = write_dm_visibility_snapshot(&mut tx, state, viewer).await?;
+    tx.commit().await?;
+    dispatch_dm_visibility_snapshot(tenant, state, &stored).await;
+    Ok(())
+}
 
-    let mut tags: Vec<Tag> = Vec::with_capacity(hidden.len() + 2);
+/// In `tx`, replace `viewer`'s snapshot (`d` = viewer pubkey, one `h` tag per
+/// hidden DM) with one built from the state read under its replacement lock.
+/// Returns the stored snapshot, for dispatch once `tx` commits. The snapshot
+/// is dated past the last one under its lock, so it always replaces it.
+async fn write_dm_visibility_snapshot(
+    tx: &mut buzz_db::AdmittedTx,
+    state: &Arc<AppState>,
+    viewer: &[u8],
+) -> anyhow::Result<StoredEvent> {
+    use buzz_db::replaceable::{ParameterizedReplacePrecondition, ParameterizedReplaceStatus};
+
+    let viewer_hex = hex::encode(viewer);
+    let relay_pubkey = state.relay_keypair.public_key();
+    let visibility = buzz_db::dm::lock_dm_visibility(tx, &relay_pubkey.to_bytes(), viewer).await?;
+
+    let mut tags: Vec<Tag> = Vec::with_capacity(visibility.hidden.len() + 2);
     tags.push(
         Tag::parse(["d", &viewer_hex])
             .map_err(|e| anyhow::anyhow!("failed to build d tag: {e}"))?,
@@ -4741,7 +4801,7 @@ pub async fn publish_dm_visibility_snapshot(
         Tag::parse(["p", &viewer_hex])
             .map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?,
     );
-    for channel_id in &hidden {
+    for channel_id in &visibility.hidden {
         tags.push(
             Tag::parse(["h", &channel_id.to_string()])
                 .map_err(|e| anyhow::anyhow!("failed to build h tag: {e}"))?,
@@ -4756,23 +4816,10 @@ pub async fn publish_dm_visibility_snapshot(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let ts = {
-        let existing = state
-            .db
-            .query_events_for_event_write(&buzz_db::event::EventQuery {
-                kinds: Some(vec![KIND_DM_VISIBILITY as i32]),
-                pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
-                d_tag: Some(viewer_hex.clone()),
-                limit: Some(1),
-                ..buzz_db::event::EventQuery::for_community(tenant.community())
-            })
-            .await
-            .unwrap_or_default();
-        existing
-            .first()
-            .map(|e| (e.event.created_at.as_secs() + 1).max(now))
-            .unwrap_or(now)
-    };
+    let ts = visibility
+        .latest_snapshot_at
+        .map(|at| (u64::try_from(at).unwrap_or_default() + 1).max(now))
+        .unwrap_or(now);
 
     let event = EventBuilder::new(Kind::Custom(KIND_DM_VISIBILITY as u16), "")
         .tags(tags)
@@ -4780,29 +4827,46 @@ pub async fn publish_dm_visibility_snapshot(
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign kind:{KIND_DM_VISIBILITY}: {e}"))?;
 
-    let (stored, was_inserted) = state
+    let result = state
         .db
-        .replace_parameterized_event(tenant.community(), &event, &viewer_hex, None)
+        .replace_parameterized_event_in_transaction(
+            tx,
+            &event,
+            &viewer_hex,
+            None,
+            ParameterizedReplacePrecondition::Unconditional,
+        )
         .await
         .map_err(|e| anyhow::anyhow!("DM visibility write failed: {}", e.kind()))?;
-    if was_inserted {
-        dispatch_persistent_event(
-            tenant,
-            state,
-            &stored,
-            KIND_DM_VISIBILITY,
-            &relay_pubkey_hex,
-            None,
-        )
-        .await;
+    // Anything else left the previous snapshot in place, which would still
+    // hide what this transaction unhid, so the caller must roll back.
+    if result.status != ParameterizedReplaceStatus::Inserted {
+        anyhow::bail!("DM visibility snapshot for {viewer_hex} was not inserted");
     }
-
     info!(
         viewer = %viewer_hex,
-        hidden_count = hidden.len(),
-        "NIP-DV DM visibility snapshot published"
+        hidden_count = visibility.hidden.len(),
+        "NIP-DV DM visibility snapshot written"
     );
-    Ok(())
+    Ok(result.event)
+}
+
+/// Fan out a snapshot from [`persist_dm_message`] once its transaction commits.
+pub async fn dispatch_dm_visibility_snapshot(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    stored: &StoredEvent,
+) {
+    let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
+    dispatch_persistent_event(
+        tenant,
+        state,
+        stored,
+        KIND_DM_VISIBILITY,
+        &relay_pubkey_hex,
+        None,
+    )
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4859,7 +4923,7 @@ async fn publish_nipia_delta(
     dispatch_persistent_event(tenant, state, &stored, kind, &relay_pubkey_hex, None).await;
 
     info!(
-        target = %target_pubkey_hex,
+        target_pubkey = %target_pubkey_hex,
         relay = %relay_pubkey_hex,
         kind,
         consent = %consent_path,

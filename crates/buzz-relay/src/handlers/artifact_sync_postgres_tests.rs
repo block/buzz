@@ -522,6 +522,96 @@ async fn close_during_a_live_head_read_sends_nothing_more() {
     no_frame(&mut rx).await;
 }
 
+/// A resync recorded while a snapshot payload waits for queue room, with the
+/// sync still owned, withholds the payload. Mutation: pass `None` instead of
+/// the handle from `send_initial_set` → the EVENT is queued → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn resync_while_a_snapshot_payload_waits_sends_no_payload() {
+    let f = fixture().await;
+    let owner = Keys::generate();
+    let home = create_channel(&f.state, &f.tenant, &owner, &[]).await;
+    revision(&f, &owner, home, Uuid::new_v4(), "create", None).await;
+
+    let (conn, mut rx) = connect(&f, &owner);
+    let capacity = conn.send_tx.capacity();
+    for _ in 0..capacity {
+        conn.send_tx
+            .try_send(WsMessage::Text("fill".into()))
+            .unwrap();
+    }
+    let task = start_sync(&f, &conn, sync_filter(&[home]));
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !f.state.artifact_syncs.contains(conn.conn_id, "s") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("sync registered");
+    f.state.artifact_syncs.resync_all("resync: test");
+    for _ in 0..capacity {
+        let Some(WsMessage::Text(text)) = rx.recv().await else {
+            panic!("connection closed");
+        };
+        assert_eq!(text.as_str(), "fill");
+    }
+    assert_eq!(frame(&mut rx).await, json!(["CLOSED", "s", "resync: test"]));
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("sync task ends")
+        .unwrap();
+    no_frame(&mut rx).await;
+}
+
+/// A resync recorded after a live head read, with the sync still owned,
+/// withholds the head it read. Mutation: pass `None` instead of the handle
+/// from `run_live` → the EVENT precedes `CLOSED` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn resync_during_a_live_head_read_sends_no_payload() {
+    let f = fixture().await;
+    let owner = Keys::generate();
+    let home = create_channel(&f.state, &f.tenant, &owner, &[]).await;
+    let d = Uuid::new_v4();
+    let first = revision(&f, &owner, home, d, "create", None).await;
+
+    let (conn, mut rx) = connect(&f, &owner);
+    let filter = buzz_core::artifact_sync::parse_sync(&sync_filter(&[home]));
+    let permit = f
+        .state
+        .handler_semaphore
+        .clone()
+        .try_acquire_owned()
+        .expect("permit");
+    let pause = Arc::new(super::close::test_seam::Pause::default());
+    let token = super::close::admit("s", &conn).await.expect("admit");
+    let task = tokio::spawn(super::artifact_sync::test_seam::LIVE_SEND_PAUSE.scope(
+        Arc::clone(&pause),
+        super::artifact_sync::handle_sync(
+            "s".into(),
+            token,
+            filter,
+            Arc::clone(&conn),
+            Arc::clone(&f.state),
+            permit,
+        ),
+    ));
+    assert_eq!(initial_set(&mut rx).await, vec![first.id.to_hex()]);
+
+    revision(&f, &owner, home, d, "update", Some(&first)).await;
+    tokio::time::timeout(Duration::from_secs(10), pause.reached.notified())
+        .await
+        .expect("live head read reached");
+    f.state.artifact_syncs.resync_all("resync: test");
+    pause.resume.notify_one();
+    assert_eq!(frame(&mut rx).await, json!(["CLOSED", "s", "resync: test"]));
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("sync task ends")
+        .unwrap();
+    no_frame(&mut rx).await;
+}
+
 /// Run an ordinary `REQ "s"` through the real handler.
 async fn ordinary_req(f: &Fixture, conn: &Arc<ConnectionState>, filters: Vec<Value>) {
     let filters: Vec<nostr::Filter> = filters

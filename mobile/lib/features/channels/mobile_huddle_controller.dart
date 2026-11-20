@@ -1,5 +1,8 @@
 import 'dart:async';
 
+export 'huddle_lifecycle_provider.dart';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -14,7 +17,7 @@ typedef HuddleHumanCountLoader = Future<int> Function(String channelId);
 
 enum MobileHuddlePresentation { hidden, fullScreen, drawer }
 
-/// Tracks whether the foreground Huddle owns the screen or lives in the
+/// Tracks whether the Huddle owns the screen or lives in the
 /// persistent app-level drawer. Audio lifecycle remains owned separately by
 /// [huddleSessionProvider].
 final class MobileHuddlePresentationNotifier
@@ -73,18 +76,6 @@ final huddleHumanCountProvider = Provider<HuddleHumanCountLoader>((ref) {
   };
 });
 
-/// Complete parent-channel Huddle lifecycle, independent of timeline paging.
-final huddleLifecycleProvider = FutureProvider.family<List<NostrEvent>, String>(
-  (ref, channelId) async {
-    if (ref.watch(relaySessionProvider).status != SessionStatus.connected) {
-      return const [];
-    }
-    return ref
-        .read(relaySessionProvider.notifier)
-        .fetchHistory(NostrFilters.huddleLifecycle(channelId));
-  },
-);
-
 /// One successful relay admission. Its epoch changes only when a newer join or
 /// start attempt begins, so duplicate teardown calls cannot invalidate the
 /// cleanup already in flight for the same admission.
@@ -92,36 +83,46 @@ final class _HuddleAdmissionToken {
   final int epoch;
   final String backingChannelId;
 
-  /// Membership is shared by all of an owner's devices. A snapshot cannot
-  /// prove that another admission did not arrive during teardown. In DMs,
-  /// leave audio only; the relay ends the room after its last peer leaves.
-  final bool relayOwnsCleanup;
+  /// DM membership also grants access to the saved transcript after hanging up.
+  final bool preserveMembership;
 
   const _HuddleAdmissionToken(
     this.epoch,
     this.backingChannelId, {
-    this.relayOwnsCleanup = false,
+    this.preserveMembership = false,
   });
 }
 
-/// Coordinates the Nostr lifecycle around the foreground audio session.
+/// Coordinates the Nostr lifecycle around the Huddle audio session.
 final class MobileHuddleController extends Notifier<bool> {
   var _generation = 0;
   var _admissionEpoch = 0;
   String? _latestAdmissionTargetBackingChannelId;
   _HuddleAdmissionToken? _admissionToken;
   final Set<_HuddleAdmissionToken> _finishedLifecycleAdmissions = {};
+  final Map<_HuddleAdmissionToken, int> _pendingMembershipLeaves = {};
 
   @override
   bool build() {
     final unregisterBeforePause = ref
         .read(relaySessionProvider.notifier)
-        .registerBeforePause(_leaveForBackground);
+        .registerBeforePause(_onPause);
     final unregisterBeforeCommunityTransition = ref
         .read(communityTransitionProvider)
         .register(_leaveForTransition);
     ref.onDispose(unregisterBeforePause);
     ref.onDispose(unregisterBeforeCommunityTransition);
+    ref.listen(relaySessionProvider, (previous, next) {
+      if (next.status != SessionStatus.connected ||
+          previous?.status == SessionStatus.connected) {
+        return;
+      }
+      final pending = Map.of(_pendingMembershipLeaves);
+      _pendingMembershipLeaves.clear();
+      for (final entry in pending.entries) {
+        unawaited(_leaveBackingMembership(entry.key, entry.value));
+      }
+    });
     ref.listen(huddleSessionProvider, (previous, next) {
       if (previous?.wasAdmitted == true &&
           next.phase == HuddleSessionPhase.failed) {
@@ -129,8 +130,9 @@ final class MobileHuddleController extends Notifier<bool> {
       }
     });
     ref.listen(appLifecycleProvider, (_, next) {
-      if (next == AppLifecycleState.paused ||
-          next == AppLifecycleState.detached) {
+      if (next == AppLifecycleState.paused) {
+        unawaited(_onPause());
+      } else if (next == AppLifecycleState.detached) {
         unawaited(_leaveForBackground());
       }
     });
@@ -212,7 +214,7 @@ final class MobileHuddleController extends Notifier<bool> {
       _admissionToken = _HuddleAdmissionToken(
         admissionEpoch,
         backingChannelId,
-        relayOwnsCleanup: _isDirectCall(parentChannelId),
+        preserveMembership: _isDirectCall(parentChannelId),
       );
     } catch (_) {
       if (admissionEpoch == _admissionEpoch) {
@@ -251,7 +253,7 @@ final class MobileHuddleController extends Notifier<bool> {
     final admissionEpoch = ++_admissionEpoch;
     _latestAdmissionTargetBackingChannelId = ephemeralChannelId;
     final currentPubkey = ref.read(currentPubkeyProvider);
-    final relayOwnsCleanup = _isDirectCall(parentChannelId);
+    final preserveMembership = _isDirectCall(parentChannelId);
     try {
       await ref
           .read(huddleSessionProvider.notifier)
@@ -277,7 +279,7 @@ final class MobileHuddleController extends Notifier<bool> {
       _admissionToken = _HuddleAdmissionToken(
         admissionEpoch,
         ephemeralChannelId,
-        relayOwnsCleanup: relayOwnsCleanup,
+        preserveMembership: preserveMembership,
       );
     }
   }
@@ -285,6 +287,30 @@ final class MobileHuddleController extends Notifier<bool> {
   Future<void>? _backgroundLeave;
   Future<void>? _failureCleanup;
   final Set<Future<void>> _lifecycleCleanups = {};
+
+  Future<void> _onPause() async {
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      final session = ref.read(huddleSessionProvider);
+      // The active iOS voice session keeps the separate audio socket alive.
+      // The main relay can still disconnect on its normal background schedule.
+      if (session.wasAdmitted &&
+          session.isInSession &&
+          session.phase != HuddleSessionPhase.leaving) {
+        // An earlier call's leave still needs the main relay to publish.
+        await _settleEarlierCleanups();
+        return;
+      }
+    }
+    await _leaveForBackground();
+  }
+
+  Future<void> _settleEarlierCleanups() async {
+    final failureCleanup = _failureCleanup;
+    if (failureCleanup != null) await failureCleanup;
+    if (_lifecycleCleanups.isNotEmpty) {
+      await Future.wait(_lifecycleCleanups.toList());
+    }
+  }
 
   Future<void> _leaveForBackground() {
     final inFlight = _backgroundLeave;
@@ -301,6 +327,7 @@ final class MobileHuddleController extends Notifier<bool> {
   }
 
   Future<void> _finishBackgroundLeave() async {
+    final generation = _lifecycleGeneration;
     Object? leaveFailure;
     StackTrace? leaveFailureStackTrace;
     try {
@@ -310,8 +337,10 @@ final class MobileHuddleController extends Notifier<bool> {
       leaveFailureStackTrace = stackTrace;
     }
 
+    if (generation != _lifecycleGeneration) return;
     final failureCleanup = _failureCleanup;
     if (failureCleanup != null) await failureCleanup;
+    if (generation != _lifecycleGeneration) return;
     if (_lifecycleCleanups.isNotEmpty) {
       await Future.wait(_lifecycleCleanups.toList());
     }
@@ -330,7 +359,25 @@ final class MobileHuddleController extends Notifier<bool> {
     );
   }
 
+  int _lifecycleGeneration = 0;
+  Future<void>? _localLeave;
+
+  Future<void> _leaveLocalAudio() {
+    return _localLeave ??= ref
+        .read(huddleSessionProvider.notifier)
+        .leave()
+        .whenComplete(() => _localLeave = null);
+  }
+
   Future<void> _leaveForTransition() async {
+    // Retire remote finalization before rebinding the community. In-flight
+    // writes may finish in their original scope, but cannot launch another.
+    ++_lifecycleGeneration;
+    _backgroundLeave = null;
+    _failureCleanup = null;
+    _lifecycleCleanups.clear();
+    _pendingMembershipLeaves.clear();
+    _admissionToken = null;
     final startFuture = _startFuture;
     if (startFuture != null) {
       ++_generation;
@@ -342,19 +389,13 @@ final class MobileHuddleController extends Notifier<bool> {
         // settle before the relay is rebound to the next community.
       }
     }
-    final failureCleanup = _failureCleanup;
-    if (failureCleanup != null) await failureCleanup;
-    final backgroundLeave = _backgroundLeave;
-    if (backgroundLeave != null) await backgroundLeave;
-    if (ref.read(huddleSessionProvider).isInSession) {
-      await leave();
-    }
-    if (_lifecycleCleanups.isNotEmpty) {
-      await Future.wait(_lifecycleCleanups.toList());
-    }
+    ++_generation;
+    state = false;
+    await _leaveLocalAudio();
   }
 
   Future<void> leave() async {
+    final lifecycleGeneration = _lifecycleGeneration;
     ++_generation;
     state = false;
     final session = ref.read(huddleSessionProvider);
@@ -365,7 +406,6 @@ final class MobileHuddleController extends Notifier<bool> {
     final humanCount =
         !session.wasAdmitted ||
             backingChannelId == null ||
-            admissionToken?.relayOwnsCleanup == true ||
             _hasOtherOwnerAdmission(session)
         ? null
         : ref
@@ -379,7 +419,7 @@ final class MobileHuddleController extends Notifier<bool> {
     Object? localFailure;
     StackTrace? localFailureStackTrace;
     try {
-      await ref.read(huddleSessionProvider.notifier).leave();
+      await _leaveLocalAudio();
     } catch (error, stackTrace) {
       localFailure = error;
       localFailureStackTrace = stackTrace;
@@ -390,6 +430,7 @@ final class MobileHuddleController extends Notifier<bool> {
         admissionToken != null) {
       await _trackLifecycleCleanup(
         _finishLeaveLifecycle(
+          generation: lifecycleGeneration,
           admissionToken: admissionToken,
           parentChannelId: parentChannelId,
           backingChannelId: backingChannelId,
@@ -403,10 +444,11 @@ final class MobileHuddleController extends Notifier<bool> {
   }
 
   Future<void> _cleanupAfterLocalTeardown(HuddleSessionState session) async {
+    final lifecycleGeneration = _lifecycleGeneration;
     final backingChannelId = session.ephemeralChannelId;
     final admissionToken = session.wasAdmitted ? _admissionToken : null;
     if (admissionToken == null || backingChannelId == null) return;
-    if (admissionToken.relayOwnsCleanup || _hasOtherOwnerAdmission(session)) {
+    if (_hasOtherOwnerAdmission(session)) {
       _admissionToken = null;
       return;
     }
@@ -416,6 +458,7 @@ final class MobileHuddleController extends Notifier<bool> {
         .catchError((_) => 2);
     await _trackLifecycleCleanup(
       _finishLeaveLifecycle(
+        generation: lifecycleGeneration,
         admissionToken: admissionToken,
         parentChannelId: session.parentChannelId,
         backingChannelId: backingChannelId,
@@ -434,13 +477,16 @@ final class MobileHuddleController extends Notifier<bool> {
   }
 
   Future<void> _finishLeaveLifecycle({
+    required int generation,
     required _HuddleAdmissionToken admissionToken,
     required String? parentChannelId,
     required String backingChannelId,
     required Future<int> humanCount,
   }) async {
+    if (!ref.mounted || generation != _lifecycleGeneration) return;
     final actions = ref.read(channelActionsProvider);
     final humansRemaining = await humanCount;
+    if (!ref.mounted || generation != _lifecycleGeneration) return;
     if (_newerAdmissionTargetsSameHuddle(admissionToken)) return;
     final currentSession = ref.read(huddleSessionProvider);
     if (currentSession.isInSession &&
@@ -457,6 +503,7 @@ final class MobileHuddleController extends Notifier<bool> {
           ephemeralChannelId: backingChannelId,
         );
       } catch (_) {}
+      if (!ref.mounted || generation != _lifecycleGeneration) return;
       if (_newerAdmissionTargetsSameHuddle(admissionToken)) return;
       final resumedSession = ref.read(huddleSessionProvider);
       if (resumedSession.isInSession &&
@@ -469,10 +516,45 @@ final class MobileHuddleController extends Notifier<bool> {
       return;
     }
 
+    if (admissionToken.preserveMembership) return;
+    await _leaveBackingMembership(admissionToken, generation);
+  }
+
+  Future<void> _leaveBackingMembership(
+    _HuddleAdmissionToken admissionToken,
+    int generation,
+  ) async {
+    bool stillDeparted() {
+      if (!ref.mounted ||
+          generation != _lifecycleGeneration ||
+          _newerAdmissionTargetsSameHuddle(admissionToken)) {
+        return false;
+      }
+      final session = ref.read(huddleSessionProvider);
+      return !session.isInSession ||
+          session.ephemeralChannelId != admissionToken.backingChannelId;
+    }
+
+    bool relayUnavailable() =>
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        ref.read(relaySessionProvider).status != SessionStatus.connected;
+
+    if (!stillDeparted()) return;
+    if (relayUnavailable()) {
+      _pendingMembershipLeaves[admissionToken] = generation;
+      return;
+    }
     try {
-      await actions.leaveChannel(backingChannelId);
+      await ref
+          .read(channelActionsProvider)
+          .leaveChannel(
+            admissionToken.backingChannelId,
+            mayPublish: () async => stillDeparted() && !relayUnavailable(),
+          );
     } catch (_) {
-      // The audio relay may already have auto-ended and archived the room.
+      if (stillDeparted() && relayUnavailable()) {
+        _pendingMembershipLeaves[admissionToken] = generation;
+      }
     }
   }
 
@@ -511,7 +593,7 @@ final class MobileHuddleController extends Notifier<bool> {
     if (!_finishedLifecycleAdmissions.add(admissionToken)) return;
     Object? failure;
     try {
-      await ref.read(huddleSessionProvider.notifier).leave();
+      await _leaveLocalAudio();
     } catch (error) {
       failure = error;
     }
@@ -573,6 +655,6 @@ final class MobileHuddleController extends Notifier<bool> {
   }
 }
 
-/// Foreground Huddle lifecycle operations and their start-in-progress flag.
+/// Huddle lifecycle operations and their start-in-progress flag.
 final mobileHuddleControllerProvider =
     NotifierProvider<MobileHuddleController, bool>(MobileHuddleController.new);

@@ -44,6 +44,20 @@ bool _queueComposerAttachment(
   return true;
 }
 
+final _pickedVideoExtension = RegExp(
+  r'\.(mp4|mov|m4v|webm|3gp|3gpp|3g2|avi|mkv)$',
+  caseSensitive: false,
+);
+
+bool _isPickedVideo(XFile file) {
+  final mime = file.mimeType;
+  if (mime != null && mime != 'application/octet-stream') {
+    return mime.startsWith('video/');
+  }
+  return _pickedVideoExtension.hasMatch(file.name) ||
+      _pickedVideoExtension.hasMatch(file.path);
+}
+
 bool _queueComposerImages(
   List<XFile> images,
   _ComposerVoiceNote voiceNote,
@@ -63,7 +77,9 @@ bool _queueComposerImages(
     for (final image in images)
       _PendingAttachment(
         file: image,
-        kind: _PendingAttachmentKind.image,
+        kind: _isPickedVideo(image)
+            ? _PendingAttachmentKind.video
+            : _PendingAttachmentKind.image,
         deleteAfterUse: deleteAfterUse,
       ),
   ];
@@ -71,6 +87,10 @@ bool _queueComposerImages(
 }
 
 enum _AttachmentSurface { closed, menu, camera, photos }
+
+bool get _hasCombinedMediaPicker =>
+    defaultTargetPlatform == TargetPlatform.iOS ||
+    defaultTargetPlatform == TargetPlatform.android;
 
 const _attachmentMenuWidth = 216.0;
 const _attachmentMenuPadding = Grid.xs;
@@ -104,10 +124,11 @@ class _AttachmentMenuLayout {
       textPainter.height + (Grid.xxs * 2),
     );
     textPainter.dispose();
+    final itemCount = _hasCombinedMediaPicker ? 4 : 5;
     final contentHeight =
         (_attachmentMenuPadding * 2) +
-        (itemHeight * 5) +
-        (_attachmentMenuItemSpacing * 4);
+        (itemHeight * itemCount) +
+        (_attachmentMenuItemSpacing * (itemCount - 1));
 
     return _AttachmentMenuLayout(
       itemHeight: itemHeight,
@@ -545,7 +566,7 @@ class _AttachmentMenu extends StatelessWidget {
     final items = <(IconData, String, VoidCallback)>[
       (BuzzIcons.camera, 'Camera', onCamera),
       (BuzzIcons.images, 'Photos', onPhotos),
-      (BuzzIcons.video, 'Video', onVideo),
+      if (!_hasCombinedMediaPicker) (BuzzIcons.video, 'Video', onVideo),
       (BuzzIcons.mic, 'Voice note', onVoiceNote),
       (BuzzIcons.file, 'Files', onFiles),
     ];
@@ -692,16 +713,7 @@ class _AttachmentStrip extends StatelessWidget {
                   ClipRRect(
                     borderRadius: BorderRadius.circular(Radii.md),
                     child: attachment.kind == _PendingAttachmentKind.video
-                        ? ColoredBox(
-                            color: Colors.black,
-                            child: Center(
-                              child: Icon(
-                                BuzzIcons.video,
-                                color: Colors.white,
-                                size: 24,
-                              ),
-                            ),
-                          )
+                        ? _PendingVideoThumbnail(file: attachment.file)
                         : attachment.kind == _PendingAttachmentKind.image &&
                               attachment.file.path.isNotEmpty
                         ? Image.file(

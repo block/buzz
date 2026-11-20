@@ -115,12 +115,7 @@ void bubbleContentTests() {
         tester.widget<BuzzAgentIcon>(find.byType(BuzzAgentIcon)).color,
         linkColor,
       );
-      final link = tester.widget<Text>(
-        find.byWidgetPredicate(
-          (w) => w is Text && w.textSpan?.toPlainText() == 'Website',
-        ),
-      );
-      expect(link.textSpan?.style?.color, linkColor);
+      expect(linkStyle(tester, 'Website')?.color, linkColor);
       await tester.tap(find.text('Alice'));
       expect(tapped, 'person');
       await tester.tap(find.text('Helper'));
@@ -353,10 +348,7 @@ void editedMarkerTests() {
 
     // Prose: inline after the last line, in the muted metadata colour.
     await show('First\n\nHi how are ya.');
-    expect(
-      plainTexts(tester),
-      anyElement(endsWith('\nHi how are ya. (edited)')),
-    );
+    expect(plainTexts(tester), contains('Hi how are ya. (edited)'));
     final context = tester.element(find.byType(MessageContent));
     expect(markerSpan(tester)?.style?.color, context.colors.onSurfaceVariant);
 

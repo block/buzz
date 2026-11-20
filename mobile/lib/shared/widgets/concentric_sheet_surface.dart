@@ -8,8 +8,6 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 
 import '../theme/theme.dart';
 
-enum ConcentricSurfaceCorners { all, bottom }
-
 /// An iOS-native surface that adopts the system's concentric corners on iOS 26
 /// and newer. Other platforms keep the normal Flutter shape.
 class ConcentricSheetSurface extends HookWidget {
@@ -17,8 +15,6 @@ class ConcentricSheetSurface extends HookWidget {
     required this.child,
     required this.enabled,
     this.color,
-    this.backdropColor,
-    this.corners = ConcentricSurfaceCorners.all,
     this.padding = const EdgeInsets.only(
       left: Grid.xxs,
       right: Grid.xxs,
@@ -36,8 +32,6 @@ class ConcentricSheetSurface extends HookWidget {
   final Widget child;
   final bool enabled;
   final Color? color;
-  final Color? backdropColor;
-  final ConcentricSurfaceCorners corners;
   final EdgeInsetsGeometry padding;
   final bool providesSheetSurface;
   final bool usesGlass;
@@ -60,12 +54,7 @@ class ConcentricSheetSurface extends HookWidget {
   static const _nativeContentClipRadius = Radii.dialog * 2;
   static const sheetTopRadius = _nativeContentClipRadius - Grid.xxs;
 
-  BorderRadius _borderRadius(double radius) => switch (corners) {
-    ConcentricSurfaceCorners.all => BorderRadius.circular(radius),
-    ConcentricSurfaceCorners.bottom => BorderRadius.vertical(
-      bottom: Radius.circular(radius),
-    ),
-  };
+  BorderRadius _borderRadius(double radius) => BorderRadius.circular(radius);
 
   Future<bool> _checkNativeSurfaceSupport() async {
     try {
@@ -83,12 +72,10 @@ class ConcentricSheetSurface extends HookWidget {
   Future<void> _updateNativeSurfaceColors({
     required MethodChannel channel,
     required Color surfaceColor,
-    required Color? backdropColor,
   }) async {
     try {
       await channel.invokeMethod<void>('updateColors', <String, Object?>{
         'color': surfaceColor.toARGB32(),
-        'backdropColor': backdropColor?.toARGB32(),
         'glassTintColor': glassTintColor?.toARGB32(),
       });
     } on MissingPluginException {
@@ -130,6 +117,58 @@ class ConcentricSheetSurface extends HookWidget {
     final surfaceColor = color ?? context.colors.surface;
     final brightness = context.theme.brightness;
     final nativeSurfaceChannel = useState<MethodChannel?>(null);
+    final nativeCornerRadius = useState<BorderRadius?>(null);
+    useEffect(() {
+      final channel = nativeSurfaceChannel.value;
+      if (channel == null) return null;
+      var active = true;
+      void updateRadii(dynamic value) {
+        if (!active || value is! Map) return;
+        double? radius(String key) {
+          final number = value[key];
+          return number is num && number.isFinite && number >= 0
+              ? number.toDouble()
+              : null;
+        }
+
+        final topLeft = radius('topLeft');
+        final topRight = radius('topRight');
+        final bottomLeft = radius('bottomLeft');
+        final bottomRight = radius('bottomRight');
+        if (topLeft == null ||
+            topRight == null ||
+            bottomLeft == null ||
+            bottomRight == null) {
+          return;
+        }
+        nativeCornerRadius.value = BorderRadius.only(
+          topLeft: Radius.circular(topLeft),
+          topRight: Radius.circular(topRight),
+          bottomLeft: Radius.circular(bottomLeft),
+          bottomRight: Radius.circular(bottomRight),
+        );
+      }
+
+      channel.setMethodCallHandler((call) async {
+        if (call.method == 'cornerRadiiChanged') updateRadii(call.arguments);
+      });
+      // The platform view can lay out before Flutter installs its handler.
+      Future<void> readInitialRadii() async {
+        try {
+          updateRadii(await channel.invokeMethod<dynamic>('getCornerRadii'));
+        } on MissingPluginException {
+          // Retain the fallback clip when the native view is unavailable.
+        } on PlatformException {
+          // A subsequent native layout can supply the geometry.
+        }
+      }
+
+      unawaited(readInitialRadii());
+      return () {
+        active = false;
+        channel.setMethodCallHandler(null);
+      };
+    }, [nativeSurfaceChannel.value]);
     useEffect(
       () {
         final channel = nativeSurfaceChannel.value;
@@ -142,7 +181,6 @@ class ConcentricSheetSurface extends HookWidget {
           _updateNativeSurfaceColors(
             channel: channel,
             surfaceColor: surfaceColor,
-            backdropColor: backdropColor,
           ),
         );
         return null;
@@ -152,7 +190,6 @@ class ConcentricSheetSurface extends HookWidget {
         nativeSurfaceSupported,
         nativeSurfaceChannel.value,
         surfaceColor,
-        backdropColor,
         glassTintColor,
       ],
     );
@@ -209,14 +246,10 @@ class ConcentricSheetSurface extends HookWidget {
                   },
                   creationParams: <String, Object>{
                     'color': surfaceColor.toARGB32(),
-                    if (backdropColor case final color?)
-                      'backdropColor': color.toARGB32(),
                     'minimumRadius': minimumRadius,
                     'capsule': capsule,
-                    'corners': corners.name,
-                    if (providesSheetSurface &&
-                        corners == ConcentricSurfaceCorners.all)
-                      'topRadius': sheetTopRadius,
+                    'independentCorners': providesSheetSurface,
+                    if (providesSheetSurface) 'topRadius': sheetTopRadius,
                     'usesGlass': usesGlass,
                     if (glassTintColor case final tint?)
                       'glassTintColor': tint.toARGB32(),
@@ -236,27 +269,19 @@ class ConcentricSheetSurface extends HookWidget {
             ),
           ClipRSuperellipse(
             key: const ValueKey('concentric-sheet-content-clip'),
-            // UIKit's container-concentric corner resolves substantially
-            // larger than its minimum radius on an edge-inset iOS sheet. Keep
-            // the Flutter content inside that continuous outline; a 24pt
-            // circular clip still lets scrolling rows show through the native
-            // corner cutouts.
-            borderRadius:
-                nativeSurfaceSupported &&
-                    providesSheetSurface &&
-                    corners == ConcentricSurfaceCorners.all
-                ? BorderRadius.vertical(
-                    top: const Radius.circular(sheetTopRadius),
-                    bottom: Radius.circular(
-                      contentClipRadius ?? _nativeContentClipRadius,
-                    ),
-                  )
-                : _borderRadius(
-                    contentClipRadius ??
-                        (nativeSurfaceSupported
-                            ? _nativeContentClipRadius
-                            : minimumRadius),
-                  ),
+            // Match each resolved UIKit corner, including asymmetric display
+            // corners and changes when folding or rotating the device.
+            borderRadius: contentClipRadius != null
+                ? _borderRadius(contentClipRadius!)
+                : nativeSurfaceSupported
+                ? (nativeCornerRadius.value ??
+                      (providesSheetSurface
+                          ? const BorderRadius.vertical(
+                              top: Radius.circular(sheetTopRadius),
+                              bottom: Radius.circular(_nativeContentClipRadius),
+                            )
+                          : _borderRadius(_nativeContentClipRadius)))
+                : fallbackBorderRadius,
             clipBehavior: Clip.antiAlias,
             child: providesSheetSurface
                 ? _ConcentricSheetSurfaceScope(

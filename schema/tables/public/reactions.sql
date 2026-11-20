@@ -2,7 +2,7 @@
 -- Conformance: reactions filter by community before event/pubkey matching.
 
 CREATE TABLE reactions (
-    community_id        UUID NOT NULL REFERENCES communities(id),
+    community_id        UUID NOT NULL,
     event_created_at    TIMESTAMPTZ NOT NULL,
     event_id            BYTEA NOT NULL,
     pubkey              BYTEA NOT NULL,

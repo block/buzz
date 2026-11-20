@@ -37,7 +37,10 @@ class _Sync extends MeSync {
   @override
   Future<NostrEvent?> head() async => null;
   @override
-  Future<void> update(MeGroups Function(MeGroups) change) async {
+  Future<void> update(
+    MeGroups Function(MeGroups) change, {
+    bool Function()? mayFile,
+  }) async {
     groups = change(groups);
   }
 }

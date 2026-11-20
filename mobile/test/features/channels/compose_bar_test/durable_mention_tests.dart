@@ -51,7 +51,7 @@ void durableMentionTests() {
           .widget<TextField>(find.byType(TextField))
           .controller!
           .text;
-      expect(draft, '@Scout @Scout ($second) ');
+      expect(draft, '@Scout ($first) @Scout ($second) ');
 
       // Same mounted composer, different thread and back: old listeners may
       // not erase the original persisted bindings while restoring another key.

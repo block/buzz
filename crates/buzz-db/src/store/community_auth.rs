@@ -412,7 +412,8 @@ impl Db {
             .await?;
         let generation = old_generation + 1;
         sqlx::query(
-            "UPDATE communities SET policy_generation = $2, requires_nip_fi = $3 WHERE id = $1",
+            "UPDATE communities SET policy_generation = $2, requires_nip_fi = $3 \
+             WHERE id = $1 AND deletion_state = 'active'",
         )
         .bind(request.community_id)
         .bind(generation)

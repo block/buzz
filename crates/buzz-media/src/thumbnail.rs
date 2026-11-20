@@ -67,6 +67,7 @@ pub fn generate_image_metadata_sync(
         return Ok((BlobMeta::default(), None));
     }
 
+    crate::validation::check_image_pixels(bytes)?;
     let img = image::load_from_memory(bytes)?;
     let (w, h) = (img.width(), img.height());
 

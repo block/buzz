@@ -49,13 +49,36 @@ final customEmojiBytesCacheProvider = Provider<CustomEmojiBytesCache>((ref) {
   return CustomEmojiBytesCache();
 });
 
+/// The neutral glyph that stands in for a custom emoji with no image: a muted
+/// sparkles icon, because a truncated `:shortcode:` is illegible at glyph size.
+/// The shortcode survives only as the semantics label.
+class CustomEmojiPlaceholder extends StatelessWidget {
+  final String shortcode;
+  final double size;
+
+  const CustomEmojiPlaceholder({
+    super.key,
+    required this.shortcode,
+    required this.size,
+  });
+
+  @override
+  Widget build(BuildContext context) => Icon(
+    BuzzIcons.sparkles,
+    size: size,
+    color: DefaultTextStyle.of(context).style.color?.withValues(alpha: 0.6),
+    semanticLabel: ':$shortcode:',
+  );
+}
+
 /// A single custom-emoji image rendered as a square, network-loaded glyph.
 ///
 /// Reused everywhere a `:shortcode:` resolves to an image: inline in message
 /// bodies, reaction pills, status, and the picker. If the image fails to load,
 /// it falls back to the literal `:shortcode:` text, so a broken URL never
 /// leaves a blank gap in prose; a [compact] glyph, such as a reaction pill,
-/// shows a sparkles icon instead, because a truncated shortcode is illegible.
+/// shows the [CustomEmojiPlaceholder] instead. A reaction slot is always
+/// [compact]: it never renders shortcode text.
 class CustomEmojiImage extends ConsumerWidget {
   final String shortcode;
   final String url;
@@ -84,45 +107,44 @@ class CustomEmojiImage extends ConsumerWidget {
       semanticLabel: ':$shortcode:',
       onBytesLoaded: (bytes) => bytesCache.remember(url, bytes),
       errorBuilder: (_, _, _) => compact
-          ? Icon(
-              BuzzIcons.sparkles,
-              size: size,
-              color: fallbackStyle.color?.withValues(alpha: 0.6),
-              semanticLabel: ':$shortcode:',
-            )
+          ? CustomEmojiPlaceholder(shortcode: shortcode, size: size)
           : Text(':$shortcode:', style: fallbackStyle),
     );
   }
 }
 
-/// gpt_markdown inline component that replaces `:shortcode:` with an inline
+/// gpt_markdown inline pattern that replaces `:shortcode:` with an inline
 /// [CustomEmojiImage] for *known* shortcodes only. Unknown `:foo:` is left as
 /// plain text. Matched case-insensitively; resolved via the lowercase palette.
 ///
-/// Parallel to the `_MentionMd` / `_ChannelLinkMd` components in
-/// message_content.dart — add an instance to a `GptMarkdown.inlineComponents`
-/// list (before the default components) to enable custom emoji in any markdown
-/// surface.
-class CustomEmojiMd extends InlineMd {
+/// Parallel to the `_MentionMd` / `_ChannelLinkMd` patterns in
+/// message_content.dart: add its [pattern] to `GptMarkdown.inlinePatterns` to
+/// enable custom emoji in any markdown surface.
+class CustomEmojiMd {
   final Map<String, String> _urlByShortcode;
   final double size;
   late final RegExp _exp = _buildPattern(_urlByShortcode.keys);
 
   /// Only include shortcodes present in the rendered [content]. gpt_markdown
-  /// embeds this pattern in a combined regex for every parsed text segment, so
-  /// unrelated community emoji must not make every message expensive to parse.
+  /// scans every message with this pattern, so unrelated community emoji
+  /// must not make every message expensive to parse.
   CustomEmojiMd(
     List<CustomEmoji> palette, {
     required String content,
     this.size = kCustomEmojiInlineSize,
   }) : _urlByShortcode = _referencedUrls(palette, content);
 
-  /// Excluded from link labels: this component renders a [WidgetSpan], and a
-  /// placeholder nested inside the link's own placeholder does not paint on
-  /// iOS — an authored `[:emoji:](url)` renders as nothing. Link resolution
-  /// wins over token detection inside a label.
-  @override
-  Set<MarkdownScope> get scopes => MarkdownComponent.allScopesExceptLinkLabel;
+  /// The [InlinePattern] to pass to `GptMarkdown.inlinePatterns`.
+  ///
+  /// Excluded from link labels by the default [InlinePattern.scopes]: it
+  /// renders a [WidgetSpan], and a placeholder nested inside the link's own
+  /// placeholder does not paint on iOS, so an authored `[:emoji:](url)` would
+  /// render as nothing. Link resolution wins over token detection inside a
+  /// label.
+  late final InlinePattern pattern = InlinePattern(
+    pattern: _exp,
+    builder: (context, match, style) => span(context, match[0]!, style),
+  );
 
   // Look ahead so adjacent tokens sharing a colon are both considered:
   // :unknown:known: must still allow the known token to match.
@@ -146,19 +168,17 @@ class CustomEmojiMd extends InlineMd {
     };
   }
 
-  @override
   RegExp get exp => _exp;
 
-  @override
-  InlineSpan span(BuildContext context, String text, GptMarkdownConfig config) {
+  InlineSpan span(BuildContext context, String text, TextStyle style) {
     final raw = exp.firstMatch(text.trim())?.group(0);
     if (raw == null) {
-      return TextSpan(text: text, style: config.style);
+      return TextSpan(text: text, style: style);
     }
     final shortcode = raw.substring(1, raw.length - 1).toLowerCase();
     final url = _urlByShortcode[shortcode];
     if (url == null) {
-      return TextSpan(text: text, style: config.style);
+      return TextSpan(text: text, style: style);
     }
     return WidgetSpan(
       alignment: PlaceholderAlignment.middle,
@@ -173,7 +193,7 @@ class CustomEmojiMd extends InlineMd {
     final sorted = shortcodes.where((s) => s.trim().isNotEmpty).toSet().toList()
       ..sort((a, b) => b.length.compareTo(a.length));
     if (sorted.isEmpty) {
-      // Never matches — gpt_markdown skips this component entirely.
+      // Never matches, so the pattern masks nothing.
       return RegExp(r'(?!x)x');
     }
     final alternatives = sorted.map(RegExp.escape).join('|');

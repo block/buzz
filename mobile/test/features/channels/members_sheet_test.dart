@@ -259,7 +259,13 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('View activity'), findsOneWidget);
-    expect(find.text('Role'), findsNothing);
+    expect(find.text('Role'), findsOneWidget);
+    expect(
+      tester
+          .widget<SegmentedButton<String>>(find.byType(SegmentedButton<String>))
+          .selected,
+      {'member'},
+    );
     expect(tester.takeException(), isNull);
   });
 

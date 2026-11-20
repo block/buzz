@@ -1,8 +1,10 @@
 import 'message_author_visibility.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'message_swipe_reply.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
 import 'reply_summary_link.dart';
+
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -56,6 +58,7 @@ import '../profile/user_profile_sheet.dart';
 import 'message_actions.dart';
 import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
+import 'message_reply_drag_target.dart';
 import 'message_content.dart';
 import 'message_media_avatar.dart';
 import 'reaction_row.dart';
@@ -727,6 +730,19 @@ class ThreadDetailPage extends HookConsumerWidget {
       );
       return null;
     }, [hasFetchedReplies, replies.length, settleGeometry, headHeight.value]);
+    // Reading starts once the thread holds still for the dwell while this
+    // page is in front and the app is in use.
+    final appInUse = isAppInUse(useAppLifecycleState());
+    final readStateReady = ref.watch(
+      readStateProvider.select((state) => state.isReady),
+    );
+    final readingActive =
+        threadViewportVisible &&
+        readStateReady &&
+        appInUse &&
+        (ModalRoute.of(context)?.isCurrent ?? true) &&
+        ConversationPaneScope.isActiveOf(context);
+    final clearCovered = useClearsCoveredUnread(ref, active: readingActive);
     void readVisibleReplies() {
       final readState = ref.read(readStateProvider);
       if (!context.mounted ||
@@ -761,21 +777,34 @@ class ThreadDetailPage extends HookConsumerWidget {
           visible.add(message);
         }
       }
+      // The tail can sit at the scroll end while the keyboard still covers
+      // it, so it counts as the bottom only when its end is above the
+      // keyboard and composer.
+      final tailIndex = _threadTailIndex(replies.length);
+      final atBottom =
+          replies.isNotEmpty &&
+          threadTailIsVisible() &&
+          itemPositionsListener.itemPositions.value.any(
+            (position) =>
+                position.index == tailIndex &&
+                position.itemTrailingEdge <= bottomEdge,
+          );
       final isDm =
           ref.read(channelsProvider.notifier).channelById(channelId)?.isDm ??
           false;
+      // Displaying a row ends its device-local unread before it is read.
+      final endCatchUp = clearCovered(visible);
       final marks = readingMarks(
-        readState: readState,
+        readState: ref.read(readStateProvider),
         channelId: channelId,
         isDm: isDm,
         currentPubkey: currentPubkey,
         loaded: allMsgs,
         visible: visible,
-        bottom: replies.isNotEmpty && threadTailIsVisible()
-            ? replies.last
-            : null,
+        bottom: atBottom ? replies.last : null,
         threadRootId: queryRootId,
         isRootThread: threadHead.parentId == null,
+        onCatchUp: endCatchUp,
       );
       final notifier = ref.read(readStateProvider.notifier);
       for (final mark in marks.entries) {
@@ -783,19 +812,9 @@ class ThreadDetailPage extends HookConsumerWidget {
       }
     }
 
-    // Reading starts once the thread holds still for the dwell while this
-    // page is in front and the app is in use.
-    final appInUse = isAppInUse(useAppLifecycleState());
-    final readStateReady = ref.watch(
-      readStateProvider.select((state) => state.isReady),
-    );
     useReadingDwell(
       positions: itemPositionsListener.itemPositions,
-      active:
-          threadViewportVisible &&
-          readStateReady &&
-          appInUse &&
-          (ModalRoute.of(context)?.isCurrent ?? true),
+      active: readingActive,
       onDwell: readVisibleReplies,
       keys: [threadHead.id, readingContentKey(allMsgs), navigationBottomInset],
     );
@@ -1085,6 +1104,12 @@ class ThreadDetailPage extends HookConsumerWidget {
                         hintText: 'Reply in thread\u2026',
                         threadHeadId: threadHead.id,
                         rootId: effectiveRootId,
+                        prefillScopeMessages: channel?.isDm ?? true
+                            ? null
+                            : [
+                                if (!liveDeletionHidesHead) liveHead,
+                                ...replies,
+                              ],
                         onFocusRequested: followThreadTailFromComposer,
                         onSend:
                             (

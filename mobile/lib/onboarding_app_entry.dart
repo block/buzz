@@ -8,6 +8,7 @@ import 'features/pairing/pairing_page.dart';
 import 'organization_app_entry.dart';
 import 'features/pairing/pairing_provider.dart';
 import 'shared/hosted/hosted_flow_provider.dart';
+import 'shared/hosted/account_community_sync_status.dart';
 import 'shared/hosted/hosted_flow.dart';
 import 'shared/hosted/hosted_communities.dart';
 import 'shared/hosted/use_known_communities.dart';
@@ -23,11 +24,15 @@ class OnboardingAppEntry extends HookConsumerWidget {
     super.key,
     this.addingCommunity = false,
     this.restoreAccount = true,
+    this.showFindCommunities = true,
     this.onExit,
     this.onComplete,
   });
   final bool addingCommunity;
   final bool restoreAccount;
+
+  /// The switcher already lists account destinations above its Add action.
+  final bool showFindCommunities;
   final VoidCallback? onExit;
 
   /// Continues picker restoration before the completed Add route is removed.
@@ -110,13 +115,14 @@ class OnboardingAppEntry extends HookConsumerWidget {
     final hasKnownCommunities = useKnownCommunities(
       accountKey: flow?.account.account?.subject,
       active:
+          showFindCommunities &&
           !existingUser.value &&
           !enteringCommunityLink.value &&
           !creating.value &&
           flow?.stage == HostedFlowStage.idle &&
           (ModalRoute.of(context)?.isCurrent ?? true),
       load: () async =>
-          (await loadKnownHostedCommunities(flow!.account)).isNotEmpty,
+          (await loadKnownAccountCommunities(flow!.account)).isNotEmpty,
     );
     final problem = flow != null && flow.accountOnly ? flow.problem : null;
     final status = flow == null
@@ -221,48 +227,64 @@ class OnboardingAppEntry extends HookConsumerWidget {
           back();
         }
       },
-      child: PairingPage(
-        connectionLanding: true,
-        showConnectionOptions:
-            !HostedEnvironment.enabled || addingCommunity || connected,
-        addingCommunity: addingCommunity,
-        signedInOnboarding: connected && !addingCommunity && !signingIn,
-        hasKnownCommunities: hasKnownCommunities,
-        existingUser: existingUser.value,
-        enteringCommunityLink: enteringCommunityLink.value,
-        creatingCommunity: creating.value,
-        onSubmitCommunity: flow == null
-            ? null
-            : (name) {
-                creating.value = false;
-                unawaited(flow.start(HostedCreateCommunity(name)));
-              },
-        onCommunityLink: () => enteringCommunityLink.value = true,
-        onCreateCommunity: flow == null || busy
-            ? null
-            : () => creating.value = true,
-        onBuilderlab: flow == null
-            ? null
-            : signingIn
-            ? () => unawaited(flow.leave())
-            : busy
-            ? null
-            : () => unawaited(flow.signInAccount()),
-        onImportIdentity: flow == null || busy
-            ? null
-            : () => unawaited(flow.signInAccount(importIdentity: true)),
-        accountStatus: status,
-        builderlabBusy: busy && !signingIn,
-        signInPending: signingIn || busy,
-        builderlabLabel: signingIn
-            ? 'Cancel sign-in'
-            : busy
-            ? 'Connecting…'
-            : connected
-            ? 'Continue with Builderlab'
-            : 'Sign in with email',
-        onWelcomeBack: back,
-        onAlreadyUseBuzz: () => existingUser.value = true,
+      child: Column(
+        children: [
+          Expanded(
+            child: PairingPage(
+              connectionLanding: true,
+              showConnectionOptions:
+                  !HostedEnvironment.enabled || addingCommunity || connected,
+              addingCommunity: addingCommunity,
+              signedInOnboarding: connected && !addingCommunity && !signingIn,
+              hasKnownCommunities: showFindCommunities && hasKnownCommunities,
+              existingUser: existingUser.value,
+              enteringCommunityLink: enteringCommunityLink.value,
+              creatingCommunity: creating.value,
+              onSubmitCommunity: flow == null
+                  ? null
+                  : (name) {
+                      creating.value = false;
+                      unawaited(flow.start(HostedCreateCommunity(name)));
+                    },
+              onCommunityLink: () => enteringCommunityLink.value = true,
+              onCreateCommunity: flow == null || busy
+                  ? null
+                  : () => creating.value = true,
+              onFindCommunities: flow == null || busy
+                  ? null
+                  : () => unawaited(flow.signInAccount(discoverOnly: true)),
+              onBuilderlab: flow == null
+                  ? null
+                  : signingIn
+                  ? () => unawaited(flow.leave())
+                  : busy
+                  ? null
+                  : () => unawaited(flow.signInAccount()),
+              onImportIdentity: flow == null || busy
+                  ? null
+                  : () => unawaited(flow.signInAccount(importIdentity: true)),
+              accountStatus: status,
+              builderlabBusy: busy && !signingIn,
+              signInPending: signingIn || busy,
+              builderlabLabel: signingIn
+                  ? 'Cancel sign-in'
+                  : busy
+                  ? 'Connecting…'
+                  : connected
+                  ? 'Continue with Builderlab'
+                  : 'Sign in with email',
+              onWelcomeBack: back,
+              onAlreadyUseBuzz: () => existingUser.value = true,
+            ),
+          ),
+          if (connected)
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 180),
+              child: const SingleChildScrollView(
+                child: Material(child: AccountCommunitySyncStatus()),
+              ),
+            ),
+        ],
       ),
     );
   }

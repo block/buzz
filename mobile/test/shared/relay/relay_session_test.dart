@@ -12,6 +12,7 @@ import 'package:buzz/features/age_gate/age_signal_provider.dart';
 import 'package:buzz/features/channels/agent_activity/observer_subscription.dart';
 import 'package:buzz/features/channels/agent_activity/observer_models.dart';
 import 'package:buzz/shared/auth/auth_provider.dart';
+import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/relay/relay_query_response.dart';
 
@@ -1077,6 +1078,92 @@ void main() {
     sockets.last.connectSuccessfully();
     expect(session.state.status, SessionStatus.connected);
   });
+
+  test(
+    'auth reloads keep the socket until status or identity changes',
+    () async {
+      final sockets = <_ControlledRelaySocket>[];
+      final keychain = nostr.Keys.generate();
+      final auth = _ReloadingAuthNotifier()..pubkey = keychain.public;
+      final session = RelaySessionNotifier(
+        socketFactory:
+            ({
+              required wsUrl,
+              required nsec,
+              required onMessage,
+              required onConnected,
+              required onDisconnected,
+            }) {
+              final socket = _ControlledRelaySocket(
+                wsUrl: wsUrl,
+                nsec: nsec,
+                onMessage: onMessage,
+                onConnected: onConnected,
+                onDisconnected: onDisconnected,
+              );
+              sockets.add(socket);
+              return socket;
+            },
+      );
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => session),
+          relayConfigProvider.overrideWith(
+            () => _FakeRelayConfigNotifier(
+              baseUrl: 'https://relay.example',
+              nsec: keychain.nsec,
+            ),
+          ),
+          authProvider.overrideWith(() => auth),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(authProvider.future);
+      final listener = container.listen(relaySessionProvider, (_, _) {});
+      addTearDown(listener.close);
+      await Future<void>.delayed(Duration.zero);
+      sockets.single.connectSuccessfully();
+
+      final events = <NostrEvent>[];
+      final subscribed = session.subscribe(_channelFilter, events.add);
+      await Future<void>.delayed(Duration.zero);
+      final subId = sockets.single.sent.single[1];
+      session.debugHandleSocketMessageForTest(['EOSE', subId]);
+      await subscribed;
+
+      // An invite join reloads auth twice for the same signed-in identity.
+      for (var i = 0; i < 2; i++) {
+        container.invalidate(authProvider);
+        await container.read(authProvider.future);
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      expect(sockets, hasLength(1));
+      expect(sockets.single.disposeCalls, 0);
+      expect(session.state.status, SessionStatus.connected);
+      session.debugHandleSocketMessageForTest([
+        'EVENT',
+        subId,
+        _event().toJson(),
+      ]);
+      session.debugFlushEventBuffer();
+      expect(events.map((event) => event.id), ['event-1']);
+
+      auth.pubkey = nostr.Keys.generate().public;
+      container.invalidate(authProvider);
+      await container.read(authProvider.future);
+      await Future<void>.delayed(Duration.zero);
+      expect(sockets, hasLength(2));
+      expect(sockets.first.disposeCalls, 1);
+
+      auth.status = AuthStatus.unauthenticated;
+      container.invalidate(authProvider);
+      await container.read(authProvider.future);
+      await Future<void>.delayed(Duration.zero);
+      expect(sockets, hasLength(2));
+      expect(sockets.last.disposeCalls, 1);
+    },
+  );
 
   test('does not schedule reconnects after background disconnect', () {
     final session = RelaySessionNotifier();
@@ -2265,6 +2352,23 @@ class _AuthenticatedAuthNotifier extends AuthNotifier {
   @override
   Future<AuthState> build() async =>
       const AuthState(status: AuthStatus.authenticated);
+}
+
+class _ReloadingAuthNotifier extends AuthNotifier {
+  AuthStatus status = AuthStatus.authenticated;
+  String? pubkey;
+
+  @override
+  Future<AuthState> build() async => AuthState(
+    status: status,
+    community: Community(
+      id: 'community-1',
+      name: 'Example',
+      relayUrl: 'https://relay.example',
+      pubkey: pubkey,
+      addedAt: DateTime(2026),
+    ),
+  );
 }
 
 class _ControlledRelaySocket extends RelaySocket {

@@ -35,3 +35,28 @@ extension on ChannelsNotifier {
     _memberSnapshotsByChannelId = Map.unmodifiable(snapshots);
   }
 }
+
+/// Membership in private backing rooms, including rooms hidden from the list.
+final channelViewerIsMemberProvider = Provider.autoDispose.family<bool, String>(
+  (ref, channelId) {
+    ref.watch(channelsProvider);
+    final pubkey = ref.watch(myPubkeyProvider);
+    return pubkey != null &&
+        ref
+            .read(channelsProvider.notifier)
+            .cachedMembersForChannel(channelId)
+            .any((member) => member.pubkey == pubkey);
+  },
+);
+
+/// Null means the room membership has not been learned yet.
+final huddleHistoryMembershipProvider = Provider.autoDispose
+    .family<bool?, String>((ref, channelId) {
+      ref.watch(channelsProvider);
+      final pubkey = ref.watch(myPubkeyProvider);
+      final notifier = ref.read(channelsProvider.notifier);
+      final members = notifier._memberSnapshotsByChannelId[channelId];
+      if (pubkey == null || !notifier._hasAuthoritativeMemberships) return null;
+      if (members == null) return false;
+      return members.any((member) => member.pubkey == pubkey);
+    });

@@ -336,6 +336,17 @@ class _InboxRow extends HookConsumerWidget {
     );
   }
 
+  /// Messages, not other inbox activity, can start a Solo chat.
+  bool get _canStartSoloChat =>
+      item.item.channelId != null &&
+      item.item.content.trim().isNotEmpty &&
+      const {
+        EventKind.streamMessage,
+        EventKind.streamMessageV2,
+        EventKind.forumPost,
+        EventKind.forumComment,
+      }.contains(item.item.kind);
+
   /// Thread root that Follow acts on: the conversation's root for thread
   /// rows, the message itself for top-level rows (matching the message
   /// actions sheet). Solo chats have no threads, and grouped DM conversations
@@ -386,14 +397,23 @@ class _InboxRow extends HookConsumerWidget {
                       title: Text(
                         following ? 'Unfollow thread' : 'Follow thread',
                       ),
-                      onTap: () {
+                      onTap: () async {
+                        final messenger = ScaffoldMessenger.maybeOf(context);
                         Navigator.of(sheetContext).pop();
                         final notifier = ref.read(
                           threadFollowsProvider.notifier,
                         );
-                        following
-                            ? notifier.unfollowThread(followRootId)
-                            : notifier.followThread(followRootId);
+                        final channelId = item.item.channelId;
+                        if (channelId == null) return;
+                        final saved = await (following
+                            ? notifier.unfollowThread(channelId, followRootId)
+                            : notifier.followThread(channelId, followRootId));
+                        if (!saved) {
+                          messenger?.showFeedbackSnackBar(
+                            SnackBar(content: Text(notifier.failureMessage)),
+                            kind: ToastKind.error,
+                          );
+                        }
                       },
                     ),
                   if (canRemind)
@@ -415,6 +435,28 @@ class _InboxRow extends HookConsumerWidget {
                       onTap();
                     },
                   ),
+                  if (_canStartSoloChat)
+                    ListTile(
+                      leading: const Icon(BuzzIcons.messageCircle),
+                      title: const Text('Start Solo chat'),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        final message = item.item;
+                        unawaited(
+                          openSoloChatFromMessage(
+                            context,
+                            ref,
+                            channel: channel,
+                            channelId: message.channelId!,
+                            messageId: message.id,
+                            threadRootId: parseThreadReference(
+                              message.tags,
+                            ).rootId,
+                            content: message.content,
+                          ),
+                        );
+                      },
+                    ),
                 ],
               ),
             ),

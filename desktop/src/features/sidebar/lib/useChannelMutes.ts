@@ -14,6 +14,7 @@ import {
 } from "./channelMutesStorage";
 import { ChannelMuteSyncManager } from "./channelMutesSync";
 import type { RemoteMutes } from "./channelMutesSync";
+import { nextSidebarFlagTime } from "./sidebarFlagTime";
 import { useStaleReaderRecovery } from "./useStaleReaderRecovery";
 
 export function useChannelMutes(
@@ -190,11 +191,11 @@ export function useChannelMutes(
   const setMuteState = React.useCallback(
     (channelId: string, muted: boolean) => {
       if (!pubkey) return;
-      const entry: ChannelMuteEntry = {
-        muted,
-        updatedAt: Math.floor(Date.now() / 1000),
-      };
       setStore((prev) => {
+        const entry: ChannelMuteEntry = {
+          muted,
+          updatedAt: nextSidebarFlagTime(prev.channels[channelId]?.updatedAt),
+        };
         const next = boundMuteStore(
           {
             version: 1,

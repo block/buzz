@@ -2,6 +2,10 @@ import 'dart:async';
 import 'dart:ui' show SemanticsAction;
 
 import 'package:buzz/features/channels/me/me_chat_assistant.dart';
+import 'package:buzz/features/channels/me/me_workspace_picker.dart';
+import 'package:buzz/shared/widgets/frosted_scaffold.dart';
+import 'package:buzz/shared/widgets/frosted_app_bar.dart';
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/features/channels/me/me_assistant_picker.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
@@ -67,7 +71,89 @@ class _Harness extends HookConsumerWidget {
   }
 }
 
+class _NativeHeaderHarness extends HookConsumerWidget {
+  const _NativeHeaderHarness();
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final workspace = useMeWorkspace(context, ref, enabled: false);
+    final assistant = useMeChatAssistant(
+      context,
+      ref,
+      enabled: false,
+      channelId: 'chat',
+      initial: null,
+      messages: const [],
+    );
+    return FrostedScaffold(
+      appBar: FrostedAppBar(
+        nativeTitle: 'Solo chat',
+        nativeLeading: IosNavigationAction(
+          label: 'Back',
+          symbol: 'chevron.backward',
+          onPressed: () {},
+        ),
+        nativeActions: [workspace.nativeAction, assistant.nativeAction],
+      ),
+      body: const SizedBox.expand(),
+    );
+  }
+}
+
 void main() {
+  testWidgets('Solo controls stay in the upper rail across folds', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.padding = const FakeViewPadding(right: 76);
+    tester.view.viewPadding = const FakeViewPadding(right: 76);
+    addTearDown(tester.view.reset);
+    tester.view.physicalSize = const Size(466, 678);
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: const _NativeHeaderHarness(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final bar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
+    final labels = ['Back', ...bar.nativeActions!.map((a) => a.label)];
+    double previousY = 0;
+    for (final label in labels) {
+      final control = find.byKey(ValueKey('duo-toolbar-$label'));
+      expect(control, findsOneWidget);
+      final rect = tester.getRect(control);
+      expect(rect.center.dx, greaterThan(390));
+      expect(rect.center.dy, greaterThan(previousY));
+      previousY = rect.center.dy;
+    }
+    tester.view.physicalSize = const Size(951, 669);
+    await tester.pumpAndSettle();
+    previousY = 0;
+    for (final label in labels) {
+      final control = find.byKey(ValueKey('duo-toolbar-$label'));
+      expect(control, findsOneWidget);
+      final rect = tester.getRect(control);
+      expect(rect.center.dx, greaterThan(875));
+      expect(rect.center.dy, greaterThan(previousY));
+      expect(rect.bottom, lessThan(400));
+      previousY = rect.center.dy;
+    }
+    final header = tester.widget<IosNavigationBar>(
+      find.byWidgetPredicate(
+        (w) => w is IosNavigationBar && !w.standaloneControl,
+      ),
+    );
+    expect(header.actions, isEmpty);
+    tester.view.physicalSize = const Size(466, 678);
+    await tester.pumpAndSettle();
+    for (final label in labels) {
+      expect(find.byKey(ValueKey('duo-toolbar-$label')), findsOneWidget);
+    }
+    expect(tester.takeException(), isNull);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
   for (final keyFallback in [false, true]) {
     final target = keyFallback ? '0123456789abcdef' * 4 : 'b';
     // An unnamed agent reads as its compact npub, like every other picker.
@@ -171,7 +257,7 @@ void main() {
       );
     }
   }
-  for (final scenario in ['valid', 'revoked', 'removed']) {
+  for (final scenario in ['valid', 'revoked', 'removed', 'switched']) {
     testWidgets('parallel send checks handle $scenario recipients', (
       tester,
     ) async {
@@ -219,6 +305,7 @@ void main() {
         result,
         scenario == 'valid' ? completion(['a']) : throwsStateError,
       );
+      if (scenario == 'switched') sync.disposed = true;
       owned.complete(scenario != 'revoked');
       membership.complete(
         scenario == 'removed'
@@ -232,6 +319,71 @@ void main() {
               ],
       );
       await assertion;
+    });
+  }
+  for (final scenario in ['member', 'removed', 'switched']) {
+    testWidgets('explicit Solo mentions validate $scenario membership', (
+      tester,
+    ) async {
+      final membership = Completer<List<ChannelMember>>();
+      late WidgetRef widgetRef;
+      final sync = MeSync(
+        RelaySessionNotifier(),
+        RelayConfig(
+          baseUrl: 'https://relay.test',
+          nsec: nostr.Nip19.encode(
+            prefix: nostr.Nip19Prefix.nsec,
+            data: '0' * 63 + '1',
+          ),
+        ),
+      );
+      var ownershipReads = 0;
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            meSyncProvider.overrideWithValue(sync),
+            meAssistantOwnershipProvider.overrideWith((ref, key) async {
+              ownershipReads++;
+              return false;
+            }),
+            channelMembersProvider(
+              'chat',
+            ).overrideWith((ref) => membership.future),
+          ],
+          child: Consumer(
+            builder: (context, ref, child) {
+              widgetRef = ref;
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+      final result = meRecipients(widgetRef, 'chat', null, [
+        'person',
+        'other-agent',
+      ]);
+      final assertion = expectLater(
+        result,
+        scenario == 'member'
+            ? completion(['person', 'other-agent'])
+            : throwsStateError,
+      );
+      if (scenario == 'switched') sync.disposed = true;
+      membership.complete([
+        ChannelMember(
+          pubkey: 'other-agent',
+          role: 'bot',
+          joinedAt: DateTime(2026),
+        ),
+        if (scenario != 'removed')
+          ChannelMember(
+            pubkey: 'person',
+            role: 'member',
+            joinedAt: DateTime(2026),
+          ),
+      ]);
+      await assertion;
+      expect(ownershipReads, 0);
     });
   }
   NostrEvent message(String author, List<String> recipients, int time) =>

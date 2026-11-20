@@ -27,7 +27,7 @@ env:
 jobs:
   rust-lint:
     name: Rust Lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.rust || inputs.desktop_rust)
     permissions:
@@ -47,7 +47,7 @@ jobs:
 
   unit-tests:
     name: Unit Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     if: inputs.lane == 'required' && (github.event_name == 'push' || inputs.rust)
     permissions:
@@ -72,7 +72,7 @@ jobs:
 
   server-cross-compile:
     name: Server Cross-Compile
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     if: inputs.lane == 'cross-compile' && (github.event_name == 'push' || inputs.rust)
     permissions:
@@ -217,7 +217,7 @@ jobs:
     name: Results
     if: ${{ always() }}
     needs: [rust-lint, unit-tests, server-cross-compile, windows-rust]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     outputs:

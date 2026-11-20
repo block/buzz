@@ -11,13 +11,7 @@ final class NotificationService: UNNotificationServiceExtension {
   private var restrictedFallbackContent: UNMutableNotificationContent?
   private lazy var interactionCleanup = BuzzInteractionCleanupRetry(
     containerURL: ageRestrictionContainerURL, deletion: interactionDeletionDeadline)
-  private lazy var communicationPresenter = BuzzCommunicationNotificationPresenter(
-    donate: { interaction, completion in interaction.donate(completion: completion) },
-    deleteAllInteractions: { [cleanup = interactionCleanup] completion in
-      cleanup.request(completion: completion)
-    },
-    updateContent: { content, intent in try content.updating(from: intent) }
-  )
+  private let communicationPresenter = BuzzCommunicationNotificationPresenter()
   private let interactionDeletionDeadline = BuzzInteractionDeletionDeadline(
     timeout: 5,
     deleteAllInteractions: { completion in
@@ -161,9 +155,16 @@ final class NotificationService: UNNotificationServiceExtension {
     bestAttemptContent = content
     var cleanUserInfo = content.userInfo
     cleanUserInfo.removeValue(forKey: BuzzPushNavigationTarget.userInfoKey)
+    cleanUserInfo.removeValue(forKey: BuzzNotificationReplyContext.userInfoKey)
     content.userInfo = cleanUserInfo
+    // Only a resolved message offers Reply; the extension sets it below.
+    content.categoryIdentifier = ""
 
-    let session = URLSession(configuration: .ephemeral)
+    let configuration = URLSessionConfiguration.ephemeral
+    // The relay's hosts set a Cloudflare cookie the extension must never send back.
+    configuration.httpCookieStorage = nil
+    configuration.httpShouldSetCookies = false
+    let session = URLSession(configuration: configuration)
     self.session = session
     let resolver = makeResolver(session: session)
     self.resolver = resolver
@@ -188,23 +189,19 @@ final class NotificationService: UNNotificationServiceExtension {
         if let navigationTarget = resolution.navigationTarget {
           var userInfo = content.userInfo
           userInfo[BuzzPushNavigationTarget.userInfoKey] = navigationTarget.userInfoValue
+          if let replyContext = resolution.replyContext,
+            navigationTarget.communityID
+              == BuzzSelectedCommunity.id(in: self.appGroupIdentifier.flatMap(UserDefaults.init(suiteName:)))
+          {
+            userInfo[BuzzNotificationReplyContext.userInfoKey] = replyContext.userInfoValue
+            content.categoryIdentifier = BuzzNotificationReplyContext.categoryIdentifier
+          }
           content.userInfo = userInfo
         }
         self.bestAttemptContent = content
-        self.communicationPresenter.present(
-          ordinaryContent: content,
-          resolution: resolution,
-          isStillAllowed: { [weak self] in
-            guard let self else { return false }
-            return self.isCurrent(scope) && self.resolver?.isStillAuthorized() == true
-              && !self.isAgeRestricted()
-          },
-          onDeletionFailure: { error in
-            NSLog("Notification cleanup retry failed: %@", String(describing: error))
-          }
-        ) { [weak self] specializedContent in
-          self?.finish(specializedContent)
-        }
+        // finish re-checks scope, authorization and age restriction.
+        self.finish(
+          self.communicationPresenter.present(ordinaryContent: content, resolution: resolution))
         return
       }
       self.finish(content)
@@ -250,10 +247,6 @@ final class NotificationService: UNNotificationServiceExtension {
     }
   }
 
-  private func isAgeRestricted() -> Bool {
-    BuzzAgeRestrictionSession.isRestricted(containerURL: ageRestrictionContainerURL)
-  }
-
   private static func restrictedFallback(
     from content: UNNotificationContent
   ) -> UNMutableNotificationContent {
@@ -264,8 +257,10 @@ final class NotificationService: UNNotificationServiceExtension {
     fallback.subtitle = ""
     fallback.body = "Open Buzz to view this message."
     fallback.threadIdentifier = ""
+    fallback.categoryIdentifier = ""
     var userInfo = fallback.userInfo
     userInfo.removeValue(forKey: BuzzPushNavigationTarget.userInfoKey)
+    userInfo.removeValue(forKey: BuzzNotificationReplyContext.userInfoKey)
     fallback.userInfo = userInfo
     return fallback
   }

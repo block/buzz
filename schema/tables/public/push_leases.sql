@@ -1,7 +1,7 @@
 -- NIP-PL effective lease state and durable wake outbox. Every key is led by
 -- community_id: client-provided origin is confirmation only, never routing.
 CREATE TABLE push_leases (
-    community_id UUID NOT NULL REFERENCES communities(id),
+    community_id UUID NOT NULL,
     author BYTEA NOT NULL CHECK (length(author) = 32),
     installation_id TEXT NOT NULL CHECK (octet_length(installation_id) BETWEEN 1 AND 64),
     source_event_id BYTEA NOT NULL CHECK (length(source_event_id) = 32),

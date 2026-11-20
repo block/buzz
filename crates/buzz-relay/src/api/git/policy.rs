@@ -244,6 +244,16 @@ pub async fn hook_policy_check(
         return (StatusCode::FORBIDDEN, "callback timestamp invalid").into_response();
     }
 
+    // The localhost callback selects its tenant by an HMAC-bound UUID rather
+    // than Host. Keep the control-plane transport usable for canonical pushes
+    // without authorizing an extra community in single-community mode.
+    if !state.config.multi_community_relay {
+        match state.db.lookup_community_host(community).await {
+            Ok(Some(host)) if crate::single_community::serves_host(&state.config, &host) => {}
+            _ => return (StatusCode::FORBIDDEN, "community not served").into_response(),
+        }
+    }
+
     // 4. Validate and resolve kind:30617 for this repo.
     // Query by (community_id, kind=30617, pubkey=owner, d_tag=repo_id) to
     // prevent spoofing and keep the localhost hook callback on the same

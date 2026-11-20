@@ -63,6 +63,18 @@
                 android:name="flutter_deeplinking_enabled"
                 android:value="false" />
         </activity>
+        <!-- Diagnostic reporting (docs/mobile-diagnostic-reporting.md). The
+             Sentry SDK starts from Dart, and only when the build has a
+             destination, so its startup provider never runs. -->
+        <provider
+            android:name="io.sentry.android.core.SentryPerformanceProvider"
+            android:authorities="${applicationId}.SentryPerformanceProvider"
+            tools:node="remove" />
+        <!-- Network-change breadcrumbs carry VPN state, signal strength and
+             bandwidth, and native reports skip the app's Dart filter. -->
+        <meta-data
+            android:name="io.sentry.breadcrumbs.network-events"
+            android:value="false" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
@@ -75,6 +87,7 @@
 
          In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
     <queries>
+        <intent><action android:name="android.speech.RecognitionService" /></intent>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>

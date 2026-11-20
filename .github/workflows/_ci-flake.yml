@@ -17,7 +17,7 @@ env:
 jobs:
   flake-select:
     name: Flake check selection
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -69,7 +69,7 @@ jobs:
     name: Flake check (Rust)
     needs: [flake-select]
     if: needs.flake-select.outputs.rust != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -111,7 +111,7 @@ jobs:
     name: Flake check (Desktop Tauri)
     needs: [flake-select]
     if: needs.flake-select.outputs.tauri != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # A Desktop Tauri lane's bound (_ci-desktop.yml: ci-apt-retry.sh bounds
     # the apt step at ~34m worst case and a cold build needs ~15m), plus a
     # second cold build: a lib selection also builds the mesh-llm graph.
@@ -180,7 +180,7 @@ jobs:
     name: Flake check (node:test)
     needs: [flake-select]
     if: needs.flake-select.outputs.node != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
       contents: read
@@ -215,7 +215,7 @@ jobs:
     name: Flake check (Playwright smoke, ${{ matrix.shard }}/${{ needs.flake-select.outputs.playwright_shard_total }})
     needs: [flake-select]
     if: needs.flake-select.outputs.playwright != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # Same bound as a smoke shard: Chromium dependency setup is bounded by
     # ci-apt-retry.sh (~25m worst case), and flake-check.mjs sizes the shards
     # so the repetitions fit the rest.
@@ -286,8 +286,10 @@ jobs:
     name: Flake check (Flutter)
     needs: [flake-select]
     if: needs.flake-select.outputs.dart != ''
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ubuntu-26.04
+    # Large mobile changes take about three minutes per repetition, plus SDK
+    # setup. Allow all ten repetitions to finish with runner variance.
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:

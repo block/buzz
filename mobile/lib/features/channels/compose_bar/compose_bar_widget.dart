@@ -28,6 +28,10 @@ class ComposeBar extends HookConsumerWidget {
   /// Optional thread IDs for thread-scoped typing indicators.
   final String? threadHeadId;
   final String? rootId;
+
+  /// The conversation's displayed messages, oldest first; prefills the agents
+  /// the viewer's latest one notified. Null turns the prefill off.
+  final List<TimelineMessage>? prefillScopeMessages;
   const ComposeBar({
     super.key,
     required this.channelId,
@@ -41,6 +45,7 @@ class ComposeBar extends HookConsumerWidget {
     this.focusNode,
     this.onFocusRestorerChanged,
     this.onFocusRequested,
+    this.prefillScopeMessages,
     required this.onSend,
   });
   @override
@@ -120,7 +125,11 @@ class ComposeBar extends HookConsumerWidget {
     );
     final voiceNoteRef = useRef(voiceNote)..value = voiceNote;
     final mentionMap = useRef(<String, MentionCandidate>{});
+    final prefillText = useRef<String?>(null);
     _useComposeDraftLifecycle(
+      context: context,
+      voiceNote: voiceNoteRef,
+      prefillText: prefillText,
       mentionMap: mentionMap,
       ref: ref,
       controller: controller,
@@ -165,30 +174,14 @@ class ComposeBar extends HookConsumerWidget {
       return () => focusNode.removeListener(collapseWhenUnfocused);
     }, [focusNode]);
 
-    final appView = View.of(context);
-    useEffect(() {
-      final observer = _ComposerKeyboardMetricsObserver(
-        view: appView,
-        onKeyboardShown: () {
-          androidImeFallbackTimer.value?.cancel();
-          androidImeTransitionStarted.value = true;
-        },
-        onKeyboardHidden: () {
-          androidImeFallbackTimer.value?.cancel();
-          if (defaultTargetPlatform == TargetPlatform.android) {
-            androidImeTransitionStarted.value = false;
-          }
-          voiceNote.onKeyboardHidden();
-          collapseComposer();
-          focusNode.unfocus();
-        },
-      );
-      WidgetsBinding.instance.addObserver(observer);
-      return () {
-        WidgetsBinding.instance.removeObserver(observer);
-        observer.dispose();
-      };
-    }, [appView, focusNode, voiceNote.isPreparing]);
+    _useComposerKeyboardMetrics(
+      context: context,
+      focusNode: focusNode,
+      voiceNote: voiceNote,
+      androidImeFallbackTimer: androidImeFallbackTimer,
+      androidImeTransitionStarted: androidImeTransitionStarted,
+      collapseComposer: collapseComposer,
+    );
     final resolvedHint =
         hintText ??
         (channelName.isNotEmpty ? 'Message #$channelName' : 'Message\u2026');
@@ -335,22 +328,35 @@ class ComposeBar extends HookConsumerWidget {
     final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
 
+    List<MentionCandidate> memberMentionCandidates() => _typedMemberCandidates(
+      membersAsync: membersAsync,
+      sessionStatus: sessionStatus,
+      cachedMembers: cachedMembers,
+      userCache: userCache,
+      agentOwners: agentOwners,
+    );
+
     // Insert a selected mention into the text field.
     void insertMention(MentionCandidate candidate) {
       final name = selectedMentionLabel(candidate.label, candidate.pubkey, {
         for (final entry in mentionMap.value.entries)
           entry.key: entry.value.pubkey,
       });
-      // Track the resolved candidate so we can pass its pubkey and prepare
-      // selected non-member agents at send time.
-      mentionMap.value[name] = candidate;
       ref
           .read(mentionHistoryProvider.notifier)
           .remember(channelId, candidate.pubkey);
 
-      final start = mentionStartIdx.value.clamp(0, controller.text.length);
+      var start = mentionStartIdx.value.clamp(0, controller.text.length);
       isModifyingText.value = true;
       try {
+        start = _requalifyNamesakes(
+          controller,
+          mentionMap.value,
+          candidate,
+          start,
+          [for (final member in memberMentionCandidates()) member.label],
+        );
+        mentionMap.value[name] = candidate;
         spliceAndMoveCursor(
           controller,
           focusNode,
@@ -362,6 +368,18 @@ class ComposeBar extends HookConsumerWidget {
       }
       mentionQuery.value = null;
     }
+
+    _useAgentMentionPrefill(
+      ref: ref,
+      channelId: channelId,
+      scopeMessages: prefillScopeMessages,
+      draftKey: draftKey,
+      controller: controller,
+      mentionMap: mentionMap,
+      prefillText: prefillText,
+      isModifyingText: isModifyingText,
+      hasAttachments: hasAttachments,
+    );
 
     // Detect @mention query and broadcast typing on text / selection change.
     useEffect(() {
@@ -511,19 +529,8 @@ class ComposeBar extends HookConsumerWidget {
     // Insert `#` at the cursor to manually trigger channel mode.
     void triggerChannel() => _insertTriggerAtCursor(controller, focusNode, '#');
 
-    // Insert a selected emoji at the cursor without replacing the draft.
-    void insertEmoji(String emoji) {
-      final text = controller.text;
-      final selection = controller.selection;
-      final cursor = selection.isValid
-          ? selection.baseOffset.clamp(0, text.length)
-          : text.length;
-      controller.value = TextEditingValue(
-        text: text.replaceRange(cursor, cursor, emoji),
-        selection: TextSelection.collapsed(offset: cursor + emoji.length),
-      );
-      focusNode.requestFocus();
-    }
+    void insertEmoji(String emoji) =>
+        _insertComposerEmoji(controller, focusNode, emoji);
 
     void clearComposer() {
       draftRevision.value += 1;
@@ -542,16 +549,17 @@ class ComposeBar extends HookConsumerWidget {
       _removePendingAttachment(attachments, draftRevision, id);
     }
 
+    bool canSend() =>
+        !(draftMembers != null && preparingAttachments.value > 0) &&
+        !interactionLocked &&
+        (controller.text.trim().isNotEmpty || hasAttachments) &&
+        !isSending.value &&
+        uploadingCount.value == 0;
+
     // Send the message.
     Future<void> send() async {
+      if (!canSend()) return;
       final text = controller.text.trim();
-      if ((draftMembers != null && preparingAttachments.value > 0) ||
-          interactionLocked ||
-          (text.isEmpty && !hasAttachments) ||
-          isSending.value ||
-          uploadingCount.value > 0) {
-        return;
-      }
       final submittedOrigin = ComposerSendOrigin.capture(sendSurfaceKey);
       Future<void> sendWithOrigin(
         String content,
@@ -572,17 +580,7 @@ class ComposeBar extends HookConsumerWidget {
         selectedMentions = _resolveComposerMentions(
           text,
           mentionMap.value,
-          buildMentionCandidates(
-            members: channelMembersForAutocomplete(
-              membersAsync: membersAsync,
-              sessionStatus: sessionStatus,
-              cachedMembers: cachedMembers,
-            ),
-            relayAgents: const [],
-            sharedChannelIds: const {},
-            userCache: userCache,
-            ownerByAgentPubkey: agentOwners ?? const {},
-          ),
+          memberMentionCandidates(),
           buildMentionCandidates(
             members: membersAsync.asData?.value ?? const [],
             relayAgents: relayAgents ?? const [],
@@ -906,37 +904,13 @@ class ComposeBar extends HookConsumerWidget {
       );
     }
 
-    // Wrap (or insert) markdown formatting around the current selection.
-    void applyFormat(String prefix, [String? suffix]) {
-      suffix ??= prefix;
-      final text = controller.text;
-      final sel = controller.selection;
-      if (!sel.isValid) return;
-
-      isModifyingText.value = true;
-      try {
-        if (sel.isCollapsed) {
-          final offset = sel.baseOffset;
-          final updated =
-              '${text.substring(0, offset)}$prefix$suffix${text.substring(offset)}';
-          controller.text = updated;
-          controller.selection = TextSelection.collapsed(
-            offset: offset + prefix.length,
-          );
-        } else {
-          final selected = text.substring(sel.start, sel.end);
-          final updated =
-              '${text.substring(0, sel.start)}$prefix$selected$suffix${text.substring(sel.end)}';
-          controller.text = updated;
-          controller.selection = TextSelection.collapsed(
-            offset: sel.start + prefix.length + selected.length + suffix.length,
-          );
-        }
-      } finally {
-        isModifyingText.value = false;
-      }
-      focusNode.requestFocus();
-    }
+    void applyFormat(String prefix, [String? suffix]) => _applyComposerFormat(
+      controller,
+      focusNode,
+      isModifyingText,
+      prefix,
+      suffix,
+    );
 
     void chooseAttachment(
       Future<void> Function() choose, {
@@ -971,6 +945,7 @@ class ComposeBar extends HookConsumerWidget {
         iosAttachmentPopover
             .present(
               sourceContext: triggerContext,
+              composerContext: sendSurfaceKey.currentContext ?? context,
               onCapture: (image) => retainAndQueueImages([image]),
               onChoosePhotos: retainAndQueueImages,
               onAllPhotos: () => chooseAttachment(() async {
@@ -1033,7 +1008,7 @@ class ComposeBar extends HookConsumerWidget {
       attachmentSurface: attachmentSurface,
       onFocusRequested: onFocusRequested,
       focusNode: focusNode,
-      view: appView,
+      view: View.of(context),
       androidImeTransitionStarted: androidImeTransitionStarted,
       androidImeFallbackTimer: androidImeFallbackTimer,
     );
@@ -1044,6 +1019,39 @@ class ComposeBar extends HookConsumerWidget {
       focusNode: focusNode,
       expand: expandComposer,
     );
+
+    final readOnly = interactionLocked || (draftMembers != null && sending);
+    // Matches what _composerSuggestionPanel renders, and only while the field
+    // can be edited.
+    final pickerVisible =
+        (channelSuggestions.isNotEmpty ||
+            suggestions.isNotEmpty ||
+            mentionRows.searchFailed) &&
+        attachmentSurface.value == _AttachmentSurface.closed &&
+        !readOnly;
+    final topChannel = channelSuggestions.firstOrNull;
+    final topMention = suggestions
+        .where((s) => !mentionRows.unavailable.contains(s.pubkey))
+        .firstOrNull;
+    final pickerQuery = (mentionQuery.value, channelQuery.value);
+    KeyEventResult handleHardwareKey(FocusNode _, KeyEvent event) =>
+        _handleComposerHardwareKey(
+          event,
+          controller,
+          inputOwned: iosAttachmentPopover.isActive || isEmojiPickerOpen.value,
+          query: (mentionQuery.value, channelQuery.value),
+          renderedQuery: pickerQuery,
+          pickerVisible: pickerVisible,
+          acceptSuggestion: topChannel != null
+              ? () => _runComposerAction(() => insertChannel(topChannel))
+              : topMention != null
+              ? () => _runComposerAction(() => insertMention(topMention))
+              : null,
+          send: () async {
+            if (attachmentSurface.value != _AttachmentSurface.closed) return;
+            if (canSend()) _runComposerAction(() => unawaited(send()));
+          },
+        );
 
     final suggestionPanel = _composerSuggestionPanel(
       channelSuggestions: channelSuggestions,
@@ -1146,6 +1154,7 @@ class ComposeBar extends HookConsumerWidget {
                 contextMenuBuilder: buildContextMenu,
                 onContentInserted: uploadPastedImage,
                 onSend: () => unawaited(send()),
+                onKeyEvent: handleHardwareKey,
                 resolvedHint: resolvedHint,
                 attachmentSurface: attachmentSurface.value,
                 onAttachmentTap: handleAttachmentTap,
@@ -1180,8 +1189,7 @@ class ComposeBar extends HookConsumerWidget {
                 hasPendingUploads: hasPendingUploads,
                 canSend: composerText.trim().isNotEmpty || hasAttachments,
                 isSending: isSending.value || (draftMembers != null && sending),
-                readOnly:
-                    interactionLocked || (draftMembers != null && sending),
+                readOnly: readOnly,
               ),
             ),
           ),

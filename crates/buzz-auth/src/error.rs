@@ -19,8 +19,8 @@ pub enum AuthError {
     #[error("relay url mismatch")]
     RelayUrlMismatch,
 
-    /// The AUTH event's `created_at` timestamp is more than ±60 seconds from now.
-    #[error("auth event timestamp outside ±60s window")]
+    /// The AUTH event's `created_at` timestamp is more than ±120 seconds from now.
+    #[error("auth event timestamp outside ±120s window")]
     EventExpired,
 
     /// NIP-98 HTTP Auth event (kind:27235) failed verification.
