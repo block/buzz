@@ -43,6 +43,11 @@ could use only information authorized for that channel's audience.
 Would maintainers support this as a community feature? If so, can existing
 membership and roles express these permissions, including revocation and
 administrative handover, or would Buzz need an agent-specific grant?
+
+When a member loses permission to use an agent, should Buzz close their existing
+private sessions, keep them available as read-only history, or allow a handover?
+If handover is supported, who may authorize access to the private history?
+
 A human Buzz maintainer should own that decision. If the direction is
 accepted, a follow-up can define the smallest open contract an external
 runtime would need to implement.
