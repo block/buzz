@@ -72,12 +72,19 @@ class SentryDiagnosticReporter implements DiagnosticReporter {
 
   @override
   void setMember(String? pubkey) {
+    final previous = _member;
     _member = pubkey;
     _drop(
-      () => _hub.configureScope(
-        (scope) =>
-            scope.setUser(pubkey == null ? null : SentryUser(id: pubkey)),
-      ),
+      () => _hub.configureScope((scope) {
+        final user = scope.setUser(
+          pubkey == null ? null : SentryUser(id: pubkey),
+        );
+        // The trail holds the previous member's network events, with their
+        // relay's host. Leaving a member clears it, so none of them reach
+        // the next member's reports.
+        if (previous == null || previous == pubkey) return user;
+        return Future.wait([user, scope.clearBreadcrumbs()]);
+      }),
     );
   }
 

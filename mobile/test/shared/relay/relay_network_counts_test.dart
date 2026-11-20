@@ -142,6 +142,18 @@ void main() {
     expect(s.counts.errors, isEmpty);
   });
 
+  journey('a community switch\'s first connect is not a reconnect', (async, s) {
+    s.settle();
+    s.counts.clear();
+
+    s.container
+        .read(relayConfigProvider.notifier)
+        .update(baseUrl: 'https://other.test', nsec: s.relay.keys.nsec);
+    s.settle();
+
+    expect(s.counts.outcomes, [(_connection, null)]);
+  });
+
   journey('another member\'s session counts nothing', (async, s) {
     s.settle();
     s.counts.clear();

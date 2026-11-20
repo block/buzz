@@ -271,6 +271,16 @@ bool isOfflineTransportError(Object error) => switch (error) {
   _ => false,
 };
 
+/// Whether a native transport [error] says an open connection was lost:
+/// `URLSession`'s network connection lost, or Cronet's connection closed or
+/// reset.
+bool isConnectionLostTransportError(Object error) => switch (error) {
+  NSErrorClientException(:final error) =>
+    error.domain.toDartString() == 'NSURLErrorDomain' && error.code == -1005,
+  NetworkException(:final errorCode) => errorCode == 5 || errorCode == 8,
+  _ => false,
+};
+
 /// Classifies an `NSURLErrorDomain` code.
 @visibleForTesting
 TransportFailure? urlErrorFailure(int code) => switch (code) {

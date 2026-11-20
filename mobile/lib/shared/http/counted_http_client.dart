@@ -30,16 +30,17 @@ class _CountedClient extends http.BaseClient {
     try {
       response = await _inner.send(request);
     } catch (error) {
-      // Closing a client aborts its requests: the app cancelled them.
-      if (!_closed) {
+      if (_deadlinePassed[request] ?? false) {
+        // Its owner gave up waiting, whether by aborting it or by closing the
+        // client it was on.
+        _count(request, stopwatch, failure: NetworkFailure.timeout);
+      } else if (!_closed && error is! http.RequestAbortedException) {
+        // An abort or close with no deadline behind it is the app cancelling
+        // (a view closed, an image scrolled away), not a network failure.
         _count(
           request,
           stopwatch,
-          // An abort before any response is a deadline or stall the caller
-          // gave up on.
-          failure: error is http.RequestAbortedException
-              ? NetworkFailure.timeout
-              : classifyTransportError(error) ?? NetworkFailure.other,
+          failure: classifyTransportError(error) ?? NetworkFailure.other,
         );
       }
       rethrow;
@@ -77,6 +78,18 @@ class _CountedClient extends http.BaseClient {
     _inner.close();
   }
 }
+
+final _deadlinePassed = Expando<bool>('HTTP deadline passed');
+
+/// Records that [request]'s deadline passed. Call it before aborting the
+/// request, or closing its client, because the caller stopped waiting.
+///
+/// The shared client then counts the request as a timeout if it had no
+/// response headers yet; one with headers was already counted as the success
+/// it was. An abort or close without this is the app cancelling and is not
+/// counted.
+void noteHttpDeadline(http.BaseRequest request) =>
+    _deadlinePassed[request] = true;
 
 /// Wraps [inner] so its requests are counted, for transports that do not come
 /// from [newAppHttpClient].
@@ -145,6 +158,8 @@ NetworkFailure? classifyTransportError(Object? error) {
       TransportFailure.unreachable =>
         isOfflineTransportError(error)
             ? NetworkFailure.offline
+            : isConnectionLostTransportError(error)
+            ? NetworkFailure.disconnected
             : NetworkFailure.unreachable,
     };
   }

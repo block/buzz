@@ -139,7 +139,6 @@ void main() {
     () async {
       final cases = <Object, NetworkFailure>{
         TimeoutException('slow'): NetworkFailure.timeout,
-        http.RequestAbortedException(): NetworkFailure.timeout,
         const SocketException('Connection refused'): NetworkFailure.unreachable,
         const SocketException('Failed host lookup: relay.example.org'):
             NetworkFailure.unreachable,
@@ -189,6 +188,62 @@ void main() {
     await settled;
 
     expect(diagnostics.events, isEmpty);
+  });
+
+  test('an abort with no deadline behind it is not counted', () async {
+    expect(
+      await send(
+        'https://relay.example.org/',
+        (_) => throw http.RequestAbortedException(),
+      ),
+      isA<http.RequestAbortedException>(),
+    );
+
+    expect(diagnostics.events, isEmpty);
+    expect(diagnostics.breadcrumbs, isEmpty);
+  });
+
+  test('a deadline that passes before headers counts one timeout, even when '
+      'its owner closes the client', () async {
+    final hung = Completer<http.Response>();
+    final client = http.runWithClient(
+      newAppHttpClient,
+      () => MockClient((_) => hung.future),
+    );
+    final request = http.Request(
+      'POST',
+      Uri.parse('https://relay.example.org/query'),
+    );
+    final settled = client.send(request).then<void>((_) {}, onError: (_) {});
+    await pumpEventQueue();
+    noteHttpDeadline(request);
+    client.close();
+    hung.completeError(http.ClientException('Client closed'));
+    await settled;
+
+    expect(diagnostics.events.map((event) => event.failure), [
+      NetworkFailure.timeout,
+    ]);
+    expect(diagnostics.events.single.endpoint, NetworkEndpoint.relayHttpQuery);
+    expect(diagnostics.breadcrumbs, hasLength(1));
+  });
+
+  test('a deadline that passes after headers leaves the success', () async {
+    final client = http.runWithClient(
+      newAppHttpClient,
+      () => MockClient((_) async => http.Response('', 200)),
+    );
+    addTearDown(client.close);
+    final request = http.Request(
+      'GET',
+      Uri.parse('https://relay.example.org/'),
+    );
+    await client.send(request);
+    noteHttpDeadline(request);
+
+    expect(diagnostics.events.map((event) => event.outcome), [
+      NetworkOutcome.success,
+    ]);
   });
 
   test(

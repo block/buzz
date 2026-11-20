@@ -108,6 +108,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   bool _ageRestricted = false;
   bool _paused = false;
   bool _hasConnectedOnce = false;
+  // The relay this session last connected to, for counting reconnects. Unlike
+  // [_hasConnectedOnce], a community switch's first connect is not one.
+  String? _connectedRelay;
   int _connectionGeneration = 0;
   int _contextGeneration = 0;
   Object _liveSubscriptionOwner = Object();
@@ -597,7 +600,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _markLiveSubscriptionsClosed();
     _connectedAt = null;
     _connectStartedAt = _now();
-    if (!renewed && (_hasConnectedOnce || state.reconnectAttempt > 0)) {
+    if (!renewed &&
+        (_connectedRelay == config.baseUrl || state.reconnectAttempt > 0)) {
       _noteNetwork(NetworkEndpoint.relayReconnect);
     }
     final generation = ++_connectionGeneration;
@@ -657,6 +661,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _socketConnected = true;
     ref.read(hostedRelayAuthProvider).connected(ref.read(relayConfigProvider));
     _hasConnectedOnce = true;
+    _connectedRelay = ref.read(relayConfigProvider).baseUrl;
     // The backoff is not reset here: a client bounced repeatedly must keep
     // backing off. [_handleDisconnected] resets it after a stable connection.
     _noteNetwork(NetworkEndpoint.relayConnection, since: _connectStartedAt);
