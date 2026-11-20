@@ -1061,16 +1061,26 @@ pub enum ChannelsCmd {
         #[arg(long)]
         channel: String,
     },
-    /// Add a member to a channel
+    /// Add members to a channel
+    ///
+    /// People are sent in events of up to 100 each, in order. People who are
+    /// already members are not skipped: `--role` also changes their role.
+    /// Unless exactly one `--pubkey` is given, it prints a report; `unknown`
+    /// lists people whose outcome is uncertain (no per-person result, or a
+    /// lost receipt), so check them before retrying.
     #[command(name = "add-member")]
     AddMember {
         /// Channel UUID
         #[arg(long)]
         channel: String,
-        /// Member pubkey (64-char hex)
+        /// Member pubkey (64-char hex); repeat to add several people
+        #[arg(long, required_unless_present = "pubkeys_file")]
+        pubkey: Vec<String>,
+        /// File with one member pubkey per line (`-` reads stdin)
         #[arg(long)]
-        pubkey: String,
-        /// Member role (owner, admin, member, guest, bot)
+        pubkeys_file: Option<String>,
+        /// Role for everyone added (owner, admin, member, guest, bot); also
+        /// changes the role of people who are already members
         #[arg(long)]
         role: Option<String>,
     },
