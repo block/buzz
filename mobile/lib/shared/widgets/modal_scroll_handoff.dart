@@ -27,7 +27,9 @@ class ModalScrollHandoff extends HookConsumerWidget {
       controller: controller,
       primary: false,
       physics: const AlwaysScrollableScrollPhysics(),
-      child: child,
+      // Like a primary scroll view, keep nested scrollables off the route's
+      // controller, which this body's position joins below.
+      child: PrimaryScrollController.none(child: child),
     );
   }
 }
@@ -100,9 +102,29 @@ class _HandoffController extends ScrollController {
     oldPosition: oldPosition,
   );
 
+  ScrollController? _route;
+
+  // Keyboard ScrollAction targets the route's primary controller while focus
+  // rests on the modal scope, so the body also joins it, as a primary scroll
+  // view would.
+  @override
+  void attach(ScrollPosition position) {
+    super.attach(position);
+    final route = bodyContext()
+        .findAncestorWidgetOfExactType<PrimaryScrollController>()
+        ?.controller;
+    if (route == null || route == this) return;
+    _route = route;
+    route.attach(position);
+  }
+
   @override
   void detach(ScrollPosition position) {
     if (position is _HandoffPosition) position.interrupt();
+    final route = _route;
+    if (route != null && route.positions.contains(position)) {
+      route.detach(position);
+    }
     super.detach(position);
   }
 }
@@ -143,6 +165,9 @@ class _HandoffPosition extends ScrollPositionWithSingleContext {
     final drag = super.drag(details, dragCancelCallback);
     // A displaced release that never went ballistic belongs to the old gesture.
     _suppressBallistic = false;
+    // Semantics scroll actions synthesize a drag without a pointer kind; they
+    // only scroll content, never the sheet.
+    if (details.kind == null) return drag;
     final token = Object();
     _gesture = token;
     _start = details;
