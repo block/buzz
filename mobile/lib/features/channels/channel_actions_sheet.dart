@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
+import '../../shared/diagnostics/diagnostic_navigation_observer.dart';
 import '../../shared/clipboard_utils.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/identity_archives/identity_archives.dart';
@@ -82,7 +83,8 @@ bool _usesNativeChannelSheet(BuildContext context) {
 }
 
 // Keep the result alive after retiring the invisible route for relay work.
-class _NativeChannelSheetRoute extends PageRouteBuilder<bool> {
+class _NativeChannelSheetRoute extends PageRouteBuilder<bool>
+    with DiagnosticSheetRoute<bool> {
   _NativeChannelSheetRoute(WidgetBuilder builder)
     : super(
         opaque: false,

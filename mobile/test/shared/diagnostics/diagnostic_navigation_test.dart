@@ -1,32 +1,30 @@
-import 'package:buzz/features/channels/channel_detail_page.dart';
-import 'package:buzz/features/channels/thread_detail_page.dart';
-import 'package:buzz/features/home/home_page.dart';
-import 'package:buzz/features/settings/settings_page.dart';
+import 'package:buzz/diagnostic_screens.dart';
+import 'package:buzz/features/pairing/pairing_page.dart';
 import 'package:buzz/features/settings/theme_picker_page.dart';
+import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/diagnostics/diagnostic_navigation_observer.dart';
 import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
-import 'package:buzz/shared/diagnostics/diagnostic_screens.dart';
-import 'package:buzz/shared/hosted/known_community_sync_provider.dart';
-import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   group('the screen a page is named', () {
-    final rows = <(Type, DiagnosticScreen)>[
-      (HomePage, DiagnosticScreen.channelList),
-      (ChannelDetailPage, DiagnosticScreen.channel),
-      (ThreadDetailPage, DiagnosticScreen.thread),
-      (SettingsPage, DiagnosticScreen.settings),
-      (ThemePickerPage, DiagnosticScreen.appearance),
+    final rows = <(Widget, DiagnosticScreen?)>[
+      (const ThemePickerPage(), DiagnosticScreen.appearance),
+      (const OnboardingAppEntry(), DiagnosticScreen.onboarding),
+      (
+        const OnboardingAppEntry(addingCommunity: true),
+        DiagnosticScreen.addCommunity,
+      ),
+      (const PairingPage(addingCommunity: true), DiagnosticScreen.addCommunity),
       // Not on the list: never named by its own type.
-      (Text, DiagnosticScreen.other),
+      (const Text('unlisted'), null),
     ];
     for (final (page, screen) in rows) {
       test('$screen for $page', () {
-        expect(DiagnosticScreens.pages[page] ?? DiagnosticScreen.other, screen);
+        expect(diagnosticScreenOf(page), screen);
       });
     }
   });
@@ -34,29 +32,38 @@ void main() {
   group('screen breadcrumbs', () {
     const channelId = 'c0ffee-secret-channel-id';
     late _RecordingReporter reporter;
+    late GlobalKey<NavigatorState> root;
 
-    Future<void> pumpApp(WidgetTester tester, {bool reporting = true}) async {
-      SharedPreferences.setMockInitialValues({});
-      final prefs = await SharedPreferences.getInstance();
+    Future<void> pumpApp(
+      WidgetTester tester, {
+      bool reporting = true,
+      Widget home = const _Page(DiagnosticScreen.channelList),
+    }) async {
       reporter = _RecordingReporter(reporting: reporting);
+      root = GlobalKey<NavigatorState>();
+      final container = ProviderContainer(
+        overrides: [
+          diagnosticReporterProvider.overrideWithValue(reporter),
+          diagnosticScreenClassifierProvider.overrideWithValue(
+            (page) => page is _Page ? page.screen : null,
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      final observer = container.read(diagnosticScreenTrailProvider).observer();
+      addTearDown(observer.dispose);
       await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            knownCommunitySyncProvider.overrideWithValue(null),
-            savedPrefsProvider.overrideWithValue(prefs),
-          ],
+        UncontrolledProviderScope(
+          container: container,
           child: MaterialApp(
-            theme: AppTheme.light(),
-            navigatorObservers: [DiagnosticNavigationObserver(reporter)],
-            home: const Scaffold(body: Text('start')),
+            navigatorKey: root,
+            navigatorObservers: [observer],
+            home: home,
           ),
         ),
       );
-      await tester.pump();
+      await tester.pumpAndSettle();
     }
-
-    NavigatorState navigator(WidgetTester tester) =>
-        tester.state<NavigatorState>(find.byType(Navigator));
 
     List<String> trail() => [
       for (final screen in reporter.screens) screen.name,
@@ -68,15 +75,15 @@ void main() {
       await pumpApp(tester);
 
       // A route whose settings carry an ID is still named by its page.
-      navigator(tester).push(
+      root.currentState!.push(
         MaterialPageRoute<void>(
           settings: const RouteSettings(name: '/channels/$channelId'),
-          builder: (_) => const ThemePickerPage(),
+          builder: (_) => const _Page(DiagnosticScreen.appearance),
         ),
       );
       await tester.pumpAndSettle();
       // An unlisted page is "other", whatever its settings say.
-      navigator(tester).push(
+      root.currentState!.push(
         MaterialPageRoute<void>(
           settings: const RouteSettings(name: '/channels/$channelId'),
           builder: (_) => const Scaffold(body: Text('unlisted')),
@@ -85,38 +92,177 @@ void main() {
       await tester.pumpAndSettle();
       // A dialog is not a screen: opening and closing it leaves nothing.
       final dialog = showDialog<void>(
-        context: navigator(tester).context,
+        context: root.currentContext!,
         builder: (_) => const AlertDialog(content: Text('dialog')),
       );
       await tester.pumpAndSettle();
-      navigator(tester).pop();
+      root.currentState!.pop();
       await dialog;
       await tester.pumpAndSettle();
+      // Nor is a sheet presented as a page route.
+      root.currentState!.push(_SheetRoute());
+      await tester.pumpAndSettle();
+      root.currentState!.pop();
+      await tester.pumpAndSettle();
       // Two pops at once leave only the screen they end on.
-      navigator(tester).popUntil((route) => route.isFirst);
+      root.currentState!.popUntil((route) => route.isFirst);
       await tester.pumpAndSettle();
 
-      expect(trail(), ['other', 'appearance', 'other', 'other']);
+      expect(trail(), ['channelList', 'appearance', 'other', 'channelList']);
       expect(
         reporter.crumbs.map((crumb) => crumb.toString()).join(),
         isNot(contains(channelId)),
       );
     });
 
+    testWidgets('a phone pane names the screen the person is on', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(390, 844);
+      addTearDown(tester.view.reset);
+      final controller = ConversationPaneController();
+      addTearDown(controller.dispose);
+      final search = ConversationPaneController();
+      addTearDown(search.dispose);
+      await pumpApp(
+        tester,
+        home: _Page(
+          DiagnosticScreen.channelList,
+          child: AdaptiveConversationPane(
+            controller: controller,
+            list: const Text('list'),
+          ),
+        ),
+      );
+      NavigatorState pane() =>
+          Navigator.of(tester.element(find.text('channel')));
+
+      // The pane's empty first page shows its host, Home, once.
+      expect(trail(), ['channelList']);
+
+      controller.open('one', (_) => const _Page(DiagnosticScreen.channel));
+      await tester.pumpAndSettle();
+      pane().push(
+        MaterialPageRoute<void>(
+          builder: (_) => const _Page(DiagnosticScreen.thread),
+        ),
+      );
+      await tester.pumpAndSettle();
+      Navigator.of(tester.element(find.text('thread'))).pop();
+      await tester.pumpAndSettle();
+
+      // A full-screen cover, such as a huddle, closes back onto the open
+      // channel rather than the list under it.
+      root.currentState!.push(
+        MaterialPageRoute<void>(builder: (_) => const Text('huddle')),
+      );
+      await tester.pumpAndSettle();
+      root.currentState!.pop();
+      await tester.pumpAndSettle();
+
+      pane().pop();
+      await tester.pumpAndSettle();
+
+      // A page that hosts its own pane is named once.
+      root.currentState!.push(
+        MaterialPageRoute<void>(
+          builder: (_) => _Page(
+            DiagnosticScreen.search,
+            child: AdaptiveConversationPane(
+              controller: search,
+              list: const Text('results'),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      root.currentState!.pop();
+      await tester.pumpAndSettle();
+
+      expect(trail(), [
+        'channelList',
+        'channel',
+        'thread',
+        'channel',
+        'other',
+        'channel',
+        'channelList',
+        'search',
+        'channelList',
+      ]);
+    });
+
+    testWidgets('a wide section change stays on its screen', (tester) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(1000, 800);
+      addTearDown(tester.view.reset);
+      final controller = ConversationPaneController();
+      addTearDown(controller.dispose);
+      await pumpApp(tester);
+      root.currentState!.push(
+        MaterialPageRoute<void>(
+          builder: (_) => _Page(
+            DiagnosticScreen.settings,
+            child: AdaptiveConversationPane(
+              controller: controller,
+              persistentSelection: true,
+              list: const Text('sections'),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      controller.open('status', (_) => const Text('status'));
+      await tester.pumpAndSettle();
+      controller.open('profile', (_) => const Text('profile'));
+      await tester.pumpAndSettle();
+      controller.open(
+        'appearance',
+        (_) => const _Page(DiagnosticScreen.appearance),
+      );
+      await tester.pumpAndSettle();
+
+      expect(trail(), ['channelList', 'settings', 'appearance']);
+    });
+
     testWidgets('a build without a destination looks at nothing', (
       tester,
     ) async {
       await pumpApp(tester, reporting: false);
-      navigator(
-        tester,
-      ).push(MaterialPageRoute<void>(builder: (_) => const ThemePickerPage()));
+      root.currentState!.push(
+        MaterialPageRoute<void>(
+          builder: (_) => const _Page(DiagnosticScreen.appearance),
+        ),
+      );
       await tester.pumpAndSettle();
-      navigator(tester).pop();
+      root.currentState!.pop();
       await tester.pumpAndSettle();
 
       expect(reporter.crumbs, isEmpty);
     });
   });
+}
+
+/// A page the test's list names [screen].
+class _Page extends StatelessWidget {
+  const _Page(this.screen, {this.child});
+
+  final DiagnosticScreen screen;
+  final Widget? child;
+
+  @override
+  Widget build(BuildContext context) =>
+      Scaffold(body: child ?? Text(screen.name));
+}
+
+class _SheetRoute extends PageRouteBuilder<void>
+    with DiagnosticSheetRoute<void> {
+  _SheetRoute()
+    : super(
+        opaque: false,
+        pageBuilder: (_, _, _) => const _Page(DiagnosticScreen.channelDetails),
+      );
 }
 
 class _RecordingReporter extends NoopDiagnosticReporter {
