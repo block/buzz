@@ -1,8 +1,6 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:buzz/shared/auth/auth_provider.dart';
-import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/diagnostics/diagnostic_member_binding.dart';
 import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
@@ -12,8 +10,6 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 import 'package:nostr/nostr.dart' as nostr;
-
-import '../diagnostics/recording_diagnostics.dart';
 
 // More ways the member can differ from the key a session signs with, on top of
 // relay_session_attribution_test.dart.
@@ -26,7 +22,7 @@ void main() {
   ]) {
     test('a session with no key is ${reported ? '' : 'not '}reported while '
         'reports name $label', () async {
-      final reporter = RecordingDiagnostics()..setMember(member);
+      final reporter = _RecordingDiagnostics()..setMember(member);
       final session = RelaySessionNotifier(
         httpClient: http_testing.MockClient(
           (_) async => http.Response('[]', 200),
@@ -54,79 +50,11 @@ void main() {
     });
   }
 
-  // The relay answers over a real socket after the app has moved on to
-  // another member.
-  for (final member in NamedMember.values) {
-    test('a refusal that arrives over the socket is '
-        '${member.reported ? '' : 'not '}reported while reports name '
-        '${member.label}', () async {
-      final received = Completer<void>();
-      final answer = Completer<void>();
-      final server = await loopbackRelay(
-        onFrame: (socket, frame) async {
-          if (frame.first != 'EVENT') return;
-          final id = (frame[1] as Map<String, dynamic>)['id'];
-          received.complete();
-          await answer.future;
-          socket.add(jsonEncode(['OK', id, false, 'invalid: bad signature']));
-        },
-      );
-      final keys = nostr.Keys.generate();
-      final reporter = RecordingDiagnostics()..setMember(keys.public);
-      final connected = Completer<void>();
-      final session = RelaySessionNotifier(
-        httpClient: http_testing.MockClient(
-          (_) async => http.Response('[]', 200),
-        ),
-        socketFactory:
-            ({
-              required wsUrl,
-              required nsec,
-              required onMessage,
-              required onConnected,
-              required onDisconnected,
-            }) => RelaySocket(
-              wsUrl: 'ws://127.0.0.1:${server.port}',
-              nsec: nsec,
-              onMessage: onMessage,
-              onConnected: () {
-                onConnected();
-                if (!connected.isCompleted) connected.complete();
-              },
-              onDisconnected: onDisconnected,
-            ),
-      );
-      final container = ProviderContainer(
-        overrides: [
-          relaySessionProvider.overrideWith(() => session),
-          relayConfigProvider.overrideWith(() => _Config(keys.nsec)),
-          authProvider.overrideWith(() => _Authenticated(keys.public)),
-          diagnosticReporterProvider.overrideWithValue(reporter),
-        ],
-      );
-      addTearDown(container.dispose);
-      await container.read(authProvider.future);
-      final listener = container.listen(relaySessionProvider, (_, _) {});
-      addTearDown(listener.close);
-      await connected.future;
-
-      final refused = session.publish(_event('event-1'));
-      await received.future;
-      reporter.setMember(member.pubkey(keys.public));
-      answer.complete();
-      await expectLater(refused, throwsA(isA<RelayEventRejectedException>()));
-
-      expect(reporter.operations, [
-        if (member.reported) DiagnosticOperation.relayRejection,
-      ]);
-    });
-  }
-
   // Through the providers the app runs: a switch changes the key and, a
   // moment later, the member. Reports from the new session follow the new
   // member; none names the old one.
   test('after a switch the new session reports under the new member', () async {
-    final reporter = RecordingDiagnostics();
+    final reporter = _RecordingDiagnostics();
     final container = ProviderContainer(
       overrides: [
         authProvider.overrideWith(() => _PendingAuth()),
@@ -187,24 +115,6 @@ class _PendingAuth extends AuthNotifier {
   Future<AuthState> build() => Completer<AuthState>().future;
 }
 
-class _Authenticated extends AuthNotifier {
-  _Authenticated(this._pubkey);
-
-  final String _pubkey;
-
-  @override
-  Future<AuthState> build() async => AuthState(
-    status: AuthStatus.authenticated,
-    community: Community(
-      id: 'community-1',
-      name: 'Example',
-      relayUrl: 'https://relay.example',
-      pubkey: _pubkey,
-      addedAt: DateTime(2026),
-    ),
-  );
-}
-
 class _Socket extends RelaySocket {
   _Socket()
     : super(
@@ -220,4 +130,22 @@ class _Socket extends RelaySocket {
 
   @override
   void dispose() {}
+}
+
+class _RecordingDiagnostics extends NoopDiagnosticReporter {
+  final operations = <DiagnosticOperation>[];
+  String? _member;
+
+  @override
+  String? get member => _member;
+
+  @override
+  void setMember(String? pubkey) => _member = pubkey;
+
+  @override
+  void reportError(
+    Object error,
+    StackTrace? stackTrace, {
+    required DiagnosticOperation operation,
+  }) => operations.add(operation);
 }

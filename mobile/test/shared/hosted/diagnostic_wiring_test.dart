@@ -1,20 +1,22 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:buzz/features/onboarding/self_hosted_entry_sheet.dart';
+import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/community/community.dart';
+import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
-import 'package:buzz/shared/hosted/hosted_admission.dart';
+import 'package:buzz/shared/hosted/hosted_flow_provider.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/self_hosted_entry.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
-
-import '../diagnostics/recording_diagnostics.dart';
 
 // The sockets that check a community before it is joined belong to a member
 // who is not active yet, so what they report goes out only while reports name
@@ -37,12 +39,12 @@ void main() {
       nsec: keys.nsec,
     );
 
-    for (final member in NamedMember.values) {
-      test('reports a frame it cannot decode while reports name '
-          '${member.label}', () async {
+    for (final member in _Member.values) {
+      test('a frame it cannot decode is ${member.reported ? '' : 'not '}'
+          'reported while reports name ${member.label}', () async {
         final server = await loopbackRelay(first: ['not json']);
         final keys = nostr.Keys.generate();
-        final diagnostics = RecordingDiagnostics()
+        final diagnostics = _RecordingDiagnostics()
           ..setMember(member.pubkey(keys.public));
 
         await SelfHostedEntry.probeRelay(
@@ -56,11 +58,12 @@ void main() {
         ]);
       });
 
-      test('built by the app reports as the probe does while reports name '
+      test('a frame it cannot decode, with the probe built by the app, is '
+          '${member.reported ? '' : 'not '}reported while reports name '
           '${member.label}', () async {
         final server = await loopbackRelay(first: ['not json']);
         final keys = nostr.Keys.generate();
-        final diagnostics = RecordingDiagnostics()
+        final diagnostics = _RecordingDiagnostics()
           ..setMember(member.pubkey(keys.public));
         final container = ProviderContainer(
           overrides: [
@@ -89,7 +92,7 @@ void main() {
           closeAfterFirst: true,
         );
         final keys = nostr.Keys.generate();
-        final diagnostics = RecordingDiagnostics();
+        final diagnostics = _RecordingDiagnostics();
 
         await expectLater(
           SelfHostedEntry.probeRelay(
@@ -105,16 +108,18 @@ void main() {
     );
   });
 
-  group('hosted admission', () {
+  // The flow the app builds hands its reporter to the relay check that admits a
+  // community, whose socket belongs to a member who is not active yet.
+  group('the hosted flow built by the app', () {
     final keys = nostr.Keys.generate();
     const link = AddCommunityDeepLink(
       relayUrl: 'wss://example.communities.buzz.xyz',
       name: 'Example',
     );
 
-    for (final member in NamedMember.values) {
-      test('reports a frame it cannot decode while reports name '
-          '${member.label}', () async {
+    for (final member in _Member.values) {
+      test('a frame it cannot decode is ${member.reported ? '' : 'not '}'
+          'reported while reports name ${member.label}', () async {
         FlutterSecureStorage.setMockInitialValues({});
         final server = await loopbackRelay(first: ['not json']);
         final account = _Account(keys.public);
@@ -129,30 +134,49 @@ void main() {
             backupId: 'backup',
           ),
         );
-        final diagnostics = RecordingDiagnostics()
+        final diagnostics = _RecordingDiagnostics()
           ..setMember(member.pubkey(keys.public));
-        final admission = HostedAdmission(
-          account: account,
-          relayAuth: HostedRelayAuth(account, enabled: false),
-          store: store,
-          diagnostics: diagnostics,
+        final relayAuth = HostedRelayAuth(account, enabled: false);
+        addTearDown(relayAuth.dispose);
+        final container = ProviderContainer(
+          overrides: [
+            diagnosticReporterProvider.overrideWithValue(diagnostics),
+            builderlabAccountProvider.overrideWithValue(account),
+            hostedRelayAuthProvider.overrideWithValue(relayAuth),
+            authProvider.overrideWith(_Auth.new),
+            activeCommunityProvider.overrideWith((ref) async => null),
+          ],
         );
-        addTearDown(admission.dispose);
+        addTearDown(container.dispose);
 
         // The admission connects to its own relay address; the test relay
         // answers there instead.
-        final community = await HttpOverrides.runWithHttpOverrides(
-          () => admission.prepare(link, 'owner', keys.public),
+        await HttpOverrides.runWithHttpOverrides(
+          () => container
+              .read(hostedFlowProvider)
+              .enterCommunity(link, 'owner', keys.public, () => true),
           _Loopback(server.port),
         );
 
-        expect(community.pubkey, keys.public);
         expect(diagnostics.operations, [
           if (member.reported) DiagnosticOperation.relayFrame,
         ]);
       });
     }
   });
+}
+
+/// Takes the community a flow admits without saving it.
+class _Auth extends AuthNotifier {
+  @override
+  Future<AuthState> build() => Completer<AuthState>().future;
+
+  @override
+  Future<void> authenticateWithCommunity(
+    Community community, {
+    bool Function()? shouldContinue,
+    bool activate = true,
+  }) async {}
 }
 
 class _Account extends BuilderlabAccountClient {
@@ -165,7 +189,7 @@ class _Account extends BuilderlabAccountClient {
       BuilderlabAccount(subject: 'owner', expiresAt: DateTime.utc(2100));
 
   @override
-  Future<Map<String, dynamic>> currentIdentity() async => {
+  Future<Map<String, dynamic>> currentIdentity({String? signer}) async => {
     'identity': {'pubkey_hex': bound},
   };
 }
@@ -202,4 +226,77 @@ class _LoopbackClient extends Fake implements HttpClient {
 
   @override
   void close({bool force = false}) => _inner.close(force: force);
+}
+
+/// A reporter that records the operation of each report. The member is
+/// whatever the test last named.
+class _RecordingDiagnostics extends NoopDiagnosticReporter {
+  final operations = <DiagnosticOperation>[];
+  String? _member;
+
+  @override
+  String? get member => _member;
+
+  @override
+  void setMember(String? pubkey) => _member = pubkey;
+
+  @override
+  void reportError(
+    Object error,
+    StackTrace? stackTrace, {
+    required DiagnosticOperation operation,
+  }) => operations.add(operation);
+}
+
+/// Who a report names while a request signed by one key is in flight.
+enum _Member {
+  other('another member'),
+  signer('the signer'),
+  none('no one');
+
+  const _Member(this.label);
+  final String label;
+
+  /// Whether a report from work signed by [signer] goes out.
+  bool get reported => this != other;
+
+  String? pubkey(String signer) => switch (this) {
+    other => 'e' * 64,
+    _Member.signer => signer,
+    none => null,
+  };
+}
+
+/// A loopback relay that sends [first] as raw frames (text or binary) as soon as a
+/// client connects, then the NIP-42 challenge, and accepts the AUTH it gets
+/// back. [onFrame] sees every other frame the client sends, with the socket.
+Future<HttpServer> loopbackRelay({
+  List<Object> first = const [],
+  void Function(WebSocket socket, List<dynamic> frame)? onFrame,
+  bool challenge = true,
+  bool closeAfterFirst = false,
+}) async {
+  final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+  addTearDown(() => server.close(force: true));
+  server.listen((request) async {
+    final ws = await WebSocketTransformer.upgrade(request);
+    for (final frame in first) {
+      ws.add(frame);
+    }
+    if (closeAfterFirst) {
+      await ws.close();
+      return;
+    }
+    ws.listen((raw) {
+      final frame = jsonDecode(raw as String) as List<dynamic>;
+      if (frame.first == 'AUTH') {
+        final id = (frame[1] as Map<String, dynamic>)['id'];
+        ws.add(jsonEncode(['OK', id, true, '']));
+      } else {
+        onFrame?.call(ws, frame);
+      }
+    });
+    if (challenge) ws.add(jsonEncode(['AUTH', 'challenge']));
+  });
+  return server;
 }
