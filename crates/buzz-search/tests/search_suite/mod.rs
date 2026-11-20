@@ -2,9 +2,10 @@
 //!
 //! Each case is a function taking a [`Backend`]; a test binary turns the
 //! cases it runs into tests with [`search_suite_tests!`]. The cases write
-//! fixture rows straight into Postgres, then search through
-//! [`SearchService::search`], so they check search behavior, not the write
-//! path.
+//! fixture rows straight into Postgres (queuing each event in the search
+//! outbox), then search through [`SearchService::search`], so they check
+//! search behavior, not the write path. On OpenSearch every search first
+//! drains the outbox and refreshes the index.
 //!
 //! Run through `scripts/postgres-test-run.sh -p buzz-search --tests` for a
 //! fresh desired-state database per test. Outside that lane, point
@@ -21,14 +22,16 @@ use buzz_core::{
     },
     CommunityId,
 };
+use buzz_search::indexer::Indexer;
+use buzz_search::opensearch::{OpenSearchConfig, SearchIndex};
 use buzz_search::{ChannelScope, SearchError, SearchQuery, SearchResult, SearchService};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use uuid::Uuid;
 
-/// Turns each named case into a test against `$backend`. The attribute after
+/// Turns each `fn case` into a test against `$backend`. The attribute after
 /// the backend goes on every test, so each binary states what its tests need.
 macro_rules! search_suite_tests {
-    ($backend:expr; #[$meta:meta] $($case:ident),+ $(,)?) => {
+    ($backend:expr; #[$meta:meta] $(fn $case:ident),+ $(,)?) => {
         $(
             #[tokio::test]
             #[$meta]
@@ -45,21 +48,36 @@ pub(crate) use search_suite_tests;
 pub enum Backend {
     /// Postgres full-text search.
     Postgres,
+    /// The OpenSearch index at `BUZZ_TEST_OPENSEARCH_URL`, kept in sync by
+    /// the indexer.
+    OpenSearch,
 }
 
 /// A test's search service, for the backend under test.
 pub struct Fixture {
     service: SearchService,
+    opensearch: Option<(Indexer, SearchIndex)>,
 }
 
 impl Fixture {
     /// Connect to the test database and build the backend's search service.
+    /// For OpenSearch, that includes a new index of the test's own.
     pub async fn setup(backend: Backend) -> (PgPool, Fixture) {
         let (pool, _schema) = setup().await;
-        let service = match backend {
-            Backend::Postgres => SearchService::new(pool.clone()),
+        let fixture = match backend {
+            Backend::Postgres => Fixture {
+                service: SearchService::new(pool.clone()),
+                opensearch: None,
+            },
+            Backend::OpenSearch => {
+                let index = test_index().await;
+                Fixture {
+                    service: SearchService::with_opensearch(pool.clone(), index.clone()),
+                    opensearch: Some((Indexer::new(pool.clone(), index.clone()), index)),
+                }
+            }
         };
-        (pool, Fixture { service })
+        (pool, fixture)
     }
 
     /// The search service under test.
@@ -69,6 +87,9 @@ impl Fixture {
 
     /// Release the fixture's resources.
     pub async fn teardown(self, pool: PgPool) {
+        if let Some((_, index)) = self.opensearch {
+            index.delete().await.expect("delete test index");
+        }
         teardown(pool, "").await;
     }
 }
@@ -83,8 +104,25 @@ pub struct Searcher<'a> {
 impl Searcher<'_> {
     /// [`SearchService::search`], once the backend has caught up.
     pub async fn search(&self, query: &SearchQuery) -> Result<SearchResult, SearchError> {
+        if let Some((indexer, index)) = &self.fixture.opensearch {
+            indexer.drain().await.expect("drain the search outbox");
+            index.refresh().await.expect("refresh the test index");
+        }
         self.fixture.service.search(query).await
     }
+}
+
+/// A new, empty message index of the calling test's own on the test cluster.
+pub async fn test_index() -> SearchIndex {
+    let index = SearchIndex::new(&OpenSearchConfig {
+        url: std::env::var("BUZZ_TEST_OPENSEARCH_URL")
+            .unwrap_or_else(|_| "http://localhost:9200".to_string()),
+        basic_auth: None,
+        index_prefix: format!("test-{}-", Uuid::new_v4().simple()),
+    })
+    .expect("OpenSearch client");
+    index.ensure().await.expect("create test index");
+    index
 }
 
 pub const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- local test-only credentials
@@ -123,7 +161,8 @@ pub async fn mk_community(pool: &PgPool, host: &str) -> CommunityId {
     CommunityId::from_uuid(id)
 }
 
-/// Insert a minimal event. `created_at_secs` is unix seconds.
+/// Insert a minimal event, and queue it in the search outbox as admission
+/// would. `created_at_secs` is unix seconds.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_event(
     pool: &PgPool,
@@ -150,6 +189,18 @@ pub async fn insert_event(
     .execute(pool)
     .await
     .expect("insert event");
+    // Postgres search ignores the outbox; the indexer skips kinds that are
+    // not searchable.
+    sqlx::query(
+        "INSERT INTO search_outbox (community_id, event_id, event_created_at) \
+         VALUES ($1, $2, to_timestamp($3))",
+    )
+    .bind(community.as_uuid())
+    .bind(&id[..])
+    .bind(created_at_secs)
+    .execute(pool)
+    .await
+    .expect("queue event for indexing");
 }
 
 pub fn rand_bytes32() -> [u8; 32] {
@@ -1376,6 +1427,63 @@ pub async fn newest_sort_pages_by_time_then_id_within_scope(backend: Backend) {
         page(1, buzz_search::SearchSort::Relevance).await[0],
         most_relevant
     );
+
+    fx.teardown(pool).await;
+}
+
+/// A heavy DM user's scope holds thousands of channel ids; the whole scope
+/// must reach the backend.
+pub async fn channel_scope_of_thousands_of_channels(backend: Backend) {
+    let (pool, fx) = Fixture::setup(backend).await;
+    let c = mk_community(&pool, "a.example").await;
+    let inside = Uuid::new_v4();
+    let outside = Uuid::new_v4();
+    let hit = rand_bytes32();
+    let pk = rand_bytes32();
+    insert_event(
+        &pool,
+        c,
+        hit,
+        pk,
+        9,
+        "scopeword inside",
+        Some(inside),
+        1_700_000_000,
+    )
+    .await;
+    insert_event(
+        &pool,
+        c,
+        rand_bytes32(),
+        pk,
+        9,
+        "scopeword outside",
+        Some(outside),
+        1_700_000_001,
+    )
+    .await;
+    let mut scope: Vec<Uuid> = (0..4_999).map(|_| Uuid::new_v4()).collect();
+    scope.push(inside);
+
+    let result = fx
+        .service()
+        .search(&SearchQuery {
+            community: c,
+            q: "scopeword".into(),
+            channel_scope: ChannelScope::Channels(scope),
+            kinds: None,
+            authors: None,
+            since: None,
+            until: None,
+            page: 1,
+            per_page: 10,
+            mode: buzz_search::SearchMode::FullText,
+            sort: buzz_search::SearchSort::Relevance,
+        })
+        .await
+        .expect("search");
+    let ids: Vec<_> = result.hits.iter().map(|hit| hit.event_id).collect();
+    assert_eq!(ids, vec![hit]);
 
     fx.teardown(pool).await;
 }
