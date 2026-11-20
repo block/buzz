@@ -361,6 +361,9 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         anyhow::anyhow!("DB connection failed: {e}")
     })?;
     step.finish();
+    // Activity rows serve only `/buzz/v1`: while it is off, messages leave
+    // them alone and the writer takes no serving-pool connections.
+    buzz_db::activity::set_writer_enabled(config.buzz_v1_enabled);
     if db.has_read_pool() {
         info!("Postgres connected (writer + lazy read replica pool)");
         // Reader-down at boot must not crash or block the relay; this warn-only

@@ -1056,6 +1056,36 @@ async fn activity_flush_waits_for_retried_writes() {
     assert_eq!(head.as_deref(), Some(held.id.as_bytes().as_slice()));
 }
 
+/// With the writer off, as the relay runs while `/buzz/v1` is off, a stored
+/// message leaves the shared row alone, and the next read rebuilds it.
+/// nextest runs each test in its own process, so the switch reaches no other
+/// test.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn activity_writer_off_leaves_rows_to_the_next_read() {
+    let f = fixture().await;
+    assert!(flush_pending(std::time::Duration::from_secs(10)).await);
+    set_writer_enabled(false);
+    let quiet = f.event(&f.other, 9, "while off", 10, vec![]);
+    let (_, inserted) =
+        f.db.insert_event_with_thread_metadata(f.community, &quiet, Some(f.channel), None)
+            .await
+            .expect("store event");
+    assert!(inserted);
+    assert!(flush_pending(std::time::Duration::from_secs(10)).await);
+    let named: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM channel_heads WHERE community_id = $1 AND head_id = $2",
+    )
+    .bind(f.community.as_uuid())
+    .bind(quiet.id.as_bytes().as_slice())
+    .fetch_one(&f.pool)
+    .await
+    .expect("count rows");
+    assert_eq!(named, 0);
+    set_writer_enabled(true);
+    assert_eq!(preview_text(&f.conversation().await), Some("while off"));
+}
+
 /// Every writer of the activity tables goes through community admission: once
 /// a community's deletion has started (quiescing) or fenced it, the
 /// background writer, its distrust pass and the on-read repair are all

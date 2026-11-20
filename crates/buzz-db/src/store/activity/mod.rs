@@ -37,7 +37,7 @@ pub use fill::Warmed;
 pub use model::*;
 #[cfg(test)]
 pub(crate) use writer::flush;
-pub use writer::flush_pending;
+pub use writer::{flush_pending, set_writer_enabled};
 pub(crate) use writer::{seen, stage, submit, Staged};
 
 #[cfg(test)]
