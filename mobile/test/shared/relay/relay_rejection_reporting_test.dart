@@ -13,7 +13,7 @@ import '../diagnostics/recording_diagnostics.dart';
 
 // What the relay's refusals do to the error list: only a reason that marks the
 // request as invalid is reported, apart from the outcomes the app handles
-// itself. Every other reason is counted, not reported. Reasons are the relay's
+// itself. No other reason is reported. Reasons are the relay's
 // own wording.
 void main() {
   // The relay's reasons for a request it refuses as invalid.
@@ -21,6 +21,8 @@ void main() {
     'invalid: bad signature',
     // Mentions a timestamp, but is not about the relay's clock window.
     'invalid: feedback timestamp is out of range',
+    // Echoes a value that mentions the clock window.
+    'invalid: unsupported report type: timestamp outside',
     // Limits.
     'invalid: a DM may hold at most 9 people; agents do not count',
     'invalid: content exceeds maximum size of 262144 bytes (got 262145)',

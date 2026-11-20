@@ -46,7 +46,7 @@ void main() {
 
       final refused = session.publish(_event('event-1'));
       session.debugHandleMessage(['OK', 'event-1', false, 'invalid: bad']);
-      await expectLater(refused, throwsA(isA<Exception>()));
+      await expectLater(refused, throwsA(isA<RelayEventRejectedException>()));
 
       expect(reporter.operations, [
         if (reported) DiagnosticOperation.relayRejection,
@@ -60,11 +60,13 @@ void main() {
     test('a refusal that arrives over the socket is '
         '${member.reported ? '' : 'not '}reported while reports name '
         '${member.label}', () async {
+      final received = Completer<void>();
       final answer = Completer<void>();
       final server = await loopbackRelay(
         onFrame: (socket, frame) async {
           if (frame.first != 'EVENT') return;
           final id = (frame[1] as Map<String, dynamic>)['id'];
+          received.complete();
           await answer.future;
           socket.add(jsonEncode(['OK', id, false, 'invalid: bad signature']));
         },
@@ -109,10 +111,10 @@ void main() {
       await connected.future;
 
       final refused = session.publish(_event('event-1'));
-      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await received.future;
       reporter.setMember(member.pubkey(keys.public));
       answer.complete();
-      await expectLater(refused, throwsA(isA<Exception>()));
+      await expectLater(refused, throwsA(isA<RelayEventRejectedException>()));
 
       expect(reporter.operations, [
         if (member.reported) DiagnosticOperation.relayRejection,
@@ -142,7 +144,7 @@ void main() {
       session.debugAttachSocketForTest(_Socket());
       final refused = session.publish(_event(id));
       session.debugHandleMessage(['OK', id, false, 'invalid: bad']);
-      await expectLater(refused, throwsA(isA<Exception>()));
+      await expectLater(refused, throwsA(isA<RelayEventRejectedException>()));
     }
 
     final config = container.read(relayConfigProvider.notifier);

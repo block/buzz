@@ -55,21 +55,18 @@ class RelayInvalidRequest implements Exception {
   String toString() => 'RelayInvalidRequest';
 }
 
-/// How the relay words a refusal for a timestamp outside its clock window,
-/// after `invalid:`. It has one wording per kind of event: ordinary events
-/// ("event timestamp too far from server time"), canvas events ("canvas event
-/// timestamp too far in the future"), relay-admin, moderation and identity
-/// archive commands ("event timestamp out of range: ..."), leave requests
-/// ("leave request timestamp out of range (...)") and observer frames
-/// ("observer frame timestamp outside ±5 minute freshness window"). Matched on
-/// "timestamp" and the phrase after it, so a reason about something else that
-/// merely mentions a timestamp ("feedback timestamp is out of range") is still
-/// reported.
+/// How the relay begins a refusal for a timestamp outside its clock window.
+/// It has one wording per kind of event: ordinary events, canvas events,
+/// relay-admin, moderation and identity archive commands (followed by the
+/// timing details), leave requests (likewise) and observer frames. Matched from
+/// the start of the reason, so a reason about something else that mentions a
+/// timestamp, or echoes a value that does, is still reported.
 const _clockWindowRefusals = [
-  'timestamp too far from server time',
-  'timestamp too far in the future',
-  'timestamp out of range',
-  'timestamp outside',
+  'invalid: event timestamp too far from server time',
+  'invalid: canvas event timestamp too far in the future',
+  'invalid: event timestamp out of range',
+  'invalid: leave request timestamp out of range',
+  'invalid: observer frame timestamp outside',
 ];
 
 /// Whether [message], a relay `OK` or `CLOSED` reason, says the app sent
@@ -92,7 +89,7 @@ bool isInvalidRequestRejection(String message) {
         'invalid: only members can add people in this channel',
       ) &&
       !normalized.startsWith('invalid: cannot remove the last owner') &&
-      !_clockWindowRefusals.any(normalized.contains);
+      !_clockWindowRefusals.any(normalized.startsWith);
 }
 
 /// Explicit access refusal; cached private history must not mask this error.
