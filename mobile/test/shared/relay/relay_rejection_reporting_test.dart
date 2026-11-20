@@ -19,6 +19,8 @@ void main() {
   // The relay's reasons for a request it refuses as invalid.
   const reported = [
     'invalid: bad signature',
+    // Mentions a timestamp, but is not about the relay's clock window.
+    'invalid: feedback timestamp is out of range',
     // Limits.
     'invalid: a DM may hold at most 9 people; agents do not count',
     'invalid: content exceeds maximum size of 262144 bytes (got 262145)',
@@ -30,7 +32,13 @@ void main() {
   ];
   // Refusals the app handles as expected outcomes, and every other reason.
   const counted = [
+    // A timestamp outside the relay's window, in each wording the relay uses.
     'invalid: event timestamp too far from server time',
+    'invalid: canvas event timestamp too far in the future',
+    'invalid: event timestamp out of range: created_at=1, now=500, '
+        'delta=-499s (max ±120s)',
+    'invalid: leave request timestamp out of range (delta=300s, max ±120s)',
+    'invalid: observer frame timestamp outside ±5 minute freshness window',
     'rate-limited: quota exceeded; retry in 7s',
     'rate-limited: too many concurrent requests',
     'restricted: only members can post in this channel',
@@ -41,28 +49,12 @@ void main() {
     'something the relay says in no known form',
     '',
   ];
-  // The spec counts every refusal for a timestamp outside the relay's window.
-  // The code reports these three, whose wording differs from the one it
-  // recognizes, so each is skipped until the two agree.
-  const clockWindow = [
-    'invalid: canvas event timestamp too far in the future',
-    'invalid: event timestamp out of range: created_at=1, now=500, '
-        'delta=-499s (max ±120s)',
-    'invalid: leave request timestamp out of range (delta=300s, max ±120s)',
+  final rows = <(String, bool)>[
+    for (final reason in reported) (reason, true),
+    for (final reason in counted) (reason, false),
   ];
 
-  final rows = <(String, bool, String?)>[
-    for (final reason in reported) (reason, true, null),
-    for (final reason in counted) (reason, false, null),
-    for (final reason in clockWindow)
-      (
-        reason,
-        false,
-        'the code reports it; the spec says a clock-window refusal is counted',
-      ),
-  ];
-
-  for (final (reason, isReported, skip) in rows) {
+  for (final (reason, isReported) in rows) {
     final expected = isReported ? 1 : 0;
     test('an OK refusal "$reason" is ${isReported ? '' : 'not '}reported', () {
       final harness = _session();
@@ -76,7 +68,7 @@ void main() {
       expect(harness.reporter.errors.map((e) => e.$2), [
         if (isReported) DiagnosticOperation.relayRejection,
       ]);
-    }, skip: skip);
+    });
 
     test(
       'a CLOSED refusal "$reason" is ${isReported ? '' : 'not '}reported',
@@ -89,7 +81,6 @@ void main() {
           if (isReported) DiagnosticOperation.relayRejection,
         ]);
       },
-      skip: skip,
     );
   }
 

@@ -55,6 +55,23 @@ class RelayInvalidRequest implements Exception {
   String toString() => 'RelayInvalidRequest';
 }
 
+/// How the relay words a refusal for a timestamp outside its clock window,
+/// after `invalid:`. It has one wording per kind of event: ordinary events
+/// ("event timestamp too far from server time"), canvas events ("canvas event
+/// timestamp too far in the future"), relay-admin, moderation and identity
+/// archive commands ("event timestamp out of range: ..."), leave requests
+/// ("leave request timestamp out of range (...)") and observer frames
+/// ("observer frame timestamp outside ±5 minute freshness window"). Matched on
+/// "timestamp" and the phrase after it, so a reason about something else that
+/// merely mentions a timestamp ("feedback timestamp is out of range") is still
+/// reported.
+const _clockWindowRefusals = [
+  'timestamp too far from server time',
+  'timestamp too far in the future',
+  'timestamp out of range',
+  'timestamp outside',
+];
+
 /// Whether [message], a relay `OK` or `CLOSED` reason, says the app sent
 /// something invalid. Refusals the app handles as expected outcomes, an
 /// archived channel, an Unarchive of a channel that is no longer archived, an
@@ -75,7 +92,7 @@ bool isInvalidRequestRejection(String message) {
         'invalid: only members can add people in this channel',
       ) &&
       !normalized.startsWith('invalid: cannot remove the last owner') &&
-      !normalized.contains('timestamp too far from server time');
+      !_clockWindowRefusals.any(normalized.contains);
 }
 
 /// Explicit access refusal; cached private history must not mask this error.
