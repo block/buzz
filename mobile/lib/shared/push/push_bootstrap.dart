@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -448,17 +449,25 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
       ],
     );
 
-    final relayOrigins = _pushRelayOrigins(communities);
     // Removing the last community with push already off leaves the relay set
     // unchanged (empty), but it is what makes the installation revocable.
     final noCommunities = communities.isEmpty;
+    final pushRelayUrls = [
+      for (final candidate in communities)
+        if (candidate.pushNotificationsEnabled) candidate.relayUrl,
+    ];
     useEffect(
       () {
         // Authority the phone holds for relays no community uses is revoked:
         // a community whose push is off, or removed, and at last the whole
         // installation. A list still loading looks empty, so wait for it.
-        if (!communitiesLoaded) return null;
-        final attempt = '${relayOrigins.join('|')}|$noCommunities';
+        if (!communitiesLoaded ||
+            !Env.pushGatewayConfigured ||
+            defaultTargetPlatform != TargetPlatform.android) {
+          return null;
+        }
+        final attempt =
+            '${_pushRelayOrigins(communities).join('|')}|$noCommunities';
         if (!reconcileAttempt.tryBegin(attempt)) return null;
         unawaited(() async {
           try {
@@ -484,7 +493,7 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
       },
       [
         communitiesLoaded,
-        relayOrigins.join('|'),
+        pushRelayUrls.join('|'),
         noCommunities,
         reconcileRetry.value,
       ],
@@ -658,12 +667,20 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
   }
 }
 
-/// The relays of the communities whose push is on, as grants name them.
-Set<String> _pushRelayOrigins(List<Community> communities) => {
-  for (final community in communities)
-    if (community.pushNotificationsEnabled)
-      canonicalBuzzPushRelayOrigin(community.relayUrl),
-};
+/// The relays of the communities whose push is on, as grants name them. A
+/// relay URL with no origin (a path, say) never had a grant, so it names none.
+Set<String> _pushRelayOrigins(List<Community> communities) {
+  final origins = <String>{};
+  for (final community in communities) {
+    if (!community.pushNotificationsEnabled) continue;
+    try {
+      origins.add(canonicalBuzzPushRelayOrigin(community.relayUrl));
+    } on FormatException {
+      continue;
+    }
+  }
+  return origins;
+}
 
 void _runRevocationOutbox(Future<void> Function() operation) {
   unawaited(

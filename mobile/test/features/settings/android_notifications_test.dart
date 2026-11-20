@@ -187,6 +187,71 @@ void main() {
       },
     );
   }
+
+  for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
+    testWidgets('a relay URL with a path does not break push on $platform', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = platform;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      final gateway = FakePushGateway(
+        nowSeconds: () => DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      );
+      debugAndroidPushAuthority = AndroidPushAuthority(
+        keystore: FakeAndroidKeystore(),
+        gateway: fakeGatewayClient(gateway),
+        store: _MemoryStore(),
+        sleep: (_) async {},
+      );
+      addTearDown(() => debugAndroidPushAuthority = null);
+      const nativePush = MethodChannel('buzz/push_registration');
+      const nativeBridge = MethodChannel('buzz/push');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      for (final channel in [nativePush, nativeBridge]) {
+        messenger.setMockMethodCallHandler(channel, (call) async => null);
+        addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      }
+      final community = Community.create(
+        name: 'Team',
+        relayUrl: 'https://relay.example/team',
+      ).copyWith(pushNotificationsEnabled: true);
+      await storage.save(community);
+      await storage.saveActiveId(community.id);
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            authProvider.overrideWith(_Auth.new),
+            communityStorageProvider.overrideWithValue(storage),
+            communitySnapshotWriterProvider.overrideWithValue(
+              (communities) async {},
+            ),
+            buzzPushLeaseRevocationStorageProvider.overrideWithValue(
+              BuzzPushLeaseRevocationStorage(secure: FakeSecureStorage()),
+            ),
+            relaySessionProvider.overrideWith(_Connected.new),
+            buzzPushDescriptorFetcherProvider.overrideWithValue(
+              (_) async => _descriptor,
+            ),
+            appLifecycleProvider.overrideWith(_Lifecycle.new),
+          ],
+          child: const BuzzPushBootstrap(child: SizedBox()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.byType(SizedBox), findsWidgets);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
 }
 
 class _MemoryStore implements AndroidPushStateStore {
