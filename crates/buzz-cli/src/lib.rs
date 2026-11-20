@@ -1445,6 +1445,10 @@ pub enum UsersCmd {
         /// Scope an exact-name agent lookup to its owner (`me`, hex, or npub)
         #[arg(long = "owner", requires = "name")]
         owner: Option<String>,
+        /// Keep archived identities in `--name` results (marked `"archived": true`).
+        /// `--pubkey` lookups always return and mark them
+        #[arg(long = "include-archived", requires = "name")]
+        include_archived: bool,
     },
     /// Update the current identity's profile
     #[command(name = "set-profile")]
