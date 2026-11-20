@@ -381,6 +381,50 @@ of the channel's messages: `buzz:workflow-owner` also names the owner. A
 marked `p` tag on any other event, for example a kind:39002 member list role,
 matches `#p` normally. See `docs/buzz-push.md` for the push rules.
 
+### Workflow Identity
+
+Every workflow message carries exactly one `["buzz:workflow-id", <id>]` tag
+that names the workflow that sent it. Channel messages, threaded replies and
+DMs all carry it. `<id>` is the workflow's UUID in hyphenated lowercase form,
+for example `0f8fad5b-d9cb-469f-a165-70867728950e`. It is the `d` value of the
+workflow's kind:30620 definition, so the `buzz:workflow-owner` value and this
+ID together give the definition's coordinate, `30620:<owner>:<id>`. Use both:
+the ID alone does not name a definition.
+
+The tag carries nothing else about the workflow: not its channel, its name or
+the run that sent the message. A definition is scoped to a channel by its `h`
+tag and the relay returns it only to people who can read that channel, so a
+client offers a way to open the workflow only when it can read the definition
+at that coordinate.
+
+The ID is an opaque identifier. Everyone who can read the message can read it,
+including a DM recipient who cannot see the workflow, and it grants no access.
+The relay authorizes each operation that takes a workflow ID separately:
+
+- reading the definition or the run history requires read access to the
+  workflow's channel;
+- starting a run by hand requires being the workflow's owner;
+- starting a run through `/hooks/{id}` requires the workflow's webhook secret;
+- saving the definition requires being the workflow's owner, and deleting it
+  requires being the owner or the owner of the agent that owns it.
+
+Someone who knows an ID can learn one thing from it: whether a workflow with
+that ID still exists, because the relay refuses to save a definition under an
+ID that another owner or channel holds.
+
+As with `buzz:workflow-owner`, trust the tag only on a message signed by the
+relay key that the community advertises. Any author can put the same tag on an
+ordinary event.
+
+A client finds no definition, and offers nothing, in these cases:
+
+- the message was sent before the relay added the tag, so it has none;
+- the definition's `d` spells the UUID another way, such as uppercase, which
+  the relay accepts but this tag never carries;
+- the relay assigned the workflow's ID instead of taking it from the
+  definition's `d`, as it did for workflows saved before it keyed them by
+  that UUID.
+
 ### Workflow Mentions
 
 A workflow message may carry `["buzz:workflow-mention", <pubkey>]` tags. Each
