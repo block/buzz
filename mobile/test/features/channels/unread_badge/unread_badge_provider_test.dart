@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
@@ -161,7 +162,15 @@ void main() {
       ),
     ];
 
-    for (final (name, channelType, events, all, mentionsOnly) in cases) {
+    void badgeCase(
+      String name,
+      String channelType,
+      List<ObservedUnreadEvent> events,
+      int all,
+      int mentionsOnly, {
+      Map<String, int> readContexts = const {},
+      Map<String, String> forced = const {},
+    }) {
       test(name, () async {
         SharedPreferences.setMockInitialValues({});
         final prefs = await SharedPreferences.getInstance();
@@ -175,6 +184,8 @@ void main() {
               ),
             ],
             observedEventsByChannel: {'ch': events},
+            readContexts: readContexts,
+            forcedUnreadContexts: forced,
             prefs: prefs,
           );
           addTearDown(container.dispose);
@@ -198,6 +209,53 @@ void main() {
         expect(container.read(appBadgeCountProvider), all);
       });
     }
+
+    for (final (name, channelType, events, all, mentionsOnly) in cases) {
+      badgeCase(name, channelType, events, all, mentionsOnly);
+    }
+
+    // Marked unread by hand, with the channel otherwise read through t30.
+    badgeCase(
+      'new mention in a channel marked unread',
+      'stream',
+      [
+        _observed(
+          id: 'm',
+          createdAt: t30 + 1,
+          highPriority: true,
+          mentioned: true,
+        ),
+      ],
+      1,
+      1,
+      readContexts: {'ch': t30},
+      forced: {'ch': 'ch'},
+    );
+    badgeCase(
+      'DM message marked unread',
+      'dm',
+      [
+        _observed(
+          id: 'd',
+          createdAt: t20,
+          highPriority: true,
+          channelType: 'dm',
+        ),
+      ],
+      1,
+      1,
+      readContexts: {'ch': t30},
+      forced: {msgContextKey('d'): 'ch'},
+    );
+    badgeCase(
+      'ordinary channel marked unread',
+      'stream',
+      [_observed(id: 'p', createdAt: t20)],
+      1,
+      0,
+      readContexts: {'ch': t30},
+      forced: {'ch': 'ch'},
+    );
   });
 
   test('all channels read returns (0, 0)', () async {

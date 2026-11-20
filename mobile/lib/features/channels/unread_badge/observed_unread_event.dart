@@ -166,20 +166,6 @@ int countUnreadAppBadgeObservedEvents(
   return count;
 }
 
-int countUnreadMentionOrDmObservedEvents(
-  Map<String, ObservedUnreadEvent>? eventsById,
-  int? Function(ObservedUnreadEvent event) getReadAt,
-) {
-  if (eventsById == null) return 0;
-  var count = 0;
-  for (final event in eventsById.values) {
-    if (!event.mentionOrDm) continue;
-    final readAt = getReadAt(event);
-    if (readAt == null || event.createdAt > readAt) count++;
-  }
-  return count;
-}
-
 int countUnreadHighPriorityObservedEvents(
   Map<String, ObservedUnreadEvent>? eventsById,
   int? Function(ObservedUnreadEvent event) getReadAt,

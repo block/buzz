@@ -2,6 +2,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../channels_provider.dart';
 import '../../../shared/push/app_badge_preference.dart';
+import '../../../shared/read_state/read_state_format.dart';
 import '../../../shared/read_state/read_state_provider.dart';
 import 'observed_unread_event.dart';
 
@@ -36,13 +37,6 @@ final unreadBadgeProvider = Provider<UnreadBadgeState>((ref) {
       for (final channel in channels) {
         if (!channel.isMember || channel.isArchived) continue;
 
-        if (readState.locallyForcedChannelIds.contains(channel.id)) {
-          general++;
-          continue;
-        }
-
-        if (!latestObservedByChannel.containsKey(channel.id)) continue;
-
         final observedEvents = observedEventsByChannel[channel.id];
         int? readAtForObservedEvent(ObservedUnreadEvent event) =>
             observedUnreadEventReadAt(
@@ -51,15 +45,32 @@ final unreadBadgeProvider = Provider<UnreadBadgeState>((ref) {
               readState.effectiveTimestamp,
             );
 
+        // Counted before the forced-unread shortcut below, so a channel
+        // marked unread still badges its mentions, and a mention or DM marked
+        // unread by itself counts.
+        for (final event
+            in observedEvents?.values ?? const <ObservedUnreadEvent>[]) {
+          if (!event.mentionOrDm) continue;
+          final readAt = readAtForObservedEvent(event);
+          if (readState.isForcedUnread(msgContextKey(event.id)) ||
+              readAt == null ||
+              event.createdAt > readAt) {
+            mentionOrDm++;
+          }
+        }
+
+        if (readState.locallyForcedChannelIds.contains(channel.id)) {
+          general++;
+          continue;
+        }
+
+        if (!latestObservedByChannel.containsKey(channel.id)) continue;
+
         final unreadCount = countUnreadObservedEvents(
           observedEvents,
           readAtForObservedEvent,
         );
         if (unreadCount == 0) continue;
-        mentionOrDm += countUnreadMentionOrDmObservedEvents(
-          observedEvents,
-          readAtForObservedEvent,
-        );
 
         if (channel.isDm ||
             countUnreadHighPriorityObservedEvents(
