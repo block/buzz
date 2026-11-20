@@ -17,7 +17,7 @@ import '../../shared/hosted/native_media_headers.dart';
 import '../../shared/relay/relay_provider.dart';
 import '../../shared/relay/relay_session_types.dart';
 import '../../shared/relay/relay_socket.dart';
-import '../../shared/widgets/feedback_snackbar.dart';
+import '../../shared/widgets/buzz_toast.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
@@ -96,7 +96,6 @@ void reportReactionFailure(
   Future<void> publish, {
   required bool adding,
 }) {
-  final messenger = ScaffoldMessenger.of(context);
   // An async catch rather than `catchError`: a grouped removal's
   // `Future.wait` is a `Future<List<void>>` at runtime, whose `catchError`
   // handler would have to return a list.
@@ -106,10 +105,12 @@ void reportReactionFailure(
     } catch (error, stackTrace) {
       final message = _reactionFailureMessage(error, adding: adding);
       if (message != null) {
-        messenger.showFeedbackSnackBar(
-          SnackBar(content: Text(message)),
-          kind: ToastKind.error,
-        );
+        // The native reaction sheet covers Flutter's overlay, so it shows the
+        // notice itself; otherwise a toast shows above any route or sheet.
+        final shown = await NativeMessagePresentation.showNotice(message);
+        if (!shown && context.mounted) {
+          showBuzzToast(context, message, kind: ToastKind.error);
+        }
       }
       if (!_isRelayOutcome(error)) {
         Error.throwWithStackTrace(error, stackTrace);

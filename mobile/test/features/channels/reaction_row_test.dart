@@ -315,8 +315,14 @@ void main() {
       await tester.tap(find.text('Toggle'));
       await tester.pump();
       expect(tester.takeException(), isNull);
-      expect(find.byType(SnackBar), notice == null ? findsNothing : findsOne);
-      if (notice != null) expect(find.text(notice), findsOneWidget);
+      for (final text in [
+        'Couldn’t add reaction. No connection.',
+        'Couldn’t remove reaction. No connection.',
+        'Reaction not confirmed. Connection lost.',
+        'Removal not confirmed. Connection lost.',
+      ]) {
+        expect(find.text(text), text == notice ? findsOneWidget : findsNothing);
+      }
     });
   }
 
