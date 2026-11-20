@@ -25,7 +25,6 @@ void main() {
     addTearDown(() {
       appHttpDiagnostics = const NoopDiagnosticReporter();
       appHttpFirstPartyHosts.clear();
-      appHttpFirstPartyDomains.clear();
     });
   });
 
@@ -54,13 +53,12 @@ void main() {
   Future<http.Response> status(int code) async => http.Response('', code);
 
   test('remote media hosts are counted as external, never by name', () async {
-    appHttpFirstPartyDomains.add('communities.example.com');
     for (final url in [
       'https://alice-smith.photos.example.net/a.jpg',
       'https://u-81f3c2.cdn.example.net/b.png',
       'https://ALICE.example.net/c.gif',
       'https://relay.example.org/media/d.jpg',
-      'https://team-x.communities.example.com/media/e.jpg',
+      'https://alice.relay.example.org/media/e.jpg',
     ]) {
       await send(url, (_) => status(200), traffic: HttpTraffic.media);
     }
@@ -77,7 +75,7 @@ void main() {
         externalHttpBackend,
         externalHttpBackend,
         'relay.example.org',
-        'team-x.communities.example.com',
+        externalHttpBackend,
         externalHttpBackend,
       ],
     );
@@ -366,6 +364,30 @@ void main() {
     ]);
     expect(diagnostics.breadcrumbs, hasLength(1));
   });
+
+  test(
+    'a body that ends after the deadline passed counts one timeout',
+    () async {
+      final body = StreamController<List<int>>();
+      final client = streamingClient(body.stream);
+      final request = http.Request(
+        'POST',
+        Uri.parse('https://relay.example.org/query'),
+      );
+      final response = await client.send(request);
+      final read = response.stream.drain<void>();
+      body.add([1]);
+      await pumpEventQueue();
+      noteHttpDeadline(request);
+      await body.close();
+      await read;
+
+      expect(diagnostics.events.map((event) => event.failure), [
+        NetworkFailure.timeout,
+      ]);
+      expect(diagnostics.breadcrumbs, hasLength(1));
+    },
+  );
 
   test('a body that breaks with no deadline behind it is a failure', () async {
     final client = streamingClient(

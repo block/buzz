@@ -24,9 +24,6 @@ final diagnosticBackendsProvider = Provider<void>((ref) {
   add(ref.watch(relayConfigProvider.select((config) => config.baseUrl)));
   add(Env.pushGatewayUrl);
   if (BuilderlabBuild.origin case final origin?) add(origin.toString());
-  appHttpFirstPartyDomains.addAll(
-    BuilderlabBuild.relayDomains.map((domain) => domain.toLowerCase()),
-  );
 });
 
 /// Holds [diagnosticMemberProvider] and [diagnosticBackendsProvider] for the

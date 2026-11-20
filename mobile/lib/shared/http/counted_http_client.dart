@@ -16,10 +16,6 @@ DiagnosticReporter appHttpDiagnostics = const NoopDiagnosticReporter();
 /// fills it.
 final appHttpFirstPartyHosts = <String>{};
 
-/// Domains whose subdomains are first party too, such as a build's hosted
-/// relay domains.
-final appHttpFirstPartyDomains = <String>{};
-
 /// The backend a request to any other host is counted under, so a remote
 /// image's host (which can name a person) never leaves the phone, and the
 /// label stays a short fixed list.
@@ -30,11 +26,7 @@ const externalHttpBackend = 'external';
 @visibleForTesting
 String httpBackend(String host) {
   final name = host.toLowerCase();
-  if (appHttpFirstPartyHosts.contains(name)) return name;
-  for (final domain in appHttpFirstPartyDomains) {
-    if (name == domain || name.endsWith('.$domain')) return name;
-  }
-  return externalHttpBackend;
+  return appHttpFirstPartyHosts.contains(name) ? name : externalHttpBackend;
 }
 
 /// Counts every request that goes through [_inner]: its backend
@@ -44,8 +36,8 @@ String httpBackend(String host) {
 ///
 /// A failure status is counted at its headers. A success is counted once its
 /// body is read to the end or its reader stops early. A body that fails or is
-/// cancelled after the caller's deadline passed ([noteHttpDeadline]) is a
-/// timeout, and one that fails before it, other than by the app aborting it,
+/// cancelled, or ends, after the caller's deadline passed ([noteHttpDeadline])
+/// is a timeout, and one that fails before it, other than by the app aborting it,
 /// is a failure of its kind. A body that is never read is not counted. Work
 /// that outlives a member change counts for nobody.
 ///
@@ -97,8 +89,9 @@ class _CountedClient extends http.BaseClient {
       if (settled) return;
       settled = true;
       count(switch ((complete, error)) {
-        (true, _) => null,
+        // The caller gave up first, even if the last bytes then arrived.
         _ when _deadlinePassed[request] ?? false => NetworkFailure.timeout,
+        (true, _) => null,
         // A reader that stops early, or an abort or close with no deadline
         // behind it, is the app done with the body.
         (false, null) || (false, http.RequestAbortedException()) => null,
