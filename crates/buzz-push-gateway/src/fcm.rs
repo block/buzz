@@ -295,7 +295,7 @@ impl TokenSource {
     /// Request a token and record the result. Callers hold `fetch`.
     async fn fetch_token(&self) -> Result<String, TokenFault> {
         let result = self.request_access_token((self.now)()).await;
-        self.log_first_mint(&result);
+        self.log_mint(&result);
         let mut state = self.state.lock().await;
         match result {
             Ok(token) => {
@@ -311,24 +311,26 @@ impl TokenSource {
         }
     }
 
-    /// Say once whether the configured credential works, so a broken setup
-    /// shows in the logs without waiting for a failing delivery.
-    fn log_first_mint(&self, result: &Result<CachedToken, MintFailure>) {
-        if self.first_mint_logged.swap(true, Ordering::Relaxed) {
-            return;
-        }
+    /// Log the first successful mint once, and every failed one, so a broken
+    /// setup (or a federation binding removed after startup) shows in the logs.
+    /// The failure backoff bounds how often a failure can log.
+    fn log_mint(&self, result: &Result<CachedToken, MintFailure>) {
         let credential = match self.minter {
             TokenMinter::ServiceAccount(_) => "service_account",
             TokenMinter::Federated(_) => "external_account",
         };
         match result {
-            Ok(_) => tracing::info!(credential, "first FCM access token minted"),
+            Ok(_) => {
+                if !self.first_mint_logged.swap(true, Ordering::Relaxed) {
+                    tracing::info!(credential, "first FCM access token minted");
+                }
+            }
             Err(failure) => tracing::warn!(
                 credential,
                 hop = failure.hop,
                 status = failure.status,
                 fault = ?failure.fault,
-                "first FCM access token mint failed"
+                "FCM access token mint failed"
             ),
         }
     }

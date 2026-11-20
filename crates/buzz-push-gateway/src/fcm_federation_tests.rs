@@ -179,11 +179,27 @@ fn pod_env(base: &str, token_file: &std::path::Path) -> HashMap<String, String> 
     ])
 }
 
-/// Write `content` to a fresh file and return its path.
-fn temp_file(content: &str) -> std::path::PathBuf {
+/// A file in the system temp directory, deleted when dropped.
+struct TempFile(std::path::PathBuf);
+
+impl std::ops::Deref for TempFile {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Write `content` to a fresh file that lives as long as the returned guard.
+fn temp_file(content: &str) -> TempFile {
     let path = std::env::temp_dir().join(format!("buzz-fcm-test-{}", uuid::Uuid::new_v4()));
     std::fs::write(&path, content).unwrap();
-    path
+    TempFile(path)
 }
 
 fn federated(
@@ -563,32 +579,29 @@ async fn one_deadline_bounds_the_whole_chain_of_hops() {
         let token_file = temp_file("token");
         let mut transport = federated(base, pod_env(base, &token_file), || NOW).unwrap();
         Arc::get_mut(&mut transport.tokens).unwrap().deadline = deadline;
-        transport
+        // The token file must outlive the mint, so it travels with the transport.
+        (transport, token_file)
     };
 
     // Three 250 ms hops fit a 5 s deadline...
     let fake = new_fake();
     delayed(&fake);
     let base = serve_fake(&fake).await;
-    let transport = build(&base, Duration::from_secs(5));
+    let (transport, _token_file) = build(&base, Duration::from_secs(5));
     assert_eq!(transport.tokens.access_token().await.ok().unwrap(), "fcm-1");
 
-    // ...but no single hop outlasts a 500 ms deadline, yet the chain does.
+    // ...but no single hop outlasts a 375 ms deadline, yet the chain does:
+    // it fires during the second hop, so impersonation is never reached.
     let fake = new_fake();
     delayed(&fake);
     let base = serve_fake(&fake).await;
-    let transport = build(&base, Duration::from_millis(500));
-    let started = Instant::now();
+    let (transport, _token_file) = build(&base, Duration::from_millis(375));
     assert_eq!(
         transport.tokens.access_token().await.err(),
         Some(TokenFault::Unavailable)
     );
-    assert!(
-        started.elapsed() < Duration::from_millis(740),
-        "{:?}",
-        started.elapsed()
-    );
     assert_eq!(count(&fake, "aws"), 1);
+    assert_eq!(count(&fake, "impersonation"), 0);
 }
 
 fn rejected(config: serde_json::Value, env: &HashMap<String, String>) -> Option<&'static str> {

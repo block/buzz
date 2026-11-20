@@ -64,9 +64,15 @@ credentials: IAM roles for service accounts (`AWS_ROLE_ARN` and
 `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`. If several are present, static
 keys win, then web identity, then Pod Identity. EC2
 instance metadata is not used. Startup validates the file and these settings but
-calls neither AWS nor Google; the first token mint logs whether it worked. The
-pod must reach the regional STS endpoint, Google's STS and IAM Credentials
-APIs, and (for Pod Identity) the agent.
+calls neither AWS nor Google. The first successful token mint is logged once,
+and every failed mint logs its hop and status. The pod must reach the regional
+STS endpoint and Google's STS and IAM Credentials APIs.
+
+The Helm chart supports IRSA as shipped: the EKS webhook injects the region and
+web identity settings. Pod Identity works in the gateway, but the chart neither
+sets `AWS_REGION` nor lets its NetworkPolicy reach the Pod Identity agent, so
+with that chart you must supply the region and an egress rule to
+`169.254.170.23/32` on TCP port 80 yourself.
 
 The wake is a high-priority, data-only FCM message with a compiled-in payload,
 one constant collapse key and a time to live taken from the delivery's expiry.

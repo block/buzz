@@ -49,8 +49,10 @@ android:
   fcmProjectId: example-project
   # Secret holding Google's credential JSON: a service account key, or an AWS
   # workload identity federation config (type external_account) for keyless
-  # access. Federation also needs AWS_REGION and AWS credentials in the pod
-  # (IRSA or EKS Pod Identity).
+  # access. Federation also needs AWS_REGION and AWS credentials in the pod.
+  # As shipped, the chart supports IRSA, whose webhook injects both. EKS Pod
+  # Identity also needs a region and a NetworkPolicy egress rule to the agent
+  # (169.254.170.23/32, TCP 80), which this chart does not add.
   fcmCredentials:
     secretName: buzz-push-gateway
     secretKey: fcm-credentials.json
