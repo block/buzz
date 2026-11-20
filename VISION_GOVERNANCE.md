@@ -44,6 +44,8 @@ agents            grants name their repos, last at most 7 days
 
 **Trusted checks** are named, not assumed. The community decides which CI identities count. A green check from anyone else is just a message. A trusted check counts as a check, never as a human review.
 
+**Secret scanning** runs at the door. Detected secrets are rejected before incoming code becomes visible to anyone else.
+
 **Agent limits** cap what any member can hand to an agent or integration: which repos, which actions, how long, and whether widening a grant needs an admin.
 
 Every change to the floor is a signed command from a named admin, checked against their role and recorded, the same way moderation actions are. The relay publishes the current rules to the people allowed to read them.
@@ -56,7 +58,7 @@ One layer sits above the community: the **hosting operator**. "Repos here can ne
 
 A repo is bound to a channel, and the channel's roles are the repo's permissions. Guests read. Members write. Admins manage: default branch, protections, and which rules the repo adds. A private channel makes a private repo, and everything about it follows: issues, status events, and labels are visible only to the channel's members.
 
-Repo admins add rules on top of the floor. They can require a second reviewer, protect a release branch, or name code owners for a directory. They can't remove the community's review, turn off secret scanning, or loosen the agent cap. When rules overlap, every applicable rule must pass. Nothing gets "overridden by the stricter one"; they all just apply.
+Repo admins add rules on top of the floor. They can require a second reviewer, protect a release branch, or name code owners for a directory. They can't remove the community's review, turn off secret scanning, or loosen the agent cap. Code owners add required review without granting repo access, and a change can't redefine its own required reviewers. When rules overlap, every applicable rule must pass. Nothing gets "overridden by the stricter one"; they all just apply.
 
 The rules card on every pull request shows the combined result and where each rule came from, so nobody has to guess whether a requirement is the repo's preference or the community's floor.
 
