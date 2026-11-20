@@ -67,35 +67,54 @@ void main() {
     clock.flushMicrotasks();
   });
 
-  fakeAsyncTest('an edit killed before its publish stays off desktop\'s '
-      'layout', (clock) {
-    final relay = SidebarRelay();
-    ChannelSectionsManager manager() => ChannelSectionsManager(
-      pubkey: relay.pubkey,
-      relayUrl: 'https://relay.example',
-      prefs: prefs,
-      crypto: ChannelSectionsCrypto(relay.keys.nsec, relay.pubkey),
-      relaySession: relay.session,
-      signedEventRelay: relay.signer,
-      remoteEnabled: true,
-      onChanged: () {},
-    )..initialize();
-    // No Team record on the relay; the app dies inside the debounce.
-    manager().createSection('mine');
-    clock.flushMicrotasks();
-    // Desktop saves its first unified layout before mobile comes back.
-    relay.stored.add(
-      relay.event('channel-workspaces', workspaces, nowSeconds()),
-    );
-    final restarted = manager();
-    clock.flushMicrotasks();
+  for (final liveFirst in [false, true]) {
+    fakeAsyncTest('an edit killed before its publish stays off desktop\'s '
+        'layout${liveFirst ? ' when the lock arrives live first' : ''}', (
+      clock,
+    ) {
+      final relay = SidebarRelay();
+      ChannelSectionsManager manager() => ChannelSectionsManager(
+        pubkey: relay.pubkey,
+        relayUrl: 'https://relay.example',
+        prefs: prefs,
+        crypto: ChannelSectionsCrypto(relay.keys.nsec, relay.pubkey),
+        relaySession: relay.session,
+        signedEventRelay: relay.signer,
+        remoteEnabled: true,
+        onChanged: () {},
+      )..initialize();
+      // No Team record on the relay; the app dies inside the debounce.
+      manager()
+        ..createSection('mine')
+        // Killed: nothing flushes.
+        ..dispose(flushPending: false);
+      clock.flushMicrotasks();
+      // Desktop saves its first unified layout before mobile comes back.
+      final head = relay.event('channel-workspaces', workspaces, nowSeconds());
+      if (liveFirst) {
+        // The startup read fails, so the head reaches mobile live first.
+        relay.historyFailures = 1;
+      } else {
+        relay.stored.add(head);
+      }
+      final restarted = manager();
+      clock.flushMicrotasks();
+      if (liveFirst) {
+        relay
+          ..stored.add(head)
+          ..emit(head);
+        clock.elapse(const Duration(seconds: 1));
+        expect(restarted.workspace, isNotNull);
+        clock.elapse(const Duration(seconds: 30));
+      }
 
-    expect(restarted.workspace, isNotNull);
-    expect(restarted.store.sections, isEmpty);
-    expect(relay.published, isEmpty);
-    restarted.dispose();
-    clock.flushMicrotasks();
-  });
+      expect(restarted.workspace, isNotNull);
+      expect(restarted.store.sections, isEmpty);
+      expect(relay.published, isEmpty);
+      restarted.dispose();
+      clock.flushMicrotasks();
+    });
+  }
 
   // live: the head arrives on the subscription while an edit waits.
   // failedRead: the publish preflight fails while the relay already holds it.

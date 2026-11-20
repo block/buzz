@@ -457,6 +457,9 @@ class ChannelSectionsManager {
       if (event.pubkey != pubkey) continue;
       _mergeEvent(event, legacy: legacy);
     }
+    // A lock adopted before this read confirmed the baseline still drops
+    // what desktop never saw.
+    if (_workspace != null) _store = _confirmed;
   }
 
   void _mergeEvent(NostrEvent event, {bool legacy = true}) {
