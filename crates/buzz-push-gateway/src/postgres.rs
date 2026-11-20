@@ -493,17 +493,21 @@ impl AuthorityStore for PostgresAuthorityStore {
             return Err(AuthorityError::Unavailable);
         }
         let fingerprint: Vec<u8> = i.try_get("token_fingerprint").map_err(db)?;
-        let quota = sqlx::query("INSERT INTO push_gateway_endpoint_quotas(token_fingerprint,window_started_at,admitted) VALUES($1,$2,1) ON CONFLICT(token_fingerprint) DO UPDATE SET window_started_at=CASE WHEN push_gateway_endpoint_quotas.window_started_at <= $2 - make_interval(secs => $3::double precision) THEN $2 ELSE push_gateway_endpoint_quotas.window_started_at END, admitted=CASE WHEN push_gateway_endpoint_quotas.window_started_at <= $2 - make_interval(secs => $3::double precision) THEN 1 ELSE push_gateway_endpoint_quotas.admitted + 1 END, updated_at=now() WHERE push_gateway_endpoint_quotas.window_started_at <= $2 - make_interval(secs => $3::double precision) OR push_gateway_endpoint_quotas.admitted < $4")
-            .bind(fingerprint).bind(at(now)?).bind(quota_window_seconds).bind(quota_max_deliveries).execute(&mut *tx).await.map_err(db)?;
-        if quota.rows_affected() != 1 {
-            return Err(AuthorityError::RateLimited);
-        }
+        // Replay fences come before the quota so a retry of an admitted
+        // request is rejected even when the endpoint quota is full. A
+        // rate-limited attempt returns before commit, so the rollback leaves
+        // its fresh fences unconsumed.
         let auth_inserted = sqlx::query("INSERT INTO push_gateway_delivery_auth_replays(relay_pubkey,auth_event_id,expires_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
             .bind(&relay_bytes).bind(event_bytes).bind(at(request_expires_at)?).execute(&mut *tx).await.map_err(db)?;
         let request_inserted = sqlx::query("INSERT INTO push_gateway_delivery_request_replays(relay_pubkey,request_id,expires_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
             .bind(&relay_bytes).bind(request_id).bind(at(request_expires_at)?).execute(&mut *tx).await.map_err(db)?;
         if auth_inserted.rows_affected() != 1 || request_inserted.rows_affected() != 1 {
             return Err(AuthorityError::Rejected);
+        }
+        let quota = sqlx::query("INSERT INTO push_gateway_endpoint_quotas(token_fingerprint,window_started_at,admitted) VALUES($1,$2,1) ON CONFLICT(token_fingerprint) DO UPDATE SET window_started_at=CASE WHEN push_gateway_endpoint_quotas.window_started_at <= $2 - make_interval(secs => $3::double precision) THEN $2 ELSE push_gateway_endpoint_quotas.window_started_at END, admitted=CASE WHEN push_gateway_endpoint_quotas.window_started_at <= $2 - make_interval(secs => $3::double precision) THEN 1 ELSE push_gateway_endpoint_quotas.admitted + 1 END, updated_at=now() WHERE push_gateway_endpoint_quotas.window_started_at <= $2 - make_interval(secs => $3::double precision) OR push_gateway_endpoint_quotas.admitted < $4")
+            .bind(fingerprint).bind(at(now)?).bind(quota_window_seconds).bind(quota_max_deliveries).execute(&mut *tx).await.map_err(db)?;
+        if quota.rows_affected() != 1 {
+            return Err(AuthorityError::RateLimited);
         }
         tx.commit().await.map_err(db)?;
         Ok(DeliveryPermit::new(authority, relay.to_owned(), request_id))
@@ -1344,6 +1348,58 @@ mod postgres_tests {
                 .await
                 .expect("count request replays");
         assert_eq!(requests, 1, "rejected admission consumes no request fence");
+
+        pool.close().await;
+        drop_schema(&schema).await;
+    }
+
+    // A retry of an admitted request at a full quota must still read as a
+    // replay (404), not as rate limiting (429): the relay requeues 429 but
+    // treats a retry's 404 as the wake already delivered. A fresh request at
+    // the same full quota is rate-limited, and neither charges the quota.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn replay_at_full_quota_is_rejected_and_fresh_request_rate_limited() {
+        let (pool, schema) = full_schema(2).await;
+        install_authority(&pool).await;
+        let store = PostgresAuthorityStore::new(pool.clone());
+        let admitted_request = Uuid::new_v4();
+        admit_with_quota(&store, &"22".repeat(32), admitted_request, 1)
+            .await
+            .expect("first delivery fills the quota");
+
+        assert_eq!(
+            admit_with_quota(&store, &"33".repeat(32), admitted_request, 1)
+                .await
+                .err(),
+            Some(AuthorityError::Rejected),
+            "a retry of the admitted request is a replay even at a full quota"
+        );
+        assert_eq!(
+            admit_with_quota(&store, &"44".repeat(32), Uuid::new_v4(), 1)
+                .await
+                .err(),
+            Some(AuthorityError::RateLimited),
+            "a fresh request at a full quota is rate-limited"
+        );
+
+        let admitted: i64 = sqlx::query_scalar("SELECT admitted FROM push_gateway_endpoint_quotas")
+            .fetch_one(&pool)
+            .await
+            .expect("read quota");
+        assert_eq!(admitted, 1, "neither refused attempt charges the quota");
+        let requests: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM push_gateway_delivery_request_replays")
+                .fetch_one(&pool)
+                .await
+                .expect("count request replays");
+        assert_eq!(requests, 1, "the rate-limited request leaves no fence");
+        let auth_events: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM push_gateway_delivery_auth_replays")
+                .fetch_one(&pool)
+                .await
+                .expect("count auth replays");
+        assert_eq!(auth_events, 1, "refused attempts consume no auth fence");
 
         pool.close().await;
         drop_schema(&schema).await;
