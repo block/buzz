@@ -417,7 +417,9 @@ class _SliverChannelsList extends HookConsumerWidget {
             sectionId: key.startsWith('group:') ? teamIdOf(key) : null,
           );
 
-    _SectionEdits editsFor(ChannelSection section) => (
+    // [layoutId] keys the workspace's saved filter; it differs from the Team
+    // section's ID when a Solo project shares that ID.
+    _SectionEdits editsFor(ChannelSection section, String layoutId) => (
       onRename: () async {
         final name = await showBuzzDialog<String>(
           context: context,
@@ -465,7 +467,7 @@ class _SliverChannelsList extends HookConsumerWidget {
           // authority. Cleanup is optional for this never-reused ID.
           ref.read(channelSectionsProvider.notifier).deleteSection(section.id);
           try {
-            await filters?.clearDeletedSection(section.id);
+            await filters?.clearDeletedSection(layoutId);
           } catch (_) {
             if (context.mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
@@ -533,7 +535,7 @@ class _SliverChannelsList extends HookConsumerWidget {
         isFirst: team == null || teamSections.first.id == team.id,
         isLast: team == null || teamSections.last.id == team.id,
         onToggle: () => toggleSection(section.id),
-        edits: team == null ? null : editsFor(team),
+        edits: team == null ? null : editsFor(team, section.id),
         sortMode: mode(),
         onSortModeChange: sortSetter(group),
       );

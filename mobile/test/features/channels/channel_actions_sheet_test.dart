@@ -556,10 +556,13 @@ void main() {
     expect(find.text('Delete channel'), findsNothing);
   });
 
-  for (final details in [false, true]) {
-    testWidgets('desktop workspaces close filing (details: $details)', (
-      tester,
-    ) async {
+  for (final (details, early) in [
+    (false, false),
+    (true, false),
+    (true, true),
+  ]) {
+    testWidgets('desktop workspaces close filing (details: $details, '
+        'before the picker draws: $early)', (tester) async {
       tester.view.physicalSize = const Size(1200, 3000);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
@@ -573,17 +576,21 @@ void main() {
       );
       await tester.tap(find.text('Open actions'));
       await tester.pumpAndSettle();
+      void lock() =>
+          (ProviderScope.containerOf(
+                    tester.element(find.text('Open actions')),
+                  ).read(channelSectionsProvider.notifier)
+                  as _FakeChannelSectionsNotifier)
+              .lock();
       await tester.tap(find.text('Move to section…'));
+      if (early) lock();
       await tester.pumpAndSettle();
-      expect(find.text('New section…'), findsOneWidget);
-
-      // Desktop saves a unified layout while the picker is open.
-      (ProviderScope.containerOf(
-                tester.element(find.text('Open actions')),
-              ).read(channelSectionsProvider.notifier)
-              as _FakeChannelSectionsNotifier)
-          .lock();
-      await tester.pumpAndSettle();
+      if (!early) {
+        expect(find.text('New section…'), findsOneWidget);
+        // Desktop saves a unified layout while the picker is open.
+        lock();
+        await tester.pumpAndSettle();
+      }
       expect(find.text('New section…'), findsNothing);
       // Details stays open beneath the picker; the actions sheet reopens.
       if (!details) {

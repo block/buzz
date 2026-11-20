@@ -627,7 +627,8 @@ Future<void> _showMoveSectionSheet(
   // Desktop's unified layout can lock legacy filing while this is open. The
   // sheet that opened this picker may already be gone, so listen on the
   // page's container.
-  final lock = ProviderScope.containerOf(context, listen: false).listen(
+  final container = ProviderScope.containerOf(context, listen: false);
+  final lock = container.listen(
     channelSectionsProvider.select((state) => state.editable),
     (_, editable) {
       final open = sheet;
@@ -638,6 +639,12 @@ Future<void> _showMoveSectionSheet(
     context: context,
     showDragHandle: true,
     builder: (sheetContext) {
+      // A lock that landed before this first frame found no sheet to close.
+      if (sheet == null && !container.read(channelSectionsProvider).editable) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (sheetContext.mounted) Navigator.of(sheetContext).pop();
+        });
+      }
       sheet = sheetContext;
       return SafeArea(
         child: IconTheme.merge(

@@ -445,6 +445,14 @@ class ChannelSectionsManager {
   }
 
   void _mergeEvents(List<NostrEvent> events, {required bool legacy}) {
+    // Cached sections can hold edits that never reached a relay holding no
+    // Team record; a read that finds none confirms only an empty layout.
+    if (_lastRemoteEventId == null &&
+        !events.any(
+          (e) => e.pubkey == pubkey && e.getTagValue('d') == 'channel-sections',
+        )) {
+      _confirmed = const ChannelSectionStore();
+    }
     for (final event in events) {
       if (event.pubkey != pubkey) continue;
       _mergeEvent(event, legacy: legacy);
@@ -607,6 +615,8 @@ class ChannelSectionsManager {
       if (signedId != null && _isAfterCursor(createdAt, signedId!)) {
         _lastRemoteCreatedAt = createdAt;
         _lastRemoteEventId = signedId;
+        // Only the head the relay keeps is confirmed.
+        _confirmed = submitted;
         // A same-second loser merged during the await must not strand the
         // device on content the relay did not keep.
         if (revision == _localRevision && !identical(_store, submitted)) {
@@ -615,7 +625,6 @@ class ChannelSectionsManager {
           if (!_disposed) _onChanged();
         }
       }
-      _confirmed = submitted;
       _lastPublishedStore = ChannelSectionStore(
         sections: List.of(submitted.sections),
         assignments: Map.of(submitted.assignments),
