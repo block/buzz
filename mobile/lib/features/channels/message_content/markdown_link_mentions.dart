@@ -42,6 +42,17 @@ const _one = 0x41;
 /// every link, so anything the
 /// tree does not show as plain text stays as typed.
 ///
+/// With [portable], the answer also covers two places this bubble draws a
+/// pill but standard Markdown readers, buzz-app among them, do not read as
+/// prose, so that text an edit rewrites is rewritten only where every reader
+/// agrees it is a mention:
+///
+/// - a reference whose definition differs only in case (`[@Bob]` with
+///   `[@bob]: <url>`), which those readers pair into a link. Ranges whose
+///   text differs only in case then share a mark.
+/// - an indented code block ([_indentedCode]), which this parser reads as a
+///   paragraph.
+///
 /// The cost follows the length of [text] and never the channel's roster.
 /// Text with no backtick, `~~~`, `]` or `://` holds neither code nor a link
 /// and is not parsed.
@@ -49,19 +60,27 @@ Set<int> mentionsInsideMarkdownLinks(
   String text,
   List<MentionRange> mentions, {
   int keep = 1,
+  bool portable = false,
 }) {
-  if (mentions.isEmpty ||
-      !(text.contains(']') ||
-          text.contains('://') ||
-          text.contains('`') ||
-          text.contains('~~~'))) {
-    return const {};
+  if (mentions.isEmpty) return const {};
+  final indented = portable ? _indentedCode(text) : const <MentionRange>[];
+  final code = {
+    for (final (i, mention) in mentions.indexed)
+      if (indented.any((c) => c.start <= mention.start && mention.end <= c.end))
+        i,
+  };
+  if (!(text.contains(']') ||
+      text.contains('://') ||
+      text.contains('`') ||
+      text.contains('~~~'))) {
+    return code;
   }
   final source = text.replaceAll(_privateUse, '\uFFFD');
   // The ranges that hold the same text share a mark.
   final sameText = <String, List<int>>{};
   for (final (i, mention) in mentions.indexed) {
-    (sameText[source.substring(mention.start, mention.end)] ??= []).add(i);
+    final label = source.substring(mention.start, mention.end);
+    (sameText[portable ? label.toLowerCase() : label] ??= []).add(i);
   }
   final groups = sameText.values.toList();
   final prose = <int>{};
@@ -113,9 +132,153 @@ Set<int> mentionsInsideMarkdownLinks(
     );
   }
   return {
+    ...code,
     for (var i = 0; i < mentions.length; i++)
       if (!prose.contains(i)) i,
   };
+}
+
+final _quoteMarker = RegExp(r'^ {0,3}> ?');
+final _fenceOpen = RegExp(r'^(`{3,}|~{3,})');
+final _atxHeading = RegExp(r'^#{1,6}(?:[ \t]|$)');
+final _thematicBreak = RegExp(r'^([-*_])[ \t]*(?:\1[ \t]*){2,}$');
+final _setextUnderline = RegExp(r'^(?:=+|-+)[ \t]*$');
+final _listMarker = RegExp(r'^(?:[-+*]|(\d{1,9})[.)])(?=[ \t]|$)');
+
+/// The width of the leading whitespace of [line] from [from], in columns
+/// with a tab stop every four, and the offset where it ends.
+({int columns, int end}) _indent(String line, [int from = 0]) {
+  var columns = 0;
+  var i = from;
+  for (; i < line.length; i++) {
+    final unit = line.codeUnitAt(i);
+    if (unit == 0x20) {
+      columns++;
+    } else if (unit == 0x09) {
+      columns += 4 - columns % 4;
+    } else {
+      break;
+    }
+  }
+  return (columns: columns, end: i);
+}
+
+/// The lines of [text] that CommonMark reads as an indented code block, as
+/// whole-line ranges. A line is one when it is indented four or more columns
+/// (a tab counts to the next multiple of four) past its container and does
+/// not continue a paragraph:
+///
+/// - A line directly under paragraph text is that paragraph's continuation,
+///   however far it is indented, also across a block quote or list item
+///   that the paragraph sits in (a lazy continuation). Only a blank line, a
+///   heading, a thematic break, a setext underline, a fence or earlier
+///   indented code ends the paragraph first.
+/// - Inside a list item the indent is counted from the item's content
+///   column, so the item's own paragraphs are not code and a line four
+///   columns deeper is; nested items stack. An item ends at a later line
+///   indented less than its content.
+/// - Inside a block quote the indent is counted after the `>` markers.
+/// - Lines inside a backtick or `~~~` fence are left to the parser.
+///
+/// HTML blocks and tables are read as paragraph text.
+List<MentionRange> _indentedCode(String text) {
+  final code = <MentionRange>[];
+  final items = <int>[];
+  var paragraph = false;
+  var quotes = 0;
+  String? fence;
+  var start = 0;
+  while (start <= text.length) {
+    var end = text.indexOf('\n', start);
+    if (end < 0) end = text.length;
+    final range = (start: start, end: end);
+    var line = text.substring(start, end);
+    start = end + 1;
+
+    var depth = 0;
+    for (var m = _quoteMarker.firstMatch(line); m != null; depth++) {
+      line = line.substring(m.end);
+      m = _quoteMarker.firstMatch(line);
+    }
+    var (:columns, end: at) = _indent(line);
+    var content = line.substring(at);
+
+    if (fence != null) {
+      if (content.startsWith(fence) &&
+          content.replaceAll(fence[0], '').trim().isEmpty) {
+        fence = null;
+      }
+      continue;
+    }
+    if (content.isEmpty) {
+      paragraph = false;
+      quotes = depth;
+      continue;
+    }
+
+    // The column this line's indent is counted from: the content of the
+    // innermost list item it is indented enough to belong to.
+    int base() => items.lastWhere((item) => item <= columns, orElse: () => 0);
+    bool startsBlock() =>
+        columns - base() < 4 &&
+        (_fenceOpen.hasMatch(content) ||
+            _atxHeading.hasMatch(content) ||
+            _thematicBreak.hasMatch(content) ||
+            _listMarker.hasMatch(content));
+    if (paragraph) {
+      if (depth == quotes && _setextUnderline.hasMatch(content)) {
+        paragraph = false;
+        continue;
+      }
+      // A list that would open under a paragraph must start with a
+      // non-empty item, numbered 1 when ordered.
+      final marker = _listMarker.firstMatch(content);
+      final opensList =
+          marker != null &&
+          (items.isNotEmpty ||
+              (content.length > marker.end &&
+                  content.substring(marker.end).trim().isNotEmpty &&
+                  (marker[1] == null || int.parse(marker[1]!) == 1)));
+      if (depth <= quotes && (!startsBlock() || marker != null && !opensList)) {
+        continue;
+      }
+    }
+    if (depth != quotes) items.clear();
+    quotes = depth;
+    paragraph = false;
+    items.removeWhere((item) => item > columns);
+
+    while (true) {
+      final indent = columns - (items.lastOrNull ?? 0);
+      if (indent >= 4) {
+        code.add(range);
+        break;
+      }
+      if (_fenceOpen.firstMatch(content) case final open?) {
+        fence = open[1];
+        break;
+      }
+      if (_atxHeading.hasMatch(content) || _thematicBreak.hasMatch(content)) {
+        break;
+      }
+      final marker = _listMarker.firstMatch(content);
+      if (marker == null) {
+        paragraph = true;
+        break;
+      }
+      // The item's content starts one to four columns after its marker;
+      // more than that is one column and then indented code.
+      final after = _indent(content, marker.end);
+      final blank = after.end == content.length;
+      final gap = blank || after.columns > 4 ? 1 : after.columns;
+      columns += marker.end + gap;
+      items.add(columns);
+      if (blank) break;
+      content = content.substring(after.end);
+      columns += after.columns - gap;
+    }
+  }
+  return code;
 }
 
 /// Hands [plain] the text of [nodes] that is not code and not part of a

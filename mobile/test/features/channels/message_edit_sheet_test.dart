@@ -426,6 +426,9 @@ void main() {
     // mention): a tagged name inside code of any form, or in a reference
     // link or its definition, is literal text. Each row is a message with
     // Bob tagged; `{bob}` marks the `@Bob` the bubble draws as his pill.
+    // `{pill}` marks one the bubble also draws as his pill but other
+    // Markdown readers read as a link or code (review 5986525865): it opens
+    // as text and an edit leaves it as written.
     final rows = [
       'x ``@Bob`` and ``a ` @Bob`` then {bob}',
       '{bob} ran\n~~~\n@Bob\n~~~\nok',
@@ -435,16 +438,26 @@ void main() {
       'see [@Bob]\n\n[@Bob]: https://example.org/bob',
       '{bob} see [@Bob] and [notes][@Bob]\n\n[@Bob]: https://example.org/bob',
       // The bubble does not pair a reference with a definition in another
-      // case: the reference is his pill in brackets.
-      '{bob} see [{bob}]\n\n[@bob]: https://example.org/bob',
+      // case and draws his pill in brackets; standard readers pair them.
+      '{bob} see [{pill}]\n\n[@bob]: https://example.org/bob',
+      // An indented code block for standard readers, by spaces or a tab.
+      '{bob} ran\n\n    {pill} indented\n\nok {bob}',
+      '{bob} ran\n\n\t{pill} tabbed',
+      // An indented line that continues a paragraph or sits in a list item
+      // is prose for every reader.
+      '{bob} ran\n    {bob} continues',
+      '- item\n\n    {bob} in the item',
       // An identity link in code is raw text there, not a chip.
       '``${_link('@Bob', _bob)}`` and {bob}',
       '~~~\n${_link('@Bob', _bob)}\n~~~\nok',
     ];
     final pill = find.byType(MessageMentionPill);
     for (final row in rows) {
-      final original = row.replaceAll('{bob}', '@Bob');
-      final pills = '{bob}'.allMatches(row).length;
+      final original = row
+          .replaceAll('{bob}', '@Bob')
+          .replaceAll('{pill}', '@Bob');
+      final chips = '{bob}'.allMatches(row).length;
+      final pills = chips + '{pill}'.allMatches(row).length;
 
       // The bubble of the message as sent.
       await tester.pumpWidget(const SizedBox.shrink());
@@ -463,14 +476,14 @@ void main() {
       await tester.pumpAndSettle();
       expect(pill, findsNWidgets(pills), reason: row);
 
-      // The sheet shows the message as written, with a chip per pill, and
-      // saves nothing unchanged.
+      // The sheet shows the message as written, with a chip per pill every
+      // reader agrees on, and saves nothing unchanged.
       var actions = await _openEditSheet(
         tester,
         message: _message(original, mentions: [_bob]),
       );
       expect(controllerOf(tester).text, original, reason: row);
-      expect(personChip, findsNWidgets(pills), reason: row);
+      expect(personChip, findsNWidgets(chips), reason: row);
       await tester.tap(find.text('Save'));
       await tester.pumpAndSettle();
       expect(actions.edits, isEmpty, reason: row);
@@ -482,17 +495,19 @@ void main() {
       );
       await tester.enterText(field, 'Edit.\n\n$original');
       await tester.pumpAndSettle();
-      expect(personChip, findsNWidgets(pills), reason: row);
+      expect(personChip, findsNWidgets(chips), reason: row);
       await tester.tap(find.text('Save'));
       await tester.pumpAndSettle();
       final edit = actions.edits.single;
       expect(
         edit.content,
-        'Edit.\n\n${row.replaceAll('{bob}', _link('@Bob', _bob))}',
+        'Edit.\n\n'
+        '${row.replaceAll('{bob}', _link('@Bob', _bob)).replaceAll('{pill}', '@Bob')}',
         reason: row,
       );
 
-      // The edited bubble draws the same pills and nothing new.
+      // The edited bubble draws the same pills and nothing new: a name
+      // left as text is still drawn beside a link that names its person.
       await _pumpEditedBubble(tester, edit);
       expect(pill, findsNWidgets(pills), reason: row);
 
@@ -502,7 +517,7 @@ void main() {
         message: _message(edit.content),
       );
       expect(controllerOf(tester).text, 'Edit.\n\n$original', reason: row);
-      expect(personChip, findsNWidgets(pills), reason: row);
+      expect(personChip, findsNWidgets(chips), reason: row);
       await tester.tap(find.text('Save'));
       await tester.pumpAndSettle();
       expect(again.edits, isEmpty, reason: row);

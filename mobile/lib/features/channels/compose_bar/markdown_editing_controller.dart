@@ -15,6 +15,16 @@ class _MarkdownRule {
 }
 
 class _MarkdownEditingController extends TextEditingController {
+  _MarkdownEditingController({this.portableProse = false});
+
+  /// Set by the message edit sheet, whose chips are rewritten as identity
+  /// links in a body other Markdown readers also draw. A name is then prose
+  /// only where those readers agree with this bubble: not in a reference
+  /// whose definition differs only in case, and not in an indented code
+  /// block. The composer leaves it unset, so a send notifies wherever this
+  /// bubble draws a pill.
+  final bool portableProse;
+
   /// Picked mentions bound to their recipients, in text order. The editor
   /// stores the literal `@Label` the relay receives; each binding is carried
   /// across edits by position, so two namesakes can both read `@Sam` and
@@ -179,7 +189,7 @@ class _MarkdownEditingController extends TextEditingController {
     }
     final linked = mentionsInsideMarkdownLinks(text, [
       for (final mention in kept) mention.range,
-    ]);
+    ], portable: portableProse);
     if (linked.isEmpty && identical(kept, mentions)) return mentions;
     return List.unmodifiable([
       for (var i = 0; i < kept.length; i++)

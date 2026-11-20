@@ -35,7 +35,9 @@ class _MessageEditSheet extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final controller = useMemoized(_MarkdownEditingController.new);
+    final controller = useMemoized(
+      () => _MarkdownEditingController(portableProse: true),
+    );
     useEffect(() => controller.dispose, [controller]);
     final focusNode = useFocusNode();
     final isModifyingText = useRef(false);
@@ -94,10 +96,12 @@ class _MessageEditSheet extends HookConsumerWidget {
       members: memberCandidates(),
       code: controller._styledCodeRanges(message.content),
     );
-    // A chip is seeded only where the bubble draws a pill. A name inside
-    // code (a span or fence of any form) or a link (`[@Bob](https://…)`, a
-    // reference `[@Bob]` and its definition) is that code's or link's own
-    // text: it opens as text, so saving leaves it exactly as written.
+    // A chip is seeded only where the bubble draws a pill and every other
+    // Markdown reader reads prose. A name inside code (a span or fence of
+    // any form, or an indented block) or a link (`[@Bob](https://…)`, a
+    // reference `[@Bob]` and its definition in any case) is that code's or
+    // link's own text: it opens as text, so saving leaves it exactly as
+    // written.
     final seed = (
       text: parsed.text,
       mentions: controller._inProse(parsed.text, parsed.mentions),
@@ -407,9 +411,12 @@ String _editedMentionContent(
   final links = mentionIdentityLinks(message.content).toList();
   // An identity link the bubble shows as raw text (inside code of any kind)
   // or inside another link stays as written.
-  final literal = mentionsInsideMarkdownLinks(message.content, [
-    for (final link in links) (start: link.start, end: link.end),
-  ], keep: 0);
+  final literal = mentionsInsideMarkdownLinks(
+    message.content,
+    [for (final link in links) (start: link.start, end: link.end)],
+    keep: 0,
+    portable: true,
+  );
   for (final (i, link) in links.indexed) {
     if (literal.contains(i) ||
         code.any((c) => c.start < link.start && link.end < c.end)) {
