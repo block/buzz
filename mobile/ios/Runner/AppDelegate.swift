@@ -861,6 +861,18 @@ import os.log
             relayURL: relayURL
           )
           await MainActor.run { result(record.flutterArguments) }
+        } catch BuzzDevPushEnrollmentError.invalidGatewayResponse {
+          // Its own code, with no text from the reply, so Dart can report
+          // contract drift without parsing messages.
+          await MainActor.run {
+            result(
+              FlutterError(
+                code: "gateway_response_invalid",
+                message: "The push gateway sent a response the app cannot read.",
+                details: nil
+              )
+            )
+          }
         } catch {
           await MainActor.run {
             result(
