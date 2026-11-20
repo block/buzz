@@ -270,14 +270,20 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
               };
               if (targets.isNotEmpty) {
                 cache.removeChannelEvents(cacheScope, channelId, targets);
-                ref.invalidate(savedChannelPreviewProvider(channelId));
+                final preview = savedChannelPreviewProvider(channelId);
+                if (ref.exists(preview) &&
+                    ref.read(preview).unwrapPrevious().value == null) {
+                  // Retry an in-flight read whose ticket has just retired.
+                  // A displayed preview can apply the live event in memory.
+                  ref.invalidate(preview);
+                }
               }
             }
             _handleLiveEvent(event);
           },
           onClosed: (message) {
             if (!_isCurrentInit(initVersion) ||
-                !isRelayAccessDenied(message.trim())) {
+                !isRelayChannelAccessDenied(message)) {
               return;
             }
             _denyAccess(
@@ -344,7 +350,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       unawaited(_fillNotices());
     } catch (e, st) {
       if (!_isCurrentInit(initVersion)) return;
-      if (isRelayAccessDenied(e)) {
+      if (isRelayChannelAccessDenied(e)) {
         _denyAccess(e, st, cache, cacheScope);
         return;
       }
@@ -438,7 +444,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       // Legacy history would re-run the timed-out work another way.
       // An access refusal must reach the outer cache-clearing handler. A
       // second transport cannot turn that refusal into a transient failure.
-      if (isRelayDeadlineError(error) || isRelayAccessDenied(error)) rethrow;
+      if (isRelayDeadlineError(error) || isRelayChannelAccessDenied(error)) {
+        rethrow;
+      }
       debugPrint(
         '[ChannelMessagesNotifier] channel window unavailable for $channelId, falling back to WS history: $error',
       );

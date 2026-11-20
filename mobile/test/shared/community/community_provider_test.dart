@@ -710,8 +710,17 @@ void main() {
       expect(await _readSaved(saved, oldSaved), hasLength(1));
 
       final notifier = container.read(communityListProvider.notifier);
+      await container.read(activeCommunityProvider.future);
+      expect(container.read(savedMessageScopeProvider), oldSaved);
+      final finishActiveRefresh = Completer<void>();
+      storage.activeReadGate = finishActiveRefresh.future;
+      addTearDown(() {
+        if (!finishActiveRefresh.isCompleted) finishActiveRefresh.complete();
+      });
       // Re-adding the same account keeps its messages.
       await notifier.addCommunity(community);
+      expect(container.read(activeCommunityProvider).isLoading, isTrue);
+      expect(container.read(savedMessageScopeProvider), oldSaved);
       expect(await _readSaved(saved, oldSaved), hasLength(1));
       // Retire refreshes from before cleanup and while the replacement is
       // being persisted but the previous identity is still published.
@@ -722,6 +731,11 @@ void main() {
       };
       await notifier.addCommunity(community.copyWith(nsec: midKeys.nsec));
       storage.onSave = null;
+      expect(container.read(activeCommunityProvider).isLoading, isTrue);
+      expect(container.read(savedMessageScopeProvider), isNull);
+      finishActiveRefresh.complete();
+      await container.read(activeCommunityProvider.future);
+      expect(container.read(savedMessageScopeProvider), midSaved);
       await saved.save(replacementInFlight, [
         _savedMessage(oldKeys.secret),
       ], relayAuthor: null);
@@ -1229,6 +1243,13 @@ class _ObservedSaveStorage extends CommunityStorage {
   _ObservedSaveStorage(FlutterSecureStorage secure) : super(secure: secure);
 
   void Function()? onSave;
+  Future<void>? activeReadGate;
+
+  @override
+  Future<String?> loadActiveId() async {
+    await activeReadGate;
+    return super.loadActiveId();
+  }
 
   @override
   Future<void> save(Community community) {

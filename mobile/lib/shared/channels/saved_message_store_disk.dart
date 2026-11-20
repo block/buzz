@@ -1,6 +1,6 @@
 part of 'saved_message_store.dart';
 
-const _version = 2;
+const _version = 3;
 // Leave space for a rollback journal containing one copy of each original
 // page plus its record headers, even if the process exits during a write.
 const _maxDatabasePages = 11520; // 45 MiB at 4 KiB per page.
@@ -49,12 +49,16 @@ _DiskResult _accessDatabase(_DiskRequest request) {
   Database? db;
   try {
     final file = File(request.path);
-    final existed = file.existsSync();
+    final existed = request.action == _DiskAction.removeChannel
+        ? _canOpenForRemoval(file)
+        : file.existsSync();
     if (!existed &&
         (request.action != _DiskAction.save || request.events.isEmpty)) {
       return const _DiskResult();
     }
-    final candidates = request.action == _DiskAction.save
+    final candidates =
+        request.action == _DiskAction.save &&
+            request.events.length <= _maxWindowEvents
         ? _cacheCandidates(request.events, request.page).toList()
         : const <NostrEvent>[];
     var knownWires = const <String, String>{};
@@ -101,6 +105,18 @@ _DiskResult _accessDatabase(_DiskRequest request) {
     return const _DiskResult(reset: true);
   } finally {
     db?.close();
+  }
+}
+
+// A false exists() result can also mean an inaccessible path. A purge must
+// distinguish that from a database that was never created.
+bool _canOpenForRemoval(File file) {
+  try {
+    file.openSync().closeSync();
+    return true;
+  } on FileSystemException catch (error) {
+    if (error.osError?.errorCode == _noSuchFile) return false;
+    rethrow;
   }
 }
 
@@ -220,11 +236,13 @@ Map<String, String> _knownWires(Database db, List<NostrEvent> candidates) {
     }
     final wire = jsonEncode(event.toJson());
     final length = utf8.encode(wire).length;
-    if (byteSize + length > _maxWindowBytes) break;
     if (knownWires[event.id] != wire &&
         !verifySavedMessageEvent(event, relayAuthor: request.relayAuthor)) {
       continue;
     }
+    // A truncated response can expose originals whose edits or deletions
+    // occur later in the response. Drop the whole page if it cannot fit.
+    if (byteSize + length > _maxWindowBytes) return (const {}, 0);
     selected[event.id] = wire;
     if (EventKind.channelTimelineContentKinds.contains(event.kind)) {
       rootIds.add(event.id);
@@ -349,7 +367,7 @@ Iterable<NostrEvent> _cacheCandidates(
   SavedMessagePage page,
 ) sync* {
   final aux = <NostrEvent>[];
-  for (final event in events.take(_maxWindowEvents)) {
+  for (final event in events) {
     if (EventKind.channelAuxEventKinds.contains(event.kind)) {
       if (event.channelId == page.channelId || event.channelId == null) {
         aux.add(event);
@@ -439,16 +457,22 @@ void _deleteDatabase(String path) {
   FileSystemException? failure;
   for (final suffix in ['-wal', '-shm', '-journal']) {
     try {
-      final file = File('$path$suffix');
-      if (file.existsSync()) file.deleteSync();
+      _deleteIfPresent('$path$suffix');
     } on FileSystemException catch (error) {
       failure ??= error;
     }
   }
   // Keep the database in place if any sidecar could still replay its pages.
   if (failure != null) throw failure;
-  final file = File(path);
-  if (file.existsSync()) file.deleteSync();
+  _deleteIfPresent(path);
+}
+
+void _deleteIfPresent(String path) {
+  try {
+    File(path).deleteSync();
+  } on FileSystemException catch (error) {
+    if (error.osError?.errorCode != _noSuchFile) rethrow;
+  }
 }
 
 Future<bool> _sweepOnWorker(
@@ -457,14 +481,19 @@ Future<bool> _sweepOnWorker(
   String? removedScope,
 ) => Isolate.run(() {
   final directory = Directory(directoryPath);
-  if (!directory.existsSync()) return false;
+  final List<FileSystemEntity> entries;
+  try {
+    entries = directory.listSync(followLinks: false);
+  } on FileSystemException catch (error) {
+    if (error.osError?.errorCode == _noSuchFile) return false;
+    rethrow;
+  }
   final filename = RegExp(
     r'^([a-f0-9]{64})-v([0-9]+)\.sqlite(?:-wal|-shm|-journal)?$',
   );
   var obsolete = false;
   final discarded = <String>{};
-  for (final entry
-      in directory.listSync(followLinks: false).whereType<File>()) {
+  for (final entry in entries.whereType<File>()) {
     final match = filename.firstMatch(p.basename(entry.path));
     if (match == null) continue;
     final scope = match[1]!;

@@ -88,6 +88,17 @@ bool isRelayAccessDenied(Object error) {
   return message.startsWith('restricted:') || message.startsWith('blocked:');
 }
 
+/// A channel-level refusal, distinct from a session authorization failure.
+bool isRelayChannelAccessDenied(Object error) {
+  if (error is RelayException && error.statusCode == 403) return true;
+  final message = error.toString().trim().toLowerCase().replaceFirst(
+    RegExp(r'^exception:\s*'),
+    '',
+  );
+  return message == 'restricted: not a channel member' ||
+      message == 'restricted: channel access revoked';
+}
+
 /// Recovery policy for a relay `CLOSED` subscription message.
 enum RelayClosedClass {
   /// A transient failure that may recover when the same REQ is retried.

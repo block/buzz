@@ -22,6 +22,15 @@ final savedChannelPreviewProvider = FutureProvider.autoDispose
       if (scope == null) return null;
       final cache = ref.watch(savedMessageStoreProvider);
       final ticket = cache.capture(scope, (channelId: channelId, rootId: ''));
+      if (ref.read(relaySessionProvider).status == SessionStatus.connected) {
+        var hasListeners = true;
+        ref.onCancel(() => hasListeners = false);
+        ref.onResume(() => hasListeners = true);
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        if (!ref.mounted || !hasListeners || !cache.isCurrent(ticket)) {
+          return null;
+        }
+      }
       final events = await cache.read(ticket);
       if (events == null) return null;
       final preview = await _preparePreview(events);

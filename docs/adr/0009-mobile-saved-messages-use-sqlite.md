@@ -34,7 +34,9 @@ and retries the save once. The app discards corrupt or incompatible files
 and refills them on demand. The cache requires no migration. Drafts and
 unsent messages use separate storage. SQLite secure deletion overwrites
 deleted rows in the logical database. The rollback journal is removed
-after commit.
+after commit. If a relay page exceeds the cache's event or byte limit,
+the app drops the saved page so it cannot show a message without its edit
+or deletion from the same response.
 
 Only the app opens the database. A shared SQLite file would require the app
 and extensions to coordinate access through suspension. iOS can terminate a
@@ -47,7 +49,15 @@ to verify and import. [Apple TN2408](https://developer.apple.com/library/archive
 Leaving or deleting a channel, an explicit relay access denial, and live
 access revocation purge its saved pages. Sign-out, community removal, and
 identity replacement purge the affected identity. Startup removes abandoned
-and incompatible cache files.
+and incompatible cache files. Before a purge, the app records a pending
+cleanup marker in application support. An incomplete purge disables saved
+previews until the app can discard the cache and save a fresh relay page.
+If a channel list refresh loses a known membership, the app confirms the
+loss against the relay writer before purging that channel's saved pages.
+
+An individual message deleted while its channel is closed may still appear
+in an offline preview until the app refreshes that conversation online.
+[Deletion reconciliation for closed channels](https://github.com/block/buzz/issues/9828)
 
 ## Follow-up
 

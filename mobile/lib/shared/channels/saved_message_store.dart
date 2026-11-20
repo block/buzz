@@ -25,16 +25,25 @@ typedef SavedMessagePage = ({String channelId, String rootId});
 
 /// The cache scope follows the signing identity of the active community.
 final savedMessageScopeProvider = Provider<SavedMessageScope?>((ref) {
-  return ref.watch(
-    activeCommunityProvider.select((result) {
-      final community = result.unwrapPrevious().value;
-      if (community == null) return null;
-      final pubkey = pubkeyFromNsec(community.nsec?.trim()) ?? community.pubkey;
-      return pubkey == null
-          ? null
-          : (communityId: community.id, pubkey: pubkey);
-    }),
+  final active = ref.watch(activeCommunityProvider).value;
+  if (active == null) return null;
+  // The active selection can be refreshing while the current list has
+  // already dropped or replaced its identity.
+  final retained = ref.watch(
+    communityListProvider.select(
+      (result) =>
+          result.unwrapPrevious().value?.any(
+            (community) =>
+                community.id == active.id &&
+                community.nsec == active.nsec &&
+                community.pubkey == active.pubkey,
+          ) ??
+          false,
+    ),
   );
+  if (!retained) return null;
+  final pubkey = pubkeyFromNsec(active.nsec?.trim()) ?? active.pubkey;
+  return pubkey == null ? null : (communityId: active.id, pubkey: pubkey);
 });
 
 /// Captures the right to read or write a page before an asynchronous load.
@@ -64,6 +73,9 @@ final savedMessageStoreProvider = Provider<SavedMessageStore>((ref) {
   return SavedMessageStore(
     root: () => ref.read(savedMessageRootProvider.future),
     diagnostics: ref.read(diagnosticReporterProvider),
+    purgeRoot: Platform.isIOS || Platform.isAndroid
+        ? getApplicationSupportDirectory
+        : null,
   );
 });
 
@@ -72,12 +84,15 @@ final class SavedMessageStore {
   SavedMessageStore({
     required Future<Directory?> Function() root,
     required DiagnosticReporter diagnostics,
+    Future<Directory> Function()? purgeRoot,
     this.payloadBudget = 64 * 1024 * 1024,
     this.databasePageLimit = _maxDatabasePages,
   }) : _root = root,
+       _purgeRoot = purgeRoot,
        _diagnostics = diagnostics;
 
   final Future<Directory?> Function() _root;
+  final Future<Directory> Function()? _purgeRoot;
   final DiagnosticReporter _diagnostics;
   final int payloadBudget;
   final int databasePageLimit;
@@ -85,6 +100,9 @@ final class SavedMessageStore {
   final _channelEpochs = <(String, String), int>{};
   final _pendingEventRemovals = <(String, String), Set<String>>{};
   Future<void> _tail = Future.value();
+  // Read the marker once per app session. This store owns all its mutations.
+  bool? _needsReset;
+  Directory? _purgeDirectory;
 
   SavedMessageTicket capture(SavedMessageScope scope, SavedMessagePage page) {
     final key = _scopeKey(scope);
@@ -132,7 +150,7 @@ final class SavedMessageStore {
     _scopeEpochs.update(key, (epoch) => epoch + 1, ifAbsent: () => 1);
     _channelEpochs.removeWhere((entry, _) => entry.$1 == key);
     _pendingEventRemovals.removeWhere((entry, _) => entry.$1 == key);
-    return _enqueue((directory) => _sweep(directory, removedScope: key));
+    return _purge((directory) => _sweep(directory, removedScope: key));
   }
 
   /// Retires every page of a channel that was deleted, left or denied.
@@ -140,9 +158,7 @@ final class SavedMessageStore {
     final key = _scopeKey(scope);
     _retireChannel((key, channelId));
     _pendingEventRemovals.remove((key, channelId));
-    return _enqueue((directory) async {
-      await _removeFromDisk(directory, key, channelId);
-    });
+    return _purge((directory) => _removeFromDisk(directory, key, channelId));
   }
 
   /// Drops changed events and keeps the rest of the saved conversation.
@@ -163,16 +179,19 @@ final class SavedMessageStore {
     if (pending != null) return;
     _pendingEventRemovals[key] = batch;
     unawaited(
-      _enqueue((directory) async {
-        if (!identical(_pendingEventRemovals[key], batch)) return;
-        _pendingEventRemovals.remove(key);
-        await _removeFromDisk(
+      _purge(
+        (directory) => _removeFromDisk(
           directory,
           key.$1,
           key.$2,
           targets: batch.length > _maxWindowEvents ? null : batch,
-        );
-      }).whenComplete(() {
+        ),
+        shouldRun: () {
+          if (!identical(_pendingEventRemovals[key], batch)) return false;
+          _pendingEventRemovals.remove(key);
+          return true;
+        },
+      ).whenComplete(() {
         if (identical(_pendingEventRemovals[key], batch)) {
           _pendingEventRemovals.remove(key);
         }
@@ -182,6 +201,60 @@ final class SavedMessageStore {
 
   void _retireChannel((String, String) key) {
     _channelEpochs.update(key, (epoch) => epoch + 1, ifAbsent: () => 1);
+  }
+
+  // One durable marker covers the serial purge queue. If the app stops
+  // before clearing it, we discard the cache before publishing any page.
+  Future<void> _purge(
+    Future<void> Function(String directory) remove, {
+    bool Function()? shouldRun,
+  }) => _enqueue((directory) async {
+    if (shouldRun?.call() == false) return;
+    late final File marker;
+    var reset = _needsReset ?? false;
+    try {
+      marker = await _purgeMarker(directory);
+      reset = _needsReset ?? await _purgePending(marker);
+      if (!reset) {
+        await marker.parent.create(recursive: true);
+        await marker.writeAsString('pending', flush: true);
+      }
+    } finally {
+      // Attempt the removal even if writing the marker fails.
+      if (reset) {
+        await _sweep(directory, retained: const {});
+      } else {
+        await remove(directory);
+      }
+    }
+    await _clearPurgeMarker(marker);
+    _needsReset = false;
+  }, onFailure: () => _needsReset = true);
+
+  Future<File> _purgeMarker(String directory) async {
+    final root = _purgeDirectory ??= await _purgeRoot?.call();
+    return File(
+      p.join(root?.path ?? p.dirname(directory), 'saved_message_purge'),
+    );
+  }
+
+  Future<bool> _purgePending(File marker) async {
+    try {
+      final file = await marker.open();
+      await file.close();
+      return true;
+    } on FileSystemException catch (error) {
+      if (error.osError?.errorCode == _noSuchFile) return false;
+      rethrow;
+    }
+  }
+
+  Future<void> _clearPurgeMarker(File marker) async {
+    try {
+      await marker.delete();
+    } on FileSystemException catch (error) {
+      if (error.osError?.errorCode != _noSuchFile) rethrow;
+    }
   }
 
   Future<void> _removeFromDisk(
@@ -227,6 +300,16 @@ final class SavedMessageStore {
     String? relayAuthor,
   }) => _enqueue<_DiskResult?>((directory) async {
     if (!isCurrent(ticket)) return null;
+    final needsReset = _needsReset ??= await _purgePending(
+      await _purgeMarker(directory),
+    );
+    if (needsReset) {
+      if (action != _DiskAction.save) return null;
+      await _sweep(directory, retained: const {});
+      await _clearPurgeMarker(await _purgeMarker(directory));
+      _needsReset = false;
+    }
+    if (!isCurrent(ticket)) return null;
     final result = await _runDisk(
       _DiskRequest(
         path: _path(directory, ticket._scope),
@@ -249,13 +332,17 @@ final class SavedMessageStore {
     return result;
   });
 
-  Future<T?> _enqueue<T>(Future<T> Function(String directory) operation) {
+  Future<T?> _enqueue<T>(
+    Future<T> Function(String directory) operation, {
+    void Function()? onFailure,
+  }) {
     final next = _tail.then((_) async {
       try {
         final root = await _root();
         if (root == null) return null;
         return await operation(p.join(root.path, 'saved_messages'));
       } catch (error, stackTrace) {
+        onFailure?.call();
         _report(error, stackTrace);
         return null;
       }
@@ -287,6 +374,9 @@ final class SavedMessageStore {
     );
   }
 }
+
+// POSIX ENOENT on iOS and Android. Other errors leave the cache unavailable.
+const _noSuchFile = 2;
 
 String _scopeKey(SavedMessageScope scope) => sha256
     .convert(utf8.encode('${scope.communityId}\n${scope.pubkey.toLowerCase()}'))

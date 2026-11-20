@@ -7044,7 +7044,8 @@ void main() {
               ),
           ];
           final messagesNotifier = _FakeMessagesNotifier(
-            newestPage,
+            personal ? newestPage : const [],
+            hasLoadedMessages: personal,
             olderPages: [olderPage],
           );
           final channelsNotifier = _FakeChannelsNotifier(
@@ -7078,12 +7079,27 @@ void main() {
               messagesNotifier: messagesNotifier,
               channelsNotifier: channelsNotifier,
               readStateNotifier: readState,
+              savedPreview: personal
+                  ? null
+                  : Future.value((
+                      events: newestPage,
+                      summaries: <String, ChannelWindowThreadSummary>{},
+                    )),
               users: const {
                 'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
               },
             ),
           );
           await tester.pumpAndSettle();
+
+          if (!personal) {
+            expect(messagesNotifier.fetchOlderCalls, 0);
+            messagesNotifier.setMessages(newestPage);
+            await tester.pump();
+            await tester.pump(const Duration(milliseconds: 1));
+            await tester.pumpAndSettle();
+            expect(messagesNotifier.fetchOlderCalls, 1);
+          }
 
           await tester.tap(
             find.byKey(const ValueKey('channel-jump-to-oldest-unread')),

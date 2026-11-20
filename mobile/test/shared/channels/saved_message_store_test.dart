@@ -18,15 +18,21 @@ const _thirdChannel = (channelId: 'channel-three', rootId: '');
 const _secret =
     '0000000000000000000000000000000000000000000000000000000000000001';
 
-NostrEvent _message(SavedMessagePage page, String text) => NostrEvent.fromJson(
+NostrEvent _message(
+  SavedMessagePage page,
+  String text, {
+  int kind = EventKind.streamMessage,
+  String? target,
+}) => NostrEvent.fromJson(
   jsonDecode(
         signNostrEvent(
-          kind: EventKind.streamMessage,
+          kind: kind,
           content: text,
           secretKey: _secret,
           createdAt: 1700000000,
           tags: [
             ['h', page.channelId],
+            if (target != null) ['e', target],
           ],
         ).toJson(),
       )
@@ -35,6 +41,7 @@ NostrEvent _message(SavedMessagePage page, String text) => NostrEvent.fromJson(
 
 class _Diagnostics extends NoopDiagnosticReporter {
   final operations = <DiagnosticOperation>[];
+  void Function()? onReport;
 
   @override
   void reportError(
@@ -43,6 +50,7 @@ class _Diagnostics extends NoopDiagnosticReporter {
     required DiagnosticOperation operation,
   }) {
     operations.add(operation);
+    onReport?.call();
   }
 }
 
@@ -318,6 +326,26 @@ void main() {
     expect(diagnostics.operations, [DiagnosticOperation.storedData]);
   });
 
+  test('omits a page that cannot fit its verified relay events', () async {
+    final ticket = store.capture(_identity, _channel);
+    final message = _message(_channel, 'saved history');
+    await store.save(ticket, [message], relayAuthor: null);
+    expect(await store.read(ticket), [message]);
+
+    final rows = [
+      for (var index = 0; index < 20; index++)
+        _message(_channel, '$index ${'x' * (100 * 1024)}'),
+    ];
+    final edit = _message(
+      _channel,
+      'x' * (100 * 1024),
+      kind: EventKind.streamMessageEdit,
+      target: message.id,
+    );
+    await store.save(ticket, [message, ...rows, edit], relayAuthor: null);
+    expect(await store.read(ticket), isNull);
+  });
+
   test('discards the cache when a targeted SQL removal fails', () async {
     final page = store.capture(_identity, _channel);
     final message = _message(_channel, 'must be removed');
@@ -335,12 +363,47 @@ void main() {
     } finally {
       db.close();
     }
+    final marker = File('${temp.path}/saved_message_purge');
+    var markerWasPending = false;
+    diagnostics.onReport = () => markerWasPending = marker.existsSync();
 
     store.removeChannelEvents(_identity, _channel.channelId, {message.id});
 
     expect(await store.read(store.capture(_identity, _channel)), isNull);
     expect(file.existsSync(), isFalse);
+    expect(markerWasPending, isTrue);
+    expect(marker.existsSync(), isFalse);
     expect(diagnostics.operations, [DiagnosticOperation.storedData]);
+  });
+
+  test('rebuilds after a purge was interrupted', () async {
+    final ticket = store.capture(_identity, _channel);
+    final other = store.capture(_otherIdentity, _channel);
+    final original = _message(_channel, 'original page');
+    await store.save(ticket, [original], relayAuthor: null);
+    await store.save(other, [original], relayAuthor: null);
+
+    final support = await Directory('${temp.path}/support').create();
+    final marker = File('${support.path}/saved_message_purge');
+    await marker.writeAsString('pending');
+    final restarted = SavedMessageStore(
+      root: () async => temp,
+      purgeRoot: () async => support,
+      diagnostics: diagnostics,
+    );
+    final page = restarted.capture(_identity, _channel);
+    expect(await restarted.read(page), isNull);
+    expect(marker.existsSync(), isTrue);
+
+    final fresh = _message(_channel, 'fresh relay result');
+    await restarted.save(page, [fresh], relayAuthor: null);
+    expect(await restarted.read(page), [fresh]);
+    expect(
+      await restarted.read(restarted.capture(_otherIdentity, _channel)),
+      isNull,
+    );
+    expect(marker.existsSync(), isFalse);
+    expect(diagnostics.operations, isEmpty);
   });
 
   test(

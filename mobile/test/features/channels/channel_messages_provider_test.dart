@@ -9,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart' hide test;
 import 'package:flutter_test/flutter_test.dart' as flutter_test show test;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
+import 'package:buzz/features/channels/channel_timeline_projection.dart';
 import 'package:buzz/features/channels/pending_local_messages_provider.dart';
 import 'package:buzz/features/channels/saved_channel_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
@@ -176,6 +177,12 @@ void main() {
       await _pumpEventQueue();
       expect(online.read(messages).value, [event]);
 
+      relay.closeLive('restricted: authorization denied');
+      await _pumpEventQueue();
+      expect(online.read(messages).value, [event]);
+      expect(store.isCurrent(ticket), isTrue);
+      expect(await store.read(ticket), [event]);
+
       relay.setConnected(false);
       await _pumpEventQueue();
       relay.setConnected(true);
@@ -277,20 +284,38 @@ void main() {
             if (!unreact) ['h', _channelId],
             ['e', unreact ? reaction.id : event.id],
           ],
-          content: '',
+          content: mutation == 'edit' ? 'Edited message' : '',
           sig: '',
         ),
       );
-      expect(online.read(preview).unwrapPrevious().value, isNull);
+      final projection = online.read(
+        channelTimelineProjectionProvider((
+          channelId: _channelId,
+          personal: false,
+          allowPreview: true,
+        )),
+      );
+      expect(projection.relayHistoryReady, isFalse);
       expect(
-        (await online.read(preview.future))?.events,
-        unorderedEquals(expected),
+        formatTimeline(
+          projection.messages.requireValue,
+        ).map((row) => row.content),
+        unorderedEquals([
+          untouched.content,
+          live.content,
+          if (mutation == 'edit') 'Edited message',
+          if (unreact) event.content,
+        ]),
       );
 
       // An initial relay query already in flight cannot restore the old page.
       query.complete([...oldPage, _bounds()]);
       await _pumpEventQueue();
       expect(store.isCurrent(ticket), isFalse);
+      expect(
+        await store.read(store.capture(scope, page)),
+        unorderedEquals(expected),
+      );
 
       final offlineRelay = _RecordingRelaySessionNotifier();
       final offline = makeContainer(offlineRelay);

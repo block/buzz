@@ -41,6 +41,15 @@ extension ChannelsNotifierJoins on ChannelsNotifier {
     RelaySessionNotifier session,
     String pubkey,
   ) async {
+    final scope = _lifecycleRef.read(savedMessageScopeProvider);
+    final previouslyJoined = <String>{
+      if (scope != null && _hasLoaded)
+        for (final channel in _listState.value ?? const <Channel>[])
+          if (channel.isMember) channel.id,
+      if (scope != null)
+        for (final entry in _memberSnapshotsByChannelId.entries)
+          if (entry.value.any((member) => member.pubkey == pubkey)) entry.key,
+    };
     Future<List<NostrEvent>> read(bool strong) async => _latestChannelEvents(
       await _fenced(
         fence,
@@ -54,13 +63,29 @@ extension ChannelsNotifierJoins on ChannelsNotifier {
         .toSet();
 
     final memberships = await read(false);
-    if (_confirmedJoins.isEmpty) return memberships;
-    if (ids(memberships).containsAll(_confirmedJoins)) {
+    final listed = ids(memberships);
+    if (listed.containsAll(_confirmedJoins) &&
+        listed.containsAll(previouslyJoined)) {
       _confirmedJoins.clear();
       return memberships;
     }
+    // A stale replica can omit a recent join or recovery. Only a writer read
+    // can turn the disappearance of a known membership into a disk purge.
     final fromWriter = await read(true);
-    _confirmedJoins.retainAll(ids(fromWriter));
+    final confirmed = ids(fromWriter);
+    _confirmedJoins.retainAll(confirmed);
+    fence.ensureCurrent();
+    if (scope != null &&
+        scope == _lifecycleRef.read(savedMessageScopeProvider)) {
+      final removed = previouslyJoined.difference(confirmed);
+      if (removed.isNotEmpty) {
+        final cache = _lifecycleRef.read(savedMessageStoreProvider);
+        for (final channelId in removed) {
+          unawaited(cache.removeChannel(scope, channelId));
+          _lifecycleRef.invalidate(savedChannelPreviewProvider(channelId));
+        }
+      }
+    }
     return fromWriter;
   }
 }

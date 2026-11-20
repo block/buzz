@@ -78,13 +78,12 @@ import 'android_ime_lift.dart';
 import 'channel.dart';
 import 'channel_actions_sheet.dart';
 import 'channel_identity_names_provider.dart';
-import 'channel_event_order.dart';
 import 'channel_member_profile_actions.dart';
 import 'channel_link_navigation.dart';
 import 'channel_management_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_messages_provider.dart';
-import 'saved_channel_page.dart';
+import 'channel_timeline_projection.dart';
 import '../../shared/channels/saved_message_store.dart';
 import 'channel_typing_provider.dart';
 import 'inline_agent_typing.dart';
@@ -491,31 +490,16 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         !isAgentIdentityUnresolved &&
         (!isAgentDm || voiceAgent != null);
     final messagesNotifier = ref.read(messagesProvider.notifier);
-    final relayError = relayMessagesState.error;
-    final preview =
-        !resolvedChannel.isForum &&
-            (!resolvedChannel.isPrivate || resolvedChannel.isMember) &&
-            !messagesNotifier.hasLoadedHistory &&
-            (relayError == null || !isRelayAccessDenied(relayError))
-        ? ref
-              .watch(savedChannelPreviewProvider(channel.id))
-              .unwrapPrevious()
-              .value
-        : null;
-    final savedEvents = preview?.events;
-    final currentEvents = relayMessagesState.value ?? const <NostrEvent>[];
-    final previewEvents = useMemoized(() {
-      if (savedEvents == null || currentEvents.isEmpty) return savedEvents;
-      final byId = {
-        for (final event in savedEvents) event.id: event,
-        for (final event in currentEvents) event.id: event,
-      };
-      return byId.values.toList()
-        ..sort(compareChannelTimelineEventsChronologically);
-    }, [savedEvents, currentEvents]);
-    final messagesState = previewEvents == null
-        ? relayMessagesState
-        : AsyncData(previewEvents);
+    final timeline = ref.watch(
+      channelTimelineProjectionProvider((
+        channelId: channel.id,
+        personal: personalChat,
+        allowPreview:
+            !resolvedChannel.isForum &&
+            (!resolvedChannel.isPrivate || resolvedChannel.isMember),
+      )),
+    );
+    final messagesState = timeline.messages;
     final isConnectionInProgress =
         sessionStatus == SessionStatus.connecting ||
         sessionStatus == SessionStatus.reconnecting;
@@ -540,7 +524,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         !resolvedChannel.isForum &&
         isConnectionInProgress &&
         !messagesNotifier.hasLoadedMessages &&
-        preview == null;
+        !timeline.isShowingPreview;
     final appBarTitleContentHeight =
         defaultTargetPlatform == TargetPlatform.android
         ? max(
@@ -728,7 +712,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           )
           .toList(),
       flat: personalChat,
-      relaySummaries: preview?.summaries ?? messagesNotifier.threadSummaries,
+      relaySummaries: timeline.summaries,
     );
 
     return FrostedScaffold(
@@ -787,7 +771,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                   ref.watch(forumPostsProvider(channel.id)).value != null
             : (isConnectionInProgress &&
                       (messagesNotifier.hasLoadedMessages ||
-                          preview != null)) ||
+                          timeline.isShowingPreview)) ||
                   messagesNotifier.isCatchingUp,
         onNativeTitlePressed: openChannelDetails,
         nativeActions: [
@@ -914,6 +898,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                             return _MessageList(
                               welcomeAgent: welcomeAgent,
                               notifier: ref.watch(messagesProvider.notifier),
+                              relayHistoryReady: timeline.relayHistoryReady,
                               inlineTyping:
                                   resolvedChannel.isMember &&
                                       !resolvedChannel.isArchived

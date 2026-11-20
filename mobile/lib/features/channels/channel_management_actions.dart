@@ -313,6 +313,7 @@ class ChannelActions {
     Future<bool> Function()? mayPublish,
   }) async {
     _ensureCommunityValid();
+    final scope = _ref.read(savedMessageScopeProvider);
     await _signedEventRelay.submit(
       kind: 9022,
       content: '',
@@ -322,7 +323,7 @@ class ChannelActions {
       mayPublish: mayPublish,
     );
     _ensureCommunityValid();
-    await _removeSavedChannel(channelId);
+    await _removeSavedChannel(channelId, scope);
     await _refreshChannelState(channelId);
   }
 
@@ -371,18 +372,21 @@ class ChannelActions {
   /// Deletes the channel and refreshes its cached state.
   Future<void> deleteChannel(String channelId) async {
     _ensureCommunityValid();
+    final scope = _ref.read(savedMessageScopeProvider);
     await _signedEventRelay.submit(
       kind: 9008,
       content: '',
       tags: buildDeleteChannelTags(channelId),
     );
     _ensureCommunityValid();
-    await _removeSavedChannel(channelId);
+    await _removeSavedChannel(channelId, scope);
     await _refreshChannelState(channelId);
   }
 
-  Future<void> _removeSavedChannel(String channelId) async {
-    final scope = _ref.read(savedMessageScopeProvider);
+  Future<void> _removeSavedChannel(
+    String channelId,
+    SavedMessageScope? scope,
+  ) async {
     if (scope == null) return;
     await _ref.read(savedMessageStoreProvider).removeChannel(scope, channelId);
     _ensureCommunityValid();
