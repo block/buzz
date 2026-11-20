@@ -282,6 +282,31 @@ void main() {
     expect(diagnostics.operations, isEmpty);
   });
 
+  test('discards the cache when a targeted SQL removal fails', () async {
+    final page = store.capture(_identity, _channel);
+    final message = _message(_channel, 'must be removed');
+    await store.save(page, [message], relayAuthor: null);
+    final file = Directory(
+      '${temp.path}/saved_messages',
+    ).listSync().whereType<File>().single;
+    final db = sqlite3.open(file.path);
+    try {
+      db.execute('''
+        CREATE TRIGGER fail_removal BEFORE DELETE ON page_events BEGIN
+          SELECT RAISE(ABORT, 'deletion failed');
+        END;
+      ''');
+    } finally {
+      db.close();
+    }
+
+    store.removeChannelEvents(_identity, _channel.channelId, {message.id});
+
+    expect(await store.read(store.capture(_identity, _channel)), isNull);
+    expect(file.existsSync(), isFalse);
+    expect(diagnostics.operations, [DiagnosticOperation.storedData]);
+  });
+
   test(
     'discards an unreadable or incompatible file and refills on the next save',
     () async {

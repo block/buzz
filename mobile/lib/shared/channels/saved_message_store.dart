@@ -241,11 +241,12 @@ final class SavedMessageStore {
       if (result != null) {
         if (result.reset) _reportReset();
         if (deferIfUnavailable || !result.reset) return true;
+      } else if (deferIfUnavailable) {
+        return false;
       }
     } catch (error, stackTrace) {
       _report(error, stackTrace);
     }
-    if (deferIfUnavailable) return false;
     // If SQL cannot remove that channel's data, discard the disposable scope.
     await _sweep(directory, removedScope: key);
     return true;
