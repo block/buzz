@@ -14,9 +14,11 @@
 --   * No foreign key references or starts at either table: 0102 and 0103
 --     dropped the subscriptions keys, 0104 the delivery_log key, and the
 --     delivery_log to subscriptions link was never a database constraint.
---   * Nothing ever wrote a row, so there is no data to repair first and no
---     backfill to wait for. Dropping a table does not scan it, so the drop
---     takes the same time however many rows an operator's copy holds.
+--   * No Buzz release ever wrote a row, so there is no data to repair first
+--     and no backfill to wait for. Any rows an operator copied in, for example
+--     with scripts/cutover/1321_backfill_default_community.sql, have no
+--     reader and are discarded with the table. Dropping a table does not scan
+--     it, so the drop takes the same time however many rows it holds.
 --   * No other object depends on the tables or the types. The drops use
 --     neither CASCADE nor a row check: an unexpected dependent fails the
 --     migration instead of being dropped with the table.

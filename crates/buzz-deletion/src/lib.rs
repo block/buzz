@@ -2026,6 +2026,16 @@ mod postgres_tests {
     }
 
     async fn claimed_test_deletion_in(db: Db, prefix: &str) -> (Db, Services, ClaimedDeletion) {
+        claimed_test_deletion_freezing(db, prefix, &[]).await
+    }
+
+    /// Like [`claimed_test_deletion_in`], but the frozen schema manifest also
+    /// lists `extra_tables`, as an approval made by an older binary would.
+    async fn claimed_test_deletion_freezing(
+        db: Db,
+        prefix: &str,
+        extra_tables: &[&str],
+    ) -> (Db, Services, ClaimedDeletion) {
         let store = db.deletion_store();
         let host = format!("{prefix}-{}.example", Uuid::new_v4().simple());
         let community = db
@@ -2036,11 +2046,16 @@ mod postgres_tests {
             .submit(Some(&host), "test", None, None)
             .await
             .expect("submit deletion request");
+        let mut schema = store
+            .inventory_schema(community.id)
+            .await
+            .expect("inventory schema");
+        schema
+            .scoped_tables
+            .extend(extra_tables.iter().map(|table| (*table).to_owned()));
+        schema.scoped_tables.sort();
         let inventory = FrozenInventory {
-            schema: store
-                .inventory_schema(community.id)
-                .await
-                .expect("inventory schema"),
+            schema,
             storage: empty_storage_manifest(community.id),
         };
         store
@@ -2926,6 +2941,7 @@ mod postgres_tests {
     /// runs to completion through the executor: the target's rows in the added
     /// tables are purged and verified and a bystander's survive. A table added
     /// after approval that is not listed still stops the request before fencing.
+    /// An approval from before migration 0105 still executes after it.
     async fn approval_before_an_expand_migration_completes() {
         let redis_url = std::env::var("BUZZ_TEST_REDIS_URL")
             .or_else(|_| std::env::var("REDIS_URL"))
@@ -3054,6 +3070,45 @@ mod postgres_tests {
             .await
             .expect("load request");
         assert!(request.fence_generation.is_none());
+
+        // An approval from before migration 0105 froze `delivery_log` and
+        // `subscriptions`, which are gone now. The executor still advances
+        // through the Approved stage on the original digest.
+        let (db, services, claim) = claimed_test_deletion_freezing(
+            scratch.clone(),
+            "deletion-dropped",
+            buzz_db::deletion::DROPPED_SCOPED_TABLES,
+        )
+        .await;
+        let services = services_with_infra(services);
+        let request_id = claim.request.id;
+        let approved_digest = claim
+            .request
+            .inventory_digest
+            .clone()
+            .expect("approval froze an inventory digest");
+        let frozen = validate_frozen_inventory(&claim.request).expect("frozen inventory");
+        for table in buzz_db::deletion::DROPPED_SCOPED_TABLES {
+            assert!(
+                frozen.schema.scoped_tables.iter().any(|t| t == table),
+                "approval froze {table}"
+            );
+        }
+        let output = execute_claim(&services, LoopMode::Run, claim, &CancellationToken::new())
+            .await
+            .expect("execute deletion");
+        assert_eq!(
+            output.stage,
+            DeletionStage::RetentionPending,
+            "{:?}",
+            output.blocked_reason.or(output.last_error)
+        );
+        let request = db
+            .deletion_store()
+            .get(request_id)
+            .await
+            .expect("load request");
+        assert_eq!(request.inventory_digest.as_deref(), Some(&*approved_digest));
 
         drop_scratch_test_db(scratch, &scratch_name).await;
     }

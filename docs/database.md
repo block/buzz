@@ -172,6 +172,9 @@ and operator CLI before the next starts.
    froze an inventory that lists the table, and `validate_approved_schema`
    (`crates/buzz-deletion/src/lib.rs`) accepts that it is gone, and nothing
    else. Remove the entry once no approval from before the drop can remain.
+   The code-removal release is the required stop and the rollback target. It
+   does not know the drop migration's version, so run it with auto-migration
+   off once the drop has applied.
 
 Migration `0105` dropped `delivery_log` and `subscriptions` this way, after
 #9746 removed their code.

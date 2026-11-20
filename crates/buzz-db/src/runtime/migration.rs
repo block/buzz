@@ -4323,6 +4323,43 @@ mod postgres_tests {
             .expect("deletion must accept the catalog after the drop");
     }
 
+    /// Migration 0105 discards any rows in the delivery tables. No Buzz
+    /// release ever wrote them, but an operator copy (for example one made by
+    /// the legacy cutover script) may hold rows. The drop must not depend on
+    /// the tables being empty.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_0105_drops_populated_delivery_tables() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(104, &pool)
+            .await
+            .expect("apply migrations through 0104");
+        let community = uuid::Uuid::new_v4();
+        for statement in [
+            "INSERT INTO subscriptions (community_id, id, owner_pubkey) \
+             VALUES ($1, 'legacy', decode(repeat('51', 32), 'hex'))",
+            "INSERT INTO delivery_log (community_id, subscription_id) VALUES ($1, 'legacy')",
+        ] {
+            sqlx::query(statement)
+                .bind(community)
+                .execute(&pool)
+                .await
+                .expect("seed delivery table");
+        }
+        run_migrations(&pool).await.expect("apply 0105");
+        let present: (bool, bool, bool) = sqlx::query_as(
+            "SELECT to_regclass('delivery_log') IS NOT NULL, \
+             to_regclass('subscriptions') IS NOT NULL, \
+             to_regtype('delivery_method') IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("look up dropped objects");
+        assert_eq!(present, (false, false, false));
+    }
+
     /// Verify migration 0044 applies cleanly against a DB that has rows in
     /// the NIP-FI 0041+0042 tables. The immutability guards (no_delete,
     /// no_truncate) are enforced via triggers; DROP TABLE bypasses them and
