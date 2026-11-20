@@ -41,8 +41,8 @@ abstract interface class DiagnosticReporter {
 
 /// The error a test report carries, so it is easy to tell apart.
 ///
-/// Not const: each report needs its own instance, or the destination's
-/// deduplication drops every report after the first.
+/// Not const: each report needs its own instance, or the SDK's own
+/// deduplication drops a repeat of the last error object.
 class DiagnosticTestError implements Exception {
   DiagnosticTestError();
 
