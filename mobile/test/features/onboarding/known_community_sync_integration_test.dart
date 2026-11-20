@@ -47,6 +47,7 @@ class _Account extends BuilderlabAccountClient {
     String path,
     Map<String, dynamic> body, {
     String? expectedSubject,
+    String? signer,
   }) async {
     expectSync(expectedSubject, 'owner');
     if (path.endsWith('/list')) {
