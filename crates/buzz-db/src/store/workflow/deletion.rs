@@ -42,6 +42,35 @@ impl Db {
         Ok(outcome)
     }
 
+    /// Retire the owner's live definitions that spell `workflow_id` in `d` other
+    /// than the canonical hyphenated lowercase form.
+    ///
+    /// A definition save calls this in the transaction that stores the canonical
+    /// definition, so the coordinate `30620:<owner>:<id>` is the only live
+    /// definition of the workflow once it commits. The save handler accepts only
+    /// the canonical spelling; this converges definitions that relays stored
+    /// before that rule. Returns the number of definitions retired.
+    pub async fn retire_other_workflow_definition_spellings(
+        &self,
+        tx: &mut AdmittedTx,
+        owner_pubkey: &[u8],
+        workflow_id: Uuid,
+    ) -> Result<u64> {
+        let retired = sqlx::query(
+            "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND kind = $2 \
+                 AND pubkey = $3 AND lower(d_tag) = ANY($4) AND d_tag <> $5 \
+                 AND deleted_at IS NULL",
+        )
+        .bind(tx.community().as_uuid())
+        .bind(KIND_WORKFLOW_DEF as i32)
+        .bind(owner_pubkey)
+        .bind(workflow_d_spellings(workflow_id))
+        .bind(workflow_id.to_string())
+        .execute(tx.conn())
+        .await?;
+        Ok(retired.rows_affected())
+    }
+
     /// Commit the public deletion request and both workflow projections together.
     ///
     /// The returned boolean grants dispatch ownership: either this transaction
@@ -75,6 +104,18 @@ impl Db {
     }
 }
 
+/// Every `d` spelling of `id` that `Uuid::parse_str` accepts, lowercased:
+/// hyphenated, simple, braced and URN. A stored `d` names this workflow exactly
+/// when its lowercase form is one of these.
+fn workflow_d_spellings(id: Uuid) -> Vec<String> {
+    vec![
+        id.hyphenated().to_string(),
+        id.simple().to_string(),
+        id.braced().to_string(),
+        id.urn().to_string(),
+    ]
+}
+
 async fn delete_workflow_in_transaction(
     tx: &mut AdmittedTx,
     owner_pubkey: &[u8],
@@ -84,11 +125,18 @@ async fn delete_workflow_in_transaction(
     let community_id = tx.community();
     let cutoff = DateTime::from_timestamp(deletion_created_at_secs, 0)
         .ok_or(DbError::InvalidTimestamp(deletion_created_at_secs))?;
+    // UUID coordinates are canonical; retain the legacy name-based path.
+    // A UUID coordinate names the workflow however it spells the UUID, so it
+    // takes the canonical coordinate's lock (the one a save holds) and covers
+    // every stored spelling. A name matches only itself.
+    let workflow_id = Uuid::parse_str(d_tag).ok();
+    let canonical = workflow_id.map(|id| id.to_string());
+    let spellings = workflow_id.map(workflow_d_spellings).unwrap_or_default();
     let lock_key = crate::store::replaceable::event_replacement_lock_key(
         community_id,
         KIND_WORKFLOW_DEF as i32,
         owner_pubkey,
-        Some(d_tag.as_bytes()),
+        Some(canonical.as_deref().unwrap_or(d_tag).as_bytes()),
     );
     crate::observability::observe_event_lock(
         crate::observability::LockType::Replacement,
@@ -101,23 +149,22 @@ async fn delete_workflow_in_transaction(
 
     let head: Option<DateTime<Utc>> = sqlx::query_scalar(
         "SELECT created_at FROM events WHERE community_id = $1 AND kind = $2 \
-             AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
-             ORDER BY created_at DESC LIMIT 1",
+             AND pubkey = $3 AND (d_tag = $4 OR lower(d_tag) = ANY($5)) \
+             AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
     )
     .bind(community_id.as_uuid())
     .bind(KIND_WORKFLOW_DEF as i32)
     .bind(owner_pubkey)
     .bind(d_tag)
+    .bind(&spellings)
     .fetch_optional(tx.conn())
     .await?;
     if head.is_some_and(|created_at| created_at > cutoff) {
         return Ok(WorkflowDeletionOutcome::default());
     }
 
-    // UUID coordinates are canonical; retain the legacy name-based path.
     // The owner predicate is in the locking SELECT; FOR UPDATE keeps it
     // binding for the deletes below.
-    let workflow_id = Uuid::parse_str(d_tag).ok();
     // Lock the workflow first: a concurrent run, approval or fire insert must
     // lock it `FOR KEY SHARE` (the reference checks in `workflow.rs`), so the
     // child deletes below see every committed child, and an insert that starts
@@ -140,13 +187,15 @@ async fn delete_workflow_in_transaction(
     };
     let definitions = sqlx::query(
         "UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND kind = $2 \
-             AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL AND created_at <= $5",
+             AND pubkey = $3 AND (d_tag = $4 OR lower(d_tag) = ANY($6)) \
+             AND deleted_at IS NULL AND created_at <= $5",
     )
     .bind(community_id.as_uuid())
     .bind(KIND_WORKFLOW_DEF as i32)
     .bind(owner_pubkey)
     .bind(d_tag)
     .bind(cutoff)
+    .bind(&spellings)
     .execute(tx.conn())
     .await?;
     let changed = deleted_channel.is_some() || definitions.rows_affected() > 0;

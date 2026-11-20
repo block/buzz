@@ -191,9 +191,10 @@ fn append_workflow_mention_tags(
 /// `<id>` is the workflow's stored UUID in hyphenated lowercase form. That is
 /// the `d` value of the workflow's kind:30620 definition as `buzz-sdk` writes
 /// it and as clients compare it, so a client pairs it with
-/// `buzz:workflow-owner` to form the coordinate `30620:<owner>:<id>`. The relay
-/// accepts a definition whose `d` spells the same UUID another way (uppercase,
-/// unhyphenated); this tag still carries the canonical form.
+/// `buzz:workflow-owner` to form the coordinate `30620:<owner>:<id>`. It is
+/// also the only `d` the save handler accepts: a definition whose `d` spells
+/// the same UUID another way (uppercase, unhyphenated) is rejected, so that
+/// coordinate holds the workflow's one live definition.
 ///
 /// Everyone who can read the message can read this tag, including people who
 /// cannot see the workflow. It is an opaque identifier and nothing more: every
@@ -718,11 +719,10 @@ mod tests {
     /// The tag value is the `d` that `buzz-sdk` writes on a workflow's
     /// kind:30620 definition, which is the string a client compares it with.
     ///
-    /// It is not every `d` the relay accepts. The save handler keys a workflow
-    /// by the UUID it parses from `d`, so a definition that spells the same
-    /// UUID in uppercase belongs to the same workflow, and the tag does not
-    /// equal that `d`. NOSTR.md ("Workflow Identity") lists this as a case in
-    /// which a client finds no definition.
+    /// `Uuid::parse_str` reads other spellings of the same UUID, such as
+    /// uppercase, as the same workflow, and the tag does not equal them. The
+    /// save handler therefore rejects them (`e2e_workflow_deletion.rs` pins
+    /// that), so the tag's coordinate is the one a definition is stored at.
     #[test]
     fn workflow_id_tag_is_the_d_value_buzz_sdk_writes() {
         const CANONICAL: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";

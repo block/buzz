@@ -221,6 +221,154 @@ async fn workflow_deletion_preserves_newer_definition_and_cleans_legacy_orphan()
     assert_absent(&db, &legacy, legacy_id).await;
 }
 
+/// Query for the owner's live definition stored under exactly `d_tag`.
+fn definition_at(community: CommunityId, owner: &[u8], d_tag: &str) -> EventQuery {
+    EventQuery {
+        kinds: Some(vec![KIND_WORKFLOW_DEF as i32]),
+        pubkey: Some(owner.to_vec()),
+        d_tag: Some(d_tag.to_string()),
+        ..EventQuery::for_community(community)
+    }
+}
+
+async fn live_definitions(db: &Db, query: &EventQuery) -> usize {
+    db.query_events(query)
+        .await
+        .expect("definition query")
+        .len()
+}
+
+/// Every `d` spelling of one UUID that relays have stored: the canonical form
+/// first, then the others `Uuid::parse_str` reads as the same workflow.
+fn stored_spellings(id: Uuid) -> [String; 5] {
+    [
+        id.to_string(),
+        id.to_string().to_uppercase(),
+        id.simple().to_string(),
+        id.braced().to_string().to_uppercase(),
+        id.urn().to_string(),
+    ]
+}
+
+/// Relays before the canonical-`d` rule stored one definition per spelling of
+/// a workflow's UUID. A delete through any spelling of the coordinate removes
+/// the workflow and every one of them, and nothing of another workflow.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn workflow_deletion_through_any_spelling_removes_every_stored_spelling() {
+    let (db, community) = setup().await;
+    let now = Timestamp::now().as_secs();
+    for via in 0..5 {
+        let keys = Keys::generate();
+        let owner = keys.public_key().to_bytes();
+        let id = Uuid::new_v4();
+        let spellings = stored_spellings(id);
+        for (age, d_tag) in spellings.iter().enumerate() {
+            seed(&db, community, &keys, id, d_tag, now - 10 + age as u64).await;
+        }
+        // Another workflow of the same owner, stored uppercase, must survive.
+        let other_id = Uuid::new_v4();
+        let other_d = other_id.to_string().to_uppercase();
+        let other = seed(&db, community, &keys, other_id, &other_d, now - 10).await;
+
+        // The newest stored spelling is the live head for every coordinate
+        // spelling: a deletion older than it is a no-op.
+        let stale = db
+            .delete_workflow_by_coordinate(community, &owner, &spellings[via], now as i64 - 7)
+            .await
+            .expect("stale deletion");
+        assert!(
+            !stale.changed,
+            "deletion via {} predates the head",
+            spellings[via]
+        );
+        for d_tag in &spellings {
+            let query = definition_at(community, &owner, d_tag);
+            assert_eq!(live_definitions(&db, &query).await, 1, "{d_tag} kept");
+        }
+
+        let outcome = db
+            .delete_workflow_by_coordinate(community, &owner, &spellings[via], now as i64)
+            .await
+            .expect("deletion");
+        assert!(outcome.changed);
+        for d_tag in &spellings {
+            let query = definition_at(community, &owner, d_tag);
+            assert_absent(&db, &query, id).await;
+        }
+        assert_present(&db, &other, other_id).await;
+    }
+}
+
+/// A save of the canonical definition retires the definitions an earlier relay
+/// stored under other spellings of the same UUID, atomically with the caller's
+/// transaction, and leaves the canonical one and other workflows alone.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn canonical_save_retires_other_stored_spellings_in_the_callers_transaction() {
+    let (db, community) = setup().await;
+    let keys = Keys::generate();
+    let owner = keys.public_key().to_bytes();
+    let id = Uuid::new_v4();
+    let now = Timestamp::now().as_secs();
+    let spellings = stored_spellings(id);
+    for d_tag in &spellings {
+        // The other spellings are newer than the canonical definition: they
+        // are retired whatever their age, because the save replaces the
+        // executable workflow whatever its age.
+        let newer = u64::from(*d_tag != spellings[0]);
+        seed(&db, community, &keys, id, d_tag, now - 10 + newer).await;
+    }
+    let other_id = Uuid::new_v4();
+    let other_d = other_id.to_string().to_uppercase();
+    let other = seed(&db, community, &keys, other_id, &other_d, now).await;
+    // Another author's event under a spelling of this UUID is not the owner's.
+    let stranger = Keys::generate();
+    let strangers_event = EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF as u16), "name: x")
+        .tags([Tag::parse(["d", spellings[1].as_str()]).expect("d tag")])
+        .sign_with_keys(&stranger)
+        .expect("sign definition");
+    db.replace_parameterized_event(community, &strangers_event, &spellings[1], None)
+        .await
+        .expect("seed stranger's definition");
+    let strangers = definition_at(community, &stranger.public_key().to_bytes(), &spellings[1]);
+
+    let mut tx = db
+        .begin_event_write_transaction(community)
+        .await
+        .expect("begin");
+    let retired = db
+        .retire_other_workflow_definition_spellings(&mut tx, &owner, id)
+        .await
+        .expect("retire");
+    assert_eq!(retired, 4);
+    drop(tx);
+    for d_tag in &spellings {
+        let query = definition_at(community, &owner, d_tag);
+        assert_eq!(
+            live_definitions(&db, &query).await,
+            1,
+            "rollback kept {d_tag}"
+        );
+    }
+
+    let mut tx = db
+        .begin_event_write_transaction(community)
+        .await
+        .expect("begin");
+    db.retire_other_workflow_definition_spellings(&mut tx, &owner, id)
+        .await
+        .expect("retire");
+    tx.commit().await.expect("commit");
+    for (index, d_tag) in spellings.iter().enumerate() {
+        let query = definition_at(community, &owner, d_tag);
+        let expected = usize::from(index == 0);
+        assert_eq!(live_definitions(&db, &query).await, expected, "{d_tag}");
+    }
+    assert_present(&db, &other, other_id).await;
+    assert_eq!(live_definitions(&db, &strangers).await, 1);
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn workflow_deletion_rolls_back_both_representations_on_failure() {

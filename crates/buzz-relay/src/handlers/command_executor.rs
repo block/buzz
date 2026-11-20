@@ -934,6 +934,13 @@ async fn handle_workflow_def(
         .ok_or_else(|| IngestError::Rejected("invalid: missing d tag (workflow_id)".into()))?;
     let workflow_id = Uuid::parse_str(&workflow_id_str)
         .map_err(|_| IngestError::Rejected("invalid: bad workflow_id format".into()))?;
+    // One spelling per workflow: definitions are stored and read by the exact
+    // `d` string, while the executable workflow is keyed by the parsed UUID.
+    // Accepting another spelling would leave two live definitions for one
+    // workflow, and `buzz:workflow-id` always carries this form.
+    if workflow_id_str != workflow_id.to_string() {
+        return Err(IngestError::Rejected(NON_CANONICAL_WORKFLOW_ID.into()));
+    }
 
     // 2. Validate caller has channel access (minimum: is a member)
     let is_member = state
@@ -1031,7 +1038,7 @@ async fn handle_workflow_def(
     let hash = compute_definition_hash(&definition_json_final);
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
+    let mut tx = match persist_command_event(&state.db, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -1079,6 +1086,15 @@ async fn handle_workflow_def(
             other => IngestError::Internal(format!("error: db upsert_workflow: {other}")),
         })?;
 
+    // Relays before the canonical-`d` rule stored definitions under other
+    // spellings of this UUID. Retire them with this save, so the canonical
+    // coordinate is the workflow's only live definition.
+    state
+        .db
+        .retire_other_workflow_definition_spellings(&mut tx, &self_bytes, workflow_id)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: retire definitions: {}", e.kind())))?;
+
     // Drop the trigger-path cache entry so the new/updated definition fires on
     // the next matching event instead of after the cache TTL.
     state
@@ -1104,6 +1120,9 @@ async fn handle_workflow_def(
         message: format!("response:{}", resp),
     })
 }
+
+/// Save rejection for a `d` that spells the workflow UUID non-canonically.
+const NON_CANONICAL_WORKFLOW_ID: &str = "invalid: workflow_id must be a lowercase hyphenated UUID";
 
 /// Trigger rejection for a missing workflow and for one the sender does not own.
 const WORKFLOW_NOT_FOUND: &str = "invalid: workflow not found or not triggerable by you";
