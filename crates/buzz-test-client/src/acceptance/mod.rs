@@ -77,7 +77,10 @@ pub struct Report {
     pub relay_url: String,
     /// The public key (hex) the run authenticated and signed as.
     pub pubkey: String,
-    /// The relay's NIP-11 `version`, when it reported one.
+    /// The build that answered the NIP-11 request: its `source_sha`, else
+    /// its `version` (see [`relay_version`]). Behind a load balancer the
+    /// WebSocket checks can reach other instances, so this names the run's
+    /// build only when the target serves a single revision.
     pub relay_version: Option<String>,
     /// True when no check failed.
     pub passed: bool,
@@ -302,14 +305,18 @@ async fn relay_info(cfg: &Config) -> (CheckReport, Option<String>) {
     }
 }
 
-/// The relay build a run reached: the NIP-11 `source_sha` when the relay
-/// advertises one, else its software `version`. A deployment gate can then
-/// match runs to the exact build it promoted.
+/// The build that answered NIP-11: its `source_sha` when that is a full
+/// 40-hex commit SHA, else its software `version`.
+///
+/// This identifies the NIP-11 responder only. The run's WebSocket
+/// connections are separate requests, so during a rolling deploy they can
+/// reach another revision. A deployment gate that counts runs for one build
+/// must point the probe at a target that serves only that revision.
 fn relay_version(info: &serde_json::Value) -> Option<String> {
-    info["source_sha"]
+    let sha = info["source_sha"]
         .as_str()
-        .or_else(|| info["version"].as_str())
-        .map(str::to_owned)
+        .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+    sha.or_else(|| info["version"].as_str()).map(str::to_owned)
 }
 
 async fn connect_auth(cfg: &Config) -> (CheckReport, Option<NostrWsConnection>) {
@@ -760,7 +767,39 @@ mod tests {
         assert_eq!(relay_version(&version_only).as_deref(), Some("0.1.0"));
         let non_string = serde_json::json!({"version": "0.1.0", "source_sha": 7});
         assert_eq!(relay_version(&non_string).as_deref(), Some("0.1.0"));
+        for bad in ["", "unknown", "0123456"] {
+            let info = serde_json::json!({"version": "0.1.0", "source_sha": bad});
+            assert_eq!(relay_version(&info).as_deref(), Some("0.1.0"), "{bad:?}");
+        }
         assert_eq!(relay_version(&serde_json::json!({})), None);
+    }
+
+    /// `relay_info` reports the build SHA from the NIP-11 document it fetched.
+    #[tokio::test]
+    async fn relay_info_reports_the_served_source_sha() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let body =
+            serde_json::json!({"supported_nips": [1], "version": "0.1.0", "source_sha": sha})
+                .to_string();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut tcp, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = tcp.read(&mut buf).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/nostr+json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            tcp.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let (report, version) = relay_info(&config(format!("ws://127.0.0.1:{port}"))).await;
+        server.await.unwrap();
+        assert_eq!(report.result, Outcome::Success, "{:?}", report.error);
+        assert_eq!(version.as_deref(), Some(sha));
     }
 
     fn config(relay_url: String) -> Config {
