@@ -75,4 +75,41 @@ void _savedChannelPreviewTests() {
     await tester.pumpAndSettle();
     expect(find.text(cached.content), findsNothing);
   });
+
+  testWidgets('a failed refresh leaves saved messages readable with Retry', (
+    tester,
+  ) async {
+    final relayMessages = _FakeMessagesNotifier([], hasLoadedMessages: false);
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [],
+        relaySessionNotifier: _ReconnectingRelaySession(
+          initialStatus: SessionStatus.connected,
+        ),
+        messagesNotifier: relayMessages,
+        savedPreview: Future.value(preview),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text(cached.content), findsOneWidget);
+    expect(find.text('Retry'), findsNothing);
+
+    relayMessages.historyRefreshFailed = true;
+    relayMessages.setMessages([fresh], historyCompleted: false);
+    await tester.pumpAndSettle();
+    expect(find.text(cached.content), findsOneWidget);
+    expect(
+      find.text('Showing saved messages. Refresh failed.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+    expect(find.text('Retry'), findsNothing);
+    expect(find.text(cached.content), findsOneWidget);
+
+    relayMessages.setMessages([fresh]);
+    await tester.pumpAndSettle();
+    expect(find.text(fresh.content), findsOneWidget);
+    expect(find.text(cached.content), findsNothing);
+  });
 }

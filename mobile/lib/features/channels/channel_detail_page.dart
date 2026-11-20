@@ -500,6 +500,11 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       )),
     );
     final messagesState = timeline.messages;
+    final refreshNotice =
+        timeline.previewRefreshFailed &&
+            sessionStatus == SessionStatus.connected
+        ? _PreviewRefreshNotice(onRetry: messagesNotifier.retryHistoryRefresh)
+        : null;
     final isConnectionInProgress =
         sessionStatus == SessionStatus.connecting ||
         sessionStatus == SessionStatus.reconnecting;
@@ -953,6 +958,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                         ),
                       ),
               ),
+              if (!showsComposer) ?refreshNotice,
               if (!resolvedChannel.isForum &&
                   (!resolvedChannel.isMember ||
                       resolvedChannel.isArchived)) ...[
@@ -974,6 +980,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      ?refreshNotice,
                       BestieTranscriptionStatus(channelId: channel.id),
                       ?assistant.pendingNotice,
                       ComposeBar(

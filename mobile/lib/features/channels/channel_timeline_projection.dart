@@ -12,6 +12,7 @@ typedef _ChannelTimeline = ({
   Map<String, ChannelWindowThreadSummary> summaries,
   bool relayHistoryReady,
   bool isShowingPreview,
+  bool previewRefreshFailed,
 });
 
 final channelTimelineProjectionProvider = Provider.autoDispose
@@ -55,5 +56,6 @@ final channelTimelineProjectionProvider = Provider.autoDispose
             : {...preview.summaries, ...liveSummaries},
         relayHistoryReady: relayHistoryReady,
         isShowingPreview: preview != null,
+        previewRefreshFailed: preview != null && notifier.historyRefreshFailed,
       );
     });

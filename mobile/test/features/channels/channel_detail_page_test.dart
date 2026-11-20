@@ -22268,6 +22268,8 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   List<NostrEvent> _messages;
   bool _hasLoadedMessages;
   bool _historyCompleted;
+  @override
+  bool historyRefreshFailed = false;
   final List<List<NostrEvent>> _olderPages;
   bool failOlderFetch;
 
@@ -22297,6 +22299,12 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
 
   @override
   AsyncValue<List<NostrEvent>> build() => AsyncData(_messages);
+
+  @override
+  void retryHistoryRefresh() {
+    historyRefreshFailed = false;
+    super.retryHistoryRefresh();
+  }
 
   @override
   bool get hasLoadedMessages => _hasLoadedMessages;

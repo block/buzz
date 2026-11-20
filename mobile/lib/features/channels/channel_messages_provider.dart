@@ -42,6 +42,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   bool _reachedOldest = false;
   bool _initInFlight = false;
   bool _hasLoadedHistory = false;
+  bool _historyRefreshFailed = false;
   AsyncError<List<NostrEvent>>? _accessDenial;
   Future<bool>? _olderInFlight;
   bool _usingChannelWindow = false;
@@ -124,6 +125,14 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
   /// A complete history response can replace the saved preview.
   bool get hasLoadedHistory => _hasLoadedHistory;
+
+  bool get historyRefreshFailed => _historyRefreshFailed;
+
+  void retryHistoryRefresh() {
+    _historyRefreshFailed = false;
+    ref.notifyListeners();
+    ref.invalidateSelf();
+  }
 
   /// Whether a loaded timeline is resubscribing and fetching its newest
   /// history, as after a reconnect, to become current again.
@@ -237,6 +246,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   Future<void> _init() async {
     final initVersion = ++_initVersion;
     _initInFlight = true;
+    _historyRefreshFailed = false;
     _clearSubscription();
     final cacheScope = ref.read(savedMessageScopeProvider);
     final cache = ref.read(savedMessageStoreProvider);
@@ -346,6 +356,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         return;
       }
       if (_accessDenial != null) return;
+      _historyRefreshFailed = true;
       final fallbackMessages = state.value ?? _lastKnownMessages;
       if (fallbackMessages != null) {
         debugPrint(

@@ -1508,6 +1508,12 @@ void main() {
       final state = container.read(channelMessagesProvider(_channelId));
       expect(state.hasError, isFalse);
       expect(state.value?.map((event) => event.id), ['live']);
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId).notifier)
+            .historyRefreshFailed,
+        isTrue,
+      );
     },
   );
 
