@@ -19,6 +19,11 @@ void main() {
         DiagnosticScreen.addCommunity,
       ),
       (const PairingPage(addingCommunity: true), DiagnosticScreen.addCommunity),
+      // Send to Desktop recovers an identity; it adds no community.
+      (
+        const PairingPage(addingCommunity: true, identityRecoveryOnly: true),
+        DiagnosticScreen.onboarding,
+      ),
       // Not on the list: never named by its own type.
       (const Text('unlisted'), null),
     ];

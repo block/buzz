@@ -39,7 +39,10 @@ DiagnosticScreen? diagnosticScreenOf(Widget page) => switch (page) {
   CommunityInvitePage() => DiagnosticScreen.invites,
   CommunitySwitcherPage() => DiagnosticScreen.communitySwitcher,
   OnboardingAppEntry(addingCommunity: true) ||
-  PairingPage(addingCommunity: true) => DiagnosticScreen.addCommunity,
+  PairingPage(
+    addingCommunity: true,
+    identityRecoveryOnly: false,
+  ) => DiagnosticScreen.addCommunity,
   MediaImageViewerPage() ||
   MediaVideoViewerPage() => DiagnosticScreen.mediaViewer,
   OnboardingAppEntry() ||
