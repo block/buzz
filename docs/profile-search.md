@@ -85,3 +85,70 @@ CREATE INDEX CONCURRENTLY idx_nip_fi_profile_heads_names
 
 If the build fails, drop the invalid index and build it again. The migration
 then checks that the index is valid and has this definition.
+
+
+## Operator-delivered verified names
+
+`POST /operator/communities/verified-profile` lets a trusted operator deliver a
+current, issuer-signed human name assertion without waiting for the target device
+to reconnect. It produces the same relay-signed kind-30382 used by profile search.
+It never creates kind-0 metadata or signs as the target, and does not enroll keys,
+grant access, change membership, or replace user-selected names or avatars.
+
+The request uses the deployment operator's payload-bound NIP-98 signature against
+`RELAY_OPERATOR_API_ORIGIN`; the existing operator allowlist and replay protection
+apply. Its JSON body contains exactly:
+
+```json
+{
+  "community_id": "<community UUID>",
+  "expected_host": "workspace.example.org",
+  "assertion": "<current human NIP-FI compact JWT>"
+}
+```
+
+The UUID and canonical host must resolve to the same active community served by
+this relay. The management request's inbound Host does not select a tenant. The
+canonical assertion verifier checks issuer trust, signature, audience, token
+class, key claims and validity bounds against that community. Only the verified
+`nostr_pubkey` and validated `nostr_public_profile` supply the target and names;
+operator-selected names or key overrides are rejected. The assertion must be for
+a human, not an agent or OAuth client subject. Display names may contain internal
+spaces and valid NFC Unicode under the existing 64-character claim rules.
+
+Publication requires a stable relay key, global NIP-FI enforcement and the
+issuer's enabled public-profile policy. The shared issuer/key deny map and
+community bans apply. The target must already be a relay member, even when
+ordinary relay admission does not require explicit membership. The operator's
+signature is proof of delivery, not proof of possession of the target key.
+`verified_at` records assertion verification; it does not claim the device
+connected at that time.
+
+A committed write responds with `{"status":"published","event":{...}}`. Verify
+the returned relay signature and the event's `p`/`d` target tags when checking a
+consumer integration. Storage failure returns 503 `publication_unavailable`.
+`{"status":"not_written"}` means no new event was written: the assertion may be
+unchanged, superseded, or no longer eligible. It is not confirmation that the
+submitted name is current. Delivery to subscribers is best effort after durable
+storage; consumers can fetch the stored event if they miss that notification.
+
+Within one issuer, an older `iat` cannot replace the current snapshot. Different
+names with an equal `iat` are ambiguous and do not replace it either; obtain a
+strictly newer assertion to change the names. An identical assertion may still
+refresh after the configured interval or adopt a changed public issuer label.
+Ordering is assertion issuance order, not an upstream directory version. The
+producer must obtain fresh authoritative names, serialize/version its source
+updates and retry with newly signed NIP-98 requests. Replaying an old assertion
+does not discover a new directory name.
+
+This endpoint has no roster consumer, scheduled backfill, issuer-token minting or
+automatic publication at provisioning time. A provisioning or roster worker must
+have an independently authorized way to obtain the current human assertion for
+each currently verified device key. A cached key receipt alone is insufficient.
+Do not use server-derived replacement identities or retain employee private keys
+for this purpose. Existing accounts can be explicitly reconciled through this
+endpoint once those prerequisites hold. The record retains the existing
+historical verified-name semantics; revocation stops eligibility/access rather
+than deleting historical names. Clients must consume kind-30382 separately from
+employee-authored kind-0 and retain user-profile precedence. Older clients that
+read only kind-0 will not gain name display or search from this endpoint alone.

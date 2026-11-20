@@ -51,15 +51,15 @@ fn input<'a>(
     community: CommunityId,
     key: &'a str,
     issued_at: DateTime<Utc>,
-    admitted_at: DateTime<Utc>,
+    verified_at: DateTime<Utc>,
     full_name: Option<&'a str>,
-) -> ProfileAdmission<'a> {
-    ProfileAdmission {
+) -> ProfileVerification<'a> {
+    ProfileVerification {
         community,
         issuer: ISSUER,
         pubkey: key,
         issued_at,
-        admitted_at,
+        verified_at,
         display_name: "Alice",
         username: "alice",
         full_name,
@@ -193,7 +193,7 @@ async fn lifecycle() {
     );
 
     // Each public field change publishes immediately.
-    let alicia = |ns: i64, n: i64| ProfileAdmission {
+    let alicia = |ns: i64, n: i64| ProfileVerification {
         display_name: "Alicia",
         username: "alicia",
         label: "Example Corp",
@@ -209,7 +209,7 @@ async fn lifecycle() {
     for (field, admission) in [
         (
             "display_name",
-            ProfileAdmission {
+            ProfileVerification {
                 username: "alice",
                 label: "Example",
                 ..alicia(7, 3604)
@@ -217,7 +217,7 @@ async fn lifecycle() {
         ),
         (
             "username",
-            ProfileAdmission {
+            ProfileVerification {
                 label: "Example",
                 ..alicia(8, 3605)
             },
@@ -235,7 +235,7 @@ async fn lifecycle() {
     // A no-op login still advances the issuer's assertion ordering.
     assert!(publish(alicia(20, 3607)).await.unwrap().is_none());
     assert!(
-        publish(ProfileAdmission {
+        publish(ProfileVerification {
             display_name: "Stale",
             ..alicia(15, 3608)
         })
@@ -247,7 +247,7 @@ async fn lifecycle() {
 
     // The latest verification from any issuer wins; assertion times are not
     // compared across issuers.
-    let other = |n: i64| ProfileAdmission {
+    let other = |n: i64| ProfileVerification {
         issuer: "https://other-issuer.test",
         display_name: "Other",
         ..input(community, &key, iat - Duration::hours(1), step(n), None)
@@ -294,9 +294,15 @@ async fn eligibility() {
     let (db, community, keys, key) = fixture().await;
     set_member(&db, community, &key, false).await;
     let iat = Utc::now() - Duration::seconds(60);
-    let at = |n: i64, membership_required| ProfileAdmission {
+    let at = |n: i64, membership_required| ProfileVerification {
         membership_required,
-        ..input(community, &key, iat, iat + Duration::seconds(n), None)
+        ..input(
+            community,
+            &key,
+            iat + Duration::seconds(n),
+            iat + Duration::seconds(n),
+            None,
+        )
     };
     assert!(
         db.publish_verified_profile(at(1, true), &keys)
@@ -325,7 +331,7 @@ async fn eligibility() {
     for membership_required in [true, false] {
         assert!(
             db.publish_verified_profile(
-                ProfileAdmission {
+                ProfileVerification {
                     display_name: "Banned Alice",
                     ..at(3, membership_required)
                 },
@@ -346,7 +352,7 @@ async fn eligibility() {
         .unwrap();
     assert!(db
         .publish_verified_profile(
-            ProfileAdmission {
+            ProfileVerification {
                 display_name: "Restored Alice",
                 ..at(4, true)
             },
@@ -367,7 +373,7 @@ async fn eligibility() {
     .unwrap();
     assert!(
         db.publish_verified_profile(
-            ProfileAdmission {
+            ProfileVerification {
                 display_name: "Expired-ban Alice",
                 ..at(5, true)
             },

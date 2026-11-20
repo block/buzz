@@ -6,8 +6,10 @@
 
 mod community_policy;
 mod invites;
+mod verified_profiles;
 pub use community_policy::{community_nip_fi_policy_status, set_community_nip_fi_policy};
 pub use invites::mint_community_invite;
+pub use verified_profiles::publish_verified_profile;
 
 use crate::access::{AccessSlot, AuthMethod, AuthResult};
 use std::sync::Arc;
@@ -1257,6 +1259,7 @@ mod postgres_tests {
     mod creation_policy_postgres_tests;
     mod initial_policy_postgres_tests;
     mod invite_postgres_tests;
+    mod verified_profiles_postgres_tests;
     use std::{
         collections::HashSet,
         sync::{Arc, Mutex},
