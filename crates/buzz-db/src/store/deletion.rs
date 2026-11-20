@@ -88,8 +88,8 @@ pub const RELAY_ADMIN_TABLES: &[(&str, &str)] = &[
 /// Catalog inventory compares the live database against this exact set before
 /// approval and again before PostgreSQL purge. A new tenant table therefore
 /// blocks deletion until this manifest is intentionally updated.
-/// [`PENDING_SCOPED_TABLES`] and [`RETIRING_SCOPED_TABLES`] are accepted present
-/// or absent and are not listed here.
+/// [`PENDING_SCOPED_TABLES`] are accepted present or absent and are not listed
+/// here.
 pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "nip_fi_profile_heads",
     "api_tokens",
@@ -127,25 +127,17 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "workflows",
 ];
 
-/// Tenant tables a later contract migration drops.
+/// Tenant tables that migration 0105 dropped, kept only for frozen approvals.
 ///
-/// Nothing reads or writes these tables any more, but they still exist until
-/// that migration runs. Like [`PENDING_SCOPED_TABLES`], the catalog accepts each
-/// one present or absent; when present, the purge deletes its rows and
-/// verification proves it empty. That keeps community deletion working before
-/// the drop, after it, in a mixed fleet, and for a request approved before the
-/// drop and executed after it: `validate_approved_schema` in `buzz-deletion`
-/// accepts a frozen table from this list that is no longer live, and no other.
-///
-/// The list is separate from [`PENDING_SCOPED_TABLES`] because the two
-/// lifecycles differ: a pending table is absent now and may appear after an
-/// approval ([`APPROVAL_FORWARD_TABLES`]), while a retiring table is live now
-/// and may vanish after one. They are purged ahead of [`PURGE_SCOPED_TABLES`],
-/// which satisfies the foreign key from `subscriptions` to `users`;
-/// `delivery_log` has no foreign key to another tenant table. Once the
-/// migration that drops a table has shipped everywhere and its approvals have
-/// drained, remove it from this list.
-pub const RETIRING_SCOPED_TABLES: &[&str] = &["delivery_log", "subscriptions"];
+/// No database has these tables at this version: deployments apply migrations
+/// before code, and auto-migration runs before the relay serves. A live table
+/// with one of these names is an unknown scoped table, so the catalog check
+/// fails closed and deletion refuses it. The one use is
+/// `validate_approved_schema` in `buzz-deletion`: a deletion request approved
+/// before migration 0105 froze an inventory that lists these tables, and its
+/// executor must still accept that they are gone. Remove this list once no
+/// approval from before migration 0105 can remain.
+pub const DROPPED_SCOPED_TABLES: &[&str] = &["delivery_log", "subscriptions"];
 
 /// Tenant tables that a later release's expand migration adds.
 ///
@@ -2380,8 +2372,8 @@ impl DeletionStore {
         }
         // Child before parent, not alphabetical (see PURGE_SCOPED_TABLES). A
         // later unit can observe zero rows; each scoped WHERE stays idempotent.
-        let optional = live_optional_tables_on(&mut tx).await?;
-        for table in optional.iter().chain(PURGE_SCOPED_TABLES) {
+        let pending = live_pending_tables_on(&mut tx).await?;
+        for table in pending.iter().chain(PURGE_SCOPED_TABLES) {
             let sql = format!("DELETE FROM {table} WHERE community_id = $1");
             let affected = sqlx::query(AssertSqlSafe(sql))
                 .bind(token.community_id.as_uuid())
@@ -2476,10 +2468,10 @@ impl DeletionStore {
                 token.community_id
             )));
         }
-        let optional = live_optional_tables_on(&mut tx).await?;
+        let pending = live_pending_tables_on(&mut tx).await?;
         let scoped = EXPECTED_SCOPED_TABLES
             .iter()
-            .chain(&optional)
+            .chain(&pending)
             .map(|table| (*table, format!("FROM {table} WHERE community_id = $1")));
         let relay_admin = RELAY_ADMIN_TABLES
             .iter()
@@ -3620,10 +3612,7 @@ async fn validate_catalog_on(conn: &mut PgConnection) -> Result<()> {
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     let mut live_tables = live_scoped_tables_on(conn).await?;
-    live_tables.retain(|table| {
-        !PENDING_SCOPED_TABLES.contains(&table.as_str())
-            && !RETIRING_SCOPED_TABLES.contains(&table.as_str())
-    });
+    live_tables.retain(|table| !PENDING_SCOPED_TABLES.contains(&table.as_str()));
     if live_tables != expected {
         let missing = expected
             .difference(&live_tables)
@@ -3643,14 +3632,12 @@ async fn validate_catalog_on(conn: &mut PgConnection) -> Result<()> {
     Ok(())
 }
 
-/// The [`PENDING_SCOPED_TABLES`] and [`RETIRING_SCOPED_TABLES`] that exist.
-/// Call under the shared schema/destruction lock so the answer holds until the
-/// transaction ends.
-async fn live_optional_tables_on(conn: &mut PgConnection) -> Result<Vec<&'static str>> {
+/// The [`PENDING_SCOPED_TABLES`] that exist. Call under the shared
+/// schema/destruction lock so the answer holds until the transaction ends.
+async fn live_pending_tables_on(conn: &mut PgConnection) -> Result<Vec<&'static str>> {
     let live = live_scoped_tables_on(conn).await?;
     Ok(PENDING_SCOPED_TABLES
         .iter()
-        .chain(RETIRING_SCOPED_TABLES)
         .copied()
         .filter(|table| live.contains(*table))
         .collect())
@@ -4159,19 +4146,6 @@ mod tests {
             assert!(APPROVAL_FORWARD_TABLES.contains(table), "{table}");
             assert!(!EXPECTED_SCOPED_TABLES.contains(table), "{table}");
             assert!(!PURGE_SCOPED_TABLES.contains(table), "{table}");
-        }
-    }
-
-    /// A retiring table is optional everywhere: never required by the catalog
-    /// or the fixed purge list, never also pending, and never added after an
-    /// approval.
-    #[test]
-    fn retiring_scoped_tables_are_only_optional() {
-        for table in RETIRING_SCOPED_TABLES {
-            assert!(!EXPECTED_SCOPED_TABLES.contains(table), "{table}");
-            assert!(!PURGE_SCOPED_TABLES.contains(table), "{table}");
-            assert!(!PENDING_SCOPED_TABLES.contains(table), "{table}");
-            assert!(!APPROVAL_FORWARD_TABLES.contains(table), "{table}");
         }
     }
 
@@ -4804,11 +4778,6 @@ pub(crate) mod postgres_tests {
             .chain(COMMUNITY_SCOPED_CONTROL_PLANE_TABLES.iter())
             .map(|table| (*table).to_owned())
             .collect::<BTreeSet<_>>();
-        // Retiring tables are accepted present or absent.
-        let live = live
-            .into_iter()
-            .filter(|table| !RETIRING_SCOPED_TABLES.contains(&table.as_str()))
-            .collect::<BTreeSet<_>>();
         assert_eq!(live, accounted);
     }
 
@@ -4863,6 +4832,13 @@ pub(crate) mod postgres_tests {
         crate::migration::run_migrations_through(&db.pool, 89)
             .await
             .expect("migrate with fence objects present");
+        // Migration 0105 drops the delivery tables, and the deletion catalog no
+        // longer accepts them as tenant tables. Drop them by hand so the
+        // catalog is the current one; their triggers go with them.
+        sqlx::raw_sql("DROP TABLE delivery_log, subscriptions")
+            .execute(&db.pool)
+            .await
+            .expect("drop the tables migration 0105 drops");
         let store = db.deletion_store();
         let community = db
             .ensure_configured_community("optional-fences.example")
@@ -4883,7 +4859,6 @@ DROP TRIGGER IF EXISTS community_write_fence_channel_members ON channel_members;
 DROP TRIGGER IF EXISTS community_write_fence_channels ON channels;
 DROP TRIGGER IF EXISTS community_write_fence_community_bans ON community_bans;
 DROP TRIGGER IF EXISTS community_write_fence_community_nip_fi_issuers ON community_nip_fi_issuers;
-DROP TRIGGER IF EXISTS community_write_fence_delivery_log ON delivery_log;
 DROP TRIGGER IF EXISTS community_write_fence_event_mentions ON event_mentions;
 DROP TRIGGER IF EXISTS community_write_fence_events ON events;
 DROP TRIGGER IF EXISTS community_write_fence_git_repo_names ON git_repo_names;
@@ -4901,7 +4876,6 @@ DROP TRIGGER IF EXISTS community_write_fence_reactions ON reactions;
 DROP TRIGGER IF EXISTS community_write_fence_relay_invites ON relay_invites;
 DROP TRIGGER IF EXISTS community_write_fence_relay_members ON relay_members;
 DROP TRIGGER IF EXISTS community_write_fence_scheduled_workflow_fires ON scheduled_workflow_fires;
-DROP TRIGGER IF EXISTS community_write_fence_subscriptions ON subscriptions;
 DROP TRIGGER IF EXISTS community_write_fence_thread_metadata ON thread_metadata;
 DROP TRIGGER IF EXISTS community_write_fence_users ON users;
 DROP TRIGGER IF EXISTS community_write_fence_workflow_approvals ON workflow_approvals;
@@ -4931,12 +4905,7 @@ DROP FUNCTION community_deletion_lock_key(UUID);
             .expect("readiness");
             store.validate_catalog().await.expect("deletion catalog");
             let inventory = store.inventory_schema(community).await.expect("inventory");
-            let required = inventory
-                .scoped_tables
-                .iter()
-                .filter(|table| !RETIRING_SCOPED_TABLES.contains(&table.as_str()))
-                .count();
-            assert_eq!(required, EXPECTED_SCOPED_TABLES.len());
+            assert_eq!(inventory.scoped_tables.len(), EXPECTED_SCOPED_TABLES.len());
             assert!(inventory.fenced_tables.is_empty());
             let lease = store
                 .acquire_serving_write_lease(
@@ -5008,6 +4977,13 @@ DROP FUNCTION community_deletion_lock_key(UUID);
         crate::migration::run_migrations_through(&db.pool, 86)
             .await
             .expect("phase-one schema");
+        // Migration 0105 drops the delivery tables, and the deletion catalog no
+        // longer accepts them as tenant tables. Drop them by hand so the
+        // catalog is the current one.
+        sqlx::raw_sql("DROP TABLE delivery_log, subscriptions")
+            .execute(&db.pool)
+            .await
+            .expect("drop the tables migration 0105 drops");
         let community = db
             .ensure_configured_community("optional-guards.example")
             .await
@@ -8933,16 +8909,9 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         let first = store.purge_postgres(&token).await.expect("purge postgres");
         assert_eq!(first["media_uploaders"], 1);
         assert_eq!(first["media_publications"], 1);
-        let optional = {
-            let mut conn = db.pool.acquire().await.expect("acquire connection");
-            live_optional_tables_on(&mut conn)
-                .await
-                .expect("live optional tables")
-        };
         let expected_tables: BTreeSet<&str> = EXPECTED_SCOPED_TABLES
             .iter()
             .chain(RELAY_ADMIN_TABLES.iter().map(|(table, _)| table))
-            .chain(&optional)
             .copied()
             .collect();
         assert_eq!(
@@ -9689,9 +9658,13 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         }
     }
 
-    /// Scratch desired-state database and a store on it.
-    async fn scratch_retiring_store(prefix: &str) -> (Db, DeletionStore, ScratchDb) {
-        let (_, scratch) = scratch_desired_state_database(prefix).await;
+    /// Migration 0105 dropped `delivery_log` and `subscriptions`. A live table
+    /// with either name is no longer accepted: it is an unknown tenant table, so
+    /// the catalog check fails closed and deletion refuses to proceed.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn dropped_scoped_tables_are_rejected_as_unknown_when_live() {
+        let (_, scratch) = scratch_desired_state_database("deletion_dropped").await;
         let db = Db::new(&DbConfig {
             database_url: scratch.url().to_owned(),
             max_connections: 5,
@@ -9701,219 +9674,31 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         .await
         .expect("connect scratch database");
         let store = db.deletion_store();
-        (db, store, scratch)
-    }
-
-    /// Approve, claim, fence, drain and remove bindings, leaving the request
-    /// ready for `purge_postgres`.
-    async fn fence_and_drain(
-        store: &DeletionStore,
-        request: &DeletionRequest,
-        inventory: &FrozenInventory,
-    ) -> LeaseToken {
-        store
-            .approve(request.id, "approver", None)
-            .await
-            .expect("approve");
-        let claim = store
-            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
-            .await
-            .expect("claim")
-            .expect("won claim");
-        store.begin_quiescing(&claim.lease).await.expect("quiesce");
-        let generation = store.fence(&claim.lease).await.expect("fence");
-        let token = LeaseToken {
-            fence_generation: Some(generation),
-            ..claim.lease
-        };
-        store
-            .freeze_destructive_storage_manifest(&token, &inventory.storage)
-            .await
-            .expect("freeze destructive storage");
-        store.mark_drained(&token).await.expect("drain");
-        store
-            .mark_bindings_removed(&token, serde_json::json!({"keys": 0}))
-            .await
-            .expect("bindings");
-        token
-    }
-
-    /// One `subscriptions` row and one `delivery_log` row per community.
-    async fn seed_retiring_tables(db: &Db, communities: &[Uuid]) {
-        for community in communities {
-            for statement in [
-                "INSERT INTO users (community_id, pubkey) VALUES ($1, decode(repeat('51', 32), 'hex'))",
-                "INSERT INTO subscriptions (community_id, id, owner_pubkey) \
-                 VALUES ($1, 'retiring', decode(repeat('51', 32), 'hex'))",
-                "INSERT INTO delivery_log (community_id, subscription_id) VALUES ($1, 'retiring')",
-            ] {
-                sqlx::query(statement)
-                    .bind(community)
-                    .execute(&db.pool)
-                    .await
-                    .expect("seed retiring table");
-            }
-        }
-    }
-
-    /// While the retiring tables still exist, the catalog accepts them, the
-    /// purge deletes the target community's rows and no one else's, and
-    /// verification proves them empty.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn retiring_scoped_tables_are_purged_and_verified_while_present() {
-        let (db, store, _scratch) = scratch_retiring_store("deletion_retiring_present").await;
         store
             .validate_catalog()
             .await
-            .expect("retiring tables present");
-        let (request, inventory) = inventoried_request(&db, &store).await;
-        for table in RETIRING_SCOPED_TABLES {
-            assert!(
-                inventory
-                    .schema
-                    .scoped_tables
-                    .iter()
-                    .any(|frozen| frozen == table),
-                "{table} is inventoried while it exists"
-            );
-        }
-        let community = *request.community_id.as_uuid();
-        let bystander = *db
-            .ensure_configured_community(&format!("bystander-{}.example", Uuid::new_v4().simple()))
-            .await
-            .expect("bystander community")
-            .id
-            .as_uuid();
-        seed_retiring_tables(&db, &[community, bystander]).await;
+            .expect("catalog without the dropped tables");
 
-        let token = fence_and_drain(&store, &request, &inventory).await;
-        let deleted = store.purge_postgres(&token).await.expect("purge postgres");
-        for table in RETIRING_SCOPED_TABLES {
-            assert_eq!(deleted.get(*table), Some(&1), "{table}");
-        }
-        store
-            .mark_cache_purged(&token, serde_json::json!({"keys": 0}))
-            .await
-            .expect("cache");
-
-        // Verification covers the retiring tables: a straggler fails it.
-        for (table, insert) in [
-            (
-                "subscriptions",
-                "INSERT INTO subscriptions (community_id, id, owner_pubkey) \
-                 VALUES ($1, 'straggler', decode(repeat('51', 32), 'hex'))",
-            ),
-            (
-                "delivery_log",
-                "INSERT INTO delivery_log (community_id, subscription_id) VALUES ($1, 'straggler')",
-            ),
-        ] {
-            sqlx::query(insert)
-                .bind(community)
-                .execute(&db.pool)
-                .await
-                .expect("seed straggler");
-            let error = store
-                .verify_postgres_logically_deleted(&token)
-                .await
-                .expect_err("a straggler in a retiring table fails verification");
-            assert!(error.to_string().contains(table), "{error}");
+        for table in DROPPED_SCOPED_TABLES {
             sqlx::query(AssertSqlSafe(format!(
-                "DELETE FROM {table} WHERE community_id = $1"
+                "CREATE TABLE {table} (community_id UUID NOT NULL)"
             )))
-            .bind(community)
             .execute(&db.pool)
             .await
-            .expect("remove straggler");
-        }
-        store
-            .verify_postgres_logically_deleted(&token)
-            .await
-            .expect("verify");
-        for table in RETIRING_SCOPED_TABLES {
-            let kept: i64 = sqlx::query_scalar(AssertSqlSafe(format!(
-                "SELECT count(*) FROM {table} WHERE community_id = $1"
-            )))
-            .bind(bystander)
-            .fetch_one(&db.pool)
-            .await
-            .expect("count bystander rows");
-            assert_eq!(kept, 1, "{table} keeps the bystander's row");
-        }
-    }
-
-    /// A deletion inventoried while the retiring tables existed and executed
-    /// after a later migration dropped them: the catalog still validates, the
-    /// purge and verification skip the missing tables, and another unknown
-    /// tenant table still fails closed.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn retiring_scoped_tables_may_be_dropped_before_purge() {
-        let (db, store, _scratch) = scratch_retiring_store("deletion_retiring_dropped").await;
-        let (request, inventory) = inventoried_request(&db, &store).await;
-        for table in RETIRING_SCOPED_TABLES {
+            .expect("create dropped table");
+            let error = store
+                .validate_catalog()
+                .await
+                .expect_err("a live dropped table fails closed");
             assert!(
-                inventory
-                    .schema
-                    .scoped_tables
-                    .iter()
-                    .any(|frozen| frozen == table),
-                "{table} is frozen while it exists"
+                error.to_string().contains(&format!("unknown={table}")),
+                "{error}"
             );
-        }
-
-        // The contract migration lands after the request was inventoried.
-        for table in RETIRING_SCOPED_TABLES {
             sqlx::query(AssertSqlSafe(format!("DROP TABLE {table}")))
                 .execute(&db.pool)
                 .await
-                .expect("drop retiring table");
+                .expect("drop dropped table");
         }
-        store
-            .validate_catalog()
-            .await
-            .expect("catalog accepts the retiring tables absent");
-        let live = store
-            .inventory_schema(request.community_id)
-            .await
-            .expect("inventory after drop");
-        for table in RETIRING_SCOPED_TABLES {
-            assert!(!live.scoped_tables.iter().any(|live| live == table));
-        }
-
-        sqlx::query("CREATE TABLE deletion_unknown_scoped (community_id UUID NOT NULL)")
-            .execute(&db.pool)
-            .await
-            .expect("create unknown table");
-        let error = store
-            .validate_catalog()
-            .await
-            .expect_err("an unknown tenant table still fails closed");
-        assert!(
-            error
-                .to_string()
-                .contains("(missing=, unknown=deletion_unknown_scoped)"),
-            "{error}"
-        );
-        sqlx::query("DROP TABLE deletion_unknown_scoped")
-            .execute(&db.pool)
-            .await
-            .expect("drop unknown table");
-
-        let token = fence_and_drain(&store, &request, &inventory).await;
-        let deleted = store.purge_postgres(&token).await.expect("purge postgres");
-        for table in RETIRING_SCOPED_TABLES {
-            assert!(!deleted.contains_key(*table), "{table}");
-        }
-        store
-            .mark_cache_purged(&token, serde_json::json!({"keys": 0}))
-            .await
-            .expect("cache");
-        store
-            .verify_postgres_logically_deleted(&token)
-            .await
-            .expect("verify");
     }
 
     /// Report-backed staff actions FK `moderation_reports`, and outbox rows FK

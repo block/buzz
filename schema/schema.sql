@@ -56,9 +56,6 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i types/workflow_status.sql
 \i types/run_status.sql
 \i types/approval_status.sql
-\i types/delivery_method.sql
-\i types/subscription_status.sql
-\i types/pause_reason.sql
 \i types/channel_add_policy.sql
 
 -- functions
@@ -72,8 +69,6 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i tables/public/personal_read_frontiers.sql
 \i tables/public/events.sql
 \i tables/public/event_mentions.sql
-\i tables/public/subscriptions.sql
-\i tables/public/delivery_log.sql
 \i tables/public/workflows.sql
 \i tables/public/workflow_runs.sql
 \i tables/public/workflow_approvals.sql
@@ -129,7 +124,6 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- partitions
 \i partitions/events.sql
-\i partitions/delivery_log.sql
 
 -- triggers
 

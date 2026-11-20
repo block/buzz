@@ -16,7 +16,7 @@ PostgreSQL stores data. The application owns behavior.
 | Concern | Today | Target |
 |---|---|---|
 | Schema source of truth | Two parallel sources: ordered sqlx migrations in `migrations/` and the desired-state manifest in `schema/` | The declarative desired state in `schema/tables/public/` is the source of truth. Deployments that apply schema out of band plan each change from it, with the tool of their choice. `migrations/` stays, because auto-migration stays supported (next row). Each app owns its own migrations and declarative schema: the relay's copies of the push gateway's tables are debt to remove (Rule 4). |
-| Who applies DDL | Startup migrations when `BUZZ_AUTO_MIGRATE` is on (binary default off, Helm chart default on), `buzz-admin migrate`, the push gateway's pre-upgrade Helm Job, and partition creation at relay startup and on a schedule | Both modes stay supported. Deployments at scale, including Block's hosted deployment, apply schema changes out of band through a reviewed workflow before deploying, and their serving relay runs no DDL. Smaller and self-hosted deployments MAY keep auto-migration on. Still open: how the two modes share one schema source, how auto-migration orders a release whose expand, backfill, and contract steps arrive in one upgrade, and how an operator recovers after a contract migration fails at boot (Rule 5). Monthly partition creation is planned to move out of the relay. Changes to partitioned tables (`events`, `delivery_log`) are outside the out-of-band envelope (Rule 6): attaching a partition to a live parent and building an index on a partitioned parent need their own reviewed procedure. |
+| Who applies DDL | Startup migrations when `BUZZ_AUTO_MIGRATE` is on (binary default off, Helm chart default on), `buzz-admin migrate`, the push gateway's pre-upgrade Helm Job, and partition creation at relay startup and on a schedule | Both modes stay supported. Deployments at scale, including Block's hosted deployment, apply schema changes out of band through a reviewed workflow before deploying, and their serving relay runs no DDL. Smaller and self-hosted deployments MAY keep auto-migration on. Still open: how the two modes share one schema source, how auto-migration orders a release whose expand, backfill, and contract steps arrive in one upgrade, and how an operator recovers after a contract migration fails at boot (Rule 5). Monthly partition creation is planned to move out of the relay. Changes to the partitioned `events` table are outside the out-of-band envelope (Rule 6): attaching a partition to a live parent and building an index on a partitioned parent need their own reviewed procedure. |
 | Integrity between tables | None in the database (migrations `0102`-`0104` dropped the last foreign keys) | None in the database. The owning application transaction checks references and performs deletes explicitly. |
 | Guards and follow-up writes | Triggers and PL/pgSQL functions (`schema/functions/`, `schema/triggers/`) | None in the database. Guards run in the owning writer's transaction; follow-up work is recorded in the same transaction and processed as durable, retryable application work. |
 | Data repair | Some historical repair embedded in migrations | Backfill definitions in application code, run by the durable framework in [data-backfills.md](data-backfills.md). |
@@ -150,16 +150,31 @@ on the list is not covered by an older approval, even when it is in
 
 #### Retiring a tenant-owned table
 
-Before a contract migration drops a table with a `community_id` column, ship a
-release that removes every reader and writer of it and moves it from
-`EXPECTED_SCOPED_TABLES` and `PURGE_SCOPED_TABLES` to
-`RETIRING_SCOPED_TABLES` (`crates/buzz-db/src/store/deletion.rs`), and deploy it
-to every relay, deletion executor and operator CLI. The catalog then accepts
-the table present or absent, the purge deletes its rows only while it exists,
-and an approval that froze it still executes after the drop
-(`validate_approved_schema` tolerates a frozen `RETIRING_SCOPED_TABLES` entry
-that is gone, and nothing else). Run the drop migration after that release
-is everywhere, and remove the entry once no pre-drop approval remains.
+Retiring takes two releases, each deployed to every relay, deletion executor
+and operator CLI before the next starts.
+
+1. **Code removal.** Remove every reader and writer of the table, and move it
+   from `EXPECTED_SCOPED_TABLES` and `PURGE_SCOPED_TABLES`
+   (`crates/buzz-db/src/store/deletion.rs`) to a retiring list. The catalog,
+   the purge and verification treat that list as they treat
+   `PENDING_SCOPED_TABLES`: each table is accepted present or absent, its rows
+   are deleted and verified only while it exists, and it is purged ahead of
+   `PURGE_SCOPED_TABLES`. Community deletion then works on either side of the
+   drop, in a mixed fleet and after a rollback to this release. The list
+   (`RETIRING_SCOPED_TABLES`) exists only between the two releases: the
+   code-removal PR adds it and the drop PR removes it.
+2. **Drop migration.** Ship the drop with its schema removal (Rule 4). In the
+   same PR, remove the table from the retiring list and add it to
+   `DROPPED_SCOPED_TABLES`. The catalog is again an exact set: a live table
+   that no list names is unknown and blocks deletion. Deployments apply
+   migrations before code, so no database has the table at this version.
+   `DROPPED_SCOPED_TABLES` has one use: a request approved before the drop
+   froze an inventory that lists the table, and `validate_approved_schema`
+   (`crates/buzz-deletion/src/lib.rs`) accepts that it is gone, and nothing
+   else. Remove the entry once no approval from before the drop can remain.
+
+Migration `0105` dropped `delivery_log` and `subscriptions` this way, after
+#9746 removed their code.
 
 #### Checklist: adding a provenance-only table
 
@@ -432,7 +447,8 @@ which the parent's drop already removed (`42704`). A deployment that applies
 `schema/` with pgschema applies the dropping migration first, under that
 migration's lock budgets, then runs pgschema. For the trigger drops see
 [trigger-retirement-deployment.md](trigger-retirement-deployment.md); for the
-foreign keys on `events` and `delivery_log`, apply `0104`.
+foreign keys on `events` and, before `0105` dropped it, `delivery_log`, apply
+`0104`.
 
 ### 6. Bound every lock and statement
 

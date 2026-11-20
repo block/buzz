@@ -5,6 +5,11 @@
 -- drop already removed (SQLSTATE 42704). This file runs migration 0104's drop
 -- for a database that pgschema brings up to date instead.
 --
+-- Migration 0105 dropped delivery_log and the schema no longer declares it, so
+-- a fresh database, or one migrated through 0105, has only events. A reused
+-- database from before the drop may still have delivery_log; its key is
+-- dropped too, only while the table exists.
+--
 -- For the test launchers only: scripts/start-relay-for-tests.sh, which reuses
 -- its database, and the populated-upgrade test run it before apply.
 -- Deployments apply migration 0104 instead (docs/database.md, "Retiring a
@@ -23,8 +28,13 @@ BEGIN
     IF to_regclass('events') IS NULL THEN
         RETURN;
     END IF;
-    LOCK TABLE events, delivery_log, communities IN ACCESS EXCLUSIVE MODE;
-    ALTER TABLE events DROP CONSTRAINT IF EXISTS events_community_id_fkey;
-    ALTER TABLE delivery_log DROP CONSTRAINT IF EXISTS delivery_log_community_id_fkey;
+    IF to_regclass('delivery_log') IS NOT NULL THEN
+        LOCK TABLE events, delivery_log, communities IN ACCESS EXCLUSIVE MODE;
+        ALTER TABLE events DROP CONSTRAINT IF EXISTS events_community_id_fkey;
+        ALTER TABLE delivery_log DROP CONSTRAINT IF EXISTS delivery_log_community_id_fkey;
+    ELSE
+        LOCK TABLE events, communities IN ACCESS EXCLUSIVE MODE;
+        ALTER TABLE events DROP CONSTRAINT IF EXISTS events_community_id_fkey;
+    END IF;
 END $$;
 COMMIT;

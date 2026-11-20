@@ -879,7 +879,20 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 105);
+        assert_eq!(migrations.len(), 106);
+        assert_eq!(migrations[105].version, 106);
+        let drop_delivery_tables = strip_sql_comments(migrations[105].sql.as_str());
+        assert!(drop_delivery_tables.contains("SET LOCAL lock_timeout = '300ms';"));
+        for statement in [
+            "DROP TABLE IF EXISTS delivery_log;",
+            "DROP TABLE IF EXISTS subscriptions;",
+            "DROP TYPE IF EXISTS delivery_method;",
+            "DROP TYPE IF EXISTS subscription_status;",
+            "DROP TYPE IF EXISTS pause_reason;",
+        ] {
+            assert!(drop_delivery_tables.contains(statement), "{statement}");
+        }
+        assert!(!drop_delivery_tables.contains("CASCADE"));
         assert_eq!(migrations[104].version, 105);
         assert!(strip_sql_comments(migrations[104].sql.as_str())
             .contains("ADD COLUMN finished BOOLEAN NOT NULL DEFAULT true;"));
@@ -1553,9 +1566,12 @@ mod postgres_tests {
             "media_uploaders",
             "media_publications",
         ];
+        // 0090 is immutable and also retired the fences on the two tables
+        // migration 0105 later drops, so list them here.
+        let dropped_later = ["delivery_log", "subscriptions"];
         for table in crate::deletion::EXPECTED_SCOPED_TABLES
             .iter()
-            .chain(crate::deletion::RETIRING_SCOPED_TABLES)
+            .chain(dropped_later.iter())
             .filter(|table| !never_fenced.contains(table))
         {
             assert!(
@@ -3415,8 +3431,7 @@ mod postgres_tests {
         async fn catch_all_bounds(pool: &PgPool) -> Vec<(String, Option<String>)> {
             sqlx::query_as(
                 "SELECT relname::text, pg_get_expr(relpartbound, oid) FROM pg_class \
-                 WHERE relname IN ('events_p_future', 'delivery_log_p_future') \
-                 ORDER BY relname",
+                 WHERE relname = 'events_p_future'",
             )
             .fetch_all(pool)
             .await
@@ -3424,13 +3439,12 @@ mod postgres_tests {
         }
         let declared_bounds = catch_all_bounds(&pool).await;
         assert!(
-            declared_bounds.len() == 2 && declared_bounds.iter().all(|(_, bound)| bound.is_some()),
-            "reconcile did not attach both catch-alls: {declared_bounds:?}"
+            declared_bounds.len() == 1 && declared_bounds.iter().all(|(_, bound)| bound.is_some()),
+            "reconcile did not attach the catch-all: {declared_bounds:?}"
         );
 
         // The relay's default startup pass advances the `events` catch-all into
-        // dated monthlies schema/partitions/ does not declare. `delivery_log` is
-        // retired from partition management, so its catch-all stays as declared.
+        // dated monthlies schema/partitions/ does not declare.
         maintain_partitions(
             &pool,
             PARTITION_MANAGER_MONTHS_AHEAD,
@@ -3443,15 +3457,11 @@ mod postgres_tests {
         .expect("maintain partitions");
         let advanced_bounds = catch_all_bounds(&pool).await;
         assert!(
-            advanced_bounds.len() == 2 && advanced_bounds.iter().all(|(_, bound)| bound.is_some()),
-            "maintenance dropped or detached a catch-all: {advanced_bounds:?}"
+            advanced_bounds.len() == 1 && advanced_bounds.iter().all(|(_, bound)| bound.is_some()),
+            "maintenance dropped or detached the catch-all: {advanced_bounds:?}"
         );
         for (declared, advanced) in declared_bounds.iter().zip(&advanced_bounds) {
-            if declared.0 == "events_p_future" {
-                assert_ne!(declared, advanced, "catch-all did not advance");
-            } else {
-                assert_eq!(declared, advanced, "retired table was partition-managed");
-            }
+            assert_ne!(declared, advanced, "catch-all did not advance");
         }
         let children: Vec<(String, String)> = sqlx::query_as(
             "SELECT p.relname::text, c.relname::text FROM pg_inherits i \
@@ -3469,10 +3479,7 @@ mod postgres_tests {
                 child.starts_with(&format!("{parent}_p2")) && !declared.contains(child)
             })
             .collect();
-        for (catch_all, bound) in declared_bounds
-            .iter()
-            .filter(|(catch_all, _)| catch_all == "events_p_future")
-        {
+        for (catch_all, bound) in &declared_bounds {
             // The first month the declared catch-all served, from its
             // `FOR VALUES FROM ('YYYY-MM-01 ...')` lower bound.
             let parent = catch_all
@@ -4193,6 +4200,24 @@ mod postgres_tests {
         );
     }
 
+    /// Before migration 0105 the delivery tables are live, and the deletion
+    /// catalog check refuses exactly them as unknown tenant tables and nothing
+    /// else. Migrations apply before code, so no deployment runs this binary
+    /// against such a catalog. Asserting the whole drift keeps the check as
+    /// strict as it is on the current schema.
+    async fn assert_only_delivery_tables_drift(store: &crate::deletion::DeletionStore) {
+        let error = store
+            .validate_catalog()
+            .await
+            .expect_err("deletion refuses the delivery tables before migration 0105");
+        assert!(
+            error
+                .to_string()
+                .contains("(missing=, unknown=delivery_log,subscriptions)"),
+            "{error}"
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn migrated_catalog_retires_universal_fences_but_keeps_deletion_guards() {
@@ -4212,10 +4237,7 @@ mod postgres_tests {
             .validate_serving_catalog()
             .await
             .expect("new runtime must accept pre-retirement catalog");
-        store
-            .validate_catalog()
-            .await
-            .expect("deletion must accept pre-retirement catalog");
+        assert_only_delivery_tables_drift(&store).await;
         run_migrations(&pool).await.expect("apply all migrations");
         let fence_triggers: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgname LIKE 'community_write_fence_%'",
@@ -4288,10 +4310,7 @@ mod postgres_tests {
             .validate_serving_catalog()
             .await
             .expect("new code must boot before the drop");
-        store
-            .validate_catalog()
-            .await
-            .expect("deletion must accept the catalog before the drop");
+        assert_only_delivery_tables_drift(&store).await;
         run_migrations(&pool).await.expect("apply all migrations");
         assert_eq!(present(&pool).await, (false, false));
         store

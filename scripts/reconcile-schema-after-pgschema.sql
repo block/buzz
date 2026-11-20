@@ -79,73 +79,6 @@ BEGIN
         ALTER TABLE events ATTACH PARTITION events_p_future
             FOR VALUES FROM ('2026-07-01') TO (MAXVALUE);
     END IF;
-
-    -- When pgschema creates partition children as standalone tables, it also
-    -- preserves the parent's identity column on delivery_log children. PostgreSQL
-    -- rejects attaching a child table that has its own identity column, so each
-    -- delivery_log attach path drops that standalone identity first. Raw
-    -- schema-created partitions are already attached, so these branches do not
-    -- run against inherited partition columns.
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_inherits
-        WHERE inhparent = 'delivery_log'::regclass
-          AND inhrelid = 'delivery_log_p_past'::regclass
-    ) THEN
-        ALTER TABLE delivery_log_p_past ALTER COLUMN id DROP IDENTITY IF EXISTS;
-        ALTER TABLE delivery_log ATTACH PARTITION delivery_log_p_past
-            FOR VALUES FROM (MINVALUE) TO ('2026-03-01');
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_inherits
-        WHERE inhparent = 'delivery_log'::regclass
-          AND inhrelid = 'delivery_log_p2026_03'::regclass
-    ) THEN
-        ALTER TABLE delivery_log_p2026_03 ALTER COLUMN id DROP IDENTITY IF EXISTS;
-        ALTER TABLE delivery_log ATTACH PARTITION delivery_log_p2026_03
-            FOR VALUES FROM ('2026-03-01') TO ('2026-04-01');
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_inherits
-        WHERE inhparent = 'delivery_log'::regclass
-          AND inhrelid = 'delivery_log_p2026_04'::regclass
-    ) THEN
-        ALTER TABLE delivery_log_p2026_04 ALTER COLUMN id DROP IDENTITY IF EXISTS;
-        ALTER TABLE delivery_log ATTACH PARTITION delivery_log_p2026_04
-            FOR VALUES FROM ('2026-04-01') TO ('2026-05-01');
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_inherits
-        WHERE inhparent = 'delivery_log'::regclass
-          AND inhrelid = 'delivery_log_p2026_05'::regclass
-    ) THEN
-        ALTER TABLE delivery_log_p2026_05 ALTER COLUMN id DROP IDENTITY IF EXISTS;
-        ALTER TABLE delivery_log ATTACH PARTITION delivery_log_p2026_05
-            FOR VALUES FROM ('2026-05-01') TO ('2026-06-01');
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_inherits
-        WHERE inhparent = 'delivery_log'::regclass
-          AND inhrelid = 'delivery_log_p2026_06'::regclass
-    ) THEN
-        ALTER TABLE delivery_log_p2026_06 ALTER COLUMN id DROP IDENTITY IF EXISTS;
-        ALTER TABLE delivery_log ATTACH PARTITION delivery_log_p2026_06
-            FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_inherits
-        WHERE inhparent = 'delivery_log'::regclass
-          AND inhrelid = 'delivery_log_p_future'::regclass
-    ) THEN
-        ALTER TABLE delivery_log_p_future ALTER COLUMN id DROP IDENTITY IF EXISTS;
-        ALTER TABLE delivery_log ATTACH PARTITION delivery_log_p_future
-            FOR VALUES FROM ('2026-07-01') TO (MAXVALUE);
-    END IF;
 END $$;
 
 -- pgschema moves the partition key to the front of a partitioned table's
@@ -155,8 +88,8 @@ END $$;
 -- events_pkey and each declared child's key, which fails once the children are
 -- attached because their keys are inherited. Rebuild the key on the parent in
 -- the declared order; PostgreSQL recreates each partition's key with it.
--- delivery_log already declares its partition key first. This block is a
--- verbatim copy of scripts/repair-events-pkey.sql; keep the two identical.
+-- This block is a verbatim copy of scripts/repair-events-pkey.sql; keep the two
+-- identical.
 DO $$
 DECLARE
     declared CONSTANT text := 'PRIMARY KEY (community_id, created_at, id)';
