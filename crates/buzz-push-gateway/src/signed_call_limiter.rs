@@ -78,6 +78,9 @@ impl State {
 impl SignedCallLimiter {
     /// At most `max_calls` calls per key in each `window_seconds` window.
     pub fn new(window_seconds: i64, max_calls: i64) -> Self {
+        // A window that never ends would restart on every call and grow the
+        // start queue without bound; config already requires it positive.
+        assert!(window_seconds > 0, "signed-call window must be positive");
         Self {
             window_seconds,
             max_calls,
