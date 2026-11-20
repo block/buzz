@@ -2060,6 +2060,71 @@ void main() {
       }
     });
 
+    testWidgets('iOS closes a Scribble writing gap when a draft gets long', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        Future<void> sendScribble(
+          String method, [
+          List<Object> size = const [],
+        ]) => tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+          SystemChannels.textInput.name,
+          SystemChannels.textInput.codec.encodeMethodCall(
+            MethodCall('TextInputClient.$method', <Object>[-1, ...size]),
+          ),
+          (_) {},
+        );
+        bool hasWritingGap() {
+          var found = false;
+          tester
+              .state<EditableTextState>(find.byType(EditableText))
+              .renderEditable
+              .text
+              ?.visitChildren((span) {
+                found = found || span is WidgetSpan;
+                return !found;
+              });
+          return found;
+        }
+
+        await tester.enterText(find.byType(TextField), 'abc');
+        await tester.pump();
+        await sendScribble('insertTextPlaceholder', [300, 0]);
+        await tester.pump();
+        expect(hasWritingGap(), isTrue);
+
+        // Pencil writing pushes the draft past the cutoff while the gap is
+        // open. Flutter ignores iOS closing the gap once handwriting is off,
+        // so a gap left open would stay in the draft.
+        await tester.enterText(
+          find.byType(TextField),
+          'a' * (stylusHandwritingMaxLength + 1),
+        );
+        await tester.pump();
+        expect(hasWritingGap(), isFalse);
+        await sendScribble('removeTextPlaceholder');
+        await tester.enterText(find.byType(TextField), 'abc');
+        await tester.pump();
+        expect(hasWritingGap(), isFalse);
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
     testWidgets('Android starts stylus handwriting in a long draft', (
       tester,
     ) async {
