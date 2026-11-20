@@ -263,7 +263,6 @@ class ChannelActionsSheet extends HookConsumerWidget {
                 close();
                 await _showMoveSectionSheet(
                   pageContext,
-                  ref,
                   channel: channel,
                   sectionId: sectionId,
                 );
@@ -616,18 +615,17 @@ Future<void> _confirmAndRun(
 }
 
 Future<void> _showMoveSectionSheet(
-  BuildContext context,
-  WidgetRef ref, {
+  BuildContext context, {
   required Channel channel,
   required String? sectionId,
 }) async {
-  final sections = [...ref.read(channelSectionsProvider).store.sections]
+  // The actions sheet that opened this picker is already closing, and its
+  // WidgetRef is disposed with it. Use the page's container throughout.
+  final container = ProviderScope.containerOf(context, listen: false);
+  final sections = [...container.read(channelSectionsProvider).store.sections]
     ..sort((a, b) => a.order.compareTo(b.order));
   BuildContext? sheet;
-  // Desktop's unified layout can lock legacy filing while this is open. The
-  // sheet that opened this picker may already be gone, so listen on the
-  // page's container.
-  final container = ProviderScope.containerOf(context, listen: false);
+  // Desktop's unified layout can lock legacy filing while this is open.
   final lock = container.listen(
     channelSectionsProvider.select((state) => state.editable),
     (_, editable) {
@@ -670,7 +668,7 @@ Future<void> _showMoveSectionSheet(
                         : null,
                     onTap: () {
                       Navigator.of(sheetContext).pop();
-                      ref
+                      container
                           .read(channelSectionsProvider.notifier)
                           .assignChannel(channel.id, section.id);
                     },
@@ -682,9 +680,11 @@ Future<void> _showMoveSectionSheet(
                     Navigator.of(sheetContext).pop();
                     final name = await _showSectionNameDialog(context);
                     if (name == null || name.isEmpty) return;
-                    final notifier = ref.read(channelSectionsProvider.notifier);
+                    final notifier = container.read(
+                      channelSectionsProvider.notifier,
+                    );
                     notifier.createSection(name);
-                    final created = ref
+                    final created = container
                         .read(channelSectionsProvider)
                         .store
                         .sections
@@ -701,7 +701,7 @@ Future<void> _showMoveSectionSheet(
                     title: const Text('Remove from section'),
                     onTap: () {
                       Navigator.of(sheetContext).pop();
-                      ref
+                      container
                           .read(channelSectionsProvider.notifier)
                           .unassignChannel(channel.id);
                     },
@@ -715,26 +715,32 @@ Future<void> _showMoveSectionSheet(
   ).whenComplete(lock.close);
 }
 
-Future<String?> _showSectionNameDialog(BuildContext context) async {
-  final controller = TextEditingController();
-  final result = await showBuzzDialog<String>(
-    context: context,
-    builder: (dialogContext) => AlertDialog(
+Future<String?> _showSectionNameDialog(BuildContext context) =>
+    showBuzzDialog<String>(
+      context: context,
+      builder: (_) => const _SectionNameDialog(),
+    );
+
+/// Owns its controller so the field outlives the dialog's exit animation.
+class _SectionNameDialog extends HookWidget {
+  const _SectionNameDialog();
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = useTextEditingController();
+    return AlertDialog(
       title: const Text('New Section'),
       content: TextField(controller: controller, autofocus: true),
       actions: [
         TextButton(
-          onPressed: () => Navigator.of(dialogContext).pop(),
+          onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
         FilledButton(
-          onPressed: () =>
-              Navigator.of(dialogContext).pop(controller.text.trim()),
+          onPressed: () => Navigator.of(context).pop(controller.text.trim()),
           child: const Text('Create'),
         ),
       ],
-    ),
-  );
-  controller.dispose();
-  return result;
+    );
+  }
 }

@@ -72,12 +72,14 @@ Widget _modalApp({
   bool details = false,
   String? canvasContent,
   Future<ChannelCanvas>? pendingCanvas,
+  ChannelSectionStore sections = const ChannelSectionStore(),
+  String? sectionId,
 }) => ProviderScope(
   overrides: [
     currentPubkeyProvider.overrideWith((ref) => _currentPubkey),
     channelMembersProvider(channel.id).overrideWith((ref) => loadMembers()),
     channelSectionsProvider.overrideWith(
-      () => _FakeChannelSectionsNotifier(const ChannelSectionStore()),
+      () => _FakeChannelSectionsNotifier(sections),
     ),
     agentOwnersProvider.overrideWithValue(
       const AsyncValue.data(<String, String>{}),
@@ -110,6 +112,7 @@ Widget _modalApp({
                   context: context,
                   channel: channel,
                   isUnread: false,
+                  sectionId: sectionId,
                 ),
           child: const Text('Open actions'),
         ),
@@ -599,6 +602,52 @@ void main() {
       }
       expect(find.text('Copy channel name'), findsOneWidget);
       expect(find.text('Move to section…'), findsNothing);
+    });
+  }
+
+  for (final (label, expected) in [
+    ('Work', 'assign channel-id work'),
+    ('Remove from section', 'unassign channel-id'),
+    ('New section…', 'assign channel-id new'),
+  ]) {
+    testWidgets('Move to section: $label files the channel after the actions '
+        'sheet closes', (tester) async {
+      tester.view.physicalSize = const Size(1200, 3000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          loadMembers: () async => const [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+          sections: const ChannelSectionStore(
+            sections: [ChannelSection(id: 'work', name: 'Work', order: 0)],
+            assignments: {'channel-id': 'work'},
+          ),
+          sectionId: 'work',
+        ),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Move to section…'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ChannelActionsSheet), findsNothing);
+
+      await tester.tap(find.text(label));
+      await tester.pumpAndSettle();
+      if (label == 'New section…') {
+        await tester.enterText(find.byType(TextField), 'Later');
+        await tester.tap(find.text('Create'));
+        await tester.pumpAndSettle();
+      }
+
+      expect(tester.takeException(), isNull);
+      final notifier =
+          ProviderScope.containerOf(
+                tester.element(find.text('Open actions')),
+              ).read(channelSectionsProvider.notifier)
+              as _FakeChannelSectionsNotifier;
+      expect(notifier.calls.last, expected);
     });
   }
 
@@ -1175,11 +1224,31 @@ void main() {
 class _FakeChannelSectionsNotifier extends ChannelSectionsNotifier {
   _FakeChannelSectionsNotifier(this._store);
 
-  final ChannelSectionStore _store;
+  ChannelSectionStore _store;
+  final calls = <String>[];
 
   @override
   ChannelSectionsState build() =>
       ChannelSectionsState(isReady: true, store: _store, version: 1);
+
+  @override
+  void assignChannel(String channelId, String sectionId) =>
+      calls.add('assign $channelId $sectionId');
+
+  @override
+  void unassignChannel(String channelId) => calls.add('unassign $channelId');
+
+  @override
+  void createSection(String name) {
+    calls.add('create $name');
+    _store = ChannelSectionStore(
+      sections: [
+        ..._store.sections,
+        ChannelSection(id: 'new', name: name, order: _store.sections.length),
+      ],
+    );
+    state = ChannelSectionsState(isReady: true, store: _store, version: 2);
+  }
 
   void lock() => state = ChannelSectionsState(
     isReady: true,
