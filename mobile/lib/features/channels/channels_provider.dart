@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:math';
 
@@ -117,6 +118,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   _unreadCaughtUpByChannel = {};
   final Map<String, Map<String, ObservedUnreadEvent>>
   _observedUnreadEventsByChannel = {};
+  // Touched wherever the two maps above change; highlights memoize on it.
+  final _observedUnreadRevisions = ObservedUnreadRevisions();
   final Map<String, Set<String>> _unreadDeletedIdsByChannel = {};
   final Set<String> _unscopedUnreadDeletedIds = {};
   Set<String> _participatedRootIds = {};
@@ -214,11 +217,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   }
 
   Map<String, Map<String, ObservedUnreadEvent>>
-  get observedUnreadEventsByChannel =>
-      Map<String, Map<String, ObservedUnreadEvent>>.unmodifiable({
-        for (final entry in _observedUnreadEventsByChannel.entries)
-          entry.key: Map<String, ObservedUnreadEvent>.unmodifiable(entry.value),
-      });
+  get observedUnreadEventsByChannel => ObservedUnreadSnapshot({
+    for (final entry in _observedUnreadEventsByChannel.entries)
+      entry.key: UnmodifiableMapView(entry.value),
+  }, _observedUnreadRevisions.of);
 
   @override
   Future<List<Channel>> build() async {
@@ -331,6 +333,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _latestObservedByChannel.clear();
       _activityRevisions.clear();
       _observedUnreadEventsByChannel.clear();
+      _observedUnreadRevisions.touchAll();
       _unreadCaughtUpByChannel.clear();
       _unreadDeletedIdsByChannel.clear();
       _unscopedUnreadDeletedIds.clear();
@@ -994,6 +997,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     _latestObservedByChannel.remove(channelId);
     _activityRevisions.remove(channelId);
     _observedUnreadEventsByChannel.remove(channelId);
+    _observedUnreadRevisions.touch(channelId);
     state = state.whenData((channels) => List<Channel>.of(channels));
   }
 

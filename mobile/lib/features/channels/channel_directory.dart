@@ -702,6 +702,8 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
       _unreadCatchUpLimit,
     );
 
+    _observedUnreadRevisions.touch(channel.id);
+
     final current = _latestObservedByChannel[channel.id] ?? 0;
     if (event.createdAt > current) {
       _latestObservedByChannel[channel.id] = event.createdAt;

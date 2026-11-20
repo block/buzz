@@ -73,6 +73,7 @@ extension _ChannelThreadFollows on ChannelsNotifier {
             unfollowed.contains(event.rootId),
       );
     }
+    _observedUnreadRevisions.touchAll();
     if (widened.isNotEmpty) {
       // Only the widened threads' channels catch up again; a root whose
       // channel is unknown could be in any of them.
