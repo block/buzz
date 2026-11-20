@@ -136,7 +136,9 @@ Future<NostrEvent> submitSignedEventOnce({
         }
       }
     },
-    onConnected: () => socket.send(['EVENT', event.toJson()]),
+    onConnected: () {
+      if (!result.isCompleted) socket.send(['EVENT', event.toJson()]);
+    },
     onDisconnected: (error) {
       if (!result.isCompleted) {
         result.completeError(error ?? Exception('Relay disconnected'));
@@ -145,21 +147,30 @@ Future<NostrEvent> submitSignedEventOnce({
   );
   socket.headers = headers;
   socket.diagnostics = reporter;
-  final resultFuture = result.future.timeout(
-    timeout,
-    onTimeout: () => Error.throwWithStackTrace(
+  // The deadline covers connecting and authenticating too. Once it passes the
+  // event is never sent, and its timeout goes to the caller, never to the
+  // zone as an uncaught error.
+  final deadline = Timer(timeout, () {
+    if (result.isCompleted) return;
+    result.completeError(
       RelayTimeoutException(
         RelayCall.publish,
         'Relay did not answer within $timeout',
         timeout,
       ),
       callSite,
-    ),
-  );
+    );
+  });
   try {
-    await socket.connect();
-    return await resultFuture;
+    // Whichever settles first: a failed connect, or the result (which the
+    // deadline settles if nothing else does). Future.any listens to both, so
+    // the other one's later error is not uncaught.
+    return await Future.any([
+      socket.connect().then((_) => result.future),
+      result.future,
+    ]);
   } finally {
+    deadline.cancel();
     await socket.disconnect();
   }
 }
