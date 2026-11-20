@@ -29,7 +29,7 @@ async fn thread_window_upper_fence_terminal_snapshot_and_fallback() {
         insert_thread_reply(pool, cid, channel, &root, &old).await;
     }
     insert_thread_reply(&writer, cid, channel, &root, &middle).await;
-    let db = Db::from_pools(writer.clone(), replica.clone());
+    let mut db = Db::from_pools(writer.clone(), replica.clone());
     let community = CommunityId::from_uuid(cid);
     let mut req = request(channel, &root, base + 30);
     // An old delivered tail does not justify an uncovered request upper bound.
@@ -66,6 +66,24 @@ async fn thread_window_upper_fence_terminal_snapshot_and_fallback() {
     assert!(!session.is_replica());
     assert_eq!(head.rows[0].event.id, middle.id);
     drop(session);
+    // So does a newer page, even with the head budget on: a continuation on
+    // a replica that has yet to replay a probed reply would end the walk.
+    db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(3600)));
+    let newer = Request::parse(&serde_json::json!({"thread_window":true,"#h":[channel],
+        "#e":[root.id.to_hex()],"kinds":[9],"direction":"newer",
+        "after":base,"after_id":"ff".repeat(32)}))
+    .unwrap();
+    let (page, session) = db
+        .get_thread_window_with_session(community, &newer, &mut ScanBudget::default())
+        .await
+        .unwrap();
+    assert!(!session.is_replica());
+    assert_eq!(
+        page.rows.iter().map(|e| e.event.id).collect::<Vec<_>>(),
+        [old.id, middle.id]
+    );
+    drop(session);
+    db.set_replica_read_max_age_for_tests(None);
 
     // Complete the reply fixture, then lag *recent* edits and channel-less
     // deletions. Coverage of old replies is not a freshness proof for aux.

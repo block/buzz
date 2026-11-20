@@ -171,7 +171,7 @@ impl Fixture {
         );
         let content: Value = serde_json::from_str(&event.content).unwrap();
         assert_eq!(content["version"], 1);
-        assert_eq!(content["direction"], "older");
+        assert_eq!(content["direction"], request.direction.as_str());
         assert_eq!(
             content["has_more"].as_bool().unwrap(),
             !content["next_cursor"].is_null()
@@ -341,6 +341,180 @@ async fn thread_window_real_query_signed_bounds_and_sentinel_aux() {
     }
 }
 
+/// A newer window pages forward from the oldest reply; every page carries the
+/// root's aux and its own rows' aux.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thread_window_newer_pages_forward() {
+    let f = Fixture::new().await;
+    let mut replies = Vec::new();
+    for n in 0..51 {
+        replies.push(f.reply(n).await);
+    }
+    let root_edit = f.aux(40003, &f.root, Some(f.channel)).await;
+    let reply_reaction = f.aux(7, &replies[50], Some(f.channel)).await;
+    let hex = |events: &[Event]| events.iter().map(|e| e.id.to_hex()).collect::<Vec<_>>();
+    let mut filter = f.filter();
+    filter["direction"] = json!("newer");
+    let page = f.query(&filter).await;
+    assert_eq!(ids(&page, Some(9)), hex(&replies[..50]));
+    let first = ids(&page, None);
+    assert!(first.contains(&root_edit.id.to_hex().as_str()), "{page}");
+    assert!(
+        !first.contains(&reply_reaction.id.to_hex().as_str()),
+        "{page}"
+    );
+    let bounds = f.bounds(&page, &filter);
+    assert_eq!(bounds["direction"], "newer");
+    assert_eq!(bounds["has_more"], true);
+    assert_eq!(
+        bounds["next_cursor"],
+        json!({"created_at": replies[49].created_at.as_secs(), "id": replies[49].id.to_hex()})
+    );
+
+    let mut tail = filter.clone();
+    tail["after"] = bounds["next_cursor"]["created_at"].clone();
+    tail["after_id"] = bounds["next_cursor"]["id"].clone();
+    let page = f.query(&tail).await;
+    assert_eq!(ids(&page, Some(9)), hex(&replies[50..]));
+    let all = ids(&page, None);
+    assert!(all.contains(&root_edit.id.to_hex().as_str()), "{page}");
+    assert!(all.contains(&reply_reaction.id.to_hex().as_str()), "{page}");
+    let bounds = f.bounds(&page, &tail);
+    assert_eq!(
+        (&bounds["has_more"], &bounds["next_cursor"]),
+        (&json!(false), &Value::Null)
+    );
+
+    // Past the last reply, a page is the root's aux and the bounds.
+    let mut end = tail.clone();
+    end["after"] = json!(replies[50].created_at.as_secs());
+    end["after_id"] = json!(replies[50].id.to_hex());
+    let page = f.query(&end).await;
+    assert_eq!(ids(&page, None)[0], root_edit.id.to_hex(), "{page}");
+    assert_eq!(page.as_array().unwrap().len(), 2, "{page}");
+    assert_eq!(f.bounds(&page, &end)["has_more"], false);
+}
+
+/// A channel window's 39006 bounds: older pages keep their d-tag and exact
+/// content bytes; newer pages add `newer` to both.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn channel_window_newer_pages_forward_with_distinct_bounds() {
+    let f = Fixture::new().await;
+    let mut tops = vec![f.root.clone()];
+    for n in 1..=2 {
+        let top = event(
+            &f.keys,
+            f.channel,
+            9,
+            &format!("top {n}"),
+            None,
+            f.root.created_at.as_secs() + n,
+        );
+        f.state
+            .db
+            .insert_event(f.community, &top, Some(f.channel))
+            .await
+            .unwrap();
+        tops.push(top);
+    }
+    let f = &f;
+    let ch = f.channel.to_string();
+    let hex = |events: &[&Event]| events.iter().map(|e| e.id.to_hex()).collect::<Vec<_>>();
+    let cursor = |e: &Event| format!("{}:{}", e.created_at.as_secs(), e.id.to_hex());
+    let window = |extra: Value| {
+        let mut filter = json!({"top_level":true,"#h":[f.channel],"kinds":[9],"limit":2});
+        for (key, val) in extra.as_object().unwrap() {
+            filter[key] = val.clone();
+        }
+        filter
+    };
+    // Each page: its rows, then exactly one relay-signed 39006 (d-tag, content).
+    let page = |filter: Value| async move {
+        let page = f.query(&filter).await;
+        let bounds: Vec<Event> = page
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|v| v["kind"] == 39006)
+            .map(|v| serde_json::from_value(v.clone()).unwrap())
+            .collect();
+        assert_eq!(bounds.len(), 1, "{page}");
+        bounds[0].verify().unwrap();
+        assert_eq!(bounds[0].pubkey, f.state.relay_keypair.public_key());
+        let d = bounds[0]
+            .tags
+            .iter()
+            .find(|t| t.kind().to_string() == "d")
+            .unwrap();
+        (
+            ids(&page, Some(9))
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+            d.content().unwrap().to_owned(),
+            bounds[0].content.clone(),
+        )
+    };
+    let (t0, t1, t2) = (&tops[0], &tops[1], &tops[2]);
+
+    let (rows, d, content) = page(window(json!({"limit":3}))).await;
+    assert_eq!(rows, hex(&[t2, t1, t0]));
+    assert_eq!(
+        (d, content),
+        (
+            format!("{ch}:head"),
+            r#"{"has_more":false,"next_cursor":null}"#.to_owned()
+        )
+    );
+    let (rows, d, content) = page(window(
+        json!({"until":t2.created_at.as_secs(),"before_id":t2.id.to_hex()}),
+    ))
+    .await;
+    assert_eq!(rows, hex(&[t1, t0]));
+    assert_eq!(
+        (d, content),
+        (
+            format!("{ch}:{}", cursor(t2)),
+            r#"{"has_more":false,"next_cursor":null}"#.to_owned()
+        )
+    );
+
+    let (rows, d, content) = page(window(json!({"direction":"newer"}))).await;
+    assert_eq!(rows, hex(&[t0, t1]));
+    assert_eq!(d, format!("{ch}:newer:head"));
+    assert_eq!(
+        serde_json::from_str::<Value>(&content).unwrap(),
+        json!({"direction":"newer","has_more":true,
+            "next_cursor":{"created_at":t1.created_at.as_secs(),"id":t1.id.to_hex()}})
+    );
+    let (rows, d, content) = page(window(
+        json!({"direction":"newer","after":t1.created_at.as_secs(),"after_id":t1.id.to_hex()}),
+    ))
+    .await;
+    assert_eq!(rows, hex(&[t2]));
+    assert_eq!(d, format!("{ch}:newer:{}", cursor(t1)));
+    assert_eq!(
+        serde_json::from_str::<Value>(&content).unwrap(),
+        json!({"direction":"newer","has_more":false,"next_cursor":null})
+    );
+
+    for extra in [
+        json!({"direction":"up"}),
+        json!({"after":1,"after_id":t1.id.to_hex()}),
+        json!({"direction":"newer","until":1,"before_id":t1.id.to_hex()}),
+        json!({"direction":"newer","after":1}),
+        json!({"direction":"newer","after":-1,"after_id":t1.id.to_hex()}),
+        json!({"direction":"newer","after":1,"after_id":"z".repeat(64)}),
+    ] {
+        let (status, body) = f
+            .post(&f.keys, "/query", json!([window(extra.clone())]))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{extra}: {body}");
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn thread_window_real_query_denial_revocation_and_colliding_tenants() {
@@ -417,8 +591,18 @@ async fn thread_window_real_query_validation_forgery_and_sql_failure() {
         ("depth_limit", json!(0)),
         ("authors", json!([f.keys.public_key().to_hex()])),
         ("page", json!(1)),
+        ("after", json!(1)),
+        ("after_id", json!("a".repeat(64))),
+        ("direction", json!("up")),
     ] {
         let mut filter = f.filter();
+        filter[key] = val;
+        let (status, body) = f.post(&f.keys, "/query", json!([filter])).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+    for (key, val) in [("until", json!(1)), ("before_id", json!("a".repeat(64)))] {
+        let mut filter = f.filter();
+        filter["direction"] = json!("newer");
         filter[key] = val;
         let (status, body) = f.post(&f.keys, "/query", json!([filter])).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");

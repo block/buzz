@@ -13,7 +13,7 @@ pub const MAX_LIMIT: u32 = 200;
 /// never reply-budget candidates, even if they have thread metadata.
 pub const ROW_KINDS: [u32; 4] = [9, 40002, 45001, 45003];
 
-/// A position in `(created_at DESC, id ASC)` order.
+/// A position in a window's keyset order (see [`Direction`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Cursor {
     /// Nonnegative Unix seconds, representable by PostgreSQL/chrono.
@@ -31,6 +31,59 @@ impl Cursor {
     }
 }
 
+/// Paging direction of a NIP-CW window, in both channel and thread mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Direction {
+    /// Newest first, `created_at DESC, id ASC`, continued by `until`/`before_id`.
+    #[default]
+    Older,
+    /// Oldest first, `created_at ASC, id DESC`, continued by `after`/`after_id`.
+    Newer,
+}
+
+impl Direction {
+    /// Parse the optional `direction` field (absent means `"older"`) and reject
+    /// the other direction's cursor fields.
+    pub fn parse(raw: &Value) -> Result<Self, String> {
+        let direction = match raw.get("direction") {
+            None => Self::Older,
+            Some(v) => match v.as_str() {
+                Some("older") => Self::Older,
+                Some("newer") => Self::Newer,
+                _ => return Err("direction must be \"older\" or \"newer\"".into()),
+            },
+        };
+        let (ts, id) = match direction {
+            Self::Older => Self::Newer,
+            Self::Newer => Self::Older,
+        }
+        .cursor_fields();
+        match [ts, id].into_iter().find(|key| raw.get(key).is_some()) {
+            Some(key) => Err(format!(
+                "{key} conflicts with direction {}",
+                direction.as_str()
+            )),
+            None => Ok(direction),
+        }
+    }
+
+    /// The wire name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Older => "older",
+            Self::Newer => "newer",
+        }
+    }
+
+    /// The request cursor's timestamp and id field names.
+    pub fn cursor_fields(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Older => ("until", "before_id"),
+            Self::Newer => ("after", "after_id"),
+        }
+    }
+}
+
 /// Validated pagination and response-affecting arguments. Construct with
 /// [`Request::parse`]; the database also validates public inputs defensively.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,7 +98,9 @@ pub struct Request {
     pub depth: u32,
     /// Sorted, deduplicated conversation row kinds.
     pub kinds: Vec<u32>,
-    /// Request upper bound; absent means newest page.
+    /// Paging direction.
+    pub direction: Direction,
+    /// Request cursor in `direction`; absent means the first page.
     pub cursor: Option<Cursor>,
     /// Include root/retained-row edits, reactions and deletion closure.
     pub include_aux: bool,
@@ -89,8 +144,11 @@ impl Request {
             "kinds",
             "limit",
             "depth_limit",
+            "direction",
             "until",
             "before_id",
+            "after",
+            "after_id",
             "include_aux",
         ];
         if object.keys().any(|key| !FIELDS.contains(&key.as_str())) {
@@ -123,20 +181,25 @@ impl Request {
             .collect::<Result<Vec<_>, _>>()?;
         kinds.sort_unstable();
         kinds.dedup();
-        let cursor = match (raw.get("until"), raw.get("before_id")) {
+        let direction = Direction::parse(raw).map_err(|e| format!("thread_window: {e}"))?;
+        let (ts_key, id_key) = direction.cursor_fields();
+        let cursor = match (raw.get(ts_key), raw.get(id_key)) {
             (None, None) => None,
             (Some(ts), Some(id)) => {
                 let cursor = Cursor {
-                    created_at: ts
-                        .as_i64()
-                        .filter(|n| *n >= 0)
-                        .ok_or("thread_window: until must be nonnegative integer seconds")?,
+                    created_at: ts.as_i64().filter(|n| *n >= 0).ok_or_else(|| {
+                        format!("thread_window: {ts_key} must be nonnegative integer seconds")
+                    })?,
                     id: event_id(id)?,
                 };
                 cursor.timestamp()?;
                 Some(cursor)
             }
-            _ => return Err("thread_window requires both until and before_id, or neither".into()),
+            _ => {
+                return Err(format!(
+                    "thread_window requires both {ts_key} and {id_key}, or neither"
+                ))
+            }
         };
         let include_aux = match raw.get("include_aux") {
             None => false,
@@ -150,6 +213,7 @@ impl Request {
             limit,
             depth,
             kinds,
+            direction,
             cursor,
             include_aux,
         })
@@ -158,13 +222,14 @@ impl Request {
     /// Canonical NIP-CW thread-mode v1 request identity. SHA-256 over a compact JSON array
     /// avoids ambiguous separators and binds all normalized response options.
     /// The host is server-resolved; the reader is the authenticated lowercase
-    /// public key. Neither may be taken from filter-supplied fields.
+    /// public key. Neither may be taken from filter-supplied fields. Default
+    /// options keep the original array, so existing bindings are unchanged.
     pub fn binding(&self, resolved_host: &str, reader_hex: &str) -> String {
         let cursor = self.cursor.as_ref().map(|c| json!([c.created_at, c.id]));
         let canonical = json!([
             "tw",
             1,
-            "older",
+            self.direction.as_str(),
             resolved_host,
             reader_hex,
             self.channel.to_string(),
@@ -198,6 +263,10 @@ mod tests {
             ("depth_limit", json!(101)),
             ("depth_limit", json!(-1)),
             ("include_aux", json!("true")),
+            ("direction", json!("up")),
+            ("direction", json!(null)),
+            ("after", json!(1)),
+            ("after_id", json!("ab".repeat(32))),
             ("thread_cursor", json!(0)),
             ("threadCursorId", json!(null)),
             ("top_level", json!(false)),
@@ -228,6 +297,35 @@ mod tests {
             f["before_id"] = json!("a".repeat(64));
             assert!(Request::parse(&f).is_err(), "{f}");
         }
+        let mut newer = filter();
+        newer["direction"] = json!("newer");
+        for (key, value) in [
+            ("until", json!(1)),
+            ("before_id", json!("ab".repeat(32))),
+            ("after", json!(1)),
+            ("after_id", json!("ab".repeat(32))),
+        ] {
+            let mut f = newer.clone();
+            f[key] = value;
+            assert!(Request::parse(&f).is_err(), "{f}");
+        }
+        for ts in [json!(-1), json!(1.5), json!(null), json!(i64::MAX)] {
+            let mut f = newer.clone();
+            f["after"] = ts;
+            f["after_id"] = json!("a".repeat(64));
+            assert!(Request::parse(&f).is_err(), "{f}");
+        }
+        newer["after"] = json!(7);
+        newer["after_id"] = json!("AB".repeat(32));
+        let request = Request::parse(&newer).unwrap();
+        assert_eq!(request.direction, Direction::Newer);
+        assert_eq!(
+            request.cursor,
+            Some(Cursor {
+                created_at: 7,
+                id: "ab".repeat(32)
+            })
+        );
     }
     #[test]
     fn binding_normalizes_defaults_and_binds_every_argument() {
@@ -246,12 +344,14 @@ mod tests {
         explicit["limit"] = json!(50);
         explicit["depth_limit"] = json!(100);
         explicit["include_aux"] = json!(false);
+        explicit["direction"] = json!("older");
         explicit["#e"] = json!(["AB".repeat(32)]);
         assert_eq!(expected, binding(&explicit));
         for (key, val) in [
             ("limit", json!(49)),
             ("depth_limit", json!(1)),
             ("include_aux", json!(true)),
+            ("direction", json!("newer")),
             ("kinds", json!([40002])),
             ("#e", json!(["cd".repeat(32)])),
             ("#h", json!([Uuid::new_v4()])),
@@ -268,5 +368,37 @@ mod tests {
         changed["until"] = json!(0);
         changed["before_id"] = json!("ab".repeat(32));
         assert_ne!(expected, binding(&changed));
+    }
+
+    /// `newer` binds the canonical array NIP-CW specifies.
+    #[test]
+    fn binding_encodes_direction_and_cursor_as_specified() {
+        let (host, reader, root) = ("relay.example", "ab".repeat(32), "cd".repeat(32));
+        let mut f = filter();
+        f["#e"] = json!([root]);
+        f["direction"] = json!("newer");
+        f["after"] = json!(5);
+        f["after_id"] = json!("ef".repeat(32));
+        let expected = json!([
+            "tw",
+            1,
+            "newer",
+            host,
+            reader,
+            Uuid::nil().to_string(),
+            root,
+            50,
+            100,
+            [9],
+            [5, "ef".repeat(32)],
+            false
+        ]);
+        assert_eq!(
+            Request::parse(&f).unwrap().binding(host, &reader),
+            format!(
+                "tw:1:{}",
+                hex::encode(Sha256::digest(expected.to_string().as_bytes()))
+            )
+        );
     }
 }

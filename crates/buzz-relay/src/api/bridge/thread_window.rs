@@ -271,7 +271,7 @@ async fn query(
     .map_err(|e| internal_error(&format!("thread bounds tags: {e}")))?;
     let bounds = nostr::EventBuilder::new(
         nostr::Kind::Custom(buzz_core::kind::KIND_THREAD_WINDOW_BOUNDS as u16),
-        json!({"version":1,"direction":"older","has_more":window.has_more,
+        json!({"version":1,"direction":request.direction.as_str(),"has_more":window.has_more,
             "next_cursor":window.next_cursor})
         .to_string(),
     )

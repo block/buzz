@@ -1012,7 +1012,7 @@ async fn channel_window_routes_head_to_writer_and_cursor_pages_to_replica() {
     let marker = signed_event_at(&author, "replica-only-marker", base + 5);
     insert_top_level(&replica, community, channel, &marker).await;
 
-    let db = Db::from_pools(writer.clone(), replica.clone());
+    let mut db = Db::from_pools(writer.clone(), replica.clone());
     // Open the fence through "now": the fixture's history is far in the
     // past, so every cursor falls below the fence and routing is
     // eligible. Fence-gating itself is pinned by the fence tests below.
@@ -1055,6 +1055,38 @@ async fn channel_window_routes_head_to_writer_and_cursor_pages_to_replica() {
         ],
         "cursor page must be served by the replica"
     );
+
+    // Newer cursor page → writer, always: a continuation on a replica that
+    // has yet to replay a probed row would end the walk early. It sees
+    // `fresh` and never `marker`, and reads the history dated before the
+    // channel was created. The head budget, which would let a head fetch
+    // read the replica, does not apply to it.
+    db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(3600)));
+    let (newer, session) = db
+        .get_channel_window_with_session(
+            cid,
+            channel,
+            10,
+            buzz_core::thread_window::Direction::Newer,
+            Some((
+                chrono::DateTime::from_timestamp(base as i64 + 10, 0).unwrap(),
+                m2.id.as_bytes().to_vec(),
+            )),
+            None,
+        )
+        .await
+        .expect("newer window");
+    assert!(
+        !session.is_replica(),
+        "a newer page must not take the covered arm"
+    );
+    let newer_contents: Vec<String> = newer
+        .rows
+        .iter()
+        .map(|r| r.stored_event.event.content.clone())
+        .collect();
+    assert_eq!(newer_contents, ["m3", "fresh-writer-only"]);
+    assert!(!newer.has_more);
 }
 
 /// Fail-closed on a mid-request replica failure (Dawn, review of
@@ -1244,7 +1276,14 @@ async fn read_session_degrades_to_writer_when_replica_connection_dies() {
         .expect("head window");
     let cursor = head.next_cursor.expect("has_more implies next_cursor");
     let (_window, mut session) = db
-        .get_channel_window_with_session(cid, channel, 10, Some(cursor), None)
+        .get_channel_window_with_session(
+            cid,
+            channel,
+            10,
+            buzz_core::thread_window::Direction::Older,
+            Some(cursor),
+            None,
+        )
         .await
         .expect("routed cursor window");
     assert!(
@@ -1324,7 +1363,14 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
         .expect("head window");
     let cursor = head.next_cursor.expect("has_more implies next_cursor");
     let (_window, session) = db
-        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
+        .get_channel_window_with_session(
+            cid,
+            channel,
+            10,
+            buzz_core::thread_window::Direction::Older,
+            Some(cursor.clone()),
+            None,
+        )
         .await
         .expect("routed cursor window");
     assert!(session.is_replica(), "fixture must route to the replica");
@@ -1349,8 +1395,15 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
     let started = Instant::now();
     let rejected = {
         let _guard = metrics::set_default_local_recorder(&recorder);
-        db.get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
-            .await
+        db.get_channel_window_with_session(
+            cid,
+            channel,
+            10,
+            buzz_core::thread_window::Direction::Older,
+            Some(cursor.clone()),
+            None,
+        )
+        .await
     }
     .err()
     .expect("a full gate must reject the history read");
@@ -1388,7 +1441,14 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
     drop(session);
     assert_eq!(db.history_reads.available(), 1);
     let (_window, session) = db
-        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
+        .get_channel_window_with_session(
+            cid,
+            channel,
+            10,
+            buzz_core::thread_window::Direction::Older,
+            Some(cursor.clone()),
+            None,
+        )
         .await
         .expect("a released permit admits the next read");
     assert!(session.is_replica());
@@ -1399,12 +1459,26 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
     // An operator lowering the cap at runtime holds new reads to the new
     // limit while one is in flight, and raising it readmits them.
     let (_window, held) = db
-        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
+        .get_channel_window_with_session(
+            cid,
+            channel,
+            10,
+            buzz_core::thread_window::Direction::Older,
+            Some(cursor.clone()),
+            None,
+        )
         .await
         .expect("routed cursor window");
     assert_eq!(db.history_read_gate().set_limit(1), 1);
     let rejected = db
-        .get_channel_window_with_session(cid, channel, 10, Some(cursor.clone()), None)
+        .get_channel_window_with_session(
+            cid,
+            channel,
+            10,
+            buzz_core::thread_window::Direction::Older,
+            Some(cursor.clone()),
+            None,
+        )
         .await
         .err()
         .expect("a lowered cap must reject the next history read");
@@ -1414,7 +1488,14 @@ async fn history_permit_follows_the_read_session_and_a_full_gate_rejects() {
     );
     assert_eq!(db.history_read_gate().set_limit(cap), cap);
     let (_window, second) = db
-        .get_channel_window_with_session(cid, channel, 10, Some(cursor), None)
+        .get_channel_window_with_session(
+            cid,
+            channel,
+            10,
+            buzz_core::thread_window::Direction::Older,
+            Some(cursor),
+            None,
+        )
         .await
         .expect("a raised cap admits the next read");
     drop((held, second));
@@ -1463,7 +1544,14 @@ async fn routed_request_holds_one_snapshot_across_page_and_aux() {
 
     // Route the cursor page to the replica and HOLD the session.
     let (window, mut session) = db
-        .get_channel_window_with_session(cid, channel, 10, Some(cursor), None)
+        .get_channel_window_with_session(
+            cid,
+            channel,
+            10,
+            buzz_core::thread_window::Direction::Older,
+            Some(cursor),
+            None,
+        )
         .await
         .expect("routed cursor window");
     assert!(
@@ -3428,9 +3516,16 @@ async fn replica_statement_cancel_propagates_without_writer_rerun() {
         "get_thread_replies",
     );
     cancelled(
-        db.get_channel_window_with_session(fx.cid, fx.channel, 10, None, None)
-            .await
-            .map(drop),
+        db.get_channel_window_with_session(
+            fx.cid,
+            fx.channel,
+            10,
+            buzz_core::thread_window::Direction::Older,
+            None,
+            None,
+        )
+        .await
+        .map(drop),
         "get_channel_window_with_session",
     );
     cancelled(

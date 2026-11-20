@@ -13,7 +13,9 @@ Channel and Thread Windows
 This NIP defines two relay-computed, cursor-paged views served as ordinary signed Nostr events through extended NIP-01 filters:
 
 - **channel mode** pages a channel's top-level timeline;
-- **thread mode** pages one root's descendants newest-first.
+- **thread mode** pages one root's descendants.
+
+Both modes read newest first by default. A relay that advertises `buzz-window-newer` also reads them oldest first (§Direction).
 
 Both modes use stable keyset order and explicit relay-signed exhaustion bounds. A channel-mode request may also include the aux closure and thread-summary overlays:
 
@@ -37,7 +39,7 @@ A relay that computes thread structure at ingest already knows which events are 
 
 This NIP does not change ingest, storage, or fan-out. Rows returned in a window are ordinary stored events; the overlays are computed per query and never stored.
 
-This NIP does not define around-target retrieval or cross-page snapshot isolation. It defines protocol compatibility and fallback rules, but the Buzz thread-mode implementation ships no client opt-in or fallback implementation. Thread mode starts at the newest reply and continues toward older replies.
+This NIP does not define around-target retrieval or cross-page snapshot isolation. It defines protocol compatibility and fallback rules, but the Buzz thread-mode implementation ships no client opt-in or fallback implementation. A window starts at one end of its channel or thread: the newest row, or the oldest (§Direction). It never starts at an arbitrary target.
 
 This NIP does not require WebSocket REQ support. A relay MAY serve window filters only on an HTTP query surface and ignore the extension fields on REQ (see §Degradation).
 
@@ -51,6 +53,23 @@ This document uses MUST, MUST NOT, SHOULD, MAY, and RECOMMENDED as defined in RF
 - **overlay**: A relay-signed event (`kind:39005`, `kind:39006`, or `kind:39007`) synthesized at query time. Overlays are metadata *about* rows: never a row, never a cursor input, never durable history.
 - **composite cursor**: The pair `(created_at, id)` identifying a position in the total order. `created_at` is unix seconds; `id` is a 64-character lowercase hex event id.
 - **scan position**: The composite cursor of the last event the relay's query *retained*, whether or not that event was ultimately delivered as a row (see §Channel-mode Relay Processing Algorithm step 3). The cursor tracks where the scan stopped, not what the client received.
+
+## Direction
+
+Both modes accept an optional `direction` field: `"older"` (the default) or `"newer"`. Any other value MUST be rejected.
+
+| | `"older"` (default) | `"newer"` |
+|---|---|---|
+| first page | the newest rows | the oldest rows |
+| total order | `created_at DESC, id ASC` | `created_at ASC, id DESC` |
+| cursor fields | `until` + `before_id` | `after` + `after_id` |
+| rows after cursor `(ts, id)` | `created_at < ts OR (created_at = ts AND id > id)` | `created_at > ts OR (created_at = ts AND id < id)` |
+
+The `"newer"` order is the exact reverse of the `"older"` order, so a client can read a channel or thread from both ends and meet without a gap or an overlap, as long as no rows are being written. A relay can accept a row whose `created_at` is in the past (the Buzz relay accepts up to 900 seconds), and it checks that when it accepts the row, not when the row commits. A row that commits after a `"newer"` page was served can therefore sort behind that page's cursor, by any distance, and never appear on a later page. Near the newest rows, `has_more: false` therefore means the read caught up when it ran. A client that reads oldest first up to the present MUST read the crossed range again when the scan reaches the newest rows: every row whose `created_at` is at or after the first page's request time, less the relay's past-timestamp allowance (960 seconds for Buzz, its write path's limit). If the relay serves the repair read from its writer, this catches every row that committed before the read, except one whose write was already in progress when the first page's request ran. Buzz serves it from the writer unless the operator sets `BUZZ_REPLICA_READ_MAX_AGE_MS` (off by default); then a read without `until` can come from a replica up to that age behind and miss the rows that committed in that time. Open the live subscription before the repair read, with `since` no later than the repair range's start, so that it delivers the rows that commit after it: a relay does not deliver a live event older than a filter's `since`. A live subscription does not replace the repair read: its EOSE does not mean that every relay node delivers to it. On Buzz, another node starts to deliver when Redis confirms the subscription, which can be after EOSE and is not reported to the client, so a late row that commits on another node after the repair read and before that confirmation reaches neither the subscription nor a later page.
+
+`after` and `after_id` have the same grammar and rules as `until` and `before_id`: both or neither, `after` a non-negative integer of unix seconds, `after_id` exactly 64 hexadecimal characters. A `"newer"` request with `until` or `before_id`, or an `"older"` request (or one without `direction`) with `after` or `after_id`, MUST be rejected. `next_cursor` is the scan position in the request's own order; the client echoes it in that direction's cursor fields. `limit`, `kinds`, `has_more`, the aux closure and summaries mean the same in both directions.
+
+A relay that supports `"newer"` SHOULD advertise `"buzz-window-newer"` in its NIP-11 `supported_extensions`. A client MUST NOT send `direction`, `after` or `after_id` to a relay that does not advertise it; without it, the client reads newest first only.
 
 ## Channel-mode Request
 
@@ -74,6 +93,7 @@ A channel-mode window request is a standard filter plus extension fields, submit
 - `limit` — the row budget. Overlays and aux events MUST NOT count against it. Relays SHOULD clamp it to a documented range (Buzz: default 50, maximum 200, minimum 1).
 - `until` + `before_id` — the request cursor: the `next_cursor` from the previous page's `kind:39006` overlay, echoed verbatim — `until` = `next_cursor.created_at`, `before_id` = `next_cursor.id`. **Both present or both absent.** Exactly one present MUST be rejected: a timestamp-only cursor silently loses or duplicates same-second rows, which is the failure mode this NIP exists to remove. Both absent = head-of-channel request.
 - `kinds` — optional; restricts which kinds may be rows. It does not affect overlay or aux kinds.
+- `direction`, `after` + `after_id` — optional; read the channel oldest first (§Direction).
 
 Cursor grammar: `until` MUST be a non-negative integer of unix seconds representable by the relay's timestamp type; `before_id` MUST be exactly 64 hexadecimal characters (the lowercase form emitted in `next_cursor.id` is canonical). A malformed value MUST cause rejection of the request — it MUST NOT be ignored and demoted to a half cursor or a head request.
 
@@ -98,7 +118,7 @@ Storage fallback (fail-open): a relay that indexes this classification at ingest
 
 For a valid window filter on an accessible channel (§Channel-mode Access Scoping) the relay MUST:
 
-1. **Select rows.** From the target channel, take events that are top-level (§Channel-mode Top-level Classification), not deleted, and matching `kinds` if present, in the total order `created_at DESC, id ASC` (`id` compared bytewise). With a cursor `(ts, id)`, retain only events where `created_at < ts OR (created_at = ts AND id > id)`.
+1. **Select rows.** From the target channel, take events that are top-level (§Channel-mode Top-level Classification), not deleted, and matching `kinds` if present, in the total order `created_at DESC, id ASC` (`id` compared bytewise). With a cursor `(ts, id)`, retain only events where `created_at < ts OR (created_at = ts AND id > id)`. A `"newer"` request uses that direction's order and keyset instead (§Direction).
 2. **Probe exhaustion.** Evaluate the query with an internal budget of `limit + 1` rows *after all predicates*. If `limit + 1` rows match, `has_more = true` and the sentinel row is discarded — it MUST NOT appear on the wire, in overlays, or in the aux closure. Otherwise `has_more = false`.
 3. **Derive the next cursor.** If `has_more`, `next_cursor` is the **scan position**: the composite cursor of the last retained candidate, captured *before* any serving-time reconstruction or filtering of individual events. Otherwise `next_cursor = null`. The invariant `next_cursor = null ⇔ has_more = false` MUST hold. Because it is a scan position, `next_cursor` MAY reference an event that does not appear in the response (e.g. one skipped by the relay as unreconstructable); it is authoritative regardless, and deriving it from delivered rows instead would stall pagination on every skipped event.
 4. **Append the aux closure** (if `include_aux` and at least one row): two hops of events referencing the rows by `e` tag. Hop 1: reactions (`kind:7`), deletions (`kind:5`, `kind:9005`), and edits (Buzz `kind:40003`) whose `e` tag is a row id. Hop 2: deletions whose `e` tag is a hop-1 event id (a delete-of-a-reaction). Each event appears at most once; access-scoped events the requester cannot read are omitted. Relays MAY cap each hop (Buzz: 1000 events per hop).
@@ -159,15 +179,16 @@ Exactly one per served window response. The **only** authority on exhaustion. Ta
 ```
 
 - `d`-tag suffix (canonical serialization): the literal string `head` for a head request, else `<created_at>:<event_id>` — decimal unix seconds, colon, full 64-character lowercase hex id — identifying the *request* cursor this page answered. Clients MUST verify the suffix equals the cursor they sent and discard the overlay (and the page) on mismatch; this binds each bounds overlay to its request and makes concurrent-page responses unambiguous.
-- `next_cursor` — the composite cursor to echo as `until` + `before_id` for the next page, or `null` iff `has_more` is `false`.
+- `next_cursor` — the composite cursor to echo as `until` + `before_id` (`after` + `after_id` for `"newer"`) for the next page, or `null` iff `has_more` is `false`.
+- A `"newer"` page puts `newer:` before the suffix — `<channel-id>:newer:head` or `<channel-id>:newer:<created_at>:<event_id>` — and adds `"direction":"newer"` to the content. An `"older"` page has neither, so its overlay is byte-identical to one from a relay without `"newer"`. Clients MUST verify both, so a page from one direction can never be taken for one from the other.
 - Reserved: an `oldest_retained` content field may be added (retention gap signaling) without a wire break. Clients MUST ignore unknown content fields.
 
 ## Channel-mode Client Behavior
 
 1. **Head request**: send the window filter with no cursor. Render rows in received order.
-2. **Continue**: read `kind:39006`; if `has_more`, send the same filter with `until = next_cursor.created_at`, `before_id = next_cursor.id`. Repeat until `has_more = false`.
+2. **Continue**: read `kind:39006`; if `has_more`, send the same filter with `until = next_cursor.created_at`, `before_id = next_cursor.id` (`after` and `after_id` for `"newer"`). Repeat until `has_more = false`.
 3. **Exhaustion**: `39006.has_more` is the only exhaustion signal. `rows < limit` proves nothing — an exact-multiple final page returns `limit` rows with `has_more = false`, and predicate filtering can shrink any page. A client MUST NOT stop paging on row count, and MUST NOT treat a full page as "more available."
-4. **Immutability**: fetched pages are immutable history chained cursor→cursor. New live events MUST NOT be spliced into fetched pages; deliver them through a separate live subscription (`since: now`) and merge at render time. On reconnect, refetch the head page and re-arm the live subscription; deeper pages need no repair.
+4. **Immutability**: fetched pages are immutable history chained cursor→cursor. New live events MUST NOT be spliced into fetched pages; deliver them through a separate live subscription (`since: now`) and merge at render time. On reconnect, refetch the head page and re-arm the live subscription; deeper pages need no repair. A `"newer"` reader instead reads late rows again, as §Direction says, gives its live subscription the repair range's start as `since` rather than now, and its head page holds the oldest rows: on reconnect it re-arms the subscription, then reads the newest rows it missed with `"older"` pages.
 5. **Bounds integrity**: a window response missing its `kind:39006`, or carrying more than one, or carrying one whose `d`-tag binding does not echo the request cursor, whose content is not parseable JSON, or whose content violates `has_more = true ⇔ next_cursor ≠ null`, is not a usable page — the client MUST discard it (and MAY retry) rather than guess at exhaustion. Clients SHOULD additionally reject overlays that violate the exact tag cardinality of §Channel-mode Overlay Event Formats or whose content fields have the wrong runtime types (hardening against a malformed or hostile serializer). Cryptographic verification is governed by §Overlay Trust.
 6. **Overlays are metadata**: never render a `39005`/`39006` as a message, never feed one into cursor math, and key cached summaries by their `d` tag (latest wins).
 
@@ -201,7 +222,7 @@ with `thread_window` absent or false:
   `threadCursor` and `threadCursorId` are also accepted.
 - Timestamp-only continuation remains accepted for compatibility but skips
   other replies in the same second; clients SHOULD send the composite pair.
-- This path traverses stored thread metadata, not the newest-first mode's strict
+- This path traverses stored thread metadata, not thread mode's strict
   row-kind filter. Clients SHOULD supply explicit `kinds` for query authorization
   but MUST NOT assume this legacy thread path restricts its reply rows by them.
 - `include_aux` appends root/reply reactions, edits and deletions, followed by
@@ -245,7 +266,8 @@ difference is intended.
 
 ## Thread Mode
 
-`thread_window: true` requests a newest-first page of replies to one root. It is
+`thread_window: true` requests a page of replies to one root, newest first unless
+`direction` is `"newer"` (§Direction). It is
 served through Buzz's NIP-98-authenticated `POST /query`; channel mode,
 `kind:39006`, and the legacy oldest-first thread path are unchanged. The response
 is a flat array of reply events, optional auxiliary events, and exactly one
@@ -273,7 +295,8 @@ four entries from `9`, `40002`, `45001`, and `45003`; relays normalize them to
 a sorted, distinct list. `limit` defaults to 50 and MUST be 1–200;
 `depth_limit` defaults to 100 and MUST be 1–100; `include_aux` defaults to
 false. A continuation MUST provide both `until` and `before_id`, or neither for
-the head page. Unknown fields, malformed values, and mixing thread windows with
+the head page; a `"newer"` request uses `after` and `after_id` instead
+(§Direction). Unknown fields, malformed values, and mixing thread windows with
 another query mode MUST be rejected. A query MAY contain at most four window
 filters.
 
@@ -289,7 +312,9 @@ For an authorized request the relay MUST:
 2. Select non-deleted replies in that channel at depths 1 through
    `depth_limit`, restricted by `kinds`, ordered by `created_at DESC, id ASC`.
    A continuation retains rows where `created_at < until OR (created_at = until
-   AND id > before_id)`.
+   AND id > before_id)`. A `"newer"` request orders by `created_at ASC, id DESC`
+   and retains rows where `created_at > after OR (created_at = after AND
+   id < after_id)`.
 3. Evaluate `limit + 1` after all predicates. Discard the extra row and set
    `has_more`; when more rows exist, `next_cursor` is the last retained scan
    candidate, captured before event reconstruction. Otherwise it is `null`.
@@ -349,15 +374,27 @@ The binding is SHA-256 over compact UTF-8 JSON of this ordered array:
 
 ```jsonc
 ["tw",1,"older","<host>","<reader hex>","<channel>","<root>",50,100,[9,40002],null,true]
-// host, reader, channel, root, limit, depth, sorted kinds, request cursor, include_aux
+// direction, host, reader, channel, root, limit, depth, sorted kinds, request cursor, include_aux
 // cursor is null or [<seconds>,"<lowercase id>"]
 ```
+
+For `"older"` (or no `direction`) the array is exactly as above, so these
+bindings keep their hashes. A `"newer"` request puts `"newer"` in place of
+`"older"` and its cursor element carries `[<after>,"<after_id>"]`:
+
+```jsonc
+["tw",1,"newer","<host>","<reader hex>","<channel>","<root>",50,100,[9],[1751500000,"<lowercase id>"],true]
+```
+
+The content's `direction` is the request's: `"older"` or `"newer"`. For a
+`"newer"` page, `next_cursor` is the next `after` cursor.
 
 `host` is the server-resolved normalized authority and `reader` is the
 authenticated lowercase pubkey. Clients MUST verify the expected relay signer
 and signature, exact tags and request binding, version, direction, and
 `next_cursor == null` iff `has_more == false`. Only validated bounds determine
-exhaustion; clients MUST echo `next_cursor` as `until` and `before_id`.
+exhaustion; clients MUST echo `next_cursor` as `until` and `before_id` (`after`
+and `after_id` for `"newer"`).
 
 An extension-unaware relay may return legacy oldest-first history without
 bounds. A client that explicitly falls back MUST restart with clean legacy
@@ -373,7 +410,7 @@ The channel-mode extension fields in this NIP are *additional* keys on a standar
 - **Extension-unaware relay**: a tolerant filter parser (one that ignores unknown keys, as common NIP-01 implementations do) serves the filter as a plain `kinds` + `#h` query — a complete, correct, standard event stream. A strict parser may instead reject the filter outright. Both are safe: neither produces a wrong-but-plausible top-level timeline. A client MUST treat *either* signal — a response with no valid `kind:39006`, or an error/unsupported-filter response — as a downgrade, and fall back by reissuing a clean standard filter with all extension keys removed and assembling threads client-side. (Buzz's own WebSocket REQ path is such a tolerant parser: the filter deserializer drops the extension fields, so a window filter on REQ serves the standard query.)
 - **Extension-unaware client**: never sends `top_level`, never sees an overlay kind, and observes a completely standard relay.
 
-A relay implementing this NIP MAY advertise it in its NIP-11 relay information document; the discovery mechanism is out of scope for this NIP. A client needs no advertisement to probe safely: send one head window request and apply the downgrade rule above — the presence of a valid `kind:39006` is the capability signal.
+A relay implementing this NIP MAY advertise it in its NIP-11 relay information document; the discovery mechanism is out of scope for this NIP, except for `"newer"` windows, which a client sends only to a relay that advertises `buzz-window-newer` (§Direction). A client needs no advertisement to probe safely: send one head window request and apply the downgrade rule above — the presence of a valid `kind:39006` is the capability signal.
 
 ## Security and Privacy Considerations
 
@@ -395,7 +432,7 @@ A channel-mode client with neither an authenticated transport nor a verifiable r
 ## Implementation Gotchas
 
 - The `limit + 1` probe MUST run after *all* predicates: access, deletion and `kinds` in both modes; top-level classification in channel mode only; root, channel and depth restrictions in thread mode. A probe over a superset produces false `has_more = true` on the last page.
-- The cursor comparison uses `id > $id` (bytewise ascending) because the total order is `created_at DESC, id ASC`. Getting the id inequality backwards drops or duplicates same-second rows — precisely the bug the composite cursor removes.
+- The cursor comparison uses `id > $id` (bytewise ascending) because the total order is `created_at DESC, id ASC`. Getting the id inequality backwards drops or duplicates same-second rows — precisely the bug the composite cursor removes. The `"newer"` order reverses both comparisons: `created_at > $ts OR (created_at = $ts AND id < $id)`.
 - `next_cursor` is the last retained *scan candidate*, not the last delivered row: capture the scan position before per-event reconstruction so a skipped event cannot stall pagination. Clients echo it verbatim and never derive or validate it against the rows they received.
 - **Channel mode only:** events ingested before the relay computed thread metadata have no depth; they MUST be treated as top-level rather than vanishing from channel windows. Thread mode instead requires metadata at depths 1..`depth_limit`.
 - The `d` tag on `39006` differs per request cursor by design: concurrent pages of one channel coexist in a replaceable-event cache instead of clobbering each other. The per-channel-singleton alternative would make page N overwrite page N+1's bounds.

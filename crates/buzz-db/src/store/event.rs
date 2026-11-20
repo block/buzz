@@ -1221,7 +1221,8 @@ pub async fn tighten_session_read_statement_timeout(
 ///
 /// The read runs under [`READ_STATEMENT_TIMEOUT`] without changing the
 /// deadline for anything else on the connection, and its statements share
-/// it: each after the first runs under what the earlier ones left.
+/// it: each after the first runs under what the earlier ones left, and none
+/// starts once it is spent ([`DbError::ReadDeadlineExceeded`]).
 /// [`ReadDeadline::PerRead`] tightens the deadline in the transaction or
 /// savepoint. Rolling it back (the read has no writes to keep) reverts every
 /// tighten.
@@ -1263,9 +1264,11 @@ impl<'c> ReadTransaction<'c> {
         query: sqlx::query::Query<'_, sqlx::Postgres, sqlx::postgres::PgArguments>,
     ) -> Result<Vec<sqlx::postgres::PgRow>> {
         if self.statements > 0 {
-            let left = READ_DEADLINE
-                .saturating_sub(self.started.elapsed())
-                .max(std::time::Duration::from_millis(1));
+            let left = READ_DEADLINE.saturating_sub(self.started.elapsed());
+            if left.is_zero() {
+                return Err(DbError::ReadDeadlineExceeded);
+            }
+            let left = left.max(std::time::Duration::from_millis(1));
             tighten_read_deadline(&mut self.tx, &format!("{}ms", left.as_millis())).await?;
         }
         self.statements += 1;
@@ -4212,8 +4215,8 @@ mod postgres_tests {
     }
 
     /// The statements of one read share its deadline: each after the first
-    /// runs under what the earlier ones left, and ending the read restores
-    /// the connection's own.
+    /// runs under what the earlier ones left, none runs once it is spent, and
+    /// ending the read restores the connection's own.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn read_statements_share_one_deadline() {
@@ -4253,6 +4256,15 @@ mod postgres_tests {
                 .expect("begin read");
             let first: f64 = read.fetch(timeout_ms()).await.expect("first")[0].get(0);
             let second: f64 = read.fetch(timeout_ms()).await.expect("second")[0].get(0);
+            read.started -= READ_DEADLINE;
+            let spent = read
+                .fetch(timeout_ms())
+                .await
+                .expect_err("a spent deadline");
+            assert!(
+                matches!(spent, DbError::ReadDeadlineExceeded) && spent.is_statement_cancelled(),
+                "{case}: a spent deadline stops the read before its next statement, got {spent}"
+            );
             read.finish().await.expect("finish");
             assert_eq!(
                 first, full,
@@ -5127,6 +5139,7 @@ mod postgres_tests {
             community,
             channel,
             LIMIT as u32,
+            buzz_core::thread_window::Direction::Older,
             window_cursor,
             Some(&[9]),
             ReadDeadline::PerRead,
@@ -5175,6 +5188,7 @@ mod postgres_tests {
                 community,
                 channel,
                 LIMIT as u32,
+                buzz_core::thread_window::Direction::Older,
                 cursor,
                 Some(&[9]),
             )
