@@ -15,7 +15,7 @@ use crate::commands::agents::fetch_archived_snapshot;
 use crate::commands::channel_templates::{self, ChannelTemplateRecord, TemplateAgentRoster};
 use crate::commands::users::presence_subject;
 use crate::error::CliError;
-use crate::validate::{parse_uuid, read_or_stdin, validate_hex64, validate_uuid};
+use crate::validate::{fold_name, parse_uuid, read_or_stdin, validate_hex64, validate_uuid};
 
 /// Stable, scriptable projection of a kind:39000 channel-metadata event: the
 /// JSON object `channels list`, `get` and `search` print for each channel.
@@ -188,7 +188,7 @@ pub async fn cmd_search_channels(
     });
     let arr = client.query_paginated(filter, limit).await?;
 
-    let matches = search_matches(&arr, &query.to_ascii_lowercase(), exact, include_archived);
+    let matches = search_matches(&arr, &fold_name(query), exact, include_archived);
     let output = serde_json::to_string(&matches).expect("serializing ChannelSummary");
     println!("{output}");
     Ok(())
@@ -229,7 +229,7 @@ fn search_matches(
 }
 
 fn name_matches(name: &str, needle_lower: &str, exact: bool) -> bool {
-    let hay = name.to_ascii_lowercase();
+    let hay = fold_name(name);
     if exact {
         hay == needle_lower
     } else {
@@ -2094,6 +2094,7 @@ mod tests {
         ResolvedAgent, RosterResolution, SkippedSlug,
     };
     use crate::client::BuzzClient;
+    use crate::validate::fold_name;
     use crate::CliError;
     use serde_json::json;
     use std::collections::HashMap;
@@ -2338,6 +2339,20 @@ mod tests {
         assert!(name_matches("Buzz-Chat-Composer", "composer", false));
         assert!(name_matches("Buzz-Chat-Composer", "buzz", false));
         assert!(!name_matches("design", "composer", false));
+    }
+
+    #[test]
+    fn name_matches_folds_non_ascii_case() {
+        // `to_ascii_lowercase` left these untouched, so a channel named in any
+        // language with cased non-ASCII letters could not be found by the
+        // obvious query — while Desktop, on JavaScript's `toLowerCase`, found
+        // it. The needle is pre-folded by the caller, as the comment above says.
+        assert!(name_matches("ÉQUIPE", &fold_name("équipe"), true));
+        assert!(name_matches("ÉQUIPE Produit", &fold_name("équipe"), false));
+        assert!(name_matches("ОБЩИЙ", &fold_name("общий"), true));
+        assert!(name_matches("Ünnepek", &fold_name("ünnepek"), true));
+        // Still a non-match, so the fold has not made matching sloppy.
+        assert!(!name_matches("ÉQUIPE", &fold_name("equipe"), true));
     }
 
     #[test]
