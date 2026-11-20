@@ -140,23 +140,13 @@ export function InviteLinkSection({
   async function handleCopy() {
     if (!inviteUrl || isGenerating || copyStatus === "copying") return;
     setCopyStatus("copying");
-    let invite: Awaited<ReturnType<typeof mintInvite>>;
     try {
-      invite = await mintInvite({ ttlSecs, maxUses });
-    } catch (error) {
-      setCopyStatus("idle");
-      toast.error(
-        `Couldn't create the invite: ${error instanceof Error ? error.message : "unknown error"}`,
-      );
-      return;
-    }
-    try {
-      await writeTextToClipboard(invite.url);
+      await writeTextToClipboard(inviteUrl);
       setCopyStatus("copied");
       toast.success("Invite link copied");
     } catch {
       setCopyStatus("idle");
-      toast.error("Invite created, but copying to the clipboard failed.");
+      toast.error("Couldn't copy the invite link.");
     }
   }
 
