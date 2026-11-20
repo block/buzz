@@ -9,6 +9,7 @@ pub mod feed;
 pub mod gifs;
 mod huddle_tracker;
 pub mod huddles;
+pub mod import;
 pub mod issues;
 pub mod mem;
 pub mod message_report;
