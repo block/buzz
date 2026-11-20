@@ -94,9 +94,10 @@ class _MessageEditSheet extends HookConsumerWidget {
       members: memberCandidates(),
       code: controller._styledCodeRanges(message.content),
     );
-    // A name inside code or a web link (`[@Bob](https://example.org)`) is
-    // that code's or link's own text: it opens as text, so saving leaves it
-    // exactly as written.
+    // A chip is seeded only where the bubble draws a pill. A name inside
+    // code (a span or fence of any form) or a link (`[@Bob](https://…)`, a
+    // reference `[@Bob]` and its definition) is that code's or link's own
+    // text: it opens as text, so saving leaves it exactly as written.
     final seed = (
       text: parsed.text,
       mentions: controller._inProse(parsed.text, parsed.mentions),
@@ -370,8 +371,9 @@ String _editedMentionContent(
   return content;
 }
 
-/// The draft that edits [message]: its text, with each identity link outside
-/// [code] shown as its `@Name`, and its chips in text order. A chip is an
+/// The draft that edits [message]: its text, with each identity link the
+/// bubble draws as a pill (outside [code] and all other code and links)
+/// shown as its `@Name`, and its chips in text order. A chip is an
 /// identity link, bound to the key it names, or an `@Name` or
 /// `@Name (<key>)` the content writes for exactly one tagged person; a name
 /// two tagged people share stays text, since the text cannot say which one
@@ -401,8 +403,17 @@ String _editedMentionContent(
   final text = StringBuffer();
   final mentions = <_ComposerMention>[];
   var offset = 0;
-  for (final link in mentionIdentityLinks(message.content)) {
-    if (code.any((c) => c.start < link.start && link.end < c.end)) continue;
+  final links = mentionIdentityLinks(message.content).toList();
+  // An identity link the bubble shows as raw text (inside code of any kind)
+  // or inside another link stays as written.
+  final literal = mentionsInsideMarkdownLinks(message.content, [
+    for (final link in links) (start: link.start, end: link.end),
+  ], keep: 0);
+  for (final (i, link) in links.indexed) {
+    if (literal.contains(i) ||
+        code.any((c) => c.start < link.start && link.end < c.end)) {
+      continue;
+    }
     text.write(message.content.substring(offset, link.start));
     final start = text.length;
     text.write(link.label);

@@ -2,8 +2,8 @@ import 'package:buzz/features/channels/message_content/markdown_link_mentions.da
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('finds the mentions a bubble reads as part of a link', () {
-    // Each row: text, and whether each `@Bob` in it is inside a link.
+  test('finds the mentions a bubble reads as code or part of a link', () {
+    // Each row: text, and whether each `@Bob` in it is inside code or a link.
     const rows = <(String, List<bool>)>[
       ('hi @Bob', [false]),
       ('[@Bob](https://example.org/bob)', [true]),
@@ -25,12 +25,38 @@ void main() {
         '| a | b |\n| - | - |\n| @Bob | [@Bob](https://example.org) |',
         [false, true],
       ),
-      // Code is not a link; the composer's own code ranges handle it.
-      ('`[@Bob](https://example.org)` @Bob', [false, false]),
+      // A reference and its definition are the link they form; a name
+      // beside them is still a mention.
+      ('see [@Bob]\n\n[@Bob]: https://example.org/bob', [true, true]),
+      (
+        '@Bob [@Bob] [x][@Bob] [@Bob][] @Bob\n\n'
+            '[@Bob]: https://example.org/bob\n\n@Bob',
+        [false, true, true, true, false, true, false],
+      ),
+      // The bubble lifts `@Bob` and `@bob` out as different text, so a
+      // reference in one case does not find a definition in another.
+      ('[@Bob] @bob\n\n[@bob]: https://example.org/bob', [false, false, true]),
+      // A definition nothing refers to is still not prose; a reference with
+      // no definition is text.
+      ('[@Bob]: https://example.org/bob', [true]),
+      ('see [@Bob] and @Bob', [false, false]),
+      // Code, as the bubble reads it, is not prose.
+      ('`[@Bob](https://example.org)` @Bob', [true, false]),
+      ('`@Bob` @Bob', [true, false]),
+      ('``@Bob`` and ``a ` @Bob`` @Bob', [true, true, false]),
+      ('```\n@Bob\n```\n@Bob', [true, false]),
+      ('~~~\n@Bob\n~~~\n@Bob', [true, false]),
+      ('````\n@Bob\n```\n@Bob\n````\n@Bob', [true, true, false]),
+      ('@Bob\n```\n@Bob unclosed', [false, true]),
+      ('@Bob\n~~~\n@Bob unclosed', [false, true]),
+      ('**`@Bob`** and `` @Bob', [true, false]),
     ];
     for (final (text, expected) in rows) {
       final mentions = [
-        for (final match in '@Bob'.allMatches(text))
+        for (final match in RegExp(
+          '@bob',
+          caseSensitive: false,
+        ).allMatches(text))
           (start: match.start, end: match.end),
       ];
       expect(mentions, hasLength(expected.length), reason: text);
@@ -41,5 +67,28 @@ void main() {
         reason: text,
       );
     }
+  });
+
+  test('tells whole ranges apart and many ranges that share a label', () {
+    // An identity link is replaced whole.
+    const link = '[@Bob](nostr:npub1example)';
+    const text = '$link ``$link`` [$link](https://example.org)';
+    final links = [
+      for (final match in link.allMatches(text))
+        (start: match.start, end: match.end),
+    ];
+    expect(mentionsInsideMarkdownLinks(text, links, keep: 0), {1, 2});
+
+    // Each of many same-label ranges is told apart: every third is code.
+    final many = [
+      for (var i = 0; i < 40; i++) i % 3 == 0 ? '``@Bob``' : '@Bob',
+    ].join(' ');
+    final ranges = [
+      for (final match in '@Bob'.allMatches(many))
+        (start: match.start, end: match.end),
+    ];
+    expect(mentionsInsideMarkdownLinks(many, ranges), {
+      for (var i = 0; i < 40; i += 3) i,
+    });
   });
 }

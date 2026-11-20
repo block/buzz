@@ -6,6 +6,7 @@ import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
+import 'package:buzz/features/channels/message_mention_pill.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
@@ -416,6 +417,96 @@ void main() {
     await tester.tap(find.text('Save'));
     await tester.pumpAndSettle();
     expect(again.edits, isEmpty);
+  });
+
+  testWidgets('an edit seeds a chip only where the bubble draws a pill', (
+    tester,
+  ) async {
+    // Review of #9699 (editing rewrites text the bubble does not draw as a
+    // mention): a tagged name inside code of any form, or in a reference
+    // link or its definition, is literal text. Each row is a message with
+    // Bob tagged; `{bob}` marks the `@Bob` the bubble draws as his pill.
+    final rows = [
+      'x ``@Bob`` and ``a ` @Bob`` then {bob}',
+      '{bob} ran\n~~~\n@Bob\n~~~\nok',
+      '{bob} ran\n````\n@Bob\n```\n@Bob\n````\nok',
+      '{bob} ran\n```\n@Bob unclosed',
+      '{bob} ran\n~~~\n@Bob unclosed',
+      'see [@Bob]\n\n[@Bob]: https://example.org/bob',
+      '{bob} see [@Bob] and [notes][@Bob]\n\n[@Bob]: https://example.org/bob',
+      // The bubble does not pair a reference with a definition in another
+      // case: the reference is his pill in brackets.
+      '{bob} see [{bob}]\n\n[@bob]: https://example.org/bob',
+      // An identity link in code is raw text there, not a chip.
+      '``${_link('@Bob', _bob)}`` and {bob}',
+      '~~~\n${_link('@Bob', _bob)}\n~~~\nok',
+    ];
+    final pill = find.byType(MessageMentionPill);
+    for (final row in rows) {
+      final original = row.replaceAll('{bob}', '@Bob');
+      final pills = '{bob}'.allMatches(row).length;
+
+      // The bubble of the message as sent.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          child: MessageContent(
+            content: original,
+            tags: [
+              ['h', _channelId],
+              ['p', _bob],
+            ],
+            mentionNames: {_bob: 'Bob'},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(pill, findsNWidgets(pills), reason: row);
+
+      // The sheet shows the message as written, with a chip per pill, and
+      // saves nothing unchanged.
+      var actions = await _openEditSheet(
+        tester,
+        message: _message(original, mentions: [_bob]),
+      );
+      expect(controllerOf(tester).text, original, reason: row);
+      expect(personChip, findsNWidgets(pills), reason: row);
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(actions.edits, isEmpty, reason: row);
+
+      // An unrelated edit rewrites only the pills, as identity links.
+      actions = await _openEditSheet(
+        tester,
+        message: _message(original, mentions: [_bob]),
+      );
+      await tester.enterText(field, 'Edit.\n\n$original');
+      await tester.pumpAndSettle();
+      expect(personChip, findsNWidgets(pills), reason: row);
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      final edit = actions.edits.single;
+      expect(
+        edit.content,
+        'Edit.\n\n${row.replaceAll('{bob}', _link('@Bob', _bob))}',
+        reason: row,
+      );
+
+      // The edited bubble draws the same pills and nothing new.
+      await _pumpEditedBubble(tester, edit);
+      expect(pill, findsNWidgets(pills), reason: row);
+
+      // Reopened, it is the same draft and saves nothing unchanged.
+      final again = await _openEditSheet(
+        tester,
+        message: _message(edit.content),
+      );
+      expect(controllerOf(tester).text, 'Edit.\n\n$original', reason: row);
+      expect(personChip, findsNWidgets(pills), reason: row);
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(again.edits, isEmpty, reason: row);
+    }
   });
 
   testWidgets('two picked namesakes save as links and never as raw keys', (

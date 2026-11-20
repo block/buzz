@@ -14,7 +14,7 @@ final _escapedPunctuation = RegExp(r'\\([!-/:-@\[-`{-~])');
 final _lineBreaks = RegExp(r'[\r\n]+');
 final _target = RegExp(r'^nostr:npub1[02-9ac-hj-np-z]+$');
 final _link = RegExp(
-  r'(?<![!\\])\[((?:\\[!-~]|[^\]\\\n])+)\]\((nostr:npub1[02-9ac-hj-np-z]+)\)',
+  r'(?<![!\\])\[((?:\\[!-~]|[^\[\]\\\n])+)\]\((nostr:npub1[02-9ac-hj-np-z]+)\)',
 );
 
 /// The identity link for [label] (`@Name`) naming [pubkey]: a one-line
