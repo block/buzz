@@ -163,29 +163,34 @@ class HomePage extends HookConsumerWidget {
         : communityName.characters.first.toUpperCase();
     final messages = ChannelsPage(
       settingsPageBuilder: settingsPageBuilder,
-      messagesNativeActionsBuilder: (openSwitcher) => [
-        IosNavigationAction(
-          label: 'Activity',
-          symbol: 'bell',
-          activityColor: hasUnreadInbox ? context.colors.primary : null,
-          activityLabel: hasUnreadInbox ? 'Unread items' : null,
-          onPressed: openInbox,
-        ),
-        IosNavigationAction(
-          label: 'Community menu',
-          imageUrl: communityIcon,
-          avatarIdentity: community?.id,
-          avatarInitial: communityInitial,
-          children: [
-            for (final action in moreActions(openSwitcher))
+      // The rail draws above Home's recording blur and its pointer blocker.
+      // Hide its controls while Bestie records, like Search and New, so a
+      // second finger cannot open a route and cancel the recording.
+      messagesNativeActionsBuilder: (openSwitcher) => recordingFocus.value
+          ? const []
+          : [
               IosNavigationAction(
-                label: action.label,
-                symbol: action.symbol,
-                onPressed: action.onPressed,
+                label: 'Activity',
+                symbol: 'bell',
+                activityColor: hasUnreadInbox ? context.colors.primary : null,
+                activityLabel: hasUnreadInbox ? 'Unread items' : null,
+                onPressed: openInbox,
               ),
-          ],
-        ),
-      ],
+              IosNavigationAction(
+                label: 'Community menu',
+                imageUrl: communityIcon,
+                avatarIdentity: community?.id,
+                avatarInitial: communityInitial,
+                children: [
+                  for (final action in moreActions(openSwitcher))
+                    IosNavigationAction(
+                      label: action.label,
+                      symbol: action.symbol,
+                      onPressed: action.onPressed,
+                    ),
+                ],
+              ),
+            ],
       messagesActionsBuilder: (openSwitcher, avatarKey) {
         final menuActions = moreActions(openSwitcher);
         return [

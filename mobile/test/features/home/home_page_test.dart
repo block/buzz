@@ -369,6 +369,19 @@ void main() {
     Navigator.of(tester.element(find.byType(ActivityPage))).pop();
     await tester.pumpAndSettle();
     expect(railActivity, findsOneWidget);
+    // Bestie recording hides the rail controls with Search and New, so they
+    // cannot open a route that cancels the recording.
+    void recording(bool value) => tester
+        .widget<MessagesNavigationBar>(find.byType(MessagesNavigationBar))
+        .onRecordingChanged!(value);
+    recording(true);
+    await tester.pumpAndSettle();
+    expect(railActivity, findsNothing);
+    expect(railMenu, findsNothing);
+    recording(false);
+    await tester.pumpAndSettle();
+    expect(railActivity, findsOneWidget);
+    expect(railMenu, findsOneWidget);
     final create = tester.widget<IosMessageCreateButton>(
       find.descendant(
         of: find.byType(MessagesNavigationBar),
