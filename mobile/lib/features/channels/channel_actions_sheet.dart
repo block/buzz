@@ -622,6 +622,18 @@ Future<void> _showMoveSectionSheet(
   // The actions sheet that opened this picker is already closing, and its
   // WidgetRef is disposed with it. Use the page's container throughout.
   final container = ProviderScope.containerOf(context, listen: false);
+  // A notification can switch communities while the picker or name dialog is
+  // open; edit only the community that opened it.
+  final config = container.read(relayConfigProvider);
+  void edit(void Function(ChannelSectionsNotifier sections) change) {
+    final current = container.read(relayConfigProvider);
+    if (current.storedOrigin != config.storedOrigin ||
+        current.nsec != config.nsec) {
+      return;
+    }
+    change(container.read(channelSectionsProvider.notifier));
+  }
+
   final sections = [...container.read(channelSectionsProvider).store.sections]
     ..sort((a, b) => a.order.compareTo(b.order));
   BuildContext? sheet;
@@ -668,9 +680,7 @@ Future<void> _showMoveSectionSheet(
                         : null,
                     onTap: () {
                       Navigator.of(sheetContext).pop();
-                      container
-                          .read(channelSectionsProvider.notifier)
-                          .assignChannel(channel.id, section.id);
+                      edit((s) => s.assignChannel(channel.id, section.id));
                     },
                   ),
                 ListTile(
@@ -680,9 +690,7 @@ Future<void> _showMoveSectionSheet(
                     Navigator.of(sheetContext).pop();
                     final name = await _showSectionNameDialog(context);
                     if (name == null || name.isEmpty) return;
-                    container
-                        .read(channelSectionsProvider.notifier)
-                        .createSectionWithChannel(channel.id, name);
+                    edit((s) => s.createSection(name, channelId: channel.id));
                   },
                 ),
                 if (sectionId != null)
@@ -691,9 +699,7 @@ Future<void> _showMoveSectionSheet(
                     title: const Text('Remove from section'),
                     onTap: () {
                       Navigator.of(sheetContext).pop();
-                      container
-                          .read(channelSectionsProvider.notifier)
-                          .unassignChannel(channel.id);
+                      edit((s) => s.unassignChannel(channel.id));
                     },
                   ),
               ],

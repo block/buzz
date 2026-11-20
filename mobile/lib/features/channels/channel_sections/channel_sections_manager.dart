@@ -245,9 +245,9 @@ class ChannelSectionsManager {
     _unsubscribe = null;
   }
 
-  /// Returns the new section's ID, or null when legacy filing is locked.
-  String? createSection(String name) {
-    if (!_editable) return null;
+  /// Files [channelId] in the new section in the same write, when given.
+  void createSection(String name, {String? channelId}) {
+    if (!_editable) return;
     final maxOrder = _store.sections.fold<int>(
       -1,
       (max, s) => s.order > max ? s.order : max,
@@ -259,11 +259,12 @@ class ChannelSectionsManager {
     );
     _store = ChannelSectionStore(
       sections: [..._store.sections, section],
-      assignments: _store.assignments,
+      assignments: channelId == null
+          ? _store.assignments
+          : {..._store.assignments, channelId: section.id},
     );
     _persist();
     markDirty();
-    return section.id;
   }
 
   void renameSection(String sectionId, String? newName, {String? icon}) {

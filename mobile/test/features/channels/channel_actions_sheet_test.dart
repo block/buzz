@@ -699,6 +699,76 @@ void main() {
     });
   }
 
+  for (final pick in ['Work', 'New section…']) {
+    testWidgets('Move to section: $pick files nothing once the community '
+        'changes behind the picker', (tester) async {
+      tester.view.physicalSize = const Size(1200, 3000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final keys = nostr.Keys.generate();
+      final other = nostr.Keys.generate();
+      const relayUrl = 'https://relay.example';
+      final mine = channelSectionsKey(keys.public, relayUrl);
+      final theirs = channelSectionsKey(other.public, relayUrl);
+      final workOnly = jsonEncode(
+        const ChannelSectionStore(
+          sections: [ChannelSection(id: 'work', name: 'Work', order: 0)],
+          assignments: {},
+        ).toJson(),
+      );
+      SharedPreferences.setMockInitialValues({
+        mine: workOnly,
+        theirs: workOnly,
+      });
+      final prefs = await SharedPreferences.getInstance();
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          loadMembers: () async => const [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+          sectionOverrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            relayConfigProvider.overrideWith(
+              () => _SignedInConfig(relayUrl, keys.nsec),
+            ),
+            activeCommunityProvider.overrideWith((ref) async => null),
+          ],
+        ),
+      );
+      final container = ProviderScope.containerOf(
+        tester.element(find.text('Open actions')),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Move to section…'));
+      await tester.pumpAndSettle();
+      void switchCommunity() =>
+          (container.read(relayConfigProvider.notifier) as _SignedInConfig)
+              .signInAs(other.nsec);
+      if (pick == 'New section…') {
+        await tester.tap(find.text(pick));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byType(TextField), 'Later');
+        switchCommunity();
+        await tester.pump();
+        await tester.tap(find.text('Create'));
+      } else {
+        switchCommunity();
+        await tester.pump();
+        await tester.tap(find.text(pick));
+      }
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(
+        container.read(channelSectionsProvider).store.assignments,
+        isEmpty,
+      );
+      expect(prefs.getString(mine), workOnly);
+      expect(prefs.getString(theirs), workOnly);
+    });
+  }
+
   testWidgets('member sees neither owner action', (tester) async {
     await tester.pumpWidget(
       _app(
@@ -1276,6 +1346,9 @@ class _SignedInConfig extends RelayConfigNotifier {
 
   @override
   RelayConfig build() => RelayConfig(baseUrl: baseUrl, nsec: nsec);
+
+  void signInAs(String other) =>
+      state = RelayConfig(baseUrl: baseUrl, nsec: other);
 }
 
 class _FakeChannelSectionsNotifier extends ChannelSectionsNotifier {
