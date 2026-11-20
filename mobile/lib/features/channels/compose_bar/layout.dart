@@ -426,6 +426,7 @@ class _ComposeBarLayout extends HookWidget {
       magnifierConfiguration: defaultTargetPlatform == TargetPlatform.iOS
           ? TextMagnifierConfiguration.disabled
           : null,
+      stylusHandwritingEnabled: stylusHandwritingEnabledFor(controller.text),
       contentInsertionConfiguration: ContentInsertionConfiguration(
         allowedMimeTypes: _pastedImageMimeTypes,
         onContentInserted: onContentInserted,

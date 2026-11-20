@@ -6,6 +6,7 @@ import 'package:buzz/shared/emoji/emoji_picker.dart';
 import 'package:buzz/shared/widgets/concentric_sheet_surface.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
+import 'package:buzz/shared/utils/stylus_handwriting.dart';
 
 import 'dart:async';
 
@@ -18,6 +19,7 @@ import 'dart:ui' as ui;
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1988,6 +1990,121 @@ void main() {
       expect(textField.controller!.selection.baseOffset, 12);
       expect(find.byType(TextField), findsOneWidget);
       expect(textField.focusNode!.hasFocus, isTrue);
+    });
+
+    testWidgets('iOS measures each character only of shorter drafts', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        Future<List<int>> sentSelectionRectCounts(String text) async {
+          tester.testTextInput.log.clear();
+          await tester.enterText(find.byType(TextField), text);
+          await tester.pump();
+          await tester.pump();
+          return [
+            for (final call in tester.testTextInput.log)
+              if (call.method == 'TextInput.setSelectionRects')
+                (call.arguments as List).length,
+          ];
+        }
+
+        // The keyboard trackpad's two-finger selection uses these rectangles.
+        expect(await sentSelectionRectCounts('abc def ghi'), [11]);
+        // Measuring a long draft one character at a time froze the app, so
+        // iOS gets no rectangles, and drops the ones from the shorter draft.
+        expect(
+          await sentSelectionRectCounts('a' * (stylusHandwritingMaxLength + 1)),
+          [0],
+        );
+        expect(await sentSelectionRectCounts('abc def'), [7]);
+        expect(
+          await sentSelectionRectCounts('a' * (stylusHandwritingMaxLength + 1)),
+          [0],
+        );
+        // Flutter skips a list equal to the last one it sent, so iOS has no
+        // rectangles back at the identical draft until the next edit.
+        expect(await sentSelectionRectCounts('abc def'), isEmpty);
+        expect(await sentSelectionRectCounts('abc def g'), [9]);
+
+        // iOS holds rectangles only for the focused field, which may be
+        // another one, so a draft crossing the cutoff without focus sends none.
+        final controller = tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!;
+        FocusManager.instance.primaryFocus?.unfocus();
+        await tester.pump();
+        tester.testTextInput.log.clear();
+        controller.text = 'a' * (stylusHandwritingMaxLength + 1);
+        await tester.pump();
+        await tester.pump();
+        expect(
+          tester.testTextInput.log.map((call) => call.method),
+          isNot(contains('TextInput.setSelectionRects')),
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('Android starts stylus handwriting in a long draft', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      final scribeCalls = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.scribe,
+        (call) async {
+          scribeCalls.add(call.method);
+          return call.method == 'Scribe.isFeatureAvailable' ? true : null;
+        },
+      );
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        await tester.enterText(
+          find.byType(TextField),
+          'a' * (stylusHandwritingMaxLength + 1),
+        );
+        await tester.pump();
+        // The keyboard inset covers the field's lower half.
+        await tester.tapAt(
+          tester.getTopLeft(find.byType(EditableText)) + const Offset(8, 8),
+          kind: PointerDeviceKind.stylus,
+        );
+        await tester.pump(const Duration(milliseconds: 500));
+        expect(scribeCalls, contains('Scribe.startStylusHandwriting'));
+      } finally {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.scribe,
+          null,
+        );
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
     });
 
     testWidgets('iOS selection handles resize a draft with the system menu', (

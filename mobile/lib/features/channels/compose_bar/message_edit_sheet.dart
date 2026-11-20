@@ -40,6 +40,12 @@ class _MessageEditSheet extends HookConsumerWidget {
     );
     useEffect(() => controller.dispose, [controller]);
     final focusNode = useFocusNode();
+    final stylusHandwriting = useMemoized(
+      () => StylusHandwritingCutoff(controller, focusNode),
+      [controller, focusNode],
+    );
+    useEffect(() => stylusHandwriting.dispose, [stylusHandwriting]);
+    final stylusHandwritingEnabled = useValueListenable(stylusHandwriting);
     final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
 
@@ -262,6 +268,7 @@ class _MessageEditSheet extends HookConsumerWidget {
                   autofocus: true,
                   minLines: 1,
                   maxLines: 5,
+                  stylusHandwritingEnabled: stylusHandwritingEnabled,
                   inputFormatters: [_ComposerChipEditingFormatter(controller)],
                   decoration: const InputDecoration(hintText: 'Edit message'),
                 ),

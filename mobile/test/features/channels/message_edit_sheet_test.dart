@@ -15,6 +15,7 @@ import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:buzz/shared/utils/stylus_handwriting.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -634,6 +635,21 @@ void main() {
     expect(tester.getTopLeft(field).dy, lessThan(top));
     expect(_rosterReads, before);
   });
+
+  testWidgets('iOS turns stylus handwriting off only while the edit is long', (
+    tester,
+  ) async {
+    bool handwriting() =>
+        tester.widget<TextField>(field).stylusHandwritingEnabled;
+    await _openEditSheet(
+      tester,
+      message: _message('a' * (stylusHandwritingMaxLength + 1)),
+    );
+    expect(handwriting(), isFalse);
+    await tester.enterText(field, 'short');
+    await tester.pump();
+    expect(handwriting(), isTrue);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets('an unchanged or emptied edit saves nothing', (tester) async {
     final actions = await _openEditSheet(

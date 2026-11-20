@@ -3,6 +3,7 @@ import 'composer_transcription.dart';
 
 import 'package:buzz/shared/widgets/buzz_toast.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+import 'package:buzz/shared/utils/stylus_handwriting.dart';
 
 import 'composer_send_origin.dart';
 

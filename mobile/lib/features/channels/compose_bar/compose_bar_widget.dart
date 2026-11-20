@@ -64,6 +64,11 @@ class ComposeBar extends HookConsumerWidget {
     final androidImeFallbackTimer = useRef<Timer?>(null);
     final ownedFocusNode = useFocusNode();
     final focusNode = this.focusNode ?? ownedFocusNode;
+    final stylusHandwriting = useMemoized(
+      () => StylusHandwritingCutoff(controller, focusNode),
+      [controller, focusNode],
+    );
+    useEffect(() => stylusHandwriting.dispose, [stylusHandwriting]);
     useEffect(
       () => () {
         androidImeFallbackTimer.value?.cancel();
