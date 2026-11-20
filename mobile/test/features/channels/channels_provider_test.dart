@@ -22,6 +22,7 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart';
 import 'package:buzz/features/channels/channel_unread.dart';
+import 'package:buzz/features/channels/channel_filter/channel_filter_activity.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
@@ -2491,48 +2492,111 @@ void main() {
   });
 
   test(
-    'self-authored activity invalidates filter reads without changing unread or sort time',
+    'Active filter activity comes from the list reads and live delivery alone',
     () async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      NostrEvent message(String id, int at, {String channel = _channelA}) =>
+          NostrEvent(
+            id: id,
+            pubkey: myPk,
+            createdAt: at,
+            kind: EventKind.streamMessageV2,
+            tags: [
+              ['h', channel],
+            ],
+            content: 'my own activity',
+            sig: 'sig',
+          );
       final session = _FakeRelaySession(
-        memberships: [_membership(_channelA, myPk)],
-        metadata: [_meta(id: _channelA, name: 'general')],
+        memberships: [
+          _membership(_channelA, myPk),
+          _membership(_channelB, myPk),
+        ],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(id: _channelB, name: 'quiet'),
+        ],
+        // Self-authored activity counts; a future-dated head does not.
+        recentMessages: [
+          message('mine', now - 100),
+          message('ahead', now + 900),
+        ],
       );
       final container = _buildContainer(session: session);
       addTearDown(container.dispose);
       await container.read(channelsProvider.future);
-      final notifier = container.read(channelsProvider.notifier);
+      await _settle();
+      AsyncValue<int?> activity(String id) =>
+          container.read(channelFilterActivityProvider(id));
+      final listeners = [
+        for (final id in [_channelA, _channelB])
+          container.listen(channelFilterActivityProvider(id), (_, _) {}),
+      ];
+      addTearDown(() {
+        for (final listener in listeners) {
+          listener.close();
+        }
+      });
+      final reads = (
+        session.historyFilters.length,
+        session.queryBatches.length,
+      );
       final before = container
           .read(channelsProvider)
           .requireValue
-          .single
+          .singleWhere((channel) => channel.id == _channelA)
           .lastMessageAt;
-      final versions = <int>[];
-      final listener = container.listen(
-        channelsProvider.select((_) => notifier.activityRevisionFor(_channelA)),
-        (_, next) => versions.add(next),
-      );
-      addTearDown(listener.close);
-      session.emit(
-        const NostrEvent(
-          id: 'self-message',
-          pubkey: myPk,
-          createdAt: 20,
-          kind: EventKind.streamMessageV2,
-          tags: [
-            ['h', _channelA],
-          ],
-          content: 'my own activity',
-          sig: 'sig',
-        ),
-      );
+      expect(activity(_channelA).value, now - 100);
+      expect(activity(_channelB), isA<AsyncData<int?>>());
+      expect(activity(_channelB).value, isNull);
+
+      session.emit(message('live', now - 10));
       await _settle();
-      expect(versions, [1]);
-      expect(notifier.latestObservedByChannel[_channelA], isNull);
+      expect(activity(_channelA).value, now - 10);
+      // Activity leaves unread and sort time alone, and costs no relay reads.
       expect(
-        container.read(channelsProvider).requireValue.single.lastMessageAt,
+        container
+            .read(channelsProvider)
+            .requireValue
+            .singleWhere((channel) => channel.id == _channelA)
+            .lastMessageAt,
         before,
       );
-      expect(notifier.activityRevisionFor(_channelB), 0);
+      expect((
+        session.historyFilters.length,
+        session.queryBatches.length,
+      ), reads);
+
+      // A reconnect reads only new channels' latest messages; the unread
+      // catch-up it already sends covers listed ones.
+      session.recentMessages = [
+        ...session.recentMessages,
+        message('missed', now - 5),
+      ];
+      final batches = session.queryBatches.length;
+      session.setStatus(SessionStatus.reconnecting);
+      session.setStatus(SessionStatus.connected);
+      await _waitUntil(
+        () => session.queryBatches
+            .skip(batches)
+            .any((batch) => batch.every((filter) => filter.since != null)),
+      );
+      await _settle();
+      expect(activity(_channelA).value, now - 5);
+
+      // A list read that never answered leaves activity unknown, not empty.
+      final failed = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+      )..latestBatchError = RelayException(503, '{"error":"query timed out"}');
+      final cold = _buildContainer(session: failed);
+      addTearDown(cold.dispose);
+      await cold.read(channelsProvider.future);
+      await _settle();
+      expect(
+        cold.read(channelFilterActivityProvider(_channelA)).isLoading,
+        isTrue,
+      );
     },
   );
 

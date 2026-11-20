@@ -98,6 +98,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
       // cross-request tombstones: a large batch can evict its own early IDs.
       final batchDeletedIds = <String>{};
       var appliedDeletion = false;
+      var activityAdvanced = false;
       for (final event in events) {
         final channelId = event.channelId;
         if (channelById.containsKey(channelId) ||
@@ -139,6 +140,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
             _unreadDeletedIdsByChannel[channelId]?.contains(event.id) == true) {
           continue;
         }
+        if (_activity.note(channelId, event.createdAt)) activityAdvanced = true;
         final readAt = readAtByChannel[channelId];
         _noteThreadChannel(event, channelId);
         if (event.pubkey.toLowerCase() == myPk.toLowerCase()) continue;
@@ -193,7 +195,10 @@ extension _UnreadCatchUp on ChannelsNotifier {
       // from here, so a second check would be dead code.
       // Recorded events also advance `lastMessageAt`, as live events do: a
       // deadline-unavailable latest-message batch leaves it unset.
-      if (recordedAtByChannel.isNotEmpty || appliedDeletion) {
+      // Newer activity also republishes, so the Active filter sees it.
+      if (recordedAtByChannel.isNotEmpty ||
+          appliedDeletion ||
+          activityAdvanced) {
         _publishUnreadCatchUp(recordedAtByChannel);
       }
     } catch (error) {

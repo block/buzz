@@ -1,7 +1,6 @@
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/shared/widgets/app_list.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
-import 'package:buzz/features/channels/channel_filter/channel_filter_activity.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_provider.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_manager.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_store.dart';

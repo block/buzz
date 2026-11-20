@@ -36,6 +36,7 @@ part 'channels_provider_lifecycle.dart';
 part 'channel_list_changes.dart';
 part 'channels_provider_joins.dart';
 part 'channel_thread_follows.dart';
+part 'channel_latest_activity.dart';
 
 const _channelTypeOrder = {'stream': 0, 'forum': 1, 'dm': 2};
 const _unreadCatchUpLimit = 1000;
@@ -105,12 +106,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   bool _listNoticesReopened = false;
   final Set<String> _reopenedLiveChunks = {};
   final Map<String, int> _latestObservedByChannel = {};
-  final Map<String, int> _activityRevisions = {};
+  final _activity = _ChannelActivity();
 
-  /// Invalidates verified activity reads for every live message, including
-  /// self-authored or muted messages, without changing unread or sort state.
-  int activityRevisionFor(String channelId) =>
-      _activityRevisions[channelId] ?? 0;
+  /// When anyone last posted in [channelId]; see [_ChannelActivity].
+  ({bool known, int? at}) activityFor(String channelId) =>
+      _activity.lookup(channelId);
 
   // Per channel, when an earlier unread catch-up in this session was sent, and
   // the read timestamp and mute state it used. See [_UnreadCatchUp].
@@ -331,7 +331,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _refreshCoordinator.retireInFlight();
       _clearLiveSubscriptions();
       _latestObservedByChannel.clear();
-      _activityRevisions.clear();
+      _activity.clear();
       _observedUnreadEventsByChannel.clear();
       _observedUnreadRevisions.touchAll();
       _unreadCaughtUpByChannel.clear();
@@ -514,13 +514,19 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         for (final c in state.value ?? const <Channel>[])
           if (c.isMember) c.id,
     };
-    final latestEventsRequest = _fetchLastMessageEvents(session, [
+    final latestRequested = [
       for (final entry in visibleMetas)
         if (memberChannelIds.contains(entry.value.id) &&
             !entry.value.isArchived &&
             !listed.contains(entry.value.id))
           entry.value,
-    ]);
+    ];
+    final latestFailedIds = <String>{};
+    final latestEventsRequest = _fetchLastMessageEvents(
+      session,
+      latestRequested,
+      failedChannelIds: latestFailedIds,
+    );
     final (displayNames, latestEvents) = await _fenced(fence, () async {
       await Future.wait(eagerError: true, [
         displayNamesRequest,
@@ -586,6 +592,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         }
       }
     }
+    _activity.noteRead(latestRequested, latestFailedIds, events);
     final mutedChannelIds = _mutedChannelIds();
     for (final event in events ?? const <NostrEvent>[]) {
       final channelId = event.channelId;
@@ -685,34 +692,6 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       ),
     );
     return channels;
-  }
-
-  /// Fetches each channel's independent latest-message window in one HTTP
-  /// bridge request. The relay preserves NIP-01 per-filter limits while
-  /// executing the filters with bounded concurrency, avoiding an unbounded
-  /// burst of websocket REQs on communities with many channels.
-  Future<List<NostrEvent>?> _fetchLastMessageEvents(
-    RelaySessionNotifier session,
-    List<ChannelData> channels,
-  ) async {
-    if (channels.isEmpty) return const [];
-
-    final filters = [
-      for (final channel in channels)
-        NostrFilter(
-          kinds: EventKind.channelMessageEventKinds,
-          tags: {
-            '#h': [channel.id],
-          },
-          limit: channel.channelType == 'dm' ? 1 : 20,
-        ),
-    ];
-
-    return _fetchChannelHistoryBatch(
-      session,
-      filters,
-      operation: 'latest-message query',
-    );
   }
 
   /// Returns null when the batch is unavailable: it hit a relay deadline.
@@ -914,7 +893,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       }
       final updated = List<Channel>.of(channels);
       final channel = updated[idx];
-      _activityRevisions[channelId] = activityRevisionFor(channelId) + 1;
+      if (EventKind.channelMessageEventKinds.contains(event.kind)) {
+        _activity.noteLive(channelId, event.createdAt);
+      }
 
       _noteThreadEvent(event, channel.id, myPk);
 
@@ -995,7 +976,6 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
   void clearObservedUnreadForChannel(String channelId) {
     _latestObservedByChannel.remove(channelId);
-    _activityRevisions.remove(channelId);
     if (_observedUnreadEventsByChannel.remove(channelId) != null) {
       _observedUnreadRevisions.touch(channelId);
     }
