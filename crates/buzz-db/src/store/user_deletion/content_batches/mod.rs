@@ -246,9 +246,9 @@ async fn plan(
         "excluded_agents": excluded_agents,
         "target_pubkeys": target_pubkeys, "trusted_relay_pubkey": relay, "included_event_kinds": KINDS,
         "batch_size": options.batch_size, "max_items": options.max_items,
-        "scope": "user- and owned-agent-attributed events (including persona, team, emoji and project definitions), trusted-relay private hidden-DM snapshots, reactions, owned subscriptions and notification delivery; unused owned workflows and recorded personal workflow inputs/notes",
+        "scope": "user- and owned-agent-attributed events (including persona, team, emoji and project definitions), trusted-relay private hidden-DM snapshots, reactions and notification delivery; unused owned workflows and recorded personal workflow inputs/notes",
         "hidden_dm_selection": "kind 30622 requires a trusted relay signer, no channel, and exactly one matching canonical d/p viewer; ambiguous or untrusted snapshots are not selected",
-        "preserved": "other users' events and reactions; member repositories; workflow history except recorded personal trigger inputs and approval notes; other owners' delivery logs unrelated to selected events",
+        "preserved": "other users' events and reactions; member repositories; workflow history except recorded personal trigger inputs and approval notes",
         "relay_attribution": if relay.is_some() { "enabled" } else { "not included; supply --relay-pubkey for relay-authored history" },
         "execution": "preview only; --delete prints and commits batches after execution checks",
         "thread_repairs": "reported separately from row items; metadata mutations are not expanded",
@@ -376,7 +376,7 @@ mod private_state_postgres_tests;
 mod workflow_postgres_tests;
 
 #[cfg(test)]
-mod copies_postgres_tests;
+mod files_postgres_tests;
 
 #[cfg(test)]
 mod schedule_postgres_tests;

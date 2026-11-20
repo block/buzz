@@ -58,14 +58,6 @@ async fn private_dm_snapshot_cleanup_checks_subject_signer_and_resumes_without_s
     let a = alice.public_key().to_hex();
     let b = bob.public_key().to_hex();
     let g = agent.public_key().to_hex();
-    sqlx::query(
-        "INSERT INTO subscriptions (community_id,id,owner_pubkey) VALUES ($1,'surviving',$2)",
-    )
-    .bind(community.as_uuid())
-    .bind(bob.public_key().as_bytes().as_slice())
-    .execute(db.pool())
-    .await
-    .unwrap();
     let mut selected = HashSet::new();
     let cases = [
         (&relay, vec![("d", &a), ("p", &a)], None, true),
@@ -99,12 +91,6 @@ async fn private_dm_snapshot_cleanup_checks_subject_signer_and_resumes_without_s
         db.insert_event(other, &event, None).await.unwrap();
         if delete {
             selected.insert(event.id.to_hex());
-        }
-        // Logs in either community and under a surviving subscription must
-        // follow only the selected private snapshot, not its claimed subject.
-        for c in [community, other] {
-            sqlx::query("INSERT INTO delivery_log (community_id,subscription_id,event_id,error_message) VALUES ($1,'surviving',$2,'historical private delivery')")
-                .bind(c.as_uuid()).bind(event.id.as_bytes().as_slice()).execute(db.pool()).await.unwrap();
         }
         if index == 0 {
             sqlx::query("UPDATE events SET deleted_at=now() WHERE community_id=$1 AND id=$2")
@@ -146,11 +132,9 @@ async fn private_dm_snapshot_cleanup_checks_subject_signer_and_resumes_without_s
     let tables = [
         "events",
         "event_mentions",
-        "delivery_log",
         "channels",
         "channel_members",
         "users",
-        "subscriptions",
     ];
     let mut before = Vec::new();
     let mut foreign = Vec::new();

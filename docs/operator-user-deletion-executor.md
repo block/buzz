@@ -35,9 +35,8 @@ rows. DM conversations, other participants' preferences and encrypted message
 copies are not selected by this rule.
 
 Content cleanup also removes signed file-metadata publications (kind 1063),
-without deleting referenced blobs. Delivery logs under surviving subscriptions
-follow every selected source event, including events reduced to tombstones.
-Mentions and pending delivery rows are removed before their source events.
+without deleting referenced blobs. Mentions and pending delivery rows are
+removed before their source events.
 
 Workflow cleanup deletes owned definitions with no runs, approvals or linked
 schedule history, removing each definition and its unused schedule claims in the same transaction.
