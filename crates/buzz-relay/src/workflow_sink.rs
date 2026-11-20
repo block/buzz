@@ -715,34 +715,39 @@ mod tests {
         ));
     }
 
-    /// The tag value is what a client compares against the `d` value of the
-    /// workflow's kind:30620 definition, however the UUID was first spelled.
+    /// The tag value is the `d` that `buzz-sdk` writes on a workflow's
+    /// kind:30620 definition, which is the string a client compares it with.
+    ///
+    /// It is not every `d` the relay accepts. The save handler keys a workflow
+    /// by the UUID it parses from `d`, so a definition that spells the same
+    /// UUID in uppercase belongs to the same workflow, and the tag does not
+    /// equal that `d`. NOSTR.md ("Workflow Identity") lists this as a case in
+    /// which a client finds no definition.
     #[test]
-    fn workflow_id_tag_carries_the_definition_d_value() {
-        for spelling in [
-            "0f8fad5b-d9cb-469f-a165-70867728950e",
-            "0F8FAD5B-D9CB-469F-A165-70867728950E",
-            "0f8fad5bd9cb469fa16570867728950e",
-        ] {
-            let workflow_id = Uuid::parse_str(spelling).expect("workflow UUID");
-            let tag = workflow_id_tag(workflow_id).expect("workflow id tag");
-            assert_eq!(
-                tag.as_slice(),
-                ["buzz:workflow-id", "0f8fad5b-d9cb-469f-a165-70867728950e"],
-                "{spelling}"
-            );
+    fn workflow_id_tag_is_the_d_value_buzz_sdk_writes() {
+        const CANONICAL: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
+        let workflow_id = Uuid::parse_str(CANONICAL).expect("workflow UUID");
+        let tag = workflow_id_tag(workflow_id).expect("workflow id tag");
+        assert_eq!(tag.as_slice(), ["buzz:workflow-id", CANONICAL]);
 
-            let definition = buzz_sdk::build_workflow_def(Uuid::new_v4(), workflow_id, "name: wf")
-                .expect("build definition")
-                .sign_with_keys(&nostr::Keys::generate())
-                .expect("sign definition");
-            let d_value = definition
-                .tags
-                .iter()
-                .find(|tag| tag.kind().to_string() == "d")
-                .and_then(|tag| tag.content());
-            assert_eq!(d_value, tag.content(), "{spelling}");
-        }
+        let definition = buzz_sdk::build_workflow_def(Uuid::new_v4(), workflow_id, "name: wf")
+            .expect("build definition")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign definition");
+        let d_value = definition
+            .tags
+            .iter()
+            .find(|tag| tag.kind().to_string() == "d")
+            .and_then(|tag| tag.content());
+        assert_eq!(d_value, tag.content());
+
+        let uppercase_d = CANONICAL.to_uppercase();
+        assert_eq!(
+            Uuid::parse_str(&uppercase_d).ok(),
+            Some(workflow_id),
+            "test premise: an uppercase d names the same workflow"
+        );
+        assert_ne!(tag.content(), Some(uppercase_d.as_str()));
     }
 
     fn m(name: &str, pubkey: &str) -> (String, String) {
