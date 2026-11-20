@@ -73,7 +73,10 @@ impl Fixture {
                 let index = test_index().await;
                 Fixture {
                     service: SearchService::with_opensearch(pool.clone(), index.clone()),
-                    opensearch: Some((Indexer::new(pool.clone(), index.clone()), index)),
+                    opensearch: Some((
+                        Indexer::new(buzz_db::Db::from_pool(pool.clone()), index.clone()),
+                        index,
+                    )),
                 }
             }
         };

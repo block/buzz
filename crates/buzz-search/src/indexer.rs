@@ -18,7 +18,6 @@
 use std::time::Duration;
 
 use buzz_db::{search_outbox, Db, DbError};
-use sqlx::PgPool;
 use tracing::{info, warn};
 
 use crate::opensearch::SearchIndex;
@@ -51,14 +50,14 @@ pub enum IndexerError {
 /// Moves queued events from `search_outbox` into a [`SearchIndex`].
 #[derive(Debug, Clone)]
 pub struct Indexer {
-    pool: PgPool,
+    db: Db,
     index: SearchIndex,
 }
 
 impl Indexer {
-    /// An indexer reading the outbox through `pool` and writing `index`.
-    pub fn new(pool: PgPool, index: SearchIndex) -> Self {
-        Self { pool, index }
+    /// An indexer reading the outbox from `db` and writing `index`.
+    pub fn new(db: Db, index: SearchIndex) -> Self {
+        Self { db, index }
     }
 
     /// Index batches until none is left to claim. A community whose batch
@@ -67,7 +66,8 @@ impl Indexer {
     pub async fn drain(&self) -> Result<(), IndexerError> {
         let mut skipped: Vec<CommunityId> = Vec::new();
         let mut rejection = None;
-        while let Some(batch) = search_outbox::claim_batch(&self.pool, BATCH_SIZE, &skipped).await?
+        while let Some(batch) =
+            search_outbox::claim_batch(self.db.pool(), BATCH_SIZE, &skipped).await?
         {
             let community = batch.community();
             match self
@@ -87,14 +87,22 @@ impl Indexer {
         rejection.map_or(Ok(()), |error| Err(error.into()))
     }
 
+    /// One leader pass: make sure the index exists, then drain. Checking
+    /// every pass (one request when the alias exists) recreates an index
+    /// that went away, and creating it here rather than at startup means an
+    /// unreachable cluster never delays serving.
+    async fn pass(&self) -> Result<(), IndexerError> {
+        self.index.ensure().await?;
+        self.drain().await
+    }
+
     /// Hold the indexer lease and keep the index up to date, forever. Abort
     /// the task to stop; that closes the lease connection and lets another
     /// instance take over.
-    pub async fn run(self, db: Db) {
+    pub async fn run(self) {
         // Spread lease attempts of instances that start together.
         tokio::time::sleep(POLL_INTERVAL.mul_f64(rand::random::<f64>())).await;
         let mut leader: Option<buzz_db::SessionLeader> = None;
-        let mut index_ready = false;
         let mut failures = 0u32;
         loop {
             if let Some(guard) = leader.as_mut() {
@@ -104,7 +112,7 @@ impl Indexer {
                 }
             }
             if leader.is_none() {
-                match db.try_lock_session_leader(INDEXER_LOCK_KEY).await {
+                match self.db.try_lock_session_leader(INDEXER_LOCK_KEY).await {
                     Ok(Some(acquired)) => {
                         info!("acquired the search indexer lease");
                         leader = Some(acquired);
@@ -114,24 +122,9 @@ impl Indexer {
                 }
             }
             if leader.is_some() {
-                // Create the index here rather than at startup, so an
-                // unreachable cluster never delays serving.
-                let result = if index_ready {
-                    self.drain().await
-                } else {
-                    match self.index.ensure().await {
-                        Ok(()) => {
-                            index_ready = true;
-                            self.drain().await
-                        }
-                        Err(error) => Err(error.into()),
-                    }
-                };
-                match result {
+                match self.pass().await {
                     Ok(()) => failures = 0,
                     Err(error) => {
-                        // A write may have failed because the index is gone.
-                        index_ready = false;
                         failures = failures.saturating_add(1);
                         warn!(%error, failures, "search indexing failed; rows stay queued");
                     }

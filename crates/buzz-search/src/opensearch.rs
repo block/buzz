@@ -171,17 +171,11 @@ impl SearchIndex {
         checked(response).await.map(drop)
     }
 
-    /// The alias a community's documents are written through. The one place
-    /// that decides it, so a community can later move to an index of its own.
-    /// Writes require an alias, so a missing index fails the write instead of
-    /// being created with a dynamic mapping.
-    fn write_alias(&self, _community: CommunityId) -> &str {
-        &self.alias
-    }
-
     /// Upsert `documents` and delete `removed` for one community, in one
-    /// bulk request. Fails unless every item succeeded; deleting a document
-    /// that is not there succeeds.
+    /// bulk request through the alias. Fails unless every item succeeded;
+    /// deleting a document that is not there succeeds. The request requires
+    /// the alias, so a missing index fails the write instead of being created
+    /// with a dynamic mapping.
     pub async fn write(
         &self,
         community: CommunityId,
@@ -191,7 +185,7 @@ impl SearchIndex {
         if documents.is_empty() && removed.is_empty() {
             return Ok(());
         }
-        let index = self.write_alias(community);
+        let index = &self.alias;
         let mut operations: Vec<BulkOperation<Value>> =
             Vec::with_capacity(documents.len() + removed.len());
         for document in documents {

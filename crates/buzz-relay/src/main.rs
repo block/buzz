@@ -662,7 +662,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                 .await
                 .map_err(|e| anyhow::anyhow!("search outbox: {e}"))?;
             info!(url = %opensearch.url, "search outbox enabled");
-            Some(buzz_search::indexer::Indexer::new(db.pool().clone(), index))
+            Some(buzz_search::indexer::Indexer::new(db.clone(), index))
         }
         None => None,
     };
@@ -1153,7 +1153,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     }
 
     if let Some(indexer) = search_indexer {
-        tokio::spawn(indexer.run(state.db.clone()));
+        tokio::spawn(indexer.run());
         info!("search indexer started");
     }
 

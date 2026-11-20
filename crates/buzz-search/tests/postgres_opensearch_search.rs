@@ -134,7 +134,7 @@ async fn admitted_messages_become_searchable() {
     let (index, prefix) = sync_index().await;
     let community = search_suite::mk_community(db.pool(), "sync.example").await;
     let keys = Keys::generate();
-    let indexer = tokio::spawn(Indexer::new(db.pool().clone(), index.clone()).run(db.clone()));
+    let indexer = tokio::spawn(Indexer::new(db.clone(), index.clone()).run());
 
     let kept = message(&keys, "syncword kept");
     db.insert_event(community, &kept, None)
@@ -194,7 +194,7 @@ async fn the_indexer_lease_hands_over() {
     let keys = Keys::generate();
     let service = SearchService::with_opensearch(db.pool().clone(), index.clone());
 
-    let first = tokio::spawn(Indexer::new(db.pool().clone(), index.clone()).run(db.clone()));
+    let first = tokio::spawn(Indexer::new(db.clone(), index.clone()).run());
     let before = message(&keys, "leaseword before");
     db.insert_event(community, &before, None)
         .await
@@ -202,7 +202,7 @@ async fn the_indexer_lease_hands_over() {
     wait_until_indexed(&db, &index).await;
 
     // The first instance holds the lease, so the second only waits.
-    let second = tokio::spawn(Indexer::new(db.pool().clone(), index.clone()).run(db.clone()));
+    let second = tokio::spawn(Indexer::new(db.clone(), index.clone()).run());
     first.abort();
     let _ = first.await;
     let after = message(&keys, "leaseword after");
@@ -236,14 +236,14 @@ async fn admission_queues_while_opensearch_is_unreachable() {
         .await
         .expect("a message is stored while OpenSearch is down");
 
-    Indexer::new(db.pool().clone(), unreachable)
+    Indexer::new(db.clone(), unreachable)
         .drain()
         .await
         .expect_err("indexing fails while OpenSearch is down");
     assert_eq!(search_outbox::depth(db.pool()).await.expect("depth"), 1);
 
     let (index, _) = sync_index().await;
-    Indexer::new(db.pool().clone(), index.clone())
+    Indexer::new(db.clone(), index.clone())
         .drain()
         .await
         .expect("indexing succeeds once OpenSearch is back");
@@ -294,7 +294,7 @@ async fn a_rejected_community_does_not_hold_back_others() {
         .await
         .expect("insert");
 
-    let error = Indexer::new(db.pool().clone(), index.clone())
+    let error = Indexer::new(db.clone(), index.clone())
         .drain()
         .await
         .expect_err("the pass reports the rejected batch");
@@ -321,7 +321,7 @@ async fn writes_never_create_an_index() {
         .await
         .expect("insert");
 
-    let indexer = Indexer::new(db.pool().clone(), index.clone());
+    let indexer = Indexer::new(db.clone(), index.clone());
     indexer
         .drain()
         .await
