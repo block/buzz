@@ -219,18 +219,22 @@ class _ComposeBarLayout extends HookWidget {
                               children: [
                                 _ComposeAction(
                                   icon: BuzzIcons.atSign,
+                                  tooltip: 'Mention someone',
                                   onTap: onMention,
                                 ),
                                 _ComposeAction(
                                   icon: BuzzIcons.hash,
+                                  tooltip: 'Mention a channel',
                                   onTap: onChannel,
                                 ),
                                 _ComposeAction(
                                   icon: BuzzIcons.smilePlus,
+                                  tooltip: 'Add emoji',
                                   onTap: onEmoji,
                                 ),
                                 _ComposeAction(
                                   icon: BuzzIcons.aLargeSmall,
+                                  tooltip: 'Show formatting',
                                   onTap: onOpenFormatting,
                                 ),
                                 const Spacer(),

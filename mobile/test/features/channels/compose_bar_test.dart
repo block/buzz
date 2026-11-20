@@ -1977,6 +1977,42 @@ void main() {
       }
     });
 
+    testWidgets('composer action buttons have accessible names', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+      await _expandComposer(tester);
+
+      for (final (icon, name) in [
+        (BuzzIcons.atSign, 'Mention someone'),
+        (BuzzIcons.hash, 'Mention a channel'),
+        (BuzzIcons.smilePlus, 'Add emoji'),
+        (BuzzIcons.aLargeSmall, 'Show formatting'),
+        (BuzzIcons.arrowUp, 'Send message'),
+      ]) {
+        final button = find.ancestor(
+          of: find.byIcon(icon),
+          matching: find.byType(IconButton),
+        );
+        expect(find.byTooltip(name), findsOneWidget, reason: name);
+        final node = tester.getSemantics(button);
+        expect(node.tooltip, name);
+        expect(node.flagsCollection.isButton, isTrue, reason: name);
+      }
+      semantics.dispose();
+    });
+
     testWidgets('composer controls use selection haptics', (tester) async {
       final hapticCalls = <MethodCall>[];
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger

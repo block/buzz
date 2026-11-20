@@ -70,9 +70,14 @@ class _FormatButton extends StatelessWidget {
 
 class _ComposeAction extends StatelessWidget {
   final IconData icon;
+  final String tooltip;
   final VoidCallback onTap;
 
-  const _ComposeAction({required this.icon, required this.onTap});
+  const _ComposeAction({
+    required this.icon,
+    required this.tooltip,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -80,6 +85,7 @@ class _ComposeAction extends StatelessWidget {
       width: 36,
       height: 36,
       child: IconButton(
+        tooltip: tooltip,
         onPressed: () => _runComposerAction(onTap),
         icon: Icon(icon, size: 20, color: context.colors.onSurfaceVariant),
         padding: EdgeInsets.zero,
