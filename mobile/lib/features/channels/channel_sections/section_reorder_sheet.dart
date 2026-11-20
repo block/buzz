@@ -1,32 +1,79 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../../shared/relay/relay.dart';
 import '../../../shared/theme/theme.dart';
 import '../../../shared/widgets/app_list.dart';
 import '../../../shared/widgets/buzz_sheet_header.dart';
-import '../../../shared/widgets/modal_presentation.dart';
 import '../../../shared/widgets/ios_glass_navigation_button.dart';
+import '../../../shared/widgets/modal_presentation.dart';
 
-final mobileSectionOrderProvider = FutureProvider.family<List<String>, String>(
-  (ref, key) async =>
-      (await SharedPreferences.getInstance()).getStringList(key) ?? [],
-);
+final mobileSectionOrderKeyProvider = Provider<String?>((ref) {
+  final pubkey = ref.watch(myPubkeyProvider);
+  if (pubkey == null) return null;
+  final relay = ref.watch(
+    relayConfigProvider.select((config) => config.baseUrl),
+  );
+  return 'section-order:$relay:$pubkey';
+});
+
+final mobileSectionOrderProvider =
+    AsyncNotifierProvider.family<_MobileSectionOrder, List<String>, String>(
+      _MobileSectionOrder.new,
+    );
+
+class _MobileSectionOrder extends AsyncNotifier<List<String>> {
+  _MobileSectionOrder(this.key);
+
+  final String key;
+  bool _saving = false;
+
+  @override
+  Future<List<String>> build() async => List.unmodifiable(
+    (await SharedPreferences.getInstance()).getStringList(key) ??
+        const <String>[],
+  );
+
+  Future<bool> save(List<String> previous, List<String> next) async {
+    if (_saving || !listEquals(state.asData?.value, previous)) return false;
+    _saving = true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (!await prefs.setStringList(key, next)) {
+        throw StateError('Unable to save section order');
+      }
+      if (ref.mounted) state = AsyncData(List.unmodifiable(next));
+      return true;
+    } finally {
+      _saving = false;
+    }
+  }
+}
+
+List<String> resolveMobileSectionOrder(
+  List<String> defaults,
+  List<String> saved,
+) => [
+  ...{...saved.where(defaults.contains), ...defaults},
+];
 
 /// Captures the visible inventory, including built-ins and mixed workspaces.
 class SectionOrderScope extends InheritedWidget {
   const SectionOrderScope({
     super.key,
     required this.labels,
+    required this.defaultOrder,
     required this.storageKey,
     required super.child,
   });
   final Map<String, String> labels;
+  final List<String> defaultOrder;
   final String storageKey;
 
   static SectionOrderScope? of(BuildContext context) =>
@@ -34,15 +81,35 @@ class SectionOrderScope extends InheritedWidget {
 
   @override
   bool updateShouldNotify(SectionOrderScope oldWidget) =>
-      labels != oldWidget.labels || storageKey != oldWidget.storageKey;
+      !mapEquals(labels, oldWidget.labels) ||
+      !listEquals(defaultOrder, oldWidget.defaultOrder) ||
+      storageKey != oldWidget.storageKey;
 
-  Future<void> show(BuildContext context) => showBuzzModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
-    showCloseButton: false,
-    enableDrag: false,
-    builder: (_) => _ReorderSheet(scope: this),
-  );
+  Future<void> show(BuildContext context) async {
+    final container = ProviderScope.containerOf(context, listen: false);
+    final route = ModalRoute.of(context);
+    try {
+      await container.read(mobileSectionOrderProvider(storageKey).future);
+    } catch (_) {
+      if (context.mounted && route?.isCurrent != false) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(
+            content: Text('Could not load section order. Try again.'),
+          ),
+        );
+      }
+      return;
+    }
+    if (!context.mounted || route?.isCurrent == false) return;
+    if (container.read(mobileSectionOrderKeyProvider) != storageKey) return;
+    await showBuzzModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showCloseButton: false,
+      enableDrag: false,
+      builder: (_) => _ReorderSheet(scope: this),
+    );
+  }
 }
 
 class _ReorderSheet extends HookConsumerWidget {
@@ -51,9 +118,22 @@ class _ReorderSheet extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final draft = useState(scope.labels.keys.toList());
+    final provider = mobileSectionOrderProvider(scope.storageKey);
+    final saved = ref.watch(provider).value ?? const <String>[];
+    final activeScope = ref.watch(mobileSectionOrderKeyProvider);
+    final initialSaved = useMemoized(() => saved);
+    final fullOrder = useMemoized(
+      () => resolveMobileSectionOrder(scope.defaultOrder, initialSaved),
+    );
+    final initialVisible = useMemoized(
+      () => fullOrder.where(scope.labels.containsKey).toList(),
+    );
+    final draft = useState(initialVisible);
     final saving = useState(false);
     final failed = useState(false);
+    final orderChanged = !listEquals(saved, initialSaved);
+    final scopeChanged = activeScope != scope.storageKey;
+    final canEdit = !saving.value && !orderChanged && !scopeChanged;
     final scroll = useScrollController();
     final rowContexts = useMemoized(() => <int, BuildContext>{});
     final dragIndex = useRef<int?>(null);
@@ -94,22 +174,59 @@ class _ReorderSheet extends HookConsumerWidget {
       return () => scroll.removeListener(updateSlot);
     }, [scroll]);
 
+    void move(int from, int to) {
+      if (saving.value || !canEdit || from == to) return;
+      final next = draft.value.toList();
+      if (from < 0 || from >= next.length || to < 0 || to >= next.length) {
+        return;
+      }
+      next.insert(to, next.removeAt(from));
+      draft.value = next;
+    }
+
     Future<void> save() async {
-      if (saving.value) return;
-      saving.value = true;
-      try {
-        final prefs = await SharedPreferences.getInstance();
-        if (!await prefs.setStringList(scope.storageKey, draft.value)) {
-          throw StateError('Unable to save section order');
-        }
-        if (!context.mounted) return;
-        ref.invalidate(mobileSectionOrderProvider(scope.storageKey));
+      if (saving.value || !canEdit || dragIndex.value != null) return;
+      if (ref.read(mobileSectionOrderKeyProvider) != scope.storageKey) return;
+      if (listEquals(draft.value, initialVisible)) {
         Navigator.pop(context);
+        return;
+      }
+      saving.value = true;
+      failed.value = false;
+      final route = ModalRoute.of(context)!;
+      try {
+        final visible = draft.value.iterator;
+        // Refill the visible slots in the new order and keep hidden slots
+        // (such as an empty Starred section) in place.
+        final next = [
+          for (final key in fullOrder)
+            if (scope.labels.containsKey(key) && visible.moveNext())
+              visible.current
+            else
+              key,
+        ];
+        final persisted = await ref
+            .read(provider.notifier)
+            .save(initialSaved, next);
+        if (!context.mounted) return;
+        if (persisted) {
+          if (route.isCurrent) {
+            Navigator.pop(context);
+          } else if (route.isActive) {
+            Navigator.of(context).removeRoute(route);
+          }
+        } else {
+          failed.value = true;
+        }
       } catch (_) {
         if (context.mounted) failed.value = true;
       } finally {
         if (context.mounted) saving.value = false;
       }
+    }
+
+    void discard() {
+      if (!saving.value) Navigator.pop(context);
     }
 
     return PopScope(
@@ -127,26 +244,23 @@ class _ReorderSheet extends HookConsumerWidget {
                   ? IosGlassNavigationButton(
                       icon: IosGlassNavigationIcon.close,
                       semanticLabel: 'Discard order',
-                      onPressed: saving.value
-                          ? null
-                          : () => Navigator.pop(context),
+                      onPressed: saving.value ? null : discard,
                     )
                   : IconButton(
                       tooltip: 'Discard order',
-                      onPressed: saving.value
-                          ? null
-                          : () => Navigator.pop(context),
+                      onPressed: saving.value ? null : discard,
                       icon: const Icon(Icons.close),
                     ),
               trailing: defaultTargetPlatform == TargetPlatform.iOS
                   ? IosGlassNavigationButton(
                       icon: IosGlassNavigationIcon.check,
                       semanticLabel: 'Save order',
-                      onPressed: saving.value ? null : save,
+                      onPressed: canEdit ? save : null,
+                      isBusy: saving.value,
                     )
                   : IconButton(
                       tooltip: 'Save order',
-                      onPressed: saving.value ? null : save,
+                      onPressed: canEdit ? save : null,
                       icon: const Icon(Icons.check),
                     ),
             ),
@@ -177,11 +291,7 @@ class _ReorderSheet extends HookConsumerWidget {
                       shrinkWrap: true,
                       buildDefaultDragHandles: false,
                       itemCount: draft.value.length,
-                      onReorderItem: (oldIndex, newIndex) {
-                        final next = draft.value.toList();
-                        next.insert(newIndex, next.removeAt(oldIndex));
-                        draft.value = next;
-                      },
+                      onReorderItem: move,
                       itemBuilder: (_, index) {
                         final key = draft.value[index];
                         return Builder(
@@ -211,16 +321,15 @@ class _ReorderSheet extends HookConsumerWidget {
                                           event.position.dy + scroll.offset;
                                       heights.clear();
                                     },
-                                    child: ReorderableDragStartListener(
+                                    child: _SectionDragHandle(
                                       index: index,
-                                      enabled: !saving.value,
-                                      child: const SizedBox.square(
-                                        dimension: 44,
-                                        child: Icon(
-                                          Icons.drag_handle,
-                                          size: 20,
-                                        ),
-                                      ),
+                                      label: scope.labels[key]!,
+                                      enabled: canEdit,
+                                      onMove: (direction) {
+                                        if (dragIndex.value != null) return;
+                                        final from = draft.value.indexOf(key);
+                                        move(from, from + direction);
+                                      },
                                     ),
                                   ),
                                 ),
@@ -234,9 +343,77 @@ class _ReorderSheet extends HookConsumerWidget {
                 ),
               ),
             ),
-            if (failed.value)
-              const Text('Could not save section order. Try again.'),
+            if (!saving.value && (orderChanged || scopeChanged || failed.value))
+              Semantics(
+                liveRegion: true,
+                child: Text(
+                  scopeChanged
+                      ? 'Account or community changed. Reopen section order to try again.'
+                      : orderChanged
+                      ? 'Section order changed. Reopen to try again.'
+                      : 'Could not save section order. Try again.',
+                ),
+              ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SectionDragHandle extends HookWidget {
+  const _SectionDragHandle({
+    required this.index,
+    required this.label,
+    required this.enabled,
+    required this.onMove,
+  });
+
+  final int index;
+  final String label;
+  final bool enabled;
+  final ValueChanged<int> onMove;
+
+  @override
+  Widget build(BuildContext context) {
+    final highlighted = useState(false);
+    return FocusableActionDetector(
+      enabled: enabled,
+      onShowFocusHighlight: (value) => highlighted.value = value,
+      shortcuts: const {
+        SingleActivator(LogicalKeyboardKey.arrowUp): DirectionalFocusIntent(
+          TraversalDirection.up,
+        ),
+        SingleActivator(LogicalKeyboardKey.arrowDown): DirectionalFocusIntent(
+          TraversalDirection.down,
+        ),
+      },
+      actions: {
+        DirectionalFocusIntent: CallbackAction<DirectionalFocusIntent>(
+          onInvoke: (intent) {
+            onMove(intent.direction == TraversalDirection.up ? -1 : 1);
+            return null;
+          },
+        ),
+      },
+      child: Tooltip(
+        message: 'Move $label with the up and down arrow keys',
+        excludeFromSemantics: true,
+        child: ReorderableDragStartListener(
+          index: index,
+          enabled: enabled,
+          child: SizedBox.square(
+            dimension: 44,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(Radii.sm),
+                border: highlighted.value
+                    ? Border.all(color: context.colors.primary)
+                    : null,
+              ),
+              child: const Icon(Icons.drag_handle, size: 20),
+            ),
+          ),
         ),
       ),
     );

@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_activity.dart';
+import 'package:buzz/features/channels/channel_sections/section_reorder_sheet.dart';
 import 'package:buzz/features/channels/channel_stars/channel_stars_provider.dart';
 import 'package:buzz/features/channels/channel_stars/channel_stars_storage.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
@@ -22,6 +25,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 
 import 'sidebar_sync_fixture.dart';
 
@@ -36,12 +40,17 @@ void main() {
     tester.view.devicePixelRatio = 3;
     addTearDown(tester.view.reset);
     SharedPreferences.setMockInitialValues({});
+    final orderStore = _OrderStore();
+    final previousStore = SharedPreferencesStorePlatform.instance;
+    SharedPreferencesStorePlatform.instance = orderStore;
+    addTearDown(() => SharedPreferencesStorePlatform.instance = previousStore);
     final prefs = await SharedPreferences.getInstance();
     final relay = SidebarRelay();
     // The relay this Home's config names; its store holds the heads below.
     relay.session.debugRelayUrl = 'https://relay.example';
     _viewer = relay.pubkey;
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    var soloActivityReads = 0;
     // Before desktop's unified record, the legacy Team sections apply.
     relay.stored.add(
       relay.event('channel-sections', {
@@ -71,9 +80,12 @@ void main() {
             ),
           ),
           channelsProvider.overrideWith(_Channels.new),
-          channelFilterActivityProvider(
-            'solo-scratch',
-          ).overrideWith((_) async => now - 8 * 86400),
+          channelFilterActivityProvider('solo-scratch').overrideWith((_) async {
+            if (soloActivityReads++ == 0) {
+              throw StateError('Activity unavailable');
+            }
+            return now - 8 * 86400;
+          }),
           meGroupsProvider.overrideWith(
             (ref) => Stream.value(
               const MeGroups(
@@ -270,6 +282,33 @@ void main() {
     // Only the filter choice was saved; no layout or sort record desktop
     // would have to reconcile.
     expect(relay.published.map((e) => e.getTagValue('d')), ['channel-filter']);
+    final soloSection = find.byKey(const ValueKey('me-ungrouped-chats'));
+    Finder soloDisclosure(String label) =>
+        find.descendant(of: soloSection, matching: find.text(label));
+    await tester.tap(find.byTooltip('Solo options'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('section-menu-Show')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Unreads').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Apply changes'));
+    await tester.pumpAndSettle();
+    expect(inList('solo-scratch'), findsNothing);
+    relay.session.setStatus(SessionStatus.disconnected);
+    await tester.pumpAndSettle();
+    await tester.tap(soloDisclosure('Show more'));
+    await tester.pumpAndSettle();
+    expect(inList('solo-scratch'), findsOneWidget);
+    await tester.tap(soloDisclosure('Show fewer'));
+    await tester.pumpAndSettle();
+    expect(inList('solo-scratch'), findsNothing);
+    expect(relay.published.map((e) => e.getTagValue('d')), [
+      'channel-filter',
+      'channel-filter',
+    ]);
+    relay.session.setStatus(SessionStatus.connected);
+    await tester.pumpAndSettle();
+
     await tester.tap(find.byTooltip('Solo options'));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('section-menu-Show')));
@@ -284,6 +323,11 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Apply changes'));
     await tester.pumpAndSettle();
+    expect(inList('solo-scratch'), findsOneWidget);
+    expect(find.text('Some activity couldn’t load'), findsOneWidget);
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+    expect(find.text('Some activity couldn’t load'), findsNothing);
     expect(inList('solo-scratch'), findsNothing);
     expect(inList('solo-plan'), findsOneWidget);
     await tester.tap(find.byTooltip('Solo options'));
@@ -327,11 +371,96 @@ void main() {
       tester.getCenter(handle('solo')).dy,
       lessThan(tester.getCenter(handle('channels')).dy),
     );
+
+    const sectionIds = [
+      'starred',
+      'group:launch',
+      'group:later',
+      'channels',
+      'solo',
+      'dms',
+    ];
+    List<String> sheetOrder(Iterable<String> ids) => ids.toList()
+      ..sort(
+        (a, b) => tester
+            .getCenter(handle(a))
+            .dy
+            .compareTo(tester.getCenter(handle(b)).dy),
+      );
+    final firstOrder = sheetOrder(sectionIds);
+    // The signing identity owns the device-local order before a profile loads.
+    final key = 'section-order:https://relay.example:${relay.pubkey}';
+    final container = ProviderScope.containerOf(tester.element(handle('solo')));
+    final orders = container.read(mobileSectionOrderProvider(key).notifier);
+    final gate = Completer<void>();
+    orderStore.gate = gate;
+    await tester.tap(find.byTooltip('Save order'));
+    await tester.pumpAndSettle();
+    // Flutter's screen-reader reorder actions call this even with drag disabled.
+    tester
+        .widget<ReorderableListView>(find.byType(ReorderableListView))
+        .onReorderItem!(0, 1);
+    await tester.pump();
+    expect(sheetOrder(sectionIds), firstOrder);
+    expect(await orders.save(const [], firstOrder.reversed.toList()), isFalse);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.byType(ReorderableListView), findsOneWidget);
+    gate.complete();
+    await tester.pumpAndSettle();
+    expect(prefs.getStringList(key), firstOrder);
+    expect(await orders.save(const [], firstOrder.reversed.toList()), isFalse);
+
+    // Reopening from the same options sheet uses the order just saved.
+    await tester.tap(find.text('Reorder sections'));
+    await tester.pumpAndSettle();
+    expect(sheetOrder(sectionIds), firstOrder);
+    await tester.tap(find.byTooltip('Discard order'));
+    await tester.pumpAndSettle();
+
+    final stars = container.read(channelStarsProvider.notifier) as _Stars;
+    stars.setStarred(false);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Reorder sections'));
+    await tester.pumpAndSettle();
+    expect(find.text('Starred'), findsNothing);
+
+    final dmFocus = Focus.of(tester.element(handle('dms')));
+    for (var n = 0; n < 10 && !dmFocus.hasPrimaryFocus; n++) {
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+    }
+    expect(dmFocus.hasPrimaryFocus, isTrue);
+    final visibleOrder = firstOrder.where((id) => id != 'starred').toList();
+    final from = visibleOrder.indexOf('dms');
+    visibleOrder.insert(from - 1, visibleOrder.removeAt(from));
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await tester.pumpAndSettle();
+    expect(sheetOrder(visibleOrder), visibleOrder);
     await tester.tap(find.byTooltip('Save order'));
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Discard changes'));
     await tester.pumpAndSettle();
-    expect(top('Solo'), lessThan(top('Team')));
+    final starredIndex = firstOrder.indexOf('starred');
+    visibleOrder.insert(starredIndex, 'starred');
+    expect(prefs.getStringList(key), visibleOrder);
+    expect(
+      prefs.getStringList('section-order:https://relay.example:null'),
+      isNull,
+    );
+    stars.setStarred(true);
+    await tester.pumpAndSettle();
+    final labels = {
+      'starred': 'Starred',
+      'group:launch': 'Launch',
+      'group:later': 'Later',
+      'channels': 'Team',
+      'solo': 'Solo',
+      'dms': 'Direct messages',
+    };
+    final rendered = labels.keys.toList()
+      ..sort((a, b) => top(labels[a]!).compareTo(top(labels[b]!)));
+    expect(rendered, visibleOrder);
     await tester.pumpWidget(const SizedBox());
   });
 }
@@ -372,6 +501,21 @@ class _Stars extends ChannelStarsNotifier {
       channels: {'pinned': ChannelStarEntry(starred: true, updatedAt: 1)},
     ),
   );
+
+  void setStarred(bool starred) =>
+      state = starred ? build() : const ChannelStarsState(isReady: true);
+}
+
+class _OrderStore extends InMemorySharedPreferencesStore {
+  _OrderStore() : super.empty();
+
+  Completer<void>? gate;
+
+  @override
+  Future<bool> setValue(String type, String key, Object value) async {
+    if (key.startsWith('flutter.section-order:')) await gate?.future;
+    return super.setValue(type, key, value);
+  }
 }
 
 class _Config extends RelayConfigNotifier {

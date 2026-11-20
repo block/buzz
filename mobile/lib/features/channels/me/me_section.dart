@@ -16,15 +16,21 @@ class MeSection extends HookWidget {
     required this.children,
     this.sliver = false,
     this.onFilter,
-  });
+  }) : buildBody = null;
+
+  const MeSection.sliverBody({
+    super.key,
+    required this.label,
+    required this.buildBody,
+    this.onFilter,
+  }) : sliver = true,
+       children = const [];
 
   final String label;
   final VoidCallback? onFilter;
-
-  /// Render rows individually in the containing scroll view.
   final bool sliver;
-
   final List<Widget> children;
+  final Widget Function(bool expanded)? buildBody;
 
   @override
   Widget build(BuildContext context) {
@@ -96,10 +102,11 @@ class MeSection extends HookWidget {
       return SliverMainAxisGroup(
         slivers: [
           SliverToBoxAdapter(child: header),
-          CollapsibleSliverBody(
-            expanded: expanded.value,
-            sliver: SliverList.list(children: children),
-          ),
+          buildBody?.call(expanded.value) ??
+              CollapsibleSliverBody(
+                expanded: expanded.value,
+                sliver: SliverList.list(children: children),
+              ),
         ],
       );
     }

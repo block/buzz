@@ -8,7 +8,6 @@ import 'channel_filter/channel_filter_activity.dart';
 import 'channel_filter/channel_filter_provider.dart';
 import 'channel_filter/channel_filter_store.dart';
 import '../../shared/widgets/collapsible_section_body.dart';
-import '../../shared/widgets/collapsible_sliver_body.dart';
 import '../../shared/http/app_http_client.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/hosted/hosted_relay_auth.dart';
@@ -28,7 +27,7 @@ import '../../shared/hosted/organization_sign_in.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math' show max, min;
+import 'dart:math' show Random, max, min;
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
@@ -60,7 +59,6 @@ import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/buzz_toast.dart';
-import '../../shared/toast_haptic.dart' show toastHaptic;
 import '../../shared/widgets/ios_composition_layer.dart';
 import '../../shared/widgets/buzz_setting_menu.dart';
 import '../../shared/widgets/buzz_titled_sheet_layout.dart';
@@ -93,6 +91,7 @@ import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
 import 'channel_mutes/channel_mutes_provider.dart';
 import 'channel_sections/section_options_button.dart';
+import 'channel_sections/filtered_channel_section_body.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_sections/workspace_layout.dart';
 import 'channel_sections/section_reorder_sheet.dart';
@@ -621,14 +620,11 @@ class ChannelsPage extends HookConsumerWidget {
         usesPinnedGradient: usesPinnedGradient,
         scrollController: channelsScrollController,
         onRefresh: () async {
-          // Solo has no banner, so pulling must also restart its reader.
+          // Restart the reader for Solo chat and project placement.
           if (soloSliver != null) ref.invalidate(meGroupsProvider);
           ref.invalidate(channelFilterActivityProvider);
           await Future.wait([
             ref.read(channelsProvider.notifier).refresh(),
-            if (soloSliver != null)
-              if (ref.read(soloFilterProvider) case final manager?)
-                manager.refresh(),
             if (ref.read(channelFilterProvider) case final manager?)
               manager.refresh(),
           ]);

@@ -313,8 +313,11 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    final generation = _contextGeneration;
     if (_rateLimitGate.isActive) await _rateLimitGate.wait();
-    if (_disposed) throw StateError('Relay session is disposed');
+    if (_disposed || generation != _contextGeneration) {
+      throw StateError('Relay history request belongs to a retired session');
+    }
     final subId = _nextSubId('h');
     final completer = Completer<List<NostrEvent>>();
 

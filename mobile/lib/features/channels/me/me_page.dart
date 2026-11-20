@@ -5,6 +5,7 @@ import '../channel_sort/channel_sort_provider.dart';
 import '../channel_sort/channel_sort_storage.dart';
 import '../channel_filter/channel_filter_provider.dart';
 import '../channel_filter/channel_filter_store.dart';
+import '../channel_sections/filtered_channel_section_body.dart';
 import '../channels_page/filters.dart';
 
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
@@ -18,6 +19,7 @@ import 'package:uuid/uuid.dart';
 import '../../../shared/profile/user_cache_provider.dart';
 import '../../../shared/widgets/concentric_sheet_surface.dart';
 import '../../../shared/widgets/bee_refresh_indicator.dart';
+import '../../../shared/widgets/collapsible_sliver_body.dart';
 import 'me_section.dart';
 import 'me_working_provider.dart';
 import 'solo_working_dots.dart';
@@ -474,7 +476,7 @@ class _SoloFilterSection extends HookConsumerWidget {
     final selected = ConversationPaneScope.maybeOf(context)?.selectedId;
     final tick = useState(0);
     int? nextExpiry;
-    final rows = <Widget>[];
+    final visibleIds = <String>{};
     final sortMode = ref.watch(
       channelSortProvider.select(
         (state) => group == 'solo'
@@ -484,7 +486,7 @@ class _SoloFilterSection extends HookConsumerWidget {
     );
     final orderedChats = sortMode == ChannelSortMode.alpha
         ? sortChannelsForList(chats.toList(), sortMode)
-        : chats;
+        : chats.toList();
     for (final chat in orderedChats) {
       final activity = mode == ChannelFilterMode.active
           ? ref.watch(channelFilterActivityProvider(chat.id)).asData
@@ -505,7 +507,7 @@ class _SoloFilterSection extends HookConsumerWidget {
         windowSeconds: window,
         selected: selected == chat.id,
       )) {
-        rows.add(row(chat));
+        visibleIds.add(chat.id);
       }
     }
     useEffect(() {
@@ -515,9 +517,8 @@ class _SoloFilterSection extends HookConsumerWidget {
         () => tick.value++,
       ).cancel;
     }, [nextExpiry, tick.value]);
-    return MeSection(
+    return MeSection.sliverBody(
       label: label,
-      sliver: true,
       onFilter: () => showSectionViewSheet(
         context,
         group: group,
@@ -526,12 +527,30 @@ class _SoloFilterSection extends HookConsumerWidget {
         onSort: (value) =>
             ref.read(channelSortProvider.notifier).setSortModeFor(group, value),
       ),
-      children: rows.isEmpty
-          ? [
-              if (chats.isNotEmpty || empty != null)
-                _MeSectionEmpty(chats.isEmpty ? empty! : 'No matching chats'),
-            ]
-          : rows,
+      buildBody: (expanded) => group == 'solo'
+          ? FilteredChannelSectionBody(
+              expanded: expanded,
+              channels: orderedChats,
+              isVisible: (chat) => visibleIds.contains(chat.id),
+              buildRow: row,
+              disclosureInset: Grid.xxs,
+              emptySliver: empty == null
+                  ? null
+                  : SliverToBoxAdapter(child: _MeSectionEmpty(empty!)),
+            )
+          : CollapsibleSliverBody(
+              expanded: expanded,
+              sliver: SliverList.list(
+                children: [
+                  for (final chat in orderedChats)
+                    if (visibleIds.contains(chat.id)) row(chat),
+                  if (visibleIds.isEmpty && (chats.isNotEmpty || empty != null))
+                    _MeSectionEmpty(
+                      chats.isEmpty ? empty! : 'No matching chats',
+                    ),
+                ],
+              ),
+            ),
     );
   }
 }

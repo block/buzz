@@ -39,7 +39,7 @@ class _CustomChannelSection extends StatelessWidget {
           onSortModeChange: onSortModeChange,
         ),
       ),
-      _SectionChannelsBody(
+      FilteredChannelSectionBody(
         expanded: expanded,
         channels: channels,
         isVisible: isVisible,
@@ -292,7 +292,7 @@ class _ChannelSection extends StatelessWidget {
           onSortModeChange: onSortModeChange,
         ),
       ),
-      _SectionChannelsBody(
+      FilteredChannelSectionBody(
         expanded: expanded,
         channels: channels,
         isVisible: isVisible,
@@ -321,153 +321,6 @@ class _ChannelSection extends StatelessWidget {
       ),
     ],
   );
-}
-
-class _FilteredRowKey extends ValueKey<String> {
-  const _FilteredRowKey(super.value);
-}
-
-class _SectionChannelsBody extends HookWidget {
-  const _SectionChannelsBody({
-    required this.expanded,
-    required this.channels,
-    required this.isVisible,
-    required this.buildRow,
-    this.emptySliver,
-  });
-
-  final bool expanded;
-  final List<Channel> channels;
-  final bool Function(Channel) isVisible;
-  final Widget Function(Channel) buildRow;
-  final Widget? emptySliver;
-
-  @override
-  Widget build(BuildContext context) {
-    final visibleChannels = <Channel>[];
-    final hiddenIds = <String>{};
-    for (final channel in channels) {
-      if (isVisible(channel)) {
-        visibleChannels.add(channel);
-      } else {
-        hiddenIds.add(channel.id);
-      }
-    }
-    final hiddenCount = hiddenIds.length;
-    final reveal = useState(false);
-    final controller = useAnimationController(
-      duration: sectionExpandDuration,
-      reverseDuration: sectionCollapseDuration,
-    );
-    final motion = useMemoized(
-      () => CurvedAnimation(
-        parent: controller,
-        curve: sectionExpandCurve,
-        reverseCurve: sectionCollapseCurve,
-      ),
-      [controller],
-    );
-    useEffect(() => motion.dispose, [motion]);
-    final renderingHidden = useState(false);
-    useEffect(() {
-      void onStatus(AnimationStatus status) {
-        if (status == AnimationStatus.dismissed) renderingHidden.value = false;
-      }
-
-      controller.addStatusListener(onStatus);
-      return () => controller.removeStatusListener(onStatus);
-    }, [controller]);
-    final reduceMotion = MediaQuery.disableAnimationsOf(context);
-    useEffect(() {
-      controller.value = 0;
-      renderingHidden.value = false;
-      reveal.value = false;
-      return null;
-    }, [hiddenIds.join(',')]);
-    final displayed = renderingHidden.value ? channels : visibleChannels;
-
-    return CollapsibleSliverBody(
-      expanded: expanded,
-      sliver: channels.isEmpty && emptySliver != null
-          ? emptySliver!
-          : SliverList.builder(
-              itemCount: displayed.length + (hiddenCount == 0 ? 0 : 1),
-              findChildIndexCallback: (key) {
-                final index = displayed.indexWhere(
-                  (c) => key is ValueKey<String> && c.id == key.value,
-                );
-                return index < 0 ? null : index;
-              },
-              itemBuilder: (context, index) {
-                if (index < displayed.length) {
-                  final channel = displayed[index];
-                  final row = buildRow(channel);
-                  if (!hiddenIds.contains(channel.id)) return row;
-                  return SizeTransition(
-                    key: _FilteredRowKey(channel.id),
-                    sizeFactor: motion,
-                    child: row,
-                  );
-                }
-                final color = Theme.of(context).brightness == Brightness.dark
-                    ? const Color(0xFF949494)
-                    : const Color(0xFF707070);
-                return Semantics(
-                  expanded: reveal.value,
-                  button: true,
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(Radii.md),
-                    onTap: () {
-                      reveal.value = !reveal.value;
-                      if (reveal.value) renderingHidden.value = true;
-                      if (reduceMotion) {
-                        controller.value = reveal.value ? 1 : 0;
-                        renderingHidden.value = reveal.value;
-                      } else if (reveal.value) {
-                        unawaited(controller.forward());
-                      } else {
-                        unawaited(controller.reverse());
-                      }
-                    },
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: Grid.gutter,
-                        vertical: Grid.inventoryRowInset,
-                      ),
-                      child: Row(
-                        children: [
-                          SizedBox(
-                            width: 24,
-                            height: 22,
-                            child: Align(
-                              alignment: Alignment.centerLeft,
-                              child: Icon(
-                                reveal.value
-                                    ? BuzzIcons.chevronUp
-                                    : BuzzIcons.chevronDown,
-                                size: 20,
-                                color: color,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: Grid.inventoryLabelGap),
-                          Expanded(
-                            child: Text(
-                              reveal.value ? 'Show fewer' : 'Show more',
-                              style: navigationChatTitleTextStyle.copyWith(
-                                color: color,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                );
-              },
-            ),
-    );
-  }
 }
 
 class _EmptyState extends StatelessWidget {

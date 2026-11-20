@@ -28,7 +28,8 @@ Future<String?> showSectionViewSheet(
   required ValueChanged<ChannelSortMode> onSort,
   bool custom = false,
 }) async {
-  final orderScope = SectionOrderScope.of(context);
+  final orderScope = context
+      .getElementForInheritedWidgetOfExactType<SectionOrderScope>();
   final presentingRoute = defaultTargetPlatform == TargetPlatform.iOS
       ? ModalRoute.of(context)
       : null;
@@ -45,10 +46,15 @@ Future<String?> showSectionViewSheet(
       isScrollControlled: true,
       isDismissible: true,
       enableDrag: false,
-      builder: (context) {
-        if (release != null) sheetRoute = ModalRoute.of(context);
+      builder: (sheetContext) {
+        if (release != null) sheetRoute = ModalRoute.of(sheetContext);
         return _SectionViewSheet(
-          orderScope: orderScope,
+          onReorder: orderScope != null
+              ? () {
+                  if (!orderScope.mounted) return;
+                  (orderScope.widget as SectionOrderScope).show(sheetContext);
+                }
+              : null,
           title: title,
           group: group,
           initialSort: sortMode,
@@ -67,7 +73,7 @@ Future<String?> showSectionViewSheet(
 }
 
 class _SectionViewSheet extends HookConsumerWidget {
-  final SectionOrderScope? orderScope;
+  final VoidCallback? onReorder;
   final String title;
   final String group;
   final ChannelSortMode initialSort;
@@ -75,7 +81,7 @@ class _SectionViewSheet extends HookConsumerWidget {
   final bool custom;
 
   const _SectionViewSheet({
-    required this.orderScope,
+    required this.onReorder,
     required this.title,
     required this.group,
     required this.initialSort,
@@ -321,7 +327,7 @@ class _SectionViewSheet extends HookConsumerWidget {
                                   },
                             child: const Text('Retry loading preferences'),
                           ),
-                        if (custom && layoutEditable || orderScope != null)
+                        if (custom && layoutEditable || onReorder != null)
                           AppListCard(
                             children: [
                               if (custom && layoutEditable)
@@ -332,13 +338,11 @@ class _SectionViewSheet extends HookConsumerWidget {
                                       ? null
                                       : () => close('rename'),
                                 ),
-                              if (orderScope != null)
+                              if (onReorder != null)
                                 AppListRow(
                                   title: 'Reorder sections',
                                   icon: BuzzIcons.arrowUpDown,
-                                  onTap: saving.value
-                                      ? null
-                                      : () => orderScope!.show(context),
+                                  onTap: saving.value ? null : onReorder,
                                 ),
                               if (custom && layoutEditable)
                                 AppListRow(

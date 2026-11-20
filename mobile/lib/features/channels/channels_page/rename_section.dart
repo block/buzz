@@ -29,6 +29,7 @@ Future<SectionRenameResult?> showSectionRenameEditor(
       };
     }
 
+    var editorOpen = true;
     picker.setMethodCallHandler((call) async {
       if (call.method != 'choose' || !context.mounted) return null;
       var unicodeOnly = false;
@@ -37,7 +38,7 @@ Future<SectionRenameResult?> showSectionRenameEditor(
       } catch (_) {
         unicodeOnly = true;
       }
-      if (!context.mounted) return null;
+      if (!editorOpen || !context.mounted) return null;
       final result = Completer<Map<String, Object?>?>();
       showEmojiPicker(
         context: context,
@@ -77,6 +78,7 @@ Future<SectionRenameResult?> showSectionRenameEditor(
     } on PlatformException {
       // A presentation failure still allows editing in Flutter.
     } finally {
+      editorOpen = false;
       picker.setMethodCallHandler(null);
     }
   }
@@ -103,6 +105,7 @@ class _SectionNameDialog extends HookWidget {
     }
 
     return AlertDialog(
+      scrollable: true,
       title: const Text('Rename Section'),
       content: Row(
         children: [
@@ -123,8 +126,8 @@ class _SectionNameDialog extends HookWidget {
           ),
           const SizedBox(width: 8),
           Expanded(
-            child: SizedBox(
-              height: 52,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 52),
               child: TextField(
                 controller: controller,
                 autofocus: true,

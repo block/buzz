@@ -1927,6 +1927,26 @@ void main() {
     session.debugDispose();
   });
 
+  test('gated history cannot register on a replacement relay', () async {
+    final gate = RelayRateLimitGate();
+    final harness = _queryHarness(
+      gate: gate,
+      client: http_testing.MockClient((_) async => http.Response('[]', 200)),
+    );
+    addTearDown(harness.container.dispose);
+    gate.activate(4);
+    final retired = expectLater(
+      harness.session.fetchHistory(_channelFilter),
+      throwsStateError,
+    );
+    harness.container.invalidate(relayConfigProvider);
+    harness.container.read(relaySessionProvider);
+    final replacement = _RecordingRelaySocket();
+    harness.session.debugAttachSocketForTest(replacement);
+    await retired;
+    expect(_reqs(replacement), isEmpty);
+  });
+
   test('rate-limited history CLOSED gates the next REQ', () async {
     final gateTimers = <_ManualTimer>[];
     final gate = RelayRateLimitGate(

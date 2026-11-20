@@ -258,11 +258,12 @@ class _SliverChannelsList extends HookConsumerWidget {
 
     var nextExpiry = 0;
     for (final MapEntry(key: id, value: key) in sectionKeyOf.entries) {
-      if (key == 'solo') continue;
       final group = sidebarGroupKey(key);
       if (filters?.store.modeFor(group) != ChannelFilterMode.active) continue;
       final evidence = ref.watch(channelFilterActivityProvider(id));
       activity[id] = evidence;
+      // Solo uses the same evidence and handles its own row expiry.
+      if (key == 'solo') continue;
       final at = evidence.asData?.value;
       if (at == null) continue;
       final expiry = at + filters!.store.windowFor(group);
@@ -432,7 +433,7 @@ class _SliverChannelsList extends HookConsumerWidget {
             .read(channelSectionsProvider.notifier)
             .renameSection(
               section.id,
-              edit.name,
+              edit.name == section.name ? null : edit.name,
               icon: edit.icon == section.icon ? null : edit.icon,
             );
       },
@@ -535,12 +536,15 @@ class _SliverChannelsList extends HookConsumerWidget {
       );
     }
 
-    final storageKey =
-        'section-order:${ref.watch(relayConfigProvider).baseUrl}:$currentPubkey';
+    final activityScope = (
+      ref.watch(relayConfigProvider.select((config) => config.baseUrl)),
+      ref.watch(myPubkeyProvider),
+    );
     final notice = useMemoized(() => ObjectRef<OverlayEntry?>(null), [
-      storageKey,
+      activityScope,
     ]);
-    final failures = useMemoized(() => <String>{}, [storageKey]);
+    final failures = useMemoized(() => <String>{}, [activityScope]);
+    final automaticAttempts = useMemoized(() => ObjectRef(0), [activityScope]);
     failures.retainAll(activity.keys);
     for (final MapEntry(key: id, value: status) in activity.entries) {
       if (status.hasError) {
@@ -550,25 +554,45 @@ class _SliverChannelsList extends HookConsumerWidget {
       }
     }
     final unavailable = failures.isNotEmpty;
-    void retryFailures() {
+    if (!unavailable) automaticAttempts.value = 0;
+
+    bool retryFailures() {
+      var started = false;
       for (final id in failures.toList()) {
         final provider = channelFilterActivityProvider(id);
-        if (!ref.read(provider).isLoading) ref.invalidate(provider);
+        if (ref.read(provider).isLoading) continue;
+        ref.invalidate(provider);
+        started = true;
       }
+      return started;
     }
 
+    // Compact detail routes cover the list within Home's route and mute its
+    // tickers. On wide layouts the Messages list stays visible beside detail.
+    final listOnstage = TickerMode.valuesOf(context).enabled;
+    final routeCurrent = ModalRoute.isCurrentOf(context) ?? true;
+    final messagesVisible = listOnstage && routeCurrent;
     final canRetry =
+        messagesVisible &&
         ref.watch(appLifecycleProvider) == AppLifecycleState.resumed &&
         ref.watch(relaySessionProvider.select((s) => s.status)) ==
             SessionStatus.connected;
+    final hasRetryableFailure = failures.any((id) => !activity[id]!.isLoading);
+    final attempts = automaticAttempts.value;
     useEffect(() {
-      if (!unavailable || !canRetry) return null;
-      final timer = Timer.periodic(
-        const Duration(seconds: 10),
-        (_) => retryFailures(),
+      if (!hasRetryableFailure || !canRetry || attempts >= 3) return null;
+      // Back off over consecutive failed rounds and stagger relay traffic
+      // across clients. Wait for a failed lookup before scheduling a round.
+      final delayMs = 10_000 * (1 << attempts);
+      final spread = delayMs ~/ 5;
+      final timer = Timer(
+        Duration(milliseconds: delayMs - spread + Random().nextInt(2 * spread)),
+        () {
+          if (retryFailures()) automaticAttempts.value++;
+        },
       );
       return timer.cancel;
-    }, [unavailable, canRetry, failures]);
+    }, [hasRetryableFailure, canRetry, automaticAttempts, attempts]);
 
     void removeNotice() {
       notice.value?.remove();
@@ -578,13 +602,18 @@ class _SliverChannelsList extends HookConsumerWidget {
 
     useEffect(() => removeNotice, [notice]);
     useEffect(() {
+      if (!messagesVisible) {
+        removeNotice();
+        return null;
+      }
       var active = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!active || !context.mounted) return;
         if (notice.value != null) {
           notice.value!.markNeedsBuild();
         } else if (unavailable) {
-          final entry = OverlayEntry(
+          late final OverlayEntry entry;
+          entry = OverlayEntry(
             builder: (_) => IosCompositionLayer(
               child: Stack(
                 children: [
@@ -594,7 +623,10 @@ class _SliverChannelsList extends HookConsumerWidget {
                     actionLabel: 'Retry',
                     onHidden: () {
                       WidgetsBinding.instance.addPostFrameCallback((_) {
-                        if (failures.isEmpty) removeNotice();
+                        if (identical(notice.value, entry) &&
+                            failures.isEmpty) {
+                          removeNotice();
+                        }
                       });
                     },
                     onSignIn: () {
@@ -608,18 +640,19 @@ class _SliverChannelsList extends HookConsumerWidget {
           );
           notice.value = entry;
           Overlay.of(context, rootOverlay: true).insert(entry);
-          unawaited(toastHaptic(ToastKind.error));
         }
       });
       return () => active = false;
-    }, [notice, unavailable]);
-    final keys = layout.sectionKeys;
-    final saved =
-        ref.watch(mobileSectionOrderProvider(storageKey)).value ??
-        const <String>[];
+    }, [notice, unavailable, messagesVisible]);
+    final keys = layout.sectionKeys.where((key) => key != 'forums').toList();
+    final orderKey = ref.watch(mobileSectionOrderKeyProvider);
+    final saved = orderKey == null
+        ? const <String>[]
+        : ref.watch(mobileSectionOrderProvider(orderKey)).value ??
+              const <String>[];
     final labels = <String, String>{};
     final sections = <Widget>[];
-    for (final key in {...saved.where(keys.contains), ...keys}) {
+    for (final key in resolveMobileSectionOrder(keys, saved)) {
       final section = sectionFor(key);
       if (section == null) continue;
       sections.add(section);
@@ -632,22 +665,25 @@ class _SliverChannelsList extends HookConsumerWidget {
       };
     }
     final empty = sectionKeyOf.isEmpty && layout.sections.isEmpty;
+    final content = SliverMainAxisGroup(
+      slivers: [
+        if (empty) ...[
+          ?soloSliver,
+          const SliverToBoxAdapter(child: _EmptyState()),
+        ] else
+          for (final (index, section) in sections.indexed) ...[
+            if (index > 0)
+              const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
+            section,
+          ],
+      ],
+    );
+    if (orderKey == null) return content;
     return SectionOrderScope(
       labels: labels,
-      storageKey: storageKey,
-      child: SliverMainAxisGroup(
-        slivers: [
-          if (empty) ...[
-            ?soloSliver,
-            const SliverToBoxAdapter(child: _EmptyState()),
-          ] else
-            for (final (index, section) in sections.indexed) ...[
-              if (index > 0)
-                const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
-              section,
-            ],
-        ],
-      ),
+      defaultOrder: keys,
+      storageKey: orderKey,
+      child: content,
     );
   }
 }

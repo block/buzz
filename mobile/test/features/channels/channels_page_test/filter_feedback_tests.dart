@@ -1,24 +1,49 @@
 part of '../channels_page_test.dart';
 
 void _filterFeedbackTests(
-  Widget Function({required List<Override> overrides}) buildTestable,
+  Widget Function({required List<Override> overrides, bool realHome})
+  buildTestable,
 ) {
-  for (final manualRetry in [true, false]) {
+  for (final coverMessages in [true, false]) {
     testWidgets(
-      'activity toast follows recovery (manual retry: $manualRetry)',
+      'activity retry ${coverMessages ? 'pauses while Messages is covered' : 'backs off and leaves manual recovery available'}',
       (tester) async {
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(390, 844);
+        addTearDown(tester.view.reset);
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final haptics = <MethodCall>[];
+        final messenger = tester.binding.defaultBinaryMessenger;
+        messenger.setMockMethodCallHandler(SystemChannels.platform, (
+          call,
+        ) async {
+          if (call.method == 'HapticFeedback.vibrate' &&
+              call.arguments == 'HapticFeedbackType.heavyImpact') {
+            haptics.add(call);
+          }
+          return null;
+        });
+        addTearDown(
+          () =>
+              messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+        );
         final manager = _filterTestManager(
           cached: ChannelFilterStore.empty().edit(
             'channels',
             ChannelFilterMode.active,
           ),
         );
+        final initialRead = Completer<int?>();
         final recovery = Completer<int?>();
+        var canRecover = false;
         final reads = <String, int>{};
         const ids = ['failed', 'loaded'];
         await tester.pumpWidget(
           buildTestable(
+            realHome: coverMessages,
             overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
               channelsProvider.overrideWith(
                 () => _FakeNotifier([
                   for (final id in ids)
@@ -49,8 +74,9 @@ void _filterFeedbackTests(
                     ifAbsent: () => 1,
                   );
                   if (id == 'failed') {
-                    if (count == 1) throw StateError('Activity unavailable');
-                    return recovery.future;
+                    if (count == 1) return initialRead.future;
+                    if (canRecover) return recovery.future;
+                    throw StateError('Activity unavailable');
                   }
                   return DateTime.now().millisecondsSinceEpoch ~/ 1000;
                 }),
@@ -58,19 +84,55 @@ void _filterFeedbackTests(
           ),
         );
         await tester.pumpAndSettle();
-        expect(find.text('failed'), findsOneWidget);
-        expect(find.text('Some activity couldn’t load'), findsOneWidget);
-        if (manualRetry) {
-          await tester.tap(find.text('Retry'));
-        } else {
-          await tester.pump(const Duration(seconds: 10));
+        final notice = find.text('Some activity couldn’t load');
+        if (coverMessages) {
+          await tester.tap(find.byTooltip('Search'));
+          await tester.pumpAndSettle();
         }
+        initialRead.completeError(StateError('Activity unavailable'));
         await tester.pumpAndSettle();
-        expect(find.text('Some activity couldn’t load'), findsOneWidget);
+        if (coverMessages) {
+          await tester.pump(const Duration(seconds: 13));
+          expect(notice, findsNothing);
+          expect(reads['failed'], 1);
+          await tester.tap(find.byKey(const Key('search-close')));
+          await tester.pumpAndSettle();
+          expect(notice, findsOneWidget);
+
+          await tester.tap(find.text('loaded'));
+          await tester.pumpAndSettle();
+          await tester.pump(const Duration(seconds: 13));
+          expect(notice, findsNothing);
+          expect(reads['failed'], 1);
+          await tester.binding.handlePopRoute();
+          await tester.pumpAndSettle();
+        } else {
+          for (final (index, minimum, maximum) in [
+            (0, 8, 12),
+            (1, 16, 24),
+            (2, 32, 48),
+          ]) {
+            await tester.pump(Duration(seconds: minimum - 1));
+            expect(reads['failed'], index + 1);
+            await tester.pump(Duration(seconds: maximum - minimum + 1));
+            await tester.pumpAndSettle();
+            expect(reads['failed'], index + 2);
+          }
+          await tester.pump(const Duration(minutes: 2));
+          await tester.pumpAndSettle();
+          expect(reads['failed'], 4);
+        }
+        expect(find.text('failed'), findsOneWidget);
+        expect(notice, findsOneWidget);
+        expect(haptics, isEmpty);
+        canRecover = true;
+        await tester.tap(find.text('Retry'));
+        await tester.pumpAndSettle();
+        expect(notice, findsOneWidget);
         recovery.complete(DateTime.now().millisecondsSinceEpoch ~/ 1000);
         await tester.pumpAndSettle();
-        expect(reads, {'failed': 2, 'loaded': 1});
-        expect(find.text('Some activity couldn’t load'), findsNothing);
+        expect(reads, {'failed': coverMessages ? 2 : 5, 'loaded': 1});
+        expect(notice, findsNothing);
         await tester.pumpWidget(const SizedBox());
         manager.dispose();
       },

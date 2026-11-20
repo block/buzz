@@ -1373,9 +1373,13 @@ void main() {
   testWidgets(
     'section options preserve management actions and Duo quick sort',
     (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
       await tester.pumpWidget(
         buildTestable(
           overrides: [
+            myPubkeyProvider.overrideWithValue('aabb'),
+            savedPrefsProvider.overrideWithValue(prefs),
             channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
             channelSectionsProvider.overrideWith(
               () => _FakeChannelSectionsNotifier(
@@ -1482,6 +1486,7 @@ void main() {
           buildTestable(
             realHome: true,
             overrides: [
+              myPubkeyProvider.overrideWithValue('aabb'),
               savedPrefsProvider.overrideWithValue(duoPrefs),
               channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
               channelSectionsProvider.overrideWith(

@@ -1962,6 +1962,17 @@ void wholeBlobLanes(SharedPreferences Function() prefs) {
       expect(names(), ['mine']);
     });
 
+    fakeAsyncTest('an emoji-only edit preserves the current section name', (
+      clock,
+    ) {
+      start(clock).createSection('Original');
+      final id = m.store.sections.single.id;
+      m.renameSection(id, 'Updated');
+      m.renameSection(id, null, icon: '🎨');
+      expect(m.store.sections.single.name, 'Updated');
+      expect(m.store.sections.single.icon, '🎨');
+    });
+
     fakeAsyncTest('OK before echo keeps a coherent cursor', (clock) {
       start(clock).createSection('mine');
       clock.elapse(const Duration(seconds: 5));
