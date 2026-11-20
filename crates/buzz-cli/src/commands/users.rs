@@ -70,9 +70,14 @@ async fn get_users_output(
         return Err(CliError::Usage("--pubkey: maximum 200 pubkeys".into()));
     }
 
-    let (profiles, archived) =
-        tokio::join!(get_profiles(client, pubkeys), archived_pubkeys(client));
-    let profiles = with_archived(profiles?, archived.as_ref(), true);
+    let Some((profiles, archived)) = alongside_archive(client, async {
+        get_profiles(client, pubkeys).await.map(Some)
+    })
+    .await?
+    else {
+        unreachable!("pubkey lookups always return profiles")
+    };
+    let profiles = with_archived(profiles, archived.as_ref(), true);
     let output = match format {
         crate::OutputFormat::Compact => {
             let compact: Vec<serde_json::Value> = profiles
@@ -88,10 +93,40 @@ async fn get_users_output(
     Ok(output)
 }
 
-/// The relay's archived pubkeys, or `None` with a stderr warning when the
-/// list can't be read or verified: archive filtering fails open, never
-/// failing the lookup.
-async fn archived_pubkeys(client: &BuzzClient) -> Option<HashSet<String>> {
+/// Runs `profiles` while the archive list is read. A profile error returns at
+/// once, and `None` (nothing to show) returns without waiting for the list.
+/// Otherwise it waits for the list, and when the list can't be read it warns
+/// on stderr and gives `None`: archive filtering fails open, never failing
+/// the lookup.
+async fn alongside_archive(
+    client: &BuzzClient,
+    profiles: impl std::future::Future<Output = Result<Option<Vec<serde_json::Value>>, CliError>>,
+) -> Result<Option<(Vec<serde_json::Value>, Option<HashSet<String>>)>, CliError> {
+    let archive = archived_pubkeys(client);
+    tokio::pin!(archive, profiles);
+    let mut archived = None;
+    let profiles = loop {
+        tokio::select! {
+            profiles = &mut profiles => break profiles?,
+            read = &mut archive, if archived.is_none() => archived = Some(read),
+        }
+    };
+    let Some(profiles) = profiles else {
+        return Ok(None);
+    };
+    let archived = match archived {
+        Some(read) => read,
+        None => archive.await,
+    };
+    let archived = archived
+        .map_err(|warning| eprintln!("{}", serde_json::json!({ "warning": warning })))
+        .ok();
+    Ok(Some((profiles, archived)))
+}
+
+/// The relay's archived pubkeys, or the warning to show when the list can't
+/// be read or verified.
+async fn archived_pubkeys(client: &BuzzClient) -> Result<HashSet<String>, String> {
     archived_pubkeys_within(client, ARCHIVE_READ_DEADLINE).await
 }
 
@@ -101,22 +136,12 @@ const ARCHIVE_READ_DEADLINE: std::time::Duration = std::time::Duration::from_sec
 async fn archived_pubkeys_within(
     client: &BuzzClient,
     deadline: std::time::Duration,
-) -> Option<HashSet<String>> {
+) -> Result<HashSet<String>, String> {
     let read = tokio::time::timeout(deadline, fetch_archived_snapshot(client))
         .await
         .unwrap_or_else(|_| Err(CliError::Other(format!("timed out after {deadline:?}"))));
-    match read {
-        Ok(archived) => Some(archived.into_iter().collect()),
-        Err(e) => {
-            eprintln!(
-                "{}",
-                serde_json::json!({"warning": format!(
-                    "archived-identities list unavailable, results not filtered: {e}"
-                )})
-            );
-            None
-        }
-    }
+    read.map(|archived| archived.into_iter().collect())
+        .map_err(|e| format!("archived-identities list unavailable, results not filtered: {e}"))
 }
 
 /// Marks each profile on the `archived` list `"archived": true`, dropping it
@@ -617,10 +642,13 @@ async fn search_by_name(
     }
 
     let owner = resolve_owner(client, owner)?;
-    let profiles = if let Some(owner) = owner {
+    let profiles = async {
+        let Some(owner) = owner else {
+            return search_profiles(client, query).await.map(Some);
+        };
         let pubkeys = owned_agent_pubkeys_by_name(client, &owner, query).await?;
         if pubkeys.is_empty() {
-            return Ok("[]".to_string());
+            return Ok(None);
         }
         let valid_pubkeys: Vec<&String> = pubkeys
             .iter()
@@ -638,15 +666,17 @@ async fn search_by_name(
             serde_json::from_str(&raw)
                 .map_err(|e| CliError::Other(format!("failed to parse response: {e}")))?
         };
-        owner_scoped_profiles(&events, &pubkeys, &owner, &effective_owner(client))
-    } else {
-        search_profiles(client, query).await?
+        Ok(Some(owner_scoped_profiles(
+            &events,
+            &pubkeys,
+            &owner,
+            &effective_owner(client),
+        )))
     };
-    let profiles = with_archived(
-        profiles,
-        archived_pubkeys(client).await.as_ref(),
-        include_archived,
-    );
+    let Some((profiles, archived)) = alongside_archive(client, profiles).await? else {
+        return Ok("[]".to_string());
+    };
+    let profiles = with_archived(profiles, archived.as_ref(), include_archived);
     let output = match format {
         crate::OutputFormat::Compact => {
             let compact: Vec<serde_json::Value> = profiles
@@ -1096,7 +1126,7 @@ mod tests {
         archived_pubkeys, archived_pubkeys_within, compact_profile, find_profiles, get_profiles,
         get_users_output, lookup_profiles, owned_agent_pubkeys_from_events, owner_scoped_profiles,
         owner_verification, parse_expiration_tag, parse_expiry, presence_subject, publish_status,
-        read_statuses, search_profiles, with_archived,
+        read_statuses, search_profiles, with_archived, ARCHIVE_READ_DEADLINE,
     };
     use crate::client::BuzzClient;
     use crate::error::CliError;
@@ -1119,6 +1149,8 @@ mod tests {
         held_kind: Option<u64>,
         /// Answer queries for this kind with invalid JSON.
         broken_kind: Option<u64>,
+        /// Answer queries for this kind with HTTP 500.
+        failing_kind: Option<u64>,
         /// NIP-11 document served at `/`.
         info: Value,
         /// Body of `POST /profiles/search`; `None` answers 404 like an older relay.
@@ -1146,12 +1178,17 @@ mod tests {
                     let mut relay = relay.lock().unwrap();
                     relay.queries.push(filter.clone());
                     if let Some(raw) = relay.raw_query_response.clone() {
-                        return raw;
+                        return (StatusCode::OK, raw);
+                    }
+                    if relay.failing_kind.is_some()
+                        && filter["kinds"][0].as_u64() == relay.failing_kind
+                    {
+                        return (StatusCode::INTERNAL_SERVER_ERROR, "boom".to_string());
                     }
                     if relay.broken_kind.is_some()
                         && filter["kinds"][0].as_u64() == relay.broken_kind
                     {
-                        return "not json".to_string();
+                        return (StatusCode::OK, "not json".to_string());
                     }
                     let kind = &filter["kinds"][0];
                     let matching: Vec<Value> = relay
@@ -1179,7 +1216,7 @@ mod tests {
                         })
                         .cloned()
                         .collect();
-                    serde_json::to_string(&matching).unwrap()
+                    (StatusCode::OK, serde_json::to_string(&matching).unwrap())
                 }),
             )
             .route(
@@ -1683,7 +1720,31 @@ mod tests {
         relay.lock().unwrap().info = json!({"self": relay_keys.public_key().to_hex()});
         relay.lock().unwrap().held_kind = Some(13535);
         let deadline = std::time::Duration::from_millis(100);
-        assert!(archived_pubkeys_within(&client, deadline).await.is_none());
+        assert!(archived_pubkeys_within(&client, deadline).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn profile_errors_return_without_waiting_for_the_archive_read() {
+        let (client, relay) = setup().await;
+        let relay_keys = Keys::generate();
+        relay.lock().unwrap().info = json!({"self": relay_keys.public_key().to_hex()});
+        relay.lock().unwrap().held_kind = Some(13535);
+        relay.lock().unwrap().failing_kind = Some(0);
+        let pubkey = Keys::generate().public_key().to_hex();
+        for (pubkeys, name) in [(vec![pubkey], None), (vec![], Some("alice"))] {
+            let started = std::time::Instant::now();
+            let result = get_users_output(
+                &client,
+                &pubkeys,
+                name,
+                None,
+                false,
+                &crate::OutputFormat::Json,
+            )
+            .await;
+            assert!(result.is_err(), "{name:?}: {result:?}");
+            assert!(started.elapsed() < ARCHIVE_READ_DEADLINE / 2, "{name:?}");
+        }
     }
 
     #[tokio::test]
@@ -1700,7 +1761,7 @@ mod tests {
                 // The query asks for the relay's author; make the impostor's event answer it.
                 relay.lock().unwrap().events[0]["pubkey"] = json!(relay_keys.public_key().to_hex());
             }
-            let archived = archived_pubkeys(&client).await;
+            let archived = archived_pubkeys(&client).await.ok();
             assert!(archived.is_none(), "forged={forged}");
             let profiles = rows(&[&old]);
             assert_eq!(
