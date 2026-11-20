@@ -156,8 +156,9 @@ const MENTIONED_SINCE: &str = r#"SELECT EXISTS (SELECT 1 FROM event_mentions
 /// list, whatever the marker's age and however busy the community is. A
 /// conversation changed when the person joined it, its shared row changed, or
 /// the person changed their own row; a thread, the last two. A post moves its
-/// author's read position without their counter; the shared row it also moves
-/// is what reports it.
+/// author's read position without their counter, and an `audience=agents` post
+/// does not move the shared row, so a read position moved to a message that
+/// arrived since the marker reports it too.
 const CHANGED: &str = r#"(SELECT cm.channel_id, ''::bytea AS root_id,
         cm.sync_modified_at >= $4 AS joined
     FROM channel_members cm
@@ -165,14 +166,15 @@ const CHANGED: &str = r#"(SELECT cm.channel_id, ''::bytea AS root_id,
     LEFT JOIN personal_read_frontiers f ON f.community_id = $1 AND f.actor = $2
         AND f.channel_id = cm.channel_id AND f.root_id = ''::bytea
     WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.removed_at IS NULL
-        AND (cm.sync_modified_at >= $4 OR h.updated_at >= $4 OR f.seq > $3)
+        AND (cm.sync_modified_at >= $4 OR h.updated_at >= $4 OR f.seq > $3
+            OR f.through_timestamp >= $4)
     LIMIT $5)
     UNION ALL
     (SELECT f.channel_id, f.root_id, false AS joined
     FROM personal_read_frontiers f
     LEFT JOIN thread_heads h ON h.community_id = $1 AND h.root_id = f.root_id
     WHERE f.community_id = $1 AND f.actor = $2 AND f.root_id <> ''::bytea
-        AND (f.seq > $3 OR h.updated_at >= $4)
+        AND (f.seq > $3 OR h.updated_at >= $4 OR f.through_timestamp >= $4)
     LIMIT $5)"#;
 
 /// The person's thread rows in channels they joined since the marker. A

@@ -762,7 +762,27 @@ async fn activity_since_returns_changes_and_removals() {
     let ids: Vec<&str> = page.rows.iter().map(|row| row.id.as_str()).collect();
     assert_eq!(ids, [f.channel.to_string().as_str()]);
     let marker = page.marker.expect("marker");
+    age().await;
     assert_eq!(f.read(&since(marker)).await.rows.len(), 0);
+
+    // My own post for agents only moves my read position past "second"
+    // without a counter or a new preview; the conversation is still reported,
+    // now read.
+    age().await;
+    let aside = f.event(
+        &f.me,
+        9,
+        "aside",
+        25,
+        vec![Tag::parse(["audience", "agents"]).expect("tag")],
+    );
+    f.store(&aside, f.channel, None).await;
+    let page = f.read(&since(marker)).await;
+    let ids: Vec<&str> = page.rows.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(ids, [f.channel.to_string().as_str()]);
+    assert!(!page.rows[0].unread);
+    assert_eq!(preview_text(&page.rows[0]), Some("second"));
+    let marker = page.marker.expect("marker");
 
     // A reply inside a thread changes the thread's row, not the channel's.
     let root = f.post(&f.me, "my question", 30).await;
@@ -931,6 +951,52 @@ async fn activity_read_rebuilds_missing_and_stale_rows() {
     let after = (f.conversation().await, f.row(&root.id.to_hex()).await);
     assert_eq!(after, before);
 
+    // A deleted edit is never shown; the row falls back to the edit before
+    // it.
+    let again = f.event(
+        &f.other,
+        40003,
+        "fixed again",
+        45,
+        vec![Tag::parse(["e", &typo.id.to_hex()]).expect("tag")],
+    );
+    f.store(&again, f.channel, None).await;
+    assert_eq!(preview_text(&f.conversation().await), Some("fixed again"));
+    f.delete(&again).await;
+    assert_eq!(preview_text(&f.conversation().await), Some("fixed"));
+
+    // A head that reaches its row after its edit is installed with the edit.
+    // Here the head's write stands in for one from another relay that ran
+    // late, after the edit's upsert found no head to apply it to.
+    sqlx::query(
+        "UPDATE channel_heads SET head_id = NULL, head_created_at = NULL, \
+            head_received_at = NULL, head_pubkey = NULL, head_text = NULL, \
+            head_edit_at = NULL, head_edit_id = NULL \
+         WHERE community_id = $1 AND channel_id = $2",
+    )
+    .bind(f.community.as_uuid())
+    .bind(f.channel)
+    .execute(&f.pool)
+    .await
+    .expect("forget the head");
+    let received: DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT received_at FROM events WHERE community_id = $1 AND id = $2")
+            .bind(f.community.as_uuid())
+            .bind(typo.id.as_bytes().as_slice())
+            .fetch_one(&f.pool)
+            .await
+            .expect("typo arrival");
+    super::writer::install_head_for_test(&f.pool, f.community, f.channel, &typo, received).await;
+    let text: Option<String> = sqlx::query_scalar(
+        "SELECT head_text FROM channel_heads WHERE community_id = $1 AND channel_id = $2",
+    )
+    .bind(f.community.as_uuid())
+    .bind(f.channel)
+    .fetch_one(&f.pool)
+    .await
+    .expect("head text");
+    assert_eq!(text.as_deref(), Some("fixed"));
+
     // A deleted message is never shown; the row falls back.
     f.delete(&typo).await;
     let row = f.conversation().await;
@@ -948,6 +1014,46 @@ async fn activity_read_rebuilds_missing_and_stale_rows() {
     f.store(&lost, f.channel, None).await;
     f.forget().await;
     assert_eq!(preview_text(&f.conversation().await), Some("lost update"));
+}
+
+/// A flush waits for a write that failed and is being retried, rather than
+/// counting it done when its retry leaves the queue.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn activity_flush_waits_for_retried_writes() {
+    let f = fixture().await;
+    f.post(&f.other, "first", 10).await;
+    // A reader's rebuild holds the shared row, so the writer's attempts time
+    // out on its lock and are retried.
+    let mut holder = f.pool.begin().await.expect("begin holder");
+    sqlx::query(
+        "SELECT 1 FROM channel_heads WHERE community_id = $1 AND channel_id = $2 FOR UPDATE",
+    )
+    .bind(f.community.as_uuid())
+    .bind(f.channel)
+    .execute(&mut *holder)
+    .await
+    .expect("hold the row");
+    let held = f.event(&f.other, 9, "held", 20, vec![]);
+    let (_, inserted) =
+        f.db.insert_event_with_thread_metadata(f.community, &held, Some(f.channel), None)
+            .await
+            .expect("store event");
+    assert!(inserted);
+    // Long enough for the first attempt to fail and its retry to start, short
+    // of the attempts running out.
+    assert!(!flush_pending(std::time::Duration::from_millis(900)).await);
+    holder.rollback().await.expect("release the row");
+    assert!(flush_pending(std::time::Duration::from_secs(10)).await);
+    let head: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT head_id FROM channel_heads WHERE community_id = $1 AND channel_id = $2",
+    )
+    .bind(f.community.as_uuid())
+    .bind(f.channel)
+    .fetch_one(&f.pool)
+    .await
+    .expect("head");
+    assert_eq!(head.as_deref(), Some(held.id.as_bytes().as_slice()));
 }
 
 /// Rows never cross communities or outlive membership.
