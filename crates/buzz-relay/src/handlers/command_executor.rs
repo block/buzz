@@ -97,12 +97,13 @@ enum PersistResult {
 /// If the event is a duplicate (ON CONFLICT DO NOTHING), the transaction is
 /// rolled back and `PersistResult::Duplicate` is returned — no mutations needed.
 ///
-/// NOTE: Domain mutations (open_dm, upsert_workflow, etc.) execute on the
-/// connection pool, NOT inside this transaction. The pattern is idempotent but
-/// not strictly atomic: if a mutation succeeds but commit fails, the mutation
-/// persists without the event record. On retry, the event INSERT succeeds
-/// (no conflict), and the mutation re-executes — which is safe for idempotent
-/// operations (open_dm, hide_dm, update_approval, upsert_workflow).
+/// NOTE: Most domain mutations (open_dm, hide_dm, update_approval) execute on
+/// the connection pool, NOT inside this transaction. The pattern is idempotent
+/// but not strictly atomic: if a mutation succeeds but commit fails, the
+/// mutation persists without the event record. On retry, the event INSERT
+/// succeeds (no conflict), and the mutation re-executes — which is safe for
+/// those idempotent operations. A workflow definition save is the exception:
+/// its workflow upsert runs inside this transaction.
 #[datastore_span(name = "persist_command_event", system = "postgresql")]
 async fn persist_command_event(
     db: &buzz_db::Db,
@@ -1067,10 +1068,12 @@ async fn handle_workflow_def(
         .await
         .map_err(|_| IngestError::Rejected("invalid: workflow channel not found".into()))?;
 
+    // The upsert runs in the definition event's transaction: a failure in any
+    // later step rolls the executable workflow back with the definition.
     state
         .db
-        .upsert_workflow(
-            community_id,
+        .upsert_workflow_in_transaction(
+            &mut tx,
             workflow_id,
             Some(channel_id),
             &self_bytes,
@@ -1101,7 +1104,8 @@ async fn handle_workflow_def(
         .workflow_engine
         .invalidate_channel_workflows(community_id, channel_id);
 
-    // Commit the event transaction after the idempotent workflow upsert succeeds.
+    // One commit for the definition event, the workflow row and the retired
+    // spellings.
     tx.commit()
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;

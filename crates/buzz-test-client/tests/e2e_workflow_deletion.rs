@@ -167,7 +167,10 @@ async fn create_channel(client: &mut BuzzTestClient, keys: &Keys, channel_id: &s
     let create_channel = EventBuilder::new(Kind::Custom(9007), "")
         .tags([
             Tag::parse(["h", channel_id]).expect("channel h tag"),
-            Tag::parse(["name", "workflow-deletion-e2e"]).expect("channel name tag"),
+            // Open channel names are unique per community, and every test in
+            // this binary creates one against the same relay.
+            Tag::parse(["name", &format!("workflow-deletion-e2e-{channel_id}")])
+                .expect("channel name tag"),
             Tag::parse(["channel_type", "stream"]).expect("channel type tag"),
             Tag::parse(["visibility", "open"]).expect("channel visibility tag"),
         ])

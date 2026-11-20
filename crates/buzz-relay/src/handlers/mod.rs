@@ -75,6 +75,8 @@ mod system_channel_postgres_tests;
 pub(crate) mod system_channels;
 #[cfg(test)]
 mod tag_pushdown_postgres_tests;
+#[cfg(test)]
+mod workflow_def_postgres_tests;
 
 /// Extract an optional TTL (in seconds) from a Nostr event's `ttl` tag,
 /// applying the server-side override when configured.
