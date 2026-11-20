@@ -21,6 +21,7 @@ import 'package:buzz/shared/channels/open_channel_directory_storage.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart';
+import 'package:buzz/features/channels/channel_unread.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
@@ -43,6 +44,7 @@ part 'channels_provider_join_cases.dart';
 part 'channels_provider_follow_cases.dart';
 part 'channels_provider_saved_directory_cases.dart';
 part 'channels_provider_thread_interest_cases.dart';
+part 'channels_provider_unread_revision_cases.dart';
 
 /// Tests for [ChannelsNotifier] in the pure-Nostr world.
 ///
@@ -60,6 +62,7 @@ void main() {
   _huddleNavigationCases();
   _unreadReadinessCases();
   _unreadDeletionCases();
+  _unreadRevisionCases();
   _requestPathCases();
   _threadActivityCases();
   _confirmedJoinCases();
