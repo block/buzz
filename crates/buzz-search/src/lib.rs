@@ -49,24 +49,40 @@ pub fn pool_options() -> PgPoolOptions {
     })
 }
 
-/// Thin handle around a `PgPool` for community-scoped FTS.
+/// The single entry point for community-scoped message search: a
+/// [`SearchQuery`] in, a [`SearchResult`] of hit keys out.
 ///
-/// Holds nothing the pool itself doesn't already own. The whole purpose of
-/// this type is a stable injection point for the relay's `AppState`.
+/// Which engine answers [`SearchService::search`] is internal to this type,
+/// so callers and their tests don't depend on it. Profile name search always
+/// runs on Postgres.
 #[derive(Debug, Clone)]
 pub struct SearchService {
     pool: PgPool,
+    backend: Backend,
+}
+
+/// The engine behind [`SearchService::search`].
+#[derive(Debug, Clone)]
+enum Backend {
+    /// Postgres full-text search over `events.search_tsv`.
+    Postgres,
 }
 
 impl SearchService {
-    /// Build a search service over an existing Postgres pool.
+    /// Build a search service over an existing Postgres pool, searching with
+    /// Postgres full-text search.
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            backend: Backend::Postgres,
+        }
     }
 
-    /// Execute a community-scoped FTS query.
+    /// Execute a community-scoped message search.
     pub async fn search(&self, query: &SearchQuery) -> Result<SearchResult, SearchError> {
-        query::search(&self.pool, query).await
+        match &self.backend {
+            Backend::Postgres => query::search(&self.pool, query).await,
+        }
     }
 
     /// Find people by profile name, and by verified profile names signed by
