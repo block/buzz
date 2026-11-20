@@ -121,10 +121,17 @@ fn render_slack_block(value: &serde_json::Value, names: &HashMap<String, String>
         .unwrap_or_default();
 
     let rendered = match block_type {
-        "text" | "plain_text" | "mrkdwn" => object
+        "text" | "plain_text" => object
             .get("text")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string)
+            .unwrap_or_default(),
+        // Block Kit `mrkdwn` text carries the same tokens and entities as a
+        // message body.
+        "mrkdwn" => object
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .map(|text| mrkdwn::convert(text, names))
             .unwrap_or_default(),
         "link" => {
             let url = object

@@ -31,6 +31,9 @@ struct RelayState {
     lose_answer_for: Option<String>,
     /// Refuse the next message containing this text without storing it.
     refuse_once: Option<String>,
+    /// Create the next channel, but answer 503: the client sends the same
+    /// create again.
+    lose_create_answer: bool,
 }
 
 #[derive(Clone, Default)]
@@ -105,6 +108,13 @@ async fn accept_event(State(relay): State<FakeRelay>, Json(event): Json<Value>) 
     let channel = tag_value(&event, "h").unwrap_or_default().to_string();
     let mut relay = relay.state();
     if relay.events.iter().any(|held| held["id"] == event["id"]) {
+        // The relay confirms a channel create it already stored.
+        if event["kind"] == 9007 {
+            return (
+                StatusCode::OK,
+                Json(json!({"event_id": id, "accepted": true, "message": "duplicate:"})),
+            );
+        }
         return not_accepted(&id, "duplicate: have it");
     }
 
@@ -114,6 +124,13 @@ async fn accept_event(State(relay): State<FakeRelay>, Json(event): Json<Value>) 
                 return not_accepted(&id, "duplicate: channel already exists");
             }
             relay.channels.insert(channel, false);
+            if std::mem::take(&mut relay.lose_create_answer) {
+                relay.events.push(event);
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error": "unavailable"})),
+                );
+            }
         }
         Some(9002) => match (tag_value(&event, "archived"), relay.channels.get(&channel)) {
             (Some("true"), Some(true)) => return invalid("invalid: channel is already archived"),
@@ -386,12 +403,33 @@ async fn a_channel_that_already_holds_the_derived_id_is_never_written_into() {
 }
 
 #[tokio::test]
+async fn a_channel_create_the_relay_confirms_on_resend_is_the_importers_own() {
+    let (relay, client) = spawn_relay().await;
+    let dir = write_messages(&["first"]);
+    // The relay creates the channel and its answer is lost, so the client
+    // sends the same create again and the relay confirms it as a duplicate.
+    relay.state().lose_create_answer = true;
+
+    cmd_import_slack(&client, params(&dir))
+        .await
+        .expect("a confirmed resend is not someone else's channel");
+    assert_eq!(relay.texts(), ["first"]);
+    assert_eq!(relay.state().channels.len(), 1);
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
 async fn a_reply_to_a_root_that_can_never_be_imported_does_not_fail_every_run() {
     let (relay, client) = spawn_relay().await;
     let oversize = "x".repeat(70 * 1024);
     let mut reply = record(1, "the reply");
     reply["thread_ts"] = json!(ts(0));
-    let dir = write_export(general(), &[record(0, &oversize), reply]);
+    // A record whose blocks hold only interactive elements has nothing to
+    // show; it is skipped too, not published as a bare attribution header.
+    let mut buttons = record(2, "");
+    buttons["blocks"] = json!([{"type": "actions", "elements": [{"type": "button"}]}]);
+    let dir = write_export(general(), &[record(0, &oversize), reply, buttons]);
 
     // The root is over the relay's size limit. Its reply keeps its content as
     // a top-level message, and the run is complete, not perpetually partial.
@@ -401,6 +439,7 @@ async fn a_reply_to_a_root_that_can_never_be_imported_does_not_fail_every_run() 
     assert_eq!(relay.texts(), ["the reply"]);
     assert_eq!(tag_value(&relay.messages()[0], "e"), None);
     assert!(ledger(&dir).skipped.contains(&format!("C1:{}", ts(0))));
+    assert!(ledger(&dir).skipped.contains(&format!("C1:{}", ts(2))));
 
     let events_before = relay.state().events.len();
     cmd_import_slack(&client, params(&dir))

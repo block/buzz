@@ -370,8 +370,8 @@ mod tests {
 
     #[test]
     fn channel_uuid_is_deterministic_and_team_scoped() {
-        // Same inputs → same UUID, so a crash-resumed run reuses the channel
-        // instead of minting a duplicate.
+        // Same inputs → same UUID, so a run that lost track of a channel is
+        // refused by the relay instead of minting a duplicate.
         assert_eq!(channel_uuid("T1", "C1"), channel_uuid("T1", "C1"));
         // Distinct team or channel → distinct UUID (no cross-workspace or
         // cross-channel collision).
@@ -869,6 +869,14 @@ mod tests {
         assert!(rendered.contains("[details](https://example.test)"));
         assert!(rendered.contains("- first"));
         assert!(rendered.contains("- second"));
+
+        // Block Kit `mrkdwn` text is message mrkdwn: tokens and entities are
+        // converted like a message body.
+        let section: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[{"type":"section","text":{"type":"mrkdwn","text":"<@U1> said a &amp; b"}}]"#,
+        )
+        .expect("section");
+        assert_eq!(render_slack_blocks(&section, &names), "@Alice said a & b");
 
         let attachment: export::SlackAttachment = serde_json::from_str(
             r#"{"fallback":"fallback only","original_url":"https://example.test/source"}"#,

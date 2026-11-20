@@ -90,7 +90,7 @@ conservative: it imports genuine conversation and skips system noise.
 | `file_share`, `file_comment`, `me_message`, huddle/canvas sharing content | Imported when renderable |
 | `channel_join` / `channel_leave` / `channel_topic` / `channel_purpose` and other system notices | Skipped |
 | `message_changed` (edits) and `message_deleted` / tombstones | Skipped — only final, still-present text is imported |
-| Message with empty top-level `text` | Block Kit rich text, classic attachment fallback/text/fields, and files are rendered; only genuinely contentless records are skipped |
+| Message with empty top-level `text` | Block Kit rich text, classic attachment fallback/text/fields, and files are rendered; only genuinely contentless records are skipped. A record whose blocks hold only interactive elements renders to nothing and is counted in `skipped` |
 
 Unknown future subtypes are accepted when they carry renderable conversation
 content. A dry run makes the filtering auditable: it reports raw record totals
@@ -156,6 +156,12 @@ membership, not attribution:
   `"<channel>:<ts>"` to the event that was published, and it is pinned to one
   workspace. Re-running skips everything already recorded, including on a newer
   export of the same workspace.
+- **Keep one state file per workspace.** The default path is inside the first
+  `--export-dir`, so a newer export unzipped elsewhere, or the same directories
+  in another order, starts an empty ledger. Pass the earlier file with `--state`.
+  Without it the importer refuses to write into the channels it created before,
+  but a DM is found by its participants, so its history would be imported a
+  second time; the summary warns when a DM already existed.
 - **A message is never published twice.** Its signed event id is journaled
   before it is sent. If the run is interrupted, or the relay's answer is lost,
   the next run looks that id up on the relay and either adopts the stored event

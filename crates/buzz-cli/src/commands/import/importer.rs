@@ -242,13 +242,20 @@ impl<'a> Importer<'a> {
                 // The UUID is derived from public Slack ids, so a channel that
                 // already holds it may belong to someone else. Never write
                 // history into a channel this ledger did not create: adopting
-                // one is the operator's explicit choice.
-                if is_duplicate(&response) {
+                // one is the operator's explicit choice. The relay refuses a
+                // new create for a taken UUID, but confirms this same event
+                // sent again after a lost answer, and that channel is ours.
+                if !was_accepted(&response) {
                     return Err(CliError::Usage(format!(
-                        "Buzz channel {uuid} already exists but is not in the state file, so \
-                         Slack conversation {} was not imported into it; if that channel is \
-                         yours, adopt it with --channel-map ({},{uuid})",
-                        channel.id, channel.id
+                        "Buzz channel {uuid} already exists but is not in the state file {}, \
+                         so Slack conversation {} was not imported into it. If an earlier \
+                         import of this workspace used another state file, pass it with \
+                         --state; adopting the channel instead would import its history \
+                         again. Only when the channel holds no imported history, adopt it \
+                         with --channel-map ({},{uuid})",
+                        self.state_path.display(),
+                        channel.id,
+                        channel.id
                     )));
                 }
 
@@ -455,6 +462,16 @@ impl<'a> Importer<'a> {
         self.flush()?;
         if created {
             self.summary.channels_created += 1;
+        } else {
+            // The relay finds or makes a DM, so a ledger that does not know
+            // this conversation cannot tell an earlier import from a DM the
+            // participants already use.
+            self.summary.warn(format!(
+                "Slack conversation {} is imported into a Buzz DM that already existed; if an \
+                 earlier import of this workspace used another state file, stop and pass it \
+                 with --state, or this history is imported twice",
+                channel.id
+            ));
         }
         Ok(uuid)
     }
@@ -828,8 +845,15 @@ pub(super) fn build_imported_message(
             None => content_parts.push(format!("📎 {}", file.label())),
         }
     }
+    let body = content_parts.join("\n\n");
+    let body = body.trim();
+    // Blocks that hold only interactive elements render to nothing; a header
+    // with no message under it is not worth publishing.
+    if body.is_empty() {
+        return Err(CliError::Other("no renderable content".into()));
+    }
     let header = attribution_header(&author_display(msg, names), &msg.ts);
-    let content = with_header(&header, content_parts.join("\n\n").trim());
+    let content = with_header(&header, body);
 
     let broadcast = matches!(
         msg.subtype.as_deref(),
@@ -863,9 +887,6 @@ fn attribution_header(author_name: &str, slack_ts: &str) -> String {
 /// line of its own when the body opens with block-level markdown that must
 /// start a line to render (a code fence, quote, list, heading, or table).
 fn with_header(header: &str, body: &str) -> String {
-    if body.is_empty() {
-        return header.to_string();
-    }
     let first_line = body.lines().next().unwrap_or_default();
     let opens_block = ["```", "~~~", ">", "|", "- ", "* ", "+ "]
         .iter()
@@ -957,6 +978,8 @@ async fn submit_signed(client: &BuzzClient, event: nostr::Event) -> Result<Strin
 }
 
 /// Whether a relay response reports that it already held what was submitted.
+/// The relay opens those answers with `duplicate:`; a rejection that merely
+/// mentions a duplicate (`invalid: duplicate d tag`) is not one of them.
 fn is_duplicate(response: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(response)
         .ok()
@@ -964,9 +987,18 @@ fn is_duplicate(response: &str) -> bool {
             parsed
                 .get("message")?
                 .as_str()
-                .map(|message| message.contains("duplicate"))
+                .map(|message| message.starts_with("duplicate:"))
         })
         .unwrap_or(false)
+}
+
+/// Whether the relay accepted the event, as opposed to answering a duplicate
+/// it did not take.
+fn was_accepted(response: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(response)
+        .ok()
+        .and_then(|parsed| parsed.get("accepted")?.as_bool())
+        .unwrap_or(true)
 }
 
 /// The ids of the events in a relay query response.
@@ -1015,10 +1047,11 @@ fn unix_now() -> u64 {
 
 /// Deterministic Buzz channel UUID for a Slack channel, derived from the
 /// workspace + Slack channel id. Making it a pure function of stable Slack ids
-/// means a re-run after a crash between the channel-create relay write and the
-/// state save reuses the same UUID (an idempotent NIP-33 replace) instead of
-/// minting a second channel. The `team_id` prefix keeps channel ids from two
-/// workspaces from colliding onto one UUID.
+/// means a run that lost track of a channel it created (a crash between the
+/// create and the state save, or a different state file) asks for the same
+/// UUID again and is refused, instead of minting a second channel. The
+/// `team_id` prefix keeps channel ids from two workspaces from colliding onto
+/// one UUID.
 pub(super) fn channel_uuid(team_id: &str, channel_id: &str) -> Uuid {
     let name = format!("buzz:slack-import:{team_id}:{channel_id}");
     Uuid::new_v5(&Uuid::NAMESPACE_URL, name.as_bytes())
