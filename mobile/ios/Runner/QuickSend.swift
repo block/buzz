@@ -54,15 +54,10 @@ final class QuickSendBridge {
     }
   }
 
-  /// Sends [text] to the Bestie once [confirm] accepts its name, or throws a
-  /// message Siri can read.
+  /// Sends [text] to the Bestie, or throws a message Siri can read.
   @MainActor
-  func send(
-    _ text: String,
-    deadline: Duration = .seconds(20),
-    confirm: (_ bestieName: String?) async throws -> Void
-  ) async throws {
-    // One at a time, so two quick sends post in the order they were confirmed.
+  func send(_ text: String, deadline: Duration = .seconds(20)) async throws {
+    // One at a time, so two quick sends post in the order they were spoken.
     guard !sending else { throw QuickSendError("Another message is still sending.") }
     sending = true
     defer { sending = false }
@@ -73,7 +68,6 @@ final class QuickSendBridge {
     guard let pubkey = bestie?["pubkey"] as? String, let scope = bestie?["scope"] as? String else {
       throw QuickSendError("Buzz couldn't find your Bestie.")
     }
-    try await confirm(bestie?["name"] as? String)
     let start = ContinuousClock.now
     do {
       _ = try await call("send", arguments: ["text": text, "bestie": pubkey, "scope": scope])
@@ -119,7 +113,7 @@ struct MessageBestieIntent: AppIntent {
   func perform() async throws -> some IntentResult {
     let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty else { throw QuickSendError("Say a message to send.") }
-    try await QuickSendBridge.shared.send(text) { _ in }
+    try await QuickSendBridge.shared.send(text)
     return .result()
   }
 }
