@@ -73,6 +73,11 @@ class RelayTimeoutException extends TimeoutException implements RelayCallError {
 
   @override
   RelayReason get reason => RelayReason.timeout;
+
+  /// The text without the duration, which [message] already states. Screens
+  /// show this text.
+  @override
+  String toString() => 'TimeoutException: $message';
 }
 
 /// The relay closed a history or live subscription with [message].
