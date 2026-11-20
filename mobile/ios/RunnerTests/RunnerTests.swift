@@ -77,10 +77,9 @@ class RunnerTests: XCTestCase {
       XCTAssertEqual(glass.centerSurface.bounds.width, vertical ? 56 : 112)
       XCTAssertEqual(glass.centerSurface.center, CGPoint(x: glass.bounds.midX, y: glass.bounds.midY))
       glass.setMenuOpen(true, animator: nil)
-      let merged = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      await waitUntil("the side surfaces have merged") {
         glass.leftSurface.alpha == 0 && glass.rightSurface.alpha == 0
-      }, object: nil)
-      await fulfillment(of: [merged], timeout: 2)
+      }
       XCTAssertEqual(glass.leftSurface.transform.tx, vertical ? 0 : 100, accuracy: 0.01)
       XCTAssertEqual(glass.leftSurface.transform.ty, vertical ? 72 : 0, accuracy: 0.01)
       XCTAssertEqual(glass.rightSurface.transform.tx, vertical ? 0 : -100, accuracy: 0.01)
@@ -88,11 +87,10 @@ class RunnerTests: XCTestCase {
       glass.setMenuOpen(false, animator: nil)
       glass.setMenuOpen(true, animator: nil)
       glass.setMenuOpen(false, animator: nil)
-      let restored = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      await waitUntil("the side surfaces are restored") {
         glass.leftSurface.alpha == 1 && glass.rightSurface.alpha == 1 &&
           glass.leftSurface.transform == .identity && glass.rightSurface.transform == .identity
-      }, object: nil)
-      await fulfillment(of: [restored], timeout: 2)
+      }
     }
   }
 
@@ -2387,6 +2385,28 @@ extension XCTestCase {
     UIApplication.shared.connectedScenes
       .compactMap { $0 as? UIWindowScene }
       .first { $0.activationState == .foregroundActive }
+  }
+
+  /// Returns once `condition` holds, and fails the test if it never does.
+  ///
+  /// `XCTNSPredicateExpectation` evaluates its predicate about once a second,
+  /// so a short wait gets one or two looks and a busy host main thread can
+  /// use them all up. This checks every few milliseconds, and checks once
+  /// more before giving up however late the main thread comes back.
+  @MainActor
+  func waitUntil(
+    _ description: String, timeout: TimeInterval = 10,
+    file: StaticString = #filePath, line: UInt = #line,
+    _ condition: @MainActor () -> Bool
+  ) async {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition() {
+      guard Date() < deadline else {
+        XCTFail("Timed out waiting until \(description)", file: file, line: line)
+        return
+      }
+      try? await Task.sleep(nanoseconds: 10_000_000)
+    }
   }
 
   /// Fulfilled once `window` is the key window and shows `root`'s view.
