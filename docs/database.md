@@ -177,7 +177,9 @@ and operator CLI before the next starts.
    off once the drop has applied.
 
 Migration `0105` dropped `delivery_log` and `subscriptions` this way, after
-#9746 removed their code.
+#9746 removed their code. It discards any rows in them, including rows the
+legacy cutover script copied in; export those before `0105` if you need them.
+Deployments that apply `schema/` with pgschema apply `0105` first.
 
 #### Checklist: adding a provenance-only table
 
