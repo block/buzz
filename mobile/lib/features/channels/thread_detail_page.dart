@@ -54,6 +54,7 @@ import 'jump_to_latest_button.dart';
 import 'jump_to_latest_switcher.dart';
 import 'local_message_send_animation_provider.dart';
 import 'local_message_send_transition.dart';
+import 'open_channel_routes.dart';
 import '../profile/user_profile_sheet.dart';
 import 'message_actions.dart';
 import 'message_action_backdrop_state.dart';
@@ -202,9 +203,14 @@ class ThreadDetailPage extends HookConsumerWidget {
     );
     final highlightedMessageId = useState<String?>(null);
     final initialTargetReadyForHighlight = useState(false);
+    // The linked message this page lands on: the one it opened for, then any
+    // later link into this thread while it is in front. Each link counts,
+    // including a repeat of the same one.
+    final linkTarget = useState((messageId: initialMessageId, link: 0));
+    final targetMessageId = linkTarget.value.messageId;
     useEffect(
       () {
-        final messageId = initialMessageId;
+        final messageId = targetMessageId;
         if (messageId == null || !initialTargetReadyForHighlight.value) {
           return null;
         }
@@ -252,7 +258,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         };
       },
       [
-        initialMessageId,
+        linkTarget.value,
         initialTargetReadyForHighlight.value,
         reducedLandingHighlightMotion,
         routeAnimation,
@@ -294,7 +300,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     // Ordinary thread entry owns a tail-follow intent before lazy item
     // positions settle. Keep Latest suppressed through those initial layout
     // frames; a deep-link entry must expose it for its older target instead.
-    final hidesLatestForInitialTailSettle = useState(initialMessageId == null);
+    final hidesLatestForInitialTailSettle = useState(targetMessageId == null);
     final hidesLatestForComposerTailCorrection = useState(false);
     final tailCorrectionInProgress = useRef(false);
     final tailCorrectionGeneration = useRef(0);
@@ -543,9 +549,44 @@ class ThreadDetailPage extends HookConsumerWidget {
       unawaited(navigateToTail());
     }
 
+    // A link into this thread while it is in front lands here like the link
+    // that opened it, instead of stacking another copy of the page.
+    useOpenThreadRoute(ref, threadHead.id, (messageId) {
+      // Like a deep-link entry, a link's older target must expose Latest.
+      // A focused composer hides it, so drop focus as a new page used to.
+      hidesLatestForInitialTailSettle.value = false;
+      composerFocusNode.unfocus();
+      didJumpToInitialMessage.value = false;
+      initialHighlightTargetIndex.value = null;
+      initialTargetReadyForHighlight.value = false;
+      highlightedMessageId.value = null;
+      linkTarget.value = (
+        messageId: messageId,
+        link: linkTarget.value.link + 1,
+      );
+    });
+
+    // The page that opened this thread loaded its first target by ID, the
+    // way a channel page does for a deep link. A later link's target may be
+    // missing here too (a reply the socket missed), so load it the same way
+    // and keep it until the next link or until this page closes.
+    useEffect(() {
+      final target = linkTarget.value;
+      final messageId = target.messageId;
+      if (target.link == 0 || messageId == null) return null;
+      if (allMsgs.any((message) => message.id == messageId)) return null;
+      final notifier = ref.read(channelMessagesProvider(channelId).notifier);
+      unawaited(
+        notifier.loadEventsById({messageId}).catchError((Object error) {
+          debugPrint('deep-link: failed to load thread target: $error');
+        }),
+      );
+      return () => notifier.releaseDeepLinkEvents({messageId});
+    }, [linkTarget.value]);
+
     useEffect(
       () {
-        final messageId = initialMessageId;
+        final messageId = targetMessageId;
         // Wait for either the authoritative thread query or a terminal query
         // error before consuming the one-shot jump. During loading, the fallback
         // main-timeline list can contain only the linked reply; after an error,
@@ -593,7 +634,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         return null;
       },
       [
-        initialMessageId,
+        linkTarget.value,
         headHeight.value,
         canUseMessagesForInitialTarget,
         fetchedReplies,
@@ -658,7 +699,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       // the target jump reveals the list; a tail correction scheduled earlier
       // would cancel that one-shot jump and leave the list hidden. Later
       // arrivals use the ordinary rules below, so a sent reply comes into view.
-      if (initialMessageId != null && !initialViewportReady.value) {
+      if (targetMessageId != null && !initialViewportReady.value) {
         initialTailSettle.abandon();
         previousReplyCount.value = replies.length;
         return null;
@@ -772,7 +813,7 @@ class ThreadDetailPage extends HookConsumerWidget {
               position,
               start: topEdge,
               end: bottomEdge,
-              linked: message.id == initialMessageId,
+              linked: message.id == targetMessageId,
             )) {
           visible.add(message);
         }
@@ -1078,8 +1119,9 @@ class ThreadDetailPage extends HookConsumerWidget {
                     isMember: isMember,
                     isArchived: isArchived,
                     composerFocusNode: composerFocusNode,
-                    restoreComposerFocus: () =>
-                        restoreComposerFocus.value?.call(),
+                    restoreComposerFocus: canReply
+                        ? () => restoreComposerFocus.value?.call()
+                        : null,
                     childrenByParent: childrenByParent,
                   ),
                 ),
