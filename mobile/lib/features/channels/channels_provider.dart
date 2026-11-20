@@ -904,6 +904,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
     final channelId = event.channelId;
     if (channelId == null) return;
+    _applySavedMessageEdit(event, channelId);
 
     final myPk = ref.read(myPubkeyProvider);
     final mutedChannelIds = _mutedChannelIds();
