@@ -31,8 +31,11 @@ final unreadBadgeProvider = Provider<UnreadBadge>((ref) {
 
   final channelsAsync = ref.watch(channelsProvider);
   final channels = channelsAsync.isLoading ? null : channelsAsync.asData?.value;
+  // A feed with a failed source may lack unread items, so it does not count.
   final feedLoaded = ref.watch(
-    activityProvider.select((feed) => !feed.isLoading && feed.asData != null),
+    activityProvider.select(
+      (feed) => !feed.isLoading && (feed.asData?.value.complete ?? false),
+    ),
   );
   final inbox = ref.watch(inboxUnreadProvider);
   final readState = ref.watch(readStateProvider);
