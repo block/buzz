@@ -37,9 +37,7 @@ class _MessageTile extends ConsumerWidget {
         : <String>{};
     final linkedPubkeys = rich
         // Only links in the two-line preview render, so only those resolve.
-        ? mentionIdentityLinkKeys(
-            messagePreviewSource(hit.content, maxLines: 2),
-          )
+        ? messagePreviewIdentityKeys(hit.content, maxLines: 2)
         : const <String>{};
     // A hit is labelled within its channel, as it would be there.
     final hitChannelId = channel?.id ?? hit.channelId;

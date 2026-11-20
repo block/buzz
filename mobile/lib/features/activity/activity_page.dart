@@ -20,7 +20,6 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
-import '../../shared/mentions/mention_identity_links.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/relay/thread_reference.dart';
@@ -44,7 +43,7 @@ import '../channels/me/me_page.dart';
 import '../channels/dm_channel_labels.dart';
 import '../channels/message_content.dart';
 import '../channels/message_content/preview_text.dart'
-    show messagePreviewSource;
+    show messagePreviewIdentityKeys;
 import '../../shared/read_state/read_state_format.dart';
 import '../../shared/reminders/remind_me_later_sheet.dart';
 import '../../shared/reminders/reminder_service.dart'

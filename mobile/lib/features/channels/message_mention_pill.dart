@@ -129,10 +129,9 @@ InlineSpan? identityMentionSpan(
   });
   final label = text.replaceAll('\u00A0', ' ');
   if (!isMentionIdentityLabel(label)) return null;
-  final name = mentionIdentityLinkName(
-    pubkey,
-    mentionLabels[pubkey] ?? mentionNames[pubkey],
-  );
+  final name =
+      mentionLabels[pubkey] ??
+      mentionIdentityLinkName(pubkey, mentionNames[pubkey]);
   final pill = MessageMentionPill(
     label: name == null ? label.substring(1) : mentionVisibleLabel(name),
     semanticsLabel: name,

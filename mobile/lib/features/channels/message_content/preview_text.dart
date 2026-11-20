@@ -148,6 +148,22 @@ String messagePreviewSource(String content, {required int maxLines}) {
   return content.substring(0, end);
 }
 
+/// The keys of the identity links a [maxLines] preview of [content] draws,
+/// read as the preview reads them (outside code, within its source limit),
+/// so a row resolves and loads only names it shows.
+Set<String> messagePreviewIdentityKeys(
+  String content, {
+  required int maxLines,
+}) => content.contains('nostr:npub1')
+    ? {
+        for (final piece in messagePreviewPieces(
+          messagePreviewSource(content, maxLines: maxLines),
+          maxLines: maxLines,
+        ))
+          if (piece is PreviewMention) piece.pubkey,
+      }
+    : const {};
+
 /// The first `maxLines + 1` lines that render, trimmed and without block
 /// syntax, read lazily so the rest of [content] is never scanned. Lines that
 /// don't render still cost a scan, so reading also stops after
@@ -457,10 +473,9 @@ class _PreviewBuilder {
         .replaceAllMapped(_escapedPunctuation, (m) => m[1]!)
         .replaceAll('\u00A0', ' ');
     if (!isMentionIdentityLabel(written)) return null;
-    final name = mentionIdentityLinkName(
-      pubkey,
-      mentionLabels[pubkey] ?? mentionNames[pubkey],
-    );
+    final name =
+        mentionLabels[pubkey] ??
+        mentionIdentityLinkName(pubkey, mentionNames[pubkey]);
     final fullLabel = name ?? written.substring(1);
     return PreviewMention(
       pubkey: pubkey,

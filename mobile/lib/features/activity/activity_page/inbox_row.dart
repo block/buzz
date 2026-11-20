@@ -43,9 +43,7 @@ class _InboxRow extends HookConsumerWidget {
     // Identity links name their own keys: resolve those for display only.
     // Only links in the two-line preview render, so only those resolve.
     final linkedPubkeys = useMemoized(
-      () => mentionIdentityLinkKeys(
-        messagePreviewSource(item.item.displayContent, maxLines: 2),
-      ),
+      () => messagePreviewIdentityKeys(item.item.displayContent, maxLines: 2),
       [item.item.displayContent],
     );
     final relevantPubkeys = {senderPubkey, ...mentionPubkeys, ...linkedPubkeys};

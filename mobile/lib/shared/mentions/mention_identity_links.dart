@@ -35,9 +35,10 @@ String mentionIdentityLink(String label, String pubkey) {
 String? mentionIdentityLinkKey(String target) =>
     _target.hasMatch(target) ? typedPublicKey(target) : null;
 
-/// [name] for an identity link to [pubkey], or null when it is only the
-/// compact npub a nameless key falls back to (as a nameless tagged agent's
-/// mention name is), so the link keeps its written label instead.
+/// [name], a mention name for an identity link to [pubkey], or null when it
+/// is only the compact npub a nameless tagged agent's mention name falls back
+/// to, so the link keeps its written label instead. Contextual labels need
+/// no such check: they are given only for a real name.
 String? mentionIdentityLinkName(String pubkey, String? name) =>
     name == null || name == shortPubkey(pubkey) ? null : name;
 
@@ -60,20 +61,39 @@ List<({int start, int end, String label, String pubkey})> mentionIdentityLinks(
       (start: match.start, end: match.end, label: label, pubkey: pubkey),
 ];
 
-final _definition = RegExp(
-  r'^ {0,3}\[[^\]\n]+\]:[ \t]*<?(nostr:npub1[02-9ac-hj-np-z]+)>?[ \t]*$',
+// Code shows links as literal text: fenced blocks, then inline spans (a run
+// of backticks closed by a run of the same length).
+final _fencedCode = RegExp(
+  r'^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:^ {0,3}\1[ \t]*$|(?![\s\S]))',
   multiLine: true,
 );
+final _inlineCode = RegExp(r'(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)');
+// The rendered forms of an inline link's destination: bare or in angle
+// brackets, with an optional title.
+final _keyLink = RegExp(
+  r'(?<![!\\])\[((?:\\[!-~]|[^\[\]\\\n])+)\]\([ \t]*<?(nostr:npub1[02-9ac-hj-np-z]+)>?(?:[ \t]+(?:"[^"\n]*"|'
+  "'"
+  r"[^'\n]*'"
+  r'))?[ \t]*\)',
+);
 
-/// The lowercase keys that identity links in [content] name, inline or as
-/// reference definitions (`[ref]: nostr:npub1…`), so a message row can
-/// resolve their names and agent icons as it does for tagged keys. Most
-/// messages carry no key, and a substring check skips the scan.
-Set<String> mentionIdentityLinkKeys(String content) =>
-    content.contains('nostr:npub1')
-    ? {
-        for (final link in mentionIdentityLinks(content)) link.pubkey,
-        for (final match in _definition.allMatches(content))
-          ?mentionIdentityLinkKey(match[1]!),
-      }
-    : const {};
+/// The lowercase keys that inline identity links in [content] name, outside
+/// code, so a message row can resolve their names and agent icons as it does
+/// for tagged keys. Pass the text the row renders (a preview's source, not
+/// the whole body). Most messages carry no key, and a substring check skips
+/// the scan.
+Set<String> mentionIdentityLinkKeys(String content) {
+  if (!content.contains('](') || !content.contains('nostr:npub1')) {
+    return const {};
+  }
+  final prose = content.contains('`') || content.contains('~~~')
+      ? content.replaceAll(_fencedCode, ' ').replaceAll(_inlineCode, ' ')
+      : content;
+  return {
+    for (final match in _keyLink.allMatches(prose))
+      if (isMentionIdentityLabel(
+        match[1]!.replaceAllMapped(_escapedPunctuation, (m) => m[1]!),
+      ))
+        ?mentionIdentityLinkKey(match[2]!),
+  };
+}

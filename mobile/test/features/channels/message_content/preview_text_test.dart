@@ -345,4 +345,29 @@ void main() {
       ),
     ]);
   });
+
+  test('a preview loads only the identity links it draws', () {
+    final link = '[@Alice](nostr:${fullNpub(_alice)})';
+    expect(messagePreviewIdentityKeys('hi $link', maxLines: 2), {_alice});
+    for (final content in [
+      'hi `$link`',
+      'one\ntwo\nthree\nfour\n$link',
+      'plain',
+    ]) {
+      expect(
+        messagePreviewIdentityKeys(content, maxLines: 2),
+        isEmpty,
+        reason: content,
+      );
+    }
+  });
+
+  test('a real name equal to a compact npub still names the link', () {
+    final link = '[@Prev](nostr:${fullNpub(_alice)})';
+    final name = shortPubkey(_alice);
+    expect(
+      _pieces('hi $link', mentionLabels: {_alice: name}).last,
+      PreviewMention(pubkey: _alice, label: name, semanticsLabel: name),
+    );
+  });
 }

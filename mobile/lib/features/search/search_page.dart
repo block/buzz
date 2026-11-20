@@ -17,7 +17,6 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 import '../../shared/identity_archives/identity_archives.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
-import '../../shared/mentions/mention_identity_links.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
@@ -36,7 +35,7 @@ import '../channels/channels_provider.dart';
 import '../channels/small_avatar.dart';
 import '../channels/message_content.dart';
 import '../channels/message_content/preview_text.dart'
-    show messagePreviewSource;
+    show messagePreviewIdentityKeys;
 import '../channels/date_formatters.dart';
 import '../forum/forum_thread_page.dart';
 import '../profile/profile_provider.dart';
