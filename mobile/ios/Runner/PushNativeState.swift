@@ -265,9 +265,12 @@ final class BuzzNotificationReplyBridge {
       // its draft saved, or has no community left to keep one in.
       let draftKept = arguments["noDraft"] as? Bool != true
       let recorded = journal.recorded(id: id)
-      if !draftKept { settleOnNotice.insert(id) }
+      // One that may have gone out keeps no draft either, so its notice is
+      // the only copy of its text until iOS accepts it.
+      let settlesNow = draftKept && outcome != .unknown
+      if !settlesNow { settleOnNotice.insert(id) }
       if buffer.complete(id: id, outcome: outcome) {
-        if draftKept { journal.settle(id: id) }
+        if settlesNow { journal.settle(id: id) }
       } else {
         settleOnNotice.remove(id)
         // A notice that iOS refused leaves the reply for the next launch.
