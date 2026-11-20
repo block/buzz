@@ -602,6 +602,9 @@ class MessageContent extends HookConsumerWidget {
         if (bubble) _MessageImageStackCount(items: trailingGallery.items),
         if (trailingGallery.content.trim().isNotEmpty) markdown,
         MessageReplyDragTarget(
+          // The photo stack is narrower than the row it aligns itself in, so
+          // it marks its own deck for the long press.
+          opensActions: !bubble,
           child: MessageAttachmentCorners(
             borderRadius: _attachmentCorners(
               start: bubbleStart && trailingGallery.content.trim().isEmpty,

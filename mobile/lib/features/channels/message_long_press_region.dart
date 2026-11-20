@@ -201,6 +201,10 @@ class _MessageLongPressRegion extends HookWidget {
       onLongPress: recognize,
       child: RawGestureDetector(
         behavior: HitTestBehavior.translucent,
+        // The detector's own semantic long press reports its centre, which
+        // can miss every target on a wide row. The action above needs no
+        // position.
+        excludeFromSemantics: true,
         gestures: {
           LongPressGestureRecognizer:
               GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(

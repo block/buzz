@@ -175,13 +175,25 @@ void swipeReplyTests() {
           Navigator.of(tester.element(find.byType(BottomSheet))).pop();
           await tester.pumpAndSettle();
 
-          // A screen reader has no pointer position to test.
+          // A screen reader has no pointer position to test, so the row
+          // offers one long press that works although its centre misses the
+          // short bubble at the row's edge.
           final semantics = tester.ensureSemantics();
-          final node = tester.getSemantics(row);
-          expect(
-            node.getSemanticsData().hasAction(SemanticsAction.longPress),
-            isTrue,
-          );
+          expect(bubbleRect.contains(rowRect.center), isFalse);
+          final holdable = <SemanticsNode>[];
+          void collect(SemanticsNode node) {
+            if (node.getSemanticsData().hasAction(SemanticsAction.longPress)) {
+              holdable.add(node);
+            }
+            node.visitChildren((child) {
+              collect(child);
+              return true;
+            });
+          }
+
+          collect(tester.getSemantics(row));
+          expect(holdable, hasLength(1));
+          final node = holdable.single;
           node.owner!.performAction(node.id, SemanticsAction.longPress);
           await tester.pumpAndSettle();
           expect(find.text('Copy text'), findsOneWidget);
@@ -435,21 +447,32 @@ void swipeReplyTests() {
             }
 
             // The unused row width on the part's own line, away from any
-            // avatar. The gallery's reply-drag target spans the row.
-            if (part.name != 'trailing gallery') {
-              final beside = Offset(
-                own ? rowRect.left + 2 : rowRect.right - 2,
-                partRect.center.dy,
-              );
-              expect(partRect.contains(beside), isFalse);
-              await tester.longPressAt(beside);
+            // avatar.
+            final beside = Offset(
+              own ? rowRect.left + 2 : rowRect.right - 2,
+              partRect.center.dy,
+            );
+            expect(partRect.contains(beside), isFalse);
+            await tester.longPressAt(beside);
+            await tester.pumpAndSettle();
+            expect(find.text('Copy link'), findsNothing);
+            // Its release is no tap on the row, so no thread opens.
+            expect(
+              find.byType(ThreadDetailPage),
+              thread ? findsOneWidget : findsNothing,
+            );
+
+            // The gallery's reply-drag target spans the row, so the blank
+            // strip beside its deck still starts a reply swipe.
+            if (part.name == 'trailing gallery') {
+              final initial = tester.getTopLeft(row);
+              final drag = await tester.startGesture(beside);
+              await drag.moveBy(const Offset(-25, 0));
+              await drag.moveBy(const Offset(-40, 0));
+              await tester.pump();
+              expect(tester.getTopLeft(row).dx, lessThan(initial.dx));
+              await drag.up();
               await tester.pumpAndSettle();
-              expect(find.text('Copy link'), findsNothing);
-              // Its release is no tap on the row, so no thread opens.
-              expect(
-                find.byType(ThreadDetailPage),
-                thread ? findsOneWidget : findsNothing,
-              );
             }
 
             // The part's own tap still wins over the message.

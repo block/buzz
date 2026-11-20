@@ -379,66 +379,68 @@ class _MessageImageStack extends HookConsumerWidget {
                   }
                   return KeyEventResult.ignored;
                 },
-                child: GestureDetector(
-                  key: const ValueKey('message-media-stack'),
-                  behavior: HitTestBehavior.opaque,
-                  onTap: open,
-                  onHorizontalDragStart: (_) {
-                    if (opening.value) return;
-                    dragging.value = true;
-                    position.stop();
-                    start.value = position.value;
-                    distance.value = 0;
-                  },
-                  onHorizontalDragUpdate: (details) {
-                    if (!dragging.value || opening.value) return;
-                    distance.value += details.delta.dx;
-                    if (!reducedMotion) {
-                      position.value = start.value - distance.value / 140;
-                    }
-                  },
-                  onHorizontalDragEnd: (details) {
-                    if (!dragging.value || opening.value) return;
-                    dragging.value = false;
-                    final dx = distance.value;
-                    final speed = details.primaryVelocity ?? 0;
-                    final step = dx.abs() > 48 || speed.abs() > 500
-                        ? (dx == 0 ? -speed.sign : -dx.sign) *
-                              math.max(1, (dx.abs() / 140).round())
-                        : 0;
-                    settle(start.value.roundToDouble() + step);
-                  },
-                  onHorizontalDragCancel: () {
-                    if (!dragging.value || opening.value) return;
-                    dragging.value = false;
-                    settle(start.value.roundToDouble());
-                  },
-                  child: SizedBox(
-                    width: width,
-                    height: height,
-                    child: Stack(
-                      key: const ValueKey('message-media-card-deck'),
-                      clipBehavior: Clip.none,
-                      alignment: mirrored
-                          ? Alignment.centerRight
-                          : Alignment.centerLeft,
-                      children: [
-                        for (final i in order) card(i),
-                        if (_stackTuningEnabled && showTuningControl)
-                          Positioned(
-                            left: 0,
-                            top: 0,
-                            child: TextButton(
-                              onPressed: () =>
-                                  _openStackTuning(context, items, mirrored),
-                              child: const Text('Tune stack'),
+                child: MessageLongPressTarget(
+                  child: GestureDetector(
+                    key: const ValueKey('message-media-stack'),
+                    behavior: HitTestBehavior.opaque,
+                    onTap: open,
+                    onHorizontalDragStart: (_) {
+                      if (opening.value) return;
+                      dragging.value = true;
+                      position.stop();
+                      start.value = position.value;
+                      distance.value = 0;
+                    },
+                    onHorizontalDragUpdate: (details) {
+                      if (!dragging.value || opening.value) return;
+                      distance.value += details.delta.dx;
+                      if (!reducedMotion) {
+                        position.value = start.value - distance.value / 140;
+                      }
+                    },
+                    onHorizontalDragEnd: (details) {
+                      if (!dragging.value || opening.value) return;
+                      dragging.value = false;
+                      final dx = distance.value;
+                      final speed = details.primaryVelocity ?? 0;
+                      final step = dx.abs() > 48 || speed.abs() > 500
+                          ? (dx == 0 ? -speed.sign : -dx.sign) *
+                                math.max(1, (dx.abs() / 140).round())
+                          : 0;
+                      settle(start.value.roundToDouble() + step);
+                    },
+                    onHorizontalDragCancel: () {
+                      if (!dragging.value || opening.value) return;
+                      dragging.value = false;
+                      settle(start.value.roundToDouble());
+                    },
+                    child: SizedBox(
+                      width: width,
+                      height: height,
+                      child: Stack(
+                        key: const ValueKey('message-media-card-deck'),
+                        clipBehavior: Clip.none,
+                        alignment: mirrored
+                            ? Alignment.centerRight
+                            : Alignment.centerLeft,
+                        children: [
+                          for (final i in order) card(i),
+                          if (_stackTuningEnabled && showTuningControl)
+                            Positioned(
+                              left: 0,
+                              top: 0,
+                              child: TextButton(
+                                onPressed: () =>
+                                    _openStackTuning(context, items, mirrored),
+                                child: const Text('Tune stack'),
+                              ),
                             ),
+                          _MessageGalleryPrecache(
+                            providers: providers,
+                            focusedIndex: index,
                           ),
-                        _MessageGalleryPrecache(
-                          providers: providers,
-                          focusedIndex: index,
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                 ),
