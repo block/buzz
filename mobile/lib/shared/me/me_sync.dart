@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/widgets.dart';
+import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -12,6 +12,7 @@ import '../relay/relay.dart';
 import 'me_groups.dart';
 import 'me_recovery.dart';
 import 'me_journal.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
 
 /// A live, account/community-scoped reader for desktop's encrypted Solo record.
 final meGroupsProvider = StreamProvider<MeGroups>((ref) {
@@ -50,7 +51,6 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
     } catch (error, stack) {
       if (!disposed) {
         syncFailed = true;
-        service.syncClosed.value = true;
         if (!hasSnapshot) controller.addError(error, stack);
       }
     }
@@ -77,7 +77,6 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
     } catch (error, stack) {
       if (!disposed) {
         syncFailed = true;
-        service.syncClosed.value = true;
         if (!hasSnapshot) controller.addError(error, stack);
       }
     }
@@ -105,7 +104,6 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
         onClosed: (_) {
           if (disposed) return;
           subscriptionClosed = true;
-          service.syncClosed.value = true;
           if (!hasSnapshot) {
             controller.addError(
               StateError('Couldn’t sync Solo. Reconnect and try again.'),
@@ -118,20 +116,23 @@ final meGroupsProvider = StreamProvider<MeGroups>((ref) {
         return;
       }
       await refresh();
-      if (!disposed && !subscriptionClosed && !syncFailed) {
-        service.syncClosed.value = false;
-      }
     } catch (error, stack) {
       if (!disposed) {
         syncFailed = true;
-        service.syncClosed.value = true;
         if (!hasSnapshot) controller.addError(error, stack);
       }
     }
   }
 
-  ref.listen(appLifecycleProvider, (_, next) {
-    if (next == AppLifecycleState.resumed) unawaited(refresh());
+  ref.listen(appForegroundProvider, (_, foreground) {
+    if (!foreground) return;
+    // Recover an interrupted reader by resubscribing instead of asking the user.
+    // Before reconnecting, leave recovery to the reconnect listener above.
+    if (subscriptionClosed || syncFailed) {
+      if (service.connected) ref.invalidateSelf();
+    } else {
+      unawaited(refresh());
+    }
   });
   ref.onDispose(() {
     disposed = true;
@@ -151,20 +152,6 @@ final meOfflineSaveWarningProvider = StreamProvider<bool>((ref) {
   changed();
   ref.onDispose(() {
     service.cacheWriteFailed.removeListener(changed);
-    unawaited(controller.close());
-  });
-  return controller.stream;
-});
-
-/// Retryable live-sync interruption without hiding cached organization.
-final meSyncWarningProvider = StreamProvider<bool>((ref) {
-  final service = ref.watch(meSyncProvider);
-  final controller = StreamController<bool>();
-  void changed() => controller.add(service.syncClosed.value);
-  service.syncClosed.addListener(changed);
-  changed();
-  ref.onDispose(() {
-    service.syncClosed.removeListener(changed);
     unawaited(controller.close());
   });
   return controller.stream;
@@ -194,7 +181,7 @@ class MeSync {
   final RelayConfig config;
   late final String community = Uri.parse(config.baseUrl).origin;
   late final String privateHex = nostr.Nip19.decode(payload: config.nsec!).data;
-  late final String pubkey = nostr.Keys(privateHex).public;
+  late final String pubkey = derivePublicKeyHex(privateHex);
   late final key = getConversationKey(privateHex, pubkey);
   final bool _connected;
 
@@ -245,9 +232,6 @@ class MeSync {
 
   /// False only after the newest candidate is durably written.
   final cacheWriteFailed = ValueNotifier(false);
-
-  /// A terminal close or invalid relay head requires explicit reader recovery.
-  final syncClosed = ValueNotifier(false);
 
   /// Serialize writes and report failures so callers can expose a retry.
   Future<void> cache(NostrEvent? event) {
@@ -347,7 +331,7 @@ class MeSync {
         )) {
       throw const FormatException('Invalid Solo record');
     }
-    nostr.Event.fromJson(jsonEncode(event.toJson()));
+    verifiedNostrEventFromJson(jsonEncode(event.toJson()));
     return MeGroups.decode(nip44Decrypt(key, event.content), community);
   }
 
@@ -393,42 +377,93 @@ class MeSync {
     }
   }
 
+  /// Publishes [event], journaled as [record], unless [refused] says no at the
+  /// send boundary, after every relay wait. A refused event leaves no
+  /// replayable journal entry behind.
+  Future<void> _publishUnlessRefused(
+    NostrEvent event,
+    String record, {
+    required bool Function() refused,
+  }) async {
+    var wasRefused = false;
+    try {
+      await session.publish(
+        event,
+        mayPublish: () async => !(wasRefused = refused()),
+      );
+    } catch (_) {
+      if (!wasRefused) rethrow;
+      await _clearConfirmedPending(record);
+      throw const MeFilingClosed();
+    }
+  }
+
   /// Refresh before applying an intent, then confirm the selected signed event.
-  Future<void> update(MeGroups Function(MeGroups) change) async {
+  ///
+  /// [mayFile] says whether this client may still change projects or chat
+  /// filings. It is asked again at each relay send, including a pending
+  /// replay; a refused filing change is dropped from the journal and throws
+  /// [MeFilingClosed].
+  Future<void> update(
+    MeGroups Function(MeGroups) change, {
+    bool Function()? mayFile,
+  }) async {
     check();
     if (_saving) throw StateError('A Solo change is still being saved.');
     _saving = true;
     try {
       MeGroups? recovered;
       String? recoveredHead;
+      var unfiled = false;
       final pending = prefs?.getString(pendingKey);
       if (pending != null) {
         final stored = jsonDecode(pending) as Map<String, dynamic>;
         final event = NostrEvent.fromJson(
           (stored['event'] as Map<String, dynamic>?) ?? stored,
         );
-        final local = decode(event);
+        final baseEvent = stored['base'] as Map<String, dynamic>?;
+        final base = baseEvent == null
+            ? const MeGroups()
+            : decode(NostrEvent.fromJson(baseEvent));
+        var local = decode(event);
         final remote = await head();
-        if (remote != null &&
-            remote.id != event.id &&
-            meEventIsNewer(remote, event)) {
+        // A filing journaled before the lock can never be sent. Keep the
+        // chats it registered and rebase them like a superseded save, so the
+        // caller's own change can still go through.
+        unfiled =
+            mayFile?.call() == false &&
+            remote?.id != event.id &&
+            _filingsDiffer(base, local);
+        if (unfiled) {
+          local = MeGroups(
+            groups: base.groups,
+            assignments: base.assignments,
+            channels: local.channels,
+          );
+        }
+        if (unfiled ||
+            (remote != null &&
+                remote.id != event.id &&
+                meEventIsNewer(remote, event))) {
           if (!stored.containsKey('event')) {
             // Older clients did not persist a base, so a safe rebase is unknown.
             throw MeRecoveryConflict();
           }
-          recoveredHead = remote.id;
-          final baseEvent = stored['base'] as Map<String, dynamic>?;
+          recoveredHead = remote?.id;
           recovered = rebaseMeGroups(
-            baseEvent == null
-                ? const MeGroups()
-                : decode(NostrEvent.fromJson(baseEvent)),
+            base,
             local,
-            decode(remote),
+            remote == null ? const MeGroups() : decode(remote),
           );
         } else {
           if (remote?.id != event.id) {
             check();
-            await session.publish(event);
+            await _publishUnlessRefused(
+              event,
+              pending,
+              refused: () =>
+                  mayFile?.call() == false && _filingsDiffer(base, local),
+            );
             if ((await head())?.id != event.id) {
               throw StateError(
                 'A previous Solo save is still unconfirmed. Try again.',
@@ -447,9 +482,15 @@ class MeSync {
           'Solo changed again. Your pending change is saved; try again.',
         );
       }
-      final value =
-          recovered ??
-          change(before == null ? const MeGroups() : decode(before));
+      final baseGroups = before == null ? const MeGroups() : decode(before);
+      final value = recovered == null
+          ? change(baseGroups)
+          : unfiled
+          ? change(recovered)
+          : recovered;
+      bool refused() =>
+          mayFile?.call() == false && _filingsDiffer(baseGroups, value);
+      if (refused()) throw const MeFilingClosed();
       final String encoded;
       try {
         encoded = value.encode(community);
@@ -470,11 +511,10 @@ class MeSync {
       }
       check();
       final signed = NostrEvent.fromJson(
-        nostr.Event.from(
+        signNostrEvent(
           kind: 30078,
           content: content,
           secretKey: privateHex,
-          verify: false,
           tags: [
             ['d', MeGroups.coordinate(community)],
             ['t', MeGroups.tag],
@@ -489,7 +529,7 @@ class MeSync {
         throw StateError('Couldn’t save this change on your phone. Try again.');
       }
       check();
-      await session.publish(signed);
+      await _publishUnlessRefused(signed, pendingRecord, refused: refused);
       check();
       if ((await head())?.id != signed.id) {
         throw StateError(
@@ -497,7 +537,7 @@ class MeSync {
         );
       }
       await _clearConfirmedPending(pendingRecord);
-      if (recovered != null) {
+      if (recovered != null && !unfiled) {
         throw StateError(
           'Your previous Solo save was recovered alongside the desktop changes. Review your projects before making another change.',
         );
@@ -507,6 +547,20 @@ class MeSync {
     }
   }
 }
+
+/// Another client now owns workspace filings, so this one must not write them.
+class MeFilingClosed implements Exception {
+  /// Thrown before any filing reaches the relay.
+  const MeFilingClosed();
+
+  @override
+  String toString() =>
+      'Workspaces are now organized on desktop. Create this one there.';
+}
+
+bool _filingsDiffer(MeGroups a, MeGroups b) =>
+    jsonEncode(a.groups) != jsonEncode(b.groups) ||
+    !mapEquals(a.assignments, b.assignments);
 
 /// A verified Solo snapshot could not be retained for offline use.
 class MeCacheException implements Exception {

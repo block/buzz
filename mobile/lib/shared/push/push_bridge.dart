@@ -2,90 +2,14 @@ import 'dart:async';
 
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../community/community.dart';
 import '../deeplink/deep_link.dart';
 import '../relay/relay_provider.dart';
-import '../relay/app_lifecycle_provider.dart';
 import 'push_snapshot.dart';
 
 const _channel = MethodChannel('buzz/push');
-
-enum BuzzPushAuthorizationStatus {
-  notDetermined,
-  denied,
-  authorized,
-  provisional,
-  ephemeral,
-}
-
-typedef BuzzPushAuthorizationStatusReader =
-    Future<BuzzPushAuthorizationStatus> Function();
-typedef BuzzPushNotificationSettingsOpener = Future<bool> Function();
-
-final buzzPushAuthorizationStatusReaderProvider =
-    Provider<BuzzPushAuthorizationStatusReader>((ref) {
-      return readBuzzPushAuthorizationStatus;
-    });
-
-final buzzPushNotificationSettingsOpenerProvider =
-    Provider<BuzzPushNotificationSettingsOpener>((ref) {
-      return openBuzzPushNotificationSettings;
-    });
-
-final buzzPushAuthorizationStatusProvider =
-    AsyncNotifierProvider<
-      BuzzPushAuthorizationStatusNotifier,
-      BuzzPushAuthorizationStatus
-    >(BuzzPushAuthorizationStatusNotifier.new);
-
-class BuzzPushAuthorizationStatusNotifier
-    extends AsyncNotifier<BuzzPushAuthorizationStatus> {
-  @override
-  Future<BuzzPushAuthorizationStatus> build() async {
-    ref.listen(appLifecycleProvider, (previous, next) {
-      if (previous != AppLifecycleState.resumed &&
-          next == AppLifecycleState.resumed) {
-        unawaited(refresh());
-      }
-    });
-    return ref.read(buzzPushAuthorizationStatusReaderProvider)();
-  }
-
-  Future<void> refresh() async {
-    state = const AsyncLoading<BuzzPushAuthorizationStatus>();
-    state = await AsyncValue.guard(
-      ref.read(buzzPushAuthorizationStatusReaderProvider),
-    );
-  }
-}
-
-Future<BuzzPushAuthorizationStatus> readBuzzPushAuthorizationStatus() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) {
-    return BuzzPushAuthorizationStatus.authorized;
-  }
-  final raw = await _channel.invokeMethod<String>(
-    'notificationAuthorizationStatus',
-  );
-  return switch (raw) {
-    'notDetermined' => BuzzPushAuthorizationStatus.notDetermined,
-    'denied' => BuzzPushAuthorizationStatus.denied,
-    'authorized' => BuzzPushAuthorizationStatus.authorized,
-    'provisional' => BuzzPushAuthorizationStatus.provisional,
-    'ephemeral' => BuzzPushAuthorizationStatus.ephemeral,
-    _ => throw FormatException(
-      'Native push bridge returned unknown authorization status: $raw',
-    ),
-  };
-}
-
-Future<bool> openBuzzPushNotificationSettings() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return false;
-  return await _channel.invokeMethod<bool>('openNotificationSettings') ?? false;
-}
 
 /// Latest APNs registration state, including callbacks replayed by iOS after
 /// the Flutter method channel attaches.
@@ -123,6 +47,168 @@ MessageDeepLink? _pushNotificationLink(Object? arguments) {
     messageId: eventId,
     threadRootId: threadRootId as String?,
   );
+}
+
+/// A reply typed into an iOS notification, waiting to be sent.
+@immutable
+class BuzzNotificationReply {
+  const BuzzNotificationReply({
+    required this.id,
+    required this.text,
+    required this.link,
+    required this.senderPubkey,
+    required this.messageCreatedAt,
+    required this.deadline,
+    this.replyRootId,
+    this.inSolo = false,
+    this.recovered = false,
+    this.mayHavePublished = false,
+  });
+
+  final String id;
+  final String text;
+
+  /// The notified message, and where tapping its notification opens.
+  final MessageDeepLink link;
+
+  /// Author of the notified message, whom the reply mentions.
+  final String senderPubkey;
+
+  /// NIP-10 thread root of the notified message; null when it is top-level.
+  final String? replyRootId;
+
+  /// When the notified message was created, in Unix seconds.
+  final int messageCreatedAt;
+
+  /// When iOS stops waiting for the reply and reports it as not sent.
+  final DateTime deadline;
+
+  /// Whether the notification knew the message is in a Solo chat, which
+  /// takes no thread replies.
+  final bool inSolo;
+
+  /// Whether an earlier launch was given this reply and never finished it.
+  /// It is never sent again.
+  final bool recovered;
+
+  /// Whether that earlier launch may have published it.
+  final bool mayHavePublished;
+
+  static BuzzNotificationReply? fromArguments(Object? arguments) {
+    if (arguments is! Map) return null;
+    final link = _pushNotificationLink({
+      for (final key in const [
+        'eventId',
+        'communityId',
+        'channelId',
+        'threadRootId',
+      ])
+        if (arguments.containsKey(key)) key: arguments[key],
+    });
+    final id = arguments['id'];
+    final text = arguments['text'];
+    final sender = arguments['senderPubkey'];
+    final root = arguments['replyRootId'];
+    final createdAt = switch (arguments['messageCreatedAt']) {
+      final String value => int.tryParse(value),
+      _ => null,
+    };
+    final deadline = switch (arguments['deadline']) {
+      final String value => int.tryParse(value),
+      _ => null,
+    };
+    if (link == null ||
+        id is! String ||
+        id.isEmpty ||
+        text is! String ||
+        text.trim().isEmpty ||
+        sender is! String ||
+        sender.isEmpty ||
+        createdAt == null ||
+        createdAt <= 0 ||
+        deadline == null ||
+        (root != null && (root is! String || root.isEmpty))) {
+      return null;
+    }
+    return BuzzNotificationReply(
+      id: id,
+      text: text,
+      link: link,
+      senderPubkey: sender,
+      messageCreatedAt: createdAt,
+      deadline: DateTime.fromMillisecondsSinceEpoch(deadline),
+      replyRootId: root as String?,
+      inSolo: arguments['inSolo'] == 'true',
+      recovered: arguments['recovered'] == 'true',
+      mayHavePublished: arguments['publishing'] == 'true',
+    );
+  }
+}
+
+/// Bumped when iOS hands the app a notification reply to send.
+final notificationReplyAvailable = ValueNotifier<int>(0);
+
+/// Takes notification replies native iOS is holding for the app.
+Future<List<BuzzNotificationReply>> takePendingBuzzNotificationReplies() async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return const [];
+  try {
+    final raw = await _channel.invokeListMethod<dynamic>(
+      'takePendingNotificationReplies',
+    );
+    return [
+      for (final value in raw ?? const [])
+        ?BuzzNotificationReply.fromArguments(value),
+    ];
+  } on MissingPluginException {
+    return const [];
+  }
+}
+
+/// Tells iOS that a notification reply may be published from now on, so a
+/// relaunch never drafts or resends it. Returns once that is saved.
+Future<void> markBuzzNotificationReplyPublishing(String id) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    await _channel.invokeMethod<void>('markNotificationReplyPublishing', id);
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}
+
+/// Reports whether a notification reply was sent, so iOS clears the
+/// conversation's notifications or shows that it wasn't. [unknown] means it
+/// may have gone out; [draftThreadRootId] is the thread holding its draft,
+/// which the "Reply not sent" notification opens.
+Future<void> completeBuzzNotificationReply(
+  String id, {
+  required bool sent,
+  bool unknown = false,
+  String? draftThreadRootId,
+}) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    await _channel.invokeMethod<void>('completeNotificationReply', {
+      'id': id,
+      'sent': sent,
+      if (unknown) 'unknown': true,
+      'draftThreadRootId': ?draftThreadRootId,
+    });
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}
+
+/// Tells the iOS notification extension which community is selected; only
+/// its notifications offer Reply.
+Future<void> shareSelectedCommunityWithNotifications(
+  String? communityId,
+) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    await _channel.invokeMethod<void>('setSelectedCommunity', communityId);
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
 }
 
 /// Pulls a notification response that arrived before the Flutter method
@@ -260,20 +346,6 @@ void reportPushLeaseCleanupError(Object error, StackTrace stackTrace) {
   debugPrintStack(stackTrace: stackTrace);
 }
 
-Future<void> registerBuzzPushCommunitySnapshot(List<Community> communities) =>
-    _registerBuzzPushCommunitySnapshot(communities, strict: false);
-
-/// Writes the age-gate snapshot through a native path that must acknowledge
-/// both the app-group store and signing-key update.
-Future<void> registerBuzzPushCommunitySnapshotStrict(
-  List<Community> communities, {
-  required bool settleFence,
-}) => _registerBuzzPushCommunitySnapshot(
-  communities,
-  strict: true,
-  settleFence: settleFence,
-);
-
 /// Restores notification presentation without reading community storage.
 Future<void> restoreAgeRestrictedBuzzNotifications() async {
   if (defaultTargetPlatform != TargetPlatform.iOS) return;
@@ -286,11 +358,9 @@ Future<void> purgeAgeRestrictedBuzzNotifications() async {
   await _channel.invokeMethod<void>('purgeAgeRestrictedNotifications');
 }
 
-Future<void> _registerBuzzPushCommunitySnapshot(
-  List<Community> communities, {
-  required bool strict,
-  bool settleFence = false,
-}) async {
+Future<void> registerBuzzPushCommunitySnapshot(
+  List<Community> communities,
+) async {
   if (defaultTargetPlatform != TargetPlatform.iOS) return;
   try {
     final snapshots = [
@@ -320,17 +390,60 @@ Future<void> _registerBuzzPushCommunitySnapshot(
         // Native storage is fail-closed; malformed keys are never exported.
       }
     }
-    await _channel.invokeMethod<void>(
-      strict ? 'syncAgeGatePushSnapshot' : 'syncPushSnapshot',
-      {
-        'section': 'communities',
-        'communities': [for (final snapshot in snapshots) snapshot.toJson()],
-        'signingKeys': signingKeys,
-        if (strict) 'settleFence': settleFence,
-      },
-    );
+    await _channel.invokeMethod<void>('syncPushSnapshot', {
+      'section': 'communities',
+      'communities': [for (final snapshot in snapshots) snapshot.toJson()],
+      'signingKeys': signingKeys,
+    });
   } on MissingPluginException {
-    if (strict) rethrow;
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}
+
+/// Shares the organization account session with the iOS notification
+/// extension, or removes it when [credential] is null. Failures propagate to
+/// the account client, which owns retrying them. Organization relays
+/// enforce NIP-FI, so the extension needs the session to mint the assertion
+/// that lets it read the message a push refers to.
+Future<void> shareOrganizationSessionWithNotifications({
+  required Uri origin,
+  required String? credential,
+  required List<String> relayHosts,
+}) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    await _channel.invokeMethod<void>('syncPushSnapshot', {
+      'section': 'organizationSession',
+      'origin': origin.toString(),
+      'credential': credential,
+      'relayHosts': relayHosts,
+    });
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}
+
+/// Shares the hosted account session with the iOS notification extension, or
+/// removes it when [credential] is null, like
+/// [shareOrganizationSessionWithNotifications]. A hosted relay matches when its
+/// host is under [communityDomain] and equal to or under one of
+/// [relayDomains], as in `HostedRelayAuth`.
+Future<void> shareHostedSessionWithNotifications({
+  required Uri origin,
+  required String? credential,
+  required List<String> relayDomains,
+  required String communityDomain,
+}) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    await _channel.invokeMethod<void>('syncPushSnapshot', {
+      'section': 'hostedSession',
+      'origin': origin.toString(),
+      'credential': credential,
+      'relayDomains': relayDomains,
+      'communityDomain': communityDomain,
+    });
+  } on MissingPluginException {
     // Flutter tests and non-Runner embeddings do not install the native bridge.
   }
 }
@@ -355,6 +468,9 @@ void installBuzzPushMethodHandler() {
             ? message
             : 'APNs registration failed';
         debugPrint('APNs registration failed: ${apnsRegistrationError.value}');
+        return null;
+      case 'notificationReplyAvailable':
+        notificationReplyAvailable.value++;
         return null;
       case 'notificationOpened':
         final link = _pushNotificationLink(call.arguments);

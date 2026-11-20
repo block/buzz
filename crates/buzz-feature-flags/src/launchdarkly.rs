@@ -10,6 +10,9 @@ use crate::{BooleanFlag, EvaluationContext, FlagEvaluator, IntegerFlag};
 
 const COMMUNITY_CONTEXT_KIND: &str = "community";
 const PUBKEY_CONTEXT_KIND: &str = "pubkey";
+/// Kind and key of the single context that process-wide settings evaluate.
+const RELAY_CONTEXT_KIND: &str = "relay";
+const RELAY_CONTEXT_KEY: &str = "relay";
 
 /// Runtime inputs required to initialize a LaunchDarkly-backed evaluator.
 #[derive(Clone)]
@@ -145,6 +148,12 @@ impl LaunchDarklyEvaluator {
         }
     }
 
+    /// Whether the SDK has received flag data. Until it has, every evaluation
+    /// returns the flag's declared default.
+    pub fn initialized(&self) -> bool {
+        self.client.initialized()
+    }
+
     /// Gracefully stop background tasks and flush pending analytics events.
     ///
     /// This call blocks the current thread until pending analytics delivery
@@ -264,10 +273,16 @@ fn authority_has_explicit_port(authority: &Authority) -> bool {
 
 /// Build the LaunchDarkly context used for evaluation.
 ///
-/// The adapter always includes a `community` kind context and optionally adds a
-/// global `pubkey` kind context when an actor is present.
+/// A community evaluation always includes a `community` kind context and
+/// optionally adds a global `pubkey` kind context when an actor is present.
+/// The process context is a single `relay` kind context keyed `relay`.
 fn launchdarkly_context(context: &EvaluationContext) -> Result<Context, String> {
-    let mut community = ContextBuilder::new(context.community().to_string());
+    let Some(community_id) = context.community() else {
+        let mut relay = ContextBuilder::new(RELAY_CONTEXT_KEY);
+        relay.kind(RELAY_CONTEXT_KIND);
+        return relay.build();
+    };
+    let mut community = ContextBuilder::new(community_id.to_string());
     community.kind(COMMUNITY_CONTEXT_KIND);
     let community = community.build()?;
 
@@ -661,6 +676,34 @@ mod tests {
                 &EvaluationContext::for_community(community),
             ),
             13
+        );
+        evaluator.close();
+    }
+
+    #[tokio::test]
+    async fn process_context_targets_relay_kind_and_sees_updates_without_restart() {
+        let test_data = TestData::new();
+        test_data.update(
+            FlagBuilder::new("process-int")
+                .variations([FlagValue::from(0_i64), FlagValue::from(5_i64)])
+                .fallthrough_variation_index(0)
+                .variation_index_for_key(kind("relay"), "relay", 1),
+        );
+        let evaluator = started_evaluator(&test_data).await;
+        let flag = IntegerFlag::new("process-int", -1);
+        let context = EvaluationContext::for_process();
+
+        assert_eq!(evaluator.evaluate_int(flag, &context), 5);
+        test_data.update(
+            FlagBuilder::new("process-int")
+                .variations([FlagValue::from(0_i64), FlagValue::from(9_i64)])
+                .fallthrough_variation_index(0)
+                .variation_index_for_key(kind("relay"), "relay", 1),
+        );
+        assert_eq!(
+            evaluator.evaluate_int(flag, &context),
+            9,
+            "a running evaluator serves the updated value"
         );
         evaluator.close();
     }

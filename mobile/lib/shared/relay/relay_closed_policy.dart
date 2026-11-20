@@ -45,6 +45,16 @@ bool isRelayDeadlineError(Object error) {
       message.startsWith(_queryTimedOutPrefix);
 }
 
+/// Explicit access refusal; cached private history must not mask this error.
+bool isRelayAccessDenied(Object error) {
+  if (error is RelayException && error.statusCode == 403) return true;
+  final message = error.toString().toLowerCase().replaceFirst(
+    RegExp(r'^exception:\s*'),
+    '',
+  );
+  return message.startsWith('restricted:') || message.startsWith('blocked:');
+}
+
 /// Recovery policy for a relay `CLOSED` subscription message.
 enum RelayClosedClass {
   /// A transient failure that may recover when the same REQ is retried.
@@ -78,6 +88,26 @@ RelayClosedClass classifyRelayClosed(String message) {
     return RelayClosedClass.terminal;
   }
   return RelayClosedClass.retryable;
+}
+
+final _relayErrorPrefixPattern = RegExp(
+  r'^(?:exception:\s*)?(?:(?:invalid|blocked|restricted|duplicate|pow|unsupported|error|rate-limited|auth-required):\s*)?',
+  caseSensitive: false,
+);
+
+/// User-facing text for a failed relay publish or request.
+///
+/// Drops the Dart `Exception: ` wrapper and a leading NIP-01 machine prefix
+/// (`invalid: `, `blocked: `, `error: `, ...) so a relay refusal such as
+/// `invalid: an open channel named "Launch" already exists` reads as
+/// `An open channel named "Launch" already exists`.
+String relayErrorMessage(Object error) {
+  final text = error.toString().trim().replaceFirst(
+    _relayErrorPrefixPattern,
+    '',
+  );
+  if (text.isEmpty) return error.toString().trim();
+  return text[0].toUpperCase() + text.substring(1);
 }
 
 final _rateLimitRetryPattern = RegExp(r'retry in (\d+)s', caseSensitive: false);

@@ -6,10 +6,9 @@
 -- namespace, so nothing else may live under it.
 --
 -- Everything SchemaBot cannot apply lives in this directory's other
--- subdirectories: `types/`, `functions/`, `partitions/`, `triggers/` (including
--- write-fence attachment), `seeds/`, and the `community_write_fence.sql`
--- bootstrap. This file composes all of them into one fresh database, in load
--- order: types → functions → tables → partitions → triggers → seeds → fence.
+-- subdirectories: `types/`, `functions/`, `partitions/`, `triggers/`, and
+-- `seeds/`. This file composes them into one fresh database, in load order:
+-- types → functions → tables → partitions → triggers → seeds.
 --
 -- `./bin/pgschema apply --file schema/schema.sql` resolves the `\i` includes
 -- relative to this file (it refuses `..`). `pgschema` skips INSERTs and some
@@ -45,7 +44,7 @@
 --   2. No UNIQUE / PRIMARY KEY / FK on a scoped table is observable across
 --      communities: each leads with `community_id` (or, for child rows whose
 --      parent already pins the community, joins carry the community tuple).
---   3. `channels.community_id` is immutable (triggers/channels.sql; no UPDATE path).
+--   3. `channels.community_id` is immutable (application writers; no UPDATE path).
 --   4. Operator-global tables are named in the explicit allowlist, not implied.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -63,20 +62,6 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i types/channel_add_policy.sql
 
 -- functions
-\i functions/channels_community_id_immutable.sql
-\i functions/guard_channel_roster_snapshot.sql
-\i functions/events_created_at_floor_guard.sql
-\i functions/prevent_community_deletion_request_retargeting.sql
-\i functions/prevent_community_deletion_approval_removal.sql
-\i functions/protect_community_deletion_manifest_keys.sql
-\i functions/community_deletion_lock_key.sql
-\i functions/community_write_fence_excluded_table.sql
-\i functions/community_write_allowed.sql
-\i functions/assert_community_write_allowed.sql
-\i functions/enforce_community_write_fence.sql
-\i functions/enforce_community_tombstone.sql
-\i functions/attach_community_write_fence.sql
-\i functions/profile_name_fields.sql
 
 -- tables
 \i tables/public/communities.sql
@@ -122,7 +107,10 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i tables/public/push_gateway_delivery_request_replays.sql
 \i tables/public/replica_heartbeat.sql
 \i tables/public/community_deletion_requests.sql
+\i tables/public/entity_deletion_approvals.sql
 \i tables/public/entity_deletion_requests.sql
+\i tables/public/entity_deletion_stage_history.sql
+\i tables/public/user_deletion_fences.sql
 \i tables/public/community_deletion_approvals.sql
 \i tables/public/community_deletion_checkpoints.sql
 \i tables/public/community_deletion_manifest_keys.sql
@@ -144,43 +132,6 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i partitions/delivery_log.sql
 
 -- triggers
-\i triggers/channels.sql
-\i triggers/events.sql
-\i triggers/community_deletion_requests.sql
-\i triggers/community_deletion_approvals.sql
-\i triggers/community_deletion_manifest_keys.sql
-\i triggers/communities.sql
-\i triggers/api_tokens.sql
-\i triggers/archived_identities.sql
-\i triggers/audit_log.sql
-\i triggers/channel_members.sql
-\i triggers/community_bans.sql
-\i triggers/community_nip_fi_issuers.sql
-\i triggers/delivery_log.sql
-\i triggers/event_mentions.sql
-\i triggers/git_repo_names.sql
-\i triggers/join_policy_acceptances.sql
-\i triggers/moderation_actions.sql
-\i triggers/moderation_reports.sql
-\i triggers/parameterized_event_watermarks.sql
-\i triggers/personal_read_accounts.sql
-\i triggers/personal_read_frontiers.sql
-\i triggers/pubkey_allowlist.sql
-\i triggers/push_leases.sql
-\i triggers/push_match_queue.sql
-\i triggers/push_wake_outbox.sql
-\i triggers/reactions.sql
-\i triggers/relay_invites.sql
-\i triggers/relay_members.sql
-\i triggers/scheduled_workflow_fires.sql
-\i triggers/subscriptions.sql
-\i triggers/thread_metadata.sql
-\i triggers/users.sql
-\i triggers/workflow_approvals.sql
-\i triggers/workflow_runs.sql
-\i triggers/workflows.sql
-\i triggers/artifact_heads.sql
-\i triggers/artifact_revisions.sql
 
 -- seeds
 \i seeds/communities.sql
@@ -195,7 +146,10 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i seeds/push_gateway_delivery_request_replays.sql
 \i seeds/replica_heartbeat.sql
 \i seeds/community_deletion_requests.sql
+\i seeds/entity_deletion_approvals.sql
 \i seeds/entity_deletion_requests.sql
+\i seeds/entity_deletion_stage_history.sql
+\i seeds/user_deletion_fences.sql
 \i seeds/community_deletion_approvals.sql
 \i seeds/community_deletion_checkpoints.sql
 \i seeds/community_deletion_manifest_keys.sql
@@ -210,5 +164,10 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i seeds/relay_operator_audit.sql
 \i seeds/storage_accounting_snapshots.sql
 
--- Fence any community-scoped table that lacks an explicit attach.
-\i community_write_fence.sql
+\i tables/public/nip_fi_profile_heads.sql
+
+\i tables/public/community_auth_upgrades.sql
+\i seeds/community_auth_upgrades.sql
+
+\i tables/public/media_uploaders.sql
+\i tables/public/media_publications.sql

@@ -1,12 +1,10 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../crypto/nip44.dart';
 import '../relay/relay.dart';
-import 'accent_colors.dart';
 import 'community_theme_preference.dart';
 import 'community_theme_sync.dart';
 import 'theme_provider.dart';
@@ -107,44 +105,6 @@ class CommunityThemeNotifier extends Notifier<CommunityThemePreference> {
       ref.onDispose(manager.dispose);
     }
     return initial;
-  }
-
-  void setMode(ThemeMode mode) {
-    var theme = state.theme;
-    if (mode == ThemeMode.system) {
-      theme = schemeForAppearanceMode(theme, mode) ?? theme;
-    } else {
-      final effective = effectiveTheme(theme, mode);
-      if (effective != null) theme = effective.name;
-    }
-    _save(
-      CommunityThemePreference(
-        theme: theme,
-        accent: state.accent,
-        followSystem: mode == ThemeMode.system,
-      ),
-    );
-  }
-
-  void setTheme(String? theme) {
-    _save(
-      CommunityThemePreference(
-        theme: theme ?? defaultSchemeName,
-        accent: state.accent,
-        followSystem: state.followSystem,
-      ),
-    );
-  }
-
-  void setAccent(int index) {
-    if (index < 0 || index >= accentColors.length) return;
-    _save(
-      CommunityThemePreference(
-        theme: state.theme,
-        accent: accentColors[index].wireValue,
-        followSystem: state.followSystem,
-      ),
-    );
   }
 
   /// Persists a complete theme-picker selection as one durable snapshot.

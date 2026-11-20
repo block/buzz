@@ -1,0 +1,838 @@
+{
+  "cases": [
+    {
+      "name": "legacy team only",
+      "team": {
+        "version": 1,
+        "sections": [
+          {
+            "id": "eng",
+            "name": "Engineering",
+            "order": 0,
+            "icon": "🛠️"
+          },
+          {
+            "id": "ops",
+            "name": "Ops",
+            "order": 1
+          }
+        ],
+        "assignments": {
+          "c1": "eng",
+          "c2": "ops",
+          "c3": "gone"
+        }
+      },
+      "expected": {
+        "sections": [
+          {
+            "id": "eng",
+            "name": "Engineering",
+            "icon": "🛠️"
+          },
+          {
+            "id": "ops",
+            "name": "Ops"
+          }
+        ],
+        "assignments": {
+          "c1": "eng",
+          "c2": "ops"
+        },
+        "sectionKeys": [
+          "starred",
+          "group:eng",
+          "group:ops",
+          "solo",
+          "channels",
+          "forums",
+          "dms"
+        ]
+      }
+    },
+    {
+      "name": "legacy team and Solo merge Solo first",
+      "team": {
+        "version": 1,
+        "sections": [
+          {
+            "id": "eng",
+            "name": "Engineering",
+            "order": 0,
+            "icon": "🛠️"
+          },
+          {
+            "id": "ops",
+            "name": "Ops",
+            "order": 1
+          }
+        ],
+        "assignments": {
+          "c1": "eng",
+          "c2": "ops",
+          "c3": "gone"
+        }
+      },
+      "solo": {
+        "groups": [
+          {
+            "id": "proj",
+            "name": "Project",
+            "defaultTemplateId": "t1"
+          }
+        ],
+        "assignments": {
+          "s1": "proj",
+          "c2": "proj"
+        }
+      },
+      "expected": {
+        "sections": [
+          {
+            "id": "proj",
+            "name": "Project"
+          },
+          {
+            "id": "eng",
+            "name": "Engineering",
+            "icon": "🛠️"
+          },
+          {
+            "id": "ops",
+            "name": "Ops"
+          }
+        ],
+        "assignments": {
+          "c1": "eng",
+          "c2": "proj",
+          "s1": "proj"
+        },
+        "sectionKeys": [
+          "starred",
+          "group:proj",
+          "group:eng",
+          "group:ops",
+          "solo",
+          "channels",
+          "forums",
+          "dms"
+        ]
+      }
+    },
+    {
+      "name": "legacy id collision renames the team section",
+      "team": {
+        "version": 1,
+        "sections": [
+          {
+            "id": "eng",
+            "name": "Engineering",
+            "order": 0,
+            "icon": "🛠️"
+          },
+          {
+            "id": "ops",
+            "name": "Ops",
+            "order": 1
+          },
+          {
+            "id": "proj",
+            "name": "Team proj",
+            "order": 2
+          }
+        ],
+        "assignments": {
+          "c4": "proj"
+        }
+      },
+      "solo": {
+        "groups": [
+          {
+            "id": "proj",
+            "name": "Project",
+            "defaultTemplateId": "t1"
+          }
+        ],
+        "assignments": {
+          "s1": "proj",
+          "c2": "proj"
+        }
+      },
+      "expected": {
+        "sections": [
+          {
+            "id": "proj",
+            "name": "Project"
+          },
+          {
+            "id": "eng",
+            "name": "Engineering",
+            "icon": "🛠️"
+          },
+          {
+            "id": "ops",
+            "name": "Ops"
+          },
+          {
+            "id": "legacy-team:proj",
+            "name": "Team proj"
+          }
+        ],
+        "assignments": {
+          "c4": "legacy-team:proj",
+          "s1": "proj",
+          "c2": "proj"
+        },
+        "sectionKeys": [
+          "starred",
+          "group:proj",
+          "group:eng",
+          "group:ops",
+          "group:legacy-team:proj",
+          "solo",
+          "channels",
+          "forums",
+          "dms"
+        ]
+      }
+    },
+    {
+      "name": "unified record with default order",
+      "unified": {
+        "version": 1,
+        "sections": [
+          {
+            "id": "w1",
+            "name": "One",
+            "order": 1
+          },
+          {
+            "id": "w0",
+            "name": "Zero",
+            "icon": ":party:",
+            "order": 0
+          }
+        ],
+        "assignments": {
+          "c1": "w1",
+          "c9": "nope"
+        },
+        "sectionOrder": []
+      },
+      "team": {
+        "version": 1,
+        "sections": [],
+        "assignments": {}
+      },
+      "expected": {
+        "sections": [
+          {
+            "id": "w0",
+            "name": "Zero",
+            "icon": ":party:"
+          },
+          {
+            "id": "w1",
+            "name": "One"
+          }
+        ],
+        "assignments": {
+          "c1": "w1"
+        },
+        "sectionKeys": [
+          "starred",
+          "group:w0",
+          "group:w1",
+          "solo",
+          "channels",
+          "forums",
+          "dms"
+        ]
+      }
+    },
+    {
+      "name": "unified saved order keeps home keys and adds new workspaces",
+      "unified": {
+        "version": 1,
+        "sections": [
+          {
+            "id": "w0",
+            "name": "Zero",
+            "order": 0
+          },
+          {
+            "id": "w1",
+            "name": "One",
+            "order": 1
+          },
+          {
+            "id": "w2",
+            "name": "Two",
+            "order": 2
+          }
+        ],
+        "assignments": {},
+        "sectionOrder": [
+          "dms",
+          "group:w1",
+          "solo",
+          "pages",
+          "group:w0",
+          "channels"
+        ]
+      },
+      "team": {
+        "version": 1,
+        "sections": [],
+        "assignments": {}
+      },
+      "expected": {
+        "sections": [
+          {
+            "id": "w0",
+            "name": "Zero"
+          },
+          {
+            "id": "w1",
+            "name": "One"
+          },
+          {
+            "id": "w2",
+            "name": "Two"
+          }
+        ],
+        "assignments": {},
+        "sectionKeys": [
+          "starred",
+          "dms",
+          "group:w1",
+          "solo",
+          "group:w0",
+          "group:w2",
+          "channels",
+          "forums"
+        ]
+      }
+    },
+    {
+      "name": "unified saved order without workspaces puts new ones after starred",
+      "unified": {
+        "version": 1,
+        "sections": [
+          {
+            "id": "w0",
+            "name": "Zero",
+            "order": 0
+          }
+        ],
+        "assignments": {},
+        "sectionOrder": [
+          "channels",
+          "starred",
+          "dms"
+        ]
+      },
+      "team": {
+        "version": 1,
+        "sections": [],
+        "assignments": {}
+      },
+      "expected": {
+        "sections": [
+          {
+            "id": "w0",
+            "name": "Zero"
+          }
+        ],
+        "assignments": {},
+        "sectionKeys": [
+          "channels",
+          "starred",
+          "group:w0",
+          "dms",
+          "solo",
+          "forums"
+        ]
+      }
+    },
+    {
+      "name": "unified imports legacy sections and filings it has not seen",
+      "unified": {
+        "version": 1,
+        "sections": [
+          {
+            "id": "eng",
+            "name": "Renamed",
+            "order": 0
+          }
+        ],
+        "assignments": {
+          "c1": "eng"
+        },
+        "sectionOrder": []
+      },
+      "team": {
+        "version": 1,
+        "sections": [
+          {
+            "id": "eng",
+            "name": "Engineering",
+            "order": 0,
+            "icon": "🛠️"
+          },
+          {
+            "id": "ops",
+            "name": "Ops",
+            "order": 1
+          }
+        ],
+        "assignments": {
+          "c1": "ops",
+          "c2": "ops",
+          "c5": "eng"
+        }
+      },
+      "solo": {
+        "groups": [
+          {
+            "id": "proj",
+            "name": "Project",
+            "defaultTemplateId": "t1"
+          }
+        ],
+        "assignments": {
+          "s1": "proj",
+          "c2": "proj"
+        }
+      },
+      "expected": {
+        "sections": [
+          {
+            "id": "eng",
+            "name": "Renamed"
+          },
+          {
+            "id": "proj",
+            "name": "Project"
+          },
+          {
+            "id": "ops",
+            "name": "Ops"
+          }
+        ],
+        "assignments": {
+          "c1": "eng",
+          "c2": "proj",
+          "c5": "eng",
+          "s1": "proj"
+        },
+        "sectionKeys": [
+          "starred",
+          "group:eng",
+          "group:proj",
+          "group:ops",
+          "solo",
+          "channels",
+          "forums",
+          "dms"
+        ]
+      }
+    },
+    {
+      "name": "unified import skips removed sections and unfiled rows",
+      "unified": {
+        "version": 1,
+        "sections": [],
+        "assignments": {},
+        "sectionOrder": [],
+        "removedSections": [
+          "ops"
+        ],
+        "unfiled": [
+          "c1"
+        ]
+      },
+      "team": {
+        "version": 1,
+        "sections": [
+          {
+            "id": "eng",
+            "name": "Engineering",
+            "order": 0,
+            "icon": "🛠️"
+          },
+          {
+            "id": "ops",
+            "name": "Ops",
+            "order": 1
+          }
+        ],
+        "assignments": {
+          "c1": "eng",
+          "c2": "ops",
+          "c3": "gone"
+        }
+      },
+      "solo": {
+        "groups": [
+          {
+            "id": "proj",
+            "name": "Project",
+            "defaultTemplateId": "t1"
+          }
+        ],
+        "assignments": {
+          "s1": "proj",
+          "c2": "proj"
+        }
+      },
+      "expected": {
+        "sections": [
+          {
+            "id": "proj",
+            "name": "Project"
+          },
+          {
+            "id": "eng",
+            "name": "Engineering",
+            "icon": "🛠️"
+          }
+        ],
+        "assignments": {
+          "c2": "proj",
+          "s1": "proj"
+        },
+        "sectionKeys": [
+          "starred",
+          "group:proj",
+          "group:eng",
+          "solo",
+          "channels",
+          "forums",
+          "dms"
+        ]
+      }
+    },
+    {
+      "name": "unified import is closed",
+      "unified": {
+        "version": 1,
+        "sections": [
+          {
+            "id": "w",
+            "name": "W",
+            "order": 0
+          }
+        ],
+        "assignments": {},
+        "sectionOrder": [
+          "group:w"
+        ],
+        "legacyImportClosed": true
+      },
+      "team": {
+        "version": 1,
+        "sections": [
+          {
+            "id": "eng",
+            "name": "Engineering",
+            "order": 0,
+            "icon": "🛠️"
+          },
+          {
+            "id": "ops",
+            "name": "Ops",
+            "order": 1
+          }
+        ],
+        "assignments": {
+          "c1": "eng",
+          "c2": "ops",
+          "c3": "gone"
+        }
+      },
+      "solo": {
+        "groups": [
+          {
+            "id": "proj",
+            "name": "Project",
+            "defaultTemplateId": "t1"
+          }
+        ],
+        "assignments": {
+          "s1": "proj",
+          "c2": "proj"
+        }
+      },
+      "expected": {
+        "sections": [
+          {
+            "id": "w",
+            "name": "W"
+          }
+        ],
+        "assignments": {},
+        "sectionKeys": [
+          "starred",
+          "group:w",
+          "solo",
+          "channels",
+          "forums",
+          "dms"
+        ]
+      }
+    },
+    {
+      "name": "unified without Solo does not import",
+      "unified": {
+        "version": 1,
+        "sections": [],
+        "assignments": {},
+        "sectionOrder": []
+      },
+      "team": {
+        "version": 1,
+        "sections": [
+          {
+            "id": "eng",
+            "name": "Engineering",
+            "order": 0,
+            "icon": "🛠️"
+          },
+          {
+            "id": "ops",
+            "name": "Ops",
+            "order": 1
+          }
+        ],
+        "assignments": {
+          "c1": "eng",
+          "c2": "ops",
+          "c3": "gone"
+        }
+      },
+      "expected": {
+        "sections": [],
+        "assignments": {},
+        "sectionKeys": [
+          "starred",
+          "solo",
+          "channels",
+          "forums",
+          "dms"
+        ]
+      }
+    },
+    {
+      "name": "compact filings expand packed ids",
+      "unified": {
+        "version": 1,
+        "sections": [
+          {
+            "id": "w",
+            "name": "W",
+            "order": 0
+          }
+        ],
+        "filings": {
+          "w": [
+            "~qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo",
+            "~~tilde",
+            "plain"
+          ]
+        },
+        "packedUnfiled": [
+          "~ASNFZ4mrze8BI0VniavN7wEjRWeJq83vASNFZ4mrze8"
+        ],
+        "sectionOrder": []
+      },
+      "team": {
+        "version": 1,
+        "sections": [
+          {
+            "id": "x",
+            "name": "X",
+            "order": 0
+          }
+        ],
+        "assignments": {
+          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef": "x",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "x"
+        }
+      },
+      "solo": {
+        "groups": [],
+        "assignments": {}
+      },
+      "expected": {
+        "sections": [
+          {
+            "id": "w",
+            "name": "W"
+          },
+          {
+            "id": "x",
+            "name": "X"
+          }
+        ],
+        "assignments": {
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": "w",
+          "~tilde": "w",
+          "plain": "w"
+        },
+        "sectionKeys": [
+          "starred",
+          "group:w",
+          "group:x",
+          "solo",
+          "channels",
+          "forums",
+          "dms"
+        ]
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "wrong version",
+      "unified": {
+        "version": 2,
+        "sections": [],
+        "assignments": {},
+        "sectionOrder": []
+      }
+    },
+    {
+      "name": "missing section order",
+      "unified": {
+        "version": 1,
+        "sections": [],
+        "assignments": {}
+      }
+    },
+    {
+      "name": "duplicate section ids",
+      "unified": {
+        "version": 1,
+        "sections": [
+          {
+            "id": "a",
+            "name": "A",
+            "order": 0
+          },
+          {
+            "id": "a",
+            "name": "B",
+            "order": 1
+          }
+        ],
+        "assignments": {},
+        "sectionOrder": []
+      }
+    },
+    {
+      "name": "blank section name",
+      "unified": {
+        "version": 1,
+        "sections": [
+          {
+            "id": "a",
+            "name": " ",
+            "order": 0
+          }
+        ],
+        "assignments": {},
+        "sectionOrder": []
+      }
+    },
+    {
+      "name": "unknown section order key",
+      "unified": {
+        "version": 1,
+        "sections": [],
+        "assignments": {},
+        "sectionOrder": [
+          "forums",
+          "bogus"
+        ]
+      }
+    },
+    {
+      "name": "duplicate section order key",
+      "unified": {
+        "version": 1,
+        "sections": [],
+        "assignments": {},
+        "sectionOrder": [
+          "dms",
+          "dms"
+        ]
+      }
+    },
+    {
+      "name": "legacy import closed with tombstones",
+      "unified": {
+        "version": 1,
+        "sections": [],
+        "assignments": {},
+        "sectionOrder": [],
+        "legacyImportClosed": true,
+        "unfiled": [
+          "c"
+        ]
+      }
+    },
+    {
+      "name": "filings for an unknown workspace",
+      "unified": {
+        "version": 1,
+        "sections": [],
+        "filings": {
+          "w": [
+            "c"
+          ]
+        },
+        "sectionOrder": []
+      }
+    },
+    {
+      "name": "filings beside assignments",
+      "unified": {
+        "version": 1,
+        "sections": [
+          {
+            "id": "w",
+            "name": "W",
+            "order": 0
+          }
+        ],
+        "filings": {
+          "w": [
+            "c"
+          ]
+        },
+        "assignments": {},
+        "sectionOrder": []
+      }
+    },
+    {
+      "name": "non-canonical packed id",
+      "unified": {
+        "version": 1,
+        "sections": [
+          {
+            "id": "w",
+            "name": "W",
+            "order": 0
+          }
+        ],
+        "filings": {
+          "w": [
+            "~AAAA"
+          ]
+        },
+        "sectionOrder": []
+      }
+    }
+  ]
+}

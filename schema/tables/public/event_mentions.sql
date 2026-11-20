@@ -5,7 +5,7 @@
 -- mentions (Max, verified at event.rs:222).
 
 CREATE TABLE event_mentions (
-    community_id        UUID NOT NULL REFERENCES communities(id),
+    community_id        UUID NOT NULL,
     pubkey_hex          VARCHAR(64) NOT NULL,
     event_id            BYTEA NOT NULL,
     event_created_at    TIMESTAMPTZ NOT NULL,

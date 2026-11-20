@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math' as math;
 
 import 'package:file_selector/file_selector.dart' as file_selector;
@@ -8,15 +9,17 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:nostr/nostr.dart' as nostr;
-import 'package:pointycastle/digests/sha256.dart';
+import 'package:crypto/crypto.dart' as crypto;
 
 import 'animated_image_sanitizer.dart';
 import 'media_auth.dart';
 import 'mp4_fast_start.dart';
 import 'relay_provider.dart';
 import '../hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
 
 part 'media_upload/platform_bindings.dart';
 part 'media_upload/helpers.dart';
@@ -62,9 +65,6 @@ const _maxFileSizeBytes = 100 * 1024 * 1024; // 100MB
 const _mediaPolicyUploadMessage = "We couldn't prepare this image for upload.";
 
 typedef PickGalleryImage = Future<XFile?> Function();
-
-/// Captures one image with the system camera, or returns null when cancelled.
-typedef PickCameraImage = Future<XFile?> Function();
 
 /// Selects multiple gallery images for upload in picker order.
 typedef PickGalleryImages = Future<List<XFile>> Function();
@@ -239,7 +239,6 @@ class MediaUploadService {
   final String _baseUrl;
   final String? _nsec;
   final PickGalleryImage _pickGalleryImage;
-  final PickCameraImage? _pickCameraImage;
   final PickGalleryImages _pickGalleryImages;
   final PickGalleryVideo _pickGalleryVideo;
   final PickAttachmentFile? _pickAttachmentFile;
@@ -252,12 +251,12 @@ class MediaUploadService {
   final DateTime Function() _now;
   final http.Client _http;
   final bool _ownsHttpClient;
+  final HashChunkObserver? _onHashChunk;
 
   MediaUploadService({
     required String baseUrl,
     required String? nsec,
     required PickGalleryImage pickGalleryImage,
-    PickCameraImage? pickCameraImage,
     PickGalleryImages? pickGalleryImages,
     required PickGalleryVideo pickGalleryVideo,
     PickAttachmentFile? pickAttachmentFile,
@@ -269,10 +268,11 @@ class MediaUploadService {
     ReadClipboardImage? readClipboardImage,
     DateTime Function()? now,
     http.Client? httpClient,
+    @visibleForTesting HashChunkObserver? onHashChunk,
   }) : _baseUrl = baseUrl,
+       _onHashChunk = onHashChunk,
        _nsec = nsec,
        _pickGalleryImage = pickGalleryImage,
-       _pickCameraImage = pickCameraImage,
        _pickGalleryImages =
            pickGalleryImages ??
            (() async {
@@ -290,7 +290,7 @@ class MediaUploadService {
        _generateVideoPoster = generateVideoPoster ?? _generatePickedVideoPoster,
        _readClipboardImage = readClipboardImage ?? _readPlatformClipboardImage,
        _now = now ?? DateTime.now,
-       _http = httpClient ?? http.Client(),
+       _http = httpClient ?? newAppHttpClient(HttpTraffic.media),
        _ownsHttpClient = httpClient == null;
 
   void dispose() {
@@ -299,28 +299,12 @@ class MediaUploadService {
     }
   }
 
-  Future<BlobDescriptor?> pickAndUploadImage() async {
-    final pickedImage = await _pickGalleryImage();
-    if (pickedImage == null) return null;
-    return uploadImage(pickedImage);
-  }
-
   /// Opens the system photo library without uploading the selected image.
   Future<XFile?> pickGalleryImage() => _pickGalleryImage();
-
-  /// Opens the system camera without uploading the captured image.
-  Future<XFile?> captureImage() async => _pickCameraImage?.call();
 
   /// Produces displayable, sanitized image bytes before an upload begins.
   Future<Uint8List> prepareImageBytes(XFile image) async =>
       (await _prepareUploadImage(image)).bytes;
-
-  /// Opens the system camera and uploads the captured image.
-  Future<BlobDescriptor?> captureAndUploadImage() async {
-    final pickedImage = await _pickCameraImage?.call();
-    if (pickedImage == null) return null;
-    return uploadImage(pickedImage);
-  }
 
   /// Opens the system picker with multi-selection enabled.
   Future<List<XFile>> pickGalleryImages() => _pickGalleryImages();
@@ -347,17 +331,20 @@ class MediaUploadService {
         false;
   }
 
-  Future<BlobDescriptor> readAndUploadClipboardImage() async {
-    final image = await readClipboardImage();
-    if (image == null) throw Exception('Unable to read pasted image');
-    return uploadImage(image);
-  }
-
   /// Reads a clipboard image for composer preview before the user sends it.
   Future<XFile?> readClipboardImage() async {
     final bytes = await _readClipboardImage();
     if (bytes == null || bytes.isEmpty) return null;
     return XFile.fromData(bytes, name: 'Pasted image');
+  }
+
+  /// Extracts a local poster without starting playback or uploading the video.
+  Future<Uint8List?> prepareVideoPoster(String path) async {
+    try {
+      return await _generateVideoPoster(path);
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Opens the system gallery video picker.
@@ -459,12 +446,6 @@ class MediaUploadService {
     }
   }
 
-  Future<BlobDescriptor?> pickAndUploadVideo() async {
-    final pickedVideo = await pickGalleryVideo();
-    if (pickedVideo == null) return null;
-    return uploadVideo(pickedVideo);
-  }
-
   /// Packages a recorded AAC voice note in the canonical MP4 envelope.
   Future<BlobDescriptor> uploadVoiceNote(
     XFile voiceNote, {
@@ -544,12 +525,6 @@ class MediaUploadService {
     return descriptor.withFilename(_safeAttachmentFilename(pickedFile.name));
   }
 
-  Future<BlobDescriptor?> pickAndUploadFile() async {
-    final pickedFile = await pickAttachmentFile();
-    if (pickedFile == null) return null;
-    return uploadFile(pickedFile);
-  }
-
   Future<BlobDescriptor> uploadBytes(
     Uint8List bytes, {
     required String mimeType,
@@ -588,7 +563,7 @@ class MediaUploadService {
       throw Exception('unsupported file type: $mimeType');
     }
 
-    final sha256 = _sha256Hex(bytes);
+    final sha256 = await sha256HexInWorker(bytes, onChunk: _onHashChunk);
     var response = await _sendUploadRequest(
       bytes: bytes,
       mimeType: mimeType,
@@ -702,12 +677,11 @@ class MediaUploadService {
       ['server', serverAuthority],
     ];
 
-    return nostr.Event.from(
+    return signNostrEvent(
       kind: _uploadAuthKind,
       content: 'Upload buzz-media',
       tags: tags,
       secretKey: privkeyHex,
-      verify: false,
     );
   }
 
@@ -743,7 +717,7 @@ class MediaUploadService {
   _PreparedUploadImage _buildPreparedUploadImage(Uint8List bytes) {
     return _PreparedUploadImage(
       bytes: bytes,
-      mimeType: _detectImageMimeType(bytes),
+      mimeType: detectImageMimeType(bytes),
     );
   }
 
@@ -830,20 +804,97 @@ Stream<List<int>> _uploadByteStream(
   }
 }
 
-String _sha256Hex(Uint8List bytes) {
-  final digest = SHA256Digest().process(bytes);
-  return digest.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join();
+const _hashChunkSize = 1024 * 1024;
+
+/// A step in the chunked hash handoff: a chunk was sent to the worker, or the
+/// worker acknowledged it.
+enum HashChunkEvent { sent, acked }
+
+/// Observes the chunked hash handoff in order. [bytes] is the total sent so
+/// far for [HashChunkEvent.sent], and the total the worker reports having
+/// received for [HashChunkEvent.acked].
+typedef HashChunkObserver = void Function(HashChunkEvent event, int bytes);
+
+/// Hashes [bytes] on a worker isolate, one bounded chunk at a time, so the
+/// payload is never copied into the worker in full.
+@visibleForTesting
+Future<String> sha256HexInWorker(
+  Uint8List bytes, {
+  HashChunkObserver? onChunk,
+}) async {
+  final port = ReceivePort();
+  final messages = StreamIterator<Object?>(port);
+  Isolate? worker;
+  Future<Object> next() async {
+    if (!await messages.moveNext()) throw StateError('hash port closed');
+    final message = messages.current;
+    if (message == null) throw StateError('hash worker exited early');
+    if (message is List) throw RemoteError('${message[0]}', '${message[1]}');
+    return message;
+  }
+
+  try {
+    worker = await Isolate.spawn(
+      _hashChunks,
+      port.sendPort,
+      onError: port.sendPort,
+      onExit: port.sendPort,
+    );
+    final chunks = await next() as SendPort;
+    for (var start = 0; start < bytes.length; start += _hashChunkSize) {
+      final end = math.min(start + _hashChunkSize, bytes.length);
+      // fromList copies only this slice; sending the view itself would copy
+      // the whole backing buffer.
+      chunks.send(
+        TransferableTypedData.fromList([
+          Uint8List.sublistView(bytes, start, end),
+        ]),
+      );
+      onChunk?.call(HashChunkEvent.sent, end);
+      // ack: one chunk in flight at a time
+      final received = await next() as int;
+      onChunk?.call(HashChunkEvent.acked, received);
+    }
+    chunks.send(null);
+    return await next() as String;
+  } finally {
+    await messages.cancel();
+    port.close();
+    worker?.kill();
+  }
+}
+
+Future<void> _hashChunks(SendPort main) async {
+  final chunks = ReceivePort();
+  late crypto.Digest digest;
+  final input = crypto.sha256.startChunkedConversion(
+    ChunkedConversionSink<crypto.Digest>.withCallback(
+      (digests) => digest = digests.single,
+    ),
+  );
+  main.send(chunks.sendPort);
+  var received = 0;
+  await for (final chunk in chunks) {
+    if (chunk == null) break;
+    final bytes = (chunk as TransferableTypedData).materialize().asUint8List();
+    input.add(bytes);
+    received += bytes.length;
+    main.send(received);
+  }
+  input.close();
+  main.send(digest.toString());
 }
 
 String? _tryDetectImageMimeType(Uint8List bytes) {
   try {
-    return _detectImageMimeType(bytes);
+    return detectImageMimeType(bytes);
   } on Exception {
     return null;
   }
 }
 
-String _detectImageMimeType(Uint8List bytes) {
+/// Returns the image MIME type of [bytes] from their signature.
+String detectImageMimeType(Uint8List bytes) {
   if (_startsWith(bytes, const [0xff, 0xd8, 0xff])) {
     return 'image/jpeg';
   }

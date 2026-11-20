@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { after, before, beforeEach, test } from "node:test";
+import { after, afterEach, before, beforeEach, test } from "node:test";
 
 import { JSDOM } from "jsdom";
 
@@ -67,8 +67,12 @@ before(async () => {
 });
 
 after(() => dom.window.close());
+// Unmount after every test, not before the next one: a tree still mounted when
+// the window closes can be re-rendered by ThemeProvider's late palette update,
+// whose `requestAnimationFrame` on the closed window starts a jsdom interval
+// that nothing clears and that fills `paintLog` until the heap limit.
+afterEach(() => cleanup?.());
 beforeEach(() => {
-  cleanup?.();
   reducedMotion = false;
   paintLog.length = 0;
   dom.window.localStorage.clear();

@@ -67,9 +67,7 @@ mod postgres_tests {
             .await
             .ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .ok()?;
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -243,9 +241,7 @@ mod postgres_tests {
             .await
             .ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .ok()?;
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -344,9 +340,7 @@ mod postgres_tests {
             .await
             .ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .ok()?;
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -1190,9 +1184,7 @@ mod external_infra {
             if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
                 db.migrate().await.unwrap();
             }
-            let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .unwrap();
+            let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).unwrap();
             let pubsub = Arc::new(
                 buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                     .await
@@ -1344,6 +1336,9 @@ mod external_infra {
                 &self.owner.public_key().to_hex(),
                 &self.repo,
                 &super::super::super::cas_publish::ParentState::fresh(),
+                &super::super::super::cas_publish::snapshot_workspace(&source)
+                    .await
+                    .unwrap(),
                 limits(0),
             )
             .await
@@ -1652,6 +1647,21 @@ mod external_infra {
 
     #[tokio::test]
     #[ignore = "requires isolated Postgres, Redis and MinIO"]
+    async fn default_branch_direct_authority_survives_unrelated_tag() {
+        let f = Fixture::new().await;
+        // The signer has no role here and owns no announcer, so only the
+        // caller's own named-maintainer authority can grant this request.
+        let unrelated = Keys::generate();
+        let tag =
+            buzz_sdk::nip_oa::compute_auth_tag(&unrelated, &f.maintainer.public_key(), "").unwrap();
+        assert_eq!(
+            f.set(&f.maintainer, "main", Some(&tag)).await.0,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires isolated Postgres, Redis and MinIO"]
     async fn default_branch_delegation_and_revocation() {
         let f = Fixture::new().await;
         let agent = Keys::generate();
@@ -1672,24 +1682,24 @@ mod external_infra {
             StatusCode::FORBIDDEN
         );
         assert_eq!(f.set(&agent, "main", Some(&tag)).await.0, StatusCode::OK);
-        // Optional credential does not take direct authority away.
-        let absent_owner = Keys::generate();
+        // A human can administer a repository announced by their managed agent,
+        // recorded as its owner through the verified tag.
         let own_tag =
-            buzz_sdk::nip_oa::compute_auth_tag(&absent_owner, &f.owner.public_key(), "").unwrap();
+            buzz_sdk::nip_oa::compute_auth_tag(&f.member, &f.owner.public_key(), "").unwrap();
         assert_eq!(
             f.set(&f.owner, "legacy", Some(&own_tag)).await.0,
             StatusCode::OK
         );
-        // A human can administer a repository announced by their managed agent.
-        f.state
+        assert!(f
+            .state
             .db
-            .set_agent_owner(
+            .is_agent_owner(
                 f.tenant.community(),
                 f.owner.public_key().as_bytes(),
                 f.member.public_key().as_bytes(),
             )
             .await
-            .unwrap();
+            .unwrap());
         assert_eq!(f.set(&f.member, "main", None).await.0, StatusCode::OK);
         f.state
             .db
@@ -1808,6 +1818,9 @@ mod external_infra {
             &f.owner.public_key().to_hex(),
             &f.repo,
             &parent,
+            &super::super::super::cas_publish::snapshot_workspace(push.path())
+                .await
+                .unwrap(),
             limits(push.hydrated_bytes()),
         )
         .await;
@@ -1835,6 +1848,9 @@ mod external_infra {
             &f.owner.public_key().to_hex(),
             &f.repo,
             &parent,
+            &super::super::super::cas_publish::snapshot_workspace(push.path())
+                .await
+                .unwrap(),
             limits(push.hydrated_bytes()),
         )
         .await
@@ -1885,6 +1901,9 @@ mod external_infra {
             &f.owner.public_key().to_hex(),
             &f.repo,
             &parent,
+            &super::super::super::cas_publish::snapshot_workspace(push.path())
+                .await
+                .unwrap(),
             limits(push.hydrated_bytes()),
         )
         .await
@@ -1911,6 +1930,9 @@ mod external_infra {
             &f.owner.public_key().to_hex(),
             &f.repo,
             &parent,
+            &super::super::super::cas_publish::snapshot_workspace(push.path())
+                .await
+                .unwrap(),
             limits(push.hydrated_bytes()),
         )
         .await

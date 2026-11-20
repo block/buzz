@@ -16,7 +16,7 @@ use axum::http::{HeaderMap, Response};
 use buzz_auth::{DenialClass, NipFiMode, VerifiedAssertion, VerifyAssertion};
 
 use crate::nip_fi_core::{
-    evaluate_attached_assertion, http_denial, AdmissionDeadline, AssertionRejection, Communities,
+    community_denial, evaluate_attached_assertion, http_denial, AdmissionDeadline, Communities,
     ResolvedCommunity,
 };
 
@@ -31,6 +31,9 @@ pub(crate) enum NipFiUpgradeOutcome {
     /// its community, whose deadline enforce would re-check after the tenant
     /// lookup.
     Observed(VerifiedAssertion, ResolvedCommunity),
+    /// Shadow: enforce would refuse the upgrade. Its counted would-deny's
+    /// line waits for the connection's first verified AUTH key.
+    WouldDeny(crate::nip_fi_shadow::PendingLine),
     /// Enforcement active but assertion absent/rejected — return the HTTP
     /// denial response.
     Denied(Response<Body>),
@@ -39,10 +42,12 @@ pub(crate) enum NipFiUpgradeOutcome {
 /// The enforced and the shadow-observed assertion slots of an admitted upgrade,
 /// and the deadline to re-check immediately before accepting the socket. The
 /// observed assertion carries its own community, for [`observe_deadline`].
+/// Last is a shadow upgrade would-deny's unwritten line.
 pub(crate) type UpgradeAssertions = (
     Option<VerifiedAssertion>,
     Option<(VerifiedAssertion, ResolvedCommunity)>,
     AdmissionDeadline,
+    Option<crate::nip_fi_shadow::PendingLine>,
 );
 
 /// Shadow's re-check at the point enforce re-checks its deadline: a binding
@@ -58,24 +63,48 @@ pub(crate) fn observe_deadline(
     match community.deadline().check() {
         Ok(()) => Some((assertion, label)),
         Err(class) => {
-            let verdict = Err((crate::nip_fi_shadow::Stage::Deadline, class));
+            let verdict = Err(crate::nip_fi_shadow::WouldDeny::new(
+                crate::nip_fi_shadow::Stage::Deadline,
+                class,
+                crate::nip_fi_shadow::STALE,
+            )
+            .by(assertion.asserted_key()));
             crate::nip_fi_shadow::record_for(route.shadow_label(), label, verdict);
             None
         }
     }
 }
 
+/// Record enforce's refusal of an admitted upgrade whose community binding
+/// went stale during the tenant lookup.
+pub(crate) fn record_stale(
+    route: crate::nip_fi_session::NipFiWsRoute,
+    community: metrics::SharedString,
+    assertion: Option<&VerifiedAssertion>,
+    class: DenialClass,
+) {
+    let deny = crate::nip_fi_shadow::WouldDeny::new(
+        crate::nip_fi_shadow::Stage::Deadline,
+        class,
+        crate::nip_fi_shadow::STALE,
+    );
+    let key = assertion.and_then(VerifiedAssertion::asserted_key);
+    crate::nip_fi_shadow::record_denial(route.shadow_label(), community, deny.by(key));
+}
+
 impl NipFiUpgradeOutcome {
     /// The enforced and the shadow-observed assertion, or the denial response.
     pub(crate) fn into_assertions(self) -> Result<UpgradeAssertions, Box<Response<Body>>> {
         match self {
-            Self::NotRequired => Ok((None, None, AdmissionDeadline::default())),
-            Self::Admitted(assertion, deadline) => Ok((Some(assertion), None, deadline)),
+            Self::NotRequired => Ok((None, None, AdmissionDeadline::default(), None)),
+            Self::Admitted(assertion, deadline) => Ok((Some(assertion), None, deadline, None)),
             Self::Observed(assertion, community) => Ok((
                 None,
                 Some((assertion, community)),
                 AdmissionDeadline::default(),
+                None,
             )),
+            Self::WouldDeny(line) => Ok((None, None, AdmissionDeadline::default(), Some(line))),
             Self::Denied(response) => Err(Box::new(response)),
         }
     }
@@ -95,6 +124,7 @@ impl NipFiUpgradeOutcome {
 /// denied" would be false. "authorization unavailable, retry after repair" is
 /// the accurate and correct signal. [FI-TRACE-DENIAL-ORACLE]
 pub(crate) async fn check_nip_fi_at_upgrade<'a>(
+    slot: &crate::access::AccessSlot,
     route: crate::nip_fi_session::NipFiWsRoute,
     headers: &HeaderMap,
     communities: impl Into<Communities<'a>>,
@@ -108,47 +138,67 @@ pub(crate) async fn check_nip_fi_at_upgrade<'a>(
         if mode.observes_only() {
             let community = communities.resolve(headers).await;
             let verdict = match &community {
-                Err(class) => Err((crate::nip_fi_shadow::Stage::Community, *class)),
-                Ok(binding) => {
-                    evaluate_attached_assertion(headers, binding, verifier).map_err(|rejection| {
-                        (
-                            crate::nip_fi_shadow::Stage::Assertion,
-                            rejection.denial_class(),
-                        )
-                    })
-                }
+                Err(class) => Err(crate::nip_fi_shadow::WouldDeny::new(
+                    crate::nip_fi_shadow::Stage::Community,
+                    *class,
+                    crate::nip_fi_shadow::UNRESOLVED,
+                )),
+                Ok(binding) => evaluate_attached_assertion(headers, binding, verifier)
+                    .map_err(crate::nip_fi_shadow::WouldDeny::assertion),
             };
             match (verdict, community) {
                 (Ok(assertion), Ok(community)) => {
                     return NipFiUpgradeOutcome::Observed(assertion, community)
                 }
                 (verdict, community) => {
+                    let label = crate::nip_fi_shadow::label(&community);
                     let verdict = verdict.map(drop);
-                    crate::nip_fi_shadow::record(route.shadow_label(), &community, verdict);
+                    if let Some(line) =
+                        crate::nip_fi_shadow::record_pending(route.shadow_label(), label, verdict)
+                    {
+                        return NipFiUpgradeOutcome::WouldDeny(line);
+                    }
                 }
             }
         }
         return NipFiUpgradeOutcome::NotRequired;
     }
 
+    use crate::access::{AuthMethod, AuthReason, AuthResult};
+    slot.method(AuthMethod::NipFi);
     if mode.denies_unconditionally() {
+        slot.finish(AuthResult::Denied(AuthReason::AuthorizationUnavailable));
         return NipFiUpgradeOutcome::Denied(http_denial(DenialClass::AuthorizationUnavailable));
     }
 
     // Enforce mode: resolve the Host's community, then validate the assertion.
-    let community = match communities.resolve(headers).await {
-        Ok(community) => community,
-        Err(class) => return NipFiUpgradeOutcome::Denied(http_denial(class)),
-    };
-    match evaluate_attached_assertion(headers, &community, verifier) {
-        Ok(assertion) => NipFiUpgradeOutcome::Admitted(assertion, community.deadline()),
-        Err(rejection) => {
-            if let AssertionRejection::Verifier(err) = rejection {
-                tracing::debug!(code = err.code(), "nip-fi assertion denied at upgrade");
+    // Every refusal is recorded as shadow records its would-deny; the
+    // refused upgrade never reaches AUTH, so its line is `absent`.
+    let community = communities.resolve(headers).await;
+    let label = crate::nip_fi_shadow::label(&community);
+    let deny = match community {
+        Ok(community) => match evaluate_attached_assertion(headers, &community, verifier) {
+            Ok(assertion) => return NipFiUpgradeOutcome::Admitted(assertion, community.deadline()),
+            Err(rejection) => {
+                slot.finish(rejection.auth_result());
+                crate::nip_fi_shadow::WouldDeny::assertion(rejection)
             }
-            NipFiUpgradeOutcome::Denied(http_denial(rejection.denial_class()))
+        },
+        Err(class) => {
+            slot.finish(AuthResult::Failed("community_unresolved"));
+            crate::nip_fi_shadow::WouldDeny::new(
+                crate::nip_fi_shadow::Stage::Community,
+                class,
+                crate::nip_fi_shadow::UNRESOLVED,
+            )
         }
-    }
+    };
+    crate::nip_fi_shadow::record_denial(route.shadow_label(), label, deny);
+    NipFiUpgradeOutcome::Denied(if deny.stage == crate::nip_fi_shadow::Stage::Community {
+        community_denial(communities, headers, deny.class)
+    } else {
+        http_denial(deny.class)
+    })
 }
 
 #[cfg(test)]
@@ -427,6 +477,7 @@ mod tests {
             axum::http::HeaderValue::from_static("Bearer eyJhbGciOiJFUzI1NiJ9.e30.sig"),
         );
         let outcome = check_nip_fi_at_upgrade(
+            &crate::access::AccessSlot::default(),
             ROOT,
             &h,
             &communities(),
@@ -449,6 +500,7 @@ mod tests {
     fn enforce_missing_header_returns_401_exact_bytes() {
         let headers = host_headers();
         let outcome = check_nip_fi_at_upgrade(
+            &crate::access::AccessSlot::default(),
             ROOT,
             &headers,
             &communities(),
@@ -481,6 +533,7 @@ mod tests {
     fn off_mode_returns_not_required() {
         let headers = host_headers(); // no assertion header
         let outcome = check_nip_fi_at_upgrade(
+            &crate::access::AccessSlot::default(),
             ROOT,
             &headers,
             &communities(),
@@ -508,9 +561,34 @@ mod tests {
     //      status assertion panics (expected 503, got 403).
     //   B) Body assertion: change the body text → panics.
     #[test]
+    fn deny_protected_logs_one_denied_auth_line() {
+        let headers = host_headers();
+        let slot = crate::access::AccessSlot::default();
+        let (_, out) = crate::access::tests::capture(|| {
+            check_nip_fi_at_upgrade(
+                &slot,
+                ROOT,
+                &headers,
+                &communities(),
+                None,
+                buzz_auth::NipFiMode::DenyProtected,
+            )
+            .now_or_never()
+            .expect("env resolution never waits");
+            slot.emit("/", 503);
+        });
+        let lines = out.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["event"], "http");
+        assert_eq!(lines[0]["outcome"], "denied");
+        assert_eq!(lines[0]["reason"], "authorization_unavailable");
+    }
+
+    #[test]
     fn deny_protected_returns_503_authorization_unavailable() {
         let headers = host_headers();
         let outcome = check_nip_fi_at_upgrade(
+            &crate::access::AccessSlot::default(),
             ROOT,
             &headers,
             &communities(),
@@ -545,6 +623,100 @@ mod tests {
         }
     }
 
+    // The WebSocket upgrade binds `nostr_owner_pubkey` to the token type with
+    // the real verifier: an agent token with a valid owner is admitted and
+    // carries that owner into the session (where AUTH applies owner bans);
+    // an agent token without one, a human token carrying one (valid or null),
+    // an agent token under an `at+jwt` policy and an unknown type are
+    // refused `evidence rejected`. Every token carries valid `at+jwt` claims,
+    // so the `at+jwt` case is refused only for its type. Mutations: accept
+    // `nip-fi-agent+jwt` under `at+jwt`, skip the owner rule, or accept any
+    // `nip-fi*` type in `enforce_token_type` → RED.
+    #[test]
+    fn upgrade_binds_the_owner_claim_to_the_agent_token_type() {
+        use crate::nip_fi_core::test_support::{
+            assertion_verifier, at_jwt_class, communities_for, sign_assertion, TEST_ISSUER,
+        };
+        use buzz_auth::TokenClass::DedicatedNipFi;
+
+        let (agent, owner) = (nostr::Keys::generate(), nostr::Keys::generate());
+        let (agent_hex, owner_hex) = (agent.public_key().to_hex(), owner.public_key().to_hex());
+        let owner_claim = || Some(serde_json::Value::from(owner_hex.clone()));
+        let cases = [
+            (
+                "agent with owner",
+                DedicatedNipFi,
+                "nip-fi-agent+jwt",
+                owner_claim(),
+                true,
+            ),
+            (
+                "agent without owner",
+                DedicatedNipFi,
+                "nip-fi-agent+jwt",
+                None,
+                false,
+            ),
+            (
+                "human with owner",
+                DedicatedNipFi,
+                "nip-fi+jwt",
+                owner_claim(),
+                false,
+            ),
+            (
+                "human with null owner",
+                DedicatedNipFi,
+                "nip-fi+jwt",
+                Some(serde_json::Value::Null),
+                false,
+            ),
+            (
+                "agent under at+jwt",
+                at_jwt_class(),
+                "nip-fi-agent+jwt",
+                owner_claim(),
+                false,
+            ),
+            (
+                "unknown type",
+                DedicatedNipFi,
+                "nip-fi-agent",
+                owner_claim(),
+                false,
+            ),
+        ];
+        for (case, token_class, typ, claim, admitted) in cases {
+            let verifier = assertion_verifier(token_class);
+            let headers = headers_with(&format!(
+                "Bearer {}",
+                sign_assertion(typ, &agent_hex, claim)
+            ));
+            let outcome = check_nip_fi_at_upgrade(
+                &crate::access::AccessSlot::default(),
+                ROOT,
+                &headers,
+                &communities_for(&[TEST_ISSUER]),
+                Some(&verifier),
+                NipFiMode::Enforce,
+            )
+            .now_or_never()
+            .expect("env resolution never waits");
+            if admitted {
+                let NipFiUpgradeOutcome::Admitted(assertion, _) = outcome else {
+                    panic!("{case}: expected admission");
+                };
+                assert_eq!(assertion.owner(), Some(owner.public_key()), "{case}");
+            } else {
+                assert_eq!(
+                    denied_parts(outcome),
+                    (StatusCode::FORBIDDEN, b"evidence rejected\n".to_vec()),
+                    "{case}"
+                );
+            }
+        }
+    }
+
     // Pins: upgrade maps verifier errors through `VerifierError::denial_class`
     // (503 for unavailable dependencies, 403 evidence rejected otherwise).
     // Mutation: mapping every verifier error to EvidenceRejected fails the
@@ -568,6 +740,7 @@ mod tests {
             let verifier = ScriptedVerifier::new(Err(err));
             let (got_status, got_body) = denied_parts(
                 check_nip_fi_at_upgrade(
+                    &crate::access::AccessSlot::default(),
                     ROOT,
                     &headers_with("Bearer a.b.c"),
                     &communities(),
@@ -588,6 +761,7 @@ mod tests {
     fn characterize_upgrade_transport_precedes_verifier_presence() {
         let (status, body) = denied_parts(
             check_nip_fi_at_upgrade(
+                &crate::access::AccessSlot::default(),
                 ROOT,
                 &headers_with("junk"),
                 &communities(),
@@ -608,6 +782,7 @@ mod tests {
     fn characterize_upgrade_admits_claimless_assertion_for_later_pairing() {
         let verifier = ScriptedVerifier::new(Ok(None));
         match check_nip_fi_at_upgrade(
+            &crate::access::AccessSlot::default(),
             ROOT,
             &headers_with("Bearer a.b.c"),
             &communities(),
@@ -634,6 +809,7 @@ mod tests {
         let headers = headers_with("Bearer a.b.c");
         assert!(matches!(
             check_nip_fi_at_upgrade(
+                &crate::access::AccessSlot::default(),
                 ROOT,
                 &headers,
                 &communities(),
@@ -646,6 +822,7 @@ mod tests {
         ));
         let (status, _) = denied_parts(
             check_nip_fi_at_upgrade(
+                &crate::access::AccessSlot::default(),
                 ROOT,
                 &headers,
                 &communities(),
@@ -669,6 +846,7 @@ mod tests {
         let headers = headers_with("Bearer a.b.c");
         let check = || {
             check_nip_fi_at_upgrade(
+                &crate::access::AccessSlot::default(),
                 ROOT,
                 &headers,
                 &communities(),
@@ -678,11 +856,12 @@ mod tests {
             .now_or_never()
             .expect("env resolution never waits")
         };
-        let Ok((None, Some(_), _)) = check().into_assertions() else {
+        let Ok((None, Some(_), _, None)) = check().into_assertions() else {
             panic!("a passing shadow assertion is observed, never enforced");
         };
         assert_eq!(verifier.calls(), 1, "shadow must evaluate the assertion");
-        let Ok((None, None, _)) = check_nip_fi_at_upgrade(
+        let Ok((None, None, _, Some(_))) = check_nip_fi_at_upgrade(
+            &crate::access::AccessSlot::default(),
             ROOT,
             &host_headers(),
             &communities(),
@@ -710,6 +889,7 @@ mod tests {
                 for headers in [host_headers(), headers_with("Bearer a.b.c")] {
                     let verifier = Some(&rejecting as &dyn VerifyAssertion);
                     let outcome = check_nip_fi_at_upgrade(
+                        &crate::access::AccessSlot::default(),
                         route,
                         &headers,
                         &communities(),
@@ -718,7 +898,7 @@ mod tests {
                     )
                     .now_or_never()
                     .expect("env resolution never waits");
-                    assert!(matches!(outcome, NipFiUpgradeOutcome::NotRequired));
+                    assert!(matches!(outcome, NipFiUpgradeOutcome::WouldDeny(_)));
                 }
             }
         });
@@ -729,5 +909,53 @@ mod tests {
             "ws assertion/rejected",
         ];
         assert_eq!(records, expected);
+    }
+
+    // Each enforce refusal is counted once with its stage and written once
+    // as `absent`: the refused upgrade never reaches AUTH. An admit records
+    // nothing. Mutations: dropping either `record_denial` path, or recording
+    // an admit → RED.
+    #[tokio::test(flavor = "current_thread")]
+    async fn enforce_upgrade_denials_are_recorded_once_as_absent() {
+        use crate::nip_fi_core::test_support::TEST_COMMUNITY_URI;
+        use crate::nip_fi_shadow::tests::{enforce_count, enforce_records};
+        let map = communities();
+        let pass = ScriptedVerifier::new(Ok(None));
+        let ((), lines, counts) = enforce_records(async {
+            let mode = buzz_auth::NipFiMode::Enforce;
+            let unmapped = HeaderMap::new();
+            let missing = host_headers();
+            let attached = headers_with("Bearer a.b.c");
+            for (headers, verifier) in [
+                (&unmapped, None),
+                (&missing, None),
+                (&attached, Some(&pass)),
+            ] {
+                let verifier = verifier.map(|v| v as &dyn VerifyAssertion);
+                let slot = crate::access::AccessSlot::default();
+                let _ = check_nip_fi_at_upgrade(&slot, ROOT, headers, &map, verifier, mode).await;
+            }
+        })
+        .await;
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines.iter().all(|l| l.contains("pubkey=\"absent\"")),
+            "{lines:?}"
+        );
+        assert!(
+            lines[0].contains("reason=\"community_unresolved\""),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].contains("reason=\"missing_assertion\""),
+            "{lines:?}"
+        );
+        assert_eq!(
+            counts,
+            [
+                enforce_count(["ws", "assertion", "missing", TEST_COMMUNITY_URI]),
+                enforce_count(["ws", "community", "unavailable", "unmapped"]),
+            ]
+        );
     }
 }

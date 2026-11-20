@@ -161,7 +161,7 @@ void main() {
       expect(dmRow.latestActivityAt, 30);
     });
 
-    test('thread replies inside a DM still group by thread root', () {
+    test('thread replies inside a DM stay in the DM conversation', () {
       bool isDm(String channelId) => channelId == 'dm1';
       final rows = buildInboxItems([
         item(id: threadIdInboxTop, createdAt: 10, channelId: 'dm1'),
@@ -173,11 +173,9 @@ void main() {
         ),
       ], isDmChannel: isDm);
 
-      expect(rows, hasLength(2));
-      expect(rows.map((r) => r.conversationId).toSet(), {
-        'dm:dm1',
-        threadIdInboxTop,
-      });
+      expect(rows, hasLength(1));
+      expect(rows.single.conversationId, 'dm:dm1');
+      expect(rows.single.groupItems, hasLength(2));
     });
 
     test('categories are priority sorted and set isActionRequired', () {
@@ -274,6 +272,39 @@ void main() {
       );
     });
 
+    test('DM filter matches DM conversations, including thread replies', () {
+      bool isDm(String channelId) => channelId == 'dm1';
+      InboxItem row(FeedItem feedItem) =>
+          buildInboxItems([feedItem], isDmChannel: isDm).single;
+      expect(
+        matchesInboxFilter(
+          row(item(id: threadIdInboxA, channelId: 'dm1')),
+          InboxFilter.dm,
+        ),
+        isTrue,
+      );
+      expect(
+        matchesInboxFilter(
+          row(
+            item(
+              id: threadIdInboxA,
+              channelId: 'dm1',
+              tags: replyTags(threadIdInboxR, threadIdInboxP),
+            ),
+          ),
+          InboxFilter.dm,
+        ),
+        isTrue,
+      );
+      expect(
+        matchesInboxFilter(
+          row(item(id: threadIdInboxA, channelId: 'general')),
+          InboxFilter.dm,
+        ),
+        isFalse,
+      );
+    });
+
     test('category filters match their category', () {
       final mention = rowOf(item(id: threadIdInboxA, category: 'mention'));
       expect(matchesInboxFilter(mention, InboxFilter.mention), isTrue);
@@ -351,24 +382,32 @@ void main() {
       );
       expect(label.text, 'Thread in');
     });
-  });
 
-  group('inboxDayLabel', () {
-    final now = DateTime(2026, 7, 25, 12);
-    int at(DateTime d) => d.millisecondsSinceEpoch ~/ 1000;
-
-    test('today / yesterday / weekday / date buckets', () {
-      expect(inboxDayLabel(at(DateTime(2026, 7, 25, 9)), now: now), 'Today');
-      expect(
-        inboxDayLabel(at(DateTime(2026, 7, 24, 9)), now: now),
-        'Yesterday',
+    test('labels the displayed event, not an older mention in its thread', () {
+      final row = buildInboxItems([
+        item(
+          id: threadIdInboxA,
+          createdAt: 100,
+          category: 'mention',
+          tags: replyTags(threadIdInboxR, threadIdInboxP),
+        ),
+        item(
+          id: threadIdInboxB,
+          createdAt: 200,
+          category: 'activity',
+          pubkey: 'pk2',
+          tags: replyTags(threadIdInboxR, threadIdInboxA),
+        ),
+      ]).single;
+      final label = inboxTypeLabel(
+        row,
+        channelName: 'general',
+        isDm: false,
+        senderLabel: 'Bob',
       );
-      expect(inboxDayLabel(at(DateTime(2026, 7, 21, 9)), now: now), 'Tuesday');
-      expect(inboxDayLabel(at(DateTime(2026, 1, 2)), now: now), 'Jan 2');
-      expect(
-        inboxDayLabel(at(DateTime(2025, 12, 31)), now: now),
-        'Dec 31, 2025',
-      );
+      expect(row.item.id, threadIdInboxB);
+      expect(label.text, 'Thread in');
+      expect(matchesInboxFilter(row, InboxFilter.mention), isTrue);
     });
   });
 }

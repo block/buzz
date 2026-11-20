@@ -706,8 +706,8 @@ fn present_keyring_with_mismatched_file_adopts_file_key_marker_failure_keeps_fil
     // so removing write permission on the dir blocks the write entirely.
     let dir_perms_orig = std::fs::metadata(dir.path()).unwrap().permissions();
     let mut dir_perms_ro = dir_perms_orig.clone();
-    // unknown_lints: the clippy lint below doesn't exist yet in the pinned
-    // 1.95 toolchain but does in CI's newer clippy — allow both worlds.
+    // unknown_lints: keep this compiling on clippy versions that predate the
+    // lint below, so the pinned toolchain and any newer clippy both accept it.
     #[allow(unknown_lints)]
     #[allow(clippy::permissions_set_readonly_value)]
     dir_perms_ro.set_readonly(true);

@@ -8,7 +8,7 @@ use std::sync::{
 use crate::{
     apns::{DeliveryAttempt, DeliveryOutcome, PushTransport},
     app_attest::AppAttestVerifier,
-    authority::{AuthorityStore, Delegation, MemoryAuthorityStore, NewInstallation},
+    authority::{AuthorityStore, Delegation, MemoryAuthorityStore, NewInstallation, Platform},
     grant::{GrantKey, GrantKeyring},
     http::ApplicationRuntime,
     model::EndpointGrant,
@@ -26,8 +26,11 @@ use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 use uuid::Uuid;
 
-const DIRECT_URL: &str = "http://push.example:8080/v1/deliveries/apns";
-const FORWARDED_URL: &str = "https://push.example/v1/deliveries/apns";
+const DIRECT_URL: &str = "http://push.example:8080/v1/deliveries";
+const FORWARDED_URL: &str = "https://push.example/v1/deliveries";
+// The APNs-named alias of the delivery route.
+const APNS_DIRECT_URL: &str = "http://push.example:8080/v1/deliveries/apns";
+const APNS_FORWARDED_URL: &str = "https://push.example/v1/deliveries/apns";
 
 struct TestTransport(Arc<AtomicUsize>);
 #[async_trait::async_trait]
@@ -54,6 +57,7 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
     authority
         .create_installation(
             NewInstallation {
+                platform: Platform::Ios,
                 id: installation_id,
                 app_attest_key_id: vec![3; 32],
                 app_attest_public_key: vec![4; 65],
@@ -107,11 +111,15 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
                 .unwrap(),
             ),
             transport: Arc::new(TestTransport(sends.clone())),
+            android: None,
         }),
         max_grant_lifetime_seconds: 600,
         max_installation_lifetime_seconds: 600,
         endpoint_quota_window_seconds: 60,
         endpoint_quota_max_deliveries: 10,
+        signed_calls: Arc::new(crate::signed_call_limiter::SignedCallLimiter::new(
+            60, 1_000,
+        )),
         now,
         accepting: Arc::new(AtomicBool::new(true)),
     });
@@ -153,14 +161,20 @@ fn request(url: &str, proto: Option<&str>, auth: String, body: Vec<u8>) -> Reque
 
 #[tokio::test]
 async fn delivery_binds_path_not_origin_or_forwarding_headers() {
-    for signed_url in [
-        DIRECT_URL,
-        FORWARDED_URL,
-        "https://other.example:8443/v1/deliveries/apns",
+    for (request_url, signed_url) in [
+        (DIRECT_URL, DIRECT_URL),
+        (DIRECT_URL, FORWARDED_URL),
+        (DIRECT_URL, "https://other.example:8443/v1/deliveries"),
+        (APNS_DIRECT_URL, APNS_DIRECT_URL),
+        (APNS_DIRECT_URL, APNS_FORWARDED_URL),
+        (
+            APNS_DIRECT_URL,
+            "https://other.example:8443/v1/deliveries/apns",
+        ),
     ] {
         let (app, keys, body, sends) = fixture().await;
         let auth = signed_header(&keys, signed_url, "POST", &body);
-        let mut request = request(DIRECT_URL, Some("invalid,https"), auth, body);
+        let mut request = request(request_url, Some("invalid,https"), auth, body);
         request.headers_mut().remove("host");
         request
             .headers_mut()
@@ -179,12 +193,45 @@ async fn delivery_binds_path_not_origin_or_forwarding_headers() {
 
 #[tokio::test]
 async fn signature_is_bound_to_delivery_path_method_and_body() {
-    for (url, method, change_body) in [
-        ("https://push.example/v1/other", "POST", false),
-        ("https://push.example/v1/deliveries/apns/", "POST", false),
-        ("https://push.example/v1/deliveries/%61pns", "POST", false),
-        (DIRECT_URL, "GET", false),
-        (DIRECT_URL, "POST", true),
+    for (request_url, url, method, change_body) in [
+        (DIRECT_URL, "https://push.example/v1/other", "POST", false),
+        (
+            DIRECT_URL,
+            "https://push.example/v1/deliveries/",
+            "POST",
+            false,
+        ),
+        (
+            DIRECT_URL,
+            "https://push.example/v1/%64eliveries",
+            "POST",
+            false,
+        ),
+        (DIRECT_URL, DIRECT_URL, "GET", false),
+        (DIRECT_URL, DIRECT_URL, "POST", true),
+        // A request signed for one route is not accepted on the other.
+        (DIRECT_URL, APNS_FORWARDED_URL, "POST", false),
+        (APNS_DIRECT_URL, FORWARDED_URL, "POST", false),
+        (
+            APNS_DIRECT_URL,
+            "https://push.example/v1/other",
+            "POST",
+            false,
+        ),
+        (
+            APNS_DIRECT_URL,
+            "https://push.example/v1/deliveries/apns/",
+            "POST",
+            false,
+        ),
+        (
+            APNS_DIRECT_URL,
+            "https://push.example/v1/deliveries/%61pns",
+            "POST",
+            false,
+        ),
+        (APNS_DIRECT_URL, APNS_DIRECT_URL, "GET", false),
+        (APNS_DIRECT_URL, APNS_DIRECT_URL, "POST", true),
     ] {
         let (app, keys, mut body, sends) = fixture().await;
         let auth = signed_header(&keys, url, method, &body);
@@ -192,12 +239,12 @@ async fn signature_is_bound_to_delivery_path_method_and_body() {
             body.push(b' ');
         }
         assert_eq!(
-            app.oneshot(request(DIRECT_URL, None, auth, body))
+            app.oneshot(request(request_url, None, auth, body))
                 .await
                 .unwrap()
                 .status(),
             StatusCode::UNAUTHORIZED,
-            "{url} {method}"
+            "{request_url} {url} {method}"
         );
         assert_eq!(sends.load(Ordering::SeqCst), 0);
     }
@@ -205,18 +252,33 @@ async fn signature_is_bound_to_delivery_path_method_and_body() {
 
 #[tokio::test]
 async fn signed_url_modifiers_and_non_http_schemes_are_rejected() {
-    for url in [
-        "https://push.example/v1/deliveries/apns?mode=one",
-        "https://push.example/v1/deliveries/apns?",
-        "https://push.example/v1/deliveries/apns#fragment",
-        "https://push.example/v1/deliveries/apns#",
-        "https://user@push.example/v1/deliveries/apns",
-        "ftp://push.example/v1/deliveries/apns",
+    for (request_url, url) in [
+        (DIRECT_URL, "https://push.example/v1/deliveries?mode=one"),
+        (DIRECT_URL, "https://push.example/v1/deliveries?"),
+        (DIRECT_URL, "https://push.example/v1/deliveries#fragment"),
+        (DIRECT_URL, "https://push.example/v1/deliveries#"),
+        (DIRECT_URL, "https://user@push.example/v1/deliveries"),
+        (DIRECT_URL, "ftp://push.example/v1/deliveries"),
+        (
+            APNS_DIRECT_URL,
+            "https://push.example/v1/deliveries/apns?mode=one",
+        ),
+        (APNS_DIRECT_URL, "https://push.example/v1/deliveries/apns?"),
+        (
+            APNS_DIRECT_URL,
+            "https://push.example/v1/deliveries/apns#fragment",
+        ),
+        (APNS_DIRECT_URL, "https://push.example/v1/deliveries/apns#"),
+        (
+            APNS_DIRECT_URL,
+            "https://user@push.example/v1/deliveries/apns",
+        ),
+        (APNS_DIRECT_URL, "ftp://push.example/v1/deliveries/apns"),
     ] {
         let (app, keys, body, sends) = fixture().await;
         let auth = signed_header(&keys, url, "POST", &body);
         assert_eq!(
-            app.oneshot(request(DIRECT_URL, None, auth, body))
+            app.oneshot(request(request_url, None, auth, body))
                 .await
                 .unwrap()
                 .status(),
@@ -229,16 +291,18 @@ async fn signed_url_modifiers_and_non_http_schemes_are_rejected() {
 
 #[tokio::test]
 async fn request_queries_are_rejected() {
-    let (app, keys, body, sends) = fixture().await;
-    let auth = signed_header(&keys, DIRECT_URL, "POST", &body);
-    assert_eq!(
-        app.oneshot(request(&format!("{DIRECT_URL}?mode=one"), None, auth, body))
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    assert_eq!(sends.load(Ordering::SeqCst), 0);
+    for url in [DIRECT_URL, APNS_DIRECT_URL] {
+        let (app, keys, body, sends) = fixture().await;
+        let auth = signed_header(&keys, url, "POST", &body);
+        assert_eq!(
+            app.oneshot(request(&format!("{url}?mode=one"), None, auth, body))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(sends.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[tokio::test]
@@ -249,7 +313,13 @@ async fn router_rejects_other_methods_and_paths() {
             crate::http::DELIVERY_PATH,
             StatusCode::METHOD_NOT_ALLOWED,
         ),
+        (
+            "GET",
+            crate::http::APNS_DELIVERY_ALIAS_PATH,
+            StatusCode::METHOD_NOT_ALLOWED,
+        ),
         ("POST", "/v1/other", StatusCode::NOT_FOUND),
+        ("POST", "/v1/deliveries/", StatusCode::NOT_FOUND),
     ] {
         let (app, keys, body, sends) = fixture().await;
         let auth = signed_header(&keys, DIRECT_URL, "POST", &body);

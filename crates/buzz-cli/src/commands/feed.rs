@@ -14,7 +14,7 @@ pub async fn cmd_get_feed(
     types: Option<&str>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
-    let my_pk = client.keys().public_key().to_hex();
+    let my_pk = client.public_key().to_hex();
     let limit = limit.unwrap_or(20).min(50);
 
     let mut filter = serde_json::json!({

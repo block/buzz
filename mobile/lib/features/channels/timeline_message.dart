@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/mentions/mention_tags.dart';
+import 'channel_event_order.dart';
 import 'channel_window.dart';
 import 'message_media.dart';
 import 'message_content/bubble_segments.dart';
@@ -180,6 +181,11 @@ class TimelineMessage {
   final String id;
   final String pubkey;
   final int createdAt;
+
+  /// Effective send time in milliseconds of the original event (see
+  /// [channelEventMilliseconds]). [tags] may come from a later edit, so the
+  /// original's `ms` offset is kept here.
+  final int createdAtMs;
   final String content;
   final List<List<String>> tags;
   final bool isSystem;
@@ -202,6 +208,7 @@ class TimelineMessage {
     required this.id,
     required this.pubkey,
     required this.createdAt,
+    int? createdAtMs,
     required this.content,
     this.tags = const [],
     this.isSystem = false,
@@ -211,7 +218,7 @@ class TimelineMessage {
     this.reactions = const [],
     this.parentId,
     this.rootId,
-  });
+  }) : createdAtMs = createdAtMs ?? createdAt * 1000;
 
   /// Attachment messages stay visually distinct from surrounding messages,
   /// even when several are sent by the same author in quick succession.
@@ -257,64 +264,39 @@ class MainTimelineEntry {
   const MainTimelineEntry({required this.message, this.summary});
 }
 
-const _membershipGroupWindowSeconds = 5 * 60;
-
-@immutable
-class _MembershipChange {
-  final String? actor;
-  final bool isSelfJoin;
-  final SystemEventType type;
-
-  const _MembershipChange({
-    required this.actor,
-    required this.isSelfJoin,
-    required this.type,
-  });
+/// Whether [message] is a self-join or a voluntary leave. Like desktop, the
+/// timeline leaves these out: only additions by someone else and removals
+/// show as membership notices.
+bool isHiddenMembershipNotice(TimelineMessage message) {
+  final event = message.systemEvent;
+  if (!message.isSystem || event == null) return false;
+  if (event.type == SystemEventType.memberLeft) return true;
+  if (event.type != SystemEventType.memberJoined) return false;
+  final actor = event.actorPubkey?.trim().toLowerCase();
+  return actor != null &&
+      actor.isNotEmpty &&
+      actor == event.targetPubkey?.trim().toLowerCase();
 }
 
-_MembershipChange? _membershipChange(MainTimelineEntry entry) {
+bool _isGroupableMembership(MainTimelineEntry entry) {
   final event = entry.message.systemEvent;
   if (!entry.message.isSystem ||
       (event?.type != SystemEventType.memberJoined &&
           event?.type != SystemEventType.memberRemoved)) {
-    return null;
+    return false;
   }
-
-  final actor = event?.actorPubkey?.trim().toLowerCase();
-  final target = event?.targetPubkey?.trim().toLowerCase();
-  if (actor == null || actor.isEmpty || target == null || target.isEmpty) {
-    return null;
-  }
-
-  final isSelfJoin =
-      event!.type == SystemEventType.memberJoined && actor == target;
-  return _MembershipChange(
-    type: event.type,
-    actor: isSelfJoin ? null : actor,
-    isSelfJoin: isSelfJoin,
-  );
+  final actor = event?.actorPubkey?.trim();
+  final target = event?.targetPubkey?.trim();
+  return actor != null &&
+      actor.isNotEmpty &&
+      target != null &&
+      target.isNotEmpty;
 }
 
-bool _membershipChangesCanGroup(
-  _MembershipChange first,
-  _MembershipChange second,
-) {
-  return first.type == second.type &&
-      first.isSelfJoin == second.isSelfJoin &&
-      (first.isSelfJoin || first.actor == second.actor);
-}
-
-bool _isSameLocalDay(int firstTimestamp, int secondTimestamp) {
-  final first = DateTime.fromMillisecondsSinceEpoch(firstTimestamp * 1000);
-  final second = DateTime.fromMillisecondsSinceEpoch(secondTimestamp * 1000);
-  return first.year == second.year &&
-      first.month == second.month &&
-      first.day == second.day;
-}
-
-/// Groups consecutive matching additions, removals, or self-joins within a
-/// five-minute window into one render item. Other events and local day
-/// boundaries break the group.
+/// Groups each uninterrupted run of additions and removals into one render
+/// item, matching the desktop timeline: any other entry breaks a run, but
+/// elapsed time, local day boundaries and different actors do not. Callers
+/// leave out [isHiddenMembershipNotice] entries first.
 ///
 /// Each inner list is one renderable timeline item. Non-grouped entries are
 /// returned as single-item lists.
@@ -324,28 +306,13 @@ List<List<MainTimelineEntry>> groupMembershipTimelineEntries(
   final groupsByStart = <int, int>{};
 
   for (var end = entries.length - 1; end >= 0;) {
-    final newestEntry = entries[end];
-    final newestChange = _membershipChange(newestEntry);
-    if (newestChange == null) {
+    if (!_isGroupableMembership(entries[end])) {
       end -= 1;
       continue;
     }
 
     var start = end;
-    while (start > 0) {
-      final candidate = entries[start - 1];
-      final candidateChange = _membershipChange(candidate);
-      if (candidateChange == null ||
-          !_membershipChangesCanGroup(candidateChange, newestChange) ||
-          !_isSameLocalDay(
-            candidate.message.createdAt,
-            newestEntry.message.createdAt,
-          ) ||
-          newestEntry.message.createdAt < candidate.message.createdAt ||
-          newestEntry.message.createdAt - candidate.message.createdAt >
-              _membershipGroupWindowSeconds) {
-        break;
-      }
+    while (start > 0 && _isGroupableMembership(entries[start - 1])) {
       start -= 1;
     }
 
@@ -409,9 +376,15 @@ List<TimelineMessage> formatTimeline(
     final targetId = _lastETag(event.tags);
     if (targetId == null || deletedIds.contains(targetId)) continue;
 
+    // Greatest (created_at, id) wins, as the relay resolves effective edits
+    // (docs/effective-message-edits.md), whatever order [events] is in.
     final existing = edits[targetId];
-    if (existing == null || event.createdAt > existing.createdAt) {
+    if (existing == null ||
+        event.createdAt > existing.createdAt ||
+        (event.createdAt == existing.createdAt &&
+            event.id.compareTo(existing.id) > 0)) {
       edits[targetId] = _Edit(
+        id: event.id,
         content: event.content,
         createdAt: event.createdAt,
         tags: event.tags,
@@ -488,6 +461,7 @@ List<TimelineMessage> formatTimeline(
             id: event.id,
             pubkey: event.pubkey,
             createdAt: event.createdAt,
+            createdAtMs: channelEventMilliseconds(event),
             content: event.content,
             tags: event.tags,
             isSystem: true,
@@ -508,6 +482,7 @@ List<TimelineMessage> formatTimeline(
             id: event.id,
             pubkey: event.pubkey,
             createdAt: event.createdAt,
+            createdAtMs: channelEventMilliseconds(event),
             content: event.content,
             tags: event.tags,
             isSystem: true,
@@ -536,6 +511,7 @@ List<TimelineMessage> formatTimeline(
           id: event.id,
           pubkey: event.pubkey,
           createdAt: event.createdAt,
+          createdAtMs: channelEventMilliseconds(event),
           content: edit?.content ?? event.content,
           tags: effectiveTags,
           edited: edit != null,
@@ -771,11 +747,13 @@ List<String> _mergeParticipants(
 }
 
 class _Edit {
+  final String id;
   final String content;
   final int createdAt;
   final List<List<String>> tags;
 
   const _Edit({
+    required this.id,
     required this.content,
     required this.createdAt,
     required this.tags,

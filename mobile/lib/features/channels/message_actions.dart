@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -25,16 +26,18 @@ import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/reminders/remind_me_later_sheet.dart';
 import '../../shared/reminders/reminder_service.dart';
 import 'channel_management_provider.dart';
+import 'me/me_page.dart';
 import 'channels_provider.dart';
-import 'emoji_picker.dart';
+import '../../shared/emoji/emoji_picker.dart';
 import 'reaction_row.dart';
-import 'recent_emoji_provider.dart';
+import '../../shared/emoji/recent_emoji_provider.dart';
 import '../../shared/read_state/message_read_state.dart';
 import '../../shared/read_state/read_state_format.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import 'thread_detail_page.dart';
 import 'thread_follows/thread_follows_provider.dart';
 import 'timeline_message.dart';
+import 'native_photo_zoom_preview.dart';
 import 'unread_badge/is_high_priority_event.dart';
 
 part 'message_actions/quick_reaction_row.dart';
@@ -145,7 +148,10 @@ Future<void> showMessageActions({
                           channelId: channelId,
                           currentPubkey: currentPubkey,
                         ),
-                        _FollowThreadTile(message: message),
+                        _FollowThreadTile(
+                          message: message,
+                          channelId: channelId,
+                        ),
                       ],
                     ),
                     SheetActionSection(
@@ -159,6 +165,26 @@ Future<void> showMessageActions({
                             // Copy to clipboard
                             final data = ClipboardData(text: message.content);
                             Clipboard.setData(data);
+                          },
+                        ),
+                        ListTile(
+                          leading: const Icon(BuzzIcons.messageCircle),
+                          title: const Text('Start Solo chat'),
+                          onTap: () {
+                            if (!_selectMessageAction(sheetContext)) return;
+                            unawaited(
+                              openSoloChatFromMessage(
+                                context,
+                                ref,
+                                channel: ref.read(
+                                  channelByIdProvider(channelId),
+                                ),
+                                channelId: channelId,
+                                messageId: message.id,
+                                threadRootId: message.rootId,
+                                content: message.content,
+                              ),
+                            );
                           },
                         ),
                       ],
@@ -380,6 +406,42 @@ String downloadedImageFilename(String imageUrl, String? contentType) {
   return 'buzz-${DateTime.now().millisecondsSinceEpoch}$extension';
 }
 
+const _photoLibrarySaver = MethodChannel('buzz/photo_library_saver');
+
+Future<void> _saveImageToPhotos(WidgetRef ref, String imageUrl) async {
+  final needsPhotoLibraryPermission =
+      defaultTargetPlatform == TargetPlatform.iOS ||
+      await requiresLegacyMediaStoragePermission();
+  if (needsPhotoLibraryPermission) {
+    final permission = await PhotoManager.requestPermissionExtend(
+      requestOption: const PermissionRequestOption(
+        iosAccessLevel: IosAccessLevel.addOnly,
+        androidPermission: AndroidPermission(
+          type: RequestType.image,
+          mediaLocation: false,
+        ),
+      ),
+    );
+    if (!permission.isAuth) {
+      throw const FileSystemException(
+        'Photo library permission was not granted.',
+      );
+    }
+  }
+  final image = await _downloadImage(ref, imageUrl);
+  if (defaultTargetPlatform == TargetPlatform.iOS) {
+    // photo_manager reads the new asset back after writing it. Add-only access
+    // forbids that read, so iOS asks for full access and a completed save is
+    // reported as a failure. The native saver only writes.
+    await _photoLibrarySaver.invokeMethod<void>('saveImage', {
+      'bytes': image.bytes,
+      'filename': image.filename,
+    });
+  } else {
+    await PhotoManager.editor.saveImage(image.bytes, filename: image.filename);
+  }
+}
+
 Future<void> _saveImage(
   BuildContext context,
   WidgetRef ref,
@@ -387,35 +449,33 @@ Future<void> _saveImage(
 ) async {
   final messenger = ScaffoldMessenger.maybeOf(context);
   try {
-    final needsPhotoLibraryPermission =
-        defaultTargetPlatform == TargetPlatform.iOS ||
-        await requiresLegacyMediaStoragePermission();
-    if (needsPhotoLibraryPermission) {
-      final permission = await PhotoManager.requestPermissionExtend(
-        requestOption: const PermissionRequestOption(
-          iosAccessLevel: IosAccessLevel.addOnly,
-          androidPermission: AndroidPermission(
-            type: RequestType.image,
-            mediaLocation: false,
-          ),
-        ),
-      );
-      if (!permission.isAuth) {
-        throw const FileSystemException(
-          'Photo library permission was not granted.',
-        );
-      }
-    }
-    final image = await _downloadImage(ref, imageUrl);
-    await PhotoManager.editor.saveImage(image.bytes, filename: image.filename);
-    messenger?.showSnackBar(
-      const SnackBar(content: Text('Image saved to Photos')),
+    await _saveImageToPhotos(ref, imageUrl);
+    messenger?.showFeedbackSnackBar(
+      const SnackBar(content: Text('Saved to Photos')),
+      kind: ToastKind.success,
     );
   } catch (_) {
-    messenger?.showSnackBar(
+    messenger?.showFeedbackSnackBar(
       const SnackBar(content: Text('Could not save image')),
+      kind: ToastKind.error,
     );
   }
+}
+
+Future<void> _shareImageFile(
+  WidgetRef ref,
+  String imageUrl, {
+  Rect? shareOrigin,
+}) async {
+  final image = await _downloadImage(ref, imageUrl);
+  final directory = await getTemporaryDirectory();
+  final file = File(
+    '${directory.path}${Platform.pathSeparator}${image.filename}',
+  );
+  await file.writeAsBytes(image.bytes, flush: true);
+  await SharePlus.instance.share(
+    ShareParams(files: [XFile(file.path)], sharePositionOrigin: shareOrigin),
+  );
 }
 
 Future<void> _shareImage(
@@ -426,21 +486,60 @@ Future<void> _shareImage(
 }) async {
   final messenger = ScaffoldMessenger.maybeOf(context);
   try {
-    final image = await _downloadImage(ref, imageUrl);
-    final directory = await getTemporaryDirectory();
-    final file = File(
-      '${directory.path}${Platform.pathSeparator}${image.filename}',
-    );
-    await file.writeAsBytes(image.bytes, flush: true);
-    await SharePlus.instance.share(
-      ShareParams(files: [XFile(file.path)], sharePositionOrigin: shareOrigin),
-    );
+    await _shareImageFile(ref, imageUrl, shareOrigin: shareOrigin);
   } catch (_) {
-    messenger?.showSnackBar(
+    messenger?.showFeedbackSnackBar(
       const SnackBar(content: Text('Could not share image')),
+      kind: ToastKind.error,
     );
   }
 }
+
+/// Reuses the gallery's downloads, permissions and message authority for UIKit.
+NativePhotoActions nativeImageActions({
+  required BuildContext context,
+  required WidgetRef ref,
+  required TimelineMessage message,
+  required String channelId,
+  required bool canManageMessage,
+}) => NativePhotoActions(
+  canDelete: canManageMessage,
+  perform: (action, url) async {
+    if (!context.mounted) return 'This message is no longer available';
+    try {
+      switch (action) {
+        case 'save':
+          await _saveImageToPhotos(ref, url);
+          return 'Saved to Photos';
+        case 'share':
+          final size = MediaQuery.sizeOf(context);
+          await _shareImageFile(
+            ref,
+            url,
+            shareOrigin: Rect.fromLTWH(
+              size.width - 60,
+              size.height - 100,
+              44,
+              44,
+            ),
+          );
+          return null;
+        case 'copy':
+          await Clipboard.setData(ClipboardData(text: url));
+          return 'Image link copied';
+        case 'delete':
+          if (!canManageMessage) return 'You cannot delete this message';
+          await ref
+              .read(channelActionsProvider)
+              .deleteMessage(channelId: channelId, eventId: message.id);
+          return null;
+      }
+    } catch (_) {
+      return 'Could not $action image';
+    }
+    return null;
+  },
+);
 
 /// Whether the actions menu should offer **Mark read** for `message`.
 ///
@@ -457,8 +556,7 @@ bool messageActionShowsUnread(
   required TimelineMessage message,
 }) {
   final readerPubkey = ref.read(myPubkeyProvider);
-  final channels = ref.read(channelsProvider).asData?.value;
-  final channel = channels?.where((c) => c.id == channelId).firstOrNull;
+  final channel = ref.read(channelsProvider.notifier).channelById(channelId);
   final channelCatchUp =
       readerPubkey != null &&
       channel != null &&
@@ -520,20 +618,37 @@ class _MarkReadUnreadTile extends ConsumerWidget {
         if (!_selectMessageAction(context)) return;
         final notifier = ref.read(readStateProvider.notifier);
         if (unread) {
-          // Advances the `msg:` marker and clears this message's own forced
-          // flag — a channel-level forced unread (channel tile) is a separate
-          // choice and stays untouched.
+          // Advances and publishes the `msg:` marker and clears this
+          // message's own forced flag — a channel-level manual unread
+          // (channel tile) is a separate choice and stays untouched.
           notifier.markContextRead(
             msgContextKey(message.id),
             message.createdAt,
+            explicit: true,
           );
         } else {
           // Read markers are monotonic and cannot move backward, so mark
-          // unread forces this message unread locally (session-local, does
-          // not survive relaunch). The channel surfaces it as unread too.
+          // unread forces this message unread on this device only (not
+          // synced, session-local). It ends when the message is read here
+          // or any device reads past it. The channel surfaces it as unread.
+          final readerPubkey = ref.read(myPubkeyProvider);
+          final channel = ref
+              .read(channelsProvider.notifier)
+              .channelById(channelId);
           notifier.markContextUnread(
             msgContextKey(message.id),
             channelId: channelId,
+            threadRootId: message.parentId == null
+                ? null
+                : message.rootId ?? message.parentId,
+            channelCatchUp:
+                readerPubkey != null &&
+                channel != null &&
+                readByChannelCatchUp(
+                  isDm: channel.isDm,
+                  isReply: message.parentId != null,
+                  highPriority: isHighPriorityEvent(message.tags, readerPubkey),
+                ),
           );
         }
       },
@@ -543,8 +658,9 @@ class _MarkReadUnreadTile extends ConsumerWidget {
 
 class _FollowThreadTile extends ConsumerWidget {
   final TimelineMessage message;
+  final String channelId;
 
-  const _FollowThreadTile({required this.message});
+  const _FollowThreadTile({required this.message, required this.channelId});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -557,13 +673,18 @@ class _FollowThreadTile extends ConsumerWidget {
     return ListTile(
       leading: Icon(following ? BuzzIcons.bellOff : BuzzIcons.bellRing),
       title: Text(following ? 'Unfollow thread' : 'Follow thread'),
-      onTap: () {
+      onTap: () async {
         if (!_selectMessageAction(context)) return;
+        final messenger = ScaffoldMessenger.maybeOf(context);
         final notifier = ref.read(threadFollowsProvider.notifier);
-        if (following) {
-          notifier.unfollowThread(rootId);
-        } else {
-          notifier.followThread(rootId);
+        final saved = await (following
+            ? notifier.unfollowThread(channelId, rootId)
+            : notifier.followThread(channelId, rootId));
+        if (!saved) {
+          messenger?.showFeedbackSnackBar(
+            SnackBar(content: Text(notifier.failureMessage)),
+            kind: ToastKind.error,
+          );
         }
       },
     );
@@ -596,9 +717,10 @@ class _MessageQuickActionsRow extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final messages = allMessages;
     final canRemind = ref.watch(reminderServiceProvider) != null;
+    final startsThreads = ref.watch(channelStartsThreadsProvider(channelId));
 
     final tiles = <Widget>[
-      if (messages != null)
+      if (messages != null && startsThreads)
         _MessageQuickActionTile(
           icon: BuzzIcons.messageSquareReply,
           label: 'Reply',
@@ -894,8 +1016,9 @@ void _confirmDelete({
                   .deleteMessage(channelId: channelId, eventId: messageId);
               onDeleted?.call();
             } catch (error) {
-              messenger.showSnackBar(
+              messenger.showFeedbackSnackBar(
                 SnackBar(content: Text('Failed to delete message: $error')),
+                kind: ToastKind.error,
               );
             }
           },

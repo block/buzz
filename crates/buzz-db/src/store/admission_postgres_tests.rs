@@ -318,9 +318,16 @@ async fn workflow_writers_require_application_admission() {
             .expect_err("workflow create must reject"),
         );
         assert_fenced(
-            super::workflow::create_workflow_run(&db.pool, *community, Uuid::new_v4(), None, None)
-                .await
-                .expect_err("workflow run create must reject"),
+            super::workflow::create_workflow_run(
+                &db.pool,
+                *community,
+                Uuid::new_v4(),
+                None,
+                None,
+                &super::workflow::RunCause::Schedule,
+            )
+            .await
+            .expect_err("workflow run create must reject"),
         );
         assert_fenced(
             super::workflow::claim_scheduled_workflow_fire(
@@ -373,6 +380,11 @@ async fn workflow_writers_require_application_admission() {
             .expect_err("approval update must reject"),
         );
     }
+    // The fixture's session runs with foreign-key triggers off, so the owner
+    // must exist for the workflow writer's own reference check.
+    super::user::ensure_user(&db.pool, communities[0], &[1; 32])
+        .await
+        .expect("active workflow owner");
     super::workflow::create_workflow(
         &db.pool,
         communities[0],
@@ -435,6 +447,7 @@ async fn channel_and_membership_writers_require_application_admission() {
                 &creator,
                 None,
                 &[],
+                false,
             )
             .await
             .expect_err("channel create must reject"),
@@ -467,6 +480,7 @@ async fn channel_and_membership_writers_require_application_admission() {
         &creator,
         None,
         &[],
+        false,
     )
     .await
     .expect("active channel create succeeds");
@@ -489,9 +503,16 @@ async fn dm_writers_require_application_admission() {
     let participants: [&[u8]; 2] = [&[1; 32], &[2; 32]];
     for community in &communities[1..] {
         assert_fenced(
-            super::dm::create_dm(&db.pool, *community, &participants, participants[0])
-                .await
-                .expect_err("DM create must reject"),
+            super::dm::create_dm(
+                &db.pool,
+                *community,
+                &participants,
+                participants[0],
+                false,
+                &|_: &str, _: &[u8]| Ok(()),
+            )
+            .await
+            .expect_err("DM create must reject"),
         );
         assert_fenced(
             super::dm::hide_dm(&db.pool, *community, Uuid::new_v4(), participants[0])
@@ -499,9 +520,16 @@ async fn dm_writers_require_application_admission() {
                 .expect_err("DM hide must reject"),
         );
     }
-    super::dm::create_dm(&db.pool, communities[0], &participants, participants[0])
-        .await
-        .expect("active DM create succeeds");
+    super::dm::create_dm(
+        &db.pool,
+        communities[0],
+        &participants,
+        participants[0],
+        false,
+        &|_: &str, _: &[u8]| Ok(()),
+    )
+    .await
+    .expect("active DM create succeeds");
 }
 
 #[tokio::test]
@@ -538,6 +566,7 @@ async fn thread_metadata_writer_requires_application_admission() {
         &[1; 32],
         None,
         &[],
+        false,
     )
     .await
     .expect("active channel");
@@ -585,6 +614,7 @@ async fn relay_admin_domain_writer_requires_application_admission() {
         &[1; 32],
         None,
         &[],
+        false,
     )
     .await
     .expect("active channel");
@@ -633,6 +663,7 @@ async fn personal_read_writer_requires_application_admission() {
         &actor.public_key().to_bytes(),
         None,
         &[],
+        false,
     )
     .await
     .expect("active channel");

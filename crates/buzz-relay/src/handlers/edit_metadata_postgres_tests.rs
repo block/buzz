@@ -6,7 +6,7 @@ use nostr::{EventBuilder, Keys, Kind, Tag};
 use uuid::Uuid;
 
 use crate::handlers::group_state_postgres_tests::{
-    community, create_channel, edit_channel, http_auth, state,
+    community, create_channel, edit_channel, group_state_tags, http_auth, state,
 };
 use crate::handlers::ingest::ingest_event;
 
@@ -350,6 +350,281 @@ async fn join_role_edit_is_applied_and_announced() {
     assert!(announced, "one join_role_changed system message");
 }
 
+/// `auto_join` is a community setting: only a relay owner or admin may set
+/// it, on an open, unarchived stream channel, and kind:39000 advertises it
+/// only while it is effective. Mutations: drop the relay-role tier → the
+/// channel owner's edit is accepted (RED); drop the in-transaction guard →
+/// `true` on a private or archived channel is accepted (RED); guard only
+/// `true` again → the relay admin's `false` is stored in the private
+/// channel (RED); mirror the column instead of the effective state in
+/// `group_metadata_tags` → the tag survives the flip to private (RED).
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn auto_join_is_relay_admin_only_and_advertised_while_effective() {
+    let state = state().await;
+    let tenant = community(&state, "edit-auto-join").await;
+    let owner = Keys::generate();
+    let channel_id = create_channel(&state, &tenant, &owner, &[]).await;
+    let notices_before = count_kind(&state, &tenant, channel_id, 40099).await;
+    let advertised = |tags: Vec<Vec<String>>| tags.contains(&vec!["auto_join".to_string()]);
+
+    // The channel owner is not a relay owner or admin: refused, nothing changes.
+    let refused = edit_channel(
+        &state,
+        &tenant,
+        &owner,
+        channel_id,
+        &[&["auto_join", "true"]],
+    )
+    .await
+    .expect_err("channel owner must not set auto_join");
+    assert!(
+        refused.contains("relay owner or admin"),
+        "channel owner refusal: {refused}"
+    );
+    assert!(
+        !state
+            .db
+            .get_channel(tenant.community(), channel_id)
+            .await
+            .expect("channel")
+            .auto_join
+    );
+    assert!(!advertised(
+        group_state_tags(&state, &tenant, channel_id, 39000).await
+    ));
+
+    // A relay admin who is not a channel member sets it. One transaction
+    // stores the event, the column and one `auto_join_changed` notice, and
+    // the republished kind:39000 advertises it.
+    let admin = Keys::generate();
+    state
+        .db
+        .add_relay_member(
+            tenant.community(),
+            &admin.public_key().to_hex(),
+            "admin",
+            None,
+            &Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("seed relay admin");
+    edit_channel(
+        &state,
+        &tenant,
+        &admin,
+        channel_id,
+        &[&["auto_join", "true"]],
+    )
+    .await
+    .expect("relay admin sets auto_join");
+    assert!(
+        state
+            .db
+            .get_channel(tenant.community(), channel_id)
+            .await
+            .expect("channel")
+            .auto_join
+    );
+    assert!(advertised(
+        group_state_tags(&state, &tenant, channel_id, 39000).await
+    ));
+    let notices = state
+        .db
+        .query_events(&EventQuery {
+            kinds: Some(vec![40099]),
+            channel_id: Some(channel_id),
+            ..EventQuery::for_community(tenant.community())
+        })
+        .await
+        .expect("query events");
+    assert_eq!(notices.len(), notices_before + 1);
+    assert!(
+        notices
+            .iter()
+            .filter_map(
+                |stored| serde_json::from_str::<serde_json::Value>(&stored.event.content).ok()
+            )
+            .any(|content| content["type"] == "auto_join_changed" && content["auto_join"] == true),
+        "one auto_join_changed system message"
+    );
+    let listed = state
+        .db
+        .list_auto_join_channels(tenant.community())
+        .await
+        .expect("list auto_join channels");
+    assert_eq!(
+        listed.iter().map(|c| c.id).collect::<Vec<_>>(),
+        [channel_id]
+    );
+
+    // Private: the stored value stays, but it is no longer effective, so the
+    // tag disappears and the relay would not join anyone.
+    edit_channel(
+        &state,
+        &tenant,
+        &owner,
+        channel_id,
+        &[&["visibility", "private"]],
+    )
+    .await
+    .expect("make private");
+    assert!(
+        state
+            .db
+            .get_channel(tenant.community(), channel_id)
+            .await
+            .expect("channel")
+            .auto_join
+    );
+    assert!(!advertised(
+        group_state_tags(&state, &tenant, channel_id, 39000).await
+    ));
+    assert!(state
+        .db
+        .list_auto_join_channels(tenant.community())
+        .await
+        .expect("list auto_join channels")
+        .is_empty());
+
+    // Both values are refused on a private channel, the same way, and
+    // nothing of either event is stored: the relay admin is not a member,
+    // so storing even a `false` would write into a channel they cannot
+    // read. Opening and flagging in one event is accepted: the guard sees
+    // the event's result. `visibility` still needs the channel owner, so
+    // that event comes from the owner once they are also on the relay
+    // roster: both tiers run. The nonce keeps the `true` from signing the
+    // same event id as the accepted edit above, which the relay would drop
+    // as a duplicate.
+    let (events_before, notices_before) = (
+        count_kind(&state, &tenant, channel_id, 9002).await,
+        count_kind(&state, &tenant, channel_id, 40099).await,
+    );
+    let refused_edits: [&[&[&str]]; 2] = [
+        &[&["auto_join", "true"], &["nonce", "private"]],
+        &[&["auto_join", "false"]],
+    ];
+    for tags in refused_edits {
+        let refused = edit_channel(&state, &tenant, &admin, channel_id, tags)
+            .await
+            .expect_err("auto_join on a private channel");
+        assert!(
+            refused.contains("open, unarchived"),
+            "private refusal of {tags:?}: {refused}"
+        );
+    }
+    assert_eq!(
+        count_kind(&state, &tenant, channel_id, 9002).await,
+        events_before,
+        "a refused auto_join event is not stored"
+    );
+    assert_eq!(
+        count_kind(&state, &tenant, channel_id, 40099).await,
+        notices_before,
+        "a refused auto_join event announces nothing"
+    );
+    assert!(
+        state
+            .db
+            .get_channel(tenant.community(), channel_id)
+            .await
+            .expect("channel")
+            .auto_join,
+        "the refused `false` leaves the stored value in place"
+    );
+    state
+        .db
+        .add_relay_member(
+            tenant.community(),
+            &owner.public_key().to_hex(),
+            "owner",
+            None,
+            &Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("seed relay owner");
+    edit_channel(
+        &state,
+        &tenant,
+        &owner,
+        channel_id,
+        &[&["visibility", "open"], &["auto_join", "true"]],
+    )
+    .await
+    .expect("open and flag in one event");
+    assert!(advertised(
+        group_state_tags(&state, &tenant, channel_id, 39000).await
+    ));
+
+    // Archived and forum channels cannot be default channels. Archiving and
+    // flagging in one event is refused by the guard on the event's result,
+    // and nothing of that event applies; on a channel that is already
+    // archived the archive fence refuses the edit first.
+    let archived_id = create_channel(&state, &tenant, &owner, &[]).await;
+    let refused = edit_channel(
+        &state,
+        &tenant,
+        &owner,
+        archived_id,
+        &[&["archived", "true"], &["auto_join", "true"]],
+    )
+    .await
+    .expect_err("archive and flag in one event");
+    assert!(
+        refused.contains("open, unarchived"),
+        "archive-and-flag refusal: {refused}"
+    );
+    assert!(
+        state
+            .db
+            .get_channel(tenant.community(), archived_id)
+            .await
+            .expect("channel")
+            .archived_at
+            .is_none(),
+        "a refused event archives nothing"
+    );
+    edit_channel(
+        &state,
+        &tenant,
+        &owner,
+        archived_id,
+        &[&["archived", "true"]],
+    )
+    .await
+    .expect("archive");
+    let refused = edit_channel(
+        &state,
+        &tenant,
+        &admin,
+        archived_id,
+        &[&["auto_join", "true"]],
+    )
+    .await
+    .expect_err("auto_join=true on an archived channel");
+    assert!(refused.contains("archived"), "archived refusal: {refused}");
+    let forum_id = create_channel(&state, &tenant, &owner, &[&["channel_type", "forum"]]).await;
+    let refused = edit_channel(&state, &tenant, &admin, forum_id, &[&["auto_join", "true"]])
+        .await
+        .expect_err("auto_join=true on a forum");
+    assert!(
+        refused.contains("stream channels"),
+        "forum refusal: {refused}"
+    );
+    for id in [archived_id, forum_id] {
+        assert!(
+            !state
+                .db
+                .get_channel(tenant.community(), id)
+                .await
+                .expect("channel")
+                .auto_join
+        );
+    }
+}
+
 /// Sign a kind:9002 that sets `archived` to `value` on `channel_id`.
 fn archive_event(owner: &Keys, channel_id: Uuid, value: &str) -> nostr::Event {
     EventBuilder::new(Kind::Custom(9002), "")
@@ -359,6 +634,55 @@ fn archive_event(owner: &Keys, channel_id: Uuid, value: &str) -> nostr::Event {
         ])
         .sign_with_keys(owner)
         .expect("sign 9002")
+}
+
+/// The loader returns every effective default channel. It used to stop at 32
+/// while kind:9002 kept accepting the flag past that, so the kind:39000 tag
+/// promised a join the relay never made for the newest channels. Mutation:
+/// put a `LIMIT` back on `list_auto_join_channels` → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn every_default_channel_is_listed() {
+    let state = state().await;
+    let tenant = community(&state, "auto-join-all").await;
+    let admin = Keys::generate();
+    state
+        .db
+        .add_relay_member(
+            tenant.community(),
+            &admin.public_key().to_hex(),
+            "admin",
+            None,
+            &Keys::generate(),
+        )
+        .await
+        .map(|write| write.outcome)
+        .expect("seed relay admin");
+
+    let mut flagged = Vec::new();
+    for _ in 0..33 {
+        let channel_id = create_channel(&state, &tenant, &admin, &[]).await;
+        edit_channel(
+            &state,
+            &tenant,
+            &admin,
+            channel_id,
+            &[&["auto_join", "true"]],
+        )
+        .await
+        .expect("relay admin sets auto_join");
+        flagged.push(channel_id);
+    }
+
+    let listed: Vec<Uuid> = state
+        .db
+        .list_auto_join_channels(tenant.community())
+        .await
+        .expect("list auto_join channels")
+        .iter()
+        .map(|channel| channel.id)
+        .collect();
+    assert_eq!(listed, flagged, "every flagged channel, oldest first");
 }
 
 /// A resend checked after its first copy committed is a duplicate.
@@ -503,5 +827,238 @@ async fn concurrent_copies_of_a_restore_apply_once() {
     assert_eq!(
         count_kind(&state, &tenant, channel_id, 40099).await,
         notices + 1
+    );
+}
+
+/// The refusal NOSTR.md documents for a private-to-open edit.
+const REFUSAL: &str = "invalid: a private channel with other members cannot be made open; create a new open channel instead";
+
+/// What `edit_channel` returns for that refusal: ingest rejects the event
+/// with exactly the documented OK message.
+fn refused() -> Result<(), String> {
+    Err(format!("Rejected({REFUSAL:?})"))
+}
+
+/// Seed `agent` as a user whose NIP-OA owner is `owner`.
+async fn seed_agent(
+    state: &crate::state::AppState,
+    tenant: &buzz_core::TenantContext,
+    agent: &Keys,
+    owner: &Keys,
+) {
+    for user in [agent, owner] {
+        state
+            .db
+            .ensure_user(tenant.community(), user.public_key().to_bytes().as_slice())
+            .await
+            .expect("ensure user");
+    }
+    assert!(state
+        .db
+        .set_agent_owner(
+            tenant.community(),
+            agent.public_key().to_bytes().as_slice(),
+            owner.public_key().to_bytes().as_slice(),
+        )
+        .await
+        .expect("set agent owner"));
+}
+
+/// A private channel can be made open only when nobody but the sender and
+/// the sender's own agents is a member (Channels for IFC): opening it would
+/// change the admission rules under anyone else who joined. Someone else's
+/// agent counts as someone else, and so does the sender's owner when an
+/// agent sends. Removed members count too: their posts stay in the
+/// history that opening would publish. A refused change stores
+/// nothing and leaves the channel private. Mutation: drop the check in
+/// `apply_channel_metadata_event` → the refused rows open → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn private_to_open_needs_no_other_members() {
+    use buzz_db::channel::MemberRole;
+
+    let state = state().await;
+    let tenant = community(&state, "private-to-open").await;
+    let owner = Keys::generate();
+    let own_agent = Keys::generate();
+    let stranger = Keys::generate();
+    let strangers_agent = Keys::generate();
+    // A member with no users row, as `put_members_on` can leave one.
+    let unknown = Keys::generate();
+    seed_agent(&state, &tenant, &own_agent, &owner).await;
+    seed_agent(&state, &tenant, &strangers_agent, &stranger).await;
+
+    struct Row<'a> {
+        name: &'a str,
+        members: Vec<(&'a Keys, MemberRole)>,
+        removed: Vec<&'a Keys>,
+        sender: &'a Keys,
+        opens: bool,
+    }
+    let rows = [
+        Row {
+            name: "only the owner",
+            members: vec![],
+            removed: vec![],
+            sender: &owner,
+            opens: true,
+        },
+        Row {
+            name: "the owner and their agent (a Solo chat)",
+            members: vec![(&own_agent, MemberRole::Member)],
+            removed: vec![],
+            sender: &owner,
+            opens: true,
+        },
+        Row {
+            name: "a removed person still counts: their posts stay",
+            members: vec![(&stranger, MemberRole::Member)],
+            removed: vec![&stranger],
+            sender: &owner,
+            opens: false,
+        },
+        Row {
+            name: "the owner's removed agent",
+            members: vec![(&own_agent, MemberRole::Member)],
+            removed: vec![&own_agent],
+            sender: &owner,
+            opens: true,
+        },
+        Row {
+            name: "another person",
+            members: vec![
+                (&own_agent, MemberRole::Member),
+                (&stranger, MemberRole::Guest),
+            ],
+            removed: vec![],
+            sender: &owner,
+            opens: false,
+        },
+        Row {
+            name: "a member with no user row",
+            members: vec![(&unknown, MemberRole::Member)],
+            removed: vec![],
+            sender: &owner,
+            opens: false,
+        },
+        Row {
+            name: "someone else's agent",
+            members: vec![(&strangers_agent, MemberRole::Bot)],
+            removed: vec![],
+            sender: &owner,
+            opens: false,
+        },
+        Row {
+            name: "an agent sending, with its owner a member",
+            members: vec![(&own_agent, MemberRole::Admin)],
+            removed: vec![],
+            sender: &own_agent,
+            opens: false,
+        },
+    ];
+
+    for row in rows {
+        let channel_id =
+            create_channel(&state, &tenant, &owner, &[&["visibility", "private"]]).await;
+        for (member, role) in &row.members {
+            state
+                .db
+                .add_member(
+                    tenant.community(),
+                    channel_id,
+                    member.public_key().to_bytes().as_slice(),
+                    *role,
+                    Some(owner.public_key().to_bytes().as_slice()),
+                )
+                .await
+                .expect("add member");
+        }
+        for member in &row.removed {
+            state
+                .db
+                .remove_member(
+                    tenant.community(),
+                    channel_id,
+                    member.public_key().to_bytes().as_slice(),
+                    owner.public_key().to_bytes().as_slice(),
+                )
+                .await
+                .expect("remove member");
+        }
+        let events_before = count_kind(&state, &tenant, channel_id, 9002).await;
+
+        let result = edit_channel(
+            &state,
+            &tenant,
+            row.sender,
+            channel_id,
+            &[&["visibility", "open"]],
+        )
+        .await;
+        let visibility = state
+            .db
+            .get_channel(tenant.community(), channel_id)
+            .await
+            .expect("channel")
+            .visibility;
+        if row.opens {
+            assert_eq!(result, Ok(()), "{}", row.name);
+            assert_eq!(visibility, "open", "{}", row.name);
+            // Open to private stays allowed, whoever is in the channel.
+            edit_channel(
+                &state,
+                &tenant,
+                row.sender,
+                channel_id,
+                &[&["visibility", "private"]],
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{}: make private again: {e}", row.name));
+        } else {
+            assert_eq!(result, refused(), "{}", row.name);
+            assert_eq!(visibility, "private", "{}", row.name);
+            assert_eq!(
+                count_kind(&state, &tenant, channel_id, 9002).await,
+                events_before,
+                "{}: a refused edit is not stored",
+                row.name
+            );
+        }
+    }
+
+    // A channel that someone else joined while it was open, then made
+    // private again, cannot be reopened.
+    let channel_id = create_channel(&state, &tenant, &owner, &[&["visibility", "open"]]).await;
+    state
+        .db
+        .add_member(
+            tenant.community(),
+            channel_id,
+            stranger.public_key().to_bytes().as_slice(),
+            MemberRole::Member,
+            None,
+        )
+        .await
+        .expect("stranger joins");
+    edit_channel(
+        &state,
+        &tenant,
+        &owner,
+        channel_id,
+        &[&["visibility", "private"]],
+    )
+    .await
+    .expect("make private");
+    assert_eq!(
+        edit_channel(
+            &state,
+            &tenant,
+            &owner,
+            channel_id,
+            &[&["visibility", "open"]],
+        )
+        .await,
+        refused(),
+        "reopen with a stranger in it"
     );
 }

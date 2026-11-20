@@ -13,12 +13,6 @@ BEGIN
         WHERE inhparent = 'events'::regclass
           AND inhrelid = 'events_p_past'::regclass
     ) THEN
-        -- pgschema may copy parent triggers onto standalone children. Drop
-        -- those copies before ATTACH; PostgreSQL recreates inherited parent
-        -- triggers while attaching and rejects same-named child triggers.
-        DROP TRIGGER IF EXISTS events_created_at_floor ON events_p_past;
-        DROP TRIGGER IF EXISTS community_write_fence_events ON events_p_past;
-        DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p_past;
         ALTER TABLE events ATTACH PARTITION events_p_past
             FOR VALUES FROM (MINVALUE) TO ('2026-01-01');
     END IF;
@@ -28,9 +22,6 @@ BEGIN
         WHERE inhparent = 'events'::regclass
           AND inhrelid = 'events_p2026_01'::regclass
     ) THEN
-        DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_01;
-        DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_01;
-        DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_01;
         ALTER TABLE events ATTACH PARTITION events_p2026_01
             FOR VALUES FROM ('2026-01-01') TO ('2026-02-01');
     END IF;
@@ -40,9 +31,6 @@ BEGIN
         WHERE inhparent = 'events'::regclass
           AND inhrelid = 'events_p2026_02'::regclass
     ) THEN
-        DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_02;
-        DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_02;
-        DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_02;
         ALTER TABLE events ATTACH PARTITION events_p2026_02
             FOR VALUES FROM ('2026-02-01') TO ('2026-03-01');
     END IF;
@@ -52,9 +40,6 @@ BEGIN
         WHERE inhparent = 'events'::regclass
           AND inhrelid = 'events_p2026_03'::regclass
     ) THEN
-        DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_03;
-        DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_03;
-        DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_03;
         ALTER TABLE events ATTACH PARTITION events_p2026_03
             FOR VALUES FROM ('2026-03-01') TO ('2026-04-01');
     END IF;
@@ -64,9 +49,6 @@ BEGIN
         WHERE inhparent = 'events'::regclass
           AND inhrelid = 'events_p2026_04'::regclass
     ) THEN
-        DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_04;
-        DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_04;
-        DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_04;
         ALTER TABLE events ATTACH PARTITION events_p2026_04
             FOR VALUES FROM ('2026-04-01') TO ('2026-05-01');
     END IF;
@@ -76,9 +58,6 @@ BEGIN
         WHERE inhparent = 'events'::regclass
           AND inhrelid = 'events_p2026_05'::regclass
     ) THEN
-        DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_05;
-        DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_05;
-        DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_05;
         ALTER TABLE events ATTACH PARTITION events_p2026_05
             FOR VALUES FROM ('2026-05-01') TO ('2026-06-01');
     END IF;
@@ -88,9 +67,6 @@ BEGIN
         WHERE inhparent = 'events'::regclass
           AND inhrelid = 'events_p2026_06'::regclass
     ) THEN
-        DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_06;
-        DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_06;
-        DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_06;
         ALTER TABLE events ATTACH PARTITION events_p2026_06
             FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
     END IF;
@@ -100,9 +76,6 @@ BEGIN
         WHERE inhparent = 'events'::regclass
           AND inhrelid = 'events_p_future'::regclass
     ) THEN
-        DROP TRIGGER IF EXISTS events_created_at_floor ON events_p_future;
-        DROP TRIGGER IF EXISTS community_write_fence_events ON events_p_future;
-        DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p_future;
         ALTER TABLE events ATTACH PARTITION events_p_future
             FOR VALUES FROM ('2026-07-01') TO (MAXVALUE);
     END IF;
@@ -120,7 +93,6 @@ BEGIN
           AND inhrelid = 'delivery_log_p_past'::regclass
     ) THEN
         ALTER TABLE delivery_log_p_past ALTER COLUMN id DROP IDENTITY IF EXISTS;
-        DROP TRIGGER IF EXISTS community_write_fence_delivery_log ON delivery_log_p_past;
         ALTER TABLE delivery_log ATTACH PARTITION delivery_log_p_past
             FOR VALUES FROM (MINVALUE) TO ('2026-03-01');
     END IF;
@@ -131,7 +103,6 @@ BEGIN
           AND inhrelid = 'delivery_log_p2026_03'::regclass
     ) THEN
         ALTER TABLE delivery_log_p2026_03 ALTER COLUMN id DROP IDENTITY IF EXISTS;
-        DROP TRIGGER IF EXISTS community_write_fence_delivery_log ON delivery_log_p2026_03;
         ALTER TABLE delivery_log ATTACH PARTITION delivery_log_p2026_03
             FOR VALUES FROM ('2026-03-01') TO ('2026-04-01');
     END IF;
@@ -142,7 +113,6 @@ BEGIN
           AND inhrelid = 'delivery_log_p2026_04'::regclass
     ) THEN
         ALTER TABLE delivery_log_p2026_04 ALTER COLUMN id DROP IDENTITY IF EXISTS;
-        DROP TRIGGER IF EXISTS community_write_fence_delivery_log ON delivery_log_p2026_04;
         ALTER TABLE delivery_log ATTACH PARTITION delivery_log_p2026_04
             FOR VALUES FROM ('2026-04-01') TO ('2026-05-01');
     END IF;
@@ -153,7 +123,6 @@ BEGIN
           AND inhrelid = 'delivery_log_p2026_05'::regclass
     ) THEN
         ALTER TABLE delivery_log_p2026_05 ALTER COLUMN id DROP IDENTITY IF EXISTS;
-        DROP TRIGGER IF EXISTS community_write_fence_delivery_log ON delivery_log_p2026_05;
         ALTER TABLE delivery_log ATTACH PARTITION delivery_log_p2026_05
             FOR VALUES FROM ('2026-05-01') TO ('2026-06-01');
     END IF;
@@ -164,7 +133,6 @@ BEGIN
           AND inhrelid = 'delivery_log_p2026_06'::regclass
     ) THEN
         ALTER TABLE delivery_log_p2026_06 ALTER COLUMN id DROP IDENTITY IF EXISTS;
-        DROP TRIGGER IF EXISTS community_write_fence_delivery_log ON delivery_log_p2026_06;
         ALTER TABLE delivery_log ATTACH PARTITION delivery_log_p2026_06
             FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
     END IF;
@@ -175,7 +143,6 @@ BEGIN
           AND inhrelid = 'delivery_log_p_future'::regclass
     ) THEN
         ALTER TABLE delivery_log_p_future ALTER COLUMN id DROP IDENTITY IF EXISTS;
-        DROP TRIGGER IF EXISTS community_write_fence_delivery_log ON delivery_log_p_future;
         ALTER TABLE delivery_log ATTACH PARTITION delivery_log_p_future
             FOR VALUES FROM ('2026-07-01') TO (MAXVALUE);
     END IF;
@@ -281,3 +248,37 @@ BEGIN
         RAISE EXCEPTION 'replica_heartbeat must contain its singleton row after pgschema apply';
     END IF;
 END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'relay_invites'
+          AND column_name = 'revoked_at'
+          AND data_type = 'timestamp with time zone'
+          AND is_nullable = 'YES'
+          AND column_default IS NULL
+    ) THEN
+        RAISE EXCEPTION 'relay_invites.revoked_at must remain nullable without a default';
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'relay_invites'
+          AND column_name = 'legacy_admission'
+          AND data_type = 'boolean'
+          AND is_nullable = 'NO'
+          AND column_default = 'true'
+    ) THEN
+        RAISE EXCEPTION 'relay_invites.legacy_admission must default to true and be not null';
+    END IF;
+    IF (SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal
+        AND tgname IN ('invite_restriction_lock', 'invite_issuer_revocation',
+                       'invite_owner_lock', 'invite_owner_revocation')) <> 0 THEN
+        RAISE EXCEPTION 'invitation revocation must use supported application writers, not triggers';
+    END IF;
+END
+$$;

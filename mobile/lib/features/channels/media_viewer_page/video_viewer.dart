@@ -390,17 +390,35 @@ class MediaVideoViewerPage extends HookConsumerWidget {
               ),
             )
           else
-            PositionedDirectional(
-              top: Grid.sm,
-              end: Grid.sm,
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
               child: _VideoViewerChrome(
                 visible: controls.visible,
                 dragOpacity: chromeOpacity,
-                child: SafeArea(
-                  child: _MediaViewerCloseButton(
-                    key: const ValueKey('message-media-video-viewer-close'),
-                    tooltip: 'Close video viewer',
-                    onPressed: () => Navigator.of(context).maybePop(),
+                child: Theme(
+                  data: ThemeData.dark(),
+                  child: NavigationBackdrop(
+                    child: SafeArea(
+                      bottom: false,
+                      child: Align(
+                        alignment: AlignmentDirectional.centerEnd,
+                        child: Padding(
+                          padding: const EdgeInsetsDirectional.only(
+                            top: Grid.sm,
+                            end: Grid.sm,
+                          ),
+                          child: _MediaViewerCloseButton(
+                            key: const ValueKey(
+                              'message-media-video-viewer-close',
+                            ),
+                            tooltip: 'Close video viewer',
+                            onPressed: () => Navigator.of(context).maybePop(),
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
                 ),
               ),

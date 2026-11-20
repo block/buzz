@@ -56,8 +56,10 @@ pub(crate) fn looks_like_mp4_iso_bmff(bytes: &[u8]) -> bool {
     let major = payload[..4].try_into().ok();
     major.is_some_and(|brand| MP4_BRANDS.contains(&brand))
         || payload[8..]
-            .chunks_exact(4)
-            .any(|brand| MP4_BRANDS.iter().any(|candidate| brand == candidate))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|brand| MP4_BRANDS.contains(brand))
 }
 
 /// MIME types blocked from the generic file-upload path.
@@ -275,16 +277,21 @@ pub fn validate_content(bytes: &[u8], config: &MediaConfig) -> Result<String, Me
     validate_image_metadata_free(bytes, &mime)?;
 
     // 5. Image bomb — check pixel dimensions before full decode.
-    //    Fail closed: imagesize supports JPEG, PNG, GIF, WebP. If dimensions
-    //    can't be parsed, reject — don't let unknown-geometry images reach the
-    //    full decoder in thumbnail generation.
-    const MAX_PIXELS: u64 = 25_000_000; // 25 megapixels — 100MB max RGBA decode
+    check_image_pixels(bytes)?;
+
+    Ok(mime)
+}
+
+/// Reject an image over 25 megapixels (100MB max RGBA decode) before any full
+/// decode. Fails closed: imagesize supports JPEG, PNG, GIF, WebP, and an image
+/// whose dimensions can't be parsed never reaches the decoder.
+pub(crate) fn check_image_pixels(bytes: &[u8]) -> Result<(), MediaError> {
+    const MAX_PIXELS: u64 = 25_000_000;
     let size = imagesize::blob_size(bytes).map_err(|_| MediaError::InvalidImage)?;
     if (size.width as u64) * (size.height as u64) > MAX_PIXELS {
         return Err(MediaError::ImageTooLarge);
     }
-
-    Ok(mime)
+    Ok(())
 }
 
 /// Validate an MP4 file on disk.

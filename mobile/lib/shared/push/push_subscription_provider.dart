@@ -1,44 +1,53 @@
-import 'dart:async';
-
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../features/channels/channel.dart';
 import '../../features/channels/channel_mutes/channel_mutes_provider.dart';
 import '../../features/channels/channels_provider.dart';
-import '../community/community.dart';
-import '../community/community_provider.dart';
+import '../auth/auth.dart';
 import '../relay/relay_provider.dart';
 import 'push_subscription.dart';
+import 'push_relay_capability_provider.dart';
+import 'push_setup_recovery.dart';
 
 /// Keeps the persisted desired lease and the App Group snapshot aligned with
 /// the active identity, joined channels, and mute state. This is desired client
 /// policy only. Relay-accepted authority is introduced by lease publication.
-final pushSubscriptionSyncProvider = Provider<void>((ref) {
-  final active = ref.watch(activeCommunityProvider).value;
-  final channels = ref.watch(channelsProvider).value;
-  final mutes = ref.watch(channelMutesProvider);
-  if (active == null ||
-      !active.pushNotificationsEnabled ||
-      channels == null ||
-      !mutes.isReady) {
-    return;
-  }
+final pushSubscriptionSyncProvider = FutureProvider.autoDispose<void>((
+  ref,
+) async {
+  try {
+    if (ref.watch(authProvider).value?.status != AuthStatus.authenticated) {
+      return;
+    }
+    final active = ref.watch(activeCommunityProvider).value;
+    if (active == null ||
+        !active.pushNotificationsEnabled ||
+        ref.watch(currentRelayPushDescriptorProvider).value == null) {
+      return;
+    }
+    final channels = ref.watch(channelsProvider).value;
+    final mutes = ref.watch(channelMutesProvider);
+    if (channels == null || !mutes.isReady) {
+      return;
+    }
 
-  final subscriptions = desiredBuzzPushSubscriptions(
-    community: active,
-    channels: channels,
-    mutedChannelIds: [
-      for (final entry in mutes.store.channels.entries)
-        if (entry.value.muted) entry.key,
-    ],
-  );
-  if (subscriptions == null) return;
-  unawaited(
-    ref
+    final subscriptions = desiredBuzzPushSubscriptions(
+      community: active,
+      channels: channels,
+      mutedChannelIds: [
+        for (final entry in mutes.store.channels.entries)
+          if (entry.value.muted) entry.key,
+      ],
+    );
+    if (subscriptions == null) return;
+    await ref
         .read(communityListProvider.notifier)
-        .updateDesiredPushSubscriptions(active.id, subscriptions),
-  );
-});
+        .updateDesiredPushSubscriptions(active.id, subscriptions);
+  } catch (error, stack) {
+    reportPushSetupError('subscription synchronization', error, stack);
+    rethrow;
+  }
+}, retry: pushSetupRetry);
 
 List<BuzzPushSubscription>? desiredBuzzPushSubscriptions({
   required Community community,

@@ -4,24 +4,26 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('normalizes addresses through the existing community parser', () {
-    for (final value in [
-      ' team.communities.buzz.xyz ',
-      'https://team.communities.buzz.xyz/',
-      'wss://team.communities.buzz.xyz',
+    for (final (value, relay) in [
+      (' team.communities.buzz.xyz ', 'wss://team.communities.buzz.xyz'),
+      ('https://team.communities.buzz.xyz/', 'wss://team.communities.buzz.xyz'),
+      ('wss://team.communities.buzz.xyz', 'wss://team.communities.buzz.xyz'),
+      ('secondary.example', 'wss://secondary.example'),
+      ('relay.example.com:8443', 'wss://relay.example.com:8443'),
     ]) {
       final uri = parseCommunityLinkInput(value)!;
       final link = parseBuzzDeepLink(uri) as AddCommunityDeepLink;
-      expect(link.relayUrl, 'wss://team.communities.buzz.xyz');
+      expect(link.relayUrl, relay, reason: value);
     }
   });
 
   test('preserves the invite and its destination', () {
     final uri = parseCommunityLinkInput(
-      'https://community.example.com/invite/abc123',
+      'https://primary.example/invite/fixture',
     )!;
     final link = parseBuzzDeepLink(uri) as InviteDeepLink;
-    expect(link.code, 'abc123');
-    expect(link.relayUrl, 'wss://community.example.com');
+    expect(link.code, 'fixture');
+    expect(link.relayUrl, 'wss://primary.example');
   });
 
   test('rejects unrelated actions and unsafe or incomplete addresses', () {
@@ -29,9 +31,11 @@ void main() {
       '',
       'not a link',
       'http://community.example.com',
+      'ws://secondary.example',
       'https://user:secret@community.example.com',
       'https://community.example.com/other',
       'https://community.example.com/invite/',
+      'https://primary.example/invite/fixture/',
       'https://community.example.com#secret',
       'https://community.example.com?token=secret',
       'https://127.0.0.1',

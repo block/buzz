@@ -151,6 +151,19 @@ pub async fn add_relay_member(
     added_by: Option<&str>,
     relay_keypair: &nostr::Keys,
 ) -> Result<MembershipWrite<bool>> {
+    add_relay_member_with_pending(pool, community, pubkey, role, added_by, None, relay_keypair)
+        .await
+}
+
+async fn add_relay_member_with_pending(
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: &str,
+    role: &str,
+    added_by: Option<&str>,
+    pending: Option<Uuid>,
+    relay_keypair: &nostr::Keys,
+) -> Result<MembershipWrite<bool>> {
     let mut tx = crate::begin_community_write_transaction(
         pool,
         community,
@@ -158,13 +171,14 @@ pub async fn add_relay_member(
     )
     .await?;
     let result = sqlx::query(
-        "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
-         VALUES ($1, $2, $3, $4) ON CONFLICT (community_id, pubkey) DO NOTHING",
+        "INSERT INTO relay_members (community_id, pubkey, role, added_by, auto_join_pending) \
+         VALUES ($1, $2, $3, $4, $5) ON CONFLICT (community_id, pubkey) DO NOTHING",
     )
     .bind(community.as_uuid())
     .bind(pubkey)
     .bind(role)
     .bind(added_by)
+    .bind(pending)
     .execute(tx.conn())
     .await?;
     let added = result.rows_affected() > 0;
@@ -201,38 +215,20 @@ pub async fn claim_relay_membership(
     policy_version: Option<&str>,
     relay_keypair: &nostr::Keys,
 ) -> Result<MembershipWrite<bool>> {
-    let mut tx = crate::begin_community_write_transaction(
+    let write = super::relay_invite::claim_relay_membership_with_owner(
         pool,
         community,
-        observability::WriterOperation::Authorization,
+        pubkey,
+        role,
+        policy_version,
+        None,
+        relay_keypair,
     )
     .await?;
-    let inserted = sqlx::query(
-        "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
-         VALUES ($1, $2, $3, 'invite') \
-         ON CONFLICT (community_id, pubkey) DO NOTHING",
-    )
-    .bind(community.as_uuid())
-    .bind(pubkey)
-    .bind(role)
-    .execute(tx.conn())
-    .await?
-    .rows_affected()
-        > 0;
-
-    if let Some(version) = policy_version {
-        sqlx::query(
-            "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
-             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-        )
-        .bind(community.as_uuid())
-        .bind(pubkey)
-        .bind(version)
-        .execute(tx.conn())
-        .await?;
-    }
-
-    commit_membership_write(tx, inserted, inserted, relay_keypair).await
+    Ok(MembershipWrite {
+        outcome: write.outcome.inserted,
+        snapshot: write.snapshot,
+    })
 }
 
 /// Returns whether a member has persisted acceptance evidence for a policy version.
@@ -274,10 +270,12 @@ pub enum RemoveResult {
 ///
 /// With `expected_role`, only a member holding exactly that role is removed;
 /// without it, any non-owner is. The member row is locked under that predicate
-/// first, so a concurrent acceptance insert (which must lock the member row for
-/// its foreign key) either commits before the child delete sees it or fails.
-/// Children go before the parent so no foreign-key action is needed. The
-/// caller commits.
+/// first, so a concurrent acceptance insert (which key-share locks the member
+/// row first, see `relay_invite::record_join_policy_acceptance`) either commits
+/// before the child delete sees it or finds the member gone and fails.
+/// Children go before the parent so no foreign-key action is needed. Every
+/// non-owner member whose recorded owner is `pubkey` is locked and removed in
+/// the same transaction. The caller commits.
 async fn delete_member_with_acceptances(
     tx: &mut crate::AdmittedTx,
     pubkey: &str,
@@ -297,14 +295,28 @@ async fn delete_member_with_acceptances(
     if locked.is_none() {
         return Ok(false);
     }
-    sqlx::query("DELETE FROM join_policy_acceptances WHERE community_id = $1 AND pubkey = $2")
+    // The removed key's agents go with it, whatever their role, except a
+    // community-owner agent. Their rows are not covered by the target's lock.
+    let agents: Vec<String> = sqlx::query_scalar(
+        "SELECT m.pubkey FROM relay_members m \
+         JOIN users u ON u.community_id = m.community_id AND u.pubkey = decode(m.pubkey, 'hex') \
+         WHERE m.community_id = $1 AND u.agent_owner_pubkey = decode($2, 'hex') AND m.role <> 'owner' \
+         ORDER BY m.pubkey FOR UPDATE OF m",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .fetch_all(tx.conn())
+    .await?;
+    let mut removed = agents;
+    removed.push(pubkey.to_owned());
+    sqlx::query("DELETE FROM join_policy_acceptances WHERE community_id = $1 AND pubkey = ANY($2)")
         .bind(community.as_uuid())
-        .bind(pubkey)
+        .bind(&removed)
         .execute(tx.conn())
         .await?;
-    sqlx::query("DELETE FROM relay_members WHERE community_id = $1 AND pubkey = $2")
+    sqlx::query("DELETE FROM relay_members WHERE community_id = $1 AND pubkey = ANY($2)")
         .bind(community.as_uuid())
-        .bind(pubkey)
+        .bind(&removed)
         .execute(tx.conn())
         .await?;
     Ok(true)
@@ -496,7 +508,7 @@ async fn lock_owner_mutation_admission(
     crate::deletion::lock_community_deletion_shared(tx, community).await?;
     // `FOR NO KEY UPDATE` still serializes with archive (`FOR NO KEY UPDATE`),
     // unarchive and deletion admission (`FOR UPDATE`), but not with the
-    // `FOR KEY SHARE` that every foreign-key child insert takes. A membership
+    // `FOR KEY SHARE` that reference checks take. A membership
     // writer holding a member row or the list lock inserts its kind:13534
     // list into `events` last, so `FOR UPDATE` here would deadlock with it.
     let target = sqlx::query(
@@ -1063,10 +1075,7 @@ impl<T> MembershipWrite<T> {
 /// changes `relay_members`, so the list commits or rolls back with the change.
 /// The per-community list lock is the last explicit lock: every other lock a
 /// membership transaction takes comes first, so the final writer reads every
-/// committed change. The list insert then takes `FOR KEY SHARE` on the
-/// community row through `events.community_id`'s foreign key; owner mutations
-/// lock that row `FOR NO KEY UPDATE`, which doesn't conflict, so no lock cycle
-/// forms. `created_at` is at least one second
+/// committed change. `created_at` is at least one second
 /// past every earlier list's, so the id is new and a client replacing by
 /// timestamp never keeps an older list from the same second. A burst of
 /// changes runs the timestamp ahead of the clock by up to one second per
@@ -1086,8 +1095,9 @@ pub(crate) async fn write_nip43_membership_snapshot(
         pubkey_bytes.as_slice(),
         None,
     );
-    observability::observe_advisory_lock(
+    observability::observe_event_lock(
         observability::LockType::Membership,
+        kind_i32,
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(lock_key)
             .execute(tx.conn()),
@@ -1101,8 +1111,9 @@ pub(crate) async fn write_nip43_membership_snapshot(
     .bind(community_id.as_uuid())
     .fetch_all(tx.conn())
     .await?;
-    // Retired lists count too: a list newer than every prior one can't
-    // repeat an earlier list's id.
+    // Soft-deleted lists count too: a list newer than every prior one can't
+    // repeat an earlier list's id. A superseded list is deleted below, but the
+    // live head it gives way to is always newer.
     let newest_created_at: Option<DateTime<Utc>> = sqlx::query_scalar(
         "SELECT max(created_at) FROM events \
          WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND channel_id IS NULL",
@@ -1142,20 +1153,19 @@ pub(crate) async fn write_nip43_membership_snapshot(
     let received_at = Utc::now();
     let d_tag = crate::event::extract_d_tag(&event);
 
-    // The relay is authoritative: retire every prior list unconditionally.
-    sqlx::query(
-        "UPDATE events SET deleted_at = NOW() \
-         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
-         AND channel_id IS NULL AND deleted_at IS NULL",
-    )
-    .bind(community_id.as_uuid())
-    .bind(kind_i32)
-    .bind(pubkey_bytes.as_slice())
-    .execute(tx.conn())
-    .await?;
+    // The relay is authoritative: retire every prior live list
+    // unconditionally. A superseded list is deleted, not soft-deleted.
+    let (_, supersede_sql) =
+        replaceable::replacement_sql(false, replaceable::hard_deletes_superseded(kind_i32));
+    sqlx::query(supersede_sql)
+        .bind(community_id.as_uuid())
+        .bind(kind_i32)
+        .bind(pubkey_bytes.as_slice())
+        .execute(tx.conn())
+        .await?;
     sqlx::query(
         "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, $10)",
     )
     .bind(community_id.as_uuid())
     .bind(event.id.as_bytes().as_slice())
@@ -1166,13 +1176,13 @@ pub(crate) async fn write_nip43_membership_snapshot(
     .bind(&event.content)
     .bind(event.sig.serialize().as_slice())
     .bind(received_at)
-    .bind::<Option<Uuid>>(None)
     .bind(d_tag.as_deref())
     .execute(tx.conn())
     .await?;
     crate::store::event_follow_up::after_admitted_insert(
         tx,
         event.id.as_bytes().as_slice(),
+        created_at,
         kind_i32,
         None,
     )
@@ -1206,15 +1216,129 @@ pub async fn rewrite_nip43_membership_list(
     commit_membership_write(tx, (), true, relay_keypair).await
 }
 
+/// Durable default-channel work for one roster admission.
+#[derive(Debug, sqlx::FromRow)]
+pub struct PendingDefaultChannelJoin {
+    /// Generation checked before writing or completing this work.
+    pub token: Uuid,
+    /// Original actor; `invite` denotes a self-claim.
+    pub added_by: Option<String>,
+}
+
+async fn pending_default_channel_join(
+    pool: &PgPool,
+    community: CommunityId,
+    pubkey: &str,
+) -> Result<Option<PendingDefaultChannelJoin>> {
+    let mut conn =
+        observability::acquire_writer(pool, observability::WriterOperation::Authorization).await?;
+    pending_default_channel_join_on(&mut conn, community, pubkey).await
+}
+
+async fn pending_default_channel_join_on(
+    conn: &mut sqlx::PgConnection,
+    community: CommunityId,
+    pubkey: &str,
+) -> Result<Option<PendingDefaultChannelJoin>> {
+    Ok(sqlx::query_as(
+        "SELECT auto_join_pending AS token, added_by FROM relay_members \
+         WHERE community_id = $1 AND pubkey = $2 AND auto_join_pending IS NOT NULL",
+    )
+    .bind(community.as_uuid())
+    .bind(pubkey)
+    .fetch_optional(conn)
+    .await?)
+}
+
 impl Db {
+    /// Read unfinished default-channel work and its original adding actor.
+    #[datastore_span(name = "pending_default_channel_join", system = "postgresql")]
+    pub async fn pending_default_channel_join(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+    ) -> Result<Option<PendingDefaultChannelJoin>> {
+        pending_default_channel_join(&self.pool, community, pubkey).await
+    }
+
+    /// [`Db::pending_default_channel_join`] on the bounded replica arm, for
+    /// the retry that runs on every AUTH. A stale answer is safe: it can only
+    /// defer the work to a later admission or carry an old token, and every
+    /// write re-checks the token on the writer. Falls back to the writer as
+    /// [`Db::is_relay_member`] does.
+    #[datastore_span(name = "pending_default_channel_join_routed", system = "postgresql")]
+    pub async fn pending_default_channel_join_routed(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+    ) -> Result<Option<PendingDefaultChannelJoin>> {
+        let path = "pending_default_channel_join";
+        match self
+            .route_read(
+                path,
+                RoutePredicate::Bounded,
+                crate::observability::ReaderOperation::Authorization,
+            )
+            .await?
+        {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match pending_default_channel_join_on(&mut tx, community, pubkey).await {
+                    Ok(pending) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(pending)
+                    }
+                    Err(e) if e.is_statement_cancelled() => {
+                        Self::record_route(path, "replica", "statement_cancelled");
+                        Err(e)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        pending_default_channel_join(&self.pool, community, pubkey).await
+                    }
+                }
+            }
+            RouteDecision::Writer => {
+                pending_default_channel_join(&self.pool, community, pubkey).await
+            }
+        }
+    }
+
+    /// Finish only the admission generation that was actually processed.
+    #[datastore_span(name = "finish_default_channel_join", system = "postgresql")]
+    pub async fn finish_default_channel_join(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+        pending: Uuid,
+    ) -> Result<()> {
+        let mut tx = crate::begin_community_write_transaction(
+            &self.pool,
+            community,
+            observability::WriterOperation::Authorization,
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE relay_members SET auto_join_pending = NULL \
+             WHERE community_id = $1 AND pubkey = $2 AND auto_join_pending = $3",
+        )
+        .bind(community.as_uuid())
+        .bind(pubkey)
+        .bind(pending)
+        .execute(tx.conn())
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Returns `true` if `pubkey` (64-char hex) is a member of `community`.
     ///
     /// Replica-routed on the bounded arm — the one PERMISSION read routed by
     /// explicit product decision (bounded-stale membership beats the 10s
     /// cache it replaced). Admits and revokes may lag by at most the budget
-    /// `B`; everything else fails closed to the writer, exactly like
-    /// [`Db::query_events_routed_bounded`]. Not precedent for routing other
-    /// permission reads.
+    /// `B`; everything else fails closed to the writer, including a busy
+    /// reader that history reads would be rejected for (see
+    /// [`Db::route_read`]). Not precedent for routing other permission reads.
     #[datastore_span(name = "is_relay_member", system = "postgresql")]
     pub async fn is_relay_member(&self, community: CommunityId, pubkey: &str) -> Result<bool> {
         let path = "relay_membership";
@@ -1224,7 +1348,7 @@ impl Db {
                 RoutePredicate::Bounded,
                 crate::observability::ReaderOperation::Authorization,
             )
-            .await
+            .await?
         {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match is_relay_member_on(&mut tx, community, pubkey).await {
@@ -1293,6 +1417,29 @@ impl Db {
         add_relay_member(&self.pool, community, pubkey, role, added_by, relay_keypair).await
     }
 
+    /// Adds a roster member and records default-channel work atomically.
+    /// Unlike the roster-only `add_relay_member`, this opts into auto-join.
+    #[datastore_span(name = "add_relay_member_with_default_channels", system = "postgresql")]
+    pub async fn add_relay_member_with_default_channels(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+        role: &str,
+        added_by: &str,
+        relay_keypair: &nostr::Keys,
+    ) -> Result<MembershipWrite<bool>> {
+        add_relay_member_with_pending(
+            &self.pool,
+            community,
+            pubkey,
+            role,
+            Some(added_by),
+            Some(Uuid::new_v4()),
+            relay_keypair,
+        )
+        .await
+    }
+
     /// Claims relay membership via an invite and atomically persists the
     /// accepted policy version when a policy is configured.
     #[datastore_span(name = "claim_relay_membership", system = "postgresql")]
@@ -1310,6 +1457,29 @@ impl Db {
             pubkey,
             role,
             policy_version,
+            relay_keypair,
+        )
+        .await
+    }
+
+    /// Claim legacy membership and verified ownership in one admission transaction.
+    #[datastore_span(name = "claim_relay_membership_with_owner", system = "postgresql")]
+    pub async fn claim_relay_membership_with_owner(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+        role: &str,
+        policy_version: Option<&str>,
+        verified_owner: Option<&str>,
+        relay_keypair: &nostr::Keys,
+    ) -> Result<MembershipWrite<super::relay_invite::MembershipClaimResult>> {
+        super::relay_invite::claim_relay_membership_with_owner(
+            &self.pool,
+            community,
+            pubkey,
+            role,
+            policy_version,
+            verified_owner,
             relay_keypair,
         )
         .await
@@ -1567,6 +1737,57 @@ mod postgres_tests {
         format!("{:064x}", Uuid::new_v4().as_u128())
     }
 
+    /// The roster write records its list lock under `membership` with the
+    /// roster's kind. Mutation: observe the list lock without its kind → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn membership_list_lock_records_the_roster_kind() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let pool = setup_pool().await;
+        let keys = nostr::Keys::generate();
+        let community = make_test_community(&pool).await;
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+
+        let mut tx = crate::begin_community_write_transaction(
+            &pool,
+            community,
+            observability::WriterOperation::Authorization,
+        )
+        .await
+        .expect("begin roster write");
+        write_nip43_membership_snapshot(&mut tx, &keys)
+            .await
+            .expect("write roster");
+        tx.commit().await.expect("commit roster");
+
+        let roster_kind = buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST.to_string();
+        let acquisitions = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, _, _, _)| {
+                let label = |name: &str| {
+                    key.key()
+                        .labels()
+                        .find(|label| label.key() == name)
+                        .map(|label| label.value().to_owned())
+                };
+                key.key().name() == "buzz_db_advisory_lock_acquisitions_total"
+                    && label("lock_type").as_deref()
+                        == Some(observability::LockType::Membership.as_str())
+                    && label("kind") == Some(roster_kind.clone())
+            })
+            .map(|(_, _, _, value)| match value {
+                DebugValue::Counter(count) => count,
+                other => panic!("acquisitions are a counter, got {other:?}"),
+            })
+            .sum::<u64>();
+        assert_eq!(acquisitions, 1, "one roster list lock per write");
+    }
+
     async fn assert_role(pool: &PgPool, community: CommunityId, pubkey: &str, role: &str) {
         assert_eq!(
             get_relay_member(pool, community, pubkey)
@@ -1589,14 +1810,12 @@ mod postgres_tests {
         .expect("count acceptances")
     }
 
-    /// Both removal paths delete acceptance evidence themselves: with every
-    /// foreign-key delete action retired, nothing cascades. Owners and a role
-    /// mismatch keep theirs.
+    /// Both removal paths delete acceptance evidence themselves: no foreign
+    /// key cascades. Owners and a role mismatch keep theirs.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn member_removal_deletes_acceptances_without_cascades() {
         let pool = setup_pool().await;
-        crate::test_support::retire_foreign_key_delete_actions(&pool).await;
         let (community, owner) = owned_community(&pool).await;
         let version = "a".repeat(64);
         sqlx::query(
@@ -1674,14 +1893,14 @@ mod postgres_tests {
     }
 
     /// An acceptance inserted concurrently with the removal holds the member
-    /// row's key-share lock. Removal must wait for it at its row lock and then
-    /// delete it; with no cascade, a removal that took its child snapshot first
-    /// would fail the foreign-key check on the member.
+    /// row's key-share lock (taken by the acceptance writer's own member
+    /// check; no foreign key takes it). Removal must wait for it at its row lock and then
+    /// delete it; a removal that took its child snapshot first would leave the
+    /// acceptance behind with no member.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn member_removal_waits_for_and_removes_concurrent_acceptance() {
         let pool = setup_pool().await;
-        crate::test_support::retire_foreign_key_delete_actions(&pool).await;
         let (community, _owner) = owned_community(&pool).await;
         let member = test_pubkey();
         claim_relay_membership(
@@ -1697,6 +1916,9 @@ mod postgres_tests {
         .expect("claim membership");
 
         let mut inserter = pool.begin().await.expect("begin acceptance insert");
+        crate::store::reference_check::require_relay_member(&mut inserter, community, &member)
+            .await
+            .expect("lock member as the acceptance writer does");
         sqlx::query(
             "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
              VALUES ($1, $2, $3)",
@@ -1732,6 +1954,231 @@ mod postgres_tests {
             RemoveResult::Removed
         );
         assert_eq!(acceptances(&pool, community, &member).await, 0);
+    }
+
+    /// Records `agent`'s owner directly, as authentication would.
+    async fn record_owner(pool: &PgPool, community: CommunityId, agent: &str, owner: &str) {
+        for key in [owner, agent] {
+            sqlx::query(
+                "INSERT INTO users (community_id, pubkey) VALUES ($1, decode($2, 'hex')) \
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(community.as_uuid())
+            .bind(key)
+            .execute(pool)
+            .await
+            .expect("insert user");
+        }
+        assert!(crate::user::set_agent_owner(
+            pool,
+            community,
+            &hex::decode(agent).unwrap(),
+            &hex::decode(owner).unwrap(),
+        )
+        .await
+        .expect("record owner"));
+    }
+
+    async fn role_of(pool: &PgPool, community: CommunityId, pubkey: &str) -> Option<String> {
+        get_relay_member(pool, community, pubkey)
+            .await
+            .expect("get relay member")
+            .map(|member| member.role)
+    }
+
+    async fn add_with_acceptance(pool: &PgPool, community: CommunityId, pubkey: &str, role: &str) {
+        assert!(
+            add_relay_member(
+                pool,
+                community,
+                pubkey,
+                role,
+                None,
+                &nostr::Keys::generate()
+            )
+            .await
+            .expect("add member")
+            .outcome
+        );
+        sqlx::query(
+            "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(pubkey)
+        .bind("c".repeat(64))
+        .execute(pool)
+        .await
+        .expect("insert acceptance");
+    }
+
+    fn snapshot_members(write: &MembershipWrite<RemoveResult>) -> Vec<String> {
+        let event = write.snapshot.as_ref().expect("roster snapshot");
+        event
+            .event
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("member"))
+            .filter_map(|tag| tag.as_slice().get(1).cloned())
+            .collect()
+    }
+
+    /// Removing a key removes every agent it owns in the same commit,
+    /// whatever the agent's role; others, and the agent elsewhere, stay.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn removal_takes_owned_agents_of_any_role() {
+        let pool = setup_pool().await;
+        let (community, _owner) = owned_community(&pool).await;
+        let (other_community, _) = owned_community(&pool).await;
+        let (human, member_agent, admin_agent, bystander) =
+            (test_pubkey(), test_pubkey(), test_pubkey(), test_pubkey());
+        add_with_acceptance(&pool, community, &human, "member").await;
+        add_with_acceptance(&pool, community, &member_agent, "member").await;
+        add_with_acceptance(&pool, community, &admin_agent, "admin").await;
+        add_with_acceptance(&pool, community, &bystander, "member").await;
+        add_with_acceptance(&pool, other_community, &member_agent, "member").await;
+        record_owner(&pool, community, &member_agent, &human).await;
+        record_owner(&pool, community, &admin_agent, &human).await;
+        record_owner(&pool, other_community, &member_agent, &human).await;
+
+        let write = remove_relay_member_if_role(
+            &pool,
+            community,
+            &human,
+            "member",
+            &nostr::Keys::generate(),
+        )
+        .await
+        .expect("remove owner of agents");
+        assert_eq!(write.outcome, RemoveResult::Removed);
+        let roster = snapshot_members(&write);
+        for gone in [&human, &member_agent, &admin_agent] {
+            assert_eq!(role_of(&pool, community, gone).await, None);
+            assert_eq!(acceptances(&pool, community, gone).await, 0);
+            assert!(!roster.contains(gone));
+        }
+        assert!(roster.contains(&bystander));
+        assert_eq!(
+            role_of(&pool, community, &bystander).await.as_deref(),
+            Some("member")
+        );
+        assert_eq!(
+            role_of(&pool, other_community, &member_agent)
+                .await
+                .as_deref(),
+            Some("member")
+        );
+    }
+
+    /// An owned agent that is the community owner keeps its membership and
+    /// acceptances and stays in the published roster.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn removal_keeps_owned_community_owner_agent() {
+        let pool = setup_pool().await;
+        let (community, owner_agent) = owned_community(&pool).await;
+        sqlx::query(
+            "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(&owner_agent)
+        .bind("c".repeat(64))
+        .execute(&pool)
+        .await
+        .expect("owner acceptance");
+        let human = test_pubkey();
+        add_with_acceptance(&pool, community, &human, "member").await;
+        record_owner(&pool, community, &owner_agent, &human).await;
+
+        let write = remove_relay_member(&pool, community, &human, &nostr::Keys::generate())
+            .await
+            .expect("remove owner of owner agent");
+        assert_eq!(write.outcome, RemoveResult::Removed);
+        assert_eq!(
+            role_of(&pool, community, &owner_agent).await.as_deref(),
+            Some("owner")
+        );
+        assert_eq!(acceptances(&pool, community, &owner_agent).await, 1);
+        let roster = snapshot_members(&write);
+        assert!(roster.contains(&owner_agent));
+        assert!(!roster.contains(&human));
+    }
+
+    /// Owner recorded only after the owner's removal: the agent's row stays.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_recorded_after_removal_leaves_agent_member() {
+        let pool = setup_pool().await;
+        let (community, _owner) = owned_community(&pool).await;
+        let (human, agent) = (test_pubkey(), test_pubkey());
+        add_with_acceptance(&pool, community, &human, "member").await;
+        add_with_acceptance(&pool, community, &agent, "member").await;
+        let write = remove_relay_member(&pool, community, &human, &nostr::Keys::generate())
+            .await
+            .expect("remove human");
+        assert_eq!(write.outcome, RemoveResult::Removed);
+        record_owner(&pool, community, &agent, &human).await;
+        assert_eq!(
+            role_of(&pool, community, &agent).await.as_deref(),
+            Some("member")
+        );
+    }
+
+    /// The race in `member_removal_waits_for_and_removes_concurrent_acceptance`
+    /// for an owned agent removed with its owner: the cascade's lock on the
+    /// agent's row waits for the in-flight acceptance and then deletes it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn cascade_waits_for_and_removes_owned_agent_concurrent_acceptance() {
+        let pool = setup_pool().await;
+        let (community, _owner) = owned_community(&pool).await;
+        let (human, agent) = (test_pubkey(), test_pubkey());
+        add_with_acceptance(&pool, community, &human, "member").await;
+        add_with_acceptance(&pool, community, &agent, "member").await;
+        record_owner(&pool, community, &agent, &human).await;
+
+        let mut inserter = pool.begin().await.expect("begin acceptance insert");
+        crate::store::reference_check::require_relay_member(&mut inserter, community, &agent)
+            .await
+            .expect("lock agent as the acceptance writer does");
+        sqlx::query(
+            "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(community.as_uuid())
+        .bind(&agent)
+        .bind("b".repeat(64))
+        .execute(&mut *inserter)
+        .await
+        .expect("insert concurrent acceptance");
+
+        let name = format!("cascade-remove-{}", Uuid::new_v4().simple());
+        let remover = crate::test_support::named_pool(&name).await;
+        let removal = tokio::spawn({
+            let human = human.clone();
+            async move {
+                remove_relay_member(&remover, community, &human, &nostr::Keys::generate())
+                    .await
+                    .map(|write| write.outcome)
+            }
+        });
+        crate::test_support::wait_for_lock_wait(&pool, &name).await;
+        inserter
+            .commit()
+            .await
+            .expect("commit concurrent acceptance");
+
+        assert_eq!(
+            removal
+                .await
+                .expect("join removal")
+                .expect("removal after concurrent acceptance"),
+            RemoveResult::Removed
+        );
+        assert_eq!(role_of(&pool, community, &agent).await, None);
+        assert_eq!(acceptances(&pool, community, &agent).await, 0);
     }
 
     async fn owned_community(pool: &PgPool) -> (CommunityId, String) {
@@ -2369,6 +2816,16 @@ mod postgres_tests {
             .expect("transfer ownership");
         assert!(matches!(write.outcome, TransferResult::Transferred { .. }));
         assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
+        // Each write above deleted the list it superseded, so only the live
+        // list is stored.
+        let stored: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND kind = $2")
+                .bind(community.as_uuid())
+                .bind(buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32)
+                .fetch_one(&pool)
+                .await
+                .expect("count stored lists");
+        assert_eq!(stored, 1, "superseded lists are deleted");
 
         let provisioned = make_test_community(&pool).await;
         let write = db
@@ -2587,7 +3044,7 @@ mod postgres_tests {
 
     /// A list repair that holds the list lock while a transfer waits on it
     /// still inserts its list: the transfer's community row lock doesn't
-    /// block the insert's foreign-key `FOR KEY SHARE`, so both commit.
+    /// block the insert, so both commit.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn owner_transfer_and_list_repair_both_commit() {
@@ -2699,6 +3156,269 @@ mod postgres_tests {
         assert_role(&pool, community, &member, "owner").await;
         assert_role(&pool, community, &owner, "member").await;
         assert_membership_list_matches(&pool, community, &keys, write.snapshot.as_ref()).await;
+    }
+
+    /// Run `claim` on its own named connection and wait until it is blocked on
+    /// a lock, so the caller can finish a removal that it started.
+    async fn spawn_blocked<T: Send + 'static>(
+        pool: &PgPool,
+        claim: impl FnOnce(PgPool) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>,
+    ) -> tokio::task::JoinHandle<T> {
+        let name = format!("member-claim-{}", Uuid::new_v4().simple());
+        let claim_pool = crate::test_support::named_pool(&name).await;
+        let handle = tokio::spawn(claim(claim_pool));
+        crate::test_support::wait_for_lock_wait(pool, &name).await;
+        handle
+    }
+
+    async fn orphan_acceptances(pool: &PgPool, community: CommunityId) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM join_policy_acceptances a WHERE a.community_id = $1 \
+             AND NOT EXISTS (SELECT 1 FROM relay_members m \
+                             WHERE m.community_id = a.community_id AND m.pubkey = a.pubkey)",
+        )
+        .bind(community.as_uuid())
+        .fetch_one(pool)
+        .await
+        .expect("count orphan acceptances")
+    }
+
+    /// A membership claim whose insert hit a conflict (the member already
+    /// exists) locks nothing on its own. It must lock the member row before it
+    /// writes the acceptance: with no foreign key, a
+    /// removal that locked the member `FOR UPDATE`, deleted its acceptances and
+    /// then the member would otherwise commit before the claim's acceptance
+    /// lands, leaving an acceptance with no member. The claim refuses instead.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn membership_claim_racing_member_removal_leaves_no_orphan_acceptance() {
+        let pool = setup_pool().await;
+        let (community, _owner) = owned_community(&pool).await;
+        let member = test_pubkey();
+        let keys = nostr::Keys::generate();
+        let _ = claim_relay_membership(&pool, community, &member, "member", None, &keys)
+            .await
+            .expect("add member");
+
+        // The removal takes its member lock; the claim then conflicts on the
+        // live row and has to wait for that lock to write its acceptance.
+        let mut removal = crate::begin_community_write_transaction(
+            &pool,
+            community,
+            observability::WriterOperation::Authorization,
+        )
+        .await
+        .expect("begin removal");
+        sqlx::query(
+            "SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2 FOR UPDATE",
+        )
+        .bind(community.as_uuid())
+        .bind(&member)
+        .execute(removal.conn())
+        .await
+        .expect("lock member");
+        let claim = spawn_blocked(&pool, |claim_pool| {
+            let member = member.clone();
+            let keys = keys.clone();
+            Box::pin(async move {
+                claim_relay_membership(
+                    &claim_pool,
+                    community,
+                    &member,
+                    "member",
+                    Some(&"c".repeat(64)),
+                    &keys,
+                )
+                .await
+                .map(|write| write.outcome)
+            })
+        })
+        .await;
+        assert!(delete_member_with_acceptances(&mut removal, &member, None)
+            .await
+            .expect("delete member"));
+        removal.commit().await.expect("commit removal");
+
+        match claim.await.expect("join claim") {
+            Err(crate::DbError::NotFound(message)) => assert!(message.contains("relay member")),
+            other => panic!("claim after the member was removed: {other:?}"),
+        }
+        assert!(!is_relay_member(&pool, community, &member)
+            .await
+            .expect("membership"));
+        assert_eq!(acceptances(&pool, community, &member).await, 0);
+        assert_eq!(orphan_acceptances(&pool, community).await, 0);
+    }
+
+    /// An invitation claim by an existing member reads the member row
+    /// `FOR KEY SHARE`, so a removal in flight orders against it: the claim
+    /// waits, finds no member once the removal commits, and joins them afresh
+    /// with its acceptance. Without the lock on that read the claim sees the
+    /// member the removal is deleting and fails writing the acceptance.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn invite_claim_racing_member_removal_rejoins_without_orphan_acceptance() {
+        let pool = setup_pool().await;
+        let (community, owner) = owned_community(&pool).await;
+        let member = test_pubkey();
+        let keys = nostr::Keys::generate();
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        let _ = claim_relay_membership(&pool, community, &member, "member", Some(&first), &keys)
+            .await
+            .expect("add member");
+        let invite = crate::relay_invite::mint_relay_invite(&pool, community, &owner, 3600, None)
+            .await
+            .expect("mint invite");
+        let hash = buzz_core::invite::hash_v2_code(&invite.code);
+
+        let mut removal = crate::begin_community_write_transaction(
+            &pool,
+            community,
+            observability::WriterOperation::Authorization,
+        )
+        .await
+        .expect("begin removal");
+        assert!(delete_member_with_acceptances(&mut removal, &member, None)
+            .await
+            .expect("delete member"));
+        let claim = spawn_blocked(&pool, |claim_pool| {
+            let member = member.clone();
+            let second = second.clone();
+            let keys = keys.clone();
+            Box::pin(async move {
+                crate::relay_invite::claim_relay_invite(
+                    &claim_pool,
+                    community,
+                    &hash,
+                    &member,
+                    Some(&second),
+                    &keys,
+                )
+                .await
+                .map(|write| write.outcome)
+            })
+        })
+        .await;
+        removal.commit().await.expect("commit removal");
+
+        let outcome = claim.await.expect("join claim").expect("claim outcome");
+        assert!(
+            matches!(outcome, crate::relay_invite::ClaimOutcome::Joined { .. }),
+            "{outcome:?}"
+        );
+        assert!(is_relay_member(&pool, community, &member)
+            .await
+            .expect("membership"));
+        assert!(
+            !has_join_policy_acceptance(&pool, community, &member, &first)
+                .await
+                .expect("removed acceptance")
+        );
+        assert!(
+            has_join_policy_acceptance(&pool, community, &member, &second)
+                .await
+                .expect("new acceptance")
+        );
+        assert_eq!(orphan_acceptances(&pool, community).await, 0);
+    }
+
+    /// An invitation claim that found no member can still lose the race to
+    /// another writer adding one before its membership INSERT. That INSERT
+    /// then hits `ON CONFLICT DO NOTHING`, which locks nothing, so the claim
+    /// must lock the member row before it writes the acceptance. The claim is
+    /// paused before the INSERT while the member is added and a removal
+    /// takes the member `FOR UPDATE`; with no foreign key, the claim then
+    /// waits on that lock, and once the removal commits it
+    /// refuses with no acceptance, no orphan and no invite use consumed.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn invite_claim_conflicting_with_a_member_added_mid_claim_waits_for_removal() {
+        let pool = setup_pool().await;
+        let (community, owner) = owned_community(&pool).await;
+        let member = test_pubkey();
+        let keys = nostr::Keys::generate();
+        let invite = crate::relay_invite::mint_relay_invite(&pool, community, &owner, 3600, None)
+            .await
+            .expect("mint invite");
+        let hash = buzz_core::invite::hash_v2_code(&invite.code);
+        let uses = |pool: PgPool| async move {
+            sqlx::query_scalar::<_, i32>(
+                "SELECT use_count FROM relay_invites WHERE community_id = $1",
+            )
+            .bind(community.as_uuid())
+            .fetch_one(&pool)
+            .await
+            .expect("invite use count")
+        };
+
+        // The claim looks the member up (none yet), then pauses before its INSERT.
+        let (arrived, release) =
+            crate::relay_invite::test_hook::arm_before_membership_insert(community);
+        let name = format!("member-claim-{}", Uuid::new_v4().simple());
+        let claim_pool = crate::test_support::named_pool(&name).await;
+        let claim = tokio::spawn({
+            let member = member.clone();
+            let keys = keys.clone();
+            async move {
+                crate::relay_invite::claim_relay_invite(
+                    &claim_pool,
+                    community,
+                    &hash,
+                    &member,
+                    Some(&"d".repeat(64)),
+                    &keys,
+                )
+                .await
+                .map(|write| write.outcome)
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(30), arrived)
+            .await
+            .expect("claim reaches the hook")
+            .expect("hook fires");
+
+        // Another writer adds the member, and a removal then holds it locked.
+        assert!(
+            add_relay_member(&pool, community, &member, "member", None, &keys)
+                .await
+                .expect("add member")
+                .outcome
+        );
+        let mut removal = crate::begin_community_write_transaction(
+            &pool,
+            community,
+            observability::WriterOperation::Authorization,
+        )
+        .await
+        .expect("begin removal");
+        sqlx::query(
+            "SELECT 1 FROM relay_members WHERE community_id = $1 AND pubkey = $2 FOR UPDATE",
+        )
+        .bind(community.as_uuid())
+        .bind(&member)
+        .execute(removal.conn())
+        .await
+        .expect("lock member");
+
+        // The resumed claim conflicts on the live row and has to wait for the lock.
+        release.notify_one();
+        crate::test_support::wait_for_lock_wait(&pool, &name).await;
+        assert!(delete_member_with_acceptances(&mut removal, &member, None)
+            .await
+            .expect("delete member"));
+        removal.commit().await.expect("commit removal");
+
+        match claim.await.expect("join claim") {
+            Err(crate::DbError::NotFound(message)) => assert!(message.contains("relay member")),
+            other => panic!("claim after the member was removed: {other:?}"),
+        }
+        assert!(!is_relay_member(&pool, community, &member)
+            .await
+            .expect("membership"));
+        assert_eq!(acceptances(&pool, community, &member).await, 0);
+        assert_eq!(orphan_acceptances(&pool, community).await, 0);
+        assert_eq!(uses(pool.clone()).await, 0, "no invite use consumed");
     }
 
     /// Returning to an earlier membership within the same second yields a new

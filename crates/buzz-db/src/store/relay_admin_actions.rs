@@ -170,7 +170,10 @@ pub async fn resolve_report_decision_atomic(
         return Ok(false);
     }
 
-    // Insert the decision audit row in the same transaction.
+    // Insert the decision audit row in the same transaction. A missing channel
+    // fails here, after the report-not-open outcome, and rolls the CAS back.
+    crate::store::reference_check::require_optional_channel(tx.conn(), community_id, channel_id)
+        .await?;
     sqlx::query(
         r#"
         INSERT INTO moderation_actions (
@@ -282,6 +285,11 @@ pub async fn claim_report(
     if status != "open" {
         return Ok(ClaimResult::NotOpen(status));
     }
+
+    // The decision audit row below names `channel_id`. A missing channel fails
+    // after the not-found, retry and not-open outcomes, before any write.
+    crate::store::reference_check::require_optional_channel(tx.conn(), community_id, channel_id)
+        .await?;
 
     // Insert the action record first to get its ID.
     let action_row = sqlx::query(
@@ -473,8 +481,9 @@ pub async fn execute_ban_with_marker(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    crate::relay_invite::lock_admission(tx.conn(), community_id).await?;
 
-    // Verify lease ownership first — abort without touching domain rows if the
+    // Verify lease ownership before domain writes — abort if the
     // lease is already gone. This prevents the commit entirely on a stale worker.
     let owned: bool = sqlx::query_scalar(
         r#"
@@ -523,6 +532,9 @@ pub async fn execute_ban_with_marker(
     .execute(tx.conn())
     .await?;
 
+    crate::relay_invite::revoke_banned_issuer_invites(tx.conn(), community_id, target_pubkey)
+        .await?;
+
     let marker = sqlx::query(
         r#"
         UPDATE relay_admin_actions
@@ -569,6 +581,7 @@ pub async fn execute_timeout_with_marker(
         crate::observability::WriterOperation::Authorization,
     )
     .await?;
+    crate::relay_invite::lock_admission(tx.conn(), community_id).await?;
 
     let owned: bool = sqlx::query_scalar(
         r#"
@@ -615,6 +628,9 @@ pub async fn execute_timeout_with_marker(
     .bind(reason)
     .execute(tx.conn())
     .await?;
+
+    crate::relay_invite::revoke_banned_issuer_invites(tx.conn(), community_id, target_pubkey)
+        .await?;
 
     let marker = sqlx::query(
         r#"
@@ -713,7 +729,7 @@ pub async fn execute_kick_with_marker(
     let kick = sqlx::query(
         r#"
         UPDATE channel_members
-        SET removed_at = NOW(), removed_by = $1
+        SET removed_at = clock_timestamp(), sync_modified_at = clock_timestamp(), removed_by = $1
         WHERE community_id = $2 AND channel_id = $3 AND pubkey = $4 AND removed_at IS NULL
         "#,
     )
@@ -728,6 +744,7 @@ pub async fn execute_kick_with_marker(
         tx.rollback().await?;
         return Ok(KickWithMarkerResult::AlreadyGone);
     }
+    crate::dm::release_dm_identity(tx.conn(), community_id, channel_id, target_pubkey).await?;
 
     let marker = sqlx::query(
         r#"
@@ -803,16 +820,35 @@ pub async fn execute_delete_with_marker(
         .fetch_optional(tx.conn())
         .await?;
 
+    // NIP-AR: an artifact revision leaves current state only through its own
+    // `op=delete` or a kind-9005 redaction. Both are fanned out, so open syncs
+    // see them; this delete would retire a head with no live signal.
+    let target: Option<(i32, chrono::DateTime<chrono::Utc>)> =
+        sqlx::query_as("SELECT kind, created_at FROM events WHERE community_id = $1 AND id = $2")
+            .bind(community_id.as_uuid())
+            .bind(target_event_id)
+            .fetch_optional(tx.conn())
+            .await?;
+    if target.is_some_and(|(kind, _)| kind == 45010) {
+        return Err(crate::error::DbError::InvalidData(
+            "artifact revisions cannot be deleted by admin action; use op=delete or kind 9005 redaction"
+                .into(),
+        ));
+    }
+
     // Canonical delete + thread_metadata counters, fenced by this transaction.
     // Counters move only when the row transitions to deleted, so a second
     // action against an already-deleted target leaves them unchanged.
-    crate::event::soft_delete_event_and_update_thread_in_tx(
-        &mut tx,
-        target_event_id,
-        parent_event_id,
-        root_event_id,
-    )
-    .await?;
+    if let Some((_, created_at)) = target {
+        crate::event::soft_delete_event_and_update_thread_in_tx(
+            &mut tx,
+            target_event_id,
+            Some(created_at),
+            parent_event_id,
+            root_event_id,
+        )
+        .await?;
+    }
 
     let marker = sqlx::query(
         r#"
@@ -1705,7 +1741,7 @@ pub async fn deploy_kick_member(
     let result = sqlx::query(
         r#"
         UPDATE channel_members
-        SET removed_at = NOW(), removed_by = $1
+        SET removed_at = clock_timestamp(), sync_modified_at = clock_timestamp(), removed_by = $1
         WHERE community_id = $2 AND channel_id = $3 AND pubkey = $4 AND removed_at IS NULL
         "#,
     )
@@ -1715,6 +1751,9 @@ pub async fn deploy_kick_member(
     .bind(target_pubkey)
     .execute(tx.conn())
     .await?;
+    if result.rows_affected() > 0 {
+        crate::dm::release_dm_identity(tx.conn(), community_id, channel_id, target_pubkey).await?;
+    }
     tx.commit().await?;
 
     if result.rows_affected() > 0 {
@@ -1865,6 +1904,14 @@ pub async fn claim_direct_action(
     } else {
         input.action
     };
+    // The audit row names `input.channel_id`. A missing channel fails after the
+    // idempotent-replay classification above and rolls the action row back.
+    crate::store::reference_check::require_optional_channel(
+        tx.conn(),
+        input.community_id,
+        input.channel_id,
+    )
+    .await?;
     sqlx::query(
         r#"
         INSERT INTO moderation_actions (

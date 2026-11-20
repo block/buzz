@@ -17,7 +17,8 @@ name: Docker image
 #
 # Triggers:
 #   - push to main           → :main + :sha-<7> + :main-<commit UTC>-<7>
-#                              + the matching :debug-* tags
+#                              + the matching :debug-* tags, only when the
+#                              push touches the image build context (below)
 #   - push tags relay-v*.*.* → :{version} + :{major}.{minor} + :{major}
 #                              + matching :debug-* tags
 #                              (+ :latest/:debug-latest for stable releases)
@@ -36,7 +37,9 @@ name: Docker image
 #
 # ghcr.io/block/buzz-push-gateway carries the same :main, :sha-<7> and
 # :main-<commit UTC>-<7> tags on main pushes, and publishes only after the
-# relay's `qualify` job accepts the same source SHA.
+# relay's `qualify` job accepts the same source SHA. A main push publishes it
+# only when the gateway's build inputs changed since the source of the current
+# :main gateway image (scripts/push-gateway-image-inputs-changed.sh).
 #
 # :main-<YYYYMMDDHHmmss>-<7> names the same main build as :sha-<7>, prefixed
 # with its UTC commit time so the tag sorts by build order. Kargo's Lexical
@@ -49,10 +52,26 @@ name: Docker image
 # semver, so relay-v0.3.0-rc.1 publishes :0.3.0-rc.1 without moving :latest,
 # and main pushes (no semver tag) never produce :latest.
 
+# Main pushes skip paths that .dockerignore keeps out of the build context:
+# they cannot change either image, and every published :main-<commit UTC>-<7>
+# tag rolls staging through Kargo. .github/ is ignored by Docker too, but this
+# workflow defines the build, so it is re-included. GitHub does not evaluate
+# path filters for tag pushes, so relay-v* tags always publish.
+# scripts/test-relay-image-eligibility-workflow.sh checks every exclusion
+# against .dockerignore.
 on:
   push:
     branches: [main]
     tags: ["relay-v[0-9]*"]
+    paths:
+      - "**"
+      - "!desktop/**"
+      - "!mobile/**"
+      - "!docs/**"
+      - "!bin/**"
+      - "!sidecars/**"
+      - "!.github/**"
+      - ".github/workflows/docker.yml"
   pull_request:
     paths:
       - "Dockerfile"
@@ -63,6 +82,7 @@ on:
       - "scripts/create-deployment-eligibility-predicate.jq"
       - "scripts/select-qualified-ci-run.jq"
       - "scripts/test-relay-image-eligibility-workflow.sh"
+      - "scripts/push-gateway-image-inputs-changed.sh"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
@@ -409,6 +429,7 @@ jobs:
           done
 
           annotations=(
+            --annotation "index:org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
             --annotation "index:org.opencontainers.image.revision=${SOURCE_SHA}"
             --annotation "index:xyz.block.buzz.build.id=github-actions:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
             --annotation "index:xyz.block.buzz.qualification.ci-run-id=${CI_RUN_ID}"
@@ -504,8 +525,33 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # Staging takes every published main gateway image, so a main push publishes
+  # one only when the gateway's build inputs changed since the source of the
+  # current :main image. Other events always build.
+  push-gateway-inputs:
+    name: Check push gateway build inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Compare with the published gateway image
+        id: check
+        env:
+          MAIN_PUSH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: scripts/push-gateway-image-inputs-changed.sh "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
   push-gateway-build:
     name: Build public push gateway (${{ matrix.platform }})
+    needs: push-gateway-inputs
+    if: needs.push-gateway-inputs.outputs.build == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
@@ -583,6 +629,8 @@ jobs:
 
   push-gateway-personal-dev:
     name: Build personal development push gateway
+    needs: push-gateway-inputs
+    if: needs.push-gateway-inputs.outputs.build == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -658,12 +706,18 @@ jobs:
         working-directory: /tmp/gateway-digests
         env:
           META_TAGS: ${{ steps.meta.outputs.tags }}
+        # :main is held back until provenance is attested; see "Publish :main".
         run: |
           set -euo pipefail
-          tags=(); while IFS= read -r tag; do [ -n "$tag" ] && tags+=("-t" "$tag"); done <<< "$META_TAGS"
+          tags=(); first_tag=""; main=false
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            if [ "$tag" = "ghcr.io/block/buzz-push-gateway:main" ]; then main=true; continue; fi
+            tags+=("-t" "$tag"); first_tag=${first_tag:-$tag}
+          done <<< "$META_TAGS"
+          echo "main=${main}" >> "$GITHUB_OUTPUT"
           digests=(); for digest in *; do digests+=("ghcr.io/block/buzz-push-gateway@sha256:${digest}"); done
           docker buildx imagetools create "${tags[@]}" "${digests[@]}"
-          first_tag=$(echo "$META_TAGS" | head -n1)
           digest=$(docker buildx imagetools inspect "$first_tag" --format '{{json .Manifest}}' | jq -r '.digest')
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
       - name: Attest gateway image provenance
@@ -672,6 +726,13 @@ jobs:
           subject-name: ghcr.io/block/buzz-push-gateway
           subject-digest: ${{ steps.manifest.outputs.digest }}
           push-to-registry: true
+      # Main pushes compare with the source of :main to decide whether to build
+      # (push-gateway-inputs), so :main moves only once the image is attested.
+      - name: Publish :main
+        if: steps.manifest.outputs.main == 'true'
+        env:
+          GATEWAY_DIGEST: ${{ steps.manifest.outputs.digest }}
+        run: docker buildx imagetools create -t ghcr.io/block/buzz-push-gateway:main "ghcr.io/block/buzz-push-gateway@${GATEWAY_DIGEST}"
       - name: Gateway publication summary
         env:
           GATEWAY_DIGEST: ${{ steps.manifest.outputs.digest }}

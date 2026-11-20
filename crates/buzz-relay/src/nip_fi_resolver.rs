@@ -355,6 +355,15 @@ impl DatabaseResolver {
         }
     }
 
+    /// Whether this pod knows `raw_host` binds no community: the host can
+    /// never be bound, or a completed lookup found no binding and its
+    /// negative entry is still live. A failed, timed-out or shed lookup
+    /// confirms nothing.
+    pub(crate) fn confirms_unmapped(&self, raw_host: &str) -> bool {
+        let host = normalize_host(raw_host);
+        !self.policy.is_bindable(&host) || self.negatively_cached(&host)
+    }
+
     /// Record that this pod just committed a binding for `host`: drop its
     /// cached "not found" and bump the sequence, so a lookup that read
     /// before the commit cannot cache one, and the creator's first login

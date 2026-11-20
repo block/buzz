@@ -6,17 +6,12 @@ import XCTest
 /// Actual UIKit picker presentation and method-channel dispatch, followed by
 /// synthetic document-provider delegate callbacks. Never persists an identity.
 final class IdentityFilePluginTests: XCTestCase {
+  /// `pick()` presents on the key window's root, so import is invoked only
+  /// once this window is key; otherwise the picker can land on another window.
   @MainActor
-  private func makeWindow() throws -> (UIWindow, UIViewController) {
-    let scene = try XCTUnwrap(UIApplication.shared.connectedScenes
-      .compactMap { $0 as? UIWindowScene }
-      .first { $0.activationState == .foregroundActive })
+  private func makeWindow() async throws -> (UIWindow, UIViewController) {
     let parent = UIViewController()
-    let window = UIWindow(windowScene: scene)
-    window.rootViewController = parent
-    window.makeKeyAndVisible()
-    parent.loadViewIfNeeded()
-    return (window, parent)
+    return (try await keyWindow(showing: parent), parent)
   }
 
   @MainActor
@@ -79,7 +74,7 @@ final class IdentityFilePluginTests: XCTestCase {
     let plugin = IdentityFilePlugin(messenger: messenger)
     XCTAssertFalse(manager.fileExists(atPath: interrupted.path))
     XCTAssertTrue(manager.fileExists(atPath: unrelated.path))
-    let (window, parent) = try makeWindow()
+    let (window, parent) = try await makeWindow()
     defer { window.isHidden = true }
     var responses = 0
     messenger.invokeImport { value in
@@ -124,7 +119,7 @@ final class IdentityFilePluginTests: XCTestCase {
   func testSyntheticDocumentsReadInPlaceAndRejectInvalidOrOversize() async throws {
     let messenger = IdentityFileTestMessenger()
     let plugin = IdentityFilePlugin(messenger: messenger)
-    let (window, parent) = try makeWindow()
+    let (window, parent) = try await makeWindow()
     defer { window.isHidden = true }
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

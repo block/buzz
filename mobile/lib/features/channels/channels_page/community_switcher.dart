@@ -1,6 +1,6 @@
 part of '../channels_page.dart';
 
-const _communityGridAvatarSize = 88.0;
+const _communityGridAvatarSize = communityGridAvatarSize;
 const _communityCenterDuration = Duration(milliseconds: 420);
 const _communityCenterCurve = Cubic(0.22, 1, 0.36, 1);
 const _communityDepartureDuration = Duration(milliseconds: 520);
@@ -9,12 +9,15 @@ const _communityRevealDuration = Duration(milliseconds: 160);
 const _communityCenteredAvatarSize = _communityGridAvatarSize * 1.5;
 
 // Readiness follows the data that determines the landing page's layout. Live
-// messages continue to sync normally after this first usable snapshot.
+// messages continue to sync normally after this first usable snapshot. The
+// header's own profile avatar hydrates independently and never gates landing.
+// Cached destinations use local layout/read preferences immediately. Remote
+// changes may reorder the list or update badges after reveal; offline landing
+// must not wait for those relay reads.
 final _communityContentReadyProvider = Provider.autoDispose<AsyncValue<bool>>((
   ref,
 ) {
   final channels = ref.watch(channelsProvider);
-  final profile = ref.watch(profileProvider);
   final community = ref.watch(activeCommunityProvider).unwrapPrevious().value;
   final sections = ref.watch(channelSectionsProvider).isReady;
   final stars = ref.watch(channelStarsProvider).isReady;
@@ -22,6 +25,10 @@ final _communityContentReadyProvider = Provider.autoDispose<AsyncValue<bool>>((
   final mutes = ref.watch(channelMutesProvider).isReady;
   final readState = ref.watch(readStateProvider).isReady;
   final hasIdentity = ref.watch(myPubkeyProvider) != null;
+  // A restored snapshot lands with the local section/star/sort/mute/read state
+  // already applied; their remote catch-up continues after reveal. Watching
+  // channelsProvider above re-evaluates this when the snapshot is installed.
+  final cached = ref.read(channelsProvider.notifier).hasCachedSnapshot;
   if (!channels.isLoading && channels.hasError) {
     return AsyncError(channels.error!, channels.stackTrace!);
   }
@@ -29,8 +36,9 @@ final _communityContentReadyProvider = Provider.autoDispose<AsyncValue<bool>>((
     community != null &&
         channels.hasValue &&
         !channels.isLoading &&
-        !profile.isLoading &&
-        (!hasIdentity || (sections && stars && sort && mutes && readState)),
+        (!hasIdentity ||
+            cached ||
+            (sections && stars && sort && mutes && readState)),
   );
 });
 
@@ -82,8 +90,11 @@ class CommunitySwitcherPage extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final communitiesAsync = ref.watch(communityListProvider);
+    final known = ref.watch(knownCommunitiesProvider);
+    final knownAsync = known.isReloading ? known.unwrapPrevious() : known;
     final activeId = ref.watch(activeCommunityProvider).value?.id;
     final isEditing = useState(false);
+    final openingAccountCommunity = useState(false);
     final flight = useState<_CommunityFlight?>(
       arrivingCommunity == null
           ? null
@@ -129,8 +140,14 @@ class CommunitySwitcherPage extends HookConsumerWidget {
         MediaQuery.disableAnimationsOf(context) ||
         FocusManager.instance.highlightMode == FocusHighlightMode.traditional;
 
-    Future<void> waitForContent() async {
+    Future<void> waitForContent({Future<void>? abandon}) async {
       final ready = Completer<void>();
+      // Stop listening once the caller no longer needs the content.
+      unawaited(
+        abandon?.then((_) {
+          if (!ready.isCompleted) ready.complete();
+        }),
+      );
       final subscription = ref.listenManual(_communityContentReadyProvider, (
         _,
         next,
@@ -168,34 +185,70 @@ class CommunitySwitcherPage extends HookConsumerWidget {
       if (!arriving) unawaited(HapticFeedback.selectionClick());
       final animate = !reducedMotion && (arriving || destination != null);
       try {
-        // Relay teardown, credential changes and provider hydration must not
-        // compete with the grid-to-center motion on the UI isolate.
-        if (animate && !arriving) {
-          await centering.forward(from: 0).orCancel;
-        } else {
-          centering.value = 1;
-        }
-        if (!context.mounted) return;
-        await WidgetsBinding.instance.endOfFrame;
-        if (!context.mounted) return;
-        if (!arriving) {
-          await ref
-              .read(communityListProvider.notifier)
-              .switchCommunity(community.id);
-        }
+        // Storage and relay teardown are asynchronous I/O, so they overlap the
+        // grid-to-center motion. Both settle before any failure is handled, so
+        // the picker never resets while one of them is still running.
+        await Future.wait<void>([
+          if (animate && !arriving)
+            centering.forward(from: 0).orCancel
+          else
+            Future.sync(() => centering.value = 1),
+          if (!arriving)
+            ref
+                .read(communityListProvider.notifier)
+                .switchCommunity(community.id),
+        ]);
         if (!context.mounted) return;
         await ref.read(activeCommunityProvider.future);
         if (!context.mounted) return;
-        // Refresh this scope before awaiting its content. ChannelsNotifier
-        // fences cached snapshots to the destination relay and identity.
-        if (!arriving) ref.invalidate(channelsProvider);
-        await (() async {
-          await waitForContent();
-          if (!context.mounted) return;
-          final bounds = await prepareLanding();
-          if (context.mounted) landingBounds.value = bounds;
-        })().timeout(const Duration(seconds: 20));
+        // Organization sign-in can be needed before content loads, or only
+        // once the relay refuses this key. Close for either, so the Home
+        // banner's action is reachable instead of covered until the timeout.
+        final signIn = ref.read(organizationSignInProvider);
+        final auth = ref.read(hostedRelayAuthProvider);
+        // The picker can close while this waits, so check before using ref.
+        bool promptVisible() =>
+            context.mounted &&
+            organizationSignInPromptVisible(
+              signIn,
+              auth,
+              ref.read(relayConfigProvider),
+            );
+        if (promptVisible()) {
+          Navigator.of(context).pop();
+          return;
+        }
+        final prompt = Completer<bool>();
+        void checkPrompt() {
+          if (!prompt.isCompleted && promptVisible()) prompt.complete(true);
+        }
+
+        signIn?.addListener(checkPrompt);
+        auth.addListener(checkPrompt);
+        final bool prompted;
+        try {
+          // Refresh this scope before awaiting its content. ChannelsNotifier
+          // fences cached snapshots to the destination relay and identity.
+          if (!arriving) ref.invalidate(channelsProvider);
+          prompted = await Future.any([
+            prompt.future,
+            (() async {
+              await waitForContent(abandon: prompt.future);
+              if (!context.mounted || prompt.isCompleted) return false;
+              final bounds = await prepareLanding();
+              if (context.mounted) landingBounds.value = bounds;
+              return false;
+            })(),
+          ]).timeout(const Duration(seconds: 20));
+        } finally {
+          signIn?.removeListener(checkPrompt);
+          auth.removeListener(checkPrompt);
+        }
         if (!context.mounted) return;
+        if (prompted) {
+          Navigator.of(context).pop();
+          return;
+        }
         if (animate) {
           await controller.forward(from: 0).orCancel;
           if (!context.mounted) return;
@@ -249,53 +302,88 @@ class CommunitySwitcherPage extends HookConsumerWidget {
       unawaited(
         navigator.push(
           MaterialPageRoute<void>(
-            builder: (_) => const OnboardingAppEntry(addingCommunity: true),
+            builder: (_) => const OnboardingAppEntry(
+              addingCommunity: true,
+              showFindCommunities: false,
+            ),
           ),
         ),
       );
     }
 
+    Future<void> openAccountCommunity(AddCommunityDeepLink community) async {
+      if (openingAccountCommunity.value) return;
+      openingAccountCommunity.value = true;
+      final hosted = HostedEnvironment.supportsRelay(
+        Uri.parse(community.relayUrl),
+      );
+      final flow = hosted ? ref.read(hostedFlowProvider) : null;
+      final pending = hosted
+          ? null
+          : ref.read(pendingDeepLinkProvider.notifier);
+      final route = ModalRoute.of(context);
+      Navigator.of(context).pop();
+      if (route != null) await route.completed;
+      // The app's hosted gate presents any required sign-in, identity recovery,
+      // or admission failure. Merely listing a destination grants no access.
+      if (flow != null) {
+        await flow.start(community);
+      } else {
+        // The app gate owns the existing self-hosted identity-choice flow.
+        pending!.open(
+          Uri(
+            scheme: 'buzz',
+            host: 'add-community',
+            queryParameters: {
+              'relay': community.relayUrl,
+              'name': community.name,
+            },
+          ),
+        );
+      }
+    }
+
     final ios = defaultTargetPlatform == TargetPlatform.iOS;
-    final header = ios
-        ? SizedBox(
-            height: frostedAppBarHeight(context),
-            child: IosNavigationBar(
-              title: '',
-              leading: IosNavigationAction(
-                label: 'Close community switcher',
-                symbol: 'xmark',
-                onPressed: () => Navigator.of(context).pop(),
-              ),
-              actions: [
-                IosNavigationAction(
-                  label: isEditing.value ? 'Done' : 'Edit',
-                  onPressed: () => isEditing.value = !isEditing.value,
-                ),
-              ],
+    final toolbarScope = DuoToolbarScope.maybeOf(context);
+    final strip = ios
+        ? (toolbarScope == null
+              ? FoldGeometry.of(context).strip
+              : toolbarScope.strip)
+        : null;
+    final closeAction = IosNavigationAction(
+      label: 'Close community switcher',
+      symbol: 'xmark',
+      onPressed: () => Navigator.of(context).pop(),
+    );
+    final editAction = IosNavigationAction(
+      label: isEditing.value ? 'Done' : 'Edit',
+      symbol: strip == null ? null : (isEditing.value ? 'checkmark' : 'pencil'),
+      onPressed: () => isEditing.value = !isEditing.value,
+    );
+    final header = FrostedAppBar(
+      nativeTitle: '',
+      automaticallyImplyLeading: false,
+      nativeLeading: strip == null ? closeAction : null,
+      nativeActions: strip == null ? [editAction] : [],
+      leading: strip != null
+          ? null
+          : IconButton(
+              tooltip: 'Close community switcher',
+              onPressed: () => Navigator.of(context).pop(),
+              icon: const Icon(BuzzIcons.x),
             ),
-          )
-        : Padding(
-            padding: const EdgeInsets.all(Grid.xxs),
-            child: Row(
-              children: [
-                IconButton(
-                  tooltip: 'Close community switcher',
-                  onPressed: () => Navigator.of(context).pop(),
-                  icon: const Icon(BuzzIcons.x),
-                ),
-                const Spacer(),
-                TextButton(
-                  key: const Key('community-switcher-edit'),
-                  onPressed: () => isEditing.value = !isEditing.value,
-                  child: Text(isEditing.value ? 'Done' : 'Edit'),
-                ),
-              ],
-            ),
-          );
+      actions: [
+        TextButton(
+          key: const Key('community-switcher-edit'),
+          onPressed: () => isEditing.value = !isEditing.value,
+          child: Text(isEditing.value ? 'Done' : 'Edit'),
+        ),
+      ],
+    );
     final body = SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(
+      padding: EdgeInsets.fromLTRB(
         Grid.gutter,
-        Grid.xs,
+        frostedAppBarHeight(context) + Grid.xs,
         Grid.gutter,
         Grid.md,
       ),
@@ -324,6 +412,17 @@ class CommunitySwitcherPage extends HookConsumerWidget {
                     ),
                   ),
                 ),
+              const AccountCommunitySyncStatus(),
+              if (knownAsync.hasError)
+                Column(
+                  children: [
+                    const Text('Could not load your account communities.'),
+                    TextButton(
+                      onPressed: () => ref.invalidate(knownCommunitiesProvider),
+                      child: const Text('Try again'),
+                    ),
+                  ],
+                ),
               communitiesAsync.when(
                 loading: () => const Center(
                   child: BuzzLoadingIndicator(
@@ -332,11 +431,13 @@ class CommunitySwitcherPage extends HookConsumerWidget {
                   ),
                 ),
                 error: (e, _) => Text('Error loading communities: $e'),
-                data: (communities) => _CommunityGrid(
+                data: (communities) => CommunityGrid(
                   children: [
                     for (final community in communities)
-                      _CommunityGridTile(
-                        community: community,
+                      CommunityGridOption(
+                        id: community.id,
+                        name: community.pickerName,
+                        relayUrl: community.relayUrl,
                         // Keep the current-community marker stable
                         // while the selected avatar leaves the grid.
                         isActive:
@@ -344,17 +445,53 @@ class CommunitySwitcherPage extends HookConsumerWidget {
                             (flight.value == null
                                 ? activeId
                                 : flight.value!.previousCommunityId),
-                        isEditing: isEditing.value,
+                        enabled: !isEditing.value,
                         hidden: flight.value?.community.id == community.id,
-                        onSelect: selectCommunity,
-                        onRemove: () => _confirmRemoveCommunity(
-                          context,
-                          ref,
-                          community,
-                          closeSheetAfterRemoval: community.id == activeId,
+                        onSelect: (origin) =>
+                            selectCommunity(community, origin),
+                        badge: _CommunityGridAction(
+                          id: community.id,
+                          name: community.pickerName,
+                          isActive:
+                              community.id ==
+                              (flight.value == null
+                                  ? activeId
+                                  : flight.value!.previousCommunityId),
+                          isEditing: isEditing.value,
+                          onRemove: () => _confirmRemoveCommunity(
+                            context,
+                            ref,
+                            community,
+                            closeSheetAfterRemoval: community.id == activeId,
+                          ),
                         ),
                       ),
-                    _CommunityGridAdd(onTap: addCommunity),
+                    for (final community
+                        in knownAsync.value ?? <AddCommunityDeepLink>[])
+                      if (!communities.any(
+                        (saved) =>
+                            relayIdentity(saved.relayUrl) ==
+                            relayIdentity(community.relayUrl),
+                      ))
+                        CommunityGridOption(
+                          id: community.relayUrl,
+                          name: community.name,
+                          relayUrl: community.relayUrl,
+                          enabled: !isEditing.value,
+                          onSelect: (_) => openAccountCommunity(community),
+                          badge: _CommunityGridAction(
+                            id: community.relayUrl,
+                            name: community.name,
+                            isActive: false,
+                            isEditing: isEditing.value,
+                            onRemove: () => _confirmRemoveAccountCommunity(
+                              context,
+                              ref,
+                              community,
+                            ),
+                          ),
+                        ),
+                    CommunityGridAdd(onTap: addCommunity),
                   ],
                 ),
               ),
@@ -363,102 +500,107 @@ class CommunitySwitcherPage extends HookConsumerWidget {
         ),
       ),
     );
-    final surface = Material(
+    final surface = FrostedScaffold(
       key: const Key('community-switcher-page'),
-      color: context.colors.surface,
-      child: SafeArea(
-        top: !ios,
-        child: ios
-            ? Stack(
-                children: [
-                  Positioned.fill(
-                    top: frostedAppBarHeight(context),
-                    child: body,
-                  ),
-                  // Paint the native bar last, as in FrostedScaffold. Painting
-                  // Flutter content after a UIKit view can hide that content
-                  // during this route's opacity/scale composition on iOS.
-                  Positioned(top: 0, left: 0, right: 0, child: header),
-                ],
-              )
-            : Column(
-                children: [
-                  header,
-                  Expanded(child: body),
-                ],
-              ),
+      appBar: header,
+      body: SafeArea(
+        top: false,
+        left: strip == null,
+        right: strip == null,
+        child: body,
       ),
     );
 
-    return PopScope(
-      canPop: flight.value == null,
-      child: IgnorePointer(
-        ignoring: flight.value != null,
-        child: AnimatedBuilder(
-          animation: Listenable.merge([centering, controller, reveal]),
-          child: RepaintBoundary(child: surface),
-          builder: (context, child) {
-            final selected = flight.value;
-            final departure = _communityDepartureCurve.transform(
-              controller.value,
-            );
-            final surfaceExit = Curves.easeOutCubic.transform(centering.value);
-            final centerProgress = _communityCenterCurve.transform(
-              centering.value,
-            );
-            final screen = MediaQuery.sizeOf(context);
-            final center = Offset(screen.width / 2, screen.height / 2);
-            final destinationRect = landingBounds.value;
-            return Stack(
-              fit: StackFit.expand,
-              children: [
-                if (selected != null)
+    return DuoToolbarPortal(
+      strip: strip,
+      active:
+          (toolbarScope?.active ?? true) &&
+          (ModalRoute.isCurrentOf(context) ?? true) &&
+          flight.value == null,
+      actions: [closeAction, editAction],
+      child: PopScope(
+        canPop: flight.value == null,
+        child: IgnorePointer(
+          ignoring: flight.value != null || openingAccountCommunity.value,
+          child: AnimatedBuilder(
+            animation: Listenable.merge([centering, controller, reveal]),
+            child: RepaintBoundary(
+              child: strip == null
+                  ? surface
+                  : DuoToolbarScope(
+                      strip: strip,
+                      active: toolbarScope?.active ?? true,
+                      child: surface,
+                    ),
+            ),
+            builder: (context, child) {
+              final selected = flight.value;
+              final departure = _communityDepartureCurve.transform(
+                controller.value,
+              );
+              final surfaceExit = Curves.easeOutCubic.transform(
+                centering.value,
+              );
+              final centerProgress = _communityCenterCurve.transform(
+                centering.value,
+              );
+              final screen = MediaQuery.sizeOf(context);
+              final center = Offset(screen.width / 2, screen.height / 2);
+              final destinationRect = landingBounds.value;
+              return Stack(
+                fit: StackFit.expand,
+                children: [
+                  if (selected != null)
+                    Opacity(
+                      key: const Key('community-loading-backdrop'),
+                      opacity: 1 - Curves.easeOutCubic.transform(reveal.value),
+                      child: ColoredBox(color: context.colors.surface),
+                    ),
                   Opacity(
-                    key: const Key('community-loading-backdrop'),
-                    opacity: 1 - Curves.easeOutCubic.transform(reveal.value),
-                    child: ColoredBox(color: context.colors.surface),
+                    key: const Key('community-picker-opacity'),
+                    opacity: 1 - surfaceExit,
+                    child: Transform.scale(
+                      scale: 1 + 0.04 * surfaceExit,
+                      child: child,
+                    ),
                   ),
-                Opacity(
-                  key: const Key('community-picker-opacity'),
-                  opacity: 1 - surfaceExit,
-                  child: Transform.scale(
-                    scale: 1 + 0.04 * surfaceExit,
-                    child: child,
-                  ),
-                ),
-                if (selected != null && controller.value == 0)
-                  Positioned(
-                    top: center.dy + _communityCenteredAvatarSize / 2 + Grid.md,
-                    left: 0,
-                    right: 0,
-                    child: Center(
-                      child: RepaintBoundary(
-                        child: BuzzLoadingIndicator(
-                          key: const Key('community-switch-loading'),
-                          size: 18,
-                          color: context.colors.onSecondaryContainer,
-                          semanticLabel: 'Loading ${selected.community.name}',
+                  if (selected != null && controller.value == 0)
+                    Positioned(
+                      top:
+                          center.dy +
+                          _communityCenteredAvatarSize / 2 +
+                          Grid.md,
+                      left: 0,
+                      right: 0,
+                      child: Center(
+                        child: RepaintBoundary(
+                          child: BuzzLoadingIndicator(
+                            key: const Key('community-switch-loading'),
+                            size: 18,
+                            color: context.colors.onSecondaryContainer,
+                            semanticLabel: 'Loading ${selected.community.name}',
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                if (selected != null)
-                  _CommunityFlyingAvatar(
-                    avatar: flightAvatar,
-                    origin: selected.origin.center,
-                    destination:
-                        destinationRect ??
-                        Rect.fromCenter(
-                          center: center,
-                          width: _communityCenteredAvatarSize,
-                          height: _communityCenteredAvatarSize,
-                        ),
-                    centerProgress: centerProgress,
-                    departure: departure,
-                  ),
-              ],
-            );
-          },
+                  if (selected != null)
+                    _CommunityFlyingAvatar(
+                      avatar: flightAvatar,
+                      origin: selected.origin.center,
+                      destination:
+                          destinationRect ??
+                          Rect.fromCenter(
+                            center: center,
+                            width: _communityCenteredAvatarSize,
+                            height: _communityCenteredAvatarSize,
+                          ),
+                      centerProgress: centerProgress,
+                      departure: departure,
+                    ),
+                ],
+              );
+            },
+          ),
         ),
       ),
     );
@@ -495,14 +637,14 @@ class _CommunityFlyingAvatar extends StatelessWidget {
     final end = destination.center;
     final delta = end - start;
     // A quadratic Bezier bends perpendicular to travel, like Motion's arc.
-    // Bow outward first, then settle into the header. Clamp the control point
+    // Bow left first, then settle into the header. Clamp the control point
     // so the larger avatar stays inside narrow screens throughout the swoop.
-    final bend = (start + end) / 2 + Offset(-delta.dy, delta.dx) * 0.75;
+    final bend = (start + end) / 2 + Offset(delta.dy, -delta.dx) * 0.75;
     final margin = _communityCenteredAvatarSize / 2 + Grid.xs;
     final width = screen.width;
     final control = Offset(
       bend.dx.clamp(margin, max(margin, width - margin)),
-      bend.dy,
+      bend.dy.clamp(margin, max(margin, screen.height - margin)),
     );
     final t = departure;
     final position =
@@ -537,163 +679,4 @@ class _CommunityFlyingAvatar extends StatelessWidget {
       ),
     );
   }
-}
-
-/// Intrinsic-height rows keep two columns without clipping scaled labels.
-class _CommunityGrid extends StatelessWidget {
-  const _CommunityGrid({required this.children});
-
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) => Column(
-    key: const Key('community-switcher-options'),
-    mainAxisSize: MainAxisSize.min,
-    children: [
-      for (var index = 0; index < children.length; index += 2)
-        Padding(
-          padding: const EdgeInsets.only(bottom: Grid.md),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(child: children[index]),
-              const SizedBox(width: Grid.xs),
-              Expanded(
-                child: index + 1 < children.length
-                    ? children[index + 1]
-                    : const SizedBox.shrink(),
-              ),
-            ],
-          ),
-        ),
-    ],
-  );
-}
-
-class _CommunityGridTile extends HookWidget {
-  const _CommunityGridTile({
-    required this.community,
-    required this.isActive,
-    required this.isEditing,
-    required this.hidden,
-    required this.onSelect,
-    required this.onRemove,
-  });
-
-  final Community community;
-  final bool isActive;
-  final bool isEditing;
-  final bool hidden;
-  final Future<void> Function(Community, Rect) onSelect;
-  final VoidCallback onRemove;
-
-  @override
-  Widget build(BuildContext context) {
-    final avatarKey = useMemoized(GlobalKey.new);
-    return Semantics(
-      selected: isActive,
-      child: InkWell(
-        key: Key('community-switcher-row-${community.id}'),
-        borderRadius: BorderRadius.circular(Radii.card),
-        onTap: isEditing
-            ? null
-            : () {
-                final box = avatarKey.currentContext?.findRenderObject();
-                if (box is RenderBox) {
-                  unawaited(
-                    onSelect(
-                      community,
-                      box.localToGlobal(Offset.zero) & box.size,
-                    ),
-                  );
-                }
-              },
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-          child: Column(
-            children: [
-              Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  Opacity(
-                    opacity: hidden ? 0 : 1,
-                    child: SizedBox(
-                      key: avatarKey,
-                      child: CommunityAvatar(
-                        key: Key('community-switcher-avatar-${community.id}'),
-                        name: community.name,
-                        relayUrl: community.relayUrl,
-                        size: _communityGridAvatarSize,
-                      ),
-                    ),
-                  ),
-                  Positioned(
-                    right: -Grid.twelve,
-                    bottom: -Grid.twelve,
-                    child: _CommunityGridAction(
-                      community: community,
-                      isActive: isActive,
-                      isEditing: isEditing,
-                      onRemove: onRemove,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: Grid.xs),
-              Text(
-                community.name,
-                textAlign: TextAlign.center,
-                style: context.textTheme.bodyLarge?.copyWith(
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _CommunityGridAdd extends StatelessWidget {
-  const _CommunityGridAdd({required this.onTap});
-
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) => InkWell(
-    key: const Key('community-switcher-add'),
-    borderRadius: BorderRadius.circular(Radii.card),
-    onTap: onTap,
-    child: Padding(
-      padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-      child: Column(
-        children: [
-          ClipRSuperellipse(
-            borderRadius: BorderRadius.circular(
-              Radii.card * _communityGridAvatarSize / 40,
-            ),
-            child: Container(
-              width: _communityGridAvatarSize,
-              height: _communityGridAvatarSize,
-              color: context.controlSurface.withValues(alpha: 0.5),
-              child: Icon(
-                BuzzIcons.plus,
-                size: 32,
-                color: context.colors.onSurfaceVariant,
-              ),
-            ),
-          ),
-          const SizedBox(height: Grid.xs),
-          Text(
-            'Add Community',
-            textAlign: TextAlign.center,
-            style: context.textTheme.bodyLarge?.copyWith(
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ],
-      ),
-    ),
-  );
 }

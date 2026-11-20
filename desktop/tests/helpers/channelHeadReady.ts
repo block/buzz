@@ -1,4 +1,7 @@
-import { expect, type Page } from "@playwright/test";
+import { expect, type Locator, type Page } from "@playwright/test";
+
+/** The seeded #general channel's id in the mock bridge. */
+export const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 
 // These default mock fixtures have immediate EOSE and no injected reconnect.
 // Steady-state pagination begins after live admission and its head refresh,
@@ -72,4 +75,18 @@ export async function waitForMockChannelHeadReady(
       );
     })
     .toBeLessThanOrEqual(2);
+}
+
+// Opening #general refreshes the head after the live subscription lands, and
+// the timeline re-pins while it does. Wait for that before touching a row.
+export async function openGeneral(page: Page) {
+  await page.getByTestId("channel-general").click();
+  await waitForMockChannelHeadReady(page, "general", GENERAL_CHANNEL_ID);
+}
+
+// Row actions are hover-only, and a moving row slips out from under the
+// pointer. The action bar is also shown on focus-within, so use the keyboard.
+export async function pressRowAction(button: Locator) {
+  await button.focus();
+  await button.press("Enter");
 }

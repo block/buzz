@@ -5,10 +5,15 @@ import 'package:buzz/features/channels/channel_actions_sheet.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
+import 'package:buzz/features/channels/channel_sections/workspace_layout.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/manage_channel_sheet.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/buzz_action_tile.dart';
+import 'package:buzz/shared/widgets/app_list_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -63,6 +68,8 @@ Widget _modalApp({
   required Channel channel,
   required Future<List<ChannelMember>> Function() loadMembers,
   required ChannelActions Function(Ref ref) createChannelActions,
+  bool soloDetails = false,
+  bool details = false,
   String? canvasContent,
   Future<ChannelCanvas>? pendingCanvas,
 }) => ProviderScope(
@@ -91,11 +98,19 @@ Widget _modalApp({
     home: Builder(
       builder: (context) => Scaffold(
         body: TextButton(
-          onPressed: () => showChannelActionsSheet(
-            context: context,
-            channel: channel,
-            isUnread: false,
-          ),
+          onPressed: () => soloDetails || details
+              ? showChannelDetailsSheet(
+                  context: context,
+                  channel: channel,
+                  currentPubkey: _currentPubkey,
+                  onMemberTap: (_, _) {},
+                  personalChat: soloDetails,
+                )
+              : showChannelActionsSheet(
+                  context: context,
+                  channel: channel,
+                  isUnread: false,
+                ),
           child: const Text('Open actions'),
         ),
       ),
@@ -104,6 +119,175 @@ Widget _modalApp({
 );
 
 void main() {
+  for (final size in [const Size(800, 390), const Size(669, 951)]) {
+    testWidgets('Duo cover or portrait $size retains the Flutter sheet', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = size;
+      tester.view.padding = const FakeViewPadding(right: 76);
+      tester.view.viewPadding = tester.view.padding;
+      addTearDown(tester.view.reset);
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          loadMembers: () async => [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+        ),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsOneWidget);
+      expect(find.byType(ChannelActionsSheet), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
+
+  for (final soloDetails in [false, true]) {
+    testWidgets(
+      'Duo ${soloDetails ? 'Solo details' : 'channel actions'} uses native presentation and live permissions',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(951, 669);
+        tester.view.padding = const FakeViewPadding(right: 76);
+        tester.view.viewPadding = tester.view.padding;
+        addTearDown(tester.view.reset);
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        const bridge = MethodChannel('buzz/channel_actions_sheet');
+        final clipboard = <String>[];
+        // Copy feedback creates the app's native toast composition layer.
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform_views,
+          (call) async {
+            if (call.method == 'create') {
+              expect((call.arguments as Map)['viewType'], 'buzz/toast_layer');
+            }
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform_views,
+            null,
+          ),
+        );
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async {
+            if (call.method == 'Clipboard.setData') {
+              clipboard.add((call.arguments as Map)['text'] as String);
+            }
+            return null;
+          },
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+        final result = Completer<String?>();
+        final members = Completer<List<ChannelMember>>();
+        final calls = <MethodCall>[];
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
+          call,
+        ) async {
+          calls.add(call);
+          return call.method == 'present' ? result.future : null;
+        });
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            bridge,
+            null,
+          ),
+        );
+        await tester.pumpWidget(
+          _modalApp(
+            channel: _channel(),
+            soloDetails: soloDetails,
+            loadMembers: () => members.future,
+            createChannelActions: (ref) => _FakeChannelActions(ref),
+          ),
+        );
+        await tester.tap(find.text('Open actions'));
+        await tester.pumpAndSettle();
+        if (soloDetails) {
+          expect(calls.last.arguments.toString(), contains('general'));
+          expect(
+            calls.last.arguments.toString(),
+            isNot(contains('Move to section')),
+          );
+        }
+        expect(calls.where((call) => call.method == 'present'), hasLength(1));
+        expect(find.byType(Dialog), findsNothing);
+        expect(find.byType(BottomSheet), findsNothing);
+        expect(
+          calls.last.arguments.toString(),
+          isNot(contains('Delete channel')),
+        );
+        members.complete([
+          ChannelMember(
+            pubkey: _currentPubkey,
+            role: 'owner',
+            joinedAt: DateTime(2025),
+          ),
+        ]);
+        await tester.pumpAndSettle();
+        expect(calls.last.arguments.toString(), contains('Delete channel'));
+        final displayModel = Map<String, dynamic>.from(
+          calls
+                  .lastWhere(
+                    (call) =>
+                        call.method == 'update' || call.method == 'present',
+                  )
+                  .arguments
+              as Map,
+        );
+        result.complete('Copy channel ID');
+        await tester.pumpAndSettle();
+        expect(clipboard, ['channel-id']);
+        expect(find.byType(ChannelActionsSheet), findsNothing);
+        expect(find.byType(ChannelDetailsPage), findsNothing);
+        expect(find.text('Open actions'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        // Render exactly the model handed to the embedded Flutter engine.
+        tester.view.physicalSize = const Size(540, 580);
+        final selected = <String>[];
+        await tester.pumpWidget(
+          ProviderScope(
+            key: const ValueKey('embedded-sheet-engine'),
+            child: MaterialApp(
+              theme: utilitySurfaceThemeData(AppTheme.light()),
+              home: ChannelSheetContent(
+                data: displayModel,
+                onSelect: selected.add,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(BuzzActionTile), findsNWidgets(soloDetails ? 3 : 2));
+        expect(find.byType(AppListCard), findsWidgets);
+        if (soloDetails) {
+          expect(
+            find.byKey(const ValueKey('channel-details-avatar')),
+            findsOneWidget,
+          );
+          expect(find.text('general'), findsOneWidget);
+        }
+        await tester.tap(find.text('Star'));
+        expect(selected, ['Star']);
+        await tester.pumpWidget(const SizedBox());
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
+  }
+
   testWidgets('owner sees the complete regular-channel action set', (
     tester,
   ) async {
@@ -159,6 +343,85 @@ void main() {
 
     expect(find.text('Mark Read'), findsOneWidget);
     expect(find.text('Mark Unread'), findsNothing);
+  });
+
+  group('Mark Read', () {
+    late _KnownTimesChannels channels;
+    late _RecordingReadState readState;
+
+    Future<void> pumpSheet(WidgetTester tester, Channel channel) async {
+      channels = _KnownTimesChannels();
+      readState = _RecordingReadState();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            currentPubkeyProvider.overrideWith((ref) => _currentPubkey),
+            channelMembersProvider(
+              channel.id,
+            ).overrideWith((ref) async => const <ChannelMember>[]),
+            agentOwnersProvider.overrideWithValue(
+              const AsyncValue.data(<String, String>{}),
+            ),
+            channelsProvider.overrideWith(() => channels),
+            readStateProvider.overrideWith(() => readState),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: Builder(
+              builder: (context) => Scaffold(
+                body: TextButton(
+                  onPressed: () => showChannelActionsSheet(
+                    context: context,
+                    channel: channel,
+                    isUnread: true,
+                  ),
+                  child: const Text('Open actions'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('covers a message that arrived while the sheet was open', (
+      tester,
+    ) async {
+      final opened = DateTime.utc(2026, 1, 1);
+      final channel = Channel(
+        id: 'channel-id',
+        name: 'general',
+        channelType: 'stream',
+        visibility: 'open',
+        description: '',
+        createdBy: 'owner',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        isMember: true,
+        lastMessageAt: opened,
+      );
+      await pumpSheet(tester, channel);
+      final openedAt = opened.millisecondsSinceEpoch ~/ 1000;
+      channels.latest = openedAt + 30;
+
+      await tester.tap(find.text('Mark Read'));
+      await tester.pumpAndSettle();
+
+      expect(readState.marks, [('channel-id', openedAt + 30, true)]);
+    });
+
+    testWidgets('with no known message time only releases forced unread', (
+      tester,
+    ) async {
+      await pumpSheet(tester, _channel());
+
+      await tester.tap(find.text('Mark Read'));
+      await tester.pumpAndSettle();
+
+      expect(readState.marks, [('channel-id', 0, true)]);
+    });
   });
 
   testWidgets('admin can archive but cannot delete', (tester) async {
@@ -292,6 +555,52 @@ void main() {
     expect(find.text('Archive channel'), findsNothing);
     expect(find.text('Delete channel'), findsNothing);
   });
+
+  for (final (details, early) in [
+    (false, false),
+    (true, false),
+    (true, true),
+  ]) {
+    testWidgets('desktop workspaces close filing (details: $details, '
+        'before the picker draws: $early)', (tester) async {
+      tester.view.physicalSize = const Size(1200, 3000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          details: details,
+          loadMembers: () async => const [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+        ),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      void lock() =>
+          (ProviderScope.containerOf(
+                    tester.element(find.text('Open actions')),
+                  ).read(channelSectionsProvider.notifier)
+                  as _FakeChannelSectionsNotifier)
+              .lock();
+      await tester.tap(find.text('Move to section…'));
+      if (early) lock();
+      await tester.pumpAndSettle();
+      if (!early) {
+        expect(find.text('New section…'), findsOneWidget);
+        // Desktop saves a unified layout while the picker is open.
+        lock();
+        await tester.pumpAndSettle();
+      }
+      expect(find.text('New section…'), findsNothing);
+      // Details stays open beneath the picker; the actions sheet reopens.
+      if (!details) {
+        await tester.tap(find.text('Open actions'));
+        await tester.pumpAndSettle();
+      }
+      expect(find.text('Copy channel name'), findsOneWidget);
+      expect(find.text('Move to section…'), findsNothing);
+    });
+  }
 
   testWidgets('member sees neither owner action', (tester) async {
     await tester.pumpWidget(
@@ -871,6 +1180,18 @@ class _FakeChannelSectionsNotifier extends ChannelSectionsNotifier {
   @override
   ChannelSectionsState build() =>
       ChannelSectionsState(isReady: true, store: _store, version: 1);
+
+  void lock() => state = ChannelSectionsState(
+    isReady: true,
+    store: _store,
+    workspace: WorkspaceRecord.fromJson({
+      'version': 1,
+      'sections': <Object>[],
+      'assignments': <String, Object>{},
+      'sectionOrder': <String>[],
+    }),
+    version: 2,
+  );
 }
 
 class _FakeChannelActions extends ChannelActions {
@@ -914,10 +1235,58 @@ class _FakeChannelActions extends ChannelActions {
   String? unarchivedChannelId;
 
   @override
-  Future<void> leaveChannel(String channelId) async {}
+  Future<void> leaveChannel(
+    String channelId, {
+    Future<bool> Function()? mayPublish,
+  }) async {}
+
+  @override
+  Future<void> archiveChannel(String channelId) async {}
 
   @override
   Future<void> unarchiveChannel(String channelId) async {
     unarchivedChannelId = channelId;
   }
+}
+
+/// Lists the sheet's channel with whatever [latest] holds when asked.
+class _KnownTimesChannels extends ChannelsNotifier {
+  int? latest;
+
+  @override
+  Future<List<Channel>> build() async => const [];
+
+  @override
+  Channel? channelById(String channelId) => Channel(
+    id: channelId,
+    name: 'general',
+    channelType: 'stream',
+    visibility: 'open',
+    description: '',
+    createdBy: 'owner',
+    createdAt: DateTime(2025),
+    memberCount: 2,
+    isMember: true,
+    lastMessageAt: latest == null
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(latest! * 1000, isUtc: true),
+  );
+
+  @override
+  void clearObservedUnreadCoveredByRead(String channelId, int readAt) {}
+}
+
+class _RecordingReadState extends ReadStateNotifier {
+  final marks = <(String, int, bool)>[];
+
+  @override
+  ReadStateState build() => const ReadStateState.inert();
+
+  @override
+  void markContextRead(
+    String contextId,
+    int unixTimestamp, {
+    bool clearForcedMessages = false,
+    bool explicit = false,
+  }) => marks.add((contextId, unixTimestamp, clearForcedMessages));
 }

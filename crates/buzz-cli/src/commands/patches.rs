@@ -50,7 +50,7 @@ pub async fn cmd_send_patch(
 
     let builder =
         with_git_provenance(buzz_sdk::build_git_patch(&repo, &content, &meta).map_err(sdk_err)?)?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");
     Ok(())
@@ -184,7 +184,7 @@ pub async fn cmd_patch_status(
 
     let builder =
         with_git_provenance(buzz_sdk::build_git_status(status, &body, &meta).map_err(sdk_err)?)?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");
     Ok(())

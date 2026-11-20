@@ -17,7 +17,7 @@ fn test_contract(issuer: &str) -> JwksSourceContract {
 fn make_offline_policy(issuer: &str) -> IssuerPolicy {
     IssuerPolicy::new(
         issuer.to_owned(),
-        vec![format!("https://relay.example/api")],
+        vec!["https://relay.example/api".to_string()],
         TokenClass::DedicatedNipFi,
         FreshnessClass::OfflineJwt,
         vec![JwtAlgorithm::ES256],
@@ -32,7 +32,7 @@ fn make_offline_policy(issuer: &str) -> IssuerPolicy {
 fn make_status_policy(issuer: &str) -> IssuerPolicy {
     IssuerPolicy::new(
         issuer.to_owned(),
-        vec![format!("https://relay.example/api")],
+        vec!["https://relay.example/api".to_string()],
         TokenClass::DedicatedNipFi,
         FreshnessClass::CurrentStatus,
         vec![JwtAlgorithm::ES256],
@@ -245,5 +245,28 @@ fn mode_predicates_separate_evaluation_from_authority() {
             "{mode:?}"
         );
         assert_eq!(mode.observes_only(), evaluates && !restricts, "{mode:?}");
+    }
+}
+
+#[test]
+fn community_requirements_follow_relay_mode() {
+    for stored in [false, true] {
+        assert_eq!(NipFiMode::Off.with_requirement(stored), NipFiMode::Off);
+        assert_eq!(
+            NipFiMode::Shadow.with_requirement(stored),
+            if stored {
+                NipFiMode::Enforce
+            } else {
+                NipFiMode::Shadow
+            }
+        );
+        assert_eq!(
+            NipFiMode::Enforce.with_requirement(stored),
+            NipFiMode::Enforce
+        );
+        assert_eq!(
+            NipFiMode::DenyProtected.with_requirement(stored),
+            NipFiMode::DenyProtected
+        );
     }
 }

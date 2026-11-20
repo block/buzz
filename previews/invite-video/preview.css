@@ -1,0 +1,196 @@
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: #f6f5f2;
+  color: #231e1e;
+  font:
+    15px -apple-system,
+    BlinkMacSystemFont,
+    Arial,
+    sans-serif;
+}
+main {
+  max-width: 1180px;
+  margin: auto;
+  padding: 44px 28px;
+}
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 44px;
+}
+.brand {
+  font-weight: 850;
+  font-size: 26px;
+  letter-spacing: -1px;
+}
+.badge {
+  font-size: 12px;
+  color: #666;
+  border: 1px solid #ddd;
+  border-radius: 30px;
+  padding: 8px 12px;
+}
+h1 {
+  font-size: 42px;
+  letter-spacing: -1.8px;
+  margin: 0 0 12px;
+}
+p {
+  color: #74716c;
+  line-height: 1.6;
+  margin: 0 0 24px;
+}
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 330px;
+  gap: 44px;
+  align-items: start;
+}
+canvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 18px;
+  background: #d7d72e;
+}
+.controls {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin: 16px 0;
+  flex-wrap: wrap;
+}
+button,
+a.download {
+  font: inherit;
+  padding: 10px 15px;
+  border: 1px solid #d8d6d0;
+  border-radius: 9px;
+  background: white;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: none;
+}
+button[aria-pressed="true"] {
+  background: #231e1e;
+  color: white;
+}
+input {
+  flex: 1;
+  min-width: 100px;
+  accent-color: #231e1e;
+}
+.caption {
+  font-size: 12px;
+}
+.phone {
+  border: 1px solid #ddd;
+  background: white;
+  border-radius: 35px;
+  padding: 22px 15px 30px;
+  box-shadow: 0 12px 35px #00000008;
+}
+.phone-top {
+  text-align: center;
+  border-bottom: 1px solid #eee;
+  padding-bottom: 18px;
+  font-size: 13px;
+}
+.avatar {
+  margin: 12px auto 6px;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: #e9e8ed;
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+}
+.date {
+  text-align: center;
+  font-size: 10px;
+  color: #898989;
+  margin: 23px 0;
+}
+.bubble {
+  margin-left: 32px;
+  background: #087eff;
+  color: white;
+  padding: 12px 15px;
+  border-radius: 18px;
+  font-size: 14px;
+  margin-bottom: 10px;
+}
+.card {
+  margin-left: 14px;
+  background: #eeeef0;
+  border-radius: 17px;
+  overflow: hidden;
+}
+.card canvas {
+  border-radius: 0;
+}
+.card-text {
+  padding: 12px;
+  font-size: 13px;
+}
+.host {
+  margin-top: 5px;
+  font-size: 11px;
+  color: #777;
+}
+.note {
+  font-size: 12px;
+  line-height: 1.6;
+  color: #85817b;
+  margin-top: 18px;
+}
+.eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 1.4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #85817b;
+  margin-bottom: 14px;
+}
+.details {
+  display: flex;
+  gap: 25px;
+  border-top: 1px solid #dedcd5;
+  margin-top: 26px;
+  padding-top: 20px;
+  font-size: 12px;
+  color: #777;
+}
+.details strong {
+  display: block;
+  font-size: 15px;
+  color: #231e1e;
+  margin-bottom: 5px;
+}
+@media (max-width: 760px) {
+  main {
+    padding: 24px 18px;
+  }
+  header {
+    margin-bottom: 30px;
+  }
+  h1 {
+    font-size: 32px;
+  }
+  .grid {
+    grid-template-columns: 1fr;
+    gap: 28px;
+  }
+  .phone {
+    max-width: 340px;
+    margin: auto;
+  }
+  aside {
+    width: 100%;
+  }
+}

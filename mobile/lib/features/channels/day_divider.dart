@@ -8,12 +8,14 @@ class DayDivider extends StatelessWidget {
   final String label;
   final int? dayTimestamp;
   final ValueListenable<int?>? stickyDayTimestamp;
+  final ValueListenable<bool>? scrollVisible;
 
   const DayDivider({
     super.key,
     required this.label,
     this.dayTimestamp,
     this.stickyDayTimestamp,
+    this.scrollVisible,
   });
 
   Widget _buildOpacity(BuildContext context, {required bool isSticky}) {
@@ -86,11 +88,13 @@ class DayDivider extends StatelessWidget {
       child: Center(
         child: activeTimestamp == null || timestamp == null
             ? _buildOpacity(context, isSticky: false)
-            : ValueListenableBuilder<int?>(
-                valueListenable: activeTimestamp,
-                builder: (context, activeDayTimestamp, _) => _buildOpacity(
+            : ListenableBuilder(
+                listenable: Listenable.merge([activeTimestamp, scrollVisible]),
+                builder: (context, _) => _buildOpacity(
                   context,
-                  isSticky: activeDayTimestamp == timestamp,
+                  isSticky:
+                      activeTimestamp.value == timestamp &&
+                      (scrollVisible?.value ?? true),
                 ),
               ),
       ),

@@ -59,10 +59,29 @@ void main() {
     InboxLocalState state() => container.read(inboxLocalStateProvider);
 
     expect(state().doneIds, {'approval-a', 'approval-b'});
-    container.read(inboxLocalStateProvider.notifier).markUnread(['approval-a']);
+    container.read(inboxLocalStateProvider.notifier).markUnread([
+      'approval-a',
+    ], baseline: 0);
     config.switchTo('https://relay-b.example');
     expect(state().doneIds, {'approval-a', 'approval-b'});
     config.switchTo('https://relay-a.example');
     expect(state().doneIds, {'approval-b'});
+  });
+
+  test('a catch-up or explicit read of a scope ends its offscreen marks, '
+      'even across a restart', () async {
+    final (container, _) = await start({});
+    final notifier = container.read(inboxLocalStateProvider.notifier);
+    notifier
+      ..markUnread(['top'], baseline: 200, scope: 'chan')
+      ..markUnread(['reply'], baseline: 200, scope: 'thread:root')
+      ..markUnread(['legacy'], baseline: 200);
+    container.invalidate(inboxLocalStateProvider);
+
+    container.read(inboxLocalStateProvider.notifier).clearScope('chan');
+    expect(container.read(inboxLocalStateProvider).unreadBaselines.keys, {
+      'reply',
+      'legacy',
+    });
   });
 }

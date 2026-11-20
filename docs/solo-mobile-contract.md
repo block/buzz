@@ -40,3 +40,34 @@ placement and shared-chat ordinary sending.
 
 These are compositional contract tests, not a live desktop/relay/device E2E
 run. Physical-device installation and launch alone do not prove that journey.
+
+## Changing an existing member's access
+
+A Solo chat owner changes an existing member's access with a signed Buzz
+kind:9050 event with `admin:channels` scope. The content is empty. Each
+required tag appears once.
+
+Relays advertise `buzz-solo-member-role` in NIP-11 `supported_extensions`.
+Clients offer role changes only when the relay advertises this extension.
+
+| Tag | Value |
+| --- | --- |
+| `h` | Solo channel UUID |
+| `p` | Target member's hex public key |
+| `expected_role` | Exact active role from the relay-signed roster: `admin`, `bot`, `member`, or `guest` |
+| `role` | `admin`, `member` (Participating), or `guest` (Viewing only) |
+
+A chat owner may lower any active non-owner to Viewing only, or lower an
+Admin to Participating. A move from Viewing only to Participating requires
+a verified agent. An Admin grant requires a verified agent owned by the
+signer. The relay stores Participating as `bot` for verified agents and
+`member` for people. Role changes bypass invitation policy.
+
+The relay requires a private Solo stream and checks the current chat and
+membership under the membership lock. It commits the command, role, signed
+admin list, and signed member roster together. It emits no admission notices.
+
+Refresh the roster after a role mismatch. Resending the same accepted event
+confirms its receipt without applying another change. Relays that lack
+kind:9050 support reject it. Clients must never fall back to kind:9000 for
+this action.

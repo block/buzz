@@ -17,25 +17,39 @@ import '../../helpers/widget_helpers.dart';
 
 void main() {
   testWidgets('shows a compact copyable identity row', (tester) async {
-    var successFeedback = false;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform_views,
+      (_) async => null,
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform_views,
+        null,
+      ),
+    );
+    var hapticCount = 0;
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       const MethodChannel('buzz/haptics'),
       (call) async {
         expect(call.method, 'success');
-        successFeedback = true;
+        hapticCount++;
         return null;
       },
     );
-    addTearDown(() {
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
         const MethodChannel('buzz/haptics'),
         null,
-      );
-    });
+      ),
+    );
+
     MethodCall? clipboardCall;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(SystemChannels.platform, (call) async {
           if (call.method == 'Clipboard.setData') clipboardCall = call;
+          if (call.method == 'HapticFeedback.vibrate') {
+            fail('Success must use native notification feedback on iOS');
+          }
           return null;
         });
     addTearDown(
@@ -45,6 +59,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       WidgetHelpers.testable(
         overrides: [
@@ -122,12 +137,51 @@ void main() {
     expect(copy.center.dx, closeTo(chevron.center.dx, 0.5));
 
     await tester.tap(find.text('Copy public key (npub)'));
-    await tester.pump();
-    expect(successFeedback, isTrue);
+    await tester.pumpAndSettle();
+    expect(hapticCount, 1);
     expect(clipboardCall?.method, 'Clipboard.setData');
     expect(clipboardCall?.arguments, {'text': expectedNpub});
-    expect(find.text('Public key (npub) copied'), findsOneWidget);
+    expect(find.text('Public key copied'), findsOneWidget);
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+  testWidgets('an out-of-range identity shows as unavailable', (tester) async {
+    _usePhoneViewport(tester);
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          relayConfigProvider.overrideWith(_OutOfRangeRelayConfigNotifier.new),
+          authProvider.overrideWith(_AuthNotifier.new),
+          pairingProvider.overrideWith(
+            () => _PairingNotifier(Future<bool>.value(true)),
+          ),
+          savedPrefsProvider.overrideWithValue(prefs),
+        ],
+        child: SettingsPage(
+          profileHeader: const SizedBox.shrink(),
+          identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.ensureVisible(find.text('Copy public key (npub)'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(
+      find.ancestor(
+        of: find.text('Copy public key (npub)'),
+        matching: find.byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.value == 'Identity unavailable',
+        ),
+      ),
+      findsOneWidget,
+    );
+  });
 
   testWidgets('waits for a resumed frame before navigating after auth', (
     tester,
@@ -137,6 +191,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       WidgetHelpers.testable(
         overrides: [
@@ -174,6 +229,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       WidgetHelpers.testable(
         overrides: [
@@ -199,10 +255,7 @@ void main() {
 
     expect(pairing.resetCalls, 1);
     expect(find.text('Identity recovery'), findsNothing);
-    expect(
-      find.text('Buzz did not return to the foreground. Try again.'),
-      findsOneWidget,
-    );
+    expect(find.text('Couldn’t resume Buzz. Try again.'), findsOneWidget);
   });
 
   testWidgets('clears authorization when disposed during authentication', (
@@ -213,6 +266,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       WidgetHelpers.testable(
         overrides: [
@@ -255,6 +309,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       WidgetHelpers.testable(
         overrides: [
@@ -298,6 +353,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
 
+    _usePhoneViewport(tester);
     await tester.pumpWidget(
       WidgetHelpers.testable(
         overrides: [
@@ -346,6 +402,17 @@ class _RelayConfigNotifier extends RelayConfigNotifier {
   RelayConfig build() => RelayConfig(baseUrl: 'https://relay.test', nsec: nsec);
 }
 
+class _OutOfRangeRelayConfigNotifier extends RelayConfigNotifier {
+  // Valid bech32 and 64 hex chars, but not below the secp256k1 order.
+  static final nsec = nostr.Nip19.encode(
+    prefix: nostr.Nip19Prefix.nsec,
+    data: 'f' * 64,
+  );
+
+  @override
+  RelayConfig build() => RelayConfig(baseUrl: 'https://relay.test', nsec: nsec);
+}
+
 class _PairingNotifier extends PairingNotifier {
   _PairingNotifier(this.authorization);
 
@@ -365,5 +432,13 @@ class _PairingNotifier extends PairingNotifier {
   @override
   void reset() {
     resetCalls++;
+  }
+}
+
+void _usePhoneViewport(WidgetTester tester) {
+  if (tester.view.physicalSize.width / tester.view.devicePixelRatio >= 640) {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(390, 1200);
+    addTearDown(tester.view.reset);
   }
 }

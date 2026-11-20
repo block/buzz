@@ -6,12 +6,10 @@
 //! the worker. Failed reads retain the last good totals with load health and
 //! the original snapshot age, never a fabricated fresh measurement.
 
-use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use tokio::sync::Mutex;
-use uuid::Uuid;
 
 use buzz_db::Db;
 use buzz_media::BucketSnapshot;
@@ -65,43 +63,13 @@ struct CachedSnapshot {
     max_objects: u64,
 }
 
-/// Key tracking which per-community series were emitted in the previous tick,
-/// so series for communities that disappear from the snapshot (unmapped, host
-/// renamed, or scope-excluded) are zeroed rather than left at their last
-/// nonzero value until the recorder's idle-eviction kicks in.
-///
-/// Carries the resolved host label (not the UUID) so a rename can still zero
-/// the old series, and distinguishes bytes vs. objects because they are
-/// separate Prometheus series.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) enum StorageEmittedKey {
-    Bytes(String),
-    Objects(String),
-}
-
-impl StorageEmittedKey {
-    fn set(&self, value: f64) {
-        match self {
-            Self::Bytes(host) => {
-                metrics::gauge!("buzz_community_storage_bytes", "community" => host.clone())
-                    .set(value);
-            }
-            Self::Objects(host) => {
-                metrics::gauge!("buzz_community_storage_objects", "community" => host.clone())
-                    .set(value);
-            }
-        }
-    }
-}
-
-/// Cached worker data and emission bookkeeping, shared across usage ticks.
+/// Cached worker data, shared across usage ticks.
 #[derive(Default)]
 pub struct StorageSweepState {
     cached: Option<CachedSnapshot>,
     // None means no worker snapshot exists. A failed read is distinct from
     // absence and remains observable even before the first successful read.
     persisted_load_ok: Option<bool>,
-    previously_emitted: HashSet<StorageEmittedKey>,
 }
 
 /// Load and emit one snapshot on the existing leader-only usage cadence.
@@ -113,8 +81,6 @@ pub async fn run_storage_metrics_tick(
     db: &Db,
     state: &Mutex<StorageSweepState>,
     mode: StorageMetricsMode,
-    host_map: Option<&HashMap<Uuid, String>>,
-    allows: impl Fn(&Uuid) -> bool,
 ) -> anyhow::Result<()> {
     if mode == StorageMetricsMode::Disabled {
         return Ok(());
@@ -123,7 +89,7 @@ pub async fn run_storage_metrics_tick(
     if result.is_err() {
         record_persisted_snapshot_load_failure(state).await;
     }
-    emit_storage_metrics(state, mode, host_map, allows).await;
+    emit_storage_metrics(state).await;
     result
 }
 
@@ -139,8 +105,6 @@ async fn refresh_persisted_snapshot(
         let mut state = state.lock().await;
         state.cached = None;
         state.persisted_load_ok = None;
-        // Keep the emitted keys until a valid snapshot returns, so its first
-        // emission can clear old community labels even before idle eviction.
         return Ok(());
     };
     let snapshot = serde_json::from_value(stored.snapshot)?;
@@ -176,28 +140,16 @@ async fn record_persisted_snapshot_load_failure(state: &Mutex<StorageSweepState>
     state.lock().await.persisted_load_ok = Some(false);
 }
 
-async fn emit_storage_metrics(
-    state: &Mutex<StorageSweepState>,
-    mode: StorageMetricsMode,
-    host_map: Option<&HashMap<Uuid, String>>,
-    allows: impl Fn(&Uuid) -> bool,
-) {
-    if mode == StorageMetricsMode::Disabled {
-        return;
-    }
-    let mut state = state.lock().await;
+async fn emit_storage_metrics(state: &Mutex<StorageSweepState>) {
+    let state = state.lock().await;
     let Some(load_ok) = state.persisted_load_ok else {
         return;
     };
     metrics::gauge!("buzz_storage_snapshot_load_ok").set(if load_ok { 1.0 } else { 0.0 });
-    emit_cached_storage_metrics(&mut state, host_map, allows);
+    emit_cached_storage_metrics(&state);
 }
 
-fn emit_cached_storage_metrics(
-    state: &mut StorageSweepState,
-    host_map: Option<&HashMap<Uuid, String>>,
-    allows: impl Fn(&Uuid) -> bool,
-) {
+fn emit_cached_storage_metrics(state: &StorageSweepState) {
     let Some(cached) = &state.cached else {
         return;
     };
@@ -228,43 +180,6 @@ fn emit_cached_storage_metrics(
     metrics::gauge!("buzz_storage_snapshot_max_objects").set(cached.max_objects as f64);
     metrics::gauge!("buzz_storage_snapshot_cap_utilization")
         .set(snapshot.physical_objects as f64 / cached.max_objects as f64);
-
-    // Without a host map (fleet-only emission) the relay attributes nothing,
-    // so it emits neither community series nor the unmapped total: every byte
-    // would otherwise miss the empty map and read as a false unmapped anomaly.
-    let mut current = HashSet::new();
-    if let Some(host_map) = host_map {
-        let mut unmapped_bytes = 0u64;
-        for (community_id, storage) in &snapshot.per_community {
-            let Some(host) = host_map.get(community_id) else {
-                unmapped_bytes += storage.bytes;
-                continue;
-            };
-            if !allows(community_id) {
-                continue;
-            }
-            metrics::gauge!("buzz_community_storage_bytes", "community" => host.clone())
-                .set(storage.bytes as f64);
-            metrics::gauge!("buzz_community_storage_objects", "community" => host.clone())
-                .set(storage.objects as f64);
-            current.insert(StorageEmittedKey::Bytes(host.clone()));
-            current.insert(StorageEmittedKey::Objects(host.clone()));
-        }
-        metrics::gauge!("buzz_storage_unmapped_community_bytes").set(unmapped_bytes as f64);
-    }
-
-    // Zero series for communities that were emitted last tick but are no longer
-    // present in the current snapshot (community removed, host renamed, or
-    // scope exclusion added).
-    for key in state
-        .previously_emitted
-        .difference(&current)
-        .cloned()
-        .collect::<Vec<_>>()
-    {
-        key.set(0.0);
-    }
-    state.previously_emitted = current;
 }
 
 #[cfg(test)]
@@ -274,8 +189,11 @@ mod postgres_tests;
 mod tests {
     use super::*;
 
+    use std::collections::HashMap;
+
     use buzz_media::CommunityStorage;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    use uuid::Uuid;
 
     fn snapshot_with(community: Uuid, bytes: u64, objects: u64) -> BucketSnapshot {
         let mut per_community = HashMap::new();
@@ -334,12 +252,7 @@ mod tests {
         let state = Mutex::new(StorageSweepState::default());
         let recorder = DebuggingRecorder::new();
         metrics::with_local_recorder(&recorder, || {
-            futures::executor::block_on(emit_storage_metrics(
-                &state,
-                StorageMetricsMode::Snapshot,
-                Some(&HashMap::new()),
-                |_| true,
-            ));
+            futures::executor::block_on(emit_storage_metrics(&state));
         });
         assert!(gauge_snapshot(&recorder).is_empty());
     }
@@ -358,8 +271,6 @@ mod tests {
                 &db,
                 &state,
                 StorageMetricsMode::Disabled,
-                Some(&HashMap::new()),
-                |_| true,
             ))
         });
         assert!(result.is_ok());
@@ -380,341 +291,12 @@ mod tests {
                 &db,
                 &state,
                 StorageMetricsMode::Snapshot,
-                Some(&HashMap::new()),
-                |_| true,
             ))
         });
         assert!(result.is_err());
         assert_eq!(
             gauge_snapshot(&recorder),
             HashMap::from([("buzz_storage_snapshot_load_ok".into(), 0.0)])
-        );
-    }
-
-    #[tokio::test]
-    async fn warm_cache_emits_community_and_unmapped_totals_with_scope_gating() {
-        let mapped = Uuid::new_v4();
-        let unmapped = Uuid::new_v4();
-        let excluded = Uuid::new_v4();
-        let mut per_community = HashMap::new();
-        per_community.insert(
-            mapped,
-            CommunityStorage {
-                bytes: 100,
-                objects: 2,
-            },
-        );
-        per_community.insert(
-            unmapped,
-            CommunityStorage {
-                bytes: 30,
-                objects: 1,
-            },
-        );
-        per_community.insert(
-            excluded,
-            CommunityStorage {
-                bytes: 7,
-                objects: 1,
-            },
-        );
-        let snapshot = BucketSnapshot {
-            physical_bytes: 137,
-            physical_objects: 4,
-            logical_bytes: 137,
-            logical_objects: 4,
-            per_community,
-            ..Default::default()
-        };
-
-        let state = Mutex::new(StorageSweepState {
-            cached: Some(CachedSnapshot {
-                data: snapshot,
-                completed_at_wall: Utc::now(),
-                duration: Duration::from_millis(500),
-                max_objects: 1_000,
-            }),
-            persisted_load_ok: Some(true),
-            ..Default::default()
-        });
-
-        let mut host_map = HashMap::new();
-        host_map.insert(mapped, "mapped.example".to_string());
-        host_map.insert(excluded, "excluded.example".to_string());
-
-        let recorder = DebuggingRecorder::new();
-        metrics::with_local_recorder(&recorder, || {
-            futures::executor::block_on(emit_storage_metrics(
-                &state,
-                StorageMetricsMode::Snapshot,
-                Some(&host_map),
-                |id| *id != excluded,
-            ));
-        });
-
-        let values = gauge_snapshot(&recorder);
-        assert_eq!(values.get("buzz_storage_snapshot_load_ok"), Some(&1.0));
-        assert_eq!(values.get("buzz_total_storage_bytes"), Some(&137.0));
-        assert_eq!(
-            values.get("buzz_storage_unmapped_community_bytes"),
-            Some(&30.0)
-        );
-        assert_eq!(values.get("buzz_community_storage_bytes"), Some(&100.0));
-    }
-
-    #[tokio::test]
-    async fn fleet_only_emission_omits_attribution_without_false_unmapped_bytes() {
-        let community = Uuid::new_v4();
-        let state = Mutex::new(StorageSweepState {
-            cached: Some(CachedSnapshot {
-                data: snapshot_with(community, 64, 2),
-                completed_at_wall: Utc::now(),
-                duration: Duration::from_millis(100),
-                max_objects: 1_000,
-            }),
-            persisted_load_ok: Some(true),
-            ..Default::default()
-        });
-
-        let recorder = DebuggingRecorder::new();
-        metrics::with_local_recorder(&recorder, || {
-            futures::executor::block_on(emit_storage_metrics(
-                &state,
-                StorageMetricsMode::Snapshot,
-                None,
-                |_| true,
-            ));
-        });
-        let values = gauge_snapshot(&recorder);
-        assert_eq!(values.get("buzz_total_storage_bytes"), Some(&64.0));
-        assert_eq!(values.get("buzz_storage_unmapped_community_bytes"), None);
-        assert!(labeled_community_gauges(&recorder).is_empty());
-
-        // A previously attributed series is zeroed once attribution stops.
-        let host_map = HashMap::from([(community, "host.example".to_string())]);
-        let recorder = DebuggingRecorder::new();
-        metrics::with_local_recorder(&recorder, || {
-            futures::executor::block_on(emit_storage_metrics(
-                &state,
-                StorageMetricsMode::Snapshot,
-                Some(&host_map),
-                |_| true,
-            ));
-            futures::executor::block_on(emit_storage_metrics(
-                &state,
-                StorageMetricsMode::Snapshot,
-                None,
-                |_| true,
-            ));
-        });
-        assert_eq!(
-            labeled_community_gauges(&recorder).get(&(
-                "buzz_community_storage_bytes".to_string(),
-                "host.example".to_string()
-            )),
-            Some(&0.0)
-        );
-    }
-
-    // --- F-EXT1 regression: stale per-community series are zeroed ---
-
-    /// Returns a map of `(metric_name, community_label_value) -> gauge_value`
-    /// for gauges that carry a "community" label. Used to verify per-community
-    /// series are zeroed rather than left stale between emissions.
-    fn labeled_community_gauges(
-        recorder: &DebuggingRecorder,
-    ) -> std::collections::HashMap<(String, String), f64> {
-        recorder
-            .snapshotter()
-            .snapshot()
-            .into_vec()
-            .into_iter()
-            .filter_map(|(composite_key, _, _, value)| {
-                let DebugValue::Gauge(v) = value else {
-                    return None;
-                };
-                let key = composite_key.key();
-                let community = key
-                    .labels()
-                    .find(|l| l.key() == "community")
-                    .map(|l| l.value().to_owned())?;
-                Some(((key.name().to_owned(), community), v.into_inner()))
-            })
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn stale_per_community_series_are_zeroed_on_disappearance() {
-        // Three scenarios in one state machine using a single StorageSweepState:
-        // (a) community disappears from snapshot (mapped → no entry),
-        // (b) host label rename (same UUID, different host string),
-        // (c) scope removal (community excluded by the `allows` predicate).
-        //
-        // After the second emission, the old series from (a), (b), and (c)
-        // must read 0.0, not their last nonzero value.
-
-        let community_a = Uuid::new_v4(); // (a) will disappear from snapshot
-        let community_b = Uuid::new_v4(); // (b) will be renamed host.old → host.new
-        let community_c = Uuid::new_v4(); // (c) will be scope-excluded
-
-        let make_snapshot = |include_a: bool, b_bytes: u64| {
-            let mut per_community = HashMap::new();
-            if include_a {
-                per_community.insert(
-                    community_a,
-                    CommunityStorage {
-                        bytes: 10,
-                        objects: 1,
-                    },
-                );
-            }
-            per_community.insert(
-                community_b,
-                CommunityStorage {
-                    bytes: b_bytes,
-                    objects: 2,
-                },
-            );
-            per_community.insert(
-                community_c,
-                CommunityStorage {
-                    bytes: 7,
-                    objects: 1,
-                },
-            );
-            BucketSnapshot {
-                physical_bytes: 10 + b_bytes + 7,
-                physical_objects: 4,
-                logical_bytes: 10 + b_bytes + 7,
-                logical_objects: 4,
-                per_community,
-                ..Default::default()
-            }
-        };
-
-        let state = Mutex::new(StorageSweepState {
-            cached: Some(CachedSnapshot {
-                data: make_snapshot(true, 20),
-                completed_at_wall: Utc::now(),
-                duration: Duration::from_millis(100),
-                max_objects: 1_000,
-            }),
-            persisted_load_ok: Some(true),
-            ..Default::default()
-        });
-
-        let recorder = DebuggingRecorder::new();
-
-        // --- Emission 1: all three communities visible ---
-        let mut host_map_1 = HashMap::new();
-        host_map_1.insert(community_a, "host.a".to_string());
-        host_map_1.insert(community_b, "host.old".to_string());
-        host_map_1.insert(community_c, "host.c".to_string());
-        metrics::with_local_recorder(&recorder, || {
-            futures::executor::block_on(emit_storage_metrics(
-                &state,
-                StorageMetricsMode::Snapshot,
-                Some(&host_map_1),
-                |_| true,
-            ));
-        });
-        {
-            let labeled = labeled_community_gauges(&recorder);
-            assert_eq!(
-                labeled.get(&(
-                    "buzz_community_storage_bytes".to_string(),
-                    "host.a".to_string()
-                )),
-                Some(&10.0),
-                "emission 1: host.a bytes should be 10"
-            );
-            assert_eq!(
-                labeled.get(&(
-                    "buzz_community_storage_bytes".to_string(),
-                    "host.old".to_string()
-                )),
-                Some(&20.0),
-                "emission 1: host.old bytes should be 20"
-            );
-        }
-
-        // --- Emission 2: community_a gone, community_b renamed, community_c excluded ---
-        {
-            let mut guard = state.lock().await;
-            guard.cached = Some(CachedSnapshot {
-                data: make_snapshot(false, 20),
-                completed_at_wall: Utc::now(),
-                duration: Duration::from_millis(100),
-                max_objects: 1_000,
-            });
-        }
-        let mut host_map_2 = HashMap::new();
-        // community_a absent from host_map → unmapped (gone from per-community series)
-        host_map_2.insert(community_b, "host.new".to_string()); // renamed
-        host_map_2.insert(community_c, "host.c".to_string());
-        metrics::with_local_recorder(&recorder, || {
-            futures::executor::block_on(emit_storage_metrics(
-                &state,
-                StorageMetricsMode::Snapshot,
-                Some(&host_map_2),
-                |id| *id != community_c, // (c) scope-excluded
-            ));
-        });
-
-        let labeled = labeled_community_gauges(&recorder);
-
-        // (a) community_a disappeared — old host.a series must be zeroed
-        assert_eq!(
-            labeled.get(&(
-                "buzz_community_storage_bytes".to_string(),
-                "host.a".to_string()
-            )),
-            Some(&0.0),
-            "(a) disappeared community: host.a bytes must be zeroed"
-        );
-        assert_eq!(
-            labeled.get(&(
-                "buzz_community_storage_objects".to_string(),
-                "host.a".to_string()
-            )),
-            Some(&0.0),
-            "(a) disappeared community: host.a objects must be zeroed"
-        );
-
-        // (b) community_b renamed host.old → host.new — old series must be zeroed
-        assert_eq!(
-            labeled.get(&(
-                "buzz_community_storage_bytes".to_string(),
-                "host.old".to_string()
-            )),
-            Some(&0.0),
-            "(b) host rename: host.old bytes must be zeroed"
-        );
-        assert_eq!(
-            labeled.get(&(
-                "buzz_community_storage_bytes".to_string(),
-                "host.new".to_string()
-            )),
-            Some(&20.0),
-            "(b) host rename: host.new bytes must be 20"
-        );
-
-        // (c) community_c scope-excluded — host.c series must be zeroed
-        assert_eq!(
-            labeled.get(&(
-                "buzz_community_storage_bytes".to_string(),
-                "host.c".to_string()
-            )),
-            Some(&0.0),
-            "(c) scope removal: host.c bytes must be zeroed"
-        );
-        assert_eq!(
-            labeled.get(&(
-                "buzz_community_storage_objects".to_string(),
-                "host.c".to_string()
-            )),
-            Some(&0.0),
-            "(c) scope removal: host.c objects must be zeroed"
         );
     }
 
@@ -730,15 +312,9 @@ mod tests {
             100,
         )
         .await;
-        let host_map = HashMap::from([(community, "example.test".to_string())]);
         let recorder = DebuggingRecorder::new();
         metrics::with_local_recorder(&recorder, || {
-            futures::executor::block_on(emit_storage_metrics(
-                &state,
-                StorageMetricsMode::Snapshot,
-                Some(&host_map),
-                |_| true,
-            ));
+            futures::executor::block_on(emit_storage_metrics(&state));
         });
         let values = gauge_snapshot(&recorder);
         assert_eq!(values.get("buzz_storage_snapshot_load_ok"), Some(&1.0));
@@ -755,6 +331,10 @@ mod tests {
             Some(&0.25)
         );
         assert!(values["buzz_storage_snapshot_age_seconds"] >= 30.0);
+        // Per-community storage is never attributed in relay metrics.
+        assert!(!values.contains_key("buzz_community_storage_bytes"));
+        assert!(!values.contains_key("buzz_community_storage_objects"));
+        assert!(!values.contains_key("buzz_storage_unmapped_community_bytes"));
         assert!(!values.contains_key("buzz_storage_sweep_ok"));
         assert!(!values.contains_key("buzz_storage_sweep_failures"));
         assert!(!values.contains_key("buzz_storage_sweep_duration_seconds"));
@@ -774,15 +354,9 @@ mod tests {
         )
         .await;
 
-        let host_map = HashMap::from([(community, "stale.example.test".to_string())]);
         let recorder = DebuggingRecorder::new();
         metrics::with_local_recorder(&recorder, || {
-            futures::executor::block_on(emit_storage_metrics(
-                &state,
-                StorageMetricsMode::Snapshot,
-                Some(&host_map),
-                |_| true,
-            ));
+            futures::executor::block_on(emit_storage_metrics(&state));
         });
 
         let values = gauge_snapshot(&recorder);
@@ -807,15 +381,9 @@ mod tests {
         .await;
         record_persisted_snapshot_load_failure(&state).await;
 
-        let host_map = HashMap::from([(community, "cached.example.test".to_string())]);
         let recorder = DebuggingRecorder::new();
         metrics::with_local_recorder(&recorder, || {
-            futures::executor::block_on(emit_storage_metrics(
-                &state,
-                StorageMetricsMode::Snapshot,
-                Some(&host_map),
-                |_| true,
-            ));
+            futures::executor::block_on(emit_storage_metrics(&state));
         });
 
         let values = gauge_snapshot(&recorder);

@@ -14,7 +14,7 @@ use crate::{
     util::now_iso,
 };
 
-use super::{normalize_description, pending, retain_persona_pending, trim_optional, trim_required};
+use super::{normalize_description, pending, trim_optional, trim_required};
 
 #[cfg(test)]
 mod name_propagation_tests;
@@ -121,17 +121,110 @@ type ProfileSyncParams = Vec<(
     Option<String>,
 )>;
 
+pub(crate) type PersonaAvatarTransfers = Vec<(nostr::Keys, String, Option<String>, Option<String>)>;
+
+/// Only settings used by the target avatar plan participate in its fence.
+/// Runtime churn and unrelated definitions cannot invalidate the transfer.
+fn avatar_settings_snapshot(
+    persona: &AgentDefinition,
+    records: &[ManagedAgentRecord],
+) -> Result<(serde_json::Value, serde_json::Value), String> {
+    let mut linked: Vec<_> = records
+        .iter()
+        .filter(|r| r.persona_id.as_deref() == Some(&persona.id))
+        .map(|r| {
+            serde_json::json!({
+                "pubkey":r.pubkey, "private_key_nsec":r.private_key_nsec,
+                "relay_url":r.relay_url, "auth_tag":r.auth_tag, "avatar_url":r.avatar_url,
+                "agent_command_override":r.agent_command_override,
+            })
+        })
+        .collect();
+    linked.sort_by(|a, b| a["pubkey"].as_str().cmp(&b["pubkey"].as_str()));
+    Ok((
+        serde_json::to_value(persona).map_err(|e| e.to_string())?,
+        serde_json::Value::Array(linked),
+    ))
+}
+
+/// Build the complete plan before any transfer or local write. A missing signer
+/// must leave the old desired avatar in place so key recovery can retry it.
+fn plan_persona_avatar_transfers(
+    persona: &AgentDefinition,
+    records: &[ManagedAgentRecord],
+    workspace_relay: &str,
+) -> Result<PersonaAvatarTransfers, String> {
+    let linked: Vec<_> = records
+        .iter()
+        .filter(|r| r.persona_id.as_deref() == Some(&persona.id))
+        .collect();
+    let unavailable: Vec<_> = linked
+        .iter()
+        .filter(|r| nostr::Keys::parse(&r.private_key_nsec).is_err())
+        .map(|r| format!("{} ({})", r.name, r.pubkey))
+        .collect();
+    if !unavailable.is_empty() {
+        return Err(format!("Cannot change the avatar: signing keys are unavailable for {}. Restore their keys, or remove or unlink those instances, then retry. Changes were not saved.", unavailable.join(", ")));
+    }
+    linked
+        .into_iter()
+        .map(|record| {
+            let keys = nostr::Keys::parse(&record.private_key_nsec).map_err(|e| e.to_string())?;
+            let mut updated = record.clone();
+            let update = prepare_linked_profile_update(&mut updated, persona, false, true, false);
+            Ok((
+                keys,
+                crate::relay::effective_agent_relay_url(&record.relay_url, workspace_relay),
+                update.profile_avatar,
+                record.auth_tag.clone(),
+            ))
+        })
+        .collect()
+}
+
+/// Transfer explicit persona selections before local writes. Empty plans (an
+/// unchanged avatar) do not acquire upload proof with the owner's authority.
+pub(crate) async fn transfer_persona_avatars_before_save(
+    state: &AppState,
+    owner: &nostr::Keys,
+    transfers: &PersonaAvatarTransfers,
+) -> Result<(), String> {
+    for (keys, relay, avatar, tag) in transfers {
+        crate::relay::profile_avatar::transfer_created_avatar(
+            state,
+            relay,
+            owner,
+            keys,
+            avatar.as_deref(),
+            tag.as_deref(),
+        )
+        .await
+        .map_err(|e| {
+            format!("Could not transfer the persona avatar; changes were not saved: {e}")
+        })?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn update_persona(
     input: UpdatePersonaRequest,
     app: AppHandle,
 ) -> Result<UpdatePersonaResult, String> {
-    let (persona, ()) = update_persona_with(input, app, |app, state, persona| {
-        retain_persona_pending(app, state, persona);
+    let (persona, ()) = update_persona_with(input, app, |app, _state, persona, scope| {
+        if let Some(scope) = scope {
+            if let Err(e) = pending::retain_persona_pending_at(scope, persona) {
+                eprintln!("buzz-desktop: persona-retain: {e}");
+            }
+            crate::commands::refresh_team_catalog_heads_for_persona_in_scope(
+                app,
+                scope,
+                &persona.id,
+            );
+        }
         // F2: immediately refresh any shared 30178 heads that include this
         // persona as a member. Best-effort inside retain so a hiccup cannot
         // fail the persona edit itself.
-        crate::commands::refresh_team_catalog_heads_for_persona(app, state, &persona.id);
         Ok(())
     })
     .await?;
@@ -145,12 +238,67 @@ pub async fn update_persona(
 /// [`update_persona`] enqueues best-effort, while
 /// [`sharing::update_persona_and_publish`] prepares a strict publication and
 /// returns the event so the caller can await relay acceptance.
-pub(super) async fn update_persona_with<R: Send + 'static>(
+pub(crate) async fn update_persona_with<T: tauri::Runtime, R: Send + 'static>(
     input: UpdatePersonaRequest,
-    app: AppHandle,
-    retain: impl FnOnce(&AppHandle, &AppState, &AgentDefinition) -> Result<R, String> + Send + 'static,
+    app: AppHandle<T>,
+    retain: impl FnOnce(
+            &AppHandle<T>,
+            &AppState,
+            &AgentDefinition,
+            Option<&crate::managed_agents::retention::RetentionScope>,
+        ) -> Result<R, String>
+        + Send
+        + 'static,
 ) -> Result<(AgentDefinition, R), String> {
     use tauri::Manager;
+
+    // Capture explicit owner authority before any await. Transfer changed avatar
+    // bytes before saving, so a failed transfer leaves the old local avatar and
+    // a normal retry still recognizes the change.
+    let state = app.state::<AppState>();
+    let retention_scope = {
+        let _workspace = state.workspace_apply_lock.lock().await;
+        crate::managed_agents::retention::active_retention_scope(&app, &state).ok()
+    };
+    let mut owner_keys = None;
+    let workspace_relay = retention_scope
+        .as_ref()
+        .map(|scope| scope.relay_url.clone())
+        .unwrap_or_else(|| crate::relay::relay_ws_url_with_override(&state));
+    let (avatar_snapshot, transfers) = {
+        let _guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let personas = load_personas(&app)?;
+        let records = load_managed_agents(&app)?;
+        let persona = personas
+            .iter()
+            .find(|p| p.id == input.id)
+            .ok_or_else(|| format!("agent {} not found", input.id))?;
+        let avatar = trim_optional(input.avatar_url.clone());
+        let mut transfers = Vec::new();
+        let snapshot = if persona.avatar_url != avatar {
+            let mut changed = persona.clone();
+            changed.avatar_url = avatar;
+            changed.acp_command = trim_optional(input.acp_command.clone());
+            transfers = plan_persona_avatar_transfers(&changed, &records, &workspace_relay)?;
+            owner_keys = Some(
+                retention_scope
+                    .as_ref()
+                    .ok_or("Signing keys unavailable for avatar transfer")?
+                    .owner_keys
+                    .clone(),
+            );
+            Some(avatar_settings_snapshot(persona, &records)?)
+        } else {
+            None
+        };
+        (snapshot, transfers)
+    };
+    if let Some(owner) = &owner_keys {
+        transfer_persona_avatars_before_save(&state, owner, &transfers).await?;
+    }
 
     // Phase 1: synchronous save (persona record + linked agent avatar updates)
     let (result, retained, profile_sync_params) = tokio::task::spawn_blocking({
@@ -172,7 +320,23 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 .lock()
                 .map_err(|error| error.to_string())?;
             let mut personas = load_personas(&app)?;
-            pending::project_active_persona_sharing(&app, &state, &mut personas);
+            if let Some(expected) = avatar_snapshot {
+                let current = personas.iter().find(|p| p.id == input.id).ok_or("Agent changed during avatar transfer; retry the edit")?;
+                if avatar_settings_snapshot(current, &load_managed_agents(&app)?)? != expected
+                    || state.signing_keys()?.public_key() != owner_keys.as_ref().ok_or("Missing avatar transfer authority")?.public_key()
+                    || crate::relay::relay_ws_url_with_override(&state) != workspace_relay
+                {
+                    return Err("Agent settings or workspace changed during avatar transfer; retry the edit".into());
+                }
+            }
+            if let Some(scope) = &retention_scope {
+                if let Err(e) = pending::project_persona_sharing_at(&scope.db_path, &scope.owner_keys.public_key().to_hex(), &mut personas) {
+                    eprintln!("buzz-desktop: persona-share-projection: {e}");
+                    for persona in &mut personas { persona.shared = false; }
+                }
+            } else {
+                for persona in &mut personas { persona.shared = false; }
+            }
             let persona = personas
                 .iter_mut()
                 .find(|record| record.id == input.id)
@@ -214,7 +378,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let result = persona.clone();
             save_personas(&app, &personas)?;
 
-            let retained = retain(&app, &state, &result)?;
+            let retained = retain(&app, &state, &result, retention_scope.as_ref())?;
             try_regenerate_nest(&app);
 
             // If the avatar, display_name, or effective description changed,
@@ -226,7 +390,6 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                 let mut records = load_managed_agents(&app)?;
                 let mut params: ProfileSyncParams = Vec::new();
                 let mut agents_modified = false;
-                let workspace_relay = crate::relay::relay_ws_url_with_override(&state);
 
                 // Propagate the display_name rename to instances that still
                 // carry the old definition display_name (pool-named instances

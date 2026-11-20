@@ -56,6 +56,18 @@ class StoredReadState {
 
 class ReadStateStorage {
   final SharedPreferences _prefs;
+  static final _lanes = Expando<Map<String, _JournalLane>>();
+
+  /// Claims the sole writer for this identity/community journal. A successor
+  /// fences already queued writes as well as late network acknowledgements.
+  Object claimJournal(String key) {
+    final lanes = _lanes[_prefs] ??= {};
+    final lane = lanes.putIfAbsent(key, _JournalLane.new);
+    return lane.owner = Object();
+  }
+
+  bool ownsJournal(String key, Object owner) =>
+      identical(_lanes[_prefs]?[key]?.owner, owner);
 
   ReadStateStorage(this._prefs);
 
@@ -93,6 +105,40 @@ class ReadStateStorage {
 
   void writeSlotId(String pubkey, String relayUrl, String slotId) {
     _prefs.setString(slotIdKey(pubkey, relayUrl), slotId);
+  }
+
+  /// The complete multi-slot journal, saved atomically as one preference.
+  Map<String, Object?>? readJournal(String pubkey) {
+    final raw = _prefs.getString('buzz.nip-rs.journal.v1:$pubkey');
+    if (raw == null) return null;
+    final journal = asStringObjectMap(jsonDecode(raw));
+    if (journal == null || journal['v'] != 1) {
+      throw const FormatException('Invalid read-state journal');
+    }
+    return journal;
+  }
+
+  Future<void> writeJournal(String pubkey, String encoded, {Object? owner}) {
+    final lane = (_lanes[_prefs] ??= {}).putIfAbsent(pubkey, _JournalLane.new);
+    Future<void> write() async {
+      if (owner != null && !identical(lane.owner, owner)) {
+        throw StateError('Read-state journal writer retired');
+      }
+      if (!await _prefs.setString('buzz.nip-rs.journal.v1:$pubkey', encoded)) {
+        throw StateError('Unable to persist read-state journal');
+      }
+    }
+
+    // One queue across owner replacements, including a write already in I/O.
+    final result = lane.saved.then(
+      (_) => write(),
+      onError: (Object _, StackTrace _) => write(),
+    );
+    lane.saved = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return result;
   }
 
   StoredReadState read(String pubkey, String relayUrl) {
@@ -239,4 +285,9 @@ bool _isValidSlotId(String? value) {
     return false;
   }
   return isValidReadStateDTag('$readStateDTagPrefix$value');
+}
+
+class _JournalLane {
+  Object? owner;
+  Future<void> saved = Future.value();
 }

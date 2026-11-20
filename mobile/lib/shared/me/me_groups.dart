@@ -88,13 +88,17 @@ class MeGroups {
     return result;
   }
 
-  MeGroups place(String channel, {String? group}) {
+  MeGroups place(String channel, {String? group, bool clearGroup = false}) {
     if (group != null && !groups.any((g) => g['id'] == group)) {
       throw StateError('This project changed. Refresh and try again.');
     }
     return MeGroups(
       groups: groups,
-      assignments: {...assignments, channel: ?group},
+      assignments: {
+        for (final entry in assignments.entries)
+          if (!clearGroup || entry.key != channel) entry.key: entry.value,
+        channel: ?group,
+      },
       channels: [...channels, if (!channels.contains(channel)) channel],
     );
   }

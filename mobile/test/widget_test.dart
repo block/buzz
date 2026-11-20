@@ -101,18 +101,12 @@ void main() {
     );
     await tester.pump();
     expect(find.bySemanticsLabel('Buzz'), findsOneWidget);
+    expect(find.text('Sign in with email').hitTestable(), findsNothing);
     expect(
-      find.text('Sign in with builderlab'),
+      find.text('or sign in with email'),
       HostedEnvironment.enabled ? findsOneWidget : findsNothing,
     );
-    expect(
-      find.text('Other options'),
-      HostedEnvironment.enabled ? findsOneWidget : findsNothing,
-    );
-    expect(
-      find.text('Scan a QR code'),
-      HostedEnvironment.enabled ? findsNothing : findsOneWidget,
-    );
+    expect(find.text('Scan a QR code'), findsOneWidget);
   });
 }
 

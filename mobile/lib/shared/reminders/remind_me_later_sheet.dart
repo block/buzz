@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
@@ -11,29 +12,48 @@ import 'reminder_time_presets.dart';
 /// Bottom sheet for "Remind me later": desktop-parity presets plus a native
 /// date/time picker, publishing the same author-private kind-30300 reminder
 /// events desktop reads.
+///
+/// With [existing], the chosen time reschedules that pending reminder (same
+/// `d` tag, note kept) instead of adding a second one. [onSaved] runs after
+/// the relay accepts the reminder.
 void showRemindMeLaterSheet({
   required BuildContext context,
   required WidgetRef ref,
   required ReminderTarget target,
+  ({String dTag, String? note})? existing,
+  VoidCallback? onSaved,
 }) {
   final service = ref.read(reminderServiceProvider);
   final messenger = ScaffoldMessenger.of(context);
   if (service == null) {
-    messenger.showSnackBar(
+    messenger.showFeedbackSnackBar(
       const SnackBar(content: Text('Sign in to set reminders')),
+      kind: ToastKind.generic,
     );
     return;
   }
 
   Future<void> submit(int notBefore) async {
     try {
-      await service.createReminder(target: target, notBefore: notBefore);
-      messenger.showSnackBar(const SnackBar(content: Text('Reminder set')));
+      await service.createReminder(
+        target: target,
+        notBefore: notBefore,
+        note: existing?.note,
+        replacingDTag: existing?.dTag,
+      );
+      onSaved?.call();
+      messenger.showFeedbackSnackBar(
+        SnackBar(
+          content: Text(existing == null ? 'Reminder set' : 'Reminder updated'),
+        ),
+        kind: ToastKind.success,
+      );
     } catch (error) {
       // Stable user-facing copy; the relay/crypto detail goes to the log.
       debugPrint('[RemindMeLater] createReminder failed: $error');
-      messenger.showSnackBar(
+      messenger.showFeedbackSnackBar(
         const SnackBar(content: Text('Couldn’t set reminder. Try again.')),
+        kind: ToastKind.error,
       );
     }
   }
@@ -119,9 +139,10 @@ Future<int?> _pickCustomDateTime(BuildContext context) async {
 
   final timestamp = combineCustomDateTime(date, time.hour, time.minute);
   if (timestamp == null && context.mounted) {
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Pick a time in the future')));
+    ScaffoldMessenger.of(context).showFeedbackSnackBar(
+      const SnackBar(content: Text('Pick a time in the future')),
+      kind: ToastKind.error,
+    );
   }
   return timestamp;
 }

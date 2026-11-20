@@ -14,6 +14,9 @@ use crate::error::Result;
 use crate::Db;
 use buzz_datastore_tracing::datastore_span;
 
+mod delivery;
+pub use delivery::due_wake_communities;
+
 async fn acquire_operation_connection(
     pool: &PgPool,
     operation: crate::observability::WriterOperation,
@@ -363,6 +366,7 @@ pub async fn accept_lease_event(
     crate::store::event_follow_up::after_admitted_insert(
         &mut tx,
         event.id.as_bytes().as_slice(),
+        created_at,
         30350,
         None,
     )
@@ -1244,6 +1248,47 @@ pub async fn revalidate_wake_for_send(
         })
 }
 
+/// Whether a lease author still passes the relay's connection gate: no active
+/// ban on them or their recorded owner, and `admission`. Mirrors
+/// `operator_listener::load_deliverable_event`.
+pub async fn author_admitted(
+    pool: &PgPool,
+    community: CommunityId,
+    author: &[u8],
+    admission: crate::operator_listener::DeliveryAdmission,
+) -> Result<bool> {
+    let mut connection =
+        acquire_operation_connection(pool, crate::observability::WriterOperation::Maintenance)
+            .await?;
+    Ok(sqlx::query_scalar(
+        "WITH principals AS ( \
+             SELECT $2::bytea AS pubkey \
+             UNION ALL \
+             SELECT agent_owner_pubkey FROM users \
+             WHERE community_id = $1 AND pubkey = $2 AND agent_owner_pubkey IS NOT NULL \
+         ) \
+         SELECT (NOT $5 OR EXISTS ( \
+                    SELECT 1 FROM pubkey_allowlist a \
+                    WHERE a.community_id = $1 AND a.pubkey = $2)) \
+            AND NOT EXISTS ( \
+                    SELECT 1 FROM community_bans b \
+                    WHERE b.community_id = $1 AND b.pubkey IN (SELECT pubkey FROM principals) \
+                      AND b.banned AND (b.ban_expires_at IS NULL OR b.ban_expires_at > now())) \
+            AND (NOT $3 OR EXISTS ( \
+                    SELECT 1 FROM relay_members rm \
+                    WHERE rm.community_id = $1 AND rm.pubkey IN ( \
+                        SELECT encode(p.pubkey, 'hex') FROM principals p \
+                        WHERE $4 OR p.pubkey = $2)))",
+    )
+    .bind(community.as_uuid())
+    .bind(author)
+    .bind(admission.require_membership)
+    .bind(admission.allow_owner_membership)
+    .bind(admission.require_allowlist)
+    .fetch_one(&mut *connection)
+    .await?)
+}
+
 /// Mark a fenced claim delivered. Stale workers cannot complete a newer claim.
 pub async fn complete_wake(
     pool: &PgPool,
@@ -1482,6 +1527,18 @@ impl Db {
         crate::push::enqueue_wakes(&self.pool, community, requests).await
     }
 
+    /// Discover the next bounded page of communities with eligible delivery work.
+    ///
+    /// Continue after the last returned ID until empty, then start a new sweep.
+    /// Discovery is advisory: claims and send-time validation remain authoritative.
+    #[datastore_span(name = "due_push_wake_communities", system = "postgresql")]
+    pub async fn due_push_wake_communities(
+        &self,
+        after: Option<CommunityId>,
+    ) -> Result<Vec<CommunityId>> {
+        due_wake_communities(&self.pool, after).await
+    }
+
     /// Exclusively claim due wake jobs for one community.
     #[datastore_span(name = "claim_due_push_wakes", system = "postgresql")]
     pub async fn claim_due_push_wakes(
@@ -1502,6 +1559,17 @@ impl Db {
         claim_id: Uuid,
     ) -> Result<crate::push::RevalidateWakeOutcome> {
         crate::push::revalidate_wake_for_send(&self.pool, community, id, claim_id).await
+    }
+
+    /// Whether a lease author still passes the relay's connection gate.
+    #[datastore_span(name = "push_author_admitted", system = "postgresql")]
+    pub async fn push_author_admitted(
+        &self,
+        community: CommunityId,
+        author: &[u8],
+        admission: crate::operator_listener::DeliveryAdmission,
+    ) -> Result<bool> {
+        crate::push::author_admitted(&self.pool, community, author, admission).await
     }
 
     /// Mark a fenced wake claim delivered.
@@ -1583,6 +1651,10 @@ impl Db {
 }
 
 #[cfg(test)]
+#[path = "push/delivery_postgres_tests.rs"]
+mod delivery_postgres_tests;
+
+#[cfg(test)]
 mod postgres_tests {
     use super::*;
     use crate::migration;
@@ -1638,7 +1710,7 @@ mod postgres_tests {
             .expect("sign lease event")
     }
 
-    async fn make_community(pool: &PgPool) -> CommunityId {
+    pub(super) async fn make_community(pool: &PgPool) -> CommunityId {
         let id = Uuid::new_v4();
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
             .bind(id)
@@ -1658,7 +1730,7 @@ mod postgres_tests {
         }
     }
 
-    async fn activate(
+    pub(super) async fn activate(
         pool: &PgPool,
         community: CommunityId,
         author: &[u8],
@@ -2087,7 +2159,7 @@ mod postgres_tests {
         assert_eq!(total, 3, "one row per distinct (endpoint, event) key");
     }
 
-    async fn enqueue_one(
+    pub(super) async fn enqueue_one(
         pool: &PgPool,
         community: CommunityId,
         author: &[u8],
@@ -2627,7 +2699,7 @@ mod postgres_tests {
         .expect("seed matcher row");
     }
 
-    async fn quiesce_test_community(pool: &PgPool, community: CommunityId) {
+    pub(super) async fn quiesce_test_community(pool: &PgPool, community: CommunityId) {
         let mut lifecycle = pool.begin().await.expect("begin lifecycle fixture");
         sqlx::query(
             "SELECT set_config('buzz.deletion_executor_community', $1, true), \
@@ -2649,10 +2721,6 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn matcher_claim_skips_quiescing_tenant_while_active_bystanders_progress() {
         let pool = setup_pool().await;
-        sqlx::query("DELETE FROM push_match_queue")
-            .execute(&pool)
-            .await
-            .expect("drain active matcher queue");
         let active_a = make_community(&pool).await;
         let target = make_community(&pool).await;
         let active_x = make_community(&pool).await;
@@ -2679,10 +2747,6 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn exhausted_match_reaper_skips_quiescing_tenant_and_reaps_active_bystanders() {
         let pool = setup_pool().await;
-        sqlx::query("DELETE FROM push_match_queue")
-            .execute(&pool)
-            .await
-            .expect("drain active matcher queue");
         let active_a = make_community(&pool).await;
         let target = make_community(&pool).await;
         let active_x = make_community(&pool).await;
@@ -2870,6 +2934,8 @@ mod postgres_tests {
                     &pool,
                     community,
                     raced.id.as_bytes().to_vec(),
+                    DateTime::from_timestamp(raced.created_at.as_secs() as i64, 0)
+                        .expect("signed timestamp"),
                     (held_tx, release_rx),
                 )
                 .await

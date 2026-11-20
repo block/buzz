@@ -96,6 +96,7 @@ class SettingsProfileHeader extends HookConsumerWidget {
                       : activeHandoff == null || animatedPosterUrl == null
                       ? AvatarImageContent(
                           imageUrl: avatarUrl,
+                          preferThumbnail: true,
                           fallback: _AvatarFallback(initial: profile?.initial),
                         )
                       : Stack(

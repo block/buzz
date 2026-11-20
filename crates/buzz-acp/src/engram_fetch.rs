@@ -23,7 +23,7 @@ use crate::relay::RestClient;
 /// to create a core memory. Ask your user about yourself."
 pub const ONBOARDING_NUDGE: &str = "No core memory found. \
 Use `buzz mem set core \"…\"` to create one (it will hold your identity, \
-rules, and goals across sessions). Ask your user about yourself.";
+lessons, and goals across sessions). Ask your user about yourself.";
 
 /// Build the rendered prompt section for the agent's core.
 ///

@@ -38,10 +38,9 @@ Future<void> _sendTextOnlyDraft({
     // A draft that changed while adding ran is not the draft the user sent.
     // Keep it and send nothing.
     if (context.mounted && draftRevision.value != submittedDraftRevision) {
-      messenger?.showSnackBar(
-        const SnackBar(
-          content: Text('Not sent: the message changed while adding people.'),
-        ),
+      messenger?.showFeedbackSnackBar(
+        const SnackBar(content: Text('Not sent. Message changed.')),
+        kind: ToastKind.error,
       );
       return;
     }
@@ -58,20 +57,23 @@ Future<void> _sendTextOnlyDraft({
       outgoing.pubkeys,
       mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
     );
-  } on StateError {
+  } on ActiveCommunityChangedError {
     restoreClearedDraft();
     _reportSendCancelledByCommunitySwitch(messenger);
   } catch (error) {
     // The caller runs unawaited, so surface publish failures and restore the
     // sent draft unless the user has already started a new one.
     restoreClearedDraft();
-    messenger?.showSnackBar(
-      SnackBar(content: Text(_composeSendErrorMessage(error))),
+    messenger?.showFeedbackSnackBar(
+      SnackBar(content: Text(_sendFailureMessage(error))),
+      kind: ToastKind.error,
     );
   }
 }
 
 void _useComposeDraftLifecycle({
+  required BuildContext context,
+  required ObjectRef<_ComposerVoiceNote> voiceNote,
   required ObjectRef<Map<String, MentionCandidate>> mentionMap,
   required WidgetRef ref,
   required _MarkdownEditingController controller,
@@ -80,6 +82,7 @@ void _useComposeDraftLifecycle({
   required String? threadHeadId,
   required String draftIdentity,
   required ObjectRef<int> draftRevision,
+  required ObjectRef<String?> prefillText,
   required ValueNotifier<List<_PendingAttachment>> attachments,
   required ObjectRef<int> uploadGeneration,
   required ObjectRef<UploadCancellationToken?> activeUploadCancellation,
@@ -102,12 +105,12 @@ void _useComposeDraftLifecycle({
         lastDraftIdentity.value != null && lastDraftIdentity.value != identity;
     lastDraftIdentity.value = identity;
     final saved = ref.read(composeDraftsProvider.notifier).draftFor(draftKey);
-    if (shouldHydrate) {
+    void restoreBindings(ComposeDraft? draft) {
       mentionMap.value
         ..clear()
         ..addAll({
           for (final entry
-              in (saved?.mentionKeys ?? <String, String>{}).entries)
+              in (draft?.mentionKeys ?? <String, String>{}).entries)
             entry.key: MentionCandidate(
               pubkey: entry.value,
               displayName: entry.key,
@@ -115,7 +118,10 @@ void _useComposeDraftLifecycle({
             ),
         });
     }
+
+    if (shouldHydrate) restoreBindings(saved);
     if (identityChanged) {
+      prefillText.value = null;
       draftRevision.value += 1;
       onDraftIdentityChanged();
       uploadGeneration.value += 1;
@@ -141,6 +147,8 @@ void _useComposeDraftLifecycle({
     void persistDraft() {
       if (!identical(currentOwner.value, owner)) return;
       final text = controller.text;
+      // An untouched agent prefill is not a draft.
+      if (text == prefillText.value) return;
       if (text != lastPersistedText) {
         // Prune before the atomic snapshot, not in a later editor listener.
         // Code formatting hides a binding without deleting its literal.
@@ -176,6 +184,93 @@ void _useComposeDraftLifecycle({
     }
 
     controller.addListener(persistDraft);
-    return () => controller.removeListener(persistDraft);
+    // Another writer, such as a failed quick send from Siri, can save this
+    // draft while the composer is open; show its text rather than overwrite
+    // it with the next keystroke. Own saves match lastPersistedText.
+    final external = ref.listenManual(
+      composeDraftsProvider.select(
+        (drafts) => drafts.where((d) => d.key == draftKey).firstOrNull,
+      ),
+      (_, saved) {
+        if (!identical(currentOwner.value, owner)) return;
+        if (saved == null ||
+            ((saved.text == lastPersistedText ||
+                    saved.text == controller.text) &&
+                mapEquals(saved.mentionKeys, lastBindings))) {
+          return;
+        }
+        // A newer draft: an ordinary send that fails must not restore over it.
+        // Text and the keys its mentions are bound to change together.
+        draftRevision.value += 1;
+        lastPersistedText = saved.text;
+        lastBindings = Map.of(saved.mentionKeys);
+        restoreBindings(saved);
+        if (controller.text != saved.text) controller.text = saved.text;
+      },
+    );
+    return () {
+      controller.removeListener(persistDraft);
+      external.close();
+    };
   }, [controller, draftKey, draftIdentity, onDraftIdentityChanged]);
+  _useComposerShareDelivery(
+    context: context,
+    ref: ref,
+    draftKey: draftKey,
+    controller: controller,
+    attachments: attachments,
+    draftRevision: draftRevision,
+    voiceNote: voiceNote,
+    uploadError: uploadError,
+  );
+}
+
+// Report aggregate work independently of rebuilds, including sub-frame failures.
+void _useComposerBusy({
+  required ValueNotifier<bool> isSending,
+  required ValueNotifier<int> uploadingCount,
+  required ValueNotifier<int> preparingAttachments,
+  required bool isDraft,
+  required ValueChanged<bool>? onChanged,
+}) {
+  final busyCallback = useRef(onChanged);
+  busyCallback.value = onChanged;
+  useEffect(() {
+    var active = true;
+    void reportCurrent() {
+      if (!active) return;
+      busyCallback.value?.call(
+        isSending.value ||
+            uploadingCount.value > 0 ||
+            (isDraft && preparingAttachments.value > 0),
+      );
+    }
+
+    void reportBusy() {
+      // Scope changes can reset the composer from a build-time effect.
+      // Ordinary operation completions still release the parent immediately.
+      if (SchedulerBinding.instance.schedulerPhase ==
+          SchedulerPhase.persistentCallbacks) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => reportCurrent());
+      } else {
+        reportCurrent();
+      }
+    }
+
+    final sources = [isSending, uploadingCount, preparingAttachments];
+    for (final source in sources) {
+      source.addListener(reportBusy);
+    }
+    return () {
+      active = false;
+      for (final source in sources) {
+        source.removeListener(reportBusy);
+      }
+      // Disposal can happen during a parent build. Release after that frame.
+      final callback = busyCallback.value;
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => callback?.call(false),
+      );
+    };
+  }, [isSending, uploadingCount, preparingAttachments, isDraft]);
 }

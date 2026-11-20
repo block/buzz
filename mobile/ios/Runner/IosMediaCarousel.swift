@@ -12,9 +12,71 @@ final class IosMediaCarouselFactory: NSObject, FlutterPlatformViewFactory {
   }
 }
 
+/// Mirrors Flutter's SkeletonShimmer: a translucent primary fill with a
+/// lighter band sweeping across it every two seconds.
+private final class CarouselShimmer: UIView {
+  private let gradient = CAGradientLayer()
+  var tint: UIColor = .systemBlue {
+    didSet { updateColors() }
+  }
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    isUserInteractionEnabled = false
+    gradient.locations = [0, 0.34, 0.5, 0.66, 1]
+    layer.addSublayer(gradient)
+    updateColors()
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(reduceMotionChanged),
+      name: UIAccessibility.reduceMotionStatusDidChangeNotification,
+      object: nil
+    )
+  }
+  @objc private func reduceMotionChanged() { animate() }
+  required init?(coder: NSCoder) { nil }
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    gradient.frame = bounds
+  }
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    animate()
+  }
+  override var isHidden: Bool {
+    didSet { animate() }
+  }
+  private func updateColors() {
+    let base = tint.withAlphaComponent(0.1).cgColor
+    let highlight = tint.withAlphaComponent(0.05).cgColor
+    gradient.colors = [base, base, highlight, base, base]
+  }
+  private func animate() {
+    gradient.removeAllAnimations()
+    // The gradient spans the cell's width; its center travels from 0.75
+    // widths before the cell to 0.75 widths past it, like the Flutter sweep.
+    gradient.startPoint = CGPoint(x: -0.75, y: 0.5)
+    gradient.endPoint = CGPoint(x: 0.25, y: 0.5)
+    guard window != nil, !isHidden, !UIAccessibility.isReduceMotionEnabled else { return }
+    let start = CABasicAnimation(keyPath: "startPoint")
+    start.fromValue = CGPoint(x: -0.75, y: 0.5)
+    start.toValue = CGPoint(x: 0.75, y: 0.5)
+    let end = CABasicAnimation(keyPath: "endPoint")
+    end.fromValue = CGPoint(x: 0.25, y: 0.5)
+    end.toValue = CGPoint(x: 1.75, y: 0.5)
+    let sweep = CAAnimationGroup()
+    sweep.animations = [start, end]
+    sweep.duration = 2
+    sweep.repeatCount = .infinity
+    sweep.timingFunction = CAMediaTimingFunction(name: .linear)
+    sweep.isRemovedOnCompletion = false
+    gradient.add(sweep, forKey: "shimmer")
+  }
+}
+
 private final class CarouselPhotoCell: UICollectionViewCell {
   let image = UIImageView()
   let status = UILabel()
+  let shimmer = CarouselShimmer()
   var request: String?
   var cancelRequest: (() -> Void)?
   func cancelImage() {
@@ -32,6 +94,7 @@ private final class CarouselPhotoCell: UICollectionViewCell {
     status.numberOfLines = 2
     status.font = .preferredFont(forTextStyle: .caption1)
     status.textColor = .secondaryLabel
+    contentView.addSubview(shimmer)
     contentView.addSubview(image)
     contentView.addSubview(status)
     isAccessibilityElement = true
@@ -41,6 +104,7 @@ private final class CarouselPhotoCell: UICollectionViewCell {
   override func layoutSubviews() {
     super.layoutSubviews()
     image.frame = contentView.bounds
+    shimmer.frame = contentView.bounds
     status.frame = contentView.bounds.insetBy(dx: 12, dy: 12)
   }
   override func prepareForReuse() {
@@ -48,6 +112,12 @@ private final class CarouselPhotoCell: UICollectionViewCell {
     cancelImage()
     image.image = nil
     status.text = nil
+  }
+  /// Shows the shimmer until the thumbnail resolves; a failed thumbnail gets
+  /// the plain surface behind its message instead.
+  func showLoading(_ loading: Bool) {
+    shimmer.isHidden = !loading
+    contentView.backgroundColor = loading ? .clear : .secondarySystemBackground
   }
 }
 
@@ -63,6 +133,7 @@ final class IosMediaCarousel: NSObject, FlutterPlatformView, UICollectionViewDat
   private var gap: CGFloat = 8
   private var trailingPadding: CGFloat = 16
   private var radius: CGFloat = 16
+  private var skeletonTint: UIColor = .systemBlue
   private var rtl = false
   private var ready = false
   private var applying = false
@@ -89,6 +160,7 @@ final class IosMediaCarousel: NSObject, FlutterPlatformView, UICollectionViewDat
         for case let cell as CarouselPhotoCell in self.collection.visibleCells where cell.request == id {
           let image = (args["bytes"] as? FlutterStandardTypedData).flatMap { UIImage(data: $0.data) }
           cell.image.image = image
+          cell.showLoading(false)
           cell.status.text = image == nil ? "Image unavailable\nTap to open" : nil
         }
         result(nil)
@@ -121,6 +193,14 @@ final class IosMediaCarousel: NSObject, FlutterPlatformView, UICollectionViewDat
     gap = args["gap"] as? Double ?? 8
     trailingPadding = args["trailingPadding"] as? Double ?? 16
     radius = args["radius"] as? Double ?? 16
+    if let argb = args["skeletonColor"] as? Int {
+      skeletonTint = UIColor(
+        red: CGFloat((argb >> 16) & 0xFF) / 255,
+        green: CGFloat((argb >> 8) & 0xFF) / 255,
+        blue: CGFloat(argb & 0xFF) / 255,
+        alpha: 1
+      )
+    }
     rtl = args["rtl"] as? Bool ?? false
     collection.overrideUserInterfaceStyle = args["brightness"] as? String == "dark" ? .dark : .light
     // Reflect the strip and each cell, keeping logical indices in reading order.
@@ -130,8 +210,9 @@ final class IosMediaCarousel: NSObject, FlutterPlatformView, UICollectionViewDat
     // The strip overflows the message gutter; restore that full inset at its end.
     layout.sectionInset = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: trailingPadding)
     layout.invalidateLayout()
-    for cell in collection.visibleCells {
+    for case let cell as CarouselPhotoCell in collection.visibleCells {
       cell.contentView.layer.cornerRadius = radius
+      cell.shimmer.tint = skeletonTint
     }
     if oldTrailingPadding != trailingPadding || oldStride != stride || oldGutter != gutter || oldLabels != labels || oldRTL != rtl {
       selected = min(selected, max(0, labels.count - 1))
@@ -156,7 +237,8 @@ final class IosMediaCarousel: NSObject, FlutterPlatformView, UICollectionViewDat
     cell.contentView.layer.cornerRadius = radius
     cell.accessibilityLabel = "Open \(labels[indexPath.item])"
     cell.accessibilityValue = "\(indexPath.item + 1) of \(labels.count)"
-    cell.status.text = "Loading image"
+    cell.shimmer.tint = skeletonTint
+    cell.showLoading(true)
     return cell
   }
   func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {

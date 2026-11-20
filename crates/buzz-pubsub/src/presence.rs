@@ -4,8 +4,8 @@
 //! TTL is 3x the 60s heartbeat interval so a single missed heartbeat doesn't
 //! cause presence flap. Clean disconnect deletes immediately.
 
+use crate::RedisConnection;
 use buzz_core::TenantContext;
-use deadpool_redis::Pool;
 use nostr::PublicKey;
 use std::collections::HashMap;
 
@@ -26,12 +26,12 @@ pub fn presence_key(ctx: &TenantContext, pubkey: &PublicKey) -> String {
 
 /// Sets presence status for `pubkey` with a [`PRESENCE_TTL_SECS`]-second TTL.
 pub async fn set_presence(
-    pool: &Pool,
+    pool: &RedisConnection,
     ctx: &TenantContext,
     pubkey: &PublicKey,
     status: &str,
 ) -> Result<(), PubSubError> {
-    let mut conn = pool.get().await?;
+    let mut conn = pool.clone();
     let key = presence_key(ctx, pubkey);
     redis::cmd("SET")
         .arg(&key)
@@ -45,11 +45,11 @@ pub async fn set_presence(
 
 /// Removes the presence entry for `pubkey`. Call on clean disconnect.
 pub async fn clear_presence(
-    pool: &Pool,
+    pool: &RedisConnection,
     ctx: &TenantContext,
     pubkey: &PublicKey,
 ) -> Result<(), PubSubError> {
-    let mut conn = pool.get().await?;
+    let mut conn = pool.clone();
     let key = presence_key(ctx, pubkey);
     redis::cmd("DEL")
         .arg(&key)
@@ -61,7 +61,7 @@ pub async fn clear_presence(
 /// Sets one status for every pubkey in `pubkeys`, each with the
 /// [`PRESENCE_TTL_SECS`] TTL, in one atomic round trip.
 pub async fn set_presence_many(
-    pool: &Pool,
+    pool: &RedisConnection,
     ctx: &TenantContext,
     pubkeys: &[PublicKey],
     status: &str,
@@ -69,7 +69,7 @@ pub async fn set_presence_many(
     if pubkeys.is_empty() {
         return Ok(());
     }
-    let mut conn = pool.get().await?;
+    let mut conn = pool.clone();
     let mut pipe = redis::pipe();
     pipe.atomic();
     for pubkey in pubkeys {
@@ -86,14 +86,14 @@ pub async fn set_presence_many(
 
 /// Removes the presence entries for every pubkey in `pubkeys`.
 pub async fn clear_presence_many(
-    pool: &Pool,
+    pool: &RedisConnection,
     ctx: &TenantContext,
     pubkeys: &[PublicKey],
 ) -> Result<(), PubSubError> {
     if pubkeys.is_empty() {
         return Ok(());
     }
-    let mut conn = pool.get().await?;
+    let mut conn = pool.clone();
     let keys: Vec<String> = pubkeys
         .iter()
         .map(|pubkey| presence_key(ctx, pubkey))
@@ -107,11 +107,11 @@ pub async fn clear_presence_many(
 
 /// Returns the current presence status for `pubkey`, or `None` if not set or expired.
 pub async fn get_presence(
-    pool: &Pool,
+    pool: &RedisConnection,
     ctx: &TenantContext,
     pubkey: &PublicKey,
 ) -> Result<Option<String>, PubSubError> {
-    let mut conn = pool.get().await?;
+    let mut conn = pool.clone();
     let key = presence_key(ctx, pubkey);
     let value: Option<String> = redis::cmd("GET").arg(&key).query_async(&mut conn).await?;
     Ok(value)
@@ -119,14 +119,14 @@ pub async fn get_presence(
 
 /// Returns `pubkey_hex → status` for all currently-set keys.
 pub async fn get_presence_bulk(
-    pool: &Pool,
+    pool: &RedisConnection,
     ctx: &TenantContext,
     pubkeys: &[PublicKey],
 ) -> Result<HashMap<String, String>, PubSubError> {
     if pubkeys.is_empty() {
         return Ok(HashMap::new());
     }
-    let mut conn = pool.get().await?;
+    let mut conn = pool.clone();
     let keys: Vec<String> = pubkeys
         .iter()
         .map(|pubkey| presence_key(ctx, pubkey))
@@ -161,10 +161,8 @@ mod tests {
         // A backend outage must surface as `Err`, not a silently-empty `Ok`.
         // `synthesize_presence` relies on this to return an error response
         // rather than a fake-empty "all offline" snapshot on a Redis failure.
-        // Pool points at a closed port so the connection attempt fails.
-        let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("pool builds lazily");
+        // The connection points at a closed port so the connection attempt fails.
+        let pool = crate::redis_connection("redis://127.0.0.1:1").expect("pool builds lazily");
         let ctx = ctx(0xaaaa, "a.example");
         let pubkey = make_pubkey();
 
@@ -284,7 +282,7 @@ mod tests {
             result.get(&untouched.to_hex()).map(String::as_str),
             Some("away")
         );
-        let mut conn = pool.get().await.unwrap();
+        let mut conn = pool.clone();
         let ttl: i64 = redis::cmd("TTL")
             .arg(presence_key(&ctx, &pk2))
             .query_async(&mut conn)
@@ -309,7 +307,7 @@ mod tests {
 
         set_presence(&pool, &ctx, &pubkey, "online").await.unwrap();
 
-        let mut conn = pool.get().await.unwrap();
+        let mut conn = pool.clone();
         let ttl: i64 = redis::cmd("TTL")
             .arg(presence_key(&ctx, &pubkey))
             .query_async(&mut conn)

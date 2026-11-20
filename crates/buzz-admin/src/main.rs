@@ -22,6 +22,7 @@
 mod communities;
 mod deletions;
 mod nip_fi;
+mod nip_fi_policy;
 mod user_deletions;
 
 use std::future::Future;
@@ -56,7 +57,9 @@ enum Command {
     ///
     /// Accepts a bech32 npub or 64-char hex pubkey. After inserting the DB row,
     /// publishes a kind:13534 membership roster via Redis so live clients see
-    /// the updated list immediately.
+    /// the updated list immediately. Does not join the member to the
+    /// community's default (`auto_join`) channels: the relay does that on an
+    /// invite claim or a kind:9030 add, which this command bypasses.
     AddMember {
         /// Nostr public key — bech32 npub or 64-char hex.
         #[arg(long)]
@@ -122,12 +125,14 @@ enum Command {
         #[command(subcommand)]
         command: nip_fi::NipFiCommand,
     },
+    /// Change or inspect a community stored NIP-FI requirement.
+    NipFiPolicy(nip_fi_policy::Args),
     /// Durable CLI-only whole-community deletion control plane.
     Deletions {
         #[command(subcommand)]
         command: deletions::DeletionsCommand,
     },
-    /// Submit and inspect synthetic user-deletion requests.
+    /// Preview real user memberships or manage synthetic user-deletion requests.
     UserDeletions {
         #[command(subcommand)]
         command: user_deletions::UserDeletionsCommand,
@@ -211,6 +216,11 @@ async fn run(cli: Cli) -> Result<i32> {
         Command::Deletions { command } => deletions::run(command).await,
         Command::UserDeletions { command } => user_deletions::run(command).await,
         Command::NipFi { command } => nip_fi::run(command).await,
+        // Retain transport/file causes for this operator command without changing
+        // the diagnostics of other admin commands. Key parse errors are redacted.
+        Command::NipFiPolicy(args) => nip_fi_policy::run(args)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:#}")),
         Command::ReconcileChannels { channel, relay_key } => {
             reconcile_channels(channel, relay_key).await?;
             Ok(0)
@@ -519,30 +529,83 @@ async fn cmd_remove_member(pubkey_arg: String, role_filter: Option<String>) -> R
         Ok((RemoveResult::Removed, snapshot)) => {
             println!("removed {pubkey_hex}");
             fan_out_membership_list(&pubsub, &tenant, snapshot).await;
+            let published = publish_member_disconnects(&db, &pubsub, &tenant, &pubkey_hex).await;
+            Ok(removed_exit_code(published))
         }
         Ok((RemoveResult::NotFound, _)) => {
+            // Rerunning after a removal whose disconnect was not confirmed
+            // lands here, so the disconnect is retried before reporting.
+            publish_member_disconnects(&db, &pubsub, &tenant, &pubkey_hex).await;
             eprintln!("error: member not found: {pubkey_hex}");
-            return Ok(2);
+            Ok(2)
         }
         Ok((RemoveResult::IsOwner, _)) => {
             eprintln!(
                 "error: cannot remove relay owner: {pubkey_hex}\n\
                  To change the owner, update RELAY_OWNER_PUBKEY and restart."
             );
-            return Ok(3);
+            Ok(3)
         }
         Ok((RemoveResult::RoleMismatch, _)) => {
             let role_str = role_filter.as_deref().unwrap_or("(unknown)");
             eprintln!("error: role mismatch — {pubkey_hex} is not currently '{role_str}'");
-            return Ok(4);
+            Ok(4)
         }
         Err(e) => {
             eprintln!("error: DB write failed: {e}");
-            return Ok(5);
+            Ok(5)
         }
     }
+}
 
-    Ok(0)
+/// Exit code after a committed removal: 0 once every disconnect was
+/// published, 6 when it must be retried by rerunning the same command.
+fn removed_exit_code(disconnect_published: bool) -> i32 {
+    if disconnect_published {
+        0
+    } else {
+        6
+    }
+}
+
+/// Publish, to every relay server, a disconnect for `pubkey_hex` and every
+/// agent recorded as its own. Idempotent, so a rerun retries it. Returns
+/// whether each disconnect reached at least one subscribed relay server; that
+/// is publication, not observed socket closure.
+async fn publish_member_disconnects(
+    db: &Db,
+    pubsub: &PubSubManager,
+    tenant: &TenantContext,
+    pubkey_hex: &str,
+) -> bool {
+    let Ok(pubkey) = hex::decode(pubkey_hex) else {
+        return false;
+    };
+    let agents = match db.list_agents_for_owner(tenant.community(), &pubkey).await {
+        Ok(agents) => agents,
+        Err(e) => {
+            eprintln!(
+                "warning: owned-agent lookup failed: {e}; disconnect not published, rerun to retry"
+            );
+            return false;
+        }
+    };
+    let mut published = true;
+    for key in std::iter::once(pubkey).chain(agents) {
+        let command = buzz_pubsub::conn_control::ConnControl::DisconnectPubkey {
+            pubkey: key,
+            event_id: String::new(),
+            reason: "blocked: access revoked".to_string(),
+            unowned_only: false,
+        };
+        published &= matches!(pubsub.publish_conn_control(tenant, &command).await, Ok(n) if n > 0);
+    }
+    if published {
+        println!("disconnect published");
+    } else {
+        eprintln!("warning: disconnect not confirmed by any relay server; rerun to retry");
+    }
+    published
 }
 
 async fn cmd_republish_members() -> Result<i32> {
@@ -661,11 +724,8 @@ async fn connect_member_services() -> Result<(Db, Arc<PubSubManager>, Keys)> {
     let redis_url =
         std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
 
-    let redis_pool = {
-        let cfg = deadpool_redis::Config::from_url(&redis_url);
-        cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .map_err(|e| anyhow::anyhow!("Redis pool creation failed: {e}"))?
-    };
+    let redis_pool = buzz_pubsub::redis_connection(&redis_url)
+        .map_err(|e| anyhow::anyhow!("Redis connection setup failed: {e}"))?;
 
     let pubsub = Arc::new(
         PubSubManager::new(&redis_url, redis_pool)
@@ -723,7 +783,6 @@ async fn reconcile_channels(
     channel_arg: Option<String>,
     relay_key_arg: Option<String>,
 ) -> Result<()> {
-    use buzz_core::channel::group_state_identity_tags;
     use buzz_core::kind::KIND_NIP29_GROUP_ADMINS;
     use buzz_db::event::EventQuery;
 
@@ -822,19 +881,11 @@ async fn reconcile_channels(
 
             // kind:39001 — admins
             {
-                let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-                tags.extend(group_state_identity_tags(
-                    &channel.channel_type,
-                    &channel.labels,
-                    &channel.created_by,
-                )?);
-                for m in members
-                    .iter()
-                    .filter(|m| m.role == "owner" || m.role == "admin")
-                {
-                    let pk = hex::encode(&m.pubkey);
-                    tags.push(Tag::parse(["p", &pk, &m.role])?);
-                }
+                let tags = buzz_db::channel::group_admins_tags(
+                    &channel_id_str,
+                    &channel.identity(),
+                    &members,
+                )?;
                 let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_ADMINS as u16), "")
                     .tags(tags)
                     .sign_with_keys(&relay_keys)
@@ -846,16 +897,11 @@ async fn reconcile_channels(
 
         // kind:39002 — members
         {
-            let mut tags: Vec<Tag> = vec![Tag::parse(["d", &channel_id_str])?];
-            tags.extend(group_state_identity_tags(
-                &channel.channel_type,
-                &channel.labels,
-                &channel.created_by,
-            )?);
-            for m in &members {
-                let pk = hex::encode(&m.pubkey);
-                tags.push(Tag::parse(["p", &pk, "", &m.role])?);
-            }
+            let tags = buzz_db::channel::group_members_tags(
+                &channel_id_str,
+                Some(&channel.identity()),
+                &members,
+            )?;
             let event = EventBuilder::new(Kind::Custom(39002), "")
                 .tags(tags)
                 .sign_with_keys(&relay_keys)
@@ -912,6 +958,14 @@ mod storage_snapshot_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A committed removal whose disconnect was not published exits nonzero
+    /// so the operator reruns it; a published one exits 0.
+    #[test]
+    fn unpublished_disconnect_after_removal_asks_for_a_rerun() {
+        assert_eq!(removed_exit_code(false), 6);
+        assert_eq!(removed_exit_code(true), 0);
+    }
 
     #[test]
     fn parses_partition_audit_month_horizon() {

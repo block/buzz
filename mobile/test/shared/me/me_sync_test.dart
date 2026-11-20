@@ -9,6 +9,7 @@ import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:buzz/shared/me/me_chat_creation.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
+import 'package:buzz/shared/identity_archives/identity_archives.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/me/me_recovery.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -67,6 +68,7 @@ class FakeRelay extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
   }) async {
     writes++;
     events = [event];
@@ -203,6 +205,7 @@ void main() {
       final config = _Config(RelayConfig(baseUrl: origin, nsec: nsec));
       final container = ProviderContainer(
         overrides: [
+          identityArchivesProvider.overrideWith((ref) async => {}),
           relayConfigProvider.overrideWith(() => config),
           relaySessionProvider.overrideWith(() => relay),
           savedPrefsProvider.overrideWithValue(prefs),
@@ -625,7 +628,6 @@ void main() {
       expect(service.cachedSnapshot()?.event?.id, fresh.id);
       relay.closeSubscription!('offline');
       await Future<void>.delayed(Duration.zero);
-      expect(service.syncClosed.value, isTrue);
       expect(container.read(meGroupsProvider).hasError, isFalse);
       expect(
         container.read(meGroupsProvider).value?.groups.single['name'],
@@ -699,57 +701,76 @@ void main() {
       expect(prefs.getString(first.pendingKey), isNull);
     },
   );
-  test(
-    'superseded pending save rebases local additions after restart',
-    () async {
-      SharedPreferences.setMockInitialValues({});
-      final prefs = await SharedPreferences.getInstance();
-      final relay = FakeRelay();
-      final config = RelayConfig(baseUrl: origin, nsec: nsec);
-      final sync = MeSync(relay, config, prefs: prefs);
-      const base = MeGroups(
-        groups: [
-          {'id': 'old', 'name': 'Original', 'defaultTemplateId': ''},
-        ],
-      );
-      const local = MeGroups(
-        groups: [
-          {'id': 'old', 'name': 'Original', 'defaultTemplateId': ''},
-          {'id': 'local', 'name': 'Phone project', 'defaultTemplateId': ''},
-        ],
-      );
-      const remote = MeGroups(
-        groups: [
-          {'id': 'old', 'name': 'Desktop rename', 'defaultTemplateId': ''},
-          {'id': 'remote', 'name': 'Desktop project', 'defaultTemplateId': ''},
-        ],
-      );
-      await prefs.setString(
-        sync.pendingKey,
-        jsonEncode({
-          'event': signed(groups: local, timestamp: 2).toJson(),
-          'base': signed(groups: base, timestamp: 1).toJson(),
-        }),
-      );
-      relay.events = [signed(groups: remote, timestamp: 3)];
-      final restarted = MeSync(relay, config, prefs: prefs);
-      var newIntentRan = false;
-      await expectLater(
-        restarted.update((v) {
+  // locked: desktop's unified record arrived after the save was journaled, so
+  // its filing can never be sent, but the chat it registered still must be.
+  for (final locked in [false, true]) {
+    test(
+      'superseded pending save rebases local additions after restart'
+      '${locked ? ' and drops filings once desktop owns them' : ''}',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        final relay = FakeRelay();
+        final config = RelayConfig(baseUrl: origin, nsec: nsec);
+        final sync = MeSync(relay, config, prefs: prefs);
+        const queued = '11111111-1111-4111-8111-111111111111';
+        const next = '22222222-2222-4222-8222-222222222222';
+        const base = MeGroups(
+          groups: [
+            {'id': 'old', 'name': 'Original', 'defaultTemplateId': ''},
+          ],
+        );
+        const local = MeGroups(
+          groups: [
+            {'id': 'old', 'name': 'Original', 'defaultTemplateId': ''},
+            {'id': 'local', 'name': 'Phone project', 'defaultTemplateId': ''},
+          ],
+          assignments: {queued: 'local'},
+          channels: [queued],
+        );
+        const remote = MeGroups(
+          groups: [
+            {'id': 'old', 'name': 'Desktop rename', 'defaultTemplateId': ''},
+            {
+              'id': 'remote',
+              'name': 'Desktop project',
+              'defaultTemplateId': '',
+            },
+          ],
+        );
+        await prefs.setString(
+          sync.pendingKey,
+          jsonEncode({
+            'event': signed(groups: local, timestamp: 2).toJson(),
+            'base': signed(groups: base, timestamp: 1).toJson(),
+          }),
+        );
+        relay.events = [signed(groups: remote, timestamp: 3)];
+        final restarted = MeSync(relay, config, prefs: prefs);
+        var newIntentRan = false;
+        final saving = restarted.update(mayFile: () => !locked, (v) {
           newIntentRan = true;
-          return v;
-        }),
-        throwsStateError,
-      );
-      expect(newIntentRan, isFalse);
-      expect(
-        restarted.decode(relay.events.single).groups.map((g) => g['name']),
-        ['Desktop rename', 'Desktop project', 'Phone project'],
-      );
-      expect(prefs.getString(sync.pendingKey), isNull);
-      expect(relay.writes, 1);
-    },
-  );
+          return v.place(next);
+        });
+        if (locked) {
+          await saving;
+        } else {
+          await expectLater(saving, throwsStateError);
+        }
+        expect(newIntentRan, locked);
+        final saved = restarted.decode(relay.events.single);
+        expect(saved.groups.map((g) => g['name']), [
+          'Desktop rename',
+          'Desktop project',
+          if (!locked) 'Phone project',
+        ]);
+        expect(saved.assignments, locked ? isEmpty : {queued: 'local'});
+        expect(saved.channels, [queued, if (locked) next]);
+        expect(prefs.getString(sync.pendingKey), isNull);
+        expect(relay.writes, 1);
+      },
+    );
+  }
   test('conflicting edits remain durable until explicit discard', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
