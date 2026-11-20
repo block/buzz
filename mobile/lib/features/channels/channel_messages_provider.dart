@@ -345,7 +345,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       state = AsyncData(merged);
       if (ticket != null && _hasListeners) {
         unawaited(
-          saveChannelPage(
+          saveMessagePage(
             ref,
             cache,
             ticket,
@@ -406,7 +406,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     _noticeAux.clear();
     if (scope != null) {
       unawaited(cache.removeChannel(scope, channelId));
-      ref.invalidate(savedChannelPreviewProvider(channelId));
+      invalidateSavedMessagePreviews(ref, channelId);
     }
     final denial = AsyncError<List<NostrEvent>>(error, stackTrace);
     _accessDenial = denial;

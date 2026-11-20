@@ -181,6 +181,72 @@ class _ThreadTailIntent {
   }
 }
 
+({
+  AsyncValue<List<NostrEvent>> relayReplyState,
+  List<TimelineMessage> allMsgs,
+  bool showingSavedReplies,
+  bool accessDenied,
+  bool liveDeletionHidesHead,
+  bool hasFetchedReplies,
+  bool canUseMessagesForInitialTarget,
+})
+_watchThreadMessages(
+  WidgetRef ref,
+  ThreadRepliesArgs args,
+  TimelineMessage threadHead,
+  List<TimelineMessage> routeSnapshot,
+  String? currentPubkey,
+) {
+  final relayReplyState = ref.watch(threadRepliesProvider(args));
+  final replyEvents = ref.watch(threadRepliesWithLocalProvider(args)).value;
+  final channelState = ref.watch(channelMessagesProvider(args.channelId));
+  final accessDenied = [
+    relayReplyState.error,
+    channelState.error,
+  ].any((error) => error != null && isRelayChannelAccessDenied(error));
+  final relayRepliesAvailable = relayReplyState.hasValue;
+  final preview = relayRepliesAvailable || accessDenied
+      ? null
+      : ref.watch(savedThreadPreviewProvider(args.savedPage));
+  final saved = preview?.isLoading == false ? preview?.value : null;
+  final live = channelState.value ?? const <NostrEvent>[];
+  // The relay query carries the aux it observed. Fold in later live changes
+  // before formatting so a deletion can suppress a reply from either source.
+  final events = saved == null && replyEvents == null
+      ? live
+      : mergeThreadEvents([...?replyEvents, ...?saved], live);
+  final observed = accessDenied
+      ? const <TimelineMessage>[]
+      : formatTimeline(events, currentPubkey: currentPubkey);
+  final headDeleted = _isDeletedBy(events, threadHead.id);
+  final allMsgs = accessDenied
+      ? const <TimelineMessage>[]
+      : !relayRepliesAvailable
+      ? _provisionalThreadMessages(routeSnapshot, observed, events)
+      : [
+          if (!headDeleted &&
+              !observed.any((message) => message.id == threadHead.id))
+            threadHead,
+          ...observed,
+        ];
+  return (
+    relayReplyState: relayReplyState,
+    allMsgs: allMsgs,
+    showingSavedReplies: saved != null,
+    accessDenied: accessDenied,
+    liveDeletionHidesHead: headDeleted,
+    hasFetchedReplies: replyEvents != null,
+    // After a terminal error, let the saved-page read settle before resolving
+    // the target index in the fallback timeline.
+    canUseMessagesForInitialTarget:
+        !accessDenied &&
+        (relayRepliesAvailable ||
+            (preview?.isLoading != true &&
+                relayReplyState.hasError &&
+                !relayReplyState.retrying)),
+  );
+}
+
 /// Display evidence while the authoritative thread query has no value (still
 /// loading, or failed on first load): the route snapshot plus live, cached
 /// and optimistic replies. The page keeps the query's loading/error status,
