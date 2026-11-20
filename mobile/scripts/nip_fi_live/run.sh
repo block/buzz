@@ -16,8 +16,21 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd -P)"
 work="${1:-$(mktemp -d "${TMPDIR:-/tmp}/nip-fi-live.XXXXXX")}"
-mkdir -p "$work"
-work="$(cd "$work" && pwd -P)"
+
+# The absolute, physical path of the work directory, resolved through its
+# nearest existing ancestor so nothing is created yet.
+absolute_path() {
+  local path="$1" tail=""
+  while [[ ! -d "$path" ]]; do
+    tail="/$(basename "$path")$tail"
+    path="$(dirname "$path")"
+  done
+  echo "$(cd "$path" && pwd -P)$tail"
+}
+work="$(absolute_path "$work")"
+
+# Refuse a work directory inside the repository before creating anything. The
+# fixture creates the directory itself and refuses one that is not new or empty.
 case "$work/" in
   "$repo"/*)
     echo "refusing work directory $work: it is inside the repository and holds a test key" >&2
@@ -25,25 +38,31 @@ case "$work/" in
     ;;
 esac
 
+fixture_out="$(mktemp "${TMPDIR:-/tmp}/nip-fi-fixture.XXXXXX")"
 fixture_pid=""
 cleanup() {
   if [[ -n "$fixture_pid" ]] && kill -0 "$fixture_pid" 2>/dev/null; then
     kill -TERM "$fixture_pid" 2>/dev/null || true
     wait "$fixture_pid" 2>/dev/null || true
   fi
+  # Keep the fixture's output with the run, but only in a directory the
+  # fixture accepted (it leaves its marker there), never in a refused one.
+  if [[ -f "$work/.nip-fi-live-workdir" && -f "$fixture_out" ]]; then
+    mv -f "$fixture_out" "$work/fixture.out" 2>/dev/null || true
+  fi
+  rm -f "$fixture_out"
 }
 trap cleanup EXIT
 
-rm -f "$work"/fixture.json "$work"/fixture-result.json "$work"/markers.jsonl "$work"/relay.log
 uv run --quiet --with cryptography python "$here/fixture.py" --workdir "$work" \
-  >"$work/fixture.out" 2>&1 &
+  >"$fixture_out" 2>&1 &
 fixture_pid=$!
 
 for _ in $(seq 1 240); do
   [[ -s "$work/fixture.json" ]] && break
   if ! kill -0 "$fixture_pid" 2>/dev/null; then
     echo "fixture exited before it was ready:" >&2
-    cat "$work/fixture.out" >&2
+    cat "$fixture_out" >&2
     exit 2
   fi
   sleep 0.5
