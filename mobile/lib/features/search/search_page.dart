@@ -35,6 +35,8 @@ import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
 import '../channels/small_avatar.dart';
 import '../channels/message_content.dart';
+import '../channels/message_content/preview_text.dart'
+    show messagePreviewSource;
 import '../channels/date_formatters.dart';
 import '../forum/forum_thread_page.dart';
 import '../profile/profile_provider.dart';
