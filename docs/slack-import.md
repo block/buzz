@@ -69,7 +69,7 @@ relay support and each author's participation; see
 |-------|------|-------|
 | Public channels (`channels.json`) | open stream, kind `9007` create + `9002` topic/purpose | UUID derived from the team and channel ids, recorded in the state file |
 | Private channels (`groups.json`, or Slackdump private records in `channels.json`) | **private** stream | Visibility is narrowed before any history write; never promoted to open |
-| DMs (`dms.json`) / MPIMs (`mpims.json`) | native Buzz DM (`41010` open) | The exact active-human participant set must be mapped before history can be written |
+| DMs (`dms.json`) / MPIMs (`mpims.json`) | native Buzz DM (`41010` open) | Every active human participant must be mapped before history can be written |
 | Messages (per-day JSON) | kind `9` stream message, `h`-tagged | Attribution header in the content; `created_at` is the import time |
 | Threads (`thread_ts`) | NIP-10 `e` reply tags | Slack threads are flat; every reply is a direct reply to the root |
 | Reactions | kind `7` | One reaction per distinct emoji, signed by the importer |
@@ -115,8 +115,8 @@ copy: a non-empty Slack topic replaces its topic, a private Slack channel makes
 it private, and a channel Slack had archived is archived once its history is
 in. An adopted archived channel is unarchived for the import and archived again
 afterwards. DMs and MPIMs cannot be adopted this way:
-they are opened through Buzz's native DM command so the relay can enforce the
-exact participant set.
+they are opened through Buzz's native DM command, so the relay decides which DM
+belongs to those people.
 
 The importer only ever writes into a channel it created itself or one named in
 `--channel-map`. A relay keeps listed channel names unique, so when the
@@ -131,10 +131,13 @@ membership, not attribution:
   added. Unmapped, deactivated, and bot users are counted in the summary and
   never replaced by another account.
 - **DMs and MPIMs** need a mapping for every active human participant, because
-  a Buzz DM's participant set is fixed when it is opened. The CLI identity must
+  Buzz keeps one DM per set of people and history written for only some of them
+  would land in a different DM. A DM those people already use is reused, so
+  everyone in it, including any agent that has joined it, can read the imported
+  history; the summary warns when a DM already existed. The CLI identity must
   itself be the mapped key of one participant; otherwise the importer would add
   the person running it to someone else's private conversation. Buzz supports
-  2–9 DM participants and one DM per participant set, so two Slack
+  2–9 DM participants and one DM per set of people, so two Slack
   conversations that resolve to the same set are blocked rather than merged. A
   blocked conversation is left out with a warning and listed in the summary as
   `dm_conversations_blocked`; the rest of the workspace is still imported. A

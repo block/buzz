@@ -614,7 +614,8 @@ mod tests {
         // the record is contentless; blocks with visible text are not.
         assert!(!is_importable(&msg(
             r#"{"type":"message","bot_id":"B1","text":"","ts":"1.000",
-                "blocks":[{"type":"actions","elements":[{"type":"button"}]}]}"#
+                "blocks":[{"type":"actions","elements":[
+                    {"type":"button","text":{"type":"plain_text","text":"Approve"},"action_id":"a"}]}]}"#
         )));
         assert!(is_importable(&msg(
             r#"{"type":"message","bot_id":"B1","text":"","ts":"1.000",

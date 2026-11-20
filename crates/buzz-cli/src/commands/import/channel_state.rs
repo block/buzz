@@ -17,6 +17,9 @@ pub(super) async fn is_archived(
         "kinds": [39000],
         "#d": [channel_id.to_string()],
         "limit": 1,
+        // Read from the writer: this decides whether to unarchive, and is
+        // read again straight after the importer's own unarchive.
+        "consistency": "strong",
     });
     let response = client.query(&filter).await.map_err(|error| {
         CliError::Other(format!(

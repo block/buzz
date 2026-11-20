@@ -227,22 +227,44 @@ fn render_slack_block(value: &serde_json::Value, names: &HashMap<String, String>
             format!("```\n{body}\n```")
         }
         "divider" => "---".to_string(),
-        "image" => {
-            let url = object
-                .get("image_url")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let label = object
-                .get("alt_text")
-                .and_then(serde_json::Value::as_str)
-                .filter(|text| !text.trim().is_empty())
-                .unwrap_or("image");
-            if url.is_empty() {
-                String::new()
-            } else {
-                format!("[{label}]({url})")
+        // Buttons, menus and form inputs cannot be replayed; their labels
+        // alone are not conversation.
+        "actions" | "input" => String::new(),
+        "image" | "video" => {
+            let text = |key: &str| {
+                let value = object.get(key)?;
+                value
+                    .as_str()
+                    .or_else(|| value.get("text")?.as_str())
+                    .or_else(|| value.get("url")?.as_str())
+                    .filter(|text| !text.trim().is_empty())
+            };
+            let label = text("title").or(text("alt_text")).unwrap_or(block_type);
+            match text("image_url")
+                .or(text("slack_file"))
+                .or(text("video_url"))
+            {
+                Some(url) => format!("[{label}]({url})"),
+                None => label.to_string(),
             }
         }
+        "table" => object
+            .get("rows")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+            .iter()
+            .map(|row| {
+                row.as_array()
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|cell| render_slack_block(cell, names).replace('\n', " "))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
         _ => {
             let mut parts = Vec::new();
             if let Some(text) = object.get("text") {

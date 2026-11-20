@@ -148,10 +148,13 @@ impl<'a> Importer<'a> {
         let mut stored = HashSet::new();
         for batch in pending.chunks(PENDING_LOOKUP_BATCH) {
             let ids: Vec<&str> = batch.iter().map(|(_, id)| id.as_str()).collect();
+            // These answers decide whether a message is signed again, so
+            // they must come from the writer, not a replica that may lag.
             let filter = serde_json::json!({
                 "ids": ids,
                 "kinds": [KIND_STREAM_MESSAGE],
                 "limit": ids.len(),
+                "consistency": "strong",
             });
             let response = self.client.query(&filter).await?;
             stored.extend(stored_event_ids(&response)?);
@@ -202,7 +205,11 @@ impl<'a> Importer<'a> {
             ),
             None => {
                 let uuid = channel_uuid(self.team_id, &channel.id);
-                if !self.create_already_stored(channel).await? {
+                // A create this run sends carries the visibility Slack has
+                // now. One an earlier run sent may predate a channel going
+                // private, so its visibility is narrowed again below.
+                let resumed = self.create_already_stored(channel).await?;
+                if !resumed {
                     self.create_channel(channel, uuid).await?;
                 }
 
@@ -216,14 +223,14 @@ impl<'a> Importer<'a> {
                         uuid: uuid.to_string(),
                         metadata_done: false,
                         archived_done: false,
-                        private_visibility_done: channel.kind.is_private(),
+                        private_visibility_done: channel.kind.is_private() && !resumed,
                         restore_archived: false,
                         members_added: std::collections::HashSet::new(),
                     },
                 );
                 self.flush()?;
                 self.summary.channels_created += 1;
-                created_now = true;
+                created_now = !resumed;
                 (uuid, false)
             }
         };
@@ -304,6 +311,7 @@ impl<'a> Importer<'a> {
             "ids": [id],
             "kinds": [KIND_NIP29_CREATE_GROUP],
             "limit": 1,
+            "consistency": "strong",
         });
         let response = self.client.query(&filter).await?;
         Ok(stored_event_ids(&response)?.contains(id))
@@ -419,13 +427,13 @@ impl<'a> Importer<'a> {
         self.flush()
     }
 
-    /// Open a native Buzz DM using the exact mapped Slack participant set.
+    /// Open the native Buzz DM of exactly the mapped Slack participants.
     ///
     /// The relay always includes the caller in a DM. Requiring the importer to
     /// map to one Slack participant prevents an operator who merely has access
     /// to an export from becoming an extra participant in every imported DM.
-    /// Requiring all active human participants up front avoids Buzz's immutable
-    /// DM participant-set rule splitting later history across two DMs.
+    /// Requiring all active human participants up front keeps the history out
+    /// of a DM of only some of them: Buzz keeps one DM per set of people.
     async fn ensure_dm(&mut self, channel: &SlackChannel) -> Result<Uuid, CliError> {
         if let Some(state) = self.state.channels.get(&channel.id) {
             let uuid = Uuid::parse_str(&state.uuid)
@@ -489,13 +497,14 @@ impl<'a> Importer<'a> {
         if created {
             self.summary.channels_created += 1;
         } else {
-            // The relay finds or makes a DM, so a ledger that does not know
-            // this conversation cannot tell an earlier import from a DM the
-            // participants already use.
+            // The relay finds or makes the DM of these people, so a ledger
+            // that does not know this conversation cannot tell an earlier
+            // import from a DM they already use, which agents may have joined.
             self.summary.warn(format!(
-                "Slack conversation {} is imported into a Buzz DM that already existed; if an \
-                 earlier import of this workspace used another state file, stop and pass it \
-                 with --state, or this history is imported twice",
+                "Slack conversation {} is imported into a Buzz DM that already existed: \
+                 everyone in it, including any agent that joined it, can read this history. \
+                 If an earlier import of this workspace used another state file, stop and \
+                 pass it with --state, or the history is imported twice",
                 channel.id
             ));
         }

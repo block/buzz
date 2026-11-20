@@ -171,8 +171,9 @@ async fn accept_event(State(relay): State<FakeRelay>, Json(event): Json<Value>) 
     accepted(&id)
 }
 
-/// Answers the two reads the importer makes: events by id, and a channel's
-/// current kind:39000 metadata by `#d`.
+/// Answers the two reads the importer makes: events by id and kind, and a
+/// channel's current kind:39000 metadata by `#d`. Like a lagging replica, it
+/// holds nothing for a read that does not ask for the writer.
 async fn query_events(
     State(relay): State<FakeRelay>,
     Json(filters): Json<Vec<Value>>,
@@ -188,12 +189,17 @@ async fn query_events(
     };
     let mut found = Vec::new();
     for filter in &filters {
+        if filter["consistency"] != "strong" {
+            continue;
+        }
         let ids: HashSet<String> = strings(filter, "ids").into_iter().collect();
+        let kinds = filter["kinds"].as_array().cloned().unwrap_or_default();
         found.extend(
             relay
                 .events
                 .iter()
                 .filter(|event| event["id"].as_str().is_some_and(|id| ids.contains(id)))
+                .filter(|event| kinds.contains(&event["kind"]))
                 .cloned(),
         );
         for channel in strings(filter, "#d") {
@@ -437,11 +443,36 @@ async fn a_channel_create_whose_answer_was_lost_is_resumed_by_the_next_run() {
     assert_eq!(interrupted.pending_channels.len(), 1);
     assert!(relay.messages().is_empty());
 
+    // Slack made the channel private before the next export. The stored
+    // create asked for an open channel, so the resume must narrow it.
+    std::fs::write(
+        dir.join("channels.json"),
+        json!([{"id": "C1", "name": "general", "is_private": true}]).to_string(),
+    )
+    .expect("channels");
+
     // The next run finds its own create on the relay and carries on in that
     // channel, without asking the operator to adopt it.
     cmd_import_slack(&client, params(&dir))
         .await
         .expect("resume completes");
+    let kinds_and_visibility: Vec<(u64, Option<String>)> = relay
+        .state()
+        .events
+        .iter()
+        .filter(|event| event["kind"] != 9007)
+        .map(|event| {
+            (
+                event["kind"].as_u64().unwrap_or_default(),
+                tag_value(event, "visibility").map(str::to_string),
+            )
+        })
+        .collect();
+    assert_eq!(
+        kinds_and_visibility,
+        [(9002, Some("private".to_string())), (9, None)],
+        "the channel is private before any history is written"
+    );
     let resumed = ledger(&dir);
     assert_eq!(
         resumed.channels["C1"].uuid,
@@ -467,7 +498,9 @@ async fn a_reply_to_a_root_that_can_never_be_imported_does_not_fail_every_run() 
     // A record whose blocks hold only interactive elements has nothing to
     // show; it is left out, not published as a bare attribution header.
     let mut buttons = record(2, "");
-    buttons["blocks"] = json!([{"type": "actions", "elements": [{"type": "button"}]}]);
+    buttons["blocks"] = json!([{"type": "actions", "elements": [
+        {"type": "button", "text": {"type": "plain_text", "text": "Approve"}, "action_id": "a"}
+    ]}]);
     let dir = write_export(general(), &[record(0, &oversize), reply, buttons]);
 
     // The root is over the relay's size limit. Its reply keeps its content as

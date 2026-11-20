@@ -884,12 +884,23 @@ mod tests {
                  "fields":[{"type":"mrkdwn","text":"*Status:* ok"},
                            {"type":"plain_text","text":"main"}]},
                 {"type":"section","fields":[{"type":"mrkdwn","text":"only fields"}]},
-                {"type":"image","image_url":"https://example.test/a.png","alt_text":"chart"}]"#,
+                {"type":"image","image_url":"https://example.test/a.png","alt_text":"chart"},
+                {"type":"image","slack_file":{"url":"https://example.test/f"},"alt_text":"upload"},
+                {"type":"video","title":{"type":"plain_text","text":"Demo"},
+                 "video_url":"https://example.test/v"},
+                {"type":"table","rows":[
+                    [{"type":"raw_text","text":"Name"},{"type":"raw_text","text":"Role"}],
+                    [{"type":"raw_text","text":"Ada"},{"type":"rich_text","elements":[
+                        {"type":"rich_text_section","elements":[{"type":"text","text":"Lead"}]}]}]]},
+                {"type":"actions","elements":[
+                    {"type":"button","text":{"type":"plain_text","text":"Approve"}}]}]"#,
         )
         .expect("card");
         assert_eq!(
             render_slack_blocks(&card, &names),
-            "Build\n**Status:** ok\nmain\nonly fields\n[chart](https://example.test/a.png)"
+            "Build\n**Status:** ok\nmain\nonly fields\n[chart](https://example.test/a.png)\n\
+             [upload](https://example.test/f)\n[Demo](https://example.test/v)\n\
+             Name | Role\nAda | Lead"
         );
 
         let attachment: export::SlackAttachment = serde_json::from_str(
