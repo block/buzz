@@ -27,6 +27,7 @@ import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
@@ -319,19 +320,7 @@ void main() {
         _meta(id: _channelA, name: 'general'),
         _meta(id: _channelB, name: 'discoverable'),
       ],
-      recentMessages: [
-        const NostrEvent(
-          id: 'm1',
-          pubkey: 'alice',
-          createdAt: 30,
-          kind: EventKind.streamMessageV2,
-          tags: [
-            ['h', _channelA],
-          ],
-          content: 'hi',
-          sig: 'sig',
-        ),
-      ],
+      recentMessages: [_signedPost(30)],
     );
     final container = _buildContainer(session: session);
     addTearDown(container.dispose);
@@ -2496,21 +2485,11 @@ void main() {
     () async {
       final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
       NostrEvent message(String id, int at, {String channel = _channelA}) =>
-          NostrEvent(
-            id: id,
-            pubkey: myPk,
-            createdAt: at,
-            kind: EventKind.streamMessageV2,
-            tags: [
-              ['h', channel],
-            ],
-            content: 'my own activity',
-            sig: 'sig',
-          );
+          _signedPost(at, channel: channel, content: id);
       final session = _FakeRelaySession(
         memberships: [
-          _membership(_channelA, myPk),
-          _membership(_channelB, myPk),
+          _membership(_channelA, _activityPk),
+          _membership(_channelB, _activityPk),
         ],
         metadata: [
           _meta(id: _channelA, name: 'general'),
@@ -2522,7 +2501,10 @@ void main() {
           message('ahead', now + 900, channel: _channelB),
         ],
       );
-      final container = _buildContainer(session: session);
+      final container = _buildContainer(
+        session: session,
+        overrides: [_testPubkeyProvider.overrideWith(_ActivityPubkey.new)],
+      );
       addTearDown(container.dispose);
       await container.read(channelsProvider.future);
       await _settle();
@@ -2550,6 +2532,13 @@ void main() {
       expect(activity(_channelB).value, inInclusiveRange(now, now + 60));
 
       session.emit(message('live', now - 10));
+      // A message whose signature fails verification is not activity.
+      session.emit(
+        NostrEvent.fromJson({
+          ...message('forged', now - 1).toJson(),
+          'sig': 'f' * 128,
+        }),
+      );
       await _settle();
       expect(activity(_channelA).value, now - 10);
       // Activity leaves unread and sort time alone, and costs no relay reads.
@@ -2597,6 +2586,29 @@ void main() {
         isTrue,
       );
 
+      // So does a read whose only post fails verification, and the next
+      // list read asks for that channel again.
+      final forged = NostrEvent.fromJson({
+        ...message('forged', now - 60).toJson(),
+        'sig': 'f' * 128,
+      });
+      final unverified = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        recentMessages: [forged],
+      );
+      final retried = _buildContainer(session: unverified);
+      addTearDown(retried.dispose);
+      await retried.read(channelsProvider.future);
+      await _settle();
+      final retriedNotifier = retried.read(channelsProvider.notifier);
+      expect(retriedNotifier.activityFor(_channelA).known, isFalse);
+      unverified.recentMessages = [message('signed', now - 60)];
+      unverified.setStatus(SessionStatus.reconnecting);
+      unverified.setStatus(SessionStatus.connected);
+      await _waitUntil(() => retriedNotifier.activityFor(_channelA).known);
+      expect(retriedNotifier.activityFor(_channelA).at, now - 60);
+
       // A covered channel with no messages is known to be empty.
       final empty = _buildContainer(
         session: _FakeRelaySession(
@@ -2617,33 +2629,32 @@ void main() {
   test('Active filter activity survives rebuilds, read gaps, failed catch-ups '
       'and deletions', () async {
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    NostrEvent message(String id, int at) => NostrEvent(
-      id: id,
-      pubkey: myPk,
-      createdAt: at,
-      kind: EventKind.streamMessageV2,
-      tags: const [
-        ['h', _channelA],
-      ],
-      content: 'hi',
-      sig: 'sig',
-    );
+    NostrEvent message(String id, int at) => _signedPost(at, content: id);
     final old = message('old', now - 10 * 86400);
     final session = _FakeRelaySession(
-      memberships: [_membership(_channelA, myPk)],
+      memberships: [_membership(_channelA, _activityPk)],
       metadata: [_meta(id: _channelA, name: 'general')],
       recentMessages: [old],
       enforceHistoryLimits: true,
     );
     final container = _buildContainer(
       session: session,
-      overrides: [readStateProvider.overrideWith(_ActivityReadState.new)],
+      overrides: [
+        readStateProvider.overrideWith(_ActivityReadState.new),
+        _testPubkeyProvider.overrideWith(_ActivityPubkey.new),
+      ],
     );
     addTearDown(container.dispose);
     await container.read(channelsProvider.future);
     final notifier = container.read(channelsProvider.notifier);
     await notifier.waitForUnreadCatchUp();
     expect(notifier.activityFor(_channelA), (known: true, at: old.createdAt));
+    // An Active section shows the channel, so its activity gaps are read.
+    var shown = container.listen(
+      channelFilterActivityProvider(_channelA),
+      (_, _) {},
+    );
+    addTearDown(() => shown.close());
 
     // Rebuilding in the same community, as creating a Solo chat does,
     // reuses the list without re-reading it; its activity stays.
@@ -2676,17 +2687,13 @@ void main() {
 
     // A failed gap read leaves activity unknown but keeps the unread post the
     // catch-up returned.
-    final mention = NostrEvent(
-      id: 'mention',
-      pubkey: 'alice',
-      createdAt: now - 5,
-      kind: EventKind.streamMessageV2,
-      tags: const [
-        ['h', _channelA],
-        ['p', myPk],
-      ],
+    final mention = _signedPost(
+      now - 5,
       content: 'hey',
-      sig: 'sig',
+      key: _aliceKey,
+      tags: [
+        ['p', _activityPk],
+      ],
     );
     session.recentMessages = [old, offline, mention];
     (container.read(readStateProvider.notifier) as _ActivityReadState)
@@ -2750,6 +2757,44 @@ void main() {
     gate.complete();
     await refreshing;
     expect(notifier.activityFor(_channelA).at, live.createdAt);
+
+    // Deleting the latest post re-reads the channel's newest one.
+    session.recentMessages = [old];
+    session.emit(
+      NostrEvent.fromJson(
+        signNostrEvent(
+          kind: EventKind.deletion,
+          content: '',
+          secretKey: _activityKey,
+          tags: [
+            ['h', _channelA],
+            ['e', live.id],
+          ],
+        ).toMap(),
+      ),
+    );
+    await _waitUntil(() => notifier.activityFor(_channelA).at == old.createdAt);
+
+    // A channel no Active section shows skips its gap read, and reads as
+    // unknown until a catch-up while it is shown.
+    shown.close();
+    await _settle();
+    final hidden = message('hidden', now - 3);
+    session.recentMessages = [old, hidden];
+    (container.read(readStateProvider.notifier) as _ActivityReadState)
+        .markReadThrough(_channelA, now - 1);
+    final gapReads = session.queryBatches.where(_isGapBatch).length;
+    await reconnect();
+    expect(session.queryBatches.where(_isGapBatch), hasLength(gapReads));
+    expect(notifier.activityFor(_channelA).known, isFalse);
+    shown = container.listen(
+      channelFilterActivityProvider(_channelA),
+      (_, _) {},
+    );
+    await reconnect();
+    await _waitUntil(
+      () => notifier.activityFor(_channelA).at == hidden.createdAt,
+    );
 
     // So does a catch-up that fails before it sends anything.
     final readState =
@@ -4201,6 +4246,41 @@ class _TestPubkeyNotifier extends Notifier<String?> {
 final _testPubkeyProvider = NotifierProvider<_TestPubkeyNotifier, String?>(
   _TestPubkeyNotifier.new,
 );
+
+// Active filter activity counts only signed messages.
+const _activityKey =
+    '0000000000000000000000000000000000000000000000000000000000000001';
+const _aliceKey =
+    '0000000000000000000000000000000000000000000000000000000000000002';
+final _activityPk = derivePublicKeyHex(_activityKey);
+
+class _ActivityPubkey extends _TestPubkeyNotifier {
+  @override
+  String? build() => _activityPk;
+}
+
+NostrEvent _signedPost(
+  int at, {
+  String channel = _channelA,
+  String content = 'hi',
+  String key = _activityKey,
+  List<List<String>> tags = const [],
+}) => NostrEvent.fromJson(
+  signNostrEvent(
+    kind: EventKind.streamMessageV2,
+    content: content,
+    secretKey: key,
+    createdAt: at,
+    tags: [
+      ['h', channel],
+      ...tags,
+    ],
+  ).toMap(),
+);
+
+bool _isGapBatch(List<NostrFilter> batch) =>
+    batch.isNotEmpty &&
+    batch.every((filter) => filter.until != null && filter.limit == 1);
 
 /// Drains pending microtasks so provider rebuilds and awaited writes land.
 Future<void> _settle() async {

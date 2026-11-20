@@ -71,22 +71,30 @@ extension _UnreadCatchUp on ChannelsNotifier {
               limit: _unreadCatchUpLimit,
             ),
       ];
-      final gapFilters = {
-        for (final channel in activeChannels)
-          if (_activityGap(channel.id, sinceByChannel[channel.id]!) case (
-            :final since,
-            :final until,
-          ))
-            channel.id: NostrFilter(
-              kinds: EventKind.channelMessageEventKinds,
-              tags: {
-                '#h': [channel.id],
-              },
-              since: since,
-              until: until,
-              limit: 1,
-            ),
-      };
+      // A gap only matters to the Active filter, and only when a post in it
+      // could be newer than the activity already known. A channel no Active
+      // section shows keeps its gap for a later catch-up, and reads as
+      // unknown meanwhile.
+      final gapFilters = <String, NostrFilter>{};
+      final deferredGaps = <String>{};
+      for (final channel in activeChannels) {
+        final gap = _activityGap(channel.id, sinceByChannel[channel.id]!);
+        if (gap == null) continue;
+        if ((_activity.latestAt(channel.id) ?? -1) >= gap.until) continue;
+        if (!_activity.isWatched(channel.id)) {
+          deferredGaps.add(channel.id);
+          continue;
+        }
+        gapFilters[channel.id] = NostrFilter(
+          kinds: EventKind.channelMessageEventKinds,
+          tags: {
+            '#h': [channel.id],
+          },
+          since: gap.since,
+          until: gap.until,
+          limit: 1,
+        );
+      }
 
       final failedChannelIds = <String>{};
       final events = await _fetchChannelHistoryBatch(
@@ -176,7 +184,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
             _unreadDeletedIdsByChannel[channelId]?.contains(event.id) == true) {
           continue;
         }
-        if (_activity.note(channelId, event.createdAt)) activityAdvanced = true;
+        if (_activity.note(channelId, event)) activityAdvanced = true;
         _noteThreadChannel(event, channelId);
         if (event.pubkey.toLowerCase() == myPk.toLowerCase()) continue;
         if (readAt != null && event.createdAt <= readAt) continue;
@@ -234,11 +242,17 @@ extension _UnreadCatchUp on ChannelsNotifier {
       // So does a channel whose activity became known or unknown.
       // A channel with a gap to read stays as it was until that read answers.
       gapFilters.removeWhere((id, _) => failedChannelIds.contains(id));
-      final coverageChanged = _activity.noteCatchUp(
-        catchUpChannelIds.difference(gapFilters.keys.toSet()),
-        failedChannelIds,
-        sentAt: requestedAt,
-      );
+      deferredGaps.removeAll(failedChannelIds);
+      final coverageChanged =
+          _activity.noteCatchUp(
+            catchUpChannelIds
+                .difference(gapFilters.keys.toSet())
+                .difference(deferredGaps),
+            failedChannelIds,
+            sentAt: requestedAt,
+          ) |
+          _activity.noteCatchUp(deferredGaps, deferredGaps);
+      _reconcileDeletedActivity(batchDeletedIds);
       if (recordedAtByChannel.isNotEmpty ||
           appliedDeletion ||
           activityAdvanced ||
@@ -301,6 +315,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
         filtersByChannel.values.toList(),
         operation: 'activity gap read',
         failedChannelIds: failedChannelIds,
+        optional: true,
       );
     } catch (error) {
       debugPrint('[ChannelsNotifier] activity gap read failed: $error');
@@ -319,7 +334,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
           _unreadDeletedIdsByChannel[channelId]?.contains(event.id) == true) {
         continue;
       }
-      changed |= _activity.note(channelId, event.createdAt);
+      changed |= _activity.note(channelId, event);
     }
     final failed = events == null ? channelIds : failedChannelIds;
     changed |= _activity.noteCatchUp(channelIds, failed, sentAt: sentAt);
