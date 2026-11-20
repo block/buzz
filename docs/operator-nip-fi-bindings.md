@@ -222,6 +222,11 @@ Raise the percentage in steps, holding each one for normal traffic.
   login 503s stay at their shadow baseline.
 - No-go: set `BUZZ_NIP_FI_ENFORCE_PERCENT=0` and investigate.
 
+A rollback is a full rollout too: pods run mixed percentages until it
+finishes. There is no per-community exemption, so removing one community
+means lowering the percentage to its bucket or below, which also drops every
+community in a higher bucket.
+
 ### Enforce
 
 Set `BUZZ_NIP_FI_MODE=enforce` and unset `BUZZ_NIP_FI_ENFORCE_PERCENT`.
