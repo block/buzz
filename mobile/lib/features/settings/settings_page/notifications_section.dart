@@ -1,7 +1,10 @@
 part of '../settings_page.dart';
 
 bool _notificationsVisible(WidgetRef ref) {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return false;
+  if (defaultTargetPlatform != TargetPlatform.iOS &&
+      defaultTargetPlatform != TargetPlatform.android) {
+    return false;
+  }
   final community = ref.watch(activeCommunityProvider).value;
   if (community == null) return false;
   final setup = ref.watch(buzzPushSetupStatusProvider);
@@ -48,6 +51,18 @@ class _NotificationsSection extends ConsumerWidget {
             subtitle: 'You can keep using Buzz. Tap to retry notifications.',
             onTap: () => retryBuzzPushSetup(ref),
           ),
+        ValueListenableBuilder<String?>(
+          valueListenable: pushUnavailableReason,
+          builder: (context, reason, _) => reason == null
+              ? const SizedBox.shrink()
+              : const AppListRow(
+                  key: ValueKey('push-unavailable'),
+                  title: 'Push is unavailable on this phone',
+                  subtitle:
+                      'You can keep using Buzz. New messages appear when you '
+                      'open the app.',
+                ),
+        ),
         MergeSemantics(
           key: const ValueKey('push-notifications-setting'),
           child: Stack(
