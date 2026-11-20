@@ -166,6 +166,7 @@ struct MentionResolution {
     ambiguous_names: Vec<String>,
 }
 
+#[cfg(test)]
 fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<String> {
     resolve_mentions(text, members).pubkeys
 }
