@@ -48,6 +48,13 @@ tests:
             name: BUZZ_HUDDLE_AUDIO_AVAILABLE
             value: "true"
         template: templates/deployment.yaml
+      # Empty image.tag falls back to Chart.appVersion. That pin is 0.3.0,
+      # a post-auto-migrate release (#2473).
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/block/buzz:0.3.0
+        template: templates/deployment.yaml
+
   - it: renders virtual-hosted S3 addressing for providers that require it
     set:
       relayUrl: wss://buzz.example.com
