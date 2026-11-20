@@ -80,10 +80,15 @@ extension ChannelsNotifierJoins on ChannelsNotifier {
       final removed = previouslyJoined.difference(confirmed);
       if (removed.isNotEmpty) {
         final cache = _lifecycleRef.read(savedMessageStoreProvider);
+        final purges = [
+          for (final channelId in removed)
+            cache.removeChannel(scope, channelId),
+        ];
         for (final channelId in removed) {
-          unawaited(cache.removeChannel(scope, channelId));
           _lifecycleRef.invalidate(savedChannelPreviewProvider(channelId));
         }
+        // Keep the old membership on disk until its cache purge runs.
+        await _fenced(fence, Future.wait(purges));
       }
     }
     return fromWriter;

@@ -51,6 +51,59 @@ void test(String description, Future<void> Function() body) {
 }
 
 void main() {
+  testWidgets('preview starts its read after one connected grace period', (
+    tester,
+  ) async {
+    const scope = (communityId: 'preview-delay', pubkey: 'viewer');
+    final pendingHistory = Completer<List<NostrEvent>>();
+    final relay = _RecordingRelaySessionNotifier(
+      queryResults: [pendingHistory.future],
+    );
+    var cacheOperations = 0;
+    final store = SavedMessageStore(
+      root: () async {
+        cacheOperations++;
+        return null;
+      },
+      diagnostics: const NoopDiagnosticReporter(),
+    );
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => relay),
+        savedMessageScopeProvider.overrideWithValue(scope),
+        savedMessageStoreProvider.overrideWithValue(store),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.listen(channelMessagesProvider(_channelId), (_, _) {});
+    await tester.idle();
+    await relay.subscribed;
+    final preview = savedChannelPreviewProvider(_channelId);
+    container.listen(preview, (_, _) {});
+
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(cacheOperations, 0);
+    relay.emit(
+      NostrEvent(
+        id: 'preview-delay-edit',
+        pubkey: 'author',
+        kind: EventKind.streamMessageEdit,
+        createdAt: 1,
+        tags: const [
+          ['h', _channelId],
+          ['e', 'target'],
+        ],
+        content: 'Edited text',
+        sig: '',
+      ),
+    );
+    await tester.idle();
+    expect(cacheOperations, 1);
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(cacheOperations, 2);
+    expect(await container.read(preview.future), isNull);
+  });
+
   testWidgets('the saved page write waits for a frame', (tester) async {
     final container = ProviderContainer(
       overrides: [

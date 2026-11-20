@@ -7011,6 +7011,48 @@ void main() {
       }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
     }
 
+    testWidgets('status bar jumps within saved rows before history is ready', (
+      tester,
+    ) async {
+      final saved = [
+        for (var i = 1; i <= 35; i++)
+          _textMsg(
+            id: 'saved-$i',
+            pubkey: 'alice',
+            content: i == 1 ? 'Oldest saved message' : 'Saved message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final notifier = _FakeMessagesNotifier(
+        [],
+        hasLoadedMessages: false,
+        failOlderFetch: true,
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: notifier,
+          disableAnimations: true,
+          savedPreview: Future.value((
+            events: saved,
+            summaries: <String, ChannelWindowThreadSummary>{},
+          )),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(findRichText('Oldest saved message'), findsNothing);
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        'flutter/status_bar',
+        const JSONMethodCodec().encodeMethodCall(
+          const MethodCall('handleScrollToTop'),
+        ),
+        (_) {},
+      );
+      await tester.pumpAndSettle();
+      expect(findRichText('Oldest saved message'), findsOneWidget);
+      expect(notifier.fetchOlderCalls, 0);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
     for (final personal in [false, true]) {
       testWidgets(
         'loads history through the oldest unread boundary personal=$personal',
@@ -14252,19 +14294,21 @@ void main() {
     testWidgets('pages past a newest page of only hidden notices', (
       tester,
     ) async {
+      final hiddenPage = [
+        for (var i = 0; i < 5; i++)
+          _systemMsg(
+            id: 'join$i',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'user$i',
+              'target': 'user$i',
+            },
+            createdAt: 2000 + i,
+          ),
+      ];
       final messagesNotifier = _FakeMessagesNotifier(
-        [
-          for (var i = 0; i < 5; i++)
-            _systemMsg(
-              id: 'join$i',
-              payload: {
-                'type': 'member_joined',
-                'actor': 'user$i',
-                'target': 'user$i',
-              },
-              createdAt: 2000 + i,
-            ),
-        ],
+        [],
+        hasLoadedMessages: false,
         failOlderFetch: true,
         olderPages: [
           [
@@ -14282,11 +14326,19 @@ void main() {
         _buildTestable(
           messages: const [],
           messagesNotifier: messagesNotifier,
+          savedPreview: Future.value((
+            events: hiddenPage,
+            summaries: <String, ChannelWindowThreadSummary>{},
+          )),
           users: const {
             'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
           },
         ),
       );
+      await tester.pumpAndSettle();
+      expect(messagesNotifier.fetchOlderCalls, 0);
+
+      messagesNotifier.setMessages(hiddenPage);
       await tester.pumpAndSettle();
 
       // A thrown fetch pauses paging once, without retrying on its own.

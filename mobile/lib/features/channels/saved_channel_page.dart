@@ -21,20 +21,25 @@ final savedChannelPreviewProvider = FutureProvider.autoDispose
       final scope = ref.watch(savedMessageScopeProvider);
       if (scope == null) return null;
       final cache = ref.watch(savedMessageStoreProvider);
-      final ticket = cache.capture(scope, (channelId: channelId, rootId: ''));
+      var hasListeners = true;
+      ref.onCancel(() => hasListeners = false);
+      ref.onResume(() => hasListeners = true);
       if (ref.read(relaySessionProvider).status == SessionStatus.connected) {
-        var hasListeners = true;
-        ref.onCancel(() => hasListeners = false);
-        ref.onResume(() => hasListeners = true);
         await Future<void>.delayed(const Duration(milliseconds: 250));
-        if (!ref.mounted || !hasListeners || !cache.isCurrent(ticket)) {
-          return null;
-        }
       }
-      final events = await cache.read(ticket);
-      if (events == null) return null;
-      final preview = await _preparePreview(events);
-      return ref.mounted && cache.isCurrent(ticket) ? preview : null;
+      // Live mutations retire the read ticket. Retry with the updated page
+      // while this preview is open, after the same initial grace period.
+      while (ref.mounted && hasListeners) {
+        final ticket = cache.capture(scope, (channelId: channelId, rootId: ''));
+        final events = await cache.read(ticket);
+        if (!ref.mounted || !hasListeners) return null;
+        if (!cache.isCurrent(ticket)) continue;
+        if (events == null) return null;
+        final preview = await _preparePreview(events);
+        if (!ref.mounted || !hasListeners) return null;
+        if (cache.isCurrent(ticket)) return preview;
+      }
+      return null;
     });
 
 Future<SavedChannelPreview> _preparePreview(List<NostrEvent> events) =>

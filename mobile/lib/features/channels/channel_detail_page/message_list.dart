@@ -611,7 +611,6 @@ class _MessageList extends HookConsumerWidget {
       ],
     );
 
-    // Reading starts after the timeline holds still while the app is in use.
     final appInUse = isAppInUse(useAppLifecycleState());
     final readStateReady = ref.watch(
       readStateProvider.select((state) => state.isReady),
@@ -834,6 +833,7 @@ class _MessageList extends HookConsumerWidget {
       notifier: notifier,
       itemScrollController: itemScrollController,
       displayCount: displayEntries.length,
+      relayHistoryReady: relayHistoryReady,
       isLoadingOlder: isLoadingOlder,
       navigatingOldest: navigatingOldest,
       olderFetchPaused: olderFetchPaused,
@@ -849,6 +849,7 @@ class _MessageList extends HookConsumerWidget {
     final hiddenHistory = _useHiddenHistoryPaging(
       context: context,
       noRows: entries.isEmpty,
+      relayHistoryReady: relayHistoryReady,
       loaded: allMessages,
       notifier: notifier,
       isLoadingOlder: isLoadingOlder,
@@ -974,7 +975,6 @@ class _MessageList extends HookConsumerWidget {
                   displayEntries.length +
                   (isLoadingOlder.value || showLoadEarlier.value ? 1 : 0),
               itemBuilder: (context, index) {
-                // Loading indicator at the top (last index in reversed list).
                 if (index >= displayEntries.length && !isLoadingOlder.value) {
                   return _LoadEarlierButton(
                     onPressed: () {

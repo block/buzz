@@ -51,13 +51,27 @@ void _confirmedJoinCases() {
         memberships: [_membership(_joinedChannel, 'me')],
         metadata: [_meta(id: _joinedChannel, name: 'joined')],
       );
+      final directory = await Directory.systemTemp.createTemp('buzz-lost-join');
+      addTearDown(() => directory.delete(recursive: true));
+      final purgeStarted = Completer<void>();
+      final allowPurge = Completer<void>();
+      final store = SavedMessageStore(
+        root: () async {
+          if (!purgeStarted.isCompleted) purgeStarted.complete();
+          await allowPurge.future;
+          return directory;
+        },
+        diagnostics: const NoopDiagnosticReporter(),
+      );
       final container = _buildContainer(
         session: session,
-        overrides: [savedMessageScopeProvider.overrideWithValue(scope)],
+        overrides: [
+          savedMessageScopeProvider.overrideWithValue(scope),
+          savedMessageStoreProvider.overrideWithValue(store),
+        ],
       );
       addTearDown(container.dispose);
       await container.read(channelsProvider.future);
-      final store = container.read(savedMessageStoreProvider);
       final ticket = store.capture(scope, page);
       final retained = store.capture(scope, (
         channelId: _otherJoinedChannel,
@@ -71,7 +85,16 @@ void _confirmedJoinCases() {
       expect(store.isCurrent(ticket), isTrue);
 
       session.writerMemberships = const [];
-      await notifier.refresh();
+      var published = false;
+      final refresh = notifier.refresh().then((_) => published = true);
+      try {
+        await purgeStarted.future;
+        await _settle();
+        expect(published, isFalse);
+      } finally {
+        allowPurge.complete();
+        await refresh;
+      }
       expect(store.isCurrent(ticket), isFalse);
       expect(store.isCurrent(retained), isTrue);
     });

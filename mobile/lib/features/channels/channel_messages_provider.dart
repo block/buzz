@@ -268,16 +268,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
                 for (final tag in event.tags)
                   if (tag.length > 1 && tag[0] == 'e') tag[1],
               };
-              if (targets.isNotEmpty) {
-                cache.removeChannelEvents(cacheScope, channelId, targets);
-                final preview = savedChannelPreviewProvider(channelId);
-                if (ref.exists(preview) &&
-                    ref.read(preview).unwrapPrevious().value == null) {
-                  // Retry an in-flight read whose ticket has just retired.
-                  // A displayed preview can apply the live event in memory.
-                  ref.invalidate(preview);
-                }
-              }
+              cache.removeChannelEvents(cacheScope, channelId, targets);
             }
             _handleLiveEvent(event);
           },
