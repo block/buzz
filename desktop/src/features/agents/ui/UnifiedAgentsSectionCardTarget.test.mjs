@@ -377,7 +377,7 @@ for (const kind of ["persona", "custom", "unknown"]) {
           fireEvent.keyDown(dot, { key: " " });
           assert.deepEqual(starts, []);
           assert.equal(
-            Boolean(screen.queryByRole("button", { name: /Stop/ })),
+            Boolean(screen.queryByRole("button", { name: /\bStop\b/ })),
             false,
           );
         }
