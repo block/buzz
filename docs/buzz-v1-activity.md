@@ -559,13 +559,13 @@ are emitted. Storage grows by touched contexts, not observed messages, and has
 no fixed context-count ceiling.
 
 Leaving/rejoining does not erase progress; revoked access hides it. Soft-deleted
-channels are inaccessible, while hard channel deletion cascades their frontiers.
-Deleting an account row cascades that actor's frontiers in the same community;
-community erasure inventories these tables, `channel_heads` and `thread_heads`
-included. The two shared tables are written only through the relay's
-community-admitted transactions and carry no write-fence trigger. The two shared tables have no foreign
-keys: a hard-deleted channel's rows stay until community erasure and are never
-read, because every read starts from current membership. There
+channels are inaccessible. None of these tables has a foreign key (migration
+0102 dropped the frontiers' two), so a hard-deleted channel's rows, or a
+deleted account's frontiers, stay until community erasure and are never read,
+because every read starts from current membership. Community erasure
+inventories these tables, `channel_heads` and `thread_heads` included. They
+are written only through the relay's community-admitted transactions and carry
+no write-fence trigger. There
 is no new public account export/reset endpoint. Operator-assisted erasure/export
 must use the established authenticated operational process and explicitly scope
 both community and actor; never equate the read-time horizon with data erasure.
