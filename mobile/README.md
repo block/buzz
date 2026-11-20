@@ -258,6 +258,14 @@ migration. Changing gateways requires fresh enrollment; old installations
 expire under their original gateway's lease policy. Current-gateway response
 loss is still retried from the exact journaled request.
 
+On Android the push wake also needs the distributor's Firebase project. Set
+`BUZZ_FIREBASE_APP_ID`, `BUZZ_FIREBASE_API_KEY`, `BUZZ_FIREBASE_PROJECT_ID` and
+`BUZZ_FIREBASE_SENDER_ID` in the build environment, from the Android app's
+settings in that project. Set all four or none: the build fails on a partial
+set, and a build with none has no push wake. Nothing Firebase-specific is
+committed. Firebase Messaging's auto-init is off, so a configured build gets no
+FCM token until the app enrolls for push.
+
 Relay rollout remains an explicit deployment opt-in. Only deployments with
 `BUZZ_PUSH_ENABLED=true` advertise the descriptor and process push. See
 `docs/push-gateway-deployment.md` for the canonical gateway profile contract,

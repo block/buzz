@@ -136,6 +136,7 @@ class MainActivity : FlutterFragmentActivity() {
     private var hostedHpkePlugin: HostedHpkePlugin? = null
     private var identityFilePlugin: IdentityFilePlugin? = null
     private var browserAuthPlugin: BrowserAuthPlugin? = null
+    private var pushNotificationOpenPlugin: PushNotificationOpenPlugin? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -148,6 +149,8 @@ class MainActivity : FlutterFragmentActivity() {
         identityFilePlugin = IdentityFilePlugin(this, flutterEngine.dartExecutor.binaryMessenger)
         browserAuthPlugin = BrowserAuthPlugin(this, flutterEngine.dartExecutor.binaryMessenger)
         hapticsPlugin = HapticsPlugin(this, flutterEngine.dartExecutor.binaryMessenger)
+        pushNotificationOpenPlugin = PushNotificationOpenPlugin(flutterEngine.dartExecutor.binaryMessenger)
+            .also { it.onLaunch(intent) }
 
         huddleMediaPlugin = HuddleMediaPlugin(
             this,
@@ -210,6 +213,7 @@ class MainActivity : FlutterFragmentActivity() {
     override fun onNewIntent(intent: Intent) {
         // Resolve the browser session before resume can report cancellation.
         browserAuthPlugin?.onNewIntent(intent)
+        pushNotificationOpenPlugin?.onNewIntent(intent)
         super.onNewIntent(intent)
     }
 
@@ -242,6 +246,8 @@ class MainActivity : FlutterFragmentActivity() {
         deviceTranscriptionPlugin = null
         browserAuthPlugin?.dispose()
         browserAuthPlugin = null
+        pushNotificationOpenPlugin?.dispose()
+        pushNotificationOpenPlugin = null
         identityFilePlugin?.dispose()
         identityFilePlugin = null
         hostedHpkePlugin?.dispose()
