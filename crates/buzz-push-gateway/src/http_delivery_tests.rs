@@ -8,7 +8,10 @@ use std::sync::{
 use crate::{
     apns::{DeliveryAttempt, DeliveryOutcome, PushTransport},
     app_attest::AppAttestVerifier,
-    authority::{AuthorityStore, Delegation, MemoryAuthorityStore, NewInstallation, Platform},
+    authority::{
+        AuthorityError, AuthorityStore, Challenge, Delegation, DeliveryDisposition, DeliveryPermit,
+        Installation, MemoryAuthorityStore, NewInstallation, Platform,
+    },
     grant::{GrantKey, GrantKeyring},
     http::ApplicationRuntime,
     model::EndpointGrant,
@@ -53,8 +56,14 @@ async fn fixture() -> (axum::Router, Keys, Vec<u8>, Arc<AtomicUsize>) {
 }
 
 async fn fixture_with(transport: Arc<dyn PushTransport>) -> (axum::Router, Keys, Vec<u8>) {
+    fixture_with_store(transport, Arc::new(MemoryAuthorityStore::default())).await
+}
+
+async fn fixture_with_store(
+    transport: Arc<dyn PushTransport>,
+    authority: Arc<dyn AuthorityStore>,
+) -> (axum::Router, Keys, Vec<u8>) {
     let keys = Keys::generate();
-    let authority = Arc::new(MemoryAuthorityStore::default());
     let token_keyring =
         Arc::new(TokenKeyring::new(vec![TokenKey::new("test", &[2; 32]).unwrap()]).unwrap());
     let grant_keyring =
@@ -569,4 +578,191 @@ async fn replay_while_first_attempt_is_in_flight_is_retried_not_dropped() {
         "a finished request id stays burned"
     );
     assert_eq!(transport.sends.load(Ordering::SeqCst), 2);
+}
+
+struct FixedOutcome(DeliveryOutcome);
+
+#[async_trait::async_trait]
+impl PushTransport for FixedOutcome {
+    async fn send(&self, _: DeliveryAttempt, _: &str) -> DeliveryOutcome {
+        self.0
+    }
+}
+
+/// The in-memory store, except that settling a delivery always fails, as it
+/// does when the database errors or the pool times out after the send.
+#[derive(Default)]
+struct FailingFinishStore(MemoryAuthorityStore);
+
+#[async_trait::async_trait]
+impl AuthorityStore for FailingFinishStore {
+    async fn ready(&self) -> Result<(), AuthorityError> {
+        self.0.ready().await
+    }
+    async fn put_challenge(&self, challenge: Challenge) -> Result<(), AuthorityError> {
+        self.0.put_challenge(challenge).await
+    }
+    async fn consume_challenge(
+        &self,
+        id: Uuid,
+        value: [u8; 32],
+        now: i64,
+    ) -> Result<(), AuthorityError> {
+        self.0.consume_challenge(id, value, now).await
+    }
+    async fn create_installation(
+        &self,
+        installation: NewInstallation,
+        now: i64,
+    ) -> Result<(), AuthorityError> {
+        self.0.create_installation(installation, now).await
+    }
+    async fn matching_installation(
+        &self,
+        app_attest_key_id: &[u8],
+        token_fingerprint: [u8; 32],
+        endpoint_epoch: i64,
+        expires_at: i64,
+        now: i64,
+    ) -> Result<Option<Installation>, AuthorityError> {
+        self.0
+            .matching_installation(
+                app_attest_key_id,
+                token_fingerprint,
+                endpoint_epoch,
+                expires_at,
+                now,
+            )
+            .await
+    }
+    async fn installation(&self, id: Uuid, now: i64) -> Result<Installation, AuthorityError> {
+        self.0.installation(id, now).await
+    }
+    async fn installation_for_revocation(
+        &self,
+        id: Uuid,
+        now: i64,
+    ) -> Result<Installation, AuthorityError> {
+        self.0.installation_for_revocation(id, now).await
+    }
+    async fn advance_assertion_counter(
+        &self,
+        installation_id: Uuid,
+        previous: u32,
+        next: u32,
+    ) -> Result<(), AuthorityError> {
+        self.0
+            .advance_assertion_counter(installation_id, previous, next)
+            .await
+    }
+    async fn upsert_delegation(&self, delegation: Delegation) -> Result<(), AuthorityError> {
+        self.0.upsert_delegation(delegation).await
+    }
+    async fn rotate_endpoint(
+        &self,
+        installation_id: Uuid,
+        expected_epoch: i64,
+        new_epoch: i64,
+        token_ciphertext: Vec<u8>,
+        token_fingerprint: [u8; 32],
+    ) -> Result<(), AuthorityError> {
+        self.0
+            .rotate_endpoint(
+                installation_id,
+                expected_epoch,
+                new_epoch,
+                token_ciphertext,
+                token_fingerprint,
+            )
+            .await
+    }
+    async fn revoke_delegation(
+        &self,
+        installation_id: Uuid,
+        relay_pubkey: &str,
+        expected_generation: i64,
+    ) -> Result<(), AuthorityError> {
+        self.0
+            .revoke_delegation(installation_id, relay_pubkey, expected_generation)
+            .await
+    }
+    async fn revoke_installation(
+        &self,
+        installation_id: Uuid,
+        expected_epoch: i64,
+        new_epoch: i64,
+    ) -> Result<(), AuthorityError> {
+        self.0
+            .revoke_installation(installation_id, expected_epoch, new_epoch)
+            .await
+    }
+    async fn authorize_delivery(
+        &self,
+        delegation_id: Uuid,
+        relay_pubkey: &str,
+        endpoint_epoch: i64,
+        generation: i64,
+        event_id: &str,
+        request_id: Uuid,
+        request_expires_at: i64,
+        quota_window_seconds: i64,
+        quota_max_deliveries: i64,
+        now: i64,
+    ) -> Result<DeliveryPermit, AuthorityError> {
+        self.0
+            .authorize_delivery(
+                delegation_id,
+                relay_pubkey,
+                endpoint_epoch,
+                generation,
+                event_id,
+                request_id,
+                request_expires_at,
+                quota_window_seconds,
+                quota_max_deliveries,
+                now,
+            )
+            .await
+    }
+    async fn finish_delivery(
+        &self,
+        _: DeliveryPermit,
+        _: DeliveryDisposition,
+    ) -> Result<(), AuthorityError> {
+        Err(AuthorityError::Unavailable)
+    }
+    async fn reap_expired(&self, now: i64) -> Result<(), AuthorityError> {
+        self.0.reap_expired(now).await
+    }
+}
+
+/// Once the provider has answered for good, a failure to record that is the
+/// gateway's problem: the relay still gets the provider's answer. A retryable
+/// answer still becomes a gateway retry, as before.
+#[tokio::test]
+async fn failed_finish_reports_terminal_outcomes_and_retries_retryable_ones() {
+    for (outcome, expected) in [
+        (DeliveryOutcome::Accepted, StatusCode::OK),
+        (
+            DeliveryOutcome::InvalidEndpoint {
+                unregistered_at: None,
+            },
+            StatusCode::GONE,
+        ),
+        (
+            DeliveryOutcome::Retry {
+                retry_after_seconds: None,
+            },
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        let (app, keys, body) = fixture_with_store(
+            Arc::new(FixedOutcome(outcome)),
+            Arc::new(FailingFinishStore::default()),
+        )
+        .await;
+        let auth = signed_header(&keys, DIRECT_URL, "POST", &body);
+        let (status, _) = status_and_body(&app, auth, body).await;
+        assert_eq!(status, expected, "{outcome:?}");
+    }
 }

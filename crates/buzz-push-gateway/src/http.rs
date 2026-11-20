@@ -251,6 +251,8 @@ const ANDROID_ENROLL_DOMAIN: &str = "buzz.push.enroll.android.v1";
 /// How long a relay should wait before retrying a request whose earlier
 /// attempt is still in flight. Long enough for a send that is minting or
 /// waiting on the push service to finish, short enough to keep wakes prompt.
+/// The relay doubles it on each attempt, so its retries land about 4, 14, 34
+/// and 74 seconds after the first attempt, not every 5 seconds.
 const IN_FLIGHT_RETRY_AFTER_SECONDS: i64 = 5;
 
 /// The Android enrollment transcript: the iOS one without `key_id`, since the
@@ -973,13 +975,19 @@ async fn deliver(
             | DeliveryOutcome::InvalidEndpoint { .. }
             | DeliveryOutcome::PermanentRequestFault => DeliveryDisposition::Terminal,
         };
-        authority_store
-            .finish_delivery(permit, disposition)
-            .await
-            .map(|()| outcome)
+        let finished = authority_store.finish_delivery(permit, disposition).await;
+        (outcome, disposition, finished)
     });
     let outcome = match delivery.await {
-        Ok(Ok(outcome)) => outcome,
+        Ok((outcome, _, Ok(()))) => outcome,
+        // The provider has answered for good, so report that answer. The id
+        // stays in flight until its request expires, which only makes a
+        // replay retry later; it can never cause a second send.
+        Ok((outcome, DeliveryDisposition::Terminal, Err(err))) => {
+            crate::metrics::record_delivery_error("finish_failed");
+            tracing::warn!(error = %err, "failed to mark a terminal delivery finished");
+            outcome
+        }
         _ => {
             crate::metrics::record_delivery_error("finish_failed");
             return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
