@@ -20,9 +20,9 @@ public struct BuzzNotificationReplyContext: Codable, Equatable, Sendable {
   /// Whether channel metadata showed a Solo chat, which takes no thread
   /// replies; nil when it was unknown.
   public let inSolo: Bool?
-  /// The account the notification was for, which the reply must be sent as.
-  /// Signing in to the same relay again keeps the community's ID but can
-  /// change its account. nil for a notification an earlier build posted.
+  /// The account the notification was for, which the reply must be sent as,
+  /// guarding against a community's credentials being replaced in place. nil
+  /// for a notification an earlier build posted.
   public let recipientPubkey: String?
 
   public init(

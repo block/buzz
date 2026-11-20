@@ -269,11 +269,11 @@ String? _replyHead(BuzzNotificationReply reply, Channel channel) =>
 
 /// Whether [community] is still signed in as the account [reply] was typed
 /// for: the key it signs with. A notification from an earlier build doesn't
-/// say, so it never is.
+/// say, so its reply is checked only by its community, as before.
 bool _isReplyAccount(BuzzNotificationReply reply, Community community) {
   final recipient = reply.recipientPubkey;
   final account = pubkeyFromNsec(community.nsec?.trim()) ?? community.pubkey;
-  return recipient != null && account?.toLowerCase() == recipient.toLowerCase();
+  return recipient == null || account?.toLowerCase() == recipient.toLowerCase();
 }
 
 /// The result for a reply that wasn't published: [NotificationReplyOutcome.notSent]

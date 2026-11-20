@@ -83,9 +83,9 @@ class BuzzNotificationReply {
   /// NIP-10 thread root of the notified message; null when it is top-level.
   final String? replyRootId;
 
-  /// The account the notification was for, which the reply must go out as.
-  /// Signing in to the same relay again keeps the community's ID but can
-  /// change its account. Null for a notification an earlier build posted.
+  /// The account the notification was for, which the reply must go out as,
+  /// guarding against a community's credentials being replaced in place. Null
+  /// for a notification an earlier build posted.
   final String? recipientPubkey;
 
   /// When the notified message was created, in Unix seconds.
