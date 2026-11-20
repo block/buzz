@@ -16,9 +16,8 @@ tests:
           count: 0
 
   - it: runs the probe from the relay image against relayUrl without a key or metrics
-    chart:
-      appVersion: "1.2.3"
     set:
+      image.tag: "1.2.3"
       acceptance.enabled: true
     asserts:
       - hasDocuments:
@@ -58,7 +57,7 @@ tests:
             - --metric-prefix
             - buzz.acceptance
             - --tag
-            - image_revision:1.2.3
+            - probe_revision:1.2.3
       - equal:
           path: spec.jobTemplate.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
           value: true
@@ -82,6 +81,16 @@ tests:
           content:
             name: BUZZ_ACCEPTANCE_ASSERTION_FILE
           any: true
+      # The probe needs no Kubernetes or cloud access: no relay service
+      # account, no token.
+      - notExists:
+          path: spec.jobTemplate.spec.template.spec.serviceAccountName
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.automountServiceAccountToken
+          value: false
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.enableServiceLinks
+          value: false
       - notExists:
           path: spec.jobTemplate.spec.template.spec.initContainers
       - notExists:
@@ -130,6 +139,9 @@ tests:
           path: spec.jobTemplate.spec.template.spec.serviceAccountName
           value: buzz-acceptance
       - equal:
+          path: spec.jobTemplate.spec.template.spec.automountServiceAccountToken
+          value: false
+      - equal:
           path: spec.jobTemplate.spec.template.metadata.annotations
           value:
             example.com/probe: "true"
@@ -144,7 +156,7 @@ tests:
             - --metric-prefix
             - example.acceptance
             - --tag
-            - image_revision:sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+            - probe_revision:sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
             - --tag
             - env:staging
             - --tag
@@ -209,10 +221,58 @@ tests:
           path: spec.jobTemplate.spec.template.metadata.labels["app.kubernetes.io/component"]
           value: acceptance
 
+  # probe_revision names the probe's image, which is the relay image this
+  # release deploys, even when acceptance.relayUrl points elsewhere.
+  - it: tags runs with the probe's image revision, not the target's
+    set:
+      image.tag: sha-abcdef1
+      acceptance:
+        enabled: true
+        relayUrl: wss://other.example.com
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].args
+          content: probe_revision:sha-abcdef1
+      - notContains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].args
+          content: image_revision:sha-abcdef1
+
+  # The chart's default appVersion image predates the probe binary.
+  - it: requires an explicit image tag or digest
+    chart:
+      appVersion: "1.2.3"
+    set:
+      acceptance.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "acceptance.enabled requires image.tag or image.digest"
+
   - it: rejects a tag without a key
     set:
+      image.tag: "1.2.3"
       acceptance:
         enabled: true
         tags: ["staging"]
     asserts:
       - failedTemplate: {}
+
+  - it: rejects a tag that reuses a probe-owned key
+    set:
+      image.tag: "1.2.3"
+      acceptance:
+        enabled: true
+        tags: ["env:staging", "relay_version:9.9.9"]
+    asserts:
+      - failedTemplate:
+          errorPattern: 'uses the probe-owned tag key "relay_version"'
+
+  - it: rejects a pod label that overrides a chart-owned label
+    set:
+      image.tag: "1.2.3"
+      acceptance:
+        enabled: true
+        podLabels:
+          app.kubernetes.io/component: other
+    asserts:
+      - failedTemplate:
+          errorPattern: 'acceptance.podLabels may not set chart-owned label "app.kubernetes.io/component"'

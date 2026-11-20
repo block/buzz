@@ -400,7 +400,8 @@ storageAccounting:
 
 # Relay acceptance probe: a CronJob that runs `buzz-acceptance` from the relay
 # image, checks the relay's core jobs once per run, and exits (see README
-# "Acceptance probe").
+# "Acceptance probe"). Requires image.tag or image.digest: the chart's default
+# appVersion image does not include the probe.
 acceptance:
   enabled: false
   schedule: "*/5 * * * *"
@@ -424,9 +425,13 @@ acceptance:
   statsdAddr: ""
   metricPrefix: buzz.acceptance
   # Extra `key:value` metric tags. The chart always adds
-  # `image_revision:<deployed image identity>`.
+  # `probe_revision:<probe image identity>`. The keys probe_revision,
+  # relay_version, check, stage and result are probe-owned and rejected here.
   tags: []
-  serviceAccountName: ""         # empty → the main Buzz service account
+  # Empty → the namespace default service account, not the relay's. The token
+  # is never mounted.
+  serviceAccountName: ""
+  # May not set app.kubernetes.io/name, /instance or /component.
   # tags.datadoghq.com/version is chart-owned; see README "Datadog version label".
   podLabels: {}
   podAnnotations: {}

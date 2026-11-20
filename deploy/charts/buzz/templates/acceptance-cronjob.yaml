@@ -1,5 +1,11 @@
+{{- include "buzz.validate" . -}}
 {{- if .Values.acceptance.enabled }}
 {{- $a := .Values.acceptance }}
+{{- range $label := list "app.kubernetes.io/name" "app.kubernetes.io/instance" "app.kubernetes.io/component" }}
+{{- if hasKey ($a.podLabels | default dict) $label }}
+{{- fail (printf "acceptance.podLabels may not set chart-owned label %q" $label) }}
+{{- end }}
+{{- end }}
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -28,7 +34,13 @@ spec:
           {{- end }}
         spec:
           restartPolicy: Never
-          serviceAccountName: {{ default (include "buzz.serviceAccountName" .) $a.serviceAccountName }}
+          {{- /* The probe needs no Kubernetes or cloud access, so it does not
+               inherit the relay's service account or its token. */}}
+          {{- with $a.serviceAccountName }}
+          serviceAccountName: {{ . }}
+          {{- end }}
+          automountServiceAccountToken: false
+          enableServiceLinks: false
           securityContext:
             {{- toYaml .Values.relay.securityContext | nindent 12 }}
           {{- with .Values.image.pullSecrets }}
@@ -53,7 +65,7 @@ spec:
                 - --metric-prefix
                 - {{ $a.metricPrefix | quote }}
                 - --tag
-                - {{ printf "image_revision:%s" (include "buzz.imageRevision" .) | quote }}
+                - {{ printf "probe_revision:%s" (include "buzz.imageRevision" .) | quote }}
                 {{- range $a.tags }}
                 - --tag
                 - {{ . | quote }}

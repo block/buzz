@@ -25,6 +25,21 @@ surface at template time regardless of which manifest helm renders first.
   {{- end -}}
 {{- end -}}
 
+{{/* The acceptance probe ships only in relay images that include it, so the
+     chart's default appVersion image can't run it. Probe-owned metric tag
+     keys can't be overridden by acceptance.tags. */}}
+{{- if .Values.acceptance.enabled -}}
+  {{- if not (or .Values.image.tag .Values.image.digest) -}}
+    {{- fail "acceptance.enabled requires image.tag or image.digest: the probe binary is not in the chart's default appVersion image." -}}
+  {{- end -}}
+  {{- range .Values.acceptance.tags -}}
+    {{- $key := splitList ":" . | first -}}
+    {{- if has $key (list "probe_revision" "relay_version" "check" "stage" "result") -}}
+      {{- fail (printf "acceptance.tags: %q uses the probe-owned tag key %q." . $key) -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+
 {{/* Multiple replicas do NOT require ReadWriteMany git storage.
 
      Git ref/object state is object-store-backed: every read and write hydrates

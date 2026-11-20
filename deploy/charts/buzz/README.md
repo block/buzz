@@ -520,8 +520,10 @@ sanitized.
 relay image. Each run checks the relay's core jobs once (NIP-11, connect and
 NIP-42 auth, channel create, publish, fan-out, history, access control and
 cleanup), prints a JSON report and exits: 0 when every check passed, 1 when
-one failed, 2 when the probe could not run or report. Because the probe ships
-in the relay image, a run always matches the relay build it checks.
+one failed, 2 when the probe could not run or report. The probe ships in the
+relay image, so it needs an explicit `image.tag` or `image.digest`: the chart
+fails to render when both are empty, because the default `Chart.AppVersion`
+image predates the probe.
 
 - The probe connects to `acceptance.relayUrl`, or to `relayUrl` when that is
   empty. Each run creates one private channel with a 1 h TTL and deletes it.
@@ -532,9 +534,16 @@ in the relay image, a run always matches the relay build it checks.
   `acceptance.metricPrefix` (`<prefix>.runs`, `<prefix>.run.seconds`,
   `<prefix>.check.runs`, `<prefix>.check.seconds`, `<prefix>.stage.seconds`).
   `$(HOST_IP)` expands to the node IP, for example `$(HOST_IP):8125` for a
-  node-local agent. Every series carries `image_revision` (the deployed image
-  identity: `image.digest`, else `image.tag`, else `Chart.AppVersion`), the
-  relay's NIP-11 `relay_version`, and each `acceptance.tags` entry.
+  node-local agent. Every series carries `probe_revision`, the relay's NIP-11
+  `relay_version`, and each `acceptance.tags` entry. `probe_revision` names the
+  probe's own image (`image.digest`, else `image.tag`), not the relay build the
+  run reached: during a rollout, or with `acceptance.relayUrl` set, the probe
+  can reach pods of another build. `acceptance.tags` can't reuse the
+  probe-owned keys `probe_revision`, `relay_version`, `check`, `stage` or
+  `result`.
+- The Pod runs with `acceptance.serviceAccountName`, or the namespace default
+  service account when that is empty. It never inherits the relay's service
+  account and never mounts its token.
 - `concurrencyPolicy` is `Forbid` and `backoffLimit` is 0: a retry would
   hide a failed run. `acceptance.activeDeadlineSeconds` bounds the whole run,
   including init containers.
@@ -545,6 +554,8 @@ init container writes it to a shared volume and `acceptance.assertionFile`
 points the probe at it. The probe re-reads the file before every connection.
 
 ```yaml
+image:
+  tag: 1.2.3                     # a relay build that includes buzz-acceptance
 acceptance:
   enabled: true
   privateKeySecret:
@@ -556,6 +567,16 @@ acceptance:
     - name: mint-assertion
       image: example.com/assertion-minter:v1
       args: [--out, /var/run/assertion/token]
+      securityContext:
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: [ALL]
+      resources:
+        limits:
+          cpu: 100m
+          memory: 64Mi
       volumeMounts:
         - name: assertion
           mountPath: /var/run/assertion
