@@ -1138,6 +1138,36 @@ class RunnerTests: XCTestCase {
   }
 
   @MainActor
+  func testStandaloneRailGroupSharesOneVerticalCapsule() throws {
+    let parent = UIViewController()
+    let bar = IosNavigationBarFactory(
+      messenger: NavigationTestMessenger(), parent: parent
+    ).create(withFrame: CGRect(x: 0, y: 0, width: 76, height: 108),
+             viewIdentifier: 999988,
+             arguments: ["standaloneControl": true, "actions": [
+               ["id": "0", "label": "Activity", "symbol": "bell", "enabled": true],
+               ["id": "1", "label": "Community menu", "symbol": "ellipsis", "enabled": true,
+                "children": [["id": "1.0", "label": "Settings", "symbol": "gearshape",
+                              "enabled": true]]],
+             ]])
+    bar.view().setNeedsLayout()
+    bar.view().layoutIfNeeded()
+    let surfaces = bar.view().subviews.compactMap { $0 as? UIVisualEffectView }
+      .filter { !$0.isHidden }
+    XCTAssertEqual(surfaces.count, 1, "Grouped rail actions share one glass capsule")
+    let surface = try XCTUnwrap(surfaces.first)
+    XCTAssertEqual(surface.frame.size, CGSize(width: 48, height: 96))
+    let buttons = descendants(of: surface).compactMap { $0 as? UIButton }
+    let activity = try XCTUnwrap(buttons.first { $0.accessibilityLabel == "Activity" })
+    let menu = try XCTUnwrap(buttons.first { $0.accessibilityLabel == "Community menu" })
+    let activityFrame = activity.convert(activity.bounds, to: surface)
+    let menuFrame = menu.convert(menu.bounds, to: surface)
+    XCTAssertEqual(activityFrame.midX, menuFrame.midX, accuracy: 0.5)
+    XCTAssertLessThanOrEqual(activityFrame.maxY, menuFrame.minY + 0.5)
+    XCTAssertTrue(menu.showsMenuAsPrimaryAction)
+  }
+
+  @MainActor
   func testNavigationIgnoresNonFiniteScrollOffsets() throws {
     let parent = UIViewController()
     let window = UIWindow(frame: UIScreen.main.bounds)

@@ -175,12 +175,14 @@ class HomePage extends HookConsumerWidget {
                 activityColor: hasUnreadInbox ? context.colors.primary : null,
                 activityLabel: hasUnreadInbox ? 'Unread items' : null,
                 onPressed: openInbox,
+                sharesRailBackground: true,
               ),
               IosNavigationAction(
                 label: 'Community menu',
                 imageUrl: communityIcon,
                 avatarIdentity: community?.id,
                 avatarInitial: communityInitial,
+                sharesRailBackground: true,
                 children: [
                   for (final action in moreActions(openSwitcher))
                     IosNavigationAction(

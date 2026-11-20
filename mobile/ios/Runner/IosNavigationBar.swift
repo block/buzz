@@ -553,8 +553,10 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       navigation.navigationBar.tintColor = Self.color(args["foreground"])
       trackedAvatar = nil
       reportedAvatarFrame = nil
-      if let leading = args["leading"] as? [String: Any],
-         let surface = makeControlGroup([leading]).customView {
+      // A rail slot holds one control, or several sharing one glass capsule.
+      let shared = args["actions"] as? [[String: Any]] ?? []
+      let group = shared.isEmpty ? (args["leading"] as? [String: Any]).map { [$0] } : shared
+      if let group, let surface = makeControlGroup(group).customView {
         standaloneSurface = surface
         container.addSubview(surface)
       }
@@ -908,7 +910,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     surface.layer.cornerCurve = .circular
     surface.clipsToBounds = true
     let stack = UIStackView()
-    stack.axis = .horizontal
+    // Duo's rail is a vertical column, so its shared capsules stack downward.
+    stack.axis = standaloneControl ? .vertical : .horizontal
     stack.translatesAutoresizingMaskIntoConstraints = false
     surface.contentView.addSubview(stack)
     for data in actions {

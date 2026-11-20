@@ -157,14 +157,19 @@ class DuoToolbarPortal extends HookConsumerWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      for (final action in actions)
+                      for (final group in _railGroups(actions))
                         SizedBox(
-                          key: ValueKey('duo-toolbar-${action.label}'),
-                          height: 60,
+                          key: ValueKey(
+                            'duo-toolbar-${group.map((a) => a.label).join('+')}',
+                          ),
+                          // Each extra control extends the capsule by its
+                          // 48-point standalone height.
+                          height: 60 + (group.length - 1) * 48.0,
                           child: IosNavigationBar(
                             title: '',
                             standaloneControl: true,
-                            leading: action,
+                            leading: group.length == 1 ? group.single : null,
+                            actions: group.length == 1 ? const [] : group,
                           ),
                         ),
                     ],
@@ -178,6 +183,21 @@ class DuoToolbarPortal extends HookConsumerWidget {
       child: child,
     );
   }
+}
+
+/// Splits rail actions into controls; adjacent actions that share the rail
+/// background become one control.
+List<List<IosNavigationAction>> _railGroups(List<IosNavigationAction> actions) {
+  final groups = <List<IosNavigationAction>>[];
+  for (final action in actions) {
+    if (action.sharesRailBackground &&
+        (groups.lastOrNull?.last.sharesRailBackground ?? false)) {
+      groups.last.add(action);
+    } else {
+      groups.add([action]);
+    }
+  }
+  return groups;
 }
 
 /// Marks sheets whose default Close action is supplied by the Duo rail.

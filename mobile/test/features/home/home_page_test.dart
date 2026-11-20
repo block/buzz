@@ -269,7 +269,9 @@ void main() {
             widget is IosMessageCreateButton &&
             widget.accessibilityLabel == 'Community menu',
       );
-      final rail = find.byKey(const ValueKey('duo-toolbar-Community menu'));
+      final rail = find.byKey(
+        const ValueKey('duo-toolbar-Activity+Community menu'),
+      );
       IosNavigationBar header() => tester
           .widgetList<IosNavigationBar>(
             find.descendant(of: bar, matching: find.byType(IosNavigationBar)),
@@ -331,7 +333,7 @@ void main() {
     expect(tester.getCenter(find.byTooltip('Search')).dx, greaterThan(390));
 
     // Duo moves the Messages header's Activity and Community menu controls
-    // into the rail as native controls, in header order.
+    // into the rail as one native glass capsule, in header order.
     final headerBell = find.byWidgetPredicate(
       (widget) =>
           widget is IosGlassNavigationButton &&
@@ -342,27 +344,34 @@ void main() {
           widget is IosMessageCreateButton &&
           widget.accessibilityLabel == 'Community menu',
     );
-    final railActivity = find.byKey(const ValueKey('duo-toolbar-Activity'));
-    final railMenu = find.byKey(const ValueKey('duo-toolbar-Community menu'));
-    IosNavigationAction railAction(Finder control) => tester
-        .widget<IosNavigationBar>(
-          find.descendant(of: control, matching: find.byType(IosNavigationBar)),
-        )
-        .leading!;
+    final railActivity = find.byKey(
+      const ValueKey('duo-toolbar-Activity+Community menu'),
+    );
+    IosNavigationBar railControl() => tester.widget<IosNavigationBar>(
+      find.descendant(
+        of: railActivity,
+        matching: find.byType(IosNavigationBar),
+      ),
+    );
     expect(headerBell, findsNothing);
     expect(headerMenu, findsNothing);
+    expect(find.byKey(const ValueKey('duo-toolbar-Activity')), findsNothing);
     expect(tester.getCenter(railActivity).dx, greaterThan(390));
-    expect(tester.getCenter(railMenu).dx, tester.getCenter(railActivity).dx);
+    // Two 48-point controls in one capsule, with the usual 12-point margin.
+    expect(tester.getSize(railActivity).height, 108);
+    expect(railControl().standaloneControl, isTrue);
+    expect(railControl().leading, isNull);
+    final railActions = railControl().actions;
+    expect(railActions.map((action) => action.label), [
+      'Activity',
+      'Community menu',
+    ]);
+    expect(railActions.first.activityColor, isNull);
     expect(
-      tester.getCenter(railActivity).dy,
-      lessThan(tester.getCenter(railMenu).dy),
-    );
-    expect(railAction(railActivity).activityColor, isNull);
-    expect(
-      railAction(railMenu).children.map((action) => action.label),
+      railActions.last.children.map((action) => action.label),
       containsAllInOrder(['Agents', 'Settings']),
     );
-    railAction(railActivity).onPressed!();
+    railActions.first.onPressed!();
     await tester.pumpAndSettle();
     expect(find.byType(ActivityPage), findsOneWidget);
     expect(railActivity, findsNothing);
@@ -377,11 +386,9 @@ void main() {
     recording(true);
     await tester.pumpAndSettle();
     expect(railActivity, findsNothing);
-    expect(railMenu, findsNothing);
     recording(false);
     await tester.pumpAndSettle();
     expect(railActivity, findsOneWidget);
-    expect(railMenu, findsOneWidget);
     final create = tester.widget<IosMessageCreateButton>(
       find.descendant(
         of: find.byType(MessagesNavigationBar),
@@ -436,7 +443,6 @@ void main() {
     expect(pane.selectedId, 'sample');
     // The list's rail controls stay above the open conversation's.
     expect(railActivity, findsOneWidget);
-    expect(railMenu, findsOneWidget);
     final openNavigation = find.byType(MessagesNavigationBar);
     expect(
       tester.widget<MessagesNavigationBar>(openNavigation).axis,

@@ -41,10 +41,15 @@ class IosNavigationAction {
     this.plain = false,
     this.sharesBackground = true,
     this.keepInHeaderOnDuo = false,
+    this.sharesRailBackground = false,
   });
 
   /// Keeps list controls beside their content when a Duo rail is present.
   final bool keepInHeaderOnDuo;
+
+  /// In Duo's rail, shares one glass capsule with adjacent actions that also
+  /// set this, instead of taking a separate control.
+  final bool sharesRailBackground;
 
   final String label;
   final String? symbol;
