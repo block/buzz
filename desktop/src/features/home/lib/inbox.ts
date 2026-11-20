@@ -58,6 +58,11 @@ export type InboxItem = {
   senderLabel: string;
   subject: string;
   timestampLabel: string;
+  /**
+   * Categories of the grouped items not known to be read. A subset of
+   * `categories`; absent means read state is unknown, so use `categories`.
+   */
+  unreadCategories?: FeedItemCategory[];
   unreadCount: number;
 };
 
@@ -336,6 +341,12 @@ function categoryPriority(category: FeedItemCategory) {
   }
 }
 
+function sortCategories(categories: readonly FeedItemCategory[]) {
+  return [...new Set(categories)].sort(
+    (left, right) => categoryPriority(left) - categoryPriority(right),
+  );
+}
+
 function getInboxThreadKey(
   item: FeedItem,
   channelById: ReadonlyMap<string, InboxChannel>,
@@ -563,25 +574,38 @@ export function buildInboxItems({
         getThreadReadAt
           ? getThreadReadAt(conversationId, groupChannelId)
           : undefined;
-      const unreadItems = (
+      // The items whose read state is known. Anything else in the group (such
+      // as a channel thread's root) stays unknown and is not treated as read.
+      const readStateItems =
         channelReadAt !== undefined
-          ? uniqueGroupItems.filter((candidate) =>
-              isItemUnread(candidate, channelReadAt),
-            )
-          : threadReplyItems.length > 0 && getMessageReadAt
-            ? threadReplyItems.filter((candidate) =>
-                isItemUnread(candidate, null, getMessageReadAt),
-              )
-            : threadReadAt !== undefined
-              ? threadReplyItems.filter((candidate) =>
-                  isItemUnread(candidate, threadReadAt),
-                )
-              : []
-      ).sort((left, right) => left.createdAt - right.createdAt);
+          ? uniqueGroupItems
+          : (threadReplyItems.length > 0 && getMessageReadAt) ||
+              threadReadAt !== undefined
+            ? threadReplyItems
+            : [];
+      const isUnread = (candidate: FeedItem) =>
+        channelReadAt !== undefined
+          ? isItemUnread(candidate, channelReadAt)
+          : getMessageReadAt
+            ? isItemUnread(candidate, null, getMessageReadAt)
+            : isItemUnread(candidate, threadReadAt ?? null);
+      const unreadItems = readStateItems
+        .filter(isUnread)
+        .sort((left, right) => left.createdAt - right.createdAt);
       const item = unreadItems[0] ?? latestItem;
-      const categories = [
-        ...new Set(group.items.map((groupItem) => groupItem.category)),
-      ].sort((left, right) => categoryPriority(left) - categoryPriority(right));
+      const categories = sortCategories(
+        group.items.map((groupItem) => groupItem.category),
+      );
+      const readItemIds = new Set(
+        readStateItems
+          .filter((candidate) => !isUnread(candidate))
+          .map((candidate) => candidate.id),
+      );
+      const unreadCategories = sortCategories(
+        group.items
+          .filter((groupItem) => !readItemIds.has(groupItem.id))
+          .map((groupItem) => groupItem.category),
+      );
       const senderLabel = resolveUserLabel({
         pubkey: item.pubkey,
         currentPubkey,
@@ -621,6 +645,7 @@ export function buildInboxItems({
         senderLabel,
         subject,
         timestampLabel: formatInboxTimestamp(group.latestActivityAt),
+        unreadCategories,
         unreadCount: unreadItems.length,
       };
     });
