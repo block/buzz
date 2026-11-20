@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
+import '../../shared/identity_transfer/native_community_entry.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
@@ -8,7 +10,53 @@ import '../../shared/widgets/modal_presentation.dart';
 import '../pairing/pairing_page.dart';
 import 'invite_join_provider.dart';
 
-Future<bool?> showInviteJoinSheet(BuildContext context) {
+Future<bool?> showInviteJoinSheet(BuildContext context) async {
+  final container = ProviderScope.containerOf(context);
+  final state = container.read(inviteJoinProvider);
+  if (defaultTargetPlatform == TargetPlatform.iOS &&
+      state.status == InviteJoinStatus.confirming &&
+      !state.isStarterSetupRecovery) {
+    final joined = await NativeCommunityEntry.show(
+      name: state.host ?? 'Unknown community',
+      dark: Theme.of(context).brightness == Brightness.dark,
+      primaryArgb: Theme.of(context).colorScheme.primary.toARGB32(),
+      onPrimaryArgb: Theme.of(context).colorScheme.onPrimary.toARGB32(),
+      choices: const [],
+      connect: (_, _, _, _) async {},
+      confirmInvite: () async {
+        final before = container.read(inviteJoinProvider);
+        final notifier = container.read(inviteJoinProvider.notifier);
+        if (before.requiresPolicyAcceptance) {
+          return await notifier.openPolicyAcceptance()
+              ? {'redirected': true}
+              : {'error': container.read(inviteJoinProvider).errorMessage};
+        }
+        if (before.requiresFreshInvite) {
+          return {
+            'error': before.errorMessage ?? 'Open a fresh invite to continue.',
+          };
+        }
+        await container.read(inviteJoinProvider.notifier).confirmJoin();
+        final result = container.read(inviteJoinProvider);
+        if (result.requiresPolicyAcceptance &&
+            await notifier.openPolicyAcceptance()) {
+          return {'redirected': true};
+        }
+        return result.status == InviteJoinStatus.success
+            ? {'joined': true}
+            : {
+                'error':
+                    container.read(inviteJoinProvider).errorMessage ??
+                    'Could not join. Try again.',
+                if (result.requiresPolicyAcceptance)
+                  'actionTitle': 'Review requirements',
+              };
+      },
+    );
+    if (joined == false) return false;
+    if (!context.mounted) return joined;
+    // Preserve the existing success screen and starter-channel destination.
+  }
   return showBuzzModalBottomSheet<bool>(
     context: context,
     isScrollControlled: true,
@@ -43,17 +91,15 @@ class InviteJoinSheet extends ConsumerWidget {
     final isStarterSetupRecovery = state.isStarterSetupRecovery;
     final host = state.host ?? 'unknown host';
     final derivedName = state.communityName;
-    final primaryLabel = switch ((
-      isClaiming,
-      isStarterSetupRecovery,
-      state.status,
-    )) {
-      (true, true, _) => 'Finishing setup…',
-      (true, false, _) => 'Joining…',
-      (false, true, InviteJoinStatus.error) => 'Retry setup',
-      (false, true, _) => 'Finish setting up',
-      _ => 'Join',
-    };
+    final primaryLabel = state.requiresPolicyAcceptance
+        ? 'Review requirements'
+        : switch ((isClaiming, isStarterSetupRecovery, state.status)) {
+            (true, true, _) => 'Finishing setup…',
+            (true, false, _) => 'Joining…',
+            (false, true, InviteJoinStatus.error) => 'Retry setup',
+            (false, true, _) => 'Finish setting up',
+            _ => 'Join',
+          };
 
     if (state.status == InviteJoinStatus.success) {
       return _InviteJoinSuccess(
@@ -70,7 +116,7 @@ class InviteJoinSheet extends ConsumerWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Icon(LucideIcons.userPlus, size: 40, color: context.colors.primary),
+            Icon(BuzzIcons.userPlus, size: 40, color: context.colors.primary),
             const SizedBox(height: Grid.sm),
             Text(
               isStarterSetupRecovery
@@ -152,11 +198,26 @@ class InviteJoinSheet extends ConsumerWidget {
                 const SizedBox(width: Grid.sm),
                 Expanded(
                   child: FilledButton.icon(
-                    onPressed: isClaiming || state.requiresFreshInvite
+                    onPressed:
+                        isClaiming ||
+                            (state.requiresFreshInvite &&
+                                !state.requiresPolicyAcceptance)
                         ? null
-                        : () async => ref
-                              .read(inviteJoinProvider.notifier)
-                              .confirmJoin(),
+                        : () async {
+                            final notifier = ref.read(
+                              inviteJoinProvider.notifier,
+                            );
+                            if (!state.requiresPolicyAcceptance) {
+                              await notifier.confirmJoin();
+                            }
+                            if (ref
+                                    .read(inviteJoinProvider)
+                                    .requiresPolicyAcceptance &&
+                                await notifier.openPolicyAcceptance() &&
+                                context.mounted) {
+                              Navigator.of(context).pop(false);
+                            }
+                          },
                     icon: isClaiming
                         ? SizedBox(
                             width: 16,
@@ -168,7 +229,7 @@ class InviteJoinSheet extends ConsumerWidget {
                                   : 'Joining community',
                             ),
                           )
-                        : const Icon(LucideIcons.check),
+                        : const Icon(BuzzIcons.check),
                     label: Text(primaryLabel),
                   ),
                 ),
@@ -202,7 +263,7 @@ class _InviteJoinSuccess extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Icon(
-              LucideIcons.circleCheck,
+              BuzzIcons.circleCheck,
               size: 40,
               color: context.colors.primary,
             ),
@@ -228,7 +289,7 @@ class _InviteJoinSuccess extends StatelessWidget {
                   ),
                 );
               },
-              icon: const Icon(LucideIcons.scanLine),
+              icon: const Icon(BuzzIcons.scanLine),
               label: const Text('Back it up now'),
             ),
             const SizedBox(height: Grid.xs),

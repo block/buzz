@@ -1,0 +1,629 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+
+import '../relay/relay.dart';
+import 'verified_profile.dart';
+import 'verified_profile_discovery_fetch.dart';
+import 'verified_profile_proof.dart';
+
+const _wantedLimit = 1024;
+
+/// Records kept after their subject stops being tracked. A roster larger than
+/// [_wantedLimit] keeps evicting and re-tracking the same people; their last
+/// known names stay on screen, unchecked, instead of blinking to fallbacks.
+const _cachedHeadLimit = 4 * _wantedLimit;
+const _eoseTimeout = Duration(seconds: 10);
+const _discoveryRefresh = Duration(minutes: 5);
+
+/// A relay returns one current projection per subject; a few duplicates are
+/// tolerated, a flood before EOSE fails the batch instead of buffering it.
+const _maxEarlyPerSubject = 4;
+
+/// Batches smaller than [verifiedProfileBatchSize] allowed before the smallest
+/// are merged into the next new one until it fills a batch.
+const _maxPartialBatches = 4;
+
+class _Batch {
+  _Batch(this.subjects, this.interest);
+  final List<String> subjects;
+
+  /// The newest interest when the batch opened. A subject whose interest is
+  /// newer was evicted and tracked again since, which dropped its `_checked`
+  /// mark and maybe its cached head, so the batch must be read again.
+  final int interest;
+  final List<NostrEvent> early = [];
+
+  /// Live events awaiting proof, newest per subject, so a fast stream cannot
+  /// queue unbounded work.
+  final Map<String, NostrEvent> pending = {};
+  Future<void> tail = Future.value();
+
+  /// The relay retried this subscription. Its replay resumes from the last
+  /// event and skips events already delivered, so it is not a snapshot: the
+  /// next sync replaces the batch with a fresh subscription.
+  bool stale = false;
+
+  /// Bumped by each retry, so a job that awaited proof across one doesn't
+  /// promote records the retry left unchecked.
+  int retries = 0;
+
+  /// Subjects that were checked when the retry began, checked again at the
+  /// replay's EOSE.
+  final Set<String> resume = {};
+  void Function()? unsubscribe;
+
+  /// Retires this batch so the next sync can reopen it.
+  void Function() fail = () {};
+  Timer? timeout;
+  bool active = true;
+  bool ready = false;
+  int candidates = 0;
+
+  void stop() {
+    active = false;
+    timeout?.cancel();
+    unsubscribe?.call();
+    unsubscribe = null;
+  }
+}
+
+/// Verified profiles for the community's currently relevant subjects, keyed by
+/// lowercase pubkey. Empty unless a successful discovery enables the feature.
+///
+/// Records survive disconnects as `checked: false` (cached) and are only
+/// reconciled by a completed subscription on the current connection.
+class VerifiedProfilesNotifier extends Notifier<Map<String, VerifiedProfile>> {
+  late final Map<String, int> _wanted = newInterestMap();
+  final Map<String, NostrEvent> _heads = {};
+  final Set<String> _checked = {};
+  final Map<String, _Batch> _batches = {};
+  VerifiedProfileAuthority? _authority;
+  bool _enabled = false;
+  bool _discoveryFresh = false;
+  bool _connected = false;
+  bool _discoveryInFlight = false;
+  Completer<void>? _discoveryDone;
+  bool _scheduled = false;
+  int _generation = 0;
+  int _interest = 0;
+  (String, String?)? _scope;
+  Timer? _refreshTimer;
+
+  /// The interest map, insertion-ordered by interest. Tests override this to
+  /// count how many entries eviction visits.
+  @visibleForTesting
+  Map<String, int> newInterestMap() => {};
+
+  @override
+  Map<String, VerifiedProfile> build() {
+    final scope = ref.watch(
+      relayConfigProvider.select((config) => (config.baseUrl, config.nsec)),
+    );
+    final status = ref.watch(
+      relaySessionProvider.select((session) => session.status),
+    );
+    if (_scope != null && _scope != scope) _resetCommunity();
+    _scope = scope;
+    final generation = ++_generation;
+    _connected = status == SessionStatus.connected;
+    _stopBatches();
+    _discoveryFresh = false;
+    _discoveryInFlight = false;
+    ref.onDispose(() {
+      _generation++;
+      _stopBatches();
+      _refreshTimer?.cancel();
+      _refreshTimer = null;
+    });
+    if (_connected && _wanted.isNotEmpty) {
+      Future.microtask(() => _onConnected(generation));
+    }
+    return _snapshot();
+  }
+
+  void _resetCommunity() {
+    _wanted.clear();
+    _heads.clear();
+    _authority = null;
+    _enabled = false;
+  }
+
+  void _stopBatches() {
+    for (final batch in _batches.values) {
+      batch.stop();
+    }
+    _batches.clear();
+    _checked.clear();
+  }
+
+  /// The people a profile search found ([searchedPeople]). Waits for
+  /// discovery when the relay's authority is not known yet, and keeps only
+  /// heads with a valid signature. A kept head also names its subject here,
+  /// so the search's rows show their verified names at once.
+  Future<List<SearchedPerson>> searched(List<NostrEvent> events) {
+    final heads = [
+      for (final event in events)
+        if (event.kind == verifiedProfileKind) event,
+    ];
+    // Without heads there is nothing to wait for or prove: answer at once.
+    if (heads.isEmpty) return SynchronousFuture(searchedPeople(events, null));
+    return _searchedWithHeads(events, heads);
+  }
+
+  Future<List<SearchedPerson>> _searchedWithHeads(
+    List<NostrEvent> events,
+    List<NostrEvent> heads,
+  ) async {
+    final generation = _generation;
+    if (_authority == null && !_discoveryFresh) {
+      unawaited(_refreshDiscovery(generation));
+      await _discoveryDone?.future;
+    }
+    final authority = _enabled ? _authority : null;
+    if (authority == null) return searchedPeople(events, null);
+    final proven = Set<NostrEvent>.identity()..addAll(await _prove(heads));
+    if (generation == _generation && authority == _authority && ref.mounted) {
+      track([
+        for (final head in proven) ?verifiedProfileSubject(head, authority),
+      ]);
+      _accept(proven.toList(), authority);
+      _publish();
+    }
+    return searchedPeople([
+      for (final event in events)
+        if (event.kind != verifiedProfileKind || proven.contains(event)) event,
+    ], authority);
+  }
+
+  /// Marks [pubkeys] relevant. Repeated calls coalesce into one scheduling pass.
+  void track(Iterable<String> pubkeys) {
+    final valid = RegExp(r'^[0-9a-f]{64}$');
+    var added = false;
+    for (final raw in pubkeys) {
+      final key = raw.trim().toLowerCase();
+      if (!valid.hasMatch(key)) continue;
+      added |= !_wanted.containsKey(key);
+      _wanted[key] ??= ++_interest;
+    }
+    // A key's interest is set once, when it is inserted, so the map's
+    // insertion order is interest order and the oldest keys come first. Take
+    // them in one pass: a scan per eviction made one 4,000-member roster take
+    // ~300 ms on device, and even `keys.first` per eviction is quadratic,
+    // because each new iterator skips the slots earlier removals left behind.
+    final overflow = _wanted.length - _wantedLimit;
+    if (overflow > 0) {
+      for (final oldest in _wanted.keys.take(overflow).toList()) {
+        _wanted.remove(oldest);
+        _checked.remove(oldest);
+      }
+      _trimCachedHeads();
+      added = true;
+    }
+    if (!added) return;
+    if (_authority == null && !_discoveryInFlight && _connected) {
+      unawaited(_refreshDiscovery(_generation));
+    } else {
+      _schedule(_generation);
+    }
+  }
+
+  /// Drops the oldest untracked records past [_cachedHeadLimit], in one pass.
+  void _trimCachedHeads() {
+    var excess = _heads.length - _cachedHeadLimit;
+    if (excess <= 0) return;
+    final drop = <String>[];
+    for (final key in _heads.keys) {
+      if (_wanted.containsKey(key)) continue;
+      drop.add(key);
+      if (--excess == 0) break;
+    }
+    drop.forEach(_heads.remove);
+  }
+
+  Future<void> _onConnected(int generation) async {
+    if (generation != _generation) return;
+    await _refreshDiscovery(generation);
+  }
+
+  void _armRefresh(int generation) {
+    _refreshTimer?.cancel();
+    _refreshTimer = null;
+    if (generation != _generation || !_connected || _wanted.isEmpty) return;
+    _refreshTimer = Timer(_discoveryRefresh, () {
+      unawaited(_refreshDiscovery(generation));
+    });
+  }
+
+  Future<void> _refreshDiscovery(int generation) async {
+    if (_discoveryInFlight || generation != _generation || !_connected) return;
+    _discoveryInFlight = true;
+    final done = _discoveryDone = Completer<void>();
+    try {
+      final result = await ref.read(verifiedProfileDiscoveryFetchProvider)();
+      if (generation != _generation) return;
+      _discoveryFresh = true;
+      switch (result) {
+        case VerifiedProfilesDisabled():
+          // Hide marks but keep the historical records.
+          _enabled = false;
+          _stopBatches();
+        case VerifiedProfilesEnabled(:final authority):
+          if (_authority != null && _authority!.pubkey != authority.pubkey) {
+            _stopBatches();
+            _heads.clear();
+          }
+          _authority = authority;
+          _enabled = true;
+          _schedule(generation);
+      }
+    } catch (error) {
+      // Failed or malformed discovery is not a disable: keep the last state,
+      // but it is no longer fresh.
+      if (generation == _generation) _discoveryFresh = false;
+      debugPrint('[VerifiedProfiles] discovery failed: $error');
+    } finally {
+      if (identical(_discoveryDone, done)) _discoveryDone = null;
+      done.complete();
+      if (generation == _generation) {
+        _discoveryInFlight = false;
+        _armRefresh(generation);
+        _publish();
+      }
+    }
+  }
+
+  void _schedule(int generation) {
+    if (_scheduled) return;
+    _scheduled = true;
+    scheduleMicrotask(() {
+      _scheduled = false;
+      if (generation == _generation) _syncBatches(generation);
+    });
+  }
+
+  void _syncBatches(int generation) {
+    final authority = _authority;
+    if (!_connected || !_enabled || authority == null) {
+      _publish();
+      return;
+    }
+    // Keep every open batch whose subjects are all still tracked since it
+    // opened, so newly tracked people get a batch of their own instead of
+    // re-reading everyone already checked. A retried batch is replaced so a
+    // fresh snapshot can prove absence, and a batch that lost a subject to
+    // eviction is replaced too, even if the subject was tracked again.
+    for (final id in _batches.keys.toList()) {
+      final batch = _batches[id]!;
+      if (!batch.stale &&
+          batch.subjects.every(
+            (subject) => (_wanted[subject] ?? 1 << 62) <= batch.interest,
+          )) {
+        continue;
+      }
+      _close(id);
+    }
+    var uncovered = _uncoveredSubjects();
+    if (uncovered.isEmpty) {
+      if (_refreshTimer == null) _armRefresh(generation);
+      _publish();
+      return;
+    }
+    // Small additions each open a small batch. Past a few of those, merge the
+    // smallest into the new subjects until they fill a batch, so the
+    // subscription count stays near the minimum while re-reading as few
+    // checked subjects as possible.
+    final partial = [
+      for (final batch in _batches.entries)
+        if (batch.value.subjects.length < verifiedProfileBatchSize) batch,
+    ];
+    if (partial.length >= _maxPartialBatches) {
+      partial.sort(
+        (a, b) => a.value.subjects.length.compareTo(b.value.subjects.length),
+      );
+      // Retire at least one unless the new subjects split evenly, since
+      // they can add a partial batch of their own.
+      var size = uncovered.length;
+      var retired = size % verifiedProfileBatchSize == 0;
+      for (final MapEntry(:key, :value) in partial) {
+        if (retired && size >= verifiedProfileBatchSize) break;
+        size += value.subjects.length;
+        retired = true;
+        _close(key);
+      }
+      uncovered = _uncoveredSubjects();
+    }
+    for (var i = 0; i < uncovered.length; i += verifiedProfileBatchSize) {
+      final end = i + verifiedProfileBatchSize;
+      final chunk = uncovered.sublist(
+        i,
+        end < uncovered.length ? end : uncovered.length,
+      );
+      unawaited(_open(chunk.join(':'), chunk, authority, generation));
+    }
+    if (_refreshTimer == null) _armRefresh(generation);
+    _publish();
+  }
+
+  void _close(String id) {
+    final batch = _batches.remove(id)!..stop();
+    _checked.removeAll(batch.subjects);
+  }
+
+  /// Tracked subjects no open batch covers, oldest interest first.
+  List<String> _uncoveredSubjects() {
+    final covered = {for (final batch in _batches.values) ...batch.subjects};
+    return [
+      for (final key in _wanted.keys)
+        if (!covered.contains(key)) key,
+    ];
+  }
+
+  Future<void> _open(
+    String id,
+    List<String> chunk,
+    VerifiedProfileAuthority authority,
+    int generation,
+  ) async {
+    final batch = _Batch(chunk, _interest);
+    _batches[id] = batch;
+    void fail() {
+      if (!batch.active) return;
+      batch.stop();
+      if (_batches[id] == batch) _batches.remove(id);
+      _checked.removeAll(chunk);
+      _publish();
+      // No hot retry: the next discovery refresh, reconnect or tracked
+      // subject reopens it.
+    }
+
+    batch.fail = fail;
+
+    batch.timeout = Timer(_eoseTimeout, fail);
+    try {
+      final unsubscribe = await ref
+          .read(relaySessionProvider.notifier)
+          .subscribeWithStatus(
+            NostrFilter(
+              kinds: const [verifiedProfileKind],
+              authors: [authority.pubkey],
+              tags: {'#d': chunk},
+              limit: chunk.length,
+            ),
+            (event) => _onEvent(batch, event, authority, generation),
+            onStatusChanged: (status) => switch (status) {
+              RelaySubscriptionStatus.ready => _onEose(
+                batch,
+                authority,
+                generation,
+              ),
+              RelaySubscriptionStatus.retrying => _onRetry(batch),
+            },
+            onClosed: (_) => fail(),
+          );
+      if (!batch.active || generation != _generation) {
+        unsubscribe();
+      } else {
+        batch.unsubscribe = unsubscribe;
+      }
+    } catch (error) {
+      debugPrint('[VerifiedProfiles] subscribe failed: $error');
+      fail();
+    }
+  }
+
+  void _onEvent(
+    _Batch batch,
+    NostrEvent event,
+    VerifiedProfileAuthority authority,
+    int generation,
+  ) {
+    if (!batch.active || generation != _generation) return;
+    final subject = verifiedProfileSubject(event, authority);
+    if (subject == null || !batch.subjects.contains(subject)) return;
+    if (!batch.ready) {
+      if (batch.early.length >= batch.subjects.length * _maxEarlyPerSubject) {
+        debugPrint('[VerifiedProfiles] too many events before EOSE');
+        batch.fail();
+        return;
+      }
+      batch.candidates++;
+      batch.early.add(event);
+      return;
+    }
+    final queued = batch.pending.isNotEmpty;
+    if (supersedes(event, batch.pending[subject])) {
+      batch.pending[subject] = event;
+    }
+    if (queued) return;
+    _enqueue(batch, generation, () async {
+      final events = batch.pending.values.toList();
+      batch.pending.clear();
+      final proven = await _prove(events);
+      if (_live(batch, generation)) {
+        _accept(proven, authority);
+        _publish();
+      }
+    });
+  }
+
+  /// The relay closed and is retrying the subscription. Its records are cached
+  /// until the replay's EOSE; replayed events, including retractions, apply as
+  /// live updates. Absence is only proven by the fresh subscription the next
+  /// sync opens, so a retrying relay is never resubscribed hot.
+  void _onRetry(_Batch batch) {
+    if (!batch.active) return;
+    batch.stale = true;
+    batch.retries++;
+    if (!batch.ready) return;
+    batch.resume.addAll(batch.subjects.where(_checked.contains));
+    _checked.removeAll(batch.subjects);
+    _publish();
+  }
+
+  void _onEose(
+    _Batch batch,
+    VerifiedProfileAuthority authority,
+    int generation,
+  ) {
+    if (!batch.active || generation != _generation) return;
+    if (batch.ready) {
+      // The end of a retry's replay: queued live updates apply first.
+      if (batch.resume.isEmpty) return;
+      final resume = Set.of(batch.resume);
+      batch.resume.clear();
+      final retries = batch.retries;
+      _enqueue(batch, generation, () async {
+        if (batch.retries != retries) return;
+        _checked.addAll(resume);
+        _publish();
+      });
+      return;
+    }
+    batch.ready = true;
+    batch.timeout?.cancel();
+    batch.timeout = null;
+    final early = List.of(batch.early);
+    batch.early.clear();
+    final candidates = batch.candidates;
+    final retries = batch.retries;
+    _enqueue(batch, generation, () async {
+      final proven = await _prove(early);
+      if (!_live(batch, generation)) return;
+      _accept(proven, authority);
+      // A retry while proof ran left these subjects for the replay or the
+      // replacement subscription to reconcile.
+      if (batch.retries != retries) {
+        _publish();
+        return;
+      }
+      final seen = {
+        for (final event in proven) verifiedProfileSubject(event, authority)!,
+      };
+      // A full response that omits subjects may be truncated: only a short
+      // response proves absence. A retried response resumed after the events
+      // already delivered, so it never does.
+      final complete =
+          retries == 0 &&
+          (candidates < batch.subjects.length ||
+              seen.length == batch.subjects.length);
+      for (final subject in batch.subjects) {
+        if (!complete && !seen.contains(subject)) continue;
+        _checked.add(subject);
+        if (!seen.contains(subject)) _heads.remove(subject);
+      }
+      _publish();
+    });
+  }
+
+  bool _live(_Batch batch, int generation) =>
+      batch.active && generation == _generation && ref.mounted;
+
+  void _enqueue(_Batch batch, int generation, Future<void> Function() job) {
+    batch.tail = batch.tail.then((_) async {
+      if (!_live(batch, generation)) return;
+      try {
+        await job();
+      } catch (error) {
+        // Retire the batch so a later sync reconciles it again.
+        debugPrint('[VerifiedProfiles] batch job failed: $error');
+        batch.fail();
+      }
+    });
+  }
+
+  Future<List<NostrEvent>> _prove(List<NostrEvent> events) async {
+    if (events.isEmpty) return const [];
+    final results = await ref.read(verifiedProfileProofCheckerProvider)(events);
+    return [
+      for (var i = 0; i < events.length; i++)
+        if (results[i]) events[i],
+    ];
+  }
+
+  void _accept(List<NostrEvent> events, VerifiedProfileAuthority authority) {
+    for (final event in events) {
+      final subject = verifiedProfileSubject(event, authority);
+      if (subject == null || !_wanted.containsKey(subject)) continue;
+      if (supersedes(event, _heads[subject])) _heads[subject] = event;
+    }
+  }
+
+  /// Validates one head. Tests override this to count parses.
+  @visibleForTesting
+  VerifiedProfile? parseHead(
+    NostrEvent event,
+    VerifiedProfileAuthority authority, {
+    required bool checked,
+  }) => parseVerifiedProfile(event, authority, checked: checked);
+
+  /// The last parse of each subject's head. Every publish rebuilds the whole
+  /// map, so without it each batch re-validated every head already known.
+  Map<String, _ParsedHead> _parsed = const {};
+
+  Map<String, VerifiedProfile> _snapshot() {
+    final authority = _authority;
+    if (!_enabled || authority == null) {
+      _parsed = const {};
+      return const {};
+    }
+    final parsed = <String, _ParsedHead>{};
+    final profiles = <String, VerifiedProfile>{};
+    for (final MapEntry(:key, :value) in _heads.entries) {
+      final checked = _discoveryFresh && _checked.contains(key);
+      final previous = _parsed[key];
+      final head =
+          previous != null &&
+              identical(previous.event, value) &&
+              previous.authority == authority
+          ? previous
+          : _ParsedHead(
+              value,
+              authority,
+              parseHead(value, authority, checked: checked),
+            );
+      parsed[key] = head;
+      if (head.withChecked(checked) case final profile?) {
+        profiles[key] = profile;
+      }
+    }
+    _parsed = parsed;
+    return profiles;
+  }
+
+  void _publish() {
+    if (!ref.mounted) return;
+    final next = _snapshot();
+    if (!mapEquals(state, next)) state = next;
+  }
+}
+
+/// A head's parse, kept while the head and authority stand. Only `checked`
+/// varies between publishes, so it is applied without validating again.
+class _ParsedHead {
+  _ParsedHead(this.event, this.authority, this._profile);
+
+  final NostrEvent event;
+  final VerifiedProfileAuthority authority;
+  VerifiedProfile? _profile;
+
+  VerifiedProfile? withChecked(bool checked) {
+    final profile = _profile;
+    if (profile == null || profile.checked == checked) return profile;
+    return _profile = VerifiedProfile(
+      displayName: profile.displayName,
+      username: profile.username,
+      fullName: profile.fullName,
+      issuerLabel: profile.issuerLabel,
+      verifiedAt: profile.verifiedAt,
+      checked: checked,
+      multipleIssuers: profile.multipleIssuers,
+    );
+  }
+}
+
+final verifiedProfilesProvider =
+    NotifierProvider<VerifiedProfilesNotifier, Map<String, VerifiedProfile>>(
+      VerifiedProfilesNotifier.new,
+    );

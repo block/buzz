@@ -224,6 +224,94 @@ async fn test_upload_and_get() {
     assert_eq!(thumb_resp.status(), 200, "thumbnail should return 200");
 }
 
+/// An 8x8 PNG whose left half is transparent. A random opaque color keeps the
+/// bytes, and so the sha, unique per run.
+fn transparent_png() -> (Vec<u8>, [u8; 3]) {
+    let [r, g, b]: [u8; 3] = rand::random();
+    let mut png = Vec::new();
+    image::RgbaImage::from_fn(8, 8, |x, _| {
+        image::Rgba([r, g, b, if x < 4 { 0 } else { 255 }])
+    })
+    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+    .expect("encode PNG");
+    (png, [r, g, b])
+}
+
+/// A transparent image's descriptor points at a WebP thumbnail that keeps its
+/// alpha, and the JPEG thumbnail installed clients derive is still served.
+#[tokio::test]
+#[ignore]
+async fn test_transparent_png_thumbnail_is_webp_with_alpha() {
+    let client = http_client();
+    let keys = Keys::generate();
+    let (png, [r, g, b]) = transparent_png();
+    let sha256 = hex::encode(Sha256::digest(&png));
+
+    let auth = sign_blossom_auth(&keys, &sha256);
+    let resp = client
+        .put(format!("{}/media/upload", relay_http_url()))
+        .header("Authorization", blossom_auth_header(&auth))
+        .header("Content-Type", "image/png")
+        .header("X-SHA-256", &sha256)
+        .body(png)
+        .send()
+        .await
+        .expect("upload PUT failed");
+    assert_eq!(resp.status(), 200, "upload should succeed");
+    let descriptor: serde_json::Value = resp.json().await.expect("BlobDescriptor JSON");
+    let thumb_url = descriptor["thumb"].as_str().expect("descriptor thumb");
+    assert!(
+        thumb_url.ends_with(&format!("/media/{sha256}.thumb.webp")),
+        "{thumb_url}"
+    );
+
+    let read_auth = blossom_auth_header(&sign_blossom_get_auth(&keys, &sha256));
+    let head = client
+        .head(thumb_url)
+        .header("Authorization", &read_auth)
+        .send()
+        .await
+        .expect("HEAD thumbnail failed");
+    assert_eq!(head.status(), 200);
+    assert_eq!(head.headers()["content-type"], "image/webp");
+
+    let get = client
+        .get(thumb_url)
+        .header("Authorization", &read_auth)
+        .send()
+        .await
+        .expect("GET thumbnail failed");
+    assert_eq!(get.status(), 200);
+    assert_eq!(get.headers()["content-type"], "image/webp");
+    let thumb = image::load_from_memory(&get.bytes().await.unwrap())
+        .expect("decode thumbnail")
+        .to_rgba8();
+    assert_eq!(
+        thumb.get_pixel(0, 0)[3],
+        0,
+        "transparent pixel stays transparent"
+    );
+    let [tr, tg, tb, ta] = thumb.get_pixel(thumb.width() - 1, 0).0;
+    assert_eq!(ta, 255, "opaque pixel stays opaque");
+    assert!(
+        [(tr, r), (tg, g), (tb, b)]
+            .iter()
+            .all(|(t, o)| t.abs_diff(*o) <= 16),
+        "opaque color survives lossy encoding: {:?} vs {:?}",
+        [tr, tg, tb],
+        [r, g, b]
+    );
+
+    let jpeg = client
+        .get(format!("{}/media/{sha256}.thumb.jpg", relay_http_url()))
+        .header("Authorization", &read_auth)
+        .send()
+        .await
+        .expect("GET JPEG thumbnail failed");
+    assert_eq!(jpeg.status(), 200, "installed clients' JPEG thumbnail");
+    assert_eq!(jpeg.headers()["content-type"], "image/jpeg");
+}
+
 /// Idempotency: uploading the same file twice returns the same BlobDescriptor.
 #[tokio::test]
 #[ignore]

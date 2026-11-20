@@ -34,7 +34,11 @@ import {
 import { useSettleGatedPrependMessages } from "./useSettleGatedPrependMessages";
 
 export type MessageTimelineHandle = {
-  scrollToBottomOnNextUpdate: () => void;
+  /** Release the frozen tail and pin the next append for a send to
+   *  `sendChannelId`. Ignored when this timeline shows another channel. */
+  scrollToBottomOnNextUpdate: (sendChannelId: string) => void;
+  /** Undo `scrollToBottomOnNextUpdate` for a send that failed. */
+  cancelScrollToBottomOnNextUpdate: () => void;
   settleAtBottom: () => boolean;
 };
 
@@ -358,6 +362,9 @@ const MessageTimelineBase = React.forwardRef<
     onScroll,
     scrollToBottom,
     scrollToBottomOnNextUpdate,
+    isOwnSendPending,
+    isVirtualizerAtBottom,
+    cancelScrollToBottomOnNextUpdate,
     scrollToMessage,
     onVirtualizerAtBottomStateChange,
   } = useAnchoredScroll({
@@ -424,14 +431,33 @@ const MessageTimelineBase = React.forwardRef<
         }
       } else if (hasConfirmedVirtualizerBottomRef.current) {
         onVirtualizerAtBottomStateChange(false);
-        if (semanticAtBottomRef.current) {
+        // Until the sent row lands, the own-send pin owns the next append.
+        // Freezing the tail first would buffer the sent row, and the pin would
+        // never see it arrive. Virtua reports a stale gap here when a
+        // discarded render already counted the sent row in its store.
+        if (semanticAtBottomRef.current && !isOwnSendPending()) {
           suppressNextSemanticBottomRef.current = true;
           queueSemanticBottom(false);
         }
       }
     },
-    [onVirtualizerAtBottomStateChange, queueSemanticBottom],
+    [isOwnSendPending, onVirtualizerAtBottomStateChange, queueSemanticBottom],
   );
+  const hasPendingLiveRows = bufferedTimeline.pendingCount > 0;
+  React.useEffect(() => {
+    // With nothing buffered, the freeze is a model no-op, so the synthetic
+    // bottom report the suppression waits for never arrives. Disarm it, and
+    // release if the reader already came back, so a single scroll back to
+    // the floor (scrollbar jump, End key) does not strand the tail frozen.
+    if (isSemanticallyAtBottom || hasPendingLiveRows) return;
+    suppressNextSemanticBottomRef.current = false;
+    if (isAtBottom) queueSemanticBottom(true);
+  }, [
+    hasPendingLiveRows,
+    isAtBottom,
+    isSemanticallyAtBottom,
+    queueSemanticBottom,
+  ]);
 
   const timelineIntroSurface = showTimelineError
     ? null
@@ -462,29 +488,64 @@ const MessageTimelineBase = React.forwardRef<
   const showPinnedIntroOnly = activePinnedIntro !== null && !showMessageList;
   const omitHistoryLeadIn = showChannelIntroOnly || showPinnedIntroOnly;
 
-  const prepareForOwnMessage = React.useCallback(() => {
-    // The user's own send is the deliberate Zulip exception: release buffered
-    // output before arming the next-append bottom pin so the sent row can enter
-    // Virtua's model and become the new physical floor.
-    setIsSemanticallyAtBottom(true);
-    scrollToBottomOnNextUpdate();
-  }, [scrollToBottomOnNextUpdate]);
+  const prepareForOwnMessage = React.useCallback(
+    (sendChannelId: string) => {
+      // A send that settles after a channel switch belongs to the channel it
+      // left, so it must neither release nor pin the one shown now.
+      if (!scrollToBottomOnNextUpdate(sendChannelId)) return;
+      // The user's own send is the deliberate Zulip exception: release buffered
+      // output along with the next-append bottom pin so the sent row can enter
+      // Virtua's model and become the new physical floor. Drop a freeze queued
+      // before the send, or it would land after this release, and the bottom
+      // report suppression that freeze armed.
+      if (semanticBottomRafRef.current !== null) {
+        window.cancelAnimationFrame(semanticBottomRafRef.current);
+        semanticBottomRafRef.current = null;
+      }
+      suppressNextSemanticBottomRef.current = false;
+      setIsSemanticallyAtBottom(true);
+    },
+    [scrollToBottomOnNextUpdate],
+  );
+  const cancelOwnMessage = React.useCallback(() => {
+    // While the send was pending, its hold skipped any freeze, including one
+    // queued before the send. If the reader is off the floor now, freeze as
+    // that report would have, so later arrivals wait behind the pill.
+    const skippedFreeze =
+      isOwnSendPending() &&
+      hasConfirmedVirtualizerBottomRef.current &&
+      !isVirtualizerAtBottom();
+    cancelScrollToBottomOnNextUpdate();
+    if (skippedFreeze) {
+      suppressNextSemanticBottomRef.current = true;
+      queueSemanticBottom(false);
+    }
+  }, [
+    cancelScrollToBottomOnNextUpdate,
+    isOwnSendPending,
+    isVirtualizerAtBottom,
+    queueSemanticBottom,
+  ]);
 
   React.useImperativeHandle(
     ref,
     () => ({
       scrollToBottomOnNextUpdate: prepareForOwnMessage,
+      cancelScrollToBottomOnNextUpdate: cancelOwnMessage,
       settleAtBottom: () => {
         if (!timelineVirtualizerApi) return false;
         scrollToBottom("auto");
         return true;
       },
     }),
-    [prepareForOwnMessage, scrollToBottom, timelineVirtualizerApi],
+    [
+      cancelOwnMessage,
+      prepareForOwnMessage,
+      scrollToBottom,
+      timelineVirtualizerApi,
+    ],
   );
 
-  // Jump-to-message is purely DOM-based now: all loaded rows are mounted, so
-  // `scrollToMessage` always finds the target row. No virtualizer convergence.
   const jumpToMessage = React.useCallback(
     (messageId: string, options?: { behavior?: ScrollBehavior }) => {
       return scrollToMessage(messageId, { highlight: true, ...options });
@@ -527,8 +588,8 @@ const MessageTimelineBase = React.forwardRef<
 
   // Scroll to the active search match when it changes. `jumpToMessage` updates
   // the scroll anchor (so the post-commit restore won't yank the view back off
-  // the match) and, when virtualized, converges on the target through the index
-  // model — the row may be windowed out of the DOM.
+  // the match) and, when virtualized, scrolls through the index model — the row
+  // may be windowed out of the DOM.
   const prevSearchActiveRef = React.useRef<string | null>(null);
   const pendingSearchTargetRef = React.useRef<string | null>(null);
   React.useEffect(() => {
@@ -550,22 +611,10 @@ const MessageTimelineBase = React.forwardRef<
     }
   }, [jumpToMessage, searchActiveMessageId, showTimelineSkeleton]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: deferredMessages and virtualizerRenderVersion are intentional retry triggers — a search hit may be spliced into messages asynchronously, and in virtualized mode a phase-1 index jump only realizes the row; retry when the rendered range changes so the DOM-visible path can center and highlight it.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: deferredMessages and virtualizerRenderVersion are intentional retry triggers — a search hit may be spliced into messages asynchronously, so retry until the timeline can scroll to it.
   React.useEffect(() => {
     const target = pendingSearchTargetRef.current;
     if (!target || showTimelineSkeleton) return;
-    if (
-      useTimelineVirtualizer &&
-      !activeScrollContainerRef.current?.querySelector(
-        `[data-message-id="${CSS.escape(target)}"]`,
-      )
-    ) {
-      // Phase 1: ask the virtualizer to realize the match's index. The retry effect
-      // runs again on range change and the DOM-visible path does the actual
-      // center + highlight once the row exists.
-      void jumpToMessage(target, { behavior: "auto" });
-      return;
-    }
     if (jumpToMessage(target, { behavior: "auto" })) {
       pendingSearchTargetRef.current = null;
     }

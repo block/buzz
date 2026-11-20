@@ -7,8 +7,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
+import 'message_reply_drag_target.dart';
+
 /// Shared hold deadline so nested reaction pills win before the message menu.
-const iosMessageLongPressDuration = Duration(milliseconds: 200);
+const iosMessageLongPressDuration = Duration(milliseconds: 500);
 const _maxMessageSnapshotDimension = 2048.0;
 
 double _messageSnapshotPixelRatio(Size size, double devicePixelRatio) {
@@ -59,6 +61,12 @@ class MessageLongPressInkWell extends StatelessWidget {
   /// The key's current context must resolve to a boundary covering the message
   /// content. When omitted, this widget inserts and owns that boundary.
   final GlobalKey? snapshotKey;
+
+  /// Whether a pointer long press opens actions only on a
+  /// [MessageLongPressTarget] or [MessageReplyDragTarget] below this region.
+  /// A hold on the empty row space around them does nothing, and neither does
+  /// its release. Otherwise a hold anywhere in the region opens actions.
+  final bool targetsOnly;
   final Widget child;
 
   const MessageLongPressInkWell({
@@ -69,6 +77,7 @@ class MessageLongPressInkWell extends StatelessWidget {
     this.borderRadius,
     this.highlightColor,
     this.snapshotKey,
+    this.targetsOnly = false,
     required this.child,
   }) : assert(onLongPress != null || onLongPressDetails != null);
 
@@ -81,6 +90,7 @@ class MessageLongPressInkWell extends StatelessWidget {
       borderRadius: borderRadius,
       highlightColor: highlightColor,
       externalSnapshotKey: snapshotKey,
+      targetsOnly: targetsOnly,
       child: child,
     );
   }
@@ -97,6 +107,7 @@ class _MessageLongPressRegion extends HookWidget {
   final BorderRadius? borderRadius;
   final Color? highlightColor;
   final GlobalKey? externalSnapshotKey;
+  final bool targetsOnly;
   final Widget child;
 
   const _MessageLongPressRegion({
@@ -106,6 +117,7 @@ class _MessageLongPressRegion extends HookWidget {
     required this.borderRadius,
     required this.highlightColor,
     required this.externalSnapshotKey,
+    required this.targetsOnly,
     required this.child,
   });
 
@@ -114,6 +126,7 @@ class _MessageLongPressRegion extends HookWidget {
     final fallbackSnapshotKey = useMemoized(GlobalKey.new, const []);
     final snapshotKey = externalSnapshotKey ?? fallbackSnapshotKey;
     final sourceHidden = useState(false);
+    final onTarget = useRef(false);
 
     void recognize() {
       final renderObject = snapshotKey.currentContext?.findRenderObject();
@@ -186,9 +199,14 @@ class _MessageLongPressRegion extends HookWidget {
     }
 
     return Semantics(
+      container: true,
       onLongPress: recognize,
       child: RawGestureDetector(
         behavior: HitTestBehavior.translucent,
+        // The detector's own semantic long press reports its centre, which
+        // can miss every target on a wide row. The action above needs no
+        // position.
+        excludeFromSemantics: true,
         gestures: {
           LongPressGestureRecognizer:
               GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
@@ -197,9 +215,23 @@ class _MessageLongPressRegion extends HookWidget {
                       ? iosMessageLongPressDuration
                       : null,
                 ),
-                (recognizer) {
-                  recognizer.onLongPressStart = (_) => recognize();
-                },
+                // A hold beside the targets still wins the arena, so its
+                // release cannot fall through to the row's tap; it just
+                // opens nothing. The target is decided at pointer down, so
+                // an edit or reaction that moves the bubble mid-hold doesn't
+                // change the outcome.
+                (recognizer) => recognizer
+                  ..onLongPressDown = (details) {
+                    onTarget.value =
+                        !targetsOnly ||
+                        messageLongPressTargetAt(
+                          context.findRenderObject(),
+                          details.globalPosition,
+                        );
+                  }
+                  ..onLongPressStart = (_) {
+                    if (onTarget.value) recognize();
+                  },
               ),
         },
         child: InkWell(

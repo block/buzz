@@ -2,15 +2,18 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Persistence for followed thread root IDs.
-///
-/// Mirrors the desktop store (`useThreadFollows.ts`): per-pubkey entries of
-/// `{rootId, followedAt}`, capped at the oldest-out limit. Desktop keeps this
-/// client-local (localStorage), so mobile does the same with
-/// SharedPreferences — following on one device intentionally does not sync.
-const threadFollowsMaxEntries = 500;
+import '../../../shared/theme/community_theme_preference.dart';
 
-String threadFollowsKey(String pubkey) => 'buzz-thread-follows.v1:$pubkey';
+/// Pre-sync thread follows: per identity and community, `{rootId,
+/// followedAt}` with no channel. Synced follows replaced this store; it is
+/// kept only as the source of the one-time legacy import, which retires each
+/// entry once its thread's channel is known and it is imported.
+String threadFollowsKey(String pubkey, String relayUrl) =>
+    'buzz-thread-follows.v1:$pubkey:${Uri.encodeComponent(normalizeCommunityRelayUrl(relayUrl))}';
+
+/// The earlier key, shared by every community of the identity.
+String legacyThreadFollowsKey(String pubkey) =>
+    'buzz-thread-follows.v1:$pubkey';
 
 class ThreadFollowEntry {
   final String rootId;
@@ -26,8 +29,14 @@ class ThreadFollowsStorage {
 
   ThreadFollowsStorage(this._prefs);
 
-  List<ThreadFollowEntry> read(String pubkey) {
-    final raw = _prefs.getString(threadFollowsKey(pubkey));
+  List<ThreadFollowEntry> read(String pubkey, String relayUrl) {
+    final key = threadFollowsKey(pubkey, relayUrl);
+    // Each community starts from the shared entry, which stays for the
+    // others. Its root ids are event ids, so they only ever match threads in
+    // their own community, and as the oldest follows they are evicted first.
+    final raw =
+        _prefs.getString(key) ??
+        _prefs.getString(legacyThreadFollowsKey(pubkey));
     if (raw == null || raw.isEmpty) return const [];
 
     try {
@@ -48,21 +57,10 @@ class ThreadFollowsStorage {
     }
   }
 
-  void write(String pubkey, List<ThreadFollowEntry> entries) {
+  void write(String pubkey, String relayUrl, List<ThreadFollowEntry> entries) {
     _prefs.setString(
-      threadFollowsKey(pubkey),
+      threadFollowsKey(pubkey, relayUrl),
       jsonEncode([for (final entry in entries) entry.toJson()]),
     );
   }
-}
-
-/// Cap entries at [threadFollowsMaxEntries], evicting the oldest follows
-/// first — same policy as desktop's `capEntries`.
-List<ThreadFollowEntry> capThreadFollowEntries(
-  List<ThreadFollowEntry> entries,
-) {
-  if (entries.length <= threadFollowsMaxEntries) return entries;
-  final sorted = [...entries]
-    ..sort((a, b) => a.followedAt.compareTo(b.followedAt));
-  return sorted.sublist(sorted.length - threadFollowsMaxEntries);
 }

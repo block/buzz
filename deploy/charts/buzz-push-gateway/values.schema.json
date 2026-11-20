@@ -21,18 +21,6 @@
       "minimum": 1,
       "maximum": 31536000
     },
-    "profiles": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "dogfood"
-      ],
-      "properties": {
-        "dogfood": {
-          "$ref": "#/$defs/enabledProfile"
-        }
-      }
-    },
     "apnsKey": false,
     "deploymentAnnotations": {
       "type": "object",
@@ -338,16 +326,45 @@
     "terminationGracePeriodSeconds": {
       "type": "integer",
       "minimum": 60
+    },
+    "application": {
+      "$ref": "#/$defs/application"
+    },
+    "profiles": false,
+    "android": {
+      "$ref": "#/$defs/android"
+    },
+    "signedCallRateLimit": {
+      "$ref": "#/$defs/signedCallRateLimit"
     }
   },
   "$defs": {
-    "profileBase": {
+    "apnsCert": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "secretName",
+        "secretKey"
+      ],
+      "properties": {
+        "secretName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "secretKey": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "application": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "appAttestAppId",
         "apnsTopic",
-        "apnsEnvironment"
+        "apnsEnvironment",
+        "apnsCert"
       ],
       "properties": {
         "appAttestAppId": {
@@ -369,33 +386,110 @@
         }
       }
     },
-    "enabledProfile": {
-      "allOf": [
-        {
-          "$ref": "#/$defs/profileBase"
-        },
-        {
-          "required": [
-            "apnsCert"
-          ]
-        }
-      ]
-    },
-    "apnsCert": {
+    "android": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "secretName",
-        "secretKey"
+        "enabled",
+        "packageName",
+        "signingCertDigests",
+        "bootKeyDigests",
+        "revocationGraceSeconds",
+        "fcmProjectId",
+        "fcmServiceAccount",
+        "attestationRoots"
       ],
       "properties": {
-        "secretName": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "packageName": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$"
+        },
+        "signingCertDigests": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$"
+          }
+        },
+        "bootKeyDigests": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$"
+          }
+        },
+        "revocationGraceSeconds": {
+          "type": "integer",
+          "minimum": 3600,
+          "maximum": 31536000
+        },
+        "fcmProjectId": {
           "type": "string",
           "minLength": 1
         },
-        "secretKey": {
-          "type": "string",
-          "minLength": 1
+        "fcmServiceAccount": {
+          "$ref": "#/$defs/apnsCert"
+        },
+        "attestationRoots": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "secretName",
+            "secretKey"
+          ],
+          "properties": {
+            "secretName": {
+              "type": "string"
+            },
+            "secretKey": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "properties": {
+              "signingCertDigests": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "signedCallRateLimit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "windowSeconds",
+        "maxCalls"
+      ],
+      "properties": {
+        "windowSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "maxCalls": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
         }
       }
     }
@@ -404,7 +498,7 @@
     "replicaCount",
     "existingSecret",
     "maxGrantLifetimeSeconds",
-    "profiles",
+    "application",
     "httpRoute",
     "image",
     "migration",

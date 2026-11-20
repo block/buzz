@@ -1,4 +1,8 @@
 import type { RelayEvent } from "@/shared/api/types";
+import {
+  compareChronologicalOrder,
+  compareRelayOrder,
+} from "@/shared/lib/eventOrder";
 
 export type ChannelWindowCursor = { createdAt: number; eventId: string };
 export type ChannelWindowThreadSummary = {
@@ -54,17 +58,6 @@ function cursorsEqual(
       left.createdAt === right.createdAt &&
       left.eventId === right.eventId)
   );
-}
-
-/** Relay order: newest timestamp first, then ascending id within a second. */
-export function compareRelayOrder(left: RelayEvent, right: RelayEvent) {
-  return left.created_at !== right.created_at
-    ? right.created_at - left.created_at
-    : left.id < right.id
-      ? -1
-      : left.id > right.id
-        ? 1
-        : 0;
 }
 
 function isStrictlyOlder(event: RelayEvent, cursor: ChannelWindowCursor) {
@@ -271,9 +264,7 @@ export function flattenChannelWindowEvents(store: ChannelWindowStore) {
   }
   for (const event of store.liveOverlay) byId.set(event.id, event);
   for (const event of store.liveAux) byId.set(event.id, event);
-  return [...byId.values()].sort((left, right) =>
-    compareRelayOrder(right, left),
-  );
+  return [...byId.values()].sort(compareChronologicalOrder);
 }
 
 /**

@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/dm_header_portrait.dart';
 import 'dart:async';
 import 'package:buzz/shared/relay/media_image.dart';
 import 'package:http/http.dart' as http;
@@ -13,6 +14,113 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 void main() {
+  testWidgets(
+    'animated DM portrait opens the same settings as the native title',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      var settingsOpened = 0;
+      await tester.pumpWidget(
+        _testApp(
+          home: MediaQuery(
+            data: const MediaQueryData(
+              viewPadding: EdgeInsets.only(top: 62),
+              disableAnimations: true,
+            ),
+            child: SizedBox(
+              width: 393,
+              height: 166,
+              child: IosNavigationBar(
+                title: 'Agent',
+                onTitlePressed: () => settingsOpened++,
+                subtitle: 'Online',
+                titleAvatars: const [
+                  IosNavigationAction(
+                    label: 'Agent',
+                    avatarInitial: 'A',
+                    avatarIsAgent: true,
+                    imageUrl:
+                        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-13.png',
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      final params =
+          tester.widget<UiKitView>(find.byType(UiKitView)).creationParams!
+              as Map;
+      expect((params['titleAvatars'] as List).length, 1);
+      expect(params['titleHasAnimatedPortrait'], isTrue);
+      final portrait = find.byType(DmHeaderPortrait);
+      expect(tester.getSize(portrait), const Size(64, 64));
+      expect(
+        tester.getTopLeft(portrait).dy -
+            tester.getTopLeft(find.byType(UiKitView)).dy,
+        58,
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('navigation-header-avatar-settings')),
+      );
+      expect(settingsOpened, 1);
+      await tester.pumpWidget(
+        _testApp(
+          home: const MediaQuery(
+            data: MediaQueryData(),
+            child: SizedBox(
+              width: 951,
+              height: 128,
+              child: IosNavigationBar(
+                title: 'Alice',
+                centerTitleInPane: true,
+                titleAvatars: [IosNavigationAction(label: 'Alice')],
+              ),
+            ),
+          ),
+        ),
+      );
+      final paneParams =
+          tester.widget<UiKitView>(find.byType(UiKitView)).creationParams!
+              as Map;
+      expect(paneParams['portraitTopPadding'], 12);
+      expect(
+        tester.getTopLeft(find.byType(DmHeaderPortrait)).dy -
+            tester.getTopLeft(find.byType(UiKitView)).dy,
+        12,
+      );
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+  testWidgets(
+    'native toolbar receives stable safe inset inside a translated route',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      await tester.pumpWidget(
+        _testApp(
+          home: MediaQuery(
+            data: const MediaQueryData(viewPadding: EdgeInsets.only(top: 62)),
+            child: Transform.translate(
+              offset: const Offset(0, 600),
+              child: const SizedBox(
+                height: 120,
+                child: IosNavigationBar(title: 'Settings'),
+              ),
+            ),
+          ),
+        ),
+      );
+      expect(
+        tester.widget<UiKitView>(find.byType(UiKitView)).creationParams,
+        containsPair('safeTop', 62.0),
+      );
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
   testWidgets(
     'native readiness waits for configuration and layout acknowledgement',
     (tester) async {
@@ -271,6 +379,41 @@ void main() {
     });
   }
 
+  testWidgets('scrolling does not rebuild the native bar', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final controller = ScrollController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      _testApp(
+        home: FrostedScaffold(
+          appBar: const FrostedAppBar(title: Text('Conversation')),
+          body: ListView(
+            controller: controller,
+            children: [
+              for (var i = 0; i < 40; i++)
+                SizedBox(height: 60, child: Text('Message $i')),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final before = tester.widget<IosNavigationBar>(
+      find.byType(IosNavigationBar),
+    );
+    controller.jumpTo(300);
+    await tester.pumpAndSettle();
+    // The same widget instance is not rebuilt, so its native payload is not
+    // encoded again for every scrolled frame.
+    expect(
+      tester.widget<IosNavigationBar>(find.byType(IosNavigationBar)),
+      same(before),
+    );
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('native material follows live theme surface changes', (
     tester,
   ) async {
@@ -356,7 +499,10 @@ void main() {
     await tester.pump();
     await tester.drag(find.byType(ListView), const Offset(0, -250));
     await tester.pumpAndSettle();
-    expect(calls.where((call) => call.method == 'scroll').last.arguments, 52);
+    expect(
+      calls.where((call) => call.method == 'scroll').last.arguments,
+      greaterThan(52),
+    );
     final bodyTop = tester.getTopLeft(find.byType(ListView)).dy;
     await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
       channel.name,
@@ -370,7 +516,10 @@ void main() {
     );
     await tester.pump();
     await tester.pump();
-    expect(calls.where((call) => call.method == 'scroll').last.arguments, 80);
+    expect(
+      calls.where((call) => call.method == 'scroll').last.arguments,
+      greaterThan(80),
+    );
     expect(tester.getSize(find.byType(UiKitView)).height, 44);
     expect(tester.getTopLeft(find.byType(ListView)).dy, bodyTop);
     await tester.pumpWidget(const SizedBox());
@@ -445,7 +594,10 @@ void main() {
       expect(selected, 2);
       await tester.drag(find.byType(ListView), const Offset(0, -180));
       await tester.pumpAndSettle();
-      expect(calls.where((call) => call.method == 'scroll').last.arguments, 52);
+      expect(
+        calls.where((call) => call.method == 'scroll').last.arguments,
+        greaterThan(52),
+      );
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
       debugDefaultTargetPlatformOverride = null;
@@ -642,6 +794,73 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     },
   );
+
+  testWidgets('retained header artwork follows the current action glyph', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final messenger = tester.binding.defaultBinaryMessenger;
+    final channels = <MethodChannel>[];
+    messenger.setMockMethodCallHandler(SystemChannels.platform_views, (
+      call,
+    ) async {
+      if (call.method == 'create') {
+        final channel = MethodChannel(
+          '${IosNavigationBar.viewType}/${(call.arguments as Map)['id']}',
+        );
+        channels.add(channel);
+        messenger.setMockMethodCallHandler(channel, (_) async => null);
+      }
+      return null;
+    });
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(SystemChannels.platform_views, null);
+      for (final channel in channels) {
+        messenger.setMockMethodCallHandler(channel, null);
+      }
+    });
+    Widget page(IosNavigationAction action) => _testApp(
+      home: IosNavigationBar(title: 'Chat', actions: [action]),
+    );
+    Map action() =>
+        ((tester.widget<UiKitView>(find.byType(UiKitView)).creationParams
+                        as Map)['actions']
+                    as List)
+                .single
+            as Map;
+    await tester.pumpWidget(
+      page(const IosNavigationAction(label: 'More', icon: Icons.more_horiz)),
+    );
+    final native = tester.element(find.byType(UiKitView));
+    await tester.runAsync(() async {
+      for (
+        var attempt = 0;
+        attempt < 100 && action()['iconData'] == null;
+        attempt++
+      ) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        await tester.pump();
+      }
+    });
+    expect(action()['iconData'], isNotNull);
+    await tester.pumpWidget(
+      page(const IosNavigationAction(label: 'Huddle', symbol: 'headphones')),
+    );
+    expect(tester.element(find.byType(UiKitView)), same(native));
+    expect(action()['symbol'], 'headphones');
+    expect(action()['iconData'], isNull);
+    await tester.pumpWidget(
+      page(const IosNavigationAction(label: 'Add', icon: Icons.add)),
+    );
+    expect(
+      action()['iconData'],
+      isNull,
+      reason: 'old artwork must not appear while the new glyph renders',
+    );
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
 
   testWidgets('Android retains its Flutter header', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;

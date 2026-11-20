@@ -1,6 +1,4 @@
-import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:nostr/nostr.dart' as nostr;
 
 import '../../../shared/relay/relay.dart';
 import '../../../shared/theme/theme_provider.dart';
@@ -12,17 +10,22 @@ class ChannelSortState {
   final bool isReady;
   final ChannelSortStore store;
 
+  /// Whether sort edits still reach desktop: false once it saved a unified
+  /// sort head, which then supplies [store].
+  final bool editable;
+
   /// Bumped on every change to force downstream rebuilds.
   final int version;
 
   const ChannelSortState({
     this.isReady = false,
     this.store = const ChannelSortStore(),
+    this.editable = true,
     this.version = 0,
   });
 
   ChannelSortMode sortModeFor(String groupKey) =>
-      store.groups[groupKey] ?? kDefaultSortMode;
+      store.groups[groupKey] ?? defaultSortModeFor(groupKey);
 }
 
 class ChannelSortNotifier extends Notifier<ChannelSortState> {
@@ -44,15 +47,9 @@ class ChannelSortNotifier extends Notifier<ChannelSortState> {
       return const ChannelSortState();
     }
 
-    final pubkey = _safePubkeyFromNsec(nsec);
-    if (pubkey == null || pubkey.isEmpty) {
-      return const ChannelSortState();
-    }
-
-    final ChannelSortCrypto crypto;
-    try {
-      crypto = ChannelSortCrypto(nsec, pubkey);
-    } catch (_) {
+    final pubkey = ref.watch(myPubkeyProvider);
+    final crypto = ref.watch(channelSortCryptoProvider);
+    if (pubkey == null || crypto == null) {
       return const ChannelSortState();
     }
 
@@ -81,8 +78,8 @@ class ChannelSortNotifier extends Notifier<ChannelSortState> {
     _manager = manager;
 
     // Resume re-read catches an EVENT a healthy socket never delivered.
-    ref.listen(appLifecycleProvider, (_, next) {
-      if (next == AppLifecycleState.resumed) manager.refreshFromRelay();
+    ref.listen(appForegroundProvider, (_, foreground) {
+      if (foreground) manager.refreshFromRelay();
     });
 
     ref.onDispose(() {
@@ -99,7 +96,12 @@ class ChannelSortNotifier extends Notifier<ChannelSortState> {
       _emitManagerState(manager);
     });
 
-    return ChannelSortState(isReady: false, store: manager.store, version: 1);
+    return ChannelSortState(
+      isReady: false,
+      store: manager.store,
+      editable: manager.editable,
+      version: 1,
+    );
   }
 
   void setSortModeFor(
@@ -114,6 +116,7 @@ class ChannelSortNotifier extends Notifier<ChannelSortState> {
     state = ChannelSortState(
       isReady: _isInitialized,
       store: manager.store,
+      editable: manager.editable,
       version: state.version + 1,
     );
   }
@@ -124,12 +127,16 @@ final channelSortProvider =
       ChannelSortNotifier.new,
     );
 
-String? _safePubkeyFromNsec(String nsec) {
+/// Identity-scoped crypto survives connection status changes. A community or
+/// signing-key change replaces it through [relayConfigProvider].
+final channelSortCryptoProvider = Provider<ChannelSortCrypto?>((ref) {
+  final config = ref.watch(relayConfigProvider);
+  final pubkey = ref.watch(myPubkeyProvider);
+  final nsec = config.nsec?.trim();
+  if (nsec == null || nsec.isEmpty || pubkey == null) return null;
   try {
-    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-    if (privkeyHex.isEmpty) return null;
-    return nostr.Keys(privkeyHex).public;
+    return ChannelSortCrypto(nsec, pubkey);
   } catch (_) {
     return null;
   }
-}
+});

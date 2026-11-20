@@ -6,6 +6,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../features/age_gate/age_signal_provider.dart';
 import 'huddle_auth.dart';
+import '../hosted/hosted_relay_auth.dart';
+import '../relay/relay_provider.dart';
 import 'huddle_media.dart';
 import 'huddle_transport.dart';
 import 'huddle_wire.dart';
@@ -152,10 +154,16 @@ final huddleMediaFactoryProvider = Provider<HuddleMediaFactory>(
   (_) => MethodChannelHuddleMedia.new,
 );
 
-final huddleTransportFactoryProvider = Provider<HuddleTransportFactory>(
-  (_) =>
-      (parameters) => HuddleTransport(parameters: parameters),
-);
+final huddleTransportFactoryProvider = Provider<HuddleTransportFactory>((ref) {
+  final auth = ref.watch(hostedRelayAuthProvider);
+  return (parameters) => HuddleTransport(
+    parameters: parameters,
+    headers: () => auth.headers(
+      RelayConfig(baseUrl: parameters.relayWebSocketUrl, nsec: parameters.nsec),
+      fresh: true,
+    ),
+  );
+});
 
 final huddleReconnectDelaysProvider = Provider<List<Duration>>(
   (_) => const [
@@ -174,7 +182,7 @@ final huddleSessionProvider =
       HuddleSessionNotifier.new,
     );
 
-/// Owns one foreground mobile Huddle and wires native Opus media to its socket.
+/// Owns one mobile Huddle and wires native Opus media to its socket.
 final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
   HuddleMedia? _media;
   HuddleTransportClient? _transport;

@@ -139,7 +139,7 @@ One per returned row with replies. Tag cardinality is exact: one `e`, one `d`, o
 
 - `reply_count` — direct replies to the row. `descendant_count` — all events in the row's thread subtree.
 - `last_reply_at` — unix seconds of the newest descendant, or `null`.
-- `participants` — up to 10 distinct author pubkeys from the thread, most recent first.
+- `participants` — up to 10 distinct author pubkeys from the thread's newest 1000 replies, deleted replies included, most recent first. Deleted replies contribute no author, and an author silent for 1000 replies drops out.
 - The `e` and `d` tags both carry the row's event id: `e` for reference-following, `d` for replaceable addressing.
 
 ### `kind:39006` — window bounds
@@ -214,6 +214,34 @@ with `thread_window` absent or false:
 A client explicitly falling back from thread windows MUST restart this path
 from the oldest reply with clean pagination state. `until`/`before_id` are not
 legacy thread continuation fields and MUST NOT be reused as such.
+
+## Plain Thread-reply Filters
+
+A plain NIP-01 filter (no `depth_limit`, no `thread_window`) is a "newest
+replies to this thread" read when all of these hold:
+
+- `#h` holds exactly one value;
+- `#e` holds exactly one lowercase-hex event id, naming a thread root (a message
+  that is not itself a reply);
+- `kinds` is present and every kind is `9` or `40002`;
+- the filter has no `#p`, `authors`, or `ids`.
+
+Buzz serves it from stored thread metadata rather than by testing every event
+that tags the root, so a page costs the same at any thread size. Ordering,
+`limit`, `since`, `until`, `before_id`, and every other filter field keep their
+usual meaning. When `#e` names a nested reply, the filter is served the
+ordinary NIP-01 way.
+
+Thread metadata exists only for a message whose NIP-10 `reply` marker resolves
+to a valid ancestry; a lone `root` marker classifies a message as top-level. A
+message of those kinds that names the root only in a bare, `mention`, or lone
+`root` `e` tag matches the filter under NIP-01 but is **not** returned by this
+read, though live subscriptions still deliver it. The same holds for a reply
+stored before the relay recorded thread metadata. Clients that need such
+references SHOULD add another kind to the filter, which takes the generic path.
+COUNT is unaffected: it counts every event that matches under NIP-01, so a
+COUNT of this filter can exceed the number of events the read returns. That
+difference is intended.
 
 ## Thread Mode
 

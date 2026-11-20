@@ -1,3 +1,4 @@
+import '../../shared/widgets/message_attachment_corners.dart';
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -5,9 +6,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
-import '../../shared/relay/relay.dart';
+import '../../shared/hosted/native_media_headers.dart';
+import '../../shared/relay/app_lifecycle_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/skeleton.dart';
@@ -53,8 +55,7 @@ class VoiceNoteAttachment extends HookConsumerWidget {
         unawaited(
           player.loadRemote(
             source,
-            headers: () =>
-                ref.read(mediaGetAuthServiceProvider).headersFor(source),
+            headers: () => ref.read(freshNativeMediaHeadersProvider)(source),
             fallbackDuration: duration,
           ),
         );
@@ -63,6 +64,26 @@ class VoiceNoteAttachment extends HookConsumerWidget {
       }
       return player.dispose;
     }, [player, source, isRemote, duration]);
+    // iOS keeps the app running in the background for Huddle audio, so stop
+    // a playing voice note when the app leaves the foreground.
+    useEffect(() {
+      final subscription = ref.listenManual(appLifecycleProvider, (
+        previous,
+        next,
+      ) {
+        if (next != AppLifecycleState.paused &&
+            next != AppLifecycleState.detached) {
+          return;
+        }
+        // A tap that is still loading would otherwise start playback once
+        // its download finishes, behind the lock screen.
+        final state = player.state;
+        if (state.isPlaying || (state.isLoading && state.canCancelLoading)) {
+          unawaited(player.pause());
+        }
+      });
+      return subscription.close;
+    }, [player]);
 
     final state = playback.state;
     final resolvedDuration = state.duration > Duration.zero
@@ -147,7 +168,9 @@ class VoiceNoteAttachment extends HookConsumerWidget {
       padding: const EdgeInsets.all(Grid.twelve),
       decoration: BoxDecoration(
         color: context.colors.surface,
-        borderRadius: BorderRadius.circular(radius),
+        borderRadius:
+            MessageAttachmentCorners.of(context) ??
+            BorderRadius.circular(radius),
         border: Border.all(color: context.colors.outlineVariant),
       ),
       child: Row(
@@ -180,7 +203,7 @@ class VoiceNoteAttachment extends HookConsumerWidget {
                         )
                       : state.hasError && isRemote
                       ? Icon(
-                          LucideIcons.refreshCcw,
+                          BuzzIcons.refreshCcw,
                           key: const ValueKey('voice-note-retry-icon'),
                           size: 18,
                           color: context.colors.onSecondaryContainer,
@@ -271,7 +294,7 @@ class VoiceNoteAttachment extends HookConsumerWidget {
                   padding: EdgeInsets.zero,
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
-                icon: const Icon(LucideIcons.x, size: 18),
+                icon: const Icon(BuzzIcons.x, size: 18),
               ),
             ),
           ],

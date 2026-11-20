@@ -21,9 +21,7 @@ spec:
     metadata:
       labels:
         {{- include "buzz.relaySelectorLabels" . | nindent 8 }}
-        {{- with .Values.relay.podLabels }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
+        {{- include "buzz.podLabelsWithVersion" (dict "root" . "labels" .Values.relay.podLabels) | nindent 8 }}
       annotations:
         # Roll pods when the chart-managed Secret changes.
         checksum/secret: {{ include (print $.Template.BasePath "/secret-chart.yaml") . | sha256sum }}

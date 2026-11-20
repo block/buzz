@@ -5,9 +5,10 @@
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use nostr::Event;
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
+use crate::AdmittedTx;
 use crate::{
     error::Result,
     event::{insert_event_with_thread_metadata_tx, ThreadMetadataParams},
@@ -124,7 +125,7 @@ pub async fn add_reaction(
         .bind(pubkey)
         .bind(emoji)
         .bind(reaction_event_id)
-        .execute(&mut *tx)
+        .execute(tx.conn())
         .await?;
 
     tx.commit().await?;
@@ -144,14 +145,14 @@ pub async fn add_reaction(
 /// statement as [`add_reaction`], preserving the new / re-activate / active-duplicate
 /// semantics while letting callers atomically couple the reaction row to other writes.
 pub(crate) async fn add_reaction_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    community: CommunityId,
+    tx: &mut AdmittedTx,
     event_id: &[u8],
     event_created_at: DateTime<Utc>,
     pubkey: &[u8],
     emoji: &str,
     reaction_event_id: Option<&[u8]>,
 ) -> Result<bool> {
+    let community = tx.community();
     let result = sqlx::query(ADD_REACTION_SQL)
         .bind(community.as_uuid())
         .bind(event_created_at)
@@ -159,7 +160,7 @@ pub(crate) async fn add_reaction_tx(
         .bind(pubkey)
         .bind(emoji)
         .bind(reaction_event_id)
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await?;
 
     Ok(result.rows_affected() != 0)
@@ -195,7 +196,7 @@ pub async fn insert_reaction_event_with_thread_metadata(
     )
     .bind(community_id.as_uuid())
     .bind(target_event_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(tx.conn())
     .await?;
 
     let Some(target_row) = target_row else {
@@ -207,7 +208,6 @@ pub async fn insert_reaction_event_with_thread_metadata(
     // Preserve add_reaction's exact new / re-activate / active-duplicate semantics.
     let reaction_inserted = add_reaction_tx(
         &mut tx,
-        community_id,
         target_event_id,
         target_created_at,
         actor_pubkey,
@@ -221,25 +221,14 @@ pub async fn insert_reaction_event_with_thread_metadata(
         return Ok(ReactionEventInsertOutcome::Duplicate);
     }
 
-    crate::event::acquire_canvas_event_write_lock_if_needed(
-        &mut tx,
-        community_id,
-        reaction_event,
-        channel_id,
-    )
-    .await?;
-    let (stored_event, was_inserted) = insert_event_with_thread_metadata_tx(
-        &mut tx,
-        community_id,
-        reaction_event,
-        channel_id,
-        thread_meta,
-    )
-    .await?;
+    crate::event::acquire_canvas_event_write_lock_if_needed(&mut tx, reaction_event, channel_id)
+        .await?;
+    let (stored_event, was_inserted) =
+        insert_event_with_thread_metadata_tx(&mut tx, reaction_event, channel_id, thread_meta)
+            .await?;
 
     if was_inserted {
-        crate::insert_mentions_in_transaction(&mut tx, community_id, reaction_event, channel_id)
-            .await?;
+        crate::insert_mentions_in_transaction(&mut tx, reaction_event, channel_id).await?;
     }
 
     tx.commit().await?;
@@ -284,7 +273,7 @@ pub async fn remove_reaction(
     .bind(event_id)
     .bind(pubkey)
     .bind(emoji)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     tx.commit().await?;
@@ -317,7 +306,7 @@ pub async fn remove_reaction_by_source_event_id(
     )
     .bind(community.as_uuid())
     .bind(reaction_event_id)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     tx.commit().await?;
@@ -405,7 +394,7 @@ pub async fn set_reaction_event_id(
     .bind(event_id)
     .bind(pubkey)
     .bind(emoji)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     tx.commit().await?;
@@ -742,6 +731,7 @@ impl Db {
 #[cfg(test)]
 mod postgres_tests {
     use super::*;
+    use crate::test_support::ScratchDb;
     use crate::{
         error::DbError,
         event::{get_event_by_id, insert_event},
@@ -785,37 +775,6 @@ mod postgres_tests {
         .await
         .expect("insert test channel");
         id
-    }
-
-    async fn admin_url() -> String {
-        crate::test_support::database_url()
-    }
-
-    async fn create_scratch_db(admin: &PgPool, prefix: &str) -> (PgPool, String) {
-        let name = format!("{}_{}", prefix, Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
-            .execute(admin)
-            .await
-            .expect("create scratch db");
-        let base = admin_url().await;
-        let idx = base.rfind('/').expect("db url has a path segment");
-        let scratch_url = format!("{}/{}", &base[..idx], name);
-        let pool = PgPool::connect(&scratch_url)
-            .await
-            .expect("connect scratch db");
-        crate::migration::run_migrations(&pool)
-            .await
-            .expect("migrate scratch db");
-        (pool, name)
-    }
-
-    async fn drop_scratch_db(admin: &PgPool, pool: PgPool, name: &str) {
-        pool.close().await;
-        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
-        )))
-        .execute(admin)
-        .await;
     }
 
     async fn install_mention_failure_injection(pool: &PgPool) {
@@ -1154,11 +1113,11 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn reaction_insert_with_thread_metadata_mention_failure_rolls_back_everything() {
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin database");
-        let (scratch_pool, name) =
-            create_scratch_db(&admin, "reaction_thread_mention_rollback").await;
+        let (scratch_pool, _scratch) = ScratchDb::migrated(
+            &crate::test_support::database_url(),
+            "reaction_thread_mention_rollback",
+        )
+        .await;
         install_mention_failure_injection(&scratch_pool).await;
 
         let db = Db::from_pool(scratch_pool.clone());
@@ -1246,8 +1205,6 @@ mod postgres_tests {
             thread_meta_count, 0,
             "thread metadata must not persist when mention indexing fails"
         );
-
-        drop_scratch_db(&admin, scratch_pool, &name).await;
     }
 
     #[tokio::test]
@@ -1512,7 +1469,12 @@ mod postgres_tests {
             .await
             .expect("load community host");
         let submitted = store
-            .submit(&host, "test-operator", Some("reaction fence regression"))
+            .submit(
+                Some(&host),
+                "test-operator",
+                Some("reaction fence regression"),
+                None,
+            )
             .await
             .expect("submit deletion request");
         let empty_digest = crate::deletion::KeyStreamDigest::new().finish().0;
@@ -1634,8 +1596,10 @@ mod postgres_tests {
 
         let mut contender = pool.begin().await.expect("begin exclusive contender");
         let exclusive_taken: bool =
-            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(community_deletion_lock_key($1))")
-                .bind(community_uuid)
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(crate::deletion::community_deletion_lock_key(
+                    buzz_core::CommunityId::from_uuid(community_uuid),
+                ))
                 .fetch_one(&mut *contender)
                 .await
                 .expect("probe exclusive community-deletion lock");
@@ -1656,8 +1620,10 @@ mod postgres_tests {
 
         let mut released = pool.begin().await.expect("begin post-release contender");
         let exclusive_after_release: bool =
-            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(community_deletion_lock_key($1))")
-                .bind(community_uuid)
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(crate::deletion::community_deletion_lock_key(
+                    buzz_core::CommunityId::from_uuid(community_uuid),
+                ))
                 .fetch_one(&mut *released)
                 .await
                 .expect("probe exclusive lock after release");

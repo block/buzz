@@ -9,90 +9,50 @@ class _ThemePreviewExperience extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final inRail = DuoToolbarScope.maybeOf(context)?.strip != null;
     final stored = ref.read(communityThemeProvider);
-    final initialEntries = _themeEntriesForMode(stored.mode);
-    var initialIndex = initialEntries.indexWhere(
-      (entry) => _themeEntryIsSelected(entry, stored.mode, stored.theme),
-    );
-    if (initialIndex < 0) initialIndex = 0;
-
     final draftMode = useState(stored.mode);
-    final draftThemeName = useState(initialEntries[initialIndex].name);
-    final draftAccent = useState(
-      accentIndexForWireValue(stored.accent) ?? defaultAccentIndex,
-    );
-    final currentPage = useState(initialIndex);
-    final suppressNextPageHaptic = useRef(false);
-    final controller = usePageController(initialPage: initialIndex);
-    final entries = _themeEntriesForMode(draftMode.value);
+    final draftAccent = useState(chatColorIndex(stored.accent));
     final platformBrightness = MediaQuery.platformBrightnessOf(context);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
-    final previousDraftMode = usePrevious(draftMode.value);
-    final animatePaginationChanges =
-        previousDraftMode == null || previousDraftMode == draftMode.value;
-
-    var selectedIndex = entries.indexWhere(
-      (entry) =>
-          _themeEntryIsSelected(entry, draftMode.value, draftThemeName.value),
-    );
-    if (selectedIndex < 0) selectedIndex = 0;
-    final selectedEntry = entries[selectedIndex];
-    final selectedDisplayed = _displayedThemeFor(
-      selectedEntry,
-      draftMode.value,
-      platformBrightness,
-    );
-    final selectedResolved = resolveSchemes(
-      selectedEntry.name,
-      draftMode.value,
-    );
-    final selectedBaseScheme = platformBrightness == Brightness.dark
-        ? selectedResolved.dark
-        : selectedResolved.light;
-    final supportsAccent = !isBuzzTheme(selectedDisplayed.name);
-
-    void updateMode(ThemeMode mode) {
-      final normalized = mode == ThemeMode.system
-          ? schemeForAppearanceMode(draftThemeName.value, mode)
-          : effectiveTheme(draftThemeName.value, mode)?.name;
-      final nextEntries = _themeEntriesForMode(mode);
-      final nextTheme = normalized ?? nextEntries.first.name;
-      var nextIndex = nextEntries.indexWhere(
-        (entry) => _themeEntryIsSelected(entry, mode, nextTheme),
-      );
-      if (nextIndex < 0) nextIndex = 0;
-
-      draftMode.value = mode;
-      draftThemeName.value = nextEntries[nextIndex].name;
-      if (nextIndex != currentPage.value) {
-        suppressNextPageHaptic.value = true;
-      }
-      currentPage.value = nextIndex;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (controller.hasClients) controller.jumpToPage(nextIndex);
-      });
-    }
+    final brightness = switch (draftMode.value) {
+      ThemeMode.light => Brightness.light,
+      ThemeMode.dark => Brightness.dark,
+      ThemeMode.system => platformBrightness,
+    };
+    final selectedEntry = findTheme(
+      brightness == Brightness.dark ? buzzDarkThemeName : buzzThemeName,
+    )!;
+    final selectedBaseScheme = brightness == Brightness.dark
+        ? darkColorScheme
+        : lightColorScheme;
 
     void cycleAppearance() {
       final index = _appearanceOrder.indexOf(draftMode.value);
-      final next = _appearanceOrder[(index + 1) % _appearanceOrder.length];
       unawaited(HapticFeedback.selectionClick());
-      updateMode(next);
+      draftMode.value = _appearanceOrder[(index + 1) % _appearanceOrder.length];
     }
+
+    void chooseColor() => showAccentColorPickerSheet(
+      context: context,
+      colorScheme: selectedBaseScheme,
+      selectedIndex: draftAccent.value,
+      onSelected: (index) => draftAccent.value = index,
+    );
 
     void applySelection() {
       unawaited(HapticFeedback.mediumImpact());
-      final notifier = ref.read(communityThemeProvider.notifier);
-      final currentAccent = ref.read(communityThemeProvider).accent;
-      notifier.setPreference(
-        CommunityThemePreference(
-          theme: selectedEntry.name,
-          accent: supportsAccent
-              ? accentColors[draftAccent.value].wireValue
-              : currentAccent,
-          followSystem: draftMode.value == ThemeMode.system,
-        ),
-      );
+      ref
+          .read(communityThemeProvider.notifier)
+          .setPreference(
+            CommunityThemePreference(
+              theme: draftMode.value == ThemeMode.dark
+                  ? buzzDarkThemeName
+                  : buzzThemeName,
+              accent: chatColorChoices[draftAccent.value].wireValue,
+              followSystem: draftMode.value == ThemeMode.system,
+            ),
+          );
       Navigator.of(context).pop();
     }
 
@@ -101,12 +61,12 @@ class _ThemePreviewExperience extends HookConsumerWidget {
       Navigator.of(context).pop();
     }
 
-    return FrostedScaffold(
+    final scaffold = FrostedScaffold(
       useUtilitySurfaceTheme: true,
       appBar: FrostedAppBar(
         automaticallyImplyLeading: false,
         centerTitle: true,
-        showBottomDivider: false,
+
         nativeLeading: IosNavigationAction(
           label: 'Close',
           symbol: 'xmark',
@@ -120,146 +80,158 @@ class _ThemePreviewExperience extends HookConsumerWidget {
         actions: [_ThemePreviewSetButton(onPressed: applySelection)],
       ),
       body: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           SizedBox(height: frostedAppBarHeight(context)),
           Expanded(
-            child: PageView.builder(
-              key: const ValueKey('theme-preview-pages'),
-              controller: controller,
-              itemCount: entries.length,
-              onPageChanged: (index) {
-                if (suppressNextPageHaptic.value) {
-                  suppressNextPageHaptic.value = false;
-                } else if (index != currentPage.value) {
-                  unawaited(HapticFeedback.selectionClick());
-                }
-                currentPage.value = index;
-                draftThemeName.value = entries[index].name;
-              },
-              itemBuilder: (context, index) => AnimatedBuilder(
-                animation: controller,
-                builder: (context, _) {
-                  var titleOffset = 0.0;
-                  if (!reduceMotion && controller.hasClients) {
-                    final page = controller.page;
-                    if (page != null) {
-                      titleOffset = (index - page).clamp(-1.0, 1.0) * Grid.md;
-                    }
-                  }
-                  return _ThemePreviewPage(
-                    theme: entries[index],
-                    mode: draftMode.value,
-                    accentIndex: draftAccent.value,
-                    platformBrightness: platformBrightness,
-                    titleHorizontalOffset: titleOffset,
-                  );
-                },
-              ),
+            child: _ThemePreviewPage(
+              theme: selectedEntry,
+              mode: draftMode.value,
+              accentIndex: draftAccent.value,
+              platformBrightness: platformBrightness,
             ),
           ),
-          SafeArea(
-            top: false,
-            minimum: const EdgeInsets.only(bottom: Grid.xs),
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(
-                Grid.gutter,
-                Grid.twelve,
-                Grid.gutter,
-                0,
-              ),
-              child: Row(
-                children: [
-                  SizedBox(
-                    width: 64,
-                    child: IgnorePointer(
-                      ignoring: !supportsAccent,
-                      child: AnimatedSwitcher(
+          if (inRail) SizedBox(height: frostedAppBarHeight(context)),
+          if (!inRail)
+            SafeArea(
+              top: false,
+              minimum: const EdgeInsets.only(bottom: Grid.xs),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  Grid.gutter,
+                  Grid.twelve,
+                  Grid.gutter,
+                  0,
+                ),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 64,
+                      child: _PreviewSheetCircleAction(
                         key: const ValueKey(
-                          'theme-preview-accent-availability',
+                          'theme-preview-accent-action-button',
                         ),
-                        duration: reduceMotion
-                            ? Duration.zero
-                            : const Duration(milliseconds: 180),
-                        reverseDuration: reduceMotion
-                            ? Duration.zero
-                            : const Duration(milliseconds: 140),
-                        switchInCurve: _appearanceMotionCurve,
-                        switchOutCurve: Curves.easeInOutCubic,
-                        layoutBuilder: (currentChild, previousChildren) =>
-                            Stack(
-                              alignment: Alignment.center,
-                              children: [...previousChildren, ?currentChild],
-                            ),
-                        transitionBuilder: (child, animation) => FadeTransition(
-                          opacity: animation,
-                          child: ScaleTransition(
-                            scale: Tween(
-                              begin: 0.78,
-                              end: 1.0,
-                            ).animate(animation),
-                            child: child,
-                          ),
+                        semanticLabel: 'Chat color',
+                        color: chatColorForScheme(
+                          selectedBaseScheme,
+                          draftAccent.value,
                         ),
-                        child: supportsAccent
-                            ? _PreviewSheetCircleAction(
-                                key: const ValueKey(
-                                  'theme-preview-accent-action-button',
-                                ),
-                                semanticLabel: 'Accent color',
-                                color: accentColorForScheme(
-                                  selectedBaseScheme,
-                                  draftAccent.value,
-                                ),
-                                onTap: () {
-                                  unawaited(HapticFeedback.lightImpact());
-                                  showAccentColorPickerSheet(
-                                    context: context,
-                                    colorScheme: selectedBaseScheme,
-                                    selectedIndex: draftAccent.value,
-                                    onSelected: (index) =>
-                                        draftAccent.value = index,
-                                  );
-                                },
-                              )
-                            : const SizedBox(
-                                key: ValueKey(
-                                  'theme-preview-accent-unavailable',
-                                ),
-                              ),
+                        onTap: chooseColor,
                       ),
                     ),
-                  ),
-                  Expanded(
-                    child: PageIndicator(
-                      semanticLabel: 'Theme',
-                      controlKey: const ValueKey('theme-preview-scrubber'),
-                      dotKeyPrefix: 'theme-pagination-dot-',
-                      count: entries.length,
-                      selected: currentPage.value.clamp(0, entries.length - 1),
-                      animateChanges: animatePaginationChanges,
-                      onSelected: (index) {
-                        if (index == currentPage.value ||
-                            !controller.hasClients) {
-                          return;
-                        }
-                        controller.jumpToPage(index);
-                      },
+                    Expanded(
+                      child: Text(
+                        appearanceModeLabel(draftMode.value),
+                        textAlign: TextAlign.center,
+                      ),
                     ),
-                  ),
-                  SizedBox(
-                    width: 64,
-                    child: _AppearanceCycleAction(
-                      mode: draftMode.value,
-                      reduceMotion: reduceMotion,
-                      onTap: cycleAppearance,
+                    SizedBox(
+                      width: 64,
+                      child: _AppearanceCycleAction(
+                        mode: draftMode.value,
+                        reduceMotion: reduceMotion,
+                        onTap: cycleAppearance,
+                      ),
                     ),
-                  ),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+    final portal = useMemoized(() => OverlayPortalController()..show());
+    return OverlayPortal(
+      overlayLocation: OverlayChildLocation.rootOverlay,
+      controller: portal,
+      overlayChildBuilder: (context) {
+        final scope = DuoToolbarScope.maybeOf(context);
+        final strip = scope?.strip;
+        if (strip == null) return const SizedBox.shrink();
+        final window =
+            View.of(context).physicalSize / View.of(context).devicePixelRatio;
+        final wide = usesConversationPanes(
+          context,
+          strip: strip,
+          windowSize: window,
+        );
+        final controls = [
+          _PreviewSheetCircleAction(
+            key: const ValueKey('theme-preview-accent-action-button'),
+            semanticLabel: 'Chat color',
+            color: chatColorForScheme(selectedBaseScheme, draftAccent.value),
+            onTap: chooseColor,
+          ),
+          _AppearanceCycleAction(
+            mode: draftMode.value,
+            reduceMotion: reduceMotion,
+            onTap: cycleAppearance,
+          ),
+        ];
+        if (wide) {
+          return Positioned(
+            left: strip.side == FoldStripSide.left ? strip.width : 0,
+            right: strip.side == FoldStripSide.right ? strip.width : 0,
+            bottom: mobileTabBarBottom(context),
+            height: mobileTabBarHeight,
+            child: Offstage(
+              offstage:
+                  !(scope?.active ?? true) ||
+                  !(ModalRoute.isCurrentOf(context) ?? true),
+              child: Row(
+                key: const ValueKey('theme-preview-bottom-row'),
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  controls[0],
+                  const SizedBox(width: Grid.xs),
+                  controls[1],
                 ],
               ),
             ),
+          );
+        }
+        return Positioned(
+          left:
+              IosNavigationMetrics.of(
+                context,
+              ).railCenter(window, strip.rect.center.dx) -
+              32,
+          top: strip.rect.bottom - strip.bottomClearance - 132,
+          width: 64,
+          child: Offstage(
+            offstage:
+                !(scope?.active ?? true) ||
+                !(ModalRoute.isCurrentOf(context) ?? true),
+            child: Column(
+              key: const ValueKey('theme-preview-rail-bottom'),
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  height: 60,
+                  child: _PreviewSheetCircleAction(
+                    key: const ValueKey('theme-preview-accent-action-button'),
+                    semanticLabel: 'Chat color',
+                    color: chatColorForScheme(
+                      selectedBaseScheme,
+                      draftAccent.value,
+                    ),
+                    onTap: chooseColor,
+                  ),
+                ),
+                SizedBox(
+                  height: 60,
+                  child: _AppearanceCycleAction(
+                    mode: draftMode.value,
+                    reduceMotion: reduceMotion,
+                    onTap: cycleAppearance,
+                  ),
+                ),
+              ],
+            ),
           ),
-        ],
-      ),
+        );
+      },
+      child: scaffold,
     );
   }
 }
@@ -270,85 +242,40 @@ class _ThemePreviewPage extends StatelessWidget {
     required this.mode,
     required this.accentIndex,
     required this.platformBrightness,
-    required this.titleHorizontalOffset,
   });
 
   final ThemeColors theme;
   final ThemeMode mode;
   final int accentIndex;
   final Brightness platformBrightness;
-  final double titleHorizontalOffset;
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.fromLTRB(Grid.gutter, Grid.xxs, Grid.gutter, 0),
+    padding: EdgeInsets.fromLTRB(
+      Grid.gutter,
+      Grid.xxs,
+      Grid.gutter,
+      DuoToolbarScope.maybeOf(context)?.strip != null ? Grid.xxs : 0,
+    ),
     child: DecoratedBox(
       key: ValueKey('theme-preview-page-${theme.name}'),
       decoration: BoxDecoration(
         color: context.colors.surfaceContainerLow,
         borderRadius: BorderRadius.circular(Radii.container),
       ),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          const previewWidth = 858.0;
-          const previewHeight = 852.0;
-          final availableWidth = constraints.maxWidth - Grid.xs * 2;
-          final availableHeight = constraints.maxHeight - Grid.xs * 2;
-          final widthScale = availableWidth / previewWidth;
-          final heightScale = availableHeight / previewHeight;
-          final scale = widthScale < heightScale ? widthScale : heightScale;
-          final previewTop =
-              (constraints.maxHeight - previewHeight * scale) / 2;
-          final desiredTitleBottom =
-              constraints.maxHeight - previewTop + Grid.md;
-          final landscapeTitleBottom =
-              constraints.maxHeight - Grid.xs - Grid.lg;
-          final titleBottom =
-              heightScale < widthScale &&
-                  desiredTitleBottom > landscapeTitleBottom
-              ? landscapeTitleBottom
-              : desiredTitleBottom;
-
-          return Stack(
-            children: [
-              Positioned.fill(
-                child: Padding(
-                  padding: const EdgeInsets.all(Grid.xs),
-                  child: FittedBox(
-                    key: ValueKey('theme-full-preview-${theme.name}'),
-                    fit: BoxFit.contain,
-                    alignment: Alignment.center,
-                    child: _ThemeDevicePairPreview(
-                      theme: theme,
-                      mode: mode,
-                      accentIndex: accentIndex,
-                      platformBrightness: platformBrightness,
-                    ),
-                  ),
-                ),
-              ),
-              Positioned(
-                left: Grid.xs,
-                right: Grid.xs,
-                bottom: titleBottom,
-                child: Transform.translate(
-                  key: ValueKey('theme-preview-name-motion-${theme.name}'),
-                  offset: Offset(titleHorizontalOffset, 0),
-                  child: Text(
-                    _themeLabelFor(theme, mode),
-                    key: ValueKey('theme-preview-name-${theme.name}'),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    textAlign: TextAlign.center,
-                    style: context.textTheme.titleSmall?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          );
-        },
+      child: Padding(
+        padding: const EdgeInsets.all(Grid.xs),
+        child: FittedBox(
+          key: ValueKey('theme-full-preview-${theme.name}'),
+          fit: BoxFit.contain,
+          alignment: Alignment.center,
+          child: _ThemeDevicePairPreview(
+            theme: theme,
+            mode: mode,
+            accentIndex: accentIndex,
+            platformBrightness: platformBrightness,
+          ),
+        ),
       ),
     ),
   );
@@ -369,19 +296,15 @@ class _ThemeDevicePairPreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final displayed = _displayedThemeFor(theme, mode, platformBrightness);
-    final resolved = resolveSchemes(theme.name, mode);
-    final base = platformBrightness == Brightness.dark
-        ? resolved.dark
-        : resolved.light;
-    final effectiveAccent = isBuzzTheme(displayed.name)
-        ? defaultAccentIndex
-        : accentIndex;
-    final scheme = applyAccent(base, effectiveAccent);
-    final gradient = buzzTopSectionGradient(displayed.name, scheme.brightness);
-    final previewTheme = scheme.brightness == Brightness.dark
-        ? AppTheme.dark(colorScheme: scheme, topSectionGradient: gradient)
-        : AppTheme.light(colorScheme: scheme, topSectionGradient: gradient);
+    final brightness = switch (mode) {
+      ThemeMode.light => Brightness.light,
+      ThemeMode.dark => Brightness.dark,
+      ThemeMode.system => platformBrightness,
+    };
+    final previewTheme = mobileAppearanceTheme(
+      brightness,
+      chatColorChoices[accentIndex].wireValue,
+    );
 
     return Row(
       key: ValueKey('theme-device-pair-preview-${theme.name}'),
@@ -437,7 +360,7 @@ class _ThemePreviewCloseButton extends StatelessWidget {
             borderRadius: BorderRadius.circular(Radii.dialog),
           ),
         ),
-        icon: const Icon(LucideIcons.x, size: 22),
+        icon: const Icon(BuzzIcons.x, size: 24),
       ),
     );
   }
@@ -558,9 +481,9 @@ class _AppearanceCycleAction extends StatelessWidget {
   final VoidCallback onTap;
 
   IconData get _icon => switch (mode) {
-    ThemeMode.light => LucideIcons.sun,
-    ThemeMode.dark => LucideIcons.moon,
-    ThemeMode.system => LucideIcons.sunMoon,
+    ThemeMode.light => BuzzIcons.sun,
+    ThemeMode.dark => BuzzIcons.moon,
+    ThemeMode.system => BuzzIcons.sunMoon,
   };
 
   IosGlassNavigationIcon get _iosIcon => switch (mode) {

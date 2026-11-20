@@ -1,0 +1,20 @@
+-- ── Channel members ───────────────────────────────────────────────────────────
+-- Conformance: "Channels and channel membership". PK leads with community_id.
+
+CREATE TABLE channel_members (
+    community_id UUID NOT NULL,
+    channel_id  UUID NOT NULL,
+    pubkey      BYTEA NOT NULL,
+    role        member_role NOT NULL DEFAULT 'member',
+    joined_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    invited_by  BYTEA,
+    removed_at  TIMESTAMPTZ,
+    removed_by  BYTEA,
+    hidden_at   TIMESTAMPTZ,
+    sync_modified_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (community_id, channel_id, pubkey)
+);
+
+CREATE INDEX idx_channel_members_pubkey ON channel_members (community_id, pubkey)
+    WHERE removed_at IS NULL;
+CREATE INDEX channel_members_sync ON channel_members (community_id, pubkey, sync_modified_at, channel_id);

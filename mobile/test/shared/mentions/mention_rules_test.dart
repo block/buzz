@@ -165,6 +165,55 @@ void main() {
     }
   });
 
+  test('a workflow owner attribution does not address its owner', () {
+    final me = 'a' * 64;
+    for (final (tags, addressed) in [
+      (
+        [
+          ['p', me],
+        ],
+        true,
+      ),
+      (
+        [
+          ['p', me.toUpperCase()],
+        ],
+        true,
+      ),
+      (
+        [
+          ['p', me, '', 'owner'],
+          ['buzz:workflow', 'true'],
+        ],
+        false,
+      ),
+      (
+        [
+          ['p', me, '', 'owner'],
+          ['buzz:workflow', 'true'],
+          ['p', me],
+        ],
+        true,
+      ),
+      // Without the workflow marker the fourth field means something else,
+      // such as a NIP-29 roster role.
+      (
+        [
+          ['p', me, '', 'owner'],
+        ],
+        true,
+      ),
+      (
+        [
+          ['p', 'b' * 64],
+        ],
+        false,
+      ),
+    ]) {
+      expect(tagsAddress(tags, me), addressed, reason: '$tags');
+    }
+  });
+
   test('order does not depend on input order', () {
     // Review case: owned Zed, unowned Alpha, human Mary.
     const zed = MentionChoice(

@@ -159,18 +159,16 @@ mod tests {
     use super::*;
     use crate::tunnel::directory::SessionDirectory;
 
-    fn pool() -> deadpool_redis::Pool {
+    fn pool() -> buzz_pubsub::RedisConnection {
         let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-        deadpool_redis::Config::from_url(url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("create redis pool")
+        buzz_pubsub::redis_connection(&url).expect("create redis pool")
     }
 
     async fn redis_directory_if_available() -> Option<SessionDirectory> {
         let pool = pool();
-        let mut conn = pool.get().await.ok()?;
+        let mut conn = pool.clone();
         redis::cmd("PING")
-            .query_async::<String>(&mut *conn)
+            .query_async::<String>(&mut conn)
             .await
             .ok()?;
         Some(SessionDirectory::with_lease_ttl(
@@ -336,8 +334,9 @@ mod tests {
             },
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::OK);
+        let status = resp.status();
         let body = body_json(resp).await;
+        assert_eq!(status, StatusCode::OK, "forwarded response: {body}");
         assert_eq!(body["outcome"], "forwarded");
         assert_eq!(body["echoed_payload"], "mesh echo evidence");
         owner_task.abort();

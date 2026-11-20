@@ -67,7 +67,21 @@ final unreadBadgeProvider = Provider<UnreadBadgeState>((ref) {
             observedEvents,
             readAtForObservedEvent,
           );
-          general += badgeCount > 0 ? badgeCount : 1;
+          if (badgeCount > 0) {
+            general += badgeCount;
+          } else {
+            // Only ordinary backlog is left. Count it when its row is bold:
+            // a synced `seen:<channel>` mark quiets backlog at or before it.
+            final seenAt = readState.contexts['seen:${channel.id}'];
+            final rowShowsBacklog =
+                seenAt == null ||
+                observedEvents!.values.any((event) {
+                  if (event.createdAt <= seenAt) return false;
+                  final readAt = readAtForObservedEvent(event);
+                  return readAt == null || event.createdAt > readAt;
+                });
+            if (rowShowsBacklog) general++;
+          }
         }
       }
 

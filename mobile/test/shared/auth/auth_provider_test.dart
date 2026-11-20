@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -8,11 +10,14 @@ import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 
 import '../community/community_storage_test.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  setUp(() => FlutterSecureStorage.setMockInitialValues({}));
   test('waits for transition teardown before replacing credentials', () async {
     final storage = CommunityStorage(secure: FakeSecureStorage());
     final active = Community.create(
@@ -54,6 +59,71 @@ void main() {
     );
   });
 
+  test('signing in names the new member at once', () async {
+    final storage = CommunityStorage(secure: FakeSecureStorage());
+    final reporter = _MemberRecorder();
+    final keys = nostr.Keys.generate();
+    final container = ProviderContainer(
+      overrides: [
+        communityStorageProvider.overrideWithValue(storage),
+        diagnosticReporterProvider.overrideWithValue(reporter),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(authProvider.future);
+
+    await container
+        .read(authProvider.notifier)
+        .authenticateWithCommunity(
+          Community.create(
+            name: 'One',
+            relayUrl: 'https://one.example',
+            nsec: keys.nsec,
+          ),
+        );
+
+    expect(reporter.member, keys.public);
+  });
+
+  test(
+    'background batch addition preserves the first active community',
+    () async {
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      final first = Community.create(
+        name: 'First',
+        relayUrl: 'wss://first.example',
+        nsec: nostr.Keys('1'.padLeft(64, '0')).nsec,
+      );
+      final second = Community.create(
+        name: 'Second',
+        relayUrl: 'wss://second.example',
+        nsec: nostr.Keys('1'.padLeft(64, '0')).nsec,
+      );
+      final container = ProviderContainer(
+        overrides: [communityStorageProvider.overrideWithValue(storage)],
+      );
+      addTearDown(container.dispose);
+      await container.read(authProvider.future);
+      await container
+          .read(authProvider.notifier)
+          .authenticateWithCommunity(first);
+      var transitions = 0;
+      container.read(communityTransitionProvider).register(() async {
+        transitions++;
+      });
+      await container
+          .read(authProvider.notifier)
+          .authenticateWithCommunity(second, activate: false);
+      expect(await storage.loadActiveId(), first.id);
+      expect(container.read(authProvider).value?.community?.id, first.id);
+      expect((await storage.loadAll()).map((item) => item.id), [
+        first.id,
+        second.id,
+      ]);
+      expect(transitions, 0);
+    },
+  );
+
   test('waits for transition teardown before removing credentials', () async {
     final storage = CommunityStorage(secure: FakeSecureStorage());
     final community = Community.create(
@@ -71,7 +141,9 @@ void main() {
     final teardown = Completer<void>();
     container.read(communityTransitionProvider).register(() => teardown.future);
 
-    final signingOut = container.read(authProvider.notifier).signOut();
+    final signingOut = container
+        .read(communityListProvider.notifier)
+        .removeCommunity(community.id);
     await Future<void>.delayed(Duration.zero);
 
     expect(await storage.loadActiveId(), community.id);
@@ -84,7 +156,7 @@ void main() {
     expect(await storage.loadAll(), isEmpty);
   });
 
-  test('serializes overlapping switch and sign-out mutations', () async {
+  test('serializes overlapping switch and remove mutations', () async {
     final storage = CommunityStorage(secure: FakeSecureStorage());
     final active = Community.create(
       name: 'Active',
@@ -111,7 +183,9 @@ void main() {
     final switching = container
         .read(communityListProvider.notifier)
         .switchCommunity(replacement.id);
-    final signingOut = container.read(authProvider.notifier).signOut();
+    final signingOut = container
+        .read(communityListProvider.notifier)
+        .removeCommunity(replacement.id);
     await Future<void>.delayed(Duration.zero);
 
     expect(await storage.loadActiveId(), active.id);
@@ -195,62 +269,59 @@ void main() {
     });
   });
 
-  test(
-    'sign out removes the active community from the shared snapshot',
-    () async {
-      final storage = CommunityStorage(secure: FakeSecureStorage());
-      final first = Community.create(
-        name: 'First',
-        relayUrl: 'https://first.example',
-        nsec: nostr.Keys.generate().nsec,
-      );
-      final second = Community.create(
-        name: 'Second',
-        relayUrl: 'https://second.example',
-        nsec: nostr.Keys.generate().nsec,
-      );
-      await storage.save(first);
-      await storage.save(second);
-      await storage.saveActiveId(first.id);
-      final snapshots = <List<Community>>[];
-      final journaledCommunityIds = <String>[];
-      final container = ProviderContainer(
-        overrides: [
-          communityStorageProvider.overrideWithValue(storage),
-          communitySnapshotWriterProvider.overrideWithValue((
-            communities,
-          ) async {
-            snapshots.add(List.of(communities));
-          }),
-          communityPushLeaseRevocationEnqueuerProvider.overrideWithValue((
-            community,
-          ) async {
-            journaledCommunityIds.add(community.id);
-            return true;
-          }),
-          communityPushLeaseRevocationTriggerProvider.overrideWithValue(
-            () async {},
-          ),
-        ],
-      );
-      addTearDown(container.dispose);
-      await container.read(authProvider.future);
-
-      await container.read(authProvider.notifier).signOut();
-
-      expect(
-        snapshots.any((snapshot) {
-          return snapshot.length == 1 && snapshot.single.id == second.id;
+  test('removing the active community updates the shared snapshot', () async {
+    final storage = CommunityStorage(secure: FakeSecureStorage());
+    final first = Community.create(
+      name: 'First',
+      relayUrl: 'https://first.example',
+      nsec: nostr.Keys.generate().nsec,
+    );
+    final second = Community.create(
+      name: 'Second',
+      relayUrl: 'https://second.example',
+      nsec: nostr.Keys.generate().nsec,
+    );
+    await storage.save(first);
+    await storage.save(second);
+    await storage.saveActiveId(first.id);
+    final snapshots = <List<Community>>[];
+    final journaledCommunityIds = <String>[];
+    final container = ProviderContainer(
+      overrides: [
+        communityStorageProvider.overrideWithValue(storage),
+        communitySnapshotWriterProvider.overrideWithValue((communities) async {
+          snapshots.add(List.of(communities));
         }),
-        isTrue,
-      );
-      expect(
-        snapshots.last.map((community) => community.id),
-        isNot(contains(first.id)),
-      );
-      expect(journaledCommunityIds, [first.id]);
-    },
-  );
+        communityPushLeaseRevocationEnqueuerProvider.overrideWithValue((
+          community,
+        ) async {
+          journaledCommunityIds.add(community.id);
+          return true;
+        }),
+        communityPushLeaseRevocationTriggerProvider.overrideWithValue(
+          () async {},
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(authProvider.future);
+
+    await container
+        .read(communityListProvider.notifier)
+        .removeCommunity(first.id);
+
+    expect(
+      snapshots.any((snapshot) {
+        return snapshot.length == 1 && snapshot.single.id == second.id;
+      }),
+      isTrue,
+    );
+    expect(
+      snapshots.last.map((community) => community.id),
+      isNot(contains(first.id)),
+    );
+    expect(journaledCommunityIds, [first.id]);
+  });
 
   test(
     'snapshot export failure does not gate startup authentication',
@@ -339,4 +410,11 @@ void main() {
     expect(auth.community?.id, valid.id);
     expect(await storage.loadActiveId(), valid.id);
   });
+}
+
+class _MemberRecorder extends NoopDiagnosticReporter {
+  String? member;
+
+  @override
+  void setMember(String? pubkey) => member = pubkey;
 }

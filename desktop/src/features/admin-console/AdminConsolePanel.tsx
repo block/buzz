@@ -3,8 +3,11 @@
  * `disabled`.
  *
  * Shows four tabs: Reports (deployment-wide moderation reports), Feedback
- * (product feedback with optional image attachments), Actions (direct ban,
- * timeout, and delete), and Staffing (Operator-only operator management).
+ * (product feedback with optional image attachments), Communities (the
+ * directory, and a page per community with its reports, restrictions, members
+ * and direct actions), and Operators (Operator-only operator management).
+ * With admin auth disabled the whole console, community pages included, is
+ * read-only: every action control is disabled because the relay refuses writes.
  *
  * All query/UI state is keyed by `(pubkey, origin)`. In-flight native requests
  * are fenced by an effect-local `active` flag that is set to `false` in the
@@ -23,13 +26,20 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { Gavel, MessageSquare, ShieldAlert, Users } from "lucide-react";
+import { Building2, MessageSquare, ShieldAlert, Users } from "lucide-react";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { cn } from "@/shared/lib/cn";
 import type { AdminPrincipalRole } from "./api";
 import { ReportsTab } from "./AdminConsoleReportsTab";
 import { FeedbackTab } from "./AdminConsoleFeedbackTab";
 import { StaffingTab } from "./AdminConsoleStaffingTab";
-import { ActionsTab } from "./AdminConsoleActionsTab";
+import { DirectActionsProvider } from "./AdminConsoleActionsTab";
+import { CommunitiesTab, CommunityPage } from "./AdminConsoleCommunities";
+import {
+  CommunityNavContext,
+  type CommunityRef,
+  useConnectedHost,
+} from "./AdminConsoleCommunityBadge";
 
 export {
   parseImetaAttachments,
@@ -38,16 +48,16 @@ export {
 
 // ── Tab bar ───────────────────────────────────────────────────────────────
 
-type Tab = "reports" | "feedback" | "actions" | "staffing";
+type Tab = "reports" | "feedback" | "communities" | "operators";
 
 function TabBar({
   activeTab,
   onSelect,
-  showStaffing,
+  visible,
 }: {
   activeTab: Tab;
   onSelect: (tab: Tab) => void;
-  showStaffing: boolean;
+  visible: Set<Tab>;
 }) {
   const allTabs: Array<{
     value: Tab;
@@ -56,11 +66,9 @@ function TabBar({
   }> = [
     { value: "reports", label: "Reports", Icon: ShieldAlert },
     { value: "feedback", label: "Feedback", Icon: MessageSquare },
-    { value: "actions", label: "Actions", Icon: Gavel },
-    ...(showStaffing
-      ? [{ value: "staffing" as const, label: "Staffing", Icon: Users }]
-      : []),
-  ];
+    { value: "communities", label: "Communities", Icon: Building2 },
+    { value: "operators", label: "Operators", Icon: Users },
+  ].filter((t) => visible.has(t.value as Tab)) as typeof allTabs;
   return (
     <div className="mb-4 flex gap-1 border-b border-border/60">
       {allTabs.map(({ value, label, Icon }) => (
@@ -92,6 +100,7 @@ export function AdminConsolePanel({
   pubkey,
   role,
   initialTab,
+  initialCommunity,
   onSelfMutation,
 }: {
   /**
@@ -119,6 +128,8 @@ export function AdminConsolePanel({
    * Do not pass this prop in production code.
    */
   initialTab?: Tab;
+  /** Test-only, like `initialTab`: land on this community's page. */
+  initialCommunity?: CommunityRef;
 }) {
   const isOperator = role === "operator";
   const [activeTab, setActiveTab] = useState<Tab>(initialTab ?? "reports");
@@ -133,70 +144,99 @@ export function AdminConsolePanel({
     setGeneration(generationRef.current);
   }, [pubkey, origin]);
 
+  const [community, setCommunity] = useState<CommunityRef | null>(
+    initialCommunity ?? null,
+  );
+  const { activeCommunity } = useCommunities();
+  const connectedHost = useConnectedHost(activeCommunity?.relayUrl ?? "");
+  const nav = {
+    open: (next: CommunityRef) => {
+      setCommunity(next);
+      setActiveTab("communities");
+    },
+    connectedHost,
+  };
+  const visibleTabs = new Set<Tab>([
+    "reports",
+    "feedback",
+    "communities",
+    ...(isOperator ? (["operators"] as Tab[]) : []),
+  ]);
+
   // Reset activeTab to the default when the current tab is no longer visible
-  // for the current role (e.g. operator→moderator while Staffing is selected).
-  // Guard is written against tab-visibility (the set TabBar would render for
-  // this role) rather than a hard-coded role string so it generalises to
-  // future tabs without requiring a companion role check here.
+  // (e.g. operator→moderator while Operators is selected).
   useEffect(() => {
-    const visibleTabs = new Set<Tab>([
-      "reports",
-      "feedback",
-      "actions",
-      ...(isOperator ? (["staffing"] as Tab[]) : []),
-    ]);
     if (!visibleTabs.has(activeTab)) {
       setActiveTab("reports");
     }
-  }, [isOperator, activeTab]);
+  });
 
   return (
-    <div
-      className="flex min-h-0 flex-1 flex-col"
-      data-testid="admin-console-panel"
-    >
-      <TabBar
-        activeTab={activeTab}
-        onSelect={setActiveTab}
-        showStaffing={isOperator}
-      />
-      {activeTab === "reports" && (
-        <div data-testid="reports-tab">
-          <ReportsTab
-            canMutate={canMutate}
-            origin={origin}
-            pubkey={pubkey}
-            generation={generation}
+    <CommunityNavContext.Provider value={nav}>
+      {/* The direct-action controller stays mounted across tabs and community
+        pages, so a frozen, pending or in-flight action (and its requestId)
+        survives navigation; an identity or origin change remounts it. */}
+      <DirectActionsProvider
+        canMutate={canMutate}
+        generation={generation}
+        key={`${pubkey}\n${origin}`}
+        origin={origin}
+        pubkey={pubkey}
+      >
+        <div
+          className="flex min-h-0 flex-1 flex-col"
+          data-testid="admin-console-panel"
+        >
+          <TabBar
+            activeTab={activeTab}
+            onSelect={(tab) => {
+              if (tab === "communities") setCommunity(null);
+              setActiveTab(tab);
+            }}
+            visible={visibleTabs}
           />
+          {activeTab === "reports" && (
+            <div data-testid="reports-tab">
+              <ReportsTab
+                canMutate={canMutate}
+                origin={origin}
+                pubkey={pubkey}
+                generation={generation}
+              />
+            </div>
+          )}
+          {activeTab === "feedback" && (
+            <FeedbackTab
+              canMutate={canMutate}
+              origin={origin}
+              pubkey={pubkey}
+              generation={generation}
+            />
+          )}
+          {activeTab === "communities" &&
+            (community ? (
+              <CommunityPage
+                canMutate={canMutate}
+                community={community}
+                generation={generation}
+                key={community.id}
+                onBack={() => setCommunity(null)}
+                origin={origin}
+                pubkey={pubkey}
+              />
+            ) : (
+              <CommunitiesTab generation={generation} origin={origin} />
+            ))}
+          {activeTab === "operators" && isOperator && (
+            <StaffingTab
+              origin={origin}
+              pubkey={pubkey}
+              generation={generation}
+              onSelfMutation={onSelfMutation}
+            />
+          )}
         </div>
-      )}
-      {activeTab === "feedback" && (
-        <FeedbackTab
-          canMutate={canMutate}
-          origin={origin}
-          pubkey={pubkey}
-          generation={generation}
-        />
-      )}
-      {/* Stays mounted across tab switches so a frozen, pending or in-flight
-          action (and its requestId) survives a trip to another tab. */}
-      <div hidden={activeTab !== "actions"}>
-        <ActionsTab
-          canMutate={canMutate}
-          key={`${pubkey}\n${origin}`}
-          origin={origin}
-          pubkey={pubkey}
-        />
-      </div>
-      {activeTab === "staffing" && isOperator && (
-        <StaffingTab
-          canMutate={canMutate}
-          origin={origin}
-          pubkey={pubkey}
-          generation={generation}
-          onSelfMutation={onSelfMutation}
-        />
-      )}
-    </div>
+      </DirectActionsProvider>
+    </CommunityNavContext.Provider>
   );
 }

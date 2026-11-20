@@ -57,8 +57,9 @@ class _InviteLinkSection extends HookConsumerWidget {
         await ref.read(shareCommunityInviteProvider)(url, origin);
       } catch (_) {
         if (!context.mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showFeedbackSnackBar(
           const SnackBar(content: Text('Could not share invite link')),
+          kind: ToastKind.error,
         );
       }
     }
@@ -74,7 +75,7 @@ class _InviteLinkSection extends HookConsumerWidget {
                 child: Builder(
                   builder: (buttonContext) => BuzzActionTile(
                     key: const Key('community-invite-share-link'),
-                    icon: LucideIcons.share2,
+                    icon: BuzzIcons.share2,
                     label: 'Share',
                     isEnabled: invite.value != null,
                     onTap: () => share(buttonContext),
@@ -85,7 +86,7 @@ class _InviteLinkSection extends HookConsumerWidget {
               Expanded(
                 child: BuzzActionTile(
                   key: const Key('community-invite-copy-link'),
-                  icon: LucideIcons.copy,
+                  icon: BuzzIcons.copy,
                   label: 'Copy',
                   isEnabled: invite.value != null,
                   onTap: () => copyToClipboard(
@@ -169,11 +170,15 @@ void _showInviteOptionSheet<T>({
   showBuzzModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
-    builder: (_) => _InviteOptionSheet<T>(
-      title: title,
-      value: value,
-      options: options,
-      onSelected: onSelected,
+    useDuoFullWidth: false,
+    isScrollControlled: true,
+    builder: (_) => SingleChildScrollView(
+      child: _InviteOptionSheet<T>(
+        title: title,
+        value: value,
+        options: options,
+        onSelected: onSelected,
+      ),
     ),
   );
 }
@@ -218,7 +223,7 @@ class _InviteOptionSheet<T> extends StatelessWidget {
                   title: option.label,
                   trailing: option.value == value
                       ? Icon(
-                          LucideIcons.check,
+                          BuzzIcons.check,
                           size: 18,
                           color: context.colors.primary,
                         )
@@ -243,7 +248,7 @@ class _InviteRowChevron extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Icon(
-      LucideIcons.chevronRight,
+      BuzzIcons.chevronRight,
       size: 18,
       color: context.colors.onSurfaceVariant,
     );

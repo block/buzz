@@ -2,6 +2,7 @@ import 'dart:math';
 
 import 'package:uuid/uuid.dart';
 
+import '../hosted/hosted_environment.dart';
 import '../push/push_subscription.dart';
 
 const _uuid = Uuid();
@@ -19,8 +20,39 @@ String _newPushLeaseInstallationId() {
 enum SensitiveActionPolicy { enabled, disabledByUser }
 
 class Community {
+  static const _defaultPushNotificationsEnabled = true;
+
+  static const _pushNotificationsEnabledKey = 'pushNotificationsEnabledV2';
+
   final String id;
-  final String name;
+
+  /// Saved label, which may be a hosted relay's full host name.
+  final String _name;
+
+  /// User-facing label. Every reader goes through here so hosted host-name
+  /// fallbacks always appear in the short form onboarding shows.
+  String get name => HostedEnvironment.communityDisplayName(_name, relayUrl);
+
+  /// Account origin and subject that explicitly saved this destination.
+  /// Legacy/unclaimed records remain local; they are never uploaded on sign-in.
+  final String? accountSyncOwner;
+
+  /// Unique revision persisted atomically with an explicit local join.
+  /// A new revision supersedes an earlier queued account removal on recovery.
+  final String? accountSyncRevision;
+
+  /// Credential-free removal intent, hidden from the device community list.
+  final bool accountSyncRemoved;
+
+  /// Distinguishes local destinations with nondefault ports in picker actions.
+  String get pickerName {
+    final uri = Uri.parse(relayUrl);
+    if (!uri.hasPort || uri.port == 443 || name.contains(uri.authority)) {
+      return name;
+    }
+    return '$name (${uri.authority})';
+  }
+
   final String relayUrl;
   final String? pubkey;
   final String? nsec;
@@ -40,17 +72,20 @@ class Community {
 
   const Community({
     required this.id,
-    required this.name,
+    required String name,
     required this.relayUrl,
+    this.accountSyncOwner,
+    this.accountSyncRevision,
+    this.accountSyncRemoved = false,
     this.pubkey,
     this.nsec,
     this.sensitiveActionPolicy = SensitiveActionPolicy.disabledByUser,
-    this.pushNotificationsEnabled = false,
+    this.pushNotificationsEnabled = _defaultPushNotificationsEnabled,
     this.pushSubscriptionState = const BuzzPushLeaseSubscriptionState.desired(),
     this.pushLeaseInstallationId,
     this.starterSetupIncomplete = false,
     required this.addedAt,
-  });
+  }) : _name = name;
 
   factory Community.create({
     required String name,
@@ -77,6 +112,9 @@ class Community {
   Community copyWith({
     String? name,
     String? relayUrl,
+    Object? accountSyncOwner = _sentinel,
+    Object? accountSyncRevision = _sentinel,
+    bool? accountSyncRemoved,
     Object? pubkey = _sentinel,
     Object? nsec = _sentinel,
     SensitiveActionPolicy? sensitiveActionPolicy,
@@ -87,8 +125,15 @@ class Community {
   }) {
     return Community(
       id: id,
-      name: name ?? this.name,
+      name: name ?? _name,
       relayUrl: relayUrl ?? this.relayUrl,
+      accountSyncOwner: accountSyncOwner == _sentinel
+          ? this.accountSyncOwner
+          : accountSyncOwner as String?,
+      accountSyncRevision: accountSyncRevision == _sentinel
+          ? this.accountSyncRevision
+          : accountSyncRevision as String?,
+      accountSyncRemoved: accountSyncRemoved ?? this.accountSyncRemoved,
       pubkey: pubkey == _sentinel ? this.pubkey : pubkey as String?,
       nsec: nsec == _sentinel ? this.nsec : nsec as String?,
       sensitiveActionPolicy:
@@ -108,12 +153,15 @@ class Community {
 
   Map<String, dynamic> toJson() => {
     'id': id,
-    'name': name,
+    'name': _name,
     'relayUrl': relayUrl,
+    if (accountSyncRemoved) 'accountSyncRemoved': true,
+    if (accountSyncOwner != null) 'accountSyncOwner': accountSyncOwner,
+    if (accountSyncRevision != null) 'accountSyncRevision': accountSyncRevision,
     if (pubkey != null) 'pubkey': pubkey,
     if (nsec != null) 'nsec': nsec,
     'sensitiveActionPolicy': sensitiveActionPolicy.name,
-    'pushNotificationsEnabled': pushNotificationsEnabled,
+    _pushNotificationsEnabledKey: pushNotificationsEnabled,
     'pushSubscriptionState': pushSubscriptionState.toJson(),
     if (pushLeaseInstallationId != null)
       'pushLeaseInstallationId': pushLeaseInstallationId,
@@ -130,7 +178,8 @@ class Community {
       );
     }
     final pushNotificationsEnabled =
-        json['pushNotificationsEnabled'] as bool? ?? false;
+        json[_pushNotificationsEnabledKey] as bool? ??
+        _defaultPushNotificationsEnabled;
     var pushSubscriptionState = json['pushSubscriptionState'] == null
         ? const BuzzPushLeaseSubscriptionState.desired()
         : BuzzPushLeaseSubscriptionState.fromJson(
@@ -145,6 +194,9 @@ class Community {
       id: json['id'] as String,
       name: json['name'] as String,
       relayUrl: json['relayUrl'] as String,
+      accountSyncRemoved: json['accountSyncRemoved'] == true,
+      accountSyncOwner: json['accountSyncOwner'] as String?,
+      accountSyncRevision: json['accountSyncRevision'] as String?,
       pubkey: json['pubkey'] as String?,
       nsec: json['nsec'] as String?,
       sensitiveActionPolicy: SensitiveActionPolicy.values.firstWhere(

@@ -15,7 +15,17 @@ cat > "$fixture/bin/flutter" <<'STUB'
 set -eu
 printf '%s\n' "$@" > "$CALL_LOG"
 STUB
-cat > "$fixture/bin/pgrep" <<'STUB'
+cat > "$fixture/bin/xcode-select" <<'STUB'
+#!/bin/bash
+[[ "$*" == "-p" ]] || exit 1
+printf '%s\n' "$SELECTED_DEVELOPER_DIR"
+STUB
+cat > "$fixture/bin/open" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$@" >> "$OPEN_LOG"
+[[ "$1" == -a && -d "$2" && "$OPEN_FAIL" == 0 ]]
+STUB
+cat > "$fixture/bin/sleep" <<'STUB'
 #!/bin/bash
 exit 0
 STUB
@@ -23,9 +33,14 @@ cat > "$fixture/scripts/mobile-worktree-overrides.sh" <<'STUB'
 #!/bin/bash
 exit 0
 STUB
-chmod +x "$fixture/bin/flutter" "$fixture/bin/pgrep" "$fixture/scripts/mobile-worktree-overrides.sh"
+chmod +x "$fixture/bin/flutter" "$fixture/bin/xcode-select" "$fixture/bin/open" "$fixture/bin/sleep" "$fixture/scripts/mobile-worktree-overrides.sh"
 export PATH="$fixture/bin:$PATH"
 export CALL_LOG="$fixture/arguments"
+export OPEN_LOG="$fixture/open-calls"
+# Spaces also exercise quoting of the selected Xcode path.
+export SELECTED_DEVELOPER_DIR="$fixture/Xcode 27.app/Contents/Developer"
+export OPEN_FAIL=0
+mkdir -p "$SELECTED_DEVELOPER_DIR" "$SELECTED_DEVELOPER_DIR/../Applications/DeviceHub.app"
 unset BUZZ_PUSH_GATEWAY_URL
 
 for recipe in mobile-dev mobile-build-android; do
@@ -56,3 +71,33 @@ printf '%s\n' 'BUZZ_PUSH_GATEWAY_URL = https:/$()/push.example' > "$fixture/mobi
 printf '%s\n' run '--dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example' > "$fixture/expected"
 diff -u "$fixture/expected" "$CALL_LOG"
 printf 'PASS mobile-dev Xcode override\n'
+
+# Both installations exist: selection must not depend on Launch Services order.
+xcode26="$fixture/Xcode 26.app/Contents/Developer"
+xcode27="$SELECTED_DEVELOPER_DIR"
+mkdir -p "$xcode26/Applications/Simulator.app"
+for scenario in selected-xcode26 selected-xcode27 launch-failure missing-app; do
+  SELECTED_DEVELOPER_DIR="$xcode27"
+  OPEN_FAIL=0
+  case "$scenario" in
+    selected-xcode26) SELECTED_DEVELOPER_DIR="$xcode26" ;;
+    launch-failure) OPEN_FAIL=1 ;;
+    missing-app) SELECTED_DEVELOPER_DIR="$fixture/Missing Xcode.app/Contents/Developer" ;;
+  esac
+  expected_app="$SELECTED_DEVELOPER_DIR/../Applications/DeviceHub.app"
+  if [[ "$scenario" == selected-xcode26 || "$scenario" == missing-app ]]; then
+    expected_app="$SELECTED_DEVELOPER_DIR/Applications/Simulator.app"
+  fi
+  rm -f "$CALL_LOG"
+  : > "$OPEN_LOG"
+  printf '%s\n' -a "$expected_app" > "$fixture/expected-open"
+  if (cd "$fixture" && /bin/bash "$fixture/mobile-dev"); then
+    [[ "$scenario" != launch-failure && "$scenario" != missing-app ]]
+    diff -u "$fixture/expected" "$CALL_LOG"
+  else
+    [[ "$scenario" == launch-failure || "$scenario" == missing-app ]]
+    [[ ! -e "$CALL_LOG" ]]
+  fi
+  diff -u "$fixture/expected-open" "$OPEN_LOG"
+  printf 'PASS mobile-dev %s\n' "$scenario"
+done

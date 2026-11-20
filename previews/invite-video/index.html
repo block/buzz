@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" /><meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+  /><title>Buzz · Invite motion preview</title>
+  <link rel="stylesheet" href="preview.css" />
+  <main>
+    <header>
+      <div class="brand">Buzz</div>
+      <span class="badge">Motion study · 07</span>
+    </header>
+    <h1>A little buzz in your messages.</h1>
+    <p>
+      The onboarding wordmark, its fuzzy texture, and a bee or two passing
+      through.
+    </p>
+    <div class="grid">
+      <section>
+        <div class="eyebrow">Loop preview</div>
+        <canvas
+          id="hero"
+          width="960"
+          height="540"
+          role="img"
+          aria-label="Fuzzy Buzz wordmark with blue and lime bees on chartreuse"
+        ></canvas>
+        <div class="controls">
+          <button type="button" id="play">Pause</button
+          ><input
+            id="seek"
+            type="range"
+            min="0"
+            max="16"
+            step="0.01"
+            value="0"
+            aria-label="Animation time"
+          /><span id="time">0.0 / 16s</span
+          ><button type="button" id="poster" aria-pressed="false">Show saved poster</button>
+        </div>
+        <a class="download" href="buzz-invite-loop.mp4" download
+          >Download MP4</a
+        >
+        <section style="margin-top: 28px">
+          <div class="eyebrow">Choose the fallback poster</div>
+          <p class="caption">
+            Scrub the animation or try a frame below, then select “Use this
+            frame”. Your choice stays saved in this browser.
+          </p>
+          <div
+            id="choices"
+            style="
+              display: grid;
+              grid-template-columns: repeat(4, 1fr);
+              gap: 8px;
+            "
+          ></div>
+          <div class="controls">
+            <button type="button" id="save-poster">Use this frame</button
+            ><a
+              id="download-poster"
+              class="download"
+              download="buzz-invite-poster.png"
+              >Download poster PNG</a
+            >
+          </div>
+          <p class="caption" id="poster-status" aria-live="polite"></p>
+          <img
+            id="poster-image"
+            alt="Selected fallback poster"
+            style="width: 100%; border-radius: 14px"
+          />
+        </section>
+        <div class="details">
+          <div><strong>16 seconds</strong>Seamless loop</div>
+          <div><strong>1-second breather</strong>Between bee passes</div>
+          <div><strong>Silent</strong>960 × 540</div>
+        </div>
+      </section>
+      <aside>
+        <div class="eyebrow">iMessage-style simulation</div>
+        <div class="phone">
+          <div class="phone-top">
+            <div class="avatar">🐝</div>
+            Your friend
+          </div>
+          <div class="date">iMessage · Today 9:41 AM</div>
+          <div class="bubble">Come join us on Buzz</div>
+          <div class="card">
+            <canvas
+              id="small"
+              width="960"
+              height="540"
+              aria-label="Simulated animated link preview"
+            ></canvas>
+            <div class="card-text">
+              <strong>Join your community on Buzz</strong>
+              <div class="host">community.example.com</div>
+            </div>
+          </div>
+        </div>
+        <p class="note">
+          Composition preview, not an actual iMessage unfurl. iMessage may show
+          the poster or require a tap; autoplay and looping are not guaranteed.
+        </p>
+      </aside>
+    </div>
+  </main>
+  <script src="preview.js"></script>
+</html>

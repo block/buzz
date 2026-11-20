@@ -2,7 +2,16 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
-String channelSectionsKey(String pubkey) => 'buzz.channel-sections.v1:$pubkey';
+import '../../../shared/theme/community_theme_preference.dart';
+
+/// Groups belong to one community, so the cache is keyed by relay as well as
+/// identity. One identity can be paired with several communities.
+String channelSectionsKey(String pubkey, String relayUrl) =>
+    'buzz.channel-sections.v1:$pubkey:${Uri.encodeComponent(normalizeCommunityRelayUrl(relayUrl))}';
+
+/// The earlier key, shared by every community of the identity.
+String legacyChannelSectionsKey(String pubkey) =>
+    'buzz.channel-sections.v1:$pubkey';
 
 class ChannelSection {
   final String id;
@@ -85,13 +94,18 @@ class ChannelSectionStore {
   }
 }
 
+typedef WorkspaceHead = ({String plaintext, int createdAt, String eventId});
+
 class ChannelSectionsStorage {
   final SharedPreferences _prefs;
 
   ChannelSectionsStorage(this._prefs);
 
-  ChannelSectionStore read(String pubkey) {
-    final raw = _prefs.getString(channelSectionsKey(pubkey));
+  ChannelSectionStore read(String pubkey, String relayUrl) {
+    // The shared entry may hold another community's groups, and the relay
+    // copy is authoritative, so drop it rather than let one community claim it.
+    _prefs.remove(legacyChannelSectionsKey(pubkey));
+    final raw = _prefs.getString(channelSectionsKey(pubkey, relayUrl));
     if (raw == null || raw.isEmpty) {
       return const ChannelSectionStore();
     }
@@ -110,7 +124,44 @@ class ChannelSectionsStorage {
     }
   }
 
-  void write(String pubkey, ChannelSectionStore store) {
-    _prefs.setString(channelSectionsKey(pubkey), jsonEncode(store.toJson()));
+  /// The last readable unified layout head, so a cold start renders the
+  /// desktop layout before the relay answers.
+  WorkspaceHead? readWorkspace(String pubkey, String relayUrl) {
+    final raw = _prefs.getString(_workspaceKey(pubkey, relayUrl));
+    if (raw == null) return null;
+    try {
+      final parsed = jsonDecode(raw);
+      if (parsed case {
+        'plaintext': final String plaintext,
+        'createdAt': final int createdAt,
+        'eventId': final String eventId,
+      }) {
+        return (plaintext: plaintext, createdAt: createdAt, eventId: eventId);
+      }
+    } on FormatException {
+      // Fall through: the relay head replaces an unreadable cache.
+    }
+    return null;
+  }
+
+  void writeWorkspace(String pubkey, String relayUrl, WorkspaceHead head) {
+    _prefs.setString(
+      _workspaceKey(pubkey, relayUrl),
+      jsonEncode({
+        'plaintext': head.plaintext,
+        'createdAt': head.createdAt,
+        'eventId': head.eventId,
+      }),
+    );
+  }
+
+  String _workspaceKey(String pubkey, String relayUrl) =>
+      '${channelSectionsKey(pubkey, relayUrl)}:workspaces';
+
+  void write(String pubkey, String relayUrl, ChannelSectionStore store) {
+    _prefs.setString(
+      channelSectionsKey(pubkey, relayUrl),
+      jsonEncode(store.toJson()),
+    );
   }
 }

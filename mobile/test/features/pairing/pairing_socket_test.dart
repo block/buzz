@@ -43,6 +43,28 @@ void main() {
       });
     }
 
+    testWidgets('a stalled upgrade stops within ten seconds', (tester) async {
+      final readiness = Completer<void>();
+      final channel = _ControlledWebSocketChannel(readiness: readiness.future);
+      final socket = _socket('ws://unused', channelFactory: (_) => channel);
+      Object? failure;
+      final connection = socket.connect().then<void>(
+        (_) {},
+        onError: (Object error) {
+          failure = error;
+        },
+      );
+      try {
+        await tester.pump(const Duration(seconds: 11));
+        expect(failure, isA<TimeoutException>());
+        expect(socket.isConnected, isFalse);
+      } finally {
+        socket.dispose();
+        readiness.complete();
+        await connection;
+      }
+    });
+
     test('connects when the pairing relay sends no AUTH challenge', () async {
       final server = await _TestRelay.start((_) {});
       addTearDown(server.close);

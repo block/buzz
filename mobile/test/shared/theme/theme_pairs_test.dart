@@ -96,88 +96,6 @@ void main() {
     });
   });
 
-  group('resolveSchemes', () {
-    test('system mode pairs the selection across brightnesses', () {
-      final resolved = resolveSchemes('github-light', ThemeMode.system);
-
-      // Null forcedMode leaves MaterialApp following the OS.
-      expect(resolved.forcedMode, isNull);
-      expect(resolved.light.brightness, Brightness.light);
-      expect(resolved.dark.brightness, Brightness.dark);
-    });
-
-    test('system mode works from the dark half of a pair too', () {
-      final resolved = resolveSchemes('github-dark', ThemeMode.system);
-
-      expect(resolved.forcedMode, isNull);
-      expect(resolved.light.brightness, Brightness.light);
-      expect(resolved.dark.brightness, Brightness.dark);
-    });
-
-    test('system mode pins an unpaired theme to its own brightness', () {
-      final resolved = resolveSchemes('andromeeda', ThemeMode.system);
-
-      // No counterpart exists, so both sides render the selected theme rather
-      // than jumping to an unrelated one.
-      expect(resolved.forcedMode, ThemeMode.dark);
-      expect(resolved.light, resolved.dark);
-      expect(resolved.dark.brightness, Brightness.dark);
-    });
-
-    test('system mode pins an unpaired light theme to light mode', () {
-      final resolved = resolveSchemes('snazzy-light', ThemeMode.system);
-
-      expect(resolved.forcedMode, ThemeMode.light);
-      expect(resolved.light, resolved.dark);
-      expect(resolved.light.brightness, Brightness.light);
-    });
-
-    test('light mode forces light and swaps a dark selection for its pair', () {
-      final resolved = resolveSchemes('github-dark', ThemeMode.light);
-
-      expect(resolved.forcedMode, ThemeMode.light);
-      expect(resolved.light, resolved.dark);
-      expect(resolved.light.brightness, Brightness.light);
-      expect(resolved.light, generateColorScheme(findTheme('github-light')!));
-    });
-
-    test('dark mode forces dark and swaps a light selection for its pair', () {
-      final resolved = resolveSchemes('github-light', ThemeMode.dark);
-
-      expect(resolved.forcedMode, ThemeMode.dark);
-      expect(resolved.dark.brightness, Brightness.dark);
-      expect(resolved.dark, generateColorScheme(findTheme('github-dark')!));
-    });
-
-    test('dark mode falls back to the default pair when pick is unpaired', () {
-      // 'snazzy-light' is light and has no dark counterpart.
-      final resolved = resolveSchemes('snazzy-light', ThemeMode.dark);
-
-      expect(resolved.forcedMode, ThemeMode.dark);
-      expect(resolved.dark.brightness, Brightness.dark);
-      expect(resolved.darkTheme?.name, buzzDarkThemeName);
-      expect(resolved.dark, generateColorScheme(findTheme(buzzDarkThemeName)!));
-    });
-
-    test('light mode falls back to the default pair when pick is unpaired', () {
-      final resolved = resolveSchemes('andromeeda', ThemeMode.light);
-
-      expect(resolved.forcedMode, ThemeMode.light);
-      expect(resolved.light.brightness, Brightness.light);
-      expect(resolved.lightTheme?.name, buzzThemeName);
-      expect(resolved.light, generateColorScheme(findTheme(buzzThemeName)!));
-    });
-
-    test('an unknown scheme name falls back to the default theme', () {
-      final resolved = resolveSchemes('not-a-theme', ThemeMode.light);
-
-      expect(
-        resolved.light,
-        generateColorScheme(findTheme(defaultSchemeName)!),
-      );
-    });
-  });
-
   group('schemeForAppearanceMode', () {
     test('system mode replaces an unpaired selection with a paired theme', () {
       expect(
@@ -231,28 +149,6 @@ void main() {
 
     test('a null selection resolves to the default theme', () {
       expect(effectiveTheme(null, ThemeMode.light)?.name, defaultSchemeName);
-    });
-  });
-
-  group('themeSelectionLabel', () {
-    test('names the pair as a whole in system mode', () {
-      expect(themeSelectionLabel('github-light', ThemeMode.system), 'Github');
-      expect(themeSelectionLabel('github-dark', ThemeMode.system), 'Github');
-    });
-
-    test('names the concrete theme in pinned modes', () {
-      expect(
-        themeSelectionLabel('github-light', ThemeMode.light),
-        'Github Light',
-      );
-      expect(
-        themeSelectionLabel('github-light', ThemeMode.dark),
-        'Github Dark',
-      );
-    });
-
-    test('falls back to the theme display name when unpaired', () {
-      expect(themeSelectionLabel('andromeeda', ThemeMode.system), 'Andromeeda');
     });
   });
 }

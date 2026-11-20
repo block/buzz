@@ -141,89 +141,91 @@ void main() {
     expect(cache.state['agent']?.displayName, 'Valid');
   });
 
-  for (final preload in [false, true]) {
-    test(
-      '${preload ? 'preload' : 'refresh'} merges after parsing against newer live state',
-      () async {
-        final started = Completer<void>();
-        final release = Completer<void>();
-        final session = _RecordingProfileSession(
-          result: Future.value([
-            _profileEvent(id: 'old', createdAt: 1, name: 'Old'),
-          ]),
-        );
-        final container = ProviderContainer(
-          overrides: [
-            relaySessionProvider.overrideWith(() => session),
-            profileEventBatchParserProvider.overrideWithValue((events) async {
-              final parsed = await parseProfileEventBatch(events);
-              started.complete();
-              await release.future;
-              return parsed;
-            }),
-          ],
-        );
-        addTearDown(container.dispose);
-        final cache = container.read(userCacheProvider.notifier);
-        final result = preload
-            ? cache.preload(['agent'])
-            : cache.refresh(['agent']);
-        await started.future;
-        cache.cacheProfileEvent(
-          _profileEvent(id: 'new', createdAt: 2, name: 'Live'),
-        );
-        cache.cacheProfileEvent(
-          _profileEvent(
-            id: 'other',
-            pubkey: 'other',
-            createdAt: 1,
-            name: 'Other',
-          ),
-        );
-        release.complete();
-        expect(await result, isTrue);
-        expect(cache.state['agent']?.displayName, 'Live');
-        expect(cache.state['other']?.displayName, 'Other');
-      },
-    );
+  for (final operation in ['refresh', 'preload', 'resolve']) {
+    test('$operation merges after parsing against newer live state', () async {
+      final started = Completer<void>();
+      final release = Completer<void>();
+      final session = _RecordingProfileSession(
+        result: Future.value([
+          _profileEvent(id: 'old', createdAt: 1, name: 'Old'),
+        ]),
+      );
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => session),
+          profileEventBatchParserProvider.overrideWithValue((events) async {
+            final parsed = await parseProfileEventBatch(events);
+            started.complete();
+            await release.future;
+            return parsed;
+          }),
+        ],
+      );
+      addTearDown(container.dispose);
+      final cache = container.read(userCacheProvider.notifier);
+      final result = switch (operation) {
+        'preload' => cache.preload(['agent']),
+        'resolve' => cache.resolve(['agent']).then((_) => true),
+        _ => cache.refresh(['agent']),
+      };
+      await started.future;
+      cache.cacheProfileEvent(
+        _profileEvent(id: 'new', createdAt: 2, name: 'Live'),
+      );
+      cache.cacheProfileEvent(
+        _profileEvent(
+          id: 'other',
+          pubkey: 'other',
+          createdAt: 1,
+          name: 'Other',
+        ),
+      );
+      release.complete();
+      expect(await result, isTrue);
+      expect(cache.state['agent']?.displayName, 'Live');
+      expect(cache.state['other']?.displayName, 'Other');
+    });
 
-    test(
-      '${preload ? 'preload' : 'refresh'} rejects a retired parsing completion',
-      () async {
-        final started = Completer<void>();
-        final release = Completer<void>();
-        final session = _RecordingProfileSession(
-          result: Future.value([
-            _profileEvent(id: 'old', createdAt: 1, name: 'Previous community'),
-          ]),
-        );
-        final container = ProviderContainer(
-          overrides: [
-            relaySessionProvider.overrideWith(() => session),
-            profileEventBatchParserProvider.overrideWithValue((events) async {
-              final parsed = await parseProfileEventBatch(events);
-              started.complete();
-              await release.future;
-              return parsed;
-            }),
-          ],
-        );
-        addTearDown(container.dispose);
-        final cache = container.read(userCacheProvider.notifier);
-        final result = preload
-            ? cache.preload(['agent'])
-            : cache.refresh(['agent']);
-        await started.future;
-        // This is the same dependency invalidation caused by community config.
-        container
-            .read(relayConfigProvider.notifier)
-            .update(baseUrl: 'https://next-community.invalid');
-        container.read(userCacheProvider);
-        release.complete();
+    test('$operation rejects a retired parsing completion', () async {
+      final started = Completer<void>();
+      final release = Completer<void>();
+      final session = _RecordingProfileSession(
+        result: Future.value([
+          _profileEvent(id: 'old', createdAt: 1, name: 'Previous community'),
+        ]),
+      );
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => session),
+          profileEventBatchParserProvider.overrideWithValue((events) async {
+            final parsed = await parseProfileEventBatch(events);
+            started.complete();
+            await release.future;
+            return parsed;
+          }),
+        ],
+      );
+      addTearDown(container.dispose);
+      final cache = container.read(userCacheProvider.notifier);
+      final result = switch (operation) {
+        'preload' => cache.preload(['agent']),
+        'resolve' => cache.resolve(['agent']).then((_) => true),
+        _ => cache.refresh(['agent']),
+      };
+      await started.future;
+      // This is the same dependency invalidation caused by community config.
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://next-community.invalid');
+      container.read(userCacheProvider);
+      release.complete();
+      if (operation == 'resolve') {
+        await expectLater(result, throwsStateError);
+      } else {
         expect(await result, isFalse);
-        expect(container.read(userCacheProvider), isEmpty);
-      },
-    );
+      }
+      expect(container.read(userCacheProvider), isEmpty);
+    });
   }
 
   test(
@@ -391,6 +393,38 @@ void main() {
     },
   );
 
+  test('a preload never asks again for profiles already on the wire', () async {
+    final firstBatch = Completer<List<NostrEvent>>();
+    final session = _RecordingProfileSession(
+      results: [
+        firstBatch.future,
+        Future.value([
+          _profileEvent(id: 'c', pubkey: 'c', createdAt: 1, name: 'C'),
+        ]),
+      ],
+    );
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    final cache = container.read(userCacheProvider.notifier);
+    final first = cache.preload(['a', 'b']);
+    await session.firstRequest.future;
+    expect(session.requestCount, 1);
+
+    // b is on the wire; only c is new.
+    final again = cache.preload(['b']);
+    final more = cache.preload(['b', 'c']);
+    firstBatch.complete([
+      _profileEvent(id: 'a', pubkey: 'a', createdAt: 1, name: 'A'),
+      _profileEvent(id: 'b', pubkey: 'b', createdAt: 1, name: 'B'),
+    ]);
+    expect(await Future.wait([first, again, more]), everyElement(isTrue));
+    expect(session.requestCount, 2);
+    expect(session.requestedFilter?.authors, ['c']);
+    expect(cache.state.keys, containsAll(['a', 'b', 'c']));
+  });
+
   test(
     'refresh verifies real OA batch while allowing main-isolate timers',
     () async {
@@ -493,6 +527,7 @@ class _RecordingProfileSession extends RelaySessionNotifier {
   final List<Future<List<NostrEvent>>> _results;
   NostrFilter? requestedFilter;
   int requestCount = 0;
+  final firstRequest = Completer<void>();
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -504,6 +539,7 @@ class _RecordingProfileSession extends RelaySessionNotifier {
   }) async {
     requestCount++;
     requestedFilter = filter;
+    if (!firstRequest.isCompleted) firstRequest.complete();
     return _results.isEmpty ? const [] : _results.removeAt(0);
   }
 }

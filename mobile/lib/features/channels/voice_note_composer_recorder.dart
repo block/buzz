@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/relay/app_lifecycle_provider.dart';
 import '../../shared/theme/theme.dart';
@@ -64,11 +64,23 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
       return subscription.close;
     }, [recorder, onCancel]);
 
-    final route = ModalRoute.of(context);
+    // A root presentation covers nested composers without pushing on their
+    // local navigator. Observe every enclosing route so either path cancels.
+    final routes = <ModalRoute<dynamic>>[];
+    BuildContext? routeContext = context;
+    while (routeContext != null) {
+      final route = ModalRoute.of(routeContext);
+      if (route != null) routes.add(route);
+      routeContext = routeContext
+          .findAncestorStateOfType<NavigatorState>()
+          ?.context;
+    }
     useEffect(() {
-      if (route != null) voiceNoteRouteObserver.subscribe(routeAware, route);
+      for (final route in routes) {
+        voiceNoteRouteObserver.subscribe(routeAware, route);
+      }
       return () => voiceNoteRouteObserver.unsubscribe(routeAware);
-    }, [routeAware, route]);
+    }, [routeAware, ...routes]);
 
     Future<void> finish() async {
       if (!isStarted.value || isStopping.value || error.value != null) return;
@@ -139,7 +151,7 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
         _RecorderButton(
           key: const ValueKey('voice-note-recorder-close'),
           tooltip: 'Discard voice note',
-          icon: LucideIcons.x,
+          icon: BuzzIcons.x,
           foreground: context.colors.onSurfaceVariant,
           background: context.colors.surface,
           onPressed: isStopping.value ? null : onCancel,
@@ -213,7 +225,7 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
         _RecorderButton(
           key: const ValueKey('voice-note-recorder-stop'),
           tooltip: 'Stop recording',
-          icon: LucideIcons.square,
+          icon: BuzzIcons.square,
           foreground: Colors.white,
           background: context.colors.error,
           onPressed: error.value == null && isStarted.value && !isStopping.value

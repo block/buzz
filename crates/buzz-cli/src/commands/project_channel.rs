@@ -34,7 +34,7 @@ pub async fn resolve_or_ensure_repo_for_channel(
         return Ok(repo);
     }
 
-    let caller = client.keys().public_key().to_hex();
+    let caller = client.public_key().to_hex();
     if let Some(repo) = repos.iter().find_map(|event| {
         event
             .pubkey
@@ -201,7 +201,7 @@ async fn ensure_default_repo(
     let repo_id = repo_id_from_project_slug(&slug)?;
     let name = project_name(project).unwrap_or_else(|| slug.clone());
     let name = truncate_repo_name(&name);
-    let caller = client.keys().public_key().to_hex();
+    let caller = client.public_key().to_hex();
 
     if let Some(existing) =
         crate::commands::repos::fetch_own_repo_announcement(client, &repo_id).await?
@@ -223,7 +223,7 @@ async fn ensure_default_repo(
         &[],
         Some(channel),
     )?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let raw = client.submit_event(event).await?;
     let winner = crate::commands::repos::fetch_own_repo_announcement(client, &repo_id).await?;
     verify_default_repo_write(&raw, winner.as_ref(), channel)?;
@@ -474,7 +474,11 @@ mod tests {
                 socket.write_all(response.as_bytes()).await.unwrap();
             }
         });
-        let client = crate::client::BuzzClient::new(base_url, keys, None, None).unwrap();
+        let client = crate::client::BuzzClient::new(
+            base_url,
+            crate::credentials::Credentials::from_keys(keys),
+        )
+        .unwrap();
 
         let result = ensure_default_repo(&client, requested, &project).await;
 

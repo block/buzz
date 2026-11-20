@@ -90,7 +90,7 @@ pub async fn handle_identity_archive_event(
 
     info!(
         actor = %actor_hex,
-        target = %target_hex,
+        target_pubkey = %target_hex,
         consent = consent_path.as_str(),
         changed,
         kind,
@@ -437,16 +437,14 @@ mod tests {
 
     async fn test_pool() -> Option<sqlx::PgPool> {
         let url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into());
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into()); // sadscan:disable np.postgres.1 -- local test fixture
         sqlx::PgPool::connect(&url).await.ok()
     }
 
     async fn test_state(pool: sqlx::PgPool) -> Option<Arc<AppState>> {
         let db = buzz_db::Db::from_pool(pool.clone());
         let config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
-        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .ok()?;
+        let redis_pool = buzz_pubsub::redis_connection(&config.redis_url).ok()?;
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
                 .await
@@ -700,6 +698,84 @@ mod tests {
             "a stale publisher must converge on the canonical empty set, never \
              strand the unarchived identity in the authoritative 13535"
         );
+    }
+
+    mod postgres_tests {
+        use super::*;
+
+        /// NIP-IA: every snapshot's `created_at` is strictly past the previous
+        /// one's, even when publishers race on one head. Concurrent publishers
+        /// each read the head behind the replacement lock. The head is first
+        /// pinned an hour ahead, so each snapshot is stamped exactly one second
+        /// past the one it replaces. A superseded kind:13535 is deleted, so the
+        /// coordinate stores one row, 16 seconds past the pinned one only if
+        /// each of the 16 publishers stored exactly one snapshot one second
+        /// later. RED-on-revert: with the head read before the lock, publishers
+        /// keep tying on head + 1, so a same-second replacement leaves the row
+        /// short of + 16 s, or a publisher exhausts its replacement attempts.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires Postgres and Redis"]
+        async fn concurrent_archival_publishers_stamp_strictly_increasing_snapshots() {
+            // Ignored, so it runs only where Postgres and Redis are provided: a
+            // missing one is a failure, never a silent pass.
+            let pool = test_pool().await.expect("Postgres for an ignored test");
+            let state = test_state(pool.clone())
+                .await
+                .expect("Redis for an ignored test");
+            let tenant = seed_test_community(&pool).await;
+            let pinned = EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_IA_ARCHIVED_LIST as u16),
+                "",
+            )
+            .tags([Tag::parse(["-"]).expect("'-' tag")])
+            .custom_created_at(nostr::Timestamp::from(
+                nostr::Timestamp::now().as_secs() + 3600,
+            ))
+            .sign_with_keys(&state.relay_keypair)
+            .expect("sign pinned kind:13535");
+            assert!(
+                state
+                    .db
+                    .replace_addressable_event(tenant.community(), &pinned, None)
+                    .await
+                    .expect("store pinned kind:13535")
+                    .1
+            );
+            let pinned_at = chrono::DateTime::from_timestamp(pinned.created_at.as_secs() as i64, 0)
+                .expect("pinned created_at");
+
+            let publishers: Vec<_> = (0..16)
+                .map(|_| {
+                    let tenant = tenant.clone();
+                    let state = state.clone();
+                    tokio::spawn(async move { publish_nipia_archival_list(&tenant, &state).await })
+                })
+                .collect();
+            for publisher in publishers {
+                publisher
+                    .await
+                    .expect("join publisher")
+                    .expect("publisher succeeds");
+            }
+
+            // Every stored row of the coordinate, retired rows included.
+            let stamps: Vec<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+                "SELECT created_at FROM events WHERE community_id = $1 AND kind = $2 \
+                 AND pubkey = $3 ORDER BY created_at",
+            )
+            .bind(tenant.community().as_uuid())
+            .bind(buzz_core::kind::KIND_IA_ARCHIVED_LIST as i32)
+            .bind(state.relay_keypair.public_key().to_bytes().as_slice())
+            .fetch_all(&pool)
+            .await
+            .expect("read stored snapshots");
+            assert_eq!(
+                stamps,
+                [pinned_at + chrono::Duration::seconds(16)],
+                "each publisher stores one snapshot one second past the head it \
+                 replaces, and deletes that head"
+            );
+        }
     }
 
     #[tokio::test]

@@ -2,10 +2,24 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
-String channelMutesKey(String pubkey) => 'buzz.channel-mutes.v1:$pubkey';
+import '../../../shared/read_state/sidebar_flags.dart';
+import '../../../shared/theme/community_theme_preference.dart';
 
-class ChannelMuteEntry {
+/// Channel ids belong to one community, so the cache is keyed by relay as
+/// well as identity. One identity can be paired with several communities.
+String channelMutesKey(String pubkey, String relayUrl) =>
+    'buzz.channel-mutes.v1:$pubkey:${Uri.encodeComponent(normalizeCommunityRelayUrl(relayUrl))}';
+
+/// The earlier key, shared by every community of the identity.
+String legacyChannelMutesKey(String pubkey) => 'buzz.channel-mutes.v1:$pubkey';
+
+class ChannelMuteEntry implements SidebarFlagEntry {
   final bool muted;
+
+  @override
+  bool get enabled => muted;
+
+  @override
   final int updatedAt;
 
   const ChannelMuteEntry({required this.muted, required this.updatedAt});
@@ -30,34 +44,30 @@ class ChannelMuteStore {
     'channels': {for (final e in channels.entries) e.key: e.value.toJson()},
   };
 
-  factory ChannelMuteStore.fromJson(Map<String, dynamic> json) {
+  factory ChannelMuteStore.fromJson(
+    Map<String, dynamic> json, {
+    bool strict = false,
+  }) {
     final rawChannels = json['channels'];
+    if (strict && (json['version'] != 1 || rawChannels is! Map)) {
+      throw const FormatException('Invalid channel mutes record');
+    }
     final channels = <String, ChannelMuteEntry>{};
     if (rawChannels is Map) {
       for (final entry in rawChannels.entries) {
         if (entry.key is String && entry.value is Map<String, dynamic>) {
           final v = entry.value as Map<String, dynamic>;
-          if (v['muted'] is bool && v['updatedAt'] is int) {
+          final timestamp = v['updatedAt'];
+          if (v['muted'] is bool && timestamp is int && timestamp >= 0) {
             channels[entry.key as String] = ChannelMuteEntry.fromJson(v);
+            continue;
           }
         }
+        if (strict) throw const FormatException('Invalid channel mute entry');
       }
     }
     return ChannelMuteStore(version: 1, channels: channels);
   }
-}
-
-ChannelMuteStore mergeStores(ChannelMuteStore local, ChannelMuteStore remote) {
-  // Per-channel max-updatedAt merge:
-  // For each channel ID in the union, keep the entry with the highest updatedAt.
-  final merged = <String, ChannelMuteEntry>{...local.channels};
-  for (final entry in remote.channels.entries) {
-    final existing = merged[entry.key];
-    if (existing == null || entry.value.updatedAt > existing.updatedAt) {
-      merged[entry.key] = entry.value;
-    }
-  }
-  return ChannelMuteStore(channels: merged);
 }
 
 class ChannelMutesStorage {
@@ -65,8 +75,11 @@ class ChannelMutesStorage {
 
   ChannelMutesStorage(this._prefs);
 
-  ChannelMuteStore read(String pubkey) {
-    final raw = _prefs.getString(channelMutesKey(pubkey));
+  ChannelMuteStore read(String pubkey, String relayUrl) {
+    // The shared entry may hold another community's channels, and the relay
+    // copy is authoritative, so drop it rather than let one community claim it.
+    _prefs.remove(legacyChannelMutesKey(pubkey));
+    final raw = _prefs.getString(channelMutesKey(pubkey, relayUrl));
     if (raw == null || raw.isEmpty) {
       return const ChannelMuteStore();
     }
@@ -84,7 +97,4 @@ class ChannelMutesStorage {
       return const ChannelMuteStore();
     }
   }
-
-  Future<bool> write(String pubkey, ChannelMuteStore store) =>
-      _prefs.setString(channelMutesKey(pubkey), jsonEncode(store.toJson()));
 }

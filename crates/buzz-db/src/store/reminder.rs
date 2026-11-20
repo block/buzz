@@ -141,7 +141,7 @@ pub async fn claim_due_reminder_with_stamp(
     .bind(community_id.as_uuid())
     .bind(event_created_at)
     .bind(event_id)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     tx.commit().await?;
@@ -184,7 +184,7 @@ pub async fn release_due_reminder(
     .bind(event_created_at)
     .bind(event_id)
     .bind(delivery_stamp)
-    .execute(&mut *tx)
+    .execute(tx.conn())
     .await?;
 
     tx.commit().await?;

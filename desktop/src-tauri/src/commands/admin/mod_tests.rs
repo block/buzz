@@ -1314,79 +1314,65 @@ async fn save_rejects_an_unrelated_content_type() {
     assert_eq!(saved, Err("admin_attachment_mime_mismatch".to_string()));
 }
 
-// ── Restrictions community scoping ────────────────────────────────────────
-
-#[test]
-fn restrictions_url_names_the_active_relay_authority() {
-    let state = relay_state("wss://Community.Example.com:8443/ws");
-    let pubkey = routes::Hex64::parse(&"ab".repeat(32)).unwrap();
-    let url = restrictions_url(
-        "https://admin.example.com",
-        &routes::AdminRoute::MemberBanDelete { pubkey },
-        None,
-        "wss://Community.Example.com:8443/ws",
-        &state,
-    )
-    .unwrap();
-    assert!(
-        url.ends_with("?communityHost=community.example.com%3A8443"),
-        "{url}"
-    );
-    assert!(!url.contains("communityId"), "{url}");
-}
-
-#[test]
-fn restrictions_url_carries_the_cursor_and_default_port_host() {
-    let state = relay_state("wss://relay.example.com");
-    let url = restrictions_url(
-        "https://admin.example.com",
-        &routes::AdminRoute::MemberRestrictionsList,
-        Some("tok".to_string()),
-        "wss://relay.example.com",
-        &state,
-    )
-    .unwrap();
-    assert!(
-        url.ends_with("/members/restrictions?cursor=tok&communityHost=relay.example.com")
-            || url.ends_with("/members/restrictions?communityHost=relay.example.com&cursor=tok"),
-        "{url}"
-    );
-}
-
-#[test]
-fn restrictions_url_errors_when_the_relay_host_is_unresolvable() {
-    let state = relay_state("not a url");
-    let err = restrictions_url(
-        "https://admin.example.com",
-        &routes::AdminRoute::MemberRestrictionsList,
-        None,
-        "not a url",
-        &state,
-    )
-    .unwrap_err();
-    assert_eq!(err, "admin_community_host_unresolved");
-}
-
-#[test]
-fn restrictions_url_rejects_a_caller_relay_that_no_longer_matches() {
-    // The list loaded from relay A; the native relay has since switched to B.
-    // Every restriction route must fail before building a request URL.
-    let state = relay_state("wss://relay-b.example.com");
-    let pubkey = routes::Hex64::parse(&"ab".repeat(32)).unwrap();
-    for route in [
-        routes::AdminRoute::MemberRestrictionsList,
-        routes::AdminRoute::MemberBanDelete {
-            pubkey: pubkey.clone(),
-        },
-        routes::AdminRoute::MemberTimeoutDelete { pubkey },
-    ] {
-        for expected in ["wss://relay-a.example.com", "", "  "] {
-            let err = restrictions_url("https://admin.example.com", &route, None, expected, &state)
-                .unwrap_err();
-            assert_eq!(err, RELAY_SCOPE_CHANGED);
-        }
-    }
-}
-
 #[path = "direct_action_tests.rs"]
 mod direct_action;
+
+// ── Key-backup guard on origin-derived URLs ───────────────────────────────
+
+/// Origins whose hostname carries NIP-49 backup text. `.localhost` resolves to
+/// the loopback stub, so without the guard each request would reach it.
+fn backup_origins(port: u16) -> [String; 2] {
+    [
+        format!("http://ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq.localhost:{port}"),
+        format!("http://NCRYPTSEC1QGG9947RLPVQU76PJ5ECREDUF9JXHSELQ.localhost:{port}"),
+    ]
+}
+
+/// A stub that records every request it receives.
+async fn recording_stub() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>) {
+    use std::sync::{Arc, Mutex};
+    let seen: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let rec = Arc::clone(&seen);
+    let addr = serve_sequence_inspect(
+        vec![("401 Unauthorized", "WWW-Authenticate: Nostr\r\n", ""); 2],
+        Some(Arc::new(move |_idx, bytes: &[u8]| {
+            rec.lock().unwrap().push(bytes.to_vec());
+        })),
+    )
+    .await;
+    (addr.port(), seen)
+}
+
+#[tokio::test]
+async fn a_probe_origin_carrying_a_key_backup_is_never_sent() {
+    let (port, seen) = recording_stub().await;
+    for origin in backup_origins(port) {
+        let sign = |_: &str| -> Result<String, String> { panic!("must not sign") };
+        let err = admin_probe_inner(&origin, Some(sign)).await.unwrap_err();
+        assert!(err.contains("NIP-49 key-backup"), "{err}");
+    }
+    assert!(seen.lock().unwrap().is_empty(), "probe reached the relay");
+}
+
+#[tokio::test]
+async fn an_attachment_origin_carrying_a_key_backup_is_never_sent() {
+    let (port, seen) = recording_stub().await;
+    for origin in backup_origins(port) {
+        let err = attachment::fetch_feedback_attachment(
+            &origin,
+            SAVE_FEEDBACK_ID,
+            &save_sha(),
+            "application/pdf",
+            14,
+            &nostr::Keys::generate(),
+            helpers::AttachmentUse::Preview,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("NIP-49 key-backup"), "{err}");
+    }
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "attachment fetch reached the relay"
+    );
+}

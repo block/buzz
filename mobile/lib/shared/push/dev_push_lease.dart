@@ -1,7 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../crypto/nip44.dart';
@@ -11,7 +14,6 @@ import 'push_bridge.dart';
 import 'push_subscription.dart';
 
 const buzzPushLeaseKind = 30350;
-const buzzDevPushAppProfile = 'buzz-ios-dogfood';
 const buzzPushTransport = 'apns';
 const _maxSafeJsonInteger = 9007199254740991;
 const _maxLeaseLifetimeSeconds = 2592000;
@@ -20,6 +22,9 @@ const _installationIdPattern = r'^[0-9a-f]{32}$';
 
 class BuzzPushLeaseDescriptor {
   final String origin;
+
+  /// Canonical channel-ID grammar advertised by this relay.
+  final String hGrammar;
   final String executorKeyId;
   final String executorPubkey;
   final String transport;
@@ -31,6 +36,7 @@ class BuzzPushLeaseDescriptor {
 
   const BuzzPushLeaseDescriptor({
     required this.origin,
+    this.hGrammar = 'uuid-v4-lowercase',
     required this.executorKeyId,
     required this.executorPubkey,
     required this.transport,
@@ -44,39 +50,12 @@ class BuzzPushLeaseDescriptor {
   factory BuzzPushLeaseDescriptor.fromRelayInformation(
     Map<String, dynamic> information,
   ) {
-    _requireExactKeys(
-      information,
-      required: const {},
-      allowed: const {
-        'name',
-        'description',
-        'pubkey',
-        'contact',
-        'supported_nips',
-        'supported_extensions',
-        'software',
-        'version',
-        'limitation',
-        'retention',
-        'relay_countries',
-        'language_tags',
-        'tags',
-        'posting_policy',
-        'payments_url',
-        'fees',
-        'icon',
-        'self',
-        'pairing_relay_url',
-        'push',
-      },
-      name: 'NIP-11 document',
-    );
     final extensions = _stringList(
       information['supported_extensions'],
       name: 'supported_extensions',
     );
-    if (!extensions.contains('nip-pl')) {
-      throw const FormatException('NIP-11 does not advertise nip-pl');
+    if (!extensions.contains('buzz-push-v1')) {
+      throw const FormatException('NIP-11 does not advertise buzz-push-v1');
     }
 
     final push = _stringMap(information['push'], name: 'push');
@@ -85,7 +64,6 @@ class BuzzPushLeaseDescriptor {
       required: const {
         'origin',
         'keys',
-        'app_profiles',
         'push_kinds',
         'h_grammar',
         'class_support',
@@ -94,7 +72,6 @@ class BuzzPushLeaseDescriptor {
       allowed: const {
         'origin',
         'keys',
-        'app_profiles',
         'push_kinds',
         'h_grammar',
         'class_support',
@@ -136,31 +113,7 @@ class BuzzPushLeaseDescriptor {
     }
     final currentKey = currentKeys.single;
 
-    final profiles = _mapList(push['app_profiles'], name: 'app_profiles');
-    final profileIds = <String>{};
-    String? transport;
-    for (final profile in profiles) {
-      _requireExactKeys(
-        profile,
-        required: const {'id', 'transport'},
-        allowed: const {'id', 'transport'},
-        name: 'app profile',
-      );
-      final id = _nonEmptyString(profile['id'], name: 'app profile id');
-      if (!profileIds.add(id)) {
-        throw FormatException('Duplicate app profile id: $id');
-      }
-      final candidate = _nonEmptyString(
-        profile['transport'],
-        name: 'app profile transport',
-      );
-      if (id == buzzDevPushAppProfile) transport = candidate;
-    }
-    if (transport != buzzPushTransport) {
-      throw const FormatException(
-        'NIP-11 does not advertise the dogfood APNs profile',
-      );
-    }
+    const transport = buzzPushTransport;
 
     final pushKinds = _intList(push['push_kinds'], name: 'push_kinds');
     if (!buzzPushEligibleKinds.every(pushKinds.contains)) {
@@ -169,7 +122,8 @@ class BuzzPushLeaseDescriptor {
       );
     }
     final hGrammar = _nonEmptyString(push['h_grammar'], name: 'h_grammar');
-    if (hGrammar != 'uuid-v4-lowercase') {
+    // Retain the advertised grammar so publication can enforce legacy limits.
+    if (hGrammar != 'uuid-lowercase' && hGrammar != 'uuid-v4-lowercase') {
       throw const FormatException('Unsupported push h_grammar');
     }
 
@@ -239,15 +193,43 @@ class BuzzPushLeaseDescriptor {
 
     return BuzzPushLeaseDescriptor(
       origin: origin,
+      hGrammar: hGrammar,
       executorKeyId: currentKey['id'] as String,
       executorPubkey: currentKey['pubkey'] as String,
-      transport: transport!,
+      transport: transport,
       maxLeaseTtlSeconds: maxLeaseTtl,
       maxContentLength: limitation['max_content_len'] as int,
       maxPlaintextLength: limitation['max_plaintext_len'] as int,
       maxEndpointLength: limitation['max_endpoint_len'] as int,
       maxStringLength: maxStringLength,
     );
+  }
+}
+
+/// The desired lease requires channel IDs that this relay cannot accept yet.
+class BuzzPushChannelGrammarException implements Exception {
+  const BuzzPushChannelGrammarException();
+
+  @override
+  String toString() =>
+      'Push lease requires uuid-lowercase support from the relay';
+}
+
+/// Validate both positive and ignore filters without weakening mute semantics.
+void validateBuzzPushChannelGrammar(
+  BuzzPushLeaseDescriptor descriptor,
+  List<BuzzPushSubscription> subscriptions,
+) {
+  if (descriptor.hGrammar == 'uuid-lowercase') return;
+  for (final subscription in subscriptions) {
+    for (final filter in [subscription.filter, ...subscription.ignore]) {
+      for (final channel in filter.hTags ?? const <String>[]) {
+        // The legacy Rust validator checked version 4, not the UUID variant.
+        if (channel[14] != '4') {
+          throw const BuzzPushChannelGrammarException();
+        }
+      }
+    }
   }
 }
 
@@ -263,10 +245,18 @@ Future<BuzzPushLeaseDescriptor> fetchBuzzPushLeaseDescriptor(
     throw FormatException('Invalid relay HTTP URL: $relayBaseUrl');
   }
   final requestUri = uri.resolve('/');
-  final ownedClient = client ?? http.Client();
+  final ownedClient = client ?? newAppHttpClient();
+  // Closing a client does not stop a request on a shared session.
+  final abort = Completer<void>();
   try {
+    final request = http.AbortableRequest(
+      'GET',
+      requestUri,
+      abortTrigger: abort.future,
+    )..headers['Accept'] = 'application/nostr+json';
     final response = await ownedClient
-        .get(requestUri, headers: const {'Accept': 'application/nostr+json'})
+        .send(request)
+        .then(http.Response.fromStream)
         .timeout(timeout);
     if (response.statusCode != 200) {
       throw StateError(
@@ -279,6 +269,7 @@ Future<BuzzPushLeaseDescriptor> fetchBuzzPushLeaseDescriptor(
     }
     return BuzzPushLeaseDescriptor.fromRelayInformation(decoded);
   } finally {
+    abort.complete();
     if (client == null) ownedClient.close();
   }
 }
@@ -314,6 +305,7 @@ Future<BuzzPushLeasePublication> publishBuzzDevPushLease({
   required BuzzPushLeaseSubmit submit,
   DateTime Function() now = DateTime.now,
 }) async {
+  validateBuzzPushChannelGrammar(descriptor, subscriptions);
   _validateGrant(grant, descriptor);
   final effectiveLeaseInstallationId =
       leaseInstallationId ?? grant.installationId;
@@ -335,7 +327,7 @@ Future<BuzzPushLeasePublication> publishBuzzDevPushLease({
   if (decoded.prefix != nostr.Nip19Prefix.nsec || decoded.data.length != 64) {
     throw const FormatException('Signing key must be a 32-byte nsec');
   }
-  final signingPubkey = nostr.Keys(decoded.data).public;
+  final signingPubkey = derivePublicKeyHex(decoded.data);
   if (signingPubkey != normalizedMemberPubkey) {
     throw const FormatException(
       'Authenticated signing key does not match the lease member pubkey',
@@ -354,7 +346,6 @@ Future<BuzzPushLeasePublication> publishBuzzDevPushLease({
   final plaintextMap = <String, dynamic>{
     'v': 1,
     'origin': descriptor.origin,
-    'app_profile': grant.appProfile,
     'transport': descriptor.transport,
     'endpoint': grant.endpointGrant,
     'generation': effectiveLeaseGeneration,
@@ -448,7 +439,7 @@ Future<BuzzPushLeasePublication> publishBuzzPushLeaseTombstone({
   if (decoded.prefix != nostr.Nip19Prefix.nsec || decoded.data.length != 64) {
     throw const FormatException('Signing key must be a 32-byte nsec');
   }
-  if (nostr.Keys(decoded.data).public != normalizedMemberPubkey) {
+  if (derivePublicKeyHex(decoded.data) != normalizedMemberPubkey) {
     throw const FormatException(
       'Authenticated signing key does not match the lease member pubkey',
     );
@@ -495,24 +486,6 @@ Future<BuzzPushLeasePublication> publishBuzzPushLeaseTombstone({
   );
 }
 
-Future<BuzzPushLeasePublication> publishBuzzPushLeaseTombstoneThroughRelay({
-  required BuzzPushLeaseDescriptor descriptor,
-  required String installationId,
-  required int generation,
-  required String nsec,
-  required String memberPubkey,
-  required SignedEventRelay relay,
-  DateTime Function() now = DateTime.now,
-}) => publishBuzzPushLeaseTombstone(
-  descriptor: descriptor,
-  installationId: installationId,
-  generation: generation,
-  nsec: nsec,
-  memberPubkey: memberPubkey,
-  submit: relay.submit,
-  now: now,
-);
-
 void _validateGrant(
   BuzzPushEndpointGrant grant,
   BuzzPushLeaseDescriptor descriptor,
@@ -527,9 +500,6 @@ void _validateGrant(
     throw const FormatException(
       'Stored endpoint grant is delegated to a different relay key',
     );
-  }
-  if (grant.appProfile != buzzDevPushAppProfile) {
-    throw const FormatException('Endpoint grant is not for buzz-ios-dogfood');
   }
   if (grant.endpointGrant.isEmpty ||
       utf8.encode(grant.endpointGrant).length > descriptor.maxEndpointLength) {

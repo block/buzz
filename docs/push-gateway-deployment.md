@@ -1,6 +1,6 @@
 # Buzz Push Gateway deployment
 
-`buzz-push-gateway` is a standalone APNs last hop. Build it with `Dockerfile.push-gateway`; do not run it in the relay image or give relays APNs credentials.
+`buzz-push-gateway` is a standalone APNs and FCM last hop. Build it with `Dockerfile.push-gateway`; do not run it in the relay image or give relays APNs or FCM credentials.
 
 ## Network and health
 
@@ -16,31 +16,92 @@
 | `BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS` | Maximum delegation capability lifetime (`1..=31536000`). |
 | `BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS` | Maximum encrypted-token installation lifetime (default 90 days, max one year). Clients must renew before expiry. |
 | `BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH` | Read-only mounted Apple App Attest root certificate PEM. |
-| `BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID` | Exact server-owned Apple App Attest application identifier (`TEAMID.bundle-id`). |
-| `BUZZ_PUSH_DOGFOOD_APNS_TOPIC` | Server-owned APNs topic. Never accepted from a client. |
-| `BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT` | `production` or `sandbox`, selected by deployment configuration. |
-| `BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH` | Read-only certificate/private-key PEM. |
+| `BUZZ_PUSH_APP_ATTEST_APP_ID` | Exact server-owned Apple App Attest application identifier (`TEAMID.bundle-id`). |
+| `BUZZ_PUSH_APNS_TOPIC` | Server-owned APNs topic. Never accepted from a client. |
+| `BUZZ_PUSH_APNS_ENVIRONMENT` | `production` or `sandbox`, selected by deployment configuration. |
+| `BUZZ_PUSH_APNS_CERT_PATH` | Read-only certificate/private-key PEM. |
 | `BUZZ_PUSH_GRANT_KEYS` | Capability AEAD keyring, `id:base64-32-bytes[,predecessor...]`; current key first. |
 | `BUZZ_PUSH_TOKEN_KEYS` | Independent token-custody AEAD keyring in the same format. Never reuse grant keys. |
 
-The current MVP serves the dogfood application identity
-(`xyz.block.buzz.dogfood.mobile`). App Attest must cryptographically validate
-the configured application ID before enrollment. Assertions and delivery use
-the server-owned APNs topic, certificate-backed connection pool, and
-environment. No client request or relay grant can supply or override an APNs
-topic.
+Each gateway serves one configured Apple application. App Attest validates
+`application.appAttestAppId` (`TEAMID.bundle-id`) before enrollment. APNs uses
+the configured topic, certificate and environment. Clients and relay grants
+cannot select or override that identity. Separate applications use separate
+gateway deployments and authority databases.
 
-This MVP has exactly one compiled-in application profile,
-`buzz-ios-dogfood`. The chart value
-`profiles.dogfood.appAttestAppId` is rendered as
-`BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID`; the gateway rejects startup when it is
-missing or empty. The exact `TEAMID.bundle-id` is environment-owned,
-non-secret deployment configuration. The chart's production values file leaves
-it empty deliberately so a production renderer must supply it from the GitOps
-environment rather than baking a Block team identifier into this repository.
-Supporting another application identity requires an explicit code, schema,
-chart, credential, and deployment change; this gateway does not currently
-select among multiple application profiles.
+See [Buzz push notes](buzz-push.md) for the current experimental contract.
+
+## Android (optional)
+
+The same gateway serves the app's Android installations through Firebase Cloud
+Messaging (FCM HTTP v1). Android is off unless all four settings below are present;
+a partial set fails startup. The platform of an installation is recorded only in
+gateway state, derived from the attestation type at enrollment. The relay never
+sees it.
+
+| Variable | Purpose |
+|---|---|
+| `BUZZ_PUSH_ANDROID_PACKAGE_NAME` | Exact Android application package, for example `com.example.buzz`. |
+| `BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS` | Comma-separated SHA-256 digests (64 hex characters each) of the app's accepted signing certificates. |
+| `BUZZ_PUSH_FCM_PROJECT_ID` | Firebase project that owns the app's registration tokens, for example `example-project`. |
+| `BUZZ_PUSH_FCM_SERVICE_ACCOUNT_PATH` | Read-only mounted service account key JSON the gateway uses to call FCM. Never commit it. |
+
+The wake is a high-priority, data-only FCM message with a compiled-in payload,
+one constant collapse key and a time to live taken from the delivery's expiry.
+After enrollment, an Android installation signs every call (delegate, revoke a
+delegation, rotate the endpoint, revoke the installation) with its attested
+Keystore key: an ECDSA P-256 signature over the same transcript bytes iOS
+signs, whose single-use challenge is its replay protection.
+
+### Key Attestation
+
+Enrollment is public, so an Android installation proves it is your app on real
+hardware before it can enroll. The gateway verifies the Key Attestation chain
+offline and accepts it only when all of these hold:
+
+- The chain ends at a configured Google attestation root and no certificate in
+  it is on Google's [status list](https://android.googleapis.com/attestation/status).
+  Google's [published hardware attestation roots](https://developer.android.com/privacy-and-security/security-key-attestation#root_certificate)
+  are built in, pinned by public key. A root change is a reviewed rollout: set
+  `BUZZ_PUSH_ANDROID_ATTESTATION_ROOTS_PATH` to a PEM bundle to replace the
+  built-in list before upgrading.
+- The attestation challenge equals the SHA-256 of the enrollment transcript.
+- The hardware-enforced properties (never the software-enforced ones) report a
+  locked bootloader and either a Verified boot state, or SelfSigned with a
+  verified boot key on your `BUZZ_PUSH_ANDROID_BOOT_KEY_DIGESTS` list. Unverified,
+  Failed, and SelfSigned with any other key are rejected.
+- Both security levels are TrustedEnvironment or StrongBox, and the key is a
+  generated, sign-only P-256 key.
+- The attested application id names exactly one package, the configured one,
+  with a configured signing digest. The operating system writes this value, so
+  it is trusted only as far as the boot state and boot key vouch for that
+  operating system.
+
+| Variable | Purpose |
+|---|---|
+| `BUZZ_PUSH_ANDROID_BOOT_KEY_DIGESTS` | Optional comma-separated SHA-256 digests (64 hex characters each) of verified boot keys accepted with a SelfSigned boot state. Empty by default, which accepts stock Android only. Add the published per-device keys of a custom operating system to support it, and update the list when new devices ship. |
+| `BUZZ_PUSH_ANDROID_ATTESTATION_ROOTS_PATH` | Optional PEM bundle that replaces the built-in Google roots. |
+| `BUZZ_PUSH_ANDROID_REVOCATION_GRACE_SECONDS` | How long the status list may go without a successful refresh before Android enrollment fails closed. Default `604800` (7 days), minimum `3600`. |
+| `BUZZ_PUSH_SIGNED_CALL_WINDOW_SECONDS`, `BUZZ_PUSH_SIGNED_CALL_MAX_CALLS` | Per-attested-key rate limit on signed installation calls (all platforms). Defaults `60` and `30`. Counters are per replica. |
+
+The gateway fetches the status list once at startup and then on Google's cache
+lifetime (between 5 minutes and 1 day), with a 30 second timeout, an 8 MiB size
+limit, and capped exponential backoff after failures. Enrollment never waits on
+a fetch: until the first fetch succeeds, or after the grace period passes
+without a refresh, Android enrollment is rejected. Allow outbound HTTPS to
+`android.googleapis.com`. Every certificate listed as REVOKED or SUSPENDED is
+rejected. Phones without hardware-backed attestation, with an unlocked
+bootloader, or running an operating system whose boot key you have not listed
+get no push; there is no software fallback.
+
+With the Helm chart, set `android.enabled=true` together with
+`android.packageName`, `android.signingCertDigests`, `android.fcmProjectId` and
+the Secret holding the service account key. `android.bootKeyDigests` and
+`android.revocationGraceSeconds` map to the settings above. To replace the
+built-in roots, name a Secret holding the PEM bundle in
+`android.attestationRoots.secretName` (and its key in `secretKey`); the chart
+mounts it and sets `BUZZ_PUSH_ANDROID_ATTESTATION_ROOTS_PATH`. Android is
+disabled by default.
 
 Optional endpoint quota policy variables are `BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS` (default `10`, max `86400`) and `BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES` (default `10`, max `10000`). These are Buzz policy hypotheses, not Apple-published limits; tune under load while retaining a hard ceiling.
 
@@ -56,12 +117,11 @@ The gateway accepts exactly the selected AAGUID and still verifies the pinned
 Apple root, certificate chain, nonce, application identity, public key,
 credential ID, and counter. This is not a simulator or attestation bypass.
 
-Set `BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID` to the personal `TEAMID.bundle-id`,
-`BUZZ_PUSH_DOGFOOD_APNS_TOPIC` to that same bundle ID,
-`BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT=sandbox`, and supply its APNs certificate.
-This isolated stack reuses the single `buzz-ios-dogfood` wire profile for its
-server-owned personal identity; it does not add a production application profile.
-Do not point distributed dogfood clients at this personal gateway.
+Set `BUZZ_PUSH_APP_ATTEST_APP_ID` to the personal `TEAMID.bundle-id`,
+`BUZZ_PUSH_APNS_TOPIC` to that same bundle ID,
+`BUZZ_PUSH_APNS_ENVIRONMENT=sandbox`, and supply its APNs certificate.
+This isolated stack uses its own server-configured application identity.
+Do not point distributed clients at this personal gateway.
 
 Build the mobile client with the personal team and parent bundle ID, its matching
 `.NotificationService` extension, development APNs/App Attest entitlements, and
@@ -99,7 +159,7 @@ that app identity; omitting it is not a push shutdown mechanism.
 
 The gateway's dedicated pool does not consume the relay-oriented `BUZZ_DB_LOCK_TIMEOUT_MS`, `BUZZ_DB_IDLE_TXN_TIMEOUT_MS`, or `BUZZ_DB_STATEMENT_TIMEOUT_MS` settings. Its session-timeout policy remains separate from the `buzz-db` writer policy and must be designed and rolled out independently.
 
-All replicas must share one PostgreSQL database. Delivery authority, replay admission, and endpoint quota reservation are transactional there, so replica count does not multiply the abuse ceiling. The gateway owns a scoped migration history under `crates/buzz-push-gateway/migrations`; it creates only the six `push_gateway_*` authority tables plus SQLx's migration-history table and never runs relay migrations.
+All replicas must share one PostgreSQL database. Delivery authority, replay admission, and endpoint quota reservation are transactional there, so replica count does not multiply the abuse ceiling. The gateway owns a scoped migration history under `crates/buzz-push-gateway/migrations`; it creates only the six `push_gateway_*` authority tables plus SQLx's migration-history table and never runs relay migrations. `crates/buzz-push-gateway/schema/` mirrors those migrations' end state as declarative desired-state DDL, one file per table; a parity test keeps their `public` tables, columns, table options, constraints, and indexes identical.
 
 The Helm chart runs a single pre-install/pre-upgrade migration Job using `migration.existingSecret`; that secret contains a DDL-capable `DATABASE_URL`. The URL MUST name a dedicated gateway database, not the relay database: SQLx stores its `_sqlx_migrations` history in `public`, so sharing a database would collide with another application's migration history. `migration.runtimeDatabaseRole` names an existing LOGIN role (the default is `buzz_push_gateway_runtime`) used by runtime `DATABASE_URL`. After scoped migrations, the Job revokes database `CREATE` from that role and schema `CREATE` from both `PUBLIC` and the role, then grants only database `CONNECT`, schema `USAGE`, and `SELECT, INSERT, UPDATE, DELETE` on the six gateway tables. The migration role must own the database/schema objects or otherwise be allowed to issue those grants; it is never provided to runtime replicas. Readiness rejects an empty/partial schema, missing DML, or a runtime role that retains database/schema `CREATE`. Helm waits for the migration hook before updating replicas, so rolling deployments never race unconditional startup migration. Readiness must be removed from load-balancer service endpoints before terminating a pod.
 
@@ -114,12 +174,15 @@ The gateway serves Prometheus metrics at `GET /metrics` on the **private health 
 | `push_gateway_apns_send_attempts_total` | counter | none | Entries into the concrete APNs HTTP send seam. Compare with terminal outcomes to detect work that never reached transport. |
 | `push_gateway_apns_deliveries_total` | counter | `outcome` = `accepted` \| `invalid_endpoint` \| `retry` \| `configuration_fault` \| `permanent_request_fault` | Terminal APNs send outcomes. |
 | `push_gateway_apns_delivery_seconds` | histogram | — | APNs send round-trip latency (seconds). |
+| `push_gateway_fcm_send_attempts_total` | counter | none | Entries into the concrete FCM HTTP send seam. |
+| `push_gateway_fcm_deliveries_total` | counter | `outcome` (the same five classes as APNs) | Terminal FCM send outcomes. |
+| `push_gateway_fcm_delivery_seconds` | histogram | none | FCM send round-trip latency (seconds), including any access token refresh. |
 | `push_gateway_admissions_total` | counter | `result` = `admitted` \| `rejected` \| `unavailable` | Outcome at the `authorize_delivery` replay/quota fence. |
 | `push_gateway_delivery_errors_total` | counter | `class` (static) | Selected delivery-handler exit classes only (see note). |
 | `push_gateway_reaper_failures_total` | counter | — | Retention reaper sweep failures. |
 | `push_gateway_readiness_failures_total` | counter | `cause` = `not_accepting` \| `authority` | Readiness probe failures by cause. |
 
-`push_gateway_delivery_errors_total` is intentionally **narrow**: it counts only selected exit classes of the `/v1/deliveries/apns` handler. `class` ∈ `invalid_grant` (grant rejected at the admission seam, before a permit is issued), `rate_limited`, `temporarily_unavailable` (authority unavailable at the admission seam), `profile_mismatch`, `profile_disabled`, `token_custody` (endpoint-token open failure), `finish_failed` (detached disposition/join failure returned as 503). Request/auth/attestation/grant validation on the enrollment, delegation, rotation, and revocation handlers is **not** counted by this metric; it is a delivery-hot-path signal, not a total error rate across the API.
+`push_gateway_delivery_errors_total` is intentionally **narrow**: it counts only selected exit classes of the delivery handler (`/v1/deliveries` and its `/v1/deliveries/apns` alias). `class` ∈ `invalid_grant` (grant rejected at the admission seam, before a permit is issued), `rate_limited`, `temporarily_unavailable` (authority unavailable at the admission seam), `profile_mismatch`, `profile_disabled`, `token_custody` (endpoint-token open failure), `finish_failed` (detached disposition/join failure returned as 503). Request/auth/attestation/grant validation on the enrollment, delegation, rotation, and revocation handlers is **not** counted by this metric; it is a delivery-hot-path signal, not a total error rate across the API.
 
 Scraping is **opt-in** and off by default, so the default chart render is unchanged and `8081` keeps no pod ingress. For prometheus-operator, set `podMonitor.enabled=true` and `networkPolicy.monitoring.enabled=true` with `networkPolicy.monitoring.namespaceSelector` / `podSelector` naming your scraper. For Datadog Autodiscovery, leave `podMonitor.enabled=false`, supply the OpenMetrics check through `podAnnotations`, and enable the same narrowly selected NetworkPolicy ingress:
 
@@ -156,7 +219,7 @@ Alerting rules ship as an opt-in prometheus-operator `PrometheusRule` (`promethe
 
 | Alert | Fires when | Severity | Action |
 |---|---|---|---|
-| `PushGatewayConfigurationFault` | any `configuration_fault` outcomes for 10m | critical | The APNs certificate/topic/environment is unhealthy. Check `BUZZ_PUSH_DOGFOOD_APNS_*` configuration. No endpoints are being invalidated. |
+| `PushGatewayConfigurationFault` | any `configuration_fault` outcomes for 10m | critical | The APNs certificate/topic/environment is unhealthy. Check `BUZZ_PUSH_APNS_*` configuration. No endpoints are being invalidated. |
 | `PushGatewayAdmissionUnavailable` | any admission `unavailable` for 5m | critical | PostgreSQL authority store is unreachable. Check DB connectivity and the pod's `postgresEgressCidrs` NetworkPolicy. |
 | `PushGatewayReadinessAuthorityFailing` | readiness `authority` failures for 5m | warning | Replicas are being pulled from the Service on DB check failure. Fix DB health before capacity drops below the PodDisruptionBudget. |
 | `PushGatewayReaperFailing` | reaper failed ≥2 times within 30m (runs every 5m) | warning | Expired reservations aren't being swept, growing the bounded-until-expiry window. Check DB write availability. |
@@ -167,8 +230,12 @@ Alerting rules ship as an opt-in prometheus-operator `PrometheusRule` (`promethe
 Relay push is an explicit deployment opt-in through `BUZZ_PUSH_ENABLED=true`;
 the established strict boolean parser rejects unknown values and the default is
 false. When enabled, `BUZZ_PUSH_GATEWAY_DELIVERY_URL` is required and must be an
-exact HTTP(S) `/v1/deliveries/apns` URL. Credentials, query and fragment are
-not accepted. The relay signs and sends the same configured URL. An absent or explicitly empty URL while
+exact HTTP(S) URL whose path is `/v1/deliveries/apns` or `/v1/deliveries`.
+Use `/v1/deliveries` only with a gateway that already serves it; the public
+gateway at `push.buzz.xyz` does not yet. A gateway that does not answer on the
+configured path (404 or 403) fails each delivery permanently, so the
+notification is dropped rather than retried.
+Credentials, query and fragment are not accepted. The relay signs and sends the same configured URL. An absent or explicitly empty URL while
 enabled is a startup error. Only an enabled relay
 advertises its host-scoped NIP-PL descriptor, accepts leases, and starts the
 matcher and delivery worker. Relays retain lease matching, authorization, durable
@@ -182,6 +249,7 @@ installation, event, or request identifier as a label.
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `buzz_push_enabled` | gauge | — | `1` only when the deployment opt-in is active. |
+| `buzz_push_enqueue_total` | counter | `result` = `completed` \| `full` \| `transaction_full` \| `closed` \| `error` \| `timeout` \| `shutdown` | Best-effort post-commit enqueue outcomes. |
 | `buzz_push_match_jobs_total` | counter | `result` = `matched` \| `unmatched` \| `error` \| `context_error` | Accepted message events evaluated by the matcher. |
 | `buzz_push_match_queue_seconds` | histogram | — | Relay receipt to matcher evaluation latency. |
 | `buzz_push_wakes_total` | counter | `result` = `enqueued` \| `duplicate` \| `inactive_lease` | Durable wake-enqueue outcomes. |
@@ -199,43 +267,17 @@ delivery run only when `BUZZ_PUSH_ENABLED=true`. End-to-end use still requires
 the client App Attest enrollment/delegation flow to place a gateway-issued opaque
 capability—not a raw APNs token—into the encrypted relay lease.
 
-## Internal dogfood evaluation and rollback
+## Evaluation and rollout
 
-The MVP is ready to enable only when the configured gateway's sole dogfood
-profile is configured with its server-owned App Attest app ID, APNs topic,
-production certificate identity, and production APNs environment, and only the
-selected internal relay deployments set `BUZZ_PUSH_ENABLED=true`. Every iOS
-artifact contains the native push bridge and Notification Service Extension,
-but the client remains inactive until its current authenticated relay
-advertises a fully valid NIP-11 `nip-pl` descriptor. There is no App Store
-gateway profile in this MVP.
+Enable push only after a physical-device test with the deployment's configured
+application identity, APNs topic, certificate and environment. Updated clients
+require the NIP-11 `buzz-push-v1` capability. Keep `nip-pl` disabled on production
+relays throughout the cutover.
 
-Physical-device validation must use an application whose App Attest identity
-and APNs topic match the configured dogfood profile. The current gateway cannot
-enroll `xyz.block.buzz.mobile` or another bundle identifier merely by changing
-deployment values: adding another identity requires the explicit multi-profile
-work described above.
-
-Dogfood end-to-end release validation starts after this feature reaches `main`:
-publish the next immutable `mobile-vX.Y.Z-rc.N` candidate from the exact current
-`origin/main` commit, build that tag through the normal Block release pipeline,
-and wait for the signed `xyz.block.buzz.dogfood.mobile` artifact to appear in
-Mobile Releases/Comp Portal before installing it on a physical device. Verify
-APNs delivery, fetched and signature-verified notification content, and
-exact-message tap routing against the configured gateway and a push-enabled
-internal relay before widening the internal evaluation.
-
-Before that first candidate, the private dogfood builder's manual signing and
-export configuration must map separate distribution
-profiles for both `xyz.block.buzz.dogfood.mobile` and
-`xyz.block.buzz.dogfood.mobile.NotificationService`; an app-only profile does
-not provision the extension. App Store rollout remains off through relay and
-gateway deployment configuration until separately approved.
-Before enabling rich message presentation, enable Apple's Communication
-Notifications capability on the parent dogfood App ID and regenerate its app
-provisioning profile. The extension profile does not need that capability.
-Apply the same parent-App-ID prerequisite to the eventual App Store rollout;
-updating Block Apple portal records is a separately authorized release step.
+Build a signed release candidate with both the app and Notification Service
+Extension provisioned. Verify APNs delivery, fetched and signature-verified
+notification content, and exact-message tap routing. Enable Apple's Communication
+Notifications capability on the parent App ID for rich message presentation.
 
 For each evaluation cohort, measure relay receipt-to-match, wake queue, relay-to-
 gateway, and gateway-to-APNs latencies from the histograms above. Track the
@@ -249,12 +291,110 @@ triggering message. Keep fallback-to-channel and placeholder/failure cases as
 explicit counts in the manual sample until privacy-preserving client telemetry
 is designed.
 
-Rollback does not require deleting credentials or mutating existing leases.
-Set `BUZZ_PUSH_ENABLED=false` on the enabled relays to stop advertisement, lease
-acceptance, matching, workers, and new gateway traffic. If the gateway itself
-is unhealthy, disable the gateway deployment only after relay delivery is off.
-Existing leases and gateway authorities then expire naturally. Adding an App
-Store application profile is outside this internal evaluation.
+### Relay push-trigger retirement gate
+
+Migration 0063 removes the push trigger for supported relay message paths.
+Before merge, verify that the deployed primary and profiler relays use the
+bounded post-commit application producer and immediate worker-stop behavior from
+[#8216](https://github.com/block/buzz/pull/8216), or a verified equivalent.
+Investigate any concrete supported path that creates notification-eligible
+messages outside those relays. Hypothetical external SQL clients and unattributed
+database sessions do not require a privileged audit or block retirement.
+
+Rollback disables push while retaining the qualified image and schema; image
+downgrades are excluded after retirement. Pending migrations must also be
+considered: migration 0062 adds system channels, which older images cannot read
+or filter correctly. The push producer floor alone is not sufficient to justify
+an image downgrade.
+
+Before separately authorized migration or deployment, bind the qualified release
+and profiler image digests to the reviewed source and rollback policy. Pull
+requests build images without publishing them; final published digest binding is
+a release gate, not a prerequisite for merging the source change. Keep automatic
+migration disabled during the transition. Resolve overlapping retirement
+migrations and verify the published migration ledger before execution. Migration
+0063's lock timeout bounds acquisition waits, not lock-hold or statement duration.
+
+After migration 0063, verify that `events_enqueue_push_match` is absent from
+the parent and every partition and `enqueue_push_match_job()` is absent.
+Migration 0065 then retires `events_refresh_channel_ttl` and
+`refresh_channel_ttl_after_event_insert()` the same way; after it, raw SQL
+writers no longer refresh ephemeral-channel deadlines. Verify application
+enqueueing and flag-only rollback on the exact deployed candidate. Legacy images and raw SQL
+writers without the application producer are unsupported after this point:
+their messages may commit without producing notifications or extending
+ephemeral-channel deadlines (so those channels can expire early). Do not restore
+either trigger or downgrade an image as an urgent rollback step. Reintroducing legacy
+writer support requires a separate reviewed forward migration and compatibility
+plan; never edit published migrations or their checksums.
+
+### Relay rollback and reactivation
+
+Set `BUZZ_PUSH_ENABLED=false` in the approved configuration for **every writer
+workload in the affected database scope**, then replace all previously enabled
+relay processes. This is a startup setting, not a live configuration reload.
+Keep the delivery URL, image, relay keys, schema, leases, client preferences and
+gateway grants unchanged. Do not stop a shared gateway as part of relay rollback.
+
+The relay copies the flag into `DbConfig::push_enabled`. Every physical writer
+connection, including the audit pool and replacement connections, sets the
+`buzz.push_enabled` PostgreSQL session setting. Other `DbConfig` callers default
+to disabled. Updated writers also set `buzz.push_async_enqueue=on`, which makes
+any surviving pre-0063 trigger skip enqueueing regardless of the enabled flag. The
+application producer is created only when enabled. Disabled writes perform no
+push locks, lease scans or queue writes.
+Before retirement, the overlap migration updates only an existing trigger
+function; it does not recreate a retired trigger or function. Deploy it before
+relying on the flag with a surviving trigger. On these pre-0063 schemas, older
+images and raw SQL writers with a missing setting retain legacy enqueue behavior;
+inventory and replace or explicitly disable all such connections before declaring
+rollback complete. After 0063, only the application producer can enqueue push
+work, and the retirement gate above excludes those legacy writers and images.
+
+On SIGTERM/Ctrl-C, the relay cancels enqueue, matcher and delivery futures immediately,
+before its listener drain. Uncommitted transactions roll back; committed claims
+remain leased until their normal expiry. No cancellation cleanup deletes or
+acknowledges queue entries. An HTTP request already accepted by the gateway may
+still produce a notification. The process shutdown deadline remains the hard
+backstop; a stalled replacement with old workers alive is incomplete rollback.
+
+Verify all old writer sessions and workers have exited, eligible messages still
+store and arrive in chat, no new matcher jobs appear, and gateway attempts stop
+once in-flight work settles. Inspect enqueue activity as well as queue counts:
+a stable count alone can conceal additions and removals. Ordinary reads, writes,
+authentication and reconnects must remain healthy.
+
+When enabled, updated application writers stage at most 256 event IDs per
+transaction and submit them only after successful commit using a non-waiting
+send. One background worker has a 256-item queue and a dedicated one-connection
+pool; it never borrows a message-write connection. Each attempt has a two-second
+deadline, a 500 ms lock timeout and a 1.5 second statement timeout. Saturation,
+errors, deadlines, process loss and shutdown can drop notifications. They cannot
+reject or roll back a committed message, and there is no replay/backfill of
+in-memory work. Monitor `buzz_push_enqueue_total` by result (`completed`, `full`,
+`transaction_full`, `closed`, `error`, `timeout`, `shutdown`). `completed` includes
+jobs with no eligible lease. Database enqueue is conditional on a live event and
+an eligible lease whose recorded update timestamp is no later than event receipt.
+These timestamps do not establish transaction commit order. When registration
+and message arrival overlap, either sending or suppressing the notification is
+acceptable; there is no exact enrollment-order guarantee. A concurrent lease
+update, including renewal of an active lease, can also suppress a notification
+under this best-effort contract. Activation never scans
+historical messages or deliberately backfills older notifications.
+
+Before 0063, this isolation requires the overlap migration and updated writers;
+legacy writers can still execute the transactional trigger. After 0063, the
+trigger is absent and all supported writers must use the application producer.
+
+Pending matcher jobs and pending/claimed delivery jobs remain dormant. Do not
+process or delete them during urgent rollback. **Before re-enabling**, inspect
+retained work across the full affected scope and record an explicit disposition
+decision. Cleanup size, batching and scoped commands are an operator decision;
+preserve leases and handle completed records through retention policy. There is
+no automatic purge or startup queue interlock: enabling workers resumes eligible
+retained work under existing expiry/retry rules. Thus an unchecked nonempty queue
+must not be silently reactivated. Messages stored while disabled are not
+backfilled on lease activation or re-enablement.
 
 ## Helm production inputs
 
@@ -273,7 +413,7 @@ the environment's GitOps values; the chart then renders
 `ghcr.io/block/buzz-push-gateway@sha256:...` and ignores the mutable tag.
 `values-production.yaml` remains an intentionally invalid production-input
 contract: deployment CI must inject the verified image digest, the provisioned
-dogfood Apple application identifier and the actual PostgreSQL network. Set
+distributed Apple application identifier, its matching APNs topic, and the actual PostgreSQL network. Set
 `gatewayOrigin` only when enabling the chart’s optional HTTPRoute; it supplies
 the routing hostname and is not passed to the gateway binary. In an
 environment with an existing ingress or service mesh route, keep
@@ -328,8 +468,10 @@ helm pull oci://ghcr.io/block/buzz/charts/buzz-push-gateway --version X.Y.Z
 
 The gateway verifies the signed method and delivery path using the NIP-98 event
 format, rather than matching the full incoming HTTP(S) request URL. The signed
-method must be `POST`; the signed URL path must be `/v1/deliveries/apns`, without
-query, fragment or credentials. Incoming request queries are rejected.
+method must be `POST`; the signed URL path must be the path of the route the
+request is sent to, `/v1/deliveries` or its `/v1/deliveries/apns` alias, without
+query, fragment or credentials. A request signed for one route is rejected on
+the other. Incoming request queries are rejected.
 Host and forwarding headers do not participate in delivery authentication.
 Event signatures, body hashes, timestamps, grant checks and replay protection
 remain enforced. No mobile App Attest audiences or relay activation settings change.

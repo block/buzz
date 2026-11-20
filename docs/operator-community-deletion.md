@@ -191,17 +191,21 @@ rejects with `409` and `code: "limit_reached"` (the `error` message keeps its
 `limit_reached:` prefix for older clients):
 
 - **Active:** live ownership plus incomplete owner deletions
-  (`BUZZ_MAX_COMMUNITIES_PER_OWNER`, default 5). A deletion keeps its slot
+  (`BUZZ_MAX_COMMUNITIES_PER_OWNER`, default 50). A deletion keeps its slot
   until logical completion records `completed_at`.
 - **Lifetime:** live ownership plus every non-aborted owner deletion, including
-  completed ones, capped at an absolute 20 regardless of the active limit.
-  Lifetime usage includes live ownership, so no owner can hold more than 20
-  live communities; a `BUZZ_MAX_COMMUNITIES_PER_OWNER` above 20 is
+  completed ones, capped at an absolute 50 regardless of the active limit.
+  Lifetime usage includes live ownership, so no owner can hold more than 50
+  live communities; a `BUZZ_MAX_COMMUNITIES_PER_OWNER` above 50 is
   unreachable, and owner lists would report a `quota_limit` the owner can
   never reach.
   Deleted communities keep their hosts as permanent tombstones, so this bounds
-  create-then-delete host squatting. Aborted deletions restore the community
-  and count only through its live membership.
+  create-then-delete host squatting. At the stock 50/50 caps, every completed
+  owner deletion permanently reduces the maximum number of live communities
+  that owner can subsequently hold: 50 active slots are only possible with no
+  prior owner deletions. Raising the active override cannot restore those slots.
+  Aborted deletions restore the community and count only through its live
+  membership.
 
 Owner-list responses carry `quota_used` (active), `quota_limit` (active), and
 `can_create` (both caps). `can_create: false` is the only signal a client needs:

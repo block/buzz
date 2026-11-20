@@ -38,8 +38,6 @@ class MobileHuddleShell extends HookConsumerWidget {
     final drawerHeight =
         _mobileHuddleDrawerBaseHeight + MediaQuery.paddingOf(context).bottom;
     final surface = _huddleDrawerSurface(context);
-    final usesNativeConcentricSurface =
-        defaultTargetPlatform == TargetPlatform.iOS;
 
     return ColoredBox(
       color: drawerOpen ? surface : context.colors.surface,
@@ -59,9 +57,7 @@ class MobileHuddleShell extends HookConsumerWidget {
               key: const ValueKey('mobile-huddle-app-surface'),
               duration: duration,
               curve: _mobileHuddleDrawerCurve,
-              clipBehavior: usesNativeConcentricSurface
-                  ? Clip.none
-                  : Clip.antiAlias,
+              clipBehavior: Clip.antiAlias,
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.vertical(
                   bottom: Radius.circular(
@@ -79,20 +75,10 @@ class MobileHuddleShell extends HookConsumerWidget {
                       ]
                     : const [],
               ),
-              child: usesNativeConcentricSurface
-                  ? ConcentricSheetSurface(
-                      key: const ValueKey(
-                        'mobile-huddle-app-concentric-surface',
-                      ),
-                      enabled: drawerOpen,
-                      color: context.colors.surface,
-                      backdropColor: surface,
-                      corners: ConcentricSurfaceCorners.bottom,
-                      padding: EdgeInsets.zero,
-                      providesSheetSurface: false,
-                      child: child,
-                    )
-                  : child,
+              // Keep the app in Flutter's compositing tree. A full-size UIKit
+              // backdrop here can hide the conversation's painted layers when
+              // the Huddle is minimized in the two-pane iOS layout.
+              child: child,
             ),
           ),
           AnimatedPositioned(
@@ -215,7 +201,7 @@ class _MobileHuddleDrawer extends ConsumerWidget {
                           key: const ValueKey('huddle-drawer-expand'),
                           tooltip: 'Open Huddle',
                           showTooltip: false,
-                          icon: LucideIcons.chevronUp,
+                          icon: BuzzIcons.chevronUp,
                           foregroundColor: foreground,
                           backgroundColor: controlSurface,
                           useHapticFeedback: true,
@@ -228,7 +214,7 @@ class _MobileHuddleDrawer extends ConsumerWidget {
                               ? 'Use earpiece'
                               : 'Use speaker',
                           showTooltip: false,
-                          icon: LucideIcons.volume2,
+                          icon: BuzzIcons.volume2,
                           foregroundColor: session.isSpeakerEnabled
                               ? drawerSurface
                               : foreground,
@@ -249,8 +235,8 @@ class _MobileHuddleDrawer extends ConsumerWidget {
                           tooltip: session.isMuted ? 'Unmute' : 'Mute',
                           showTooltip: false,
                           icon: session.isMuted
-                              ? LucideIcons.micOff
-                              : LucideIcons.mic,
+                              ? BuzzIcons.micOff
+                              : BuzzIcons.mic,
                           foregroundColor: session.isMuted
                               ? foreground
                               : drawerSurface,
@@ -269,7 +255,7 @@ class _MobileHuddleDrawer extends ConsumerWidget {
                       key: const ValueKey('huddle-drawer-leave'),
                       tooltip: 'Leave Huddle',
                       showTooltip: false,
-                      icon: LucideIcons.phoneOff,
+                      icon: BuzzIcons.phoneOff,
                       foregroundColor: context.colors.error,
                       backgroundColor: controlSurface,
                       useHapticFeedback: true,

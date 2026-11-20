@@ -77,12 +77,15 @@ test.describe("project conversation load failure", () => {
     await installMockBridge(page);
     await page.goto("/", { waitUntil: "domcontentloaded" });
 
-    // Seed the conversation BEFORE opening general — i.e. before its live
-    // subscription exists — so the reply lands in the mock store (searchable,
-    // and returnable by a successful get_thread_replies) but is never live
-    // pushed into the thread-replies cache. If general were open first, the
-    // live handler would seed that cache and the panel would render the list
-    // branch, masking the error card. The root carries the repository discovery
+    // Seed the conversation into the mock store (searchable, and returnable by
+    // a successful get_thread_replies) without it ever being live-pushed into
+    // the thread-replies cache: a live reply would make the panel render the
+    // list branch and mask the error card. Seeding before any subscription
+    // exists is not enough on its own — the panel's live REQ uses
+    // `since = floor(now)` and the mock replays stored events with
+    // `created_at >= since`, so a reply dated in the current or next second
+    // still arrives live. Date both events a minute in the past so neither can
+    // fall inside that window. The root carries the repository discovery
     // token so it surfaces as the channel's latest discussion hit (what the
     // Channels-tab row opens); its reply omits the token so it never competes
     // to be the opened hit.
@@ -119,14 +122,14 @@ test.describe("project conversation load failure", () => {
           channelName: "general",
           content: rootContent,
           pubkey: author,
-          createdAt: now,
+          createdAt: now - 60,
         });
         emit({
           channelName: "general",
           content: replyContent,
           parentEventId: root.id,
           pubkey: author,
-          createdAt: now + 1,
+          createdAt: now - 59,
         });
         return root.id;
       },

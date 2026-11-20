@@ -128,28 +128,29 @@ String dmAvatarInitial(Channel channel, {String? currentPubkey}) {
   return label.isNotEmpty ? label[0].toUpperCase() : '?';
 }
 
+/// Sorts by the visible label, resolving each label only once per invocation.
 List<Channel> sortDmChannelsByDisplayLabel(
   Iterable<Channel> channels, {
   String? currentPubkey,
   IdentityNameSources? names,
 }) {
-  final sorted = channels.toList();
+  // Keep sort keys local: the next call must reflect current viewer, channel
+  // participants, and community profile/owner names.
+  final sorted = [
+    for (final channel in channels)
+      (
+        channel: channel,
+        label: resolveDmChannelDisplayLabel(
+          channel,
+          currentPubkey: currentPubkey,
+          names: names,
+        ).toLowerCase(),
+      ),
+  ];
   sorted.sort((left, right) {
-    final leftLabel = resolveDmChannelDisplayLabel(
-      left,
-      currentPubkey: currentPubkey,
-      names: names,
-    );
-    final rightLabel = resolveDmChannelDisplayLabel(
-      right,
-      currentPubkey: currentPubkey,
-      names: names,
-    );
-    final labelCompare = leftLabel.toLowerCase().compareTo(
-      rightLabel.toLowerCase(),
-    );
+    final labelCompare = left.label.compareTo(right.label);
     if (labelCompare != 0) return labelCompare;
-    return left.id.compareTo(right.id);
+    return left.channel.id.compareTo(right.channel.id);
   });
-  return sorted;
+  return [for (final entry in sorted) entry.channel];
 }

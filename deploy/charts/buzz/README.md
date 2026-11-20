@@ -12,7 +12,7 @@ This chart has two operating profiles selected by values:
 ## Quickstart (eval only)
 
 ```sh
-helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.10 \
+helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.12 \
   --create-namespace --namespace buzz \
   --set quickstart=true \
   --set postgresql.enabled=true \
@@ -37,6 +37,20 @@ image:
   repository: ghcr.io/block/buzz
   digest: sha256:<64-lowercase-hex-characters>
 ```
+
+Bundled object storage uses [Silo](https://silo.pgsty.com/download/), a maintained
+MinIO fork, with matching `pgsty/silo` and `pgsty/mc` release images pinned by
+multi-platform digest. Both images allow anonymous pulls and support Linux
+amd64 and arm64; the upstream Quay MinIO images no longer allow anonymous pulls.
+The existing `minio` names and `MINIO_*` settings remain compatible. Keep the
+Helm and Compose pins aligned when upgrading, and run Buzz's
+[object-store conformance probe](../../../docs/git-on-object-storage.md#conformance-admitting-a-backend-for-a3)
+against the new release before deploying it.
+
+For an existing MinIO data volume, follow Silo's
+[migration guide](https://silo.pgsty.com/compatibility/migration/) and take a
+backup before upgrading. Replacing the container image upgrades the storage
+server as well as changing its registry.
 
 ## Production (GitOps)
 
@@ -159,8 +173,8 @@ two gauges labelled `phase`:
 - `buzz_startup_phase_seconds` is the finished step's duration.
 
 `degraded` means the step hit a non-fatal error and startup continued — for
-example, some communities failed NIP-43 reconciliation or a NIP-FI issuer did
-not warm. `failed` means startup aborted inside the step.
+example, some large channel rosters failed reconciliation or a NIP-FI issuer
+did not warm. `failed` means startup aborted inside the step.
 
 These are gauges, not counters, because each value is written once per boot
 and a monotonic-counter scrape drops a series' first sample. Each is written
@@ -169,8 +183,7 @@ field of the `Prometheus metrics exporter started` log (2700 s with default
 intervals). A step that runs longer than that timeout loses its `_current`
 series, so a pod stuck that long shows no current step. The `phase` values are
 the closed `StartupStep` vocabulary in `crates/buzz-relay/src/startup_steps.rs`;
-they never reuse an early lifecycle phase name. The NIP-43 startup reconcile
-also logs `NIP-43 startup reconciliation progress` every 5,000 communities.
+they never reuse an early lifecycle phase name.
 
 ### Readiness contract
 
@@ -181,6 +194,15 @@ gating the probe on them removed the whole deployment from the load balancer at
 once and left a reconnect burst with nowhere to land. There is no separate
 "starting" state — the health listener does not bind until the database,
 migrations, Redis, and pub/sub are up, so a process that can answer has booted.
+With `BUZZ_NIP_FI_COMMUNITY_SOURCE=database` and a mode other than `off`, the
+first NIP-FI binding snapshot also loads before any listener binds (startup
+phase `nip_fi_snapshot_load`); a failed load exits the process, so a pod never
+reports ready without one. Later refresh failures do not affect readiness —
+watch `buzz_nip_fi_binding_snapshot_loaded_timestamp_seconds` instead. The
+source's env vars (`BUZZ_NIP_FI_COMMUNITY_SOURCE`,
+`BUZZ_NIP_FI_SNAPSHOT_MAX_ROWS`, `BUZZ_NIP_FI_SNAPSHOT_REFRESH_TIMEOUT_MS`,
+`BUZZ_NIP_FI_RESOLVER_NEGATIVE_CACHE_MAX`, `BUZZ_NIP_FI_RESOLVER_MAX_INFLIGHT`)
+and alerts are in `docs/operator-nip-fi-bindings.md`.
 
 Shared-dependency health moved to **`/_status`** on the same private health
 listener, under a `dependencies` object carrying the `postgres`, `redis`,
@@ -340,7 +362,7 @@ can give it to a caller.
 | `buzz_db_connection_step_duration_seconds` | histogram | `pool_role`, `step` |
 | `buzz_db_connection_step_attempts_total` | counter | `pool_role`, `step`, `outcome` |
 
-The fixed steps are `writer_pool`, `physical_connect`, `created_at_floor`,
+The fixed steps are `writer_pool`, `physical_connect`,
 `session_timeouts`, `isolation`, and `ready`. Measurable phases emit start,
 duration, and terminal evidence. `physical_connect` and `ready` are success
 milestones: SQLx 0.9 exposes `after_connect` only after DNS, network, TLS, and
@@ -354,8 +376,8 @@ start counter to derive the number of attempts currently in progress. The
 session phases run in order, so a later phase start also proves the earlier
 phases succeeded for that attempt.
 
-Four start counters, four 13-series histograms, and fifteen terminal counters
-create a hard ceiling of 71 raw Prometheus series per pod. Connection ordinals,
+Three start counters, three 13-series histograms, and twelve terminal counters
+create a hard ceiling of 54 raw Prometheus series per pod. Connection ordinals,
 database URLs, hosts, usernames, SQL, and raw errors are forbidden as metric
 labels.
 
@@ -394,6 +416,38 @@ reader family remains absent when no read replica is configured; use
 Pool sizing and the aggregate connection budget across all four roles remain
 deployment configuration concerns. The relay does not enforce a combined
 connection ceiling.
+
+The reader pool keeps a warm floor of one fifth of its maximum (at least one)
+established connections per relay pod, so standing reader connections are
+that floor times the pod count; size the replica's `max_connections` for it.
+Each routed read proves the replica is caught up before serving from it. A
+proof that does not answer within 1s falls back to the writer, counted as
+`buzz_db_route_decision{decision="writer",reason="reader_proof_timeout"}`.
+A sustained rise in that series means the replica is reachable but not
+answering, for example during a failover. Every connection returned to the
+reader pool passes a release check first. A connection is closed instead of
+returned, and the pool dials a replacement, when the check does not answer
+within 5s (`reason="timeout"`), fails (`error`), or finds a transaction still
+open (`open_transaction`). Each close increments
+`buzz_db_reader_release_closed_total{reason}`, a counter with those three
+series. A rise in `timeout` means reader sockets stopped answering.
+
+Subscription-history reads are the exception to the writer fallback when the
+reader is merely busy. Each pod admits at most its reader pool size less one
+fifth (16 at the default pool size of 20) history reads to the reader at
+once, which normally leaves authorization reads a free reader connection
+(connections still finishing their release can briefly take it). A history read
+that waits more than 1s for admission, or misses the reader's 150ms acquire
+budget while every reader connection is busy, is rejected with the retryable
+`CLOSED` `error: database error` instead of moving to the writer, where it
+would compete with authentication and tenant lookups. Each rejection
+increments `buzz_db_route_decision{decision="rejected"}`, with
+`reason="history_read_cap"` or `"reader_acquire_timeout"`. A history read
+the reader cannot serve for other reasons (unreachable, validation failure,
+proof timeout, stale replica) still falls back to the writer. The
+compatibility families `buzz_db_pool_acquire_wait_seconds` and
+`buzz_db_pool_acquisitions_total` carry `operation` as well as `pool_role`
+and `outcome`.
 
 ## Relay Pod extensions
 
@@ -445,6 +499,85 @@ collide with chart-owned containers or volumes, mounts must reference existing
 volumes, and each init container must define an appropriate security context
 and resources. Empty `relay.command` and `relay.args` arrays preserve the image
 defaults; non-empty values override its entrypoint and arguments respectively.
+
+## Storage accounting worker
+
+`storageAccounting.enabled=true` adds a CronJob that runs
+`buzz-admin storage-snapshot` against the relay's S3 bucket and writes a
+durable snapshot row, keeping the expensive object walk off the relay Pods.
+
+### Snapshot identity contract
+
+Every snapshot row records the code that produced it in `code_sha`, taken from
+the `BUZZ_STORAGE_SNAPSHOT_CODE_SHA` environment variable the chart derives
+from the deployed image identity (`image.digest` when set, otherwise
+`image.tag`, otherwise `Chart.AppVersion`). The value is never hashed or
+sanitized.
+
+## Datadog version label
+
+Every Pod the chart renders — relay, pairing relay, storage accounting, and the
+deletion drain operator job — carries a chart-owned
+`tags.datadoghq.com/version` label derived from the deployed image:
+`image.tag` when set, otherwise `image.digest`, otherwise `Chart.AppVersion`.
+The tag is preferred because it is the readable build name (`sha-<sha7>`, or
+`main-<UTC commit time>-<sha7>` for Kargo-promoted main builds) dashboards use; promotion tooling writes it together with the digest
+that actually pins the image.
+
+```yaml
+relay:
+  podLabels:
+    tags.datadoghq.com/env: production
+    tags.datadoghq.com/service: buzz
+    # tags.datadoghq.com/version: NOT set here — the chart owns it.
+```
+
+Precedence is explicit: a `tags.datadoghq.com/version` supplied under any
+workload's `podLabels` is ignored. Every other label — including
+`tags.datadoghq.com/env` and `tags.datadoghq.com/service`, which describe the
+deployment rather than the image — passes through unchanged. Remove any
+wrapper-maintained version pins when upgrading; a pin equal to `image.tag`
+renders identically, so the upgrade does not roll Pods for that label.
+
+A Kubernetes label value is capped at 63 bytes, must begin and end with an
+alphanumeric, and may otherwise contain only `[-._a-zA-Z0-9]` — a far narrower
+grammar than an OCI tag. `image.tag` is deliberately left unconstrained, so the
+label is derived through a total mapping rather than a check that could reject
+a tag the chart used to accept:
+
+| Revision | Label |
+|---|---|
+| `sha256:<64 hex>` digest | the hex without `sha256:`, first 63 characters |
+| already a valid label value, lowercase, no `__`, and not exactly 63 lowercase hex characters | emitted byte for byte (e.g. `1.2.3-rc.4`, `sha-1a2b3c4`) |
+| anything else | the first 63 hex characters of the revision's SHA-256 |
+
+The passthrough row requires Datadog's normal form because Datadog lowercases
+tag values and collapses `__`: passing `ReleaseA` and `releasea` through
+unchanged would report one version for two revisions. Every emitted label is
+therefore already normalized, so distinct labels stay distinct in Datadog.
+
+When both `image.tag` and `image.digest` are set, the label names the tag —
+even if the tag and digest disagree. The digest still pins what actually runs
+(`repository@digest`), so keep the two in step when promoting.
+
+Exactly 63 lowercase hex characters is a **reserved shape** — it is what the
+first and third rows emit, so the passthrough row must not be able to emit it
+too. A tag of that shape is hashed rather than preserved. Shorter hex tags and
+ordinary 40-character git SHAs are unaffected.
+
+Arbitrary OCI revisions outnumber 63-byte label values, so **no mapping onto
+this grammar can be injective** and the chart does not claim one. What it does
+claim is collision *resistance*: every case retains 252 bits of SHA-256, the
+same margin the digest case has always relied on, and the reserved shape keeps
+that margin across cases rather than only within one. Two earlier iterations
+fell short of this — one kept a readable prefix with only 40 bits of hash (a
+colliding tag pair was brute-forced in about a second), and one let a
+passthrough tag reproduce a hashed label with no hash work at all, by copying a
+rendered label into `image.tag`.
+
+The image reference in the Pod spec and `BUZZ_STORAGE_SNAPSHOT_CODE_SHA` always
+keep the exact revision; the label is the joinable telemetry key. See
+`docs/deployment-identity.md`.
 
 ## Device pairing relay
 
@@ -498,9 +631,13 @@ default so long-lived WebSocket connections have time to drain.
 
 ## Upgrades
 
-Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run at startup, gated by `BUZZ_AUTO_MIGRATE` (default `true`). Multiple replicas race-safely behind a Postgres advisory lock. `helm upgrade` is the entire upgrade procedure.
+Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run at startup, gated by `BUZZ_AUTO_MIGRATE` (default `true`). Multiple replicas race-safely behind a Postgres advisory lock. Outside the required stop below, `helm upgrade` is the entire upgrade procedure.
 
-Migration 0032 is a hard compatibility boundary for relay versions that publish repaired channel rosters. The relay verifies the roster-fence trigger catalog and behavior before opening listeners and refuses to start if 0032 is missing or inert. Apply migrations before rolling the relay; for large installations, prefer a controlled `buzz-admin migrate` job with PostgreSQL lock monitoring before the code rollout.
+**Required stop before migrations 0089–0091, 0095 and 0096.** These migrations drop database triggers whose work the relay now does in application code. Before you upgrade to a build that contains any of them, every relay pod, job and rollback target must run a stop build. An older relay that keeps serving after they run can write data the dropped triggers used to refuse, and some older builds refuse to start without the 0032 roster trigger or the community tombstone trigger. [`docs/trigger-retirement-deployment.md`](../../../docs/trigger-retirement-deployment.md) names the stop build and gives the procedure and rollback.
+
+**Required stop before migration 0100.** Migrations 0098–0100 undo migration 0097, and 0100 drops the columns and indexes that 0097 added. No tagged relay release reads them. Only rolling images built from commit `eebf62b6` (#9650) up to, but not including, `a4061916` (#9689) do. Their channel artifact reads and writes fail once 0100 runs. If any relay pod, job or rollback target runs one of those images, move all of them to `sha-a406191` or later before you upgrade. To roll back after 0100 has run, set `migrate.autoMigrate=false` first, because an older binary with auto-migration on refuses a database that has migrations it does not know. Then roll back to `sha-a406191` or later, never to an image in that range. Migration 0098 refuses a database whose `artifact_heads` primary key is not `(community_id, artifact_id)`. Recover such a database as #9689 describes before upgrading.
+
+Apply migrations before rolling the relay; for large installations, prefer a controlled `buzz-admin migrate` job with PostgreSQL lock monitoring before the code rollout.
 
 If you prefer decoupling migrations from serving, set `migrate.autoMigrate=false`. **In that mode the chart does not run migrations for you** — you own running `buzz-admin migrate` (separate Pod / one-shot Job) against the database before every `helm install` / `helm upgrade`. Readiness probes only verify DB connectivity, not schema freshness, so a pod will appear healthy against an unmigrated schema and fail under load. A pre-upgrade Helm Job for this is on the chart roadmap; the values knob `migrate.preUpgradeJob.enabled` is reserved.
 
@@ -540,11 +677,11 @@ and the relay image via its own `chart-v*` tags. Every PR/`main` push still
 lints, unit-tests, and render-checks the chart; only a `chart-v*` tag publishes,
 so an in-progress `main` can never overwrite a released version.
 
-To cut a release, push a `chart-release/<version>` branch whose `<version>`
-matches `Chart.yaml`'s `version`; merging it auto-tags `chart-v<version>` and
-dispatches the publish job (same lane machinery as the desktop and relay
-releases — see `.github/workflows/auto-tag-on-release-pr-merge.yml`). The publish
-job fails loudly if the tag version and `Chart.yaml` version disagree.
+Merging a PR from a branch in `block/buzz` that bumps `version` in
+`Chart.yaml` creates a `chart-v<version>` tag and triggers the publish job.
+For a dedicated release PR, use a `chart-release/<version>` branch with a
+version matching `Chart.yaml`. The publish job checks that the tag and
+`Chart.yaml` version agree.
 
 ## Development
 

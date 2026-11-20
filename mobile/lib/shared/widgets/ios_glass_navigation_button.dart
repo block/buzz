@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:buzz/shared/theme/buzz_icons.dart';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show PlatformViewHitTestBehavior;
@@ -12,6 +14,7 @@ import '../theme/theme.dart';
 enum IosGlassNavigationIcon {
   back,
   close,
+  check,
   camera,
   photoLibrary,
   palette,
@@ -27,6 +30,8 @@ enum IosGlassNavigationIcon {
   systemAppearance,
   more,
   reply,
+  trash,
+  bell,
 }
 
 /// Leading width used by iOS channel-style headers.
@@ -58,7 +63,9 @@ class IosGlassNavigationButton extends HookWidget {
     this.swatchColor,
     this.isBusy = false,
     this.isSelected = false,
+    this.tintsSelection = true,
     this.nativeViewSuppressed,
+    this.artwork,
   });
 
   static const viewType = 'buzz/navigation_glass';
@@ -102,13 +109,39 @@ class IosGlassNavigationButton extends HookWidget {
   /// Whether the native control exposes its selected state.
   final bool isSelected;
 
+  /// Whether selection changes the glass fill as well as accessibility state.
+  final bool tintsSelection;
+
   /// When true, substitutes an accessible Flutter control for the native view.
   final ValueListenable<bool>? nativeViewSuppressed;
+
+  /// Flutter artwork over the native glass control; UIKit still handles touch.
+  final Widget? artwork;
 
   @override
   Widget build(BuildContext context) {
     assert(defaultTargetPlatform == TargetPlatform.iOS);
+    final native = HookBuilder(builder: _buildNative);
+    return Tooltip(
+      message: semanticLabel,
+      excludeFromSemantics: true,
+      child: SizedBox(
+        width: width,
+        height: height,
+        child: nativeViewSuppressed == null
+            ? native
+            : ValueListenableBuilder<bool>(
+                valueListenable: nativeViewSuppressed!,
+                builder: (context, suppressNativeView, _) =>
+                    suppressNativeView ? _buildFallback(context) : native,
+              ),
+      ),
+    );
+  }
+
+  Widget _buildNative(BuildContext context) {
     final nativeChannel = useState<MethodChannel?>(null);
+    final highlighted = useState(false);
     final onPressedRef = useRef(onPressed)..value = onPressed;
     final brightness = context.theme.brightness.name;
     final effectiveForeground = foregroundColor ?? context.colors.primary;
@@ -120,6 +153,9 @@ class IosGlassNavigationButton extends HookWidget {
       final channel = nativeChannel.value;
       if (channel == null) return null;
       channel.setMethodCallHandler((call) async {
+        if (call.method == 'highlighted') {
+          highlighted.value = call.arguments == true;
+        }
         if (call.method == 'pressed') {
           onPressedRef.value?.call();
         }
@@ -138,6 +174,7 @@ class IosGlassNavigationButton extends HookWidget {
               'enabled': enabled,
               'busy': isBusy,
               'selected': isSelected,
+              'tintsSelection': tintsSelection,
               'swatchColor': ?swatchColorValue,
             }),
           );
@@ -151,6 +188,7 @@ class IosGlassNavigationButton extends HookWidget {
         enabled,
         isBusy,
         isSelected,
+        tintsSelection,
         swatchColorValue,
       ],
     );
@@ -168,153 +206,155 @@ class IosGlassNavigationButton extends HookWidget {
       return null;
     }, [nativeChannel.value, icon, label, semanticLabel]);
 
-    Widget buildControl({required bool suppressNativeView}) {
-      if (suppressNativeView) {
-        final resolvedButtonCenterX = buttonCenterX ?? width / 2;
-        return Semantics(
-          container: true,
-          button: true,
-          enabled: enabled,
-          selected: isSelected,
-          label: semanticLabel,
-          onTap: onPressed,
-          child: ExcludeSemantics(
-            child: Stack(
-              key: const ValueKey('ios-glass-navigation-flutter-fallback'),
-              children: [
-                Positioned(
-                  left: resolvedButtonCenterX - controlSize / 2,
-                  top: (height - controlSize) / 2,
-                  width: controlSize,
-                  height: controlSize,
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: context.colors.surface.withValues(alpha: 0.72),
-                      shape: BoxShape.circle,
-                      border: Border.all(
-                        color: context.colors.inverseSurface.withValues(
-                          alpha: 0.07,
-                        ),
-                      ),
-                    ),
-                    child: isBusy
-                        ? Center(
-                            child: SizedBox.square(
-                              dimension: 22,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: effectiveForeground,
-                              ),
-                            ),
-                          )
-                        : icon == IosGlassNavigationIcon.colorSwatch
-                        ? Padding(
-                            padding: const EdgeInsets.all(4),
-                            child: DecoratedBox(
-                              decoration: BoxDecoration(
-                                color: swatchColor,
-                                shape: BoxShape.circle,
-                              ),
-                            ),
-                          )
-                        : label != null
-                        ? Text(
-                            label!,
-                            maxLines: 1,
-                            style: context.textTheme.labelMedium?.copyWith(
-                              color: effectiveForeground,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          )
-                        : Icon(
-                            switch (icon) {
-                              IosGlassNavigationIcon.more => Icons.more_horiz,
-                              IosGlassNavigationIcon.reply => Icons.reply,
-                              IosGlassNavigationIcon.back =>
-                                Icons.arrow_back_ios_new_rounded,
-                              IosGlassNavigationIcon.close =>
-                                Icons.close_rounded,
-                              IosGlassNavigationIcon.camera =>
-                                Icons.camera_alt_rounded,
-                              IosGlassNavigationIcon.photoLibrary =>
-                                Icons.photo_library_rounded,
-                              IosGlassNavigationIcon.palette =>
-                                Icons.palette_rounded,
-                              IosGlassNavigationIcon.droplet =>
-                                Icons.water_drop_rounded,
-                              IosGlassNavigationIcon.emoji =>
-                                Icons.emoji_emotions_rounded,
-                              IosGlassNavigationIcon.person =>
-                                Icons.person_rounded,
-                              IosGlassNavigationIcon.frame =>
-                                Icons.photo_size_select_actual_rounded,
-                              IosGlassNavigationIcon.rotateCamera =>
-                                Icons.cameraswitch_rounded,
-                              IosGlassNavigationIcon.shutter => Icons.circle,
-                              IosGlassNavigationIcon.colorSwatch =>
-                                Icons.circle,
-                              IosGlassNavigationIcon.sun =>
-                                Icons.light_mode_rounded,
-                              IosGlassNavigationIcon.moon =>
-                                Icons.dark_mode_rounded,
-                              IosGlassNavigationIcon.systemAppearance =>
-                                Icons.brightness_auto_rounded,
-                            },
-                            size: icon == IosGlassNavigationIcon.shutter
-                                ? controlSize * 0.72
-                                : 22,
-                            color: icon == IosGlassNavigationIcon.colorSwatch
-                                ? swatchColor
-                                : effectiveForeground,
-                          ),
-                  ),
+    final creationParams = <String, Object>{
+      'icon': icon.name,
+      'accessibilityLabel': semanticLabel,
+      'accessibilityHidden': false,
+      'brightness': brightness,
+      'foregroundColor': foregroundValue,
+      'enabled': enabled,
+      'busy': isBusy,
+      'selected': isSelected,
+      'tintsSelection': tintsSelection,
+      'controlSize': controlSize,
+      'controlWidth': controlSize,
+      'fillWidth': fillWidth,
+      'buttonCenterX': buttonCenterX ?? width / 2,
+      'hitTargetWidth': width,
+      'hitTargetHeight': height,
+      'swatchColor': ?swatchColorValue,
+    };
+    if (label != null) creationParams['label'] = label!;
+    final nativeControl = UiKitView(
+      viewType: viewType,
+      hitTestBehavior: PlatformViewHitTestBehavior.opaque,
+      creationParams: creationParams,
+      creationParamsCodec: const StandardMessageCodec(),
+      onPlatformViewCreated: (viewId) {
+        nativeChannel.value = MethodChannel('$viewType/$viewId');
+      },
+    );
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        Positioned.fill(child: nativeControl),
+        if (artwork != null)
+          IgnorePointer(
+            child: ExcludeSemantics(
+              child: AnimatedScale(
+                scale: highlighted.value && enabled ? 0.94 : 1,
+                duration: MediaQuery.disableAnimationsOf(context)
+                    ? Duration.zero
+                    : const Duration(milliseconds: 100),
+                child: SizedBox.square(
+                  dimension: controlSize - 8,
+                  child: artwork,
                 ),
-              ],
+              ),
             ),
           ),
-        );
-      }
-      final creationParams = <String, Object>{
-        'icon': icon.name,
-        'accessibilityLabel': semanticLabel,
-        'brightness': brightness,
-        'foregroundColor': foregroundValue,
-        'enabled': enabled,
-        'busy': isBusy,
-        'selected': isSelected,
-        'controlSize': controlSize,
-        'controlWidth': controlSize,
-        'fillWidth': fillWidth,
-        'buttonCenterX': buttonCenterX ?? width / 2,
-        'hitTargetWidth': width,
-        'hitTargetHeight': height,
-        'swatchColor': ?swatchColorValue,
-      };
-      if (label != null) creationParams['label'] = label!;
-      return UiKitView(
-        viewType: viewType,
-        hitTestBehavior: PlatformViewHitTestBehavior.opaque,
-        creationParams: creationParams,
-        creationParamsCodec: const StandardMessageCodec(),
-        onPlatformViewCreated: (viewId) {
-          nativeChannel.value = MethodChannel('$viewType/$viewId');
-        },
-      );
-    }
+      ],
+    );
+  }
 
-    return Tooltip(
-      message: semanticLabel,
-      excludeFromSemantics: true,
-      child: SizedBox(
-        width: width,
-        height: height,
-        child: nativeViewSuppressed == null
-            ? buildControl(suppressNativeView: false)
-            : ValueListenableBuilder<bool>(
-                valueListenable: nativeViewSuppressed!,
-                builder: (context, suppressNativeView, _) =>
-                    buildControl(suppressNativeView: suppressNativeView),
+  Widget _buildFallback(BuildContext context) {
+    final effectiveForeground = foregroundColor ?? context.colors.primary;
+    final enabled = onPressed != null;
+    final resolvedButtonCenterX = buttonCenterX ?? width / 2;
+    return Semantics(
+      container: true,
+      button: true,
+      enabled: enabled,
+      selected: isSelected,
+      label: semanticLabel,
+      onTap: onPressed,
+      child: ExcludeSemantics(
+        child: Stack(
+          key: const ValueKey('ios-glass-navigation-flutter-fallback'),
+          children: [
+            Positioned(
+              left: resolvedButtonCenterX - controlSize / 2,
+              top: (height - controlSize) / 2,
+              width: controlSize,
+              height: controlSize,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: context.colors.surface.withValues(alpha: 0.72),
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: context.colors.inverseSurface.withValues(
+                      alpha: 0.07,
+                    ),
+                  ),
+                ),
+                child: isBusy
+                    ? Center(
+                        child: SizedBox.square(
+                          dimension: 22,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: effectiveForeground,
+                          ),
+                        ),
+                      )
+                    : icon == IosGlassNavigationIcon.colorSwatch
+                    ? Padding(
+                        padding: const EdgeInsets.all(4),
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: swatchColor,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                      )
+                    : label != null
+                    ? Text(
+                        label!,
+                        maxLines: 1,
+                        style: context.textTheme.labelMedium?.copyWith(
+                          color: effectiveForeground,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      )
+                    : Icon(
+                        switch (icon) {
+                          IosGlassNavigationIcon.more => BuzzIcons.ellipsis,
+                          IosGlassNavigationIcon.bell => BuzzIcons.bell,
+                          IosGlassNavigationIcon.trash => BuzzIcons.trash2,
+                          IosGlassNavigationIcon.reply =>
+                            BuzzIcons.cornerUpLeft,
+                          IosGlassNavigationIcon.back => BuzzIcons.chevronLeft,
+                          IosGlassNavigationIcon.close => BuzzIcons.x,
+                          IosGlassNavigationIcon.check => BuzzIcons.check,
+                          IosGlassNavigationIcon.camera => BuzzIcons.camera,
+                          IosGlassNavigationIcon.photoLibrary =>
+                            BuzzIcons.images,
+                          IosGlassNavigationIcon.palette => BuzzIcons.palette,
+                          IosGlassNavigationIcon.droplet => BuzzIcons.droplet,
+                          IosGlassNavigationIcon.emoji => BuzzIcons.smile,
+                          IosGlassNavigationIcon.person => BuzzIcons.user,
+                          IosGlassNavigationIcon.frame => BuzzIcons.square,
+                          IosGlassNavigationIcon.rotateCamera =>
+                            BuzzIcons.switchCamera,
+                          IosGlassNavigationIcon.shutter => BuzzIcons.circle,
+                          IosGlassNavigationIcon.colorSwatch =>
+                            BuzzIcons.circle,
+                          IosGlassNavigationIcon.sun => BuzzIcons.sun,
+                          IosGlassNavigationIcon.moon => BuzzIcons.moon,
+                          IosGlassNavigationIcon.systemAppearance =>
+                            BuzzIcons.sunMoon,
+                        },
+                        size: icon == IosGlassNavigationIcon.shutter
+                            ? controlSize * 0.72
+                            : 24,
+                        color: icon == IosGlassNavigationIcon.colorSwatch
+                            ? swatchColor
+                            : effectiveForeground,
+                      ),
               ),
+            ),
+          ],
+        ),
       ),
     );
   }

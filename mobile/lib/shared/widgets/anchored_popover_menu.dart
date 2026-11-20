@@ -5,9 +5,11 @@ import 'package:flutter/material.dart';
 
 import '../theme/theme.dart';
 
-const _popoverEnterDuration = Duration(milliseconds: 150);
+/// How app popovers enter: a quick fade while scaling up from slightly small.
+const appPopoverEnterDuration = Duration(milliseconds: 150);
+const appPopoverEnterCurve = Curves.easeOutCubic;
+const appPopoverStartScale = 0.96;
 const _popoverExitDuration = Duration(milliseconds: 110);
-const _popoverStartScale = 0.96;
 
 /// Elevation shared by anchored menus and composer popover surfaces.
 const appPopoverElevation = 8.0;
@@ -54,7 +56,7 @@ Future<T?> showAnchoredPopover<T>({
   EdgeInsetsGeometry menuPadding = EdgeInsets.zero,
   Clip clipBehavior = Clip.antiAlias,
   Key? surfaceKey,
-}) {
+}) async {
   final navigator = Navigator.of(context);
   final overlay = navigator.overlay;
   final triggerRenderObject = context.findRenderObject();
@@ -70,30 +72,30 @@ Future<T?> showAnchoredPopover<T>({
   final overlayRect = Offset.zero & overlayRenderObject.size;
   final mediaQuery = MediaQuery.of(context);
 
-  return navigator.push<T>(
-    _AnchoredPopoverRoute<T>(
-      position: RelativeRect.fromRect(triggerRect, overlayRect),
-      items: items,
-      width: width,
-      alignment: alignment,
-      offset: offset,
-      color: color ?? appPopoverColor(context),
-      shape: shape ?? appPopoverShape(context),
-      elevation: elevation,
-      shadowColor: shadowColor ?? appPopoverShadowColor(context),
-      menuPadding: menuPadding,
-      clipBehavior: clipBehavior,
-      surfaceKey: surfaceKey,
-      screenPadding: EdgeInsets.fromLTRB(
-        math.max(Grid.xxs, mediaQuery.padding.left),
-        math.max(Grid.xxs, mediaQuery.padding.top),
-        math.max(Grid.xxs, mediaQuery.padding.right),
-        math.max(Grid.xxs, mediaQuery.padding.bottom),
-      ),
-      reducedMotion: mediaQuery.disableAnimations,
-      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+  final route = _AnchoredPopoverRoute<T>(
+    position: RelativeRect.fromRect(triggerRect, overlayRect),
+    items: items,
+    width: width,
+    alignment: alignment,
+    offset: offset,
+    color: color ?? appPopoverColor(context),
+    shape: shape ?? appPopoverShape(context),
+    elevation: elevation,
+    shadowColor: shadowColor ?? appPopoverShadowColor(context),
+    menuPadding: menuPadding,
+    clipBehavior: clipBehavior,
+    surfaceKey: surfaceKey,
+    screenPadding: EdgeInsets.fromLTRB(
+      math.max(Grid.xxs, mediaQuery.padding.left),
+      math.max(Grid.xxs, mediaQuery.padding.top),
+      math.max(Grid.xxs, mediaQuery.padding.right),
+      math.max(Grid.xxs, mediaQuery.padding.bottom),
     ),
+    reducedMotion: mediaQuery.disableAnimations,
+    barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
   );
+  final result = await navigator.push<T>(route);
+  return result;
 }
 
 class _AnchoredPopoverRoute<T> extends PopupRoute<T> {
@@ -142,7 +144,7 @@ class _AnchoredPopoverRoute<T> extends PopupRoute<T> {
 
   @override
   Duration get transitionDuration =>
-      reducedMotion ? Duration.zero : _popoverEnterDuration;
+      reducedMotion ? Duration.zero : appPopoverEnterDuration;
 
   @override
   Duration get reverseTransitionDuration =>
@@ -155,10 +157,10 @@ class _AnchoredPopoverRoute<T> extends PopupRoute<T> {
     Animation<double> secondaryAnimation,
   ) {
     final curvedAnimation = animation.drive(
-      CurveTween(curve: Curves.easeOutCubic),
+      CurveTween(curve: appPopoverEnterCurve),
     );
     final scaleAnimation = Tween<double>(
-      begin: _popoverStartScale,
+      begin: appPopoverStartScale,
       end: 1,
     ).animate(curvedAnimation);
     final transformOrigin = switch (alignment) {

@@ -10,6 +10,7 @@ class _IOSInlinePhotoPicker extends HookWidget {
   final Future<List<XFile>> Function() onPickAllPhotos;
   final Future<void> Function(List<XFile> photos) onChoosePhotos;
   final Future<void> Function(List<XFile> photos) onChooseAllPhotos;
+  final Future<void> Function(Future<void> Function()) preparePhotos;
   final Widget fallback;
 
   const _IOSInlinePhotoPicker({
@@ -17,6 +18,7 @@ class _IOSInlinePhotoPicker extends HookWidget {
     required this.onPickAllPhotos,
     required this.onChoosePhotos,
     required this.onChooseAllPhotos,
+    required this.preparePhotos,
     required this.fallback,
   });
 
@@ -55,13 +57,13 @@ class _IOSInlinePhotoPicker extends HookWidget {
           case 'didFail':
             isPreparingSelection.value = false;
             if (!context.mounted) return;
-            ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
               SnackBar(
                 content: Text(
-                  call.arguments as String? ??
-                      'Unable to prepare the selected photos.',
+                  call.arguments as String? ?? 'Couldn’t prepare photos',
                 ),
               ),
+              kind: ToastKind.error,
             );
         }
       });
@@ -74,7 +76,7 @@ class _IOSInlinePhotoPicker extends HookWidget {
         !isPreparingSelection.value &&
         !isProcessing.value;
 
-    Future<void> submitSelection() async {
+    Future<void> submitSelection() => preparePhotos(() async {
       if (!canSelect) return;
       isProcessing.value = true;
       try {
@@ -91,7 +93,7 @@ class _IOSInlinePhotoPicker extends HookWidget {
       } finally {
         if (context.mounted) isProcessing.value = false;
       }
-    }
+    });
 
     Future<void> openAllPhotos() async {
       if (isPreparingSelection.value || isProcessing.value) return;
@@ -103,8 +105,9 @@ class _IOSInlinePhotoPicker extends HookWidget {
         }
       } catch (_) {
         if (context.mounted) {
-          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-            const SnackBar(content: Text('Unable to open your photo library.')),
+          ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+            const SnackBar(content: Text('Couldn’t open photo library')),
+            kind: ToastKind.error,
           );
         }
       } finally {
@@ -180,14 +183,14 @@ class _IOSInlinePhotoPicker extends HookWidget {
                         child: BuzzLoadingIndicator(
                           size: 20,
                           color: Colors.white,
-                          semanticLabel: 'Preparing selected photos',
+                          semanticLabel: 'Preparing selected items',
                         ),
                       )
                     : Text(
                         selectedCount.value == 0
                             ? 'All Photos'
                             : 'Add ${selectedCount.value} '
-                                  '${selectedCount.value == 1 ? 'photo' : 'photos'}',
+                                  '${selectedCount.value == 1 ? 'item' : 'items'}',
                       ),
               ),
             ),
@@ -199,7 +202,7 @@ class _IOSInlinePhotoPicker extends HookWidget {
                 child: BuzzLoadingIndicator(
                   size: 44,
                   color: Colors.white,
-                  semanticLabel: 'Preparing selected photos',
+                  semanticLabel: 'Preparing selected items',
                 ),
               ),
             ),

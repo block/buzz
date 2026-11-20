@@ -5,8 +5,8 @@
 //! would-deny where enforce checks them, the admit once the connection is
 //! actually admitted, or `deadline` when enforce's deadline passes first. An
 //! admitted session then records at most one end: `expired` at the deadline,
-//! or `revoked` when a deny for its key arrives once it registered. Every
-//! transition runs under one session lock, and a session whose socket was
+//! or `revoked` when a deny for its key or owner arrives once it registered.
+//! Every transition runs under one session lock, and a session whose socket was
 //! cancelled, or whose AUTH ended unadmitted for a non-NIP-FI reason, retires
 //! without a record.
 
@@ -14,17 +14,17 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
-use axum::http::HeaderMap;
 use buzz_auth::{DenialClass, VerifiedAssertion};
 use nostr::PublicKey;
 use tokio_util::sync::CancellationToken;
 
-use crate::nip_fi_shadow::{Stage, WouldDeny};
+use crate::nip_fi_core::NipFiSession;
+use crate::nip_fi_shadow::{Stage, WouldDeny, DENY_SET};
 use crate::state::AppState;
 
 #[derive(Clone, Copy)]
 enum Phase {
-    /// `revoked`: a deny for the key arrived after registration, which
+    /// `revoked`: a deny for the key or owner arrived after registration, which
     /// enforce's registered-session scan acts on whatever the phase.
     Pending {
         revoked: bool,
@@ -48,10 +48,11 @@ impl ShadowSessions {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Records one `revoked` end for each registered session of `pubkey`
-    /// under `issuer`, at once if admitted or at its admit if still pending;
-    /// a session already ended records nothing, so re-sent denies are
-    /// idempotent.
+    /// Records one `revoked` end for each registered session under `issuer`
+    /// whose asserted key or verified owner is `pubkey`, matched as enforce's
+    /// [`NipFiSession`] matches, at once if admitted or at its admit if still
+    /// pending; a session already ended records nothing, so re-sent denies
+    /// are idempotent.
     pub(crate) fn would_close(&self, issuer: &str, pubkey: &[u8]) {
         let live: Vec<_> = self
             .registered()
@@ -59,20 +60,22 @@ impl ShadowSessions {
             .filter_map(Weak::upgrade)
             .collect();
         for session in live {
-            let key = session.assertion.asserted_key().map(|k| k.to_bytes());
-            if session.assertion.identity().issuer() == issuer
-                && key.as_ref().map(|k| &k[..]) == Some(pubkey)
-            {
+            let assertion = &session.assertion;
+            if assertion.asserted_key().is_some_and(|key| {
+                NipFiSession::from_assertion(assertion).matches(issuer, &key.to_bytes(), pubkey)
+            }) {
                 session.revoke();
             }
         }
     }
 }
 
+/// A shadow session exists only for an assertion verified against a resolved
+/// community, whose label all its records carry.
 pub(crate) struct ShadowSession {
     id: u64,
     route: &'static str,
-    community: String,
+    community: metrics::SharedString,
     assertion: VerifiedAssertion,
     phase: Mutex<Phase>,
     /// The socket's cancellation, read only to stop recording.
@@ -87,7 +90,7 @@ impl ShadowSession {
     pub(crate) fn start(
         state: &AppState,
         route: &'static str,
-        headers: &HeaderMap,
+        community: metrics::SharedString,
         assertion: VerifiedAssertion,
         connection_time: chrono::DateTime<chrono::Utc>,
     ) -> Arc<Self> {
@@ -101,7 +104,7 @@ impl ShadowSession {
         let session = Arc::new(Self {
             id: sessions.next_id.fetch_add(1, Ordering::Relaxed),
             route,
-            community: crate::nip_fi_shadow::community_label(headers, &nip_fi.communities),
+            community,
             assertion,
             phase: Mutex::new(Phase::Pending { revoked: false }),
             cancel: OnceLock::new(),
@@ -129,7 +132,32 @@ impl ShadowSession {
     /// NIP-42 key is not the asserted one, or the assertion has no key.
     pub(crate) fn observe_pairing(&self, pubkey: PublicKey) {
         if self.assertion.asserted_key() != Some(pubkey) {
-            self.decide(Err((Stage::Pairing, DenialClass::AuthorizationDenied)));
+            let reason = if self.assertion.asserted_key().is_some() {
+                "key_mismatch"
+            } else {
+                "no_asserted_key"
+            };
+            let deny = WouldDeny::new(Stage::Pairing, DenialClass::AuthorizationDenied, reason);
+            self.decide(Err(deny.by(Some(pubkey))));
+        }
+    }
+
+    /// At enforce's token-owner checks: records the would-deny when an agent
+    /// assertion's owner is banned or differs from the agent's stored owner.
+    pub(crate) async fn observe_owner(
+        &self,
+        state: &AppState,
+        community: buzz_core::CommunityId,
+        pubkey: PublicKey,
+    ) {
+        let Some(owner) = self.assertion.owner() else {
+            return;
+        };
+        if let Some((class, reason)) =
+            crate::handlers::auth::token_owner_denial(state, community, pubkey, owner).await
+        {
+            let deny = WouldDeny::new(Stage::Owner, class, reason);
+            self.decide(Err(deny.by(Some(pubkey))));
         }
     }
 
@@ -140,7 +168,7 @@ impl ShadowSession {
             .registered()
             .insert(self.id, Arc::downgrade(self));
         if deny_listed(state, &self.assertion) {
-            self.decide(Err((Stage::DenySet, DenialClass::AuthorizationDenied)));
+            self.decide(Err(DENY_SET.by(self.assertion.asserted_key())));
         }
     }
 
@@ -157,7 +185,12 @@ impl ShadowSession {
         self.transition(|phase| match *phase {
             Phase::Pending { revoked: false } => {
                 *phase = Phase::Ended;
-                let verdict = Err((Stage::Deadline, DenialClass::EvidenceRejected));
+                let deny = WouldDeny::new(
+                    Stage::Deadline,
+                    DenialClass::EvidenceRejected,
+                    "session_deadline",
+                );
+                let verdict = Err(deny.by(self.assertion.asserted_key()));
                 crate::nip_fi_shadow::record_for(self.route, self.community.clone(), verdict);
             }
             Phase::Admitted => self.end(phase, "expired"),
@@ -231,15 +264,34 @@ impl ShadowSession {
 /// One AUTH attempt, audio's through its join commit: refused, or dropped,
 /// while the session is still pending, it ended unadmitted for a non-NIP-FI
 /// reason (NIP-42 failure, ordinary policy refusal), so the session retires
-/// without a record.
-pub(crate) struct AuthAttempt<'a>(pub(crate) Option<&'a Arc<ShadowSession>>);
+/// without a record. Both the shadow and the enforce session retire.
+pub(crate) struct AuthAttempt<'a>(&'a crate::state::CommunityConnectionControl);
 
-impl AuthAttempt<'_> {
+impl<'a> AuthAttempt<'a> {
+    pub(crate) fn new(control: &'a crate::state::CommunityConnectionControl) -> Self {
+        Self(control)
+    }
+
     /// Retires a pending session where the refusal is decided, before the
     /// refusal's frames and cleanup are awaited.
     pub(crate) fn refused(&self) {
-        if let Some(session) = self.0 {
+        if let Some(session) = self.0.nip_fi_shadow() {
             session.retire_pending();
+        }
+        if let Some(session) = self.0.nip_fi_enforce() {
+            session.retire();
+        }
+    }
+}
+
+impl AuthAttempt<'_> {
+    /// An effect permit refused at `gate`: when its deadline has passed, the
+    /// gate saw the expiry before the expiry worker could, so the enforce
+    /// session claims that deadline outcome now, before this attempt's
+    /// retirement could end it unrecorded. Cancellation alone stays quiet.
+    pub(crate) fn effect_refused(&self, gate: &crate::nip_fi_gate::SessionAdmissionGate) {
+        if let Some(session) = self.0.nip_fi_enforce().filter(|_| gate.deadline_passed()) {
+            session.expire();
         }
     }
 }
@@ -263,23 +315,22 @@ impl Drop for ShadowSession {
 /// returns `true` when enforce would have refused the upgrade here.
 pub(crate) fn upgrade_denied(
     state: &AppState,
-    headers: &HeaderMap,
+    community: &metrics::SharedString,
     assertion: &VerifiedAssertion,
 ) -> bool {
     let denied = deny_listed(state, assertion);
     if denied {
-        let verdict = Err((Stage::DenySet, DenialClass::AuthorizationDenied));
-        crate::nip_fi_shadow::record("ws", headers, &state.config.nip_fi.communities, verdict);
+        let verdict = Err(DENY_SET.by(assertion.asserted_key()));
+        crate::nip_fi_shadow::record_for("ws", community.clone(), verdict);
     }
     denied
 }
 
 fn deny_listed(state: &AppState, assertion: &VerifiedAssertion) -> bool {
-    let issuer = assertion.identity().issuer();
-    assertion
-        .asserted_key()
-        .zip(state.nip_fi_deny_map.as_deref())
-        .is_some_and(|(key, map)| map.is_denied(issuer, &key, chrono::Utc::now()))
+    state
+        .nip_fi_deny_map
+        .as_deref()
+        .is_some_and(|map| crate::nip_fi_core::assertion_denied(map, assertion, chrono::Utc::now()))
 }
 
 #[cfg(test)]
@@ -298,6 +349,11 @@ pub(crate) mod tests {
     /// `end/reason`, sorted.
     pub(crate) fn shadow_records(body: impl Future<Output = ()>) -> Vec<String> {
         collect(body, false, false)
+    }
+
+    /// [`shadow_records`] plus the would-deny lines `body` logged.
+    pub(crate) fn shadow_logged(body: impl Future<Output = ()>) -> (Vec<String>, Vec<String>) {
+        crate::nip_fi_shadow::tests::would_deny_lines(|| shadow_records(body))
     }
 
     /// [`shadow_records`], each prefixed with its `route` label.
@@ -330,6 +386,7 @@ pub(crate) mod tests {
             };
             let record = match key.name() {
                 "buzz_nip_fi_shadow_total" => {
+                    crate::nip_fi_shadow::tests::assert_shadow_schema(key);
                     format!("{}/{}", label("stage").unwrap(), label("outcome").unwrap())
                 }
                 "buzz_nip_fi_shadow_session_end_total" => {
@@ -355,10 +412,11 @@ pub(crate) mod tests {
     /// timeout, so a path that reaches Postgres fails fast whether or not
     /// one runs locally.
     pub(crate) async fn shadow_state(denied: Option<PublicKey>) -> AppState {
-        let mut state =
-            (*crate::state::tests::test_state_with_database_url("postgres://127.0.0.1:1/none")
-                .await)
-                .clone();
+        let mut state = (*crate::state::tests::test_state_with_unreachable_database_url(
+            "postgres://127.0.0.1:1/none",
+        )
+        .await)
+            .clone();
         let capacity = vec![IssuerCapacity {
             issuer: "test-issuer".to_owned(),
             capacity: 8,
@@ -383,7 +441,13 @@ pub(crate) mod tests {
         lifetime: Duration,
     ) -> Arc<ShadowSession> {
         let assertion = VerifiedAssertion::for_test(key, vec![Utc::now() + lifetime]);
-        ShadowSession::start(state, "ws", &HeaderMap::new(), assertion, Utc::now())
+        ShadowSession::start(
+            state,
+            "ws",
+            crate::nip_fi_shadow::BOUND.into(),
+            assertion,
+            Utc::now(),
+        )
     }
 
     fn auth(session: &Arc<ShadowSession>, state: &AppState, pubkey: PublicKey) {
@@ -469,6 +533,174 @@ pub(crate) mod tests {
             crate::api::nip_fi::NipFiDisconnectApplyResult::Applied(merged) => merged,
             other => panic!("disconnect not applied: {other:?}"),
         }
+    }
+
+    /// Audio's owner-link refusal is recorded through the same admission
+    /// seam root uses (`owner_link_denial` → `record_enforce_refusal`), on
+    /// route `audio`, with root's reasons: a conflicting stored owner is
+    /// `not_stored_owner`, an unwritable link `owner_link_unavailable`; a
+    /// NIP-OA (non-token) link failure is no owner verdict and retires.
+    /// Mutation: dropping `owner_reason` from `owner_link_denial` records
+    /// nothing for the token cases.
+    #[test]
+    fn audio_owner_link_refusal_shares_roots_seam_and_reasons() {
+        use crate::api::relay_members::OwnerLink;
+        for (link, token, expected, reason) in [
+            (
+                OwnerLink::Conflict,
+                true,
+                &["audio owner/denied"][..],
+                Some("not_stored_owner"),
+            ),
+            (
+                OwnerLink::Unavailable,
+                true,
+                &["audio owner/unavailable"][..],
+                Some("owner_link_unavailable"),
+            ),
+            (OwnerLink::Unavailable, false, &[][..], None),
+        ] {
+            let (records, lines, _, ()) =
+                crate::nip_fi_shadow::tests::enforce_observed(async {}, |()| async move {
+                    let (agent, owner) = (
+                        nostr::Keys::generate().public_key(),
+                        nostr::Keys::generate().public_key(),
+                    );
+                    let control = crate::state::CommunityConnectionControl::new(
+                        tokio_util::sync::CancellationToken::new(),
+                    );
+                    control.attach_nip_fi_enforce(crate::nip_fi_shadow::EnforceSession::new(
+                        "audio",
+                        crate::nip_fi_shadow::BOUND.into(),
+                        Some(agent),
+                    ));
+                    let denial = crate::handlers::auth::owner_link_denial(link, token);
+                    assert!(denial.is_some(), "{link:?} refuses");
+                    crate::handlers::auth::record_enforce_refusal(
+                        &control,
+                        denial.as_ref(),
+                        Some(&owned_assertion(agent, owner)),
+                    );
+                });
+            assert_eq!(records, expected, "{link:?} token={token}: {lines:?}");
+            if let Some(reason) = reason {
+                assert!(
+                    lines.len() == 1
+                        && lines[0].contains(&format!("reason=\"{reason}\""))
+                        && lines[0].contains("route=\"audio\""),
+                    "{lines:?}"
+                );
+            }
+        }
+    }
+
+    /// An agent assertion for `agent` acting for `owner`, valid for an hour.
+    pub(crate) fn owned_assertion(agent: PublicKey, owner: PublicKey) -> VerifiedAssertion {
+        VerifiedAssertion::for_test(Some(agent), vec![Utc::now() + Duration::hours(1)])
+            .with_owner_for_test(owner)
+    }
+
+    // An owner's disconnect, delivered cross-pod after admission or between
+    // the deny-set check and the admit, ends each of its agents' ws and audio
+    // sessions `revoked` exactly once and closes no real socket, even one the
+    // real registry would match; the owner under another issuer and an
+    // ownerless session of the agent key take no end. Mutation: dropping the
+    // owner arm of `would_close` loses every `end/revoked`.
+    #[test]
+    fn owner_disconnect_ends_owned_agent_sessions_and_closes_nothing() {
+        let records = shadow_records_by_route(async {
+            let state = pod(8).await;
+            let (agent, owner) = (Keys::generate().public_key(), Keys::generate().public_key());
+            let owned = |route| {
+                let assertion = owned_assertion(agent, owner);
+                ShadowSession::start(
+                    &state,
+                    route,
+                    crate::nip_fi_shadow::BOUND.into(),
+                    assertion,
+                    Utc::now(),
+                )
+            };
+            let cancel = CancellationToken::new();
+            let control = crate::state::CommunityConnectionControl::new(cancel.clone());
+            let (terminal_tx, mut terminal_rx) = tokio::sync::mpsc::channel(1);
+            control.set_terminal_frame_sender(terminal_tx);
+            control.set_proven_identity(
+                agent.to_bytes().to_vec(),
+                Some(NipFiSession::from_assertion(&owned_assertion(agent, owner))),
+            );
+            let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+            let _guard =
+                state
+                    .community_connections
+                    .register(uuid::Uuid::new_v4(), community, control);
+
+            let admitted = [owned("ws"), owned("audio")];
+            let pending = [owned("ws"), owned("audio")];
+            let ownerless = session(&state, Some(agent), Duration::hours(1));
+            for s in admitted.iter().chain([&ownerless]) {
+                auth(s, &state, agent);
+            }
+            for s in &pending {
+                s.observe_pairing(agent);
+                s.observe_deny_set(&state);
+            }
+            state
+                .nip_fi_shadow_sessions
+                .would_close("other-issuer", &owner.to_bytes());
+            for s in &admitted {
+                assert!(matches!(*s.phase.lock().unwrap(), Phase::Admitted));
+            }
+            for s in &pending {
+                let phase = s.phase.lock().unwrap();
+                assert!(matches!(*phase, Phase::Pending { revoked: false }));
+            }
+            deliver(&state, &owner);
+            revoke(&state, &owner);
+            for s in &pending {
+                s.admit();
+            }
+            assert!(!cancel.is_cancelled(), "shadow never cancels a socket");
+            assert!(terminal_rx.try_recv().is_err(), "shadow sends no frame");
+        });
+        let expected = [
+            "audio admit/admit",
+            "audio admit/admit",
+            "audio end/revoked",
+            "audio end/revoked",
+            "ws admit/admit",
+            "ws admit/admit",
+            "ws admit/admit",
+            "ws end/revoked",
+            "ws end/revoked",
+        ];
+        assert_eq!(records, expected);
+    }
+
+    // The shadow deny observer reads the owner's deny entry at the upgrade
+    // and after registration. Mutation: dropping the owner arm of
+    // `assertion_denied` records two admits instead.
+    #[test]
+    fn owner_deny_entry_records_deny_set_at_upgrade_and_after_registration() {
+        let (agent, owner) = (Keys::generate().public_key(), Keys::generate().public_key());
+        let records = shadow_records(async move {
+            let state = shadow_state(Some(owner)).await;
+            let assertion = owned_assertion(agent, owner);
+            assert!(upgrade_denied(
+                &state,
+                &crate::nip_fi_shadow::BOUND.into(),
+                &assertion
+            ));
+            let s = ShadowSession::start(
+                &state,
+                "ws",
+                crate::nip_fi_shadow::BOUND.into(),
+                assertion,
+                Utc::now(),
+            );
+            auth(&s, &state, agent);
+        });
+        assert_eq!(records, ["deny_set/denied", "deny_set/denied"]);
     }
 
     /// A shadow pod whose deny map holds `capacity` entries for the
@@ -629,8 +861,16 @@ pub(crate) mod tests {
                 VerifiedAssertion::for_test(Some(key), vec![Utc::now() + Duration::hours(1)]);
             let clean =
                 VerifiedAssertion::for_test(Some(Keys::generate().public_key()), vec![Utc::now()]);
-            assert!(upgrade_denied(&state, &HeaderMap::new(), &listed));
-            assert!(!upgrade_denied(&state, &HeaderMap::new(), &clean));
+            assert!(upgrade_denied(
+                &state,
+                &crate::nip_fi_shadow::BOUND.into(),
+                &listed
+            ));
+            assert!(!upgrade_denied(
+                &state,
+                &crate::nip_fi_shadow::BOUND.into(),
+                &clean
+            ));
         });
         assert_eq!(records, ["deny_set/denied"]);
     }

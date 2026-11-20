@@ -56,7 +56,7 @@ class AppListCard extends StatelessWidget {
             // which lands them within a few levels of the card fill — invisible.
             // Tinting with the text color instead keeps the hairline readable on
             // the card in both brightnesses.
-            color: context.colors.onSurface.withValues(alpha: 0.12),
+            color: context.colors.onSurface.withValues(alpha: 0.07),
           ),
         );
       }

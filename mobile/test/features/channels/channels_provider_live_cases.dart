@@ -34,10 +34,10 @@ void _liveSubscriptionTests() {
         _channelA,
         _channelB,
       ]);
-      expect(
-        session.subscribeFilters.single.kinds,
-        EventKind.channelEventKinds,
-      );
+      expect(session.subscribeFilters.single.kinds, [
+        ...EventKind.channelEventKinds,
+        EventKind.nip29EditMetadata,
+      ]);
       expect(session.subscribeFilters.single.limit, 0);
 
       session.resumePausedSubscribe();

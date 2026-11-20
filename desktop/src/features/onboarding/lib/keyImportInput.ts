@@ -76,6 +76,15 @@ export function classifyKeyImportInput(input: string): KeyImportKind {
 }
 
 /**
+ * Whether `input` carries an `nsec` or NIP-49 backup anywhere, in either
+ * case. Search boxes use this to keep pasted key material on the device.
+ */
+export function containsSecretKey(input: string): boolean {
+  const lower = input.toLowerCase();
+  return lower.includes("nsec1") || lower.includes("ncryptsec1");
+}
+
+/**
  * Password-independent NIP-49 validation used for the automatic UI transition.
  * A candidate must have canonical casing and length, a valid Bech32 checksum,
  * and the current 91-byte/version-2 NIP-49 payload shape.

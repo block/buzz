@@ -1,12 +1,32 @@
 # Buzz domain language
 
-Shared terminology for Buzz product behavior. This glossary currently covers mobile [push suppression](#push-suppression); it is not a complete model of Buzz.
+Shared terminology for Buzz product behavior. This glossary currently covers mobile [push suppression](#push-suppression), the [notification body](#notification-body), the [notification reply](#notification-reply), [mobile builds](#mobile-builds), [diagnostic reporting](#diagnostic-reporting), [sharing](#sharing), [quick send](#quick-send) and the [open-channel directory](#open-channel-directory); it is not a complete model of Buzz.
 
 ## Notifications
 
 ### Mobile push notification
 
 A notification directed to a user's mobile installation through the platform's push service.
+
+### Wake signal
+
+The fixed push a [push gateway](#push-gateway) sends to an installation, telling it to fetch new events from its relays. It carries nothing about any event.
+
+_Avoid_: Silent push, content push
+
+### Push gateway
+
+The service that holds one mobile app's platform push credentials (an [internal build](#internal-build), the [public build](#public-build) or a fork's app) and sends [wake signals](#wake-signal) to that app's installations on every platform. See [ADR 0004](docs/adr/0004-push-gateway-hides-device-platform.md).
+
+_Avoid_: Push server, APNs gateway
+
+### Notification body
+
+The text a [mobile push notification](#mobile-push-notification) shows for a message: the message's text with its Markdown syntax removed, cut only where the platform would cut it. See [ADR 0002](docs/adr/0002-notification-message-text.md).
+
+### Notification reply
+
+A reply the user types into a [mobile push notification](#mobile-push-notification) for a message and sends without opening the app. It goes in a subthread under that message and mentions its sender. See [ADR 0004](docs/adr/0004-notification-reply.md).
 
 ### Push suppression
 
@@ -51,3 +71,65 @@ A [suppression activity signal](#suppression-activity-signal) that extends how l
 ### Inactivity cutoff
 
 The time of the last observed [desktop activity](#desktop-activity) plus the duration specified in the spec, when [desktop inactivity](#desktop-inactivity) begins. New desktop activity moves this cutoff forward.
+
+## Mobile builds
+
+### Internal build
+
+A mobile app an organization distributes only to its own members, for example through device management. It uses only that organization's Builderlab and reaches only that organization's community.
+
+_Avoid_: Dogfood build, enterprise build, org build
+
+### Public build
+
+The mobile app distributed through the App Store and TestFlight. It uses only the public Builderlab and cannot reach any organization's community.
+
+_Avoid_: App Store build, external build
+
+### Diagnostic reporting
+
+Sending crash, error and performance data from a mobile installation to a [reporting destination](#reporting-destination). It exists to diagnose faults: it is not a record of how people use the app (beyond the SDK's session records, which say when each session started, how long it lasted from start to end, how it ended and how many errors it had), and it never includes what they write. See [ADR 0007](docs/adr/0007-diagnostic-reporting-follows-the-destination.md).
+
+_Avoid_: Telemetry, analytics, tracking, observability
+
+### Reporting destination
+
+Where a mobile build's [diagnostic reporting](#diagnostic-reporting) is sent, chosen at build time by whoever distributes the build. A build with no reporting destination reports nothing.
+
+_Avoid_: DSN, Sentry project
+
+## Sharing
+
+### Share
+
+Bringing content such as a screenshot, screen recording, URL or text from another app into a Buzz conversation through the system share sheet. A share ends in that conversation's composer, where the person adds their own text and sends it.
+
+_Avoid_: Forward, post
+
+### Share target
+
+A conversation offered among the share sheet's suggested destinations: an existing channel or DM, or a new Solo chat. Share targets are learned from top-level messages a person sends in a conversation; thread replies and incoming messages never count.
+
+_Avoid_: Recipient, contact, suggestion
+
+## Agents and conversations
+
+### Bestie
+
+The one agent a person has chosen as their default in a community. A community has at most one Bestie per person.
+
+_Avoid_: Default agent, main agent, assistant
+
+### Quick send
+
+Sending a message to Buzz from outside the app (Siri, Shortcuts, the Action button) without opening Buzz. A quick send to the [Bestie](#bestie) posts the message in the person's DM with the Bestie.
+
+_Avoid_: Siri message, dictation, background send
+
+## Channels
+
+### Open-channel directory
+
+The open, listed channels of a community that a person can find and preview without being a member. Private channels, DMs and unlisted channels are never in it. A client's saved copy is the set it last saw, so a channel that has since turned private, unlisted or deleted can linger in it until the next full read.
+
+_Avoid_: Channel list, public channels, discovery

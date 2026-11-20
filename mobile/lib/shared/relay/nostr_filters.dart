@@ -12,15 +12,6 @@ const int kMaxExplicitChannelValues = 128;
 /// Centralising filter shapes keeps relay queries consistent across providers
 /// and makes kind/tag conventions easy to audit.
 abstract final class NostrFilters {
-  /// Channels where I'm a member (kind:39002 with `#p` = my pubkey).
-  static NostrFilter myChannels(String myPk) => NostrFilter(
-    kinds: [39002],
-    tags: {
-      '#p': [myPk],
-    },
-    limit: 500,
-  );
-
   /// Channel metadata for the given channel IDs.
   static NostrFilter channelMetadata(List<String> ids) =>
       NostrFilter(kinds: [39000], tags: {'#d': ids}, limit: ids.length);
@@ -47,6 +38,7 @@ abstract final class NostrFilters {
     String channelId, {
     int limit = 200,
     int? until,
+    String? beforeId,
   }) => NostrFilter(
     kinds: EventKind.channelEventKinds,
     tags: {
@@ -54,7 +46,67 @@ abstract final class NostrFilters {
     },
     limit: limit,
     until: until,
+    extensions: {'before_id': ?beforeId},
   );
+
+  /// A channel's system notices (kind:40099), newest first, below the
+  /// `until` + `before_id` cursor the channel-window pages use. [since]
+  /// includes the oldest loaded row's whole second, including id ties.
+  static NostrFilter channelNotices(
+    String channelId, {
+    int? since,
+    int? until,
+    String? beforeId,
+  }) => NostrFilter(
+    kinds: const [EventKind.systemMessage],
+    tags: {
+      '#h': [channelId],
+    },
+    limit: channelNoticePageSize,
+    since: since,
+    until: until,
+    extensions: {'before_id': ?beforeId},
+  );
+
+  /// Notices one [channelNotices] read asks for.
+  static const channelNoticePageSize = 500;
+
+  /// Reactions and deletions that target [eventIds]: the auxiliary events a
+  /// channel-window page returns with its rows (`include_aux`), newest first,
+  /// below the `until` + `before_id` cursor. Call again with the reaction ids,
+  /// asking only for [EventKind.deletion] and [EventKind.nip29DeleteEvent],
+  /// to read removed reactions.
+  ///
+  /// With [channelId], the read names the channel in `#h`: a system channel,
+  /// or an unlisted one for a non-member, shows its events only to a filter
+  /// that names it (NIP-CL). Without it, the read also finds deletions stored
+  /// with no channel.
+  static NostrFilter channelAux(
+    List<String> eventIds, {
+    String? channelId,
+    List<int> kinds = channelAuxKinds,
+    int? until,
+    String? beforeId,
+  }) => NostrFilter(
+    kinds: kinds,
+    tags: {
+      '#e': eventIds,
+      if (channelId != null) '#h': [channelId],
+    },
+    limit: channelAuxLimit,
+    until: until,
+    extensions: {'before_id': ?beforeId},
+  );
+
+  /// The kinds [channelAux] reads by default.
+  static const channelAuxKinds = [
+    EventKind.deletion,
+    EventKind.reaction,
+    EventKind.nip29DeleteEvent,
+  ];
+
+  /// Auxiliary events one [channelAux] read asks for.
+  static const channelAuxLimit = 1000;
 
   /// Huddle lifecycle state for one parent channel, independent of timeline paging.
   static NostrFilter huddleLifecycle(String channelId) => NostrFilter(
@@ -65,14 +117,6 @@ abstract final class NostrFilters {
     limit: 200,
   );
 
-  /// Reactions (kind:7) on a specific event.
-  static NostrFilter reactions(String eventId) => NostrFilter(
-    kinds: [7],
-    tags: {
-      '#e': [eventId],
-    },
-  );
-
   /// Canvas event for a channel.
   static NostrFilter canvas(String channelId) => NostrFilter(
     kinds: [40100],
@@ -80,23 +124,6 @@ abstract final class NostrFilters {
       '#h': [channelId],
     },
     limit: 1,
-  );
-
-  /// Workflows (kind:30620) in a channel.
-  static NostrFilter workflows(String channelId) => NostrFilter(
-    kinds: [30620],
-    tags: {
-      '#h': [channelId],
-    },
-  );
-
-  /// DM channels where I'm a participant.
-  static NostrFilter dmList(String myPk) => NostrFilter(
-    kinds: [39000],
-    tags: {
-      '#t': ['dm'],
-      '#p': [myPk],
-    },
   );
 
   /// Latest per-viewer hidden-DM snapshot (kind:30622, `#p` = my pubkey).
@@ -132,22 +159,6 @@ abstract final class NostrFilters {
         },
       );
 
-  /// NIP-50 message search, optionally scoped to a channel.
-  static NostrFilter searchMessages(
-    String query, {
-    String? channelId,
-    int limit = 20,
-  }) => NostrFilter(
-    kinds: [9, 40002, 45001, 45003],
-    tags: channelId != null
-        ? {
-            '#h': [channelId],
-          }
-        : const {},
-    search: query,
-    limit: limit,
-  );
-
   /// Global user search over kind:0 profiles (NIP-50 via the HTTP bridge).
   ///
   /// `search_mode: "prefix"` is a Buzz bridge-only extension: every caller is
@@ -162,61 +173,6 @@ abstract final class NostrFilters {
     extensions: const {'search_mode': 'prefix'},
   );
 
-  /// Deletions (kind:5) targeting event IDs.
-  static NostrFilter deletionsByTargetIds(
-    List<String> ids, {
-    List<String>? authors,
-  }) => NostrFilter(
-    kinds: [EventKind.deletion],
-    authors: authors,
-    tags: {'#e': ids},
-    limit: ids.length,
-  );
-
-  /// User notes (kind:1) for the global Pulse timeline.
-  static NostrFilter globalNotes({int limit = 50, int? until}) =>
-      NostrFilter(kinds: [EventKind.note], limit: limit, until: until);
-
-  /// Notes by a set of authors for Pulse timelines.
-  static NostrFilter notesTimeline(
-    List<String> pubkeys, {
-    int limit = 200,
-    int? until,
-  }) => NostrFilter(
-    kinds: [EventKind.note],
-    authors: pubkeys,
-    limit: limit,
-    until: until,
-  );
-
-  /// Reactions authored by a user.
-  static NostrFilter userReactions(String pubkey, {int limit = 200}) =>
-      NostrFilter(kinds: [EventKind.reaction], authors: [pubkey], limit: limit);
-
-  /// Reactions targeting notes.
-  static NostrFilter noteReactions(List<String> noteIds) => NostrFilter(
-    kinds: [EventKind.reaction],
-    tags: {'#e': noteIds},
-    limit: 500,
-  );
-
-  /// Fetch notes by ids.
-  static NostrFilter notesByIds(List<String> ids) =>
-      NostrFilter(kinds: [EventKind.note], ids: ids, limit: ids.length);
-
-  /// User notes (kind:1) for a single author.
-  static NostrFilter userNotes(String pubkey, {int limit = 20, int? until}) =>
-      NostrFilter(
-        kinds: [EventKind.note],
-        authors: [pubkey],
-        limit: limit,
-        until: until,
-      );
-
-  /// Contact list (kind:3) for a user.
-  static NostrFilter contactList(String pubkey) =>
-      NostrFilter(kinds: [EventKind.contactList], authors: [pubkey], limit: 1);
-
   /// Relay membership list (kind:13534).
   static NostrFilter relayMembers() =>
       const NostrFilter(kinds: [EventKind.relayMembership], limit: 1);
@@ -224,8 +180,4 @@ abstract final class NostrFilters {
   /// Agent profiles (kind:10100).
   static NostrFilter agentProfiles() =>
       const NostrFilter(kinds: [10100], limit: 100);
-
-  /// User status (NIP-38, kind:30315).
-  static NostrFilter userStatus(String pubkey) =>
-      NostrFilter(kinds: [30315], authors: [pubkey], limit: 1);
 }

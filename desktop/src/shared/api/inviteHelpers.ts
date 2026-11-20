@@ -87,6 +87,24 @@ export function inviteErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : `${error}`;
 }
 
+/** Explain claim denials without suggesting a new link can bypass restrictions. */
+export function inviteClaimErrorMessage(error: unknown): string {
+  const message = inviteErrorMessage(error);
+  if (message === "invite_restricted") {
+    return "This account, or the account that owns it, is restricted in this community. Contact a community administrator. If the restriction is temporary, try again after it ends.";
+  }
+  if (message === "invite_owner_mismatch") {
+    return "This account does not match its recorded owner. Use the correct account or owner identity to join this community.";
+  }
+  if (isInviteExpiredError(error)) {
+    return "This invite code has expired — ask for a new one.";
+  }
+  if (isInviteExhaustedError(error)) {
+    return "This invite has reached its use limit. Ask for a new invite.";
+  }
+  return message;
+}
+
 export function isInviteExpiredError(error: unknown): boolean {
   return inviteErrorMessage(error) === INVITE_EXPIRED_ERROR;
 }

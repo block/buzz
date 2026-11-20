@@ -170,8 +170,15 @@ mod postgres_tests {
 
         state
             .db
-            .add_relay_member(community, &key.public_key().to_hex(), "member", None)
+            .add_relay_member(
+                community,
+                &key.public_key().to_hex(),
+                "member",
+                None,
+                &nostr::Keys::generate(),
+            )
             .await
+            .map(|write| write.outcome)
             .unwrap();
         // Dev headers must not bypass real auth even for an admitted member.
         assert_eq!(
@@ -248,15 +255,14 @@ mod postgres_tests {
         assert_eq!(body["community_id"], community.as_uuid().to_string());
         assert_eq!(body["pubkey"], key.public_key().to_hex());
         assert_eq!(body["events"], json!([event]));
-        let info = crate::nip11::nip11_document(&state, &host).await;
+        let info = crate::nip11::nip11_document(&state, &host).await.unwrap();
         assert_eq!(
             info.read_state_snapshot.as_ref().unwrap()["community_id"],
             body["community_id"]
         );
         assert!(crate::nip11::nip11_document(&state, "unmapped.invalid")
             .await
-            .read_state_snapshot
-            .is_none());
+            .is_err());
         let (_, other_body) = request(state.clone(), &other_host, Some(&key), filter(&key)).await;
         assert_eq!(
             other_body["community_id"],
@@ -346,7 +352,7 @@ mod postgres_tests {
     #[ignore = "requires Postgres"]
     async fn read_state_snapshot_router_advertised_event_array_byte_boundary() {
         let (state, host, community, key) = setup().await;
-        let info = crate::nip11::nip11_document(&state, &host).await;
+        let info = crate::nip11::nip11_document(&state, &host).await.unwrap();
         let descriptor = info.read_state_snapshot.unwrap();
         let budget = descriptor["max_event_array_bytes"].as_u64().unwrap() as usize;
         assert_eq!(budget, buzz_db::read_state::MAX_SNAPSHOT_BYTES);

@@ -53,7 +53,8 @@ class PendingDeepLinkNotifier extends Notifier<BuzzDeepLink?> {
   void open(Uri uri) {
     final link = parseBuzzDeepLink(uri);
     if (link == null) {
-      debugPrint('deep-link: ignoring unsupported link: $uri');
+      // Unknown links may contain OAuth codes or invite credentials.
+      debugPrint('deep-link: ignoring unsupported link');
       return;
     }
     _enqueue(link);
@@ -67,15 +68,12 @@ class PendingDeepLinkNotifier extends Notifier<BuzzDeepLink?> {
     state = _waiting.isEmpty ? null : _waiting.removeFirst();
   }
 
-  /// Selects the device-local community carried by a structured push target.
+  /// Selects the device-local community a push or share target names.
   /// Ordinary shared deep links have no community ID and remain unchanged.
   Future<DeepLinkCommunityPreparation> prepareCommunity(
-    BuzzDeepLink link,
+    String? communityId,
   ) async {
-    if (link is! MessageDeepLink || link.communityId == null) {
-      return DeepLinkCommunityPreparation.ready;
-    }
-    final communityId = link.communityId!;
+    if (communityId == null) return DeepLinkCommunityPreparation.ready;
     try {
       final communities = await ref.read(communityListProvider.future);
       if (!communities.any((community) => community.id == communityId)) {

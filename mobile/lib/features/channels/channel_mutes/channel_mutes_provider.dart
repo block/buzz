@@ -1,6 +1,4 @@
-import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:nostr/nostr.dart' as nostr;
 
 import '../../../shared/relay/relay.dart';
 import '../../../shared/theme/theme_provider.dart';
@@ -12,12 +10,16 @@ class ChannelMutesState {
   final bool isReady;
   final ChannelMuteStore store;
 
+  /// Relay-confirmed mutes used to suppress channel row dots.
+  final Set<String> confirmedMutedChannelIds;
+
   /// Bumped on every change to force downstream rebuilds.
   final int version;
 
   const ChannelMutesState({
     this.isReady = false,
     this.store = const ChannelMuteStore(),
+    this.confirmedMutedChannelIds = const {},
     this.version = 0,
   });
 }
@@ -25,10 +27,12 @@ class ChannelMutesState {
 class ChannelMutesNotifier extends Notifier<ChannelMutesState> {
   ChannelMutesManager? _manager;
   bool _isInitialized = false;
+  (String, String)? _confirmationScope;
+  var _confirmedMutes = const ConfirmedChannelMutes.empty();
 
   @override
   ChannelMutesState build() {
-    _manager?.dispose(flushPending: false);
+    _manager?.dispose();
     _manager = null;
     _isInitialized = false;
 
@@ -38,20 +42,17 @@ class ChannelMutesNotifier extends Notifier<ChannelMutesState> {
     ref.watch(activeCommunityProvider);
 
     final nsec = relayConfig.nsec?.trim();
-    if (nsec == null || nsec.isEmpty) {
+    final pubkey = ref.watch(myPubkeyProvider);
+    final crypto = ref.watch(channelMutesCryptoProvider);
+    if (nsec == null || nsec.isEmpty || pubkey == null || crypto == null) {
+      _confirmationScope = null;
+      _confirmedMutes = const ConfirmedChannelMutes.empty();
       return const ChannelMutesState();
     }
-
-    final pubkey = _safePubkeyFromNsec(nsec);
-    if (pubkey == null || pubkey.isEmpty) {
-      return const ChannelMutesState();
-    }
-
-    final ChannelMutesCrypto crypto;
-    try {
-      crypto = ChannelMutesCrypto(nsec, pubkey);
-    } catch (_) {
-      return const ChannelMutesState();
+    final scope = (pubkey, relayConfig.baseUrl);
+    if (_confirmationScope != scope) {
+      _confirmationScope = scope;
+      _confirmedMutes = const ConfirmedChannelMutes.empty();
     }
 
     final prefs = ref.read(savedPrefsProvider);
@@ -63,6 +64,7 @@ class ChannelMutesNotifier extends Notifier<ChannelMutesState> {
     late final ChannelMutesManager manager;
     manager = ChannelMutesManager(
       pubkey: pubkey,
+      relayUrl: relayConfig.baseUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: ref.read(relaySessionProvider.notifier),
@@ -73,8 +75,8 @@ class ChannelMutesNotifier extends Notifier<ChannelMutesState> {
     _manager = manager;
 
     // Resume re-read catches an EVENT a healthy socket never delivered.
-    ref.listen(appLifecycleProvider, (_, next) {
-      if (next == AppLifecycleState.resumed) manager.refreshFromRelay();
+    ref.listen(appForegroundProvider, (_, foreground) {
+      if (foreground) manager.refreshFromRelay();
     });
 
     ref.onDispose(() {
@@ -91,7 +93,11 @@ class ChannelMutesNotifier extends Notifier<ChannelMutesState> {
       _emitManagerState(manager);
     });
 
-    return ChannelMutesState(isReady: false, store: manager.store, version: 1);
+    return ChannelMutesState(
+      store: manager.store,
+      confirmedMutedChannelIds: _confirmedMutes.channelIds,
+      version: 1,
+    );
   }
 
   void muteChannel(String channelId) => _manager?.muteChannel(channelId);
@@ -100,9 +106,19 @@ class ChannelMutesNotifier extends Notifier<ChannelMutesState> {
 
   void _emitManagerState(ChannelMutesManager manager) {
     if (_manager != manager) return;
+    // Keep the last confirmed view while a replacement manager reconnects.
+    // The manager still reads and merges its new session's store normally.
+    final confirmation = manager.confirmedMutes;
+    if (_confirmedMutes.precedes(
+      confirmation.createdAt,
+      confirmation.eventId,
+    )) {
+      _confirmedMutes = confirmation;
+    }
     state = ChannelMutesState(
       isReady: _isInitialized,
       store: manager.store,
+      confirmedMutedChannelIds: _confirmedMutes.channelIds,
       version: state.version + 1,
     );
   }
@@ -113,12 +129,16 @@ final channelMutesProvider =
       ChannelMutesNotifier.new,
     );
 
-String? _safePubkeyFromNsec(String nsec) {
+/// Identity-scoped crypto survives connection status changes. A community or
+/// signing-key change replaces it through [relayConfigProvider].
+final channelMutesCryptoProvider = Provider<ChannelMutesCrypto?>((ref) {
+  final config = ref.watch(relayConfigProvider);
+  final pubkey = ref.watch(myPubkeyProvider);
+  final nsec = config.nsec?.trim();
+  if (nsec == null || nsec.isEmpty || pubkey == null) return null;
   try {
-    final privkeyHex = nostr.Nip19.decode(payload: nsec).data;
-    if (privkeyHex.isEmpty) return null;
-    return nostr.Keys(privkeyHex).public;
+    return ChannelMutesCrypto(nsec, pubkey);
   } catch (_) {
     return null;
   }
-}
+});

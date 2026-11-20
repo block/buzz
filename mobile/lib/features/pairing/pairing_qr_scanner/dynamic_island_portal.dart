@@ -2,11 +2,20 @@ part of '../pairing_qr_scanner.dart';
 
 // A smooth, non-bouncy spring inspired by Apple's public motion guidance;
 // these are our timings, not private Dynamic Island animation constants.
-const _dynamicIslandOpenDuration = Duration(milliseconds: 440);
-const _dynamicIslandCloseDuration = Duration(milliseconds: 360);
+const _dynamicIslandOpenDuration = Duration(milliseconds: 230);
+const _dynamicIslandCloseDuration = Duration(milliseconds: 180);
 
 class _DynamicIslandQrScannerPortal extends HookWidget {
-  const _DynamicIslandQrScannerPortal();
+  const _DynamicIslandQrScannerPortal({
+    this.onProgress,
+    this.cameraFrame,
+    required this.sourceSize,
+  });
+
+  final Rect? cameraFrame;
+  final Size sourceSize;
+
+  final ValueChanged<double>? onProgress;
 
   @override
   Widget build(BuildContext context) {
@@ -15,7 +24,6 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
     final isClosing = useState(false);
     final canPop = useState(false);
     final hasHandledResult = useRef(false);
-    final cameraMounted = useRef(false);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
 
     useEffect(() {
@@ -25,6 +33,29 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
         unawaited(controller.dispose());
       };
     }, [controller]);
+
+    useEffect(() {
+      var active = true;
+      void publish() {
+        if (active) onProgress?.call(animation.value.clamp(0.0, 1.0));
+      }
+
+      void changed() {
+        // Reduced motion can update the controller while this route builds.
+        if (WidgetsBinding.instance.schedulerPhase ==
+            SchedulerPhase.persistentCallbacks) {
+          WidgetsBinding.instance.addPostFrameCallback((_) => publish());
+        } else {
+          publish();
+        }
+      }
+
+      animation.addListener(changed);
+      return () {
+        active = false;
+        animation.removeListener(changed);
+      };
+    }, [animation, onProgress]);
 
     Future<void> finish(String? result) async {
       if (canPop.value) return;
@@ -61,7 +92,9 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
                 )
                 .orCancel;
           }
-          if (closing && context.mounted) await finish(null);
+          if (closing && context.mounted) {
+            await finish(null);
+          }
         } on TickerCanceled {
           // A dismissal, motion-setting change, or unmount can retarget the spring.
         }
@@ -108,6 +141,9 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
               final geometry = DynamicIslandQrScannerGeometry(
                 viewport: constraints.biggest,
                 safeAreaTop: MediaQuery.viewPaddingOf(context).top,
+                cameraFrame:
+                    duoQrScannerCameraFrame(context) ??
+                    (constraints.biggest == sourceSize ? cameraFrame : null),
               );
 
               return Stack(
@@ -130,16 +166,6 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
                       final scannerOpacity = geometry.scannerOpacityAt(
                         progress,
                       );
-                      // Once revealed, keep the camera mounted until the route
-                      // closes. Native camera teardown can stall a moving frame.
-                      if (scannerOpacity > 0) cameraMounted.value = true;
-                      final introLabelOpacity = isClosing.value
-                          ? 0.0
-                          : geometry.introLabelOpacityAt(progress);
-                      final promptOpacity = math.max(
-                        introLabelOpacity,
-                        scannerOpacity,
-                      );
 
                       return Positioned.fromRect(
                         rect: frame,
@@ -148,25 +174,24 @@ class _DynamicIslandQrScannerPortal extends HookWidget {
                           key: const ValueKey(
                             'dynamic-island-qr-scanner-portal',
                           ),
-                          borderRadius: BorderRadius.circular(
-                            geometry.cornerRadiusAt(progress),
-                          ),
+                          borderRadius: geometry.borderRadiusAt(progress),
                           child: ColoredBox(
                             color: Colors.black,
                             child: Stack(
                               fit: StackFit.expand,
                               children: [
-                                if (cameraMounted.value)
-                                  Opacity(
-                                    opacity: scannerOpacity,
-                                    child: _QrScannerCamera(
-                                      controller: controller,
-                                      onDetect: handleDetection,
-                                    ),
+                                // Warm the camera during opening; dispose only
+                                // after the closing morph has finished.
+                                Opacity(
+                                  opacity: scannerOpacity,
+                                  child: _QrScannerCamera(
+                                    controller: controller,
+                                    onDetect: handleDetection,
                                   ),
+                                ),
                                 IgnorePointer(
                                   child: Opacity(
-                                    opacity: promptOpacity,
+                                    opacity: scannerOpacity,
                                     child: Center(
                                       child: Text(
                                         'Scan a QR code',

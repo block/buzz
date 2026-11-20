@@ -692,6 +692,9 @@ test("animates the responding agent with the shared speaker ring", async ({
     /rounded-squircle-clip/,
   );
 
+  // The huddle chat's composer takes focus once its editor mounts, even from
+  // a focused button. Let that land before focusing the trigger.
+  await expect(page.getByTestId("message-input")).toBeFocused();
   const voiceMenuTrigger = page.getByTestId("huddle-agent-voice-menu-trigger");
   await voiceMenuTrigger.focus();
   await expect(voiceMenuTrigger).toBeFocused();
@@ -849,6 +852,10 @@ test("assigns distinct agent voices and exposes compact per-agent controls", asy
     );
   });
   expect(new Set(assignedVoices).size).toBe(2);
+
+  // Let the huddle chat finish mounting and autofocus before opening an
+  // overlay; a late composer focus would dismiss the popover.
+  await expect(page.getByTestId("message-input")).toBeFocused();
 
   await page.getByRole("button", { name: "Voice settings for alice" }).click();
   await waitForAnimations(page);

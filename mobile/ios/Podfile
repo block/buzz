@@ -38,6 +38,13 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+    target.build_configurations.each do |config|
+      minimum = Gem::Version.new('16.0')
+      current = config.build_settings['IPHONEOS_DEPLOYMENT_TARGET']
+      if current && Gem::Version.new(current) < minimum
+        config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = minimum.to_s
+      end
+    end
   end
   # Flutter creates plugin symlinks during installation, so load the upstream
   # helper here rather than requiring an existing Pods install at parse time.

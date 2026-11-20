@@ -49,17 +49,128 @@ pub(crate) async fn run_migrations_through(pool: &PgPool, target: i64) -> Result
 
 async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
     reject_legacy_nip_rs_cardinality_ambiguity(conn).await?;
+    for (version, doc, indexes) in INLINE_INDEX_BUILDS {
+        MIGRATOR.run_to(version - 1, &mut *conn).await?;
+        build_indexes_before_migration(conn, *version, doc, indexes).await?;
+    }
     MIGRATOR.run(&mut *conn).await?;
-    // The replica-fence proof (see `replica_fence`) requires the commit-time
-    // `created_at` floor trigger from migration 0021 — correctly shaped — on
-    // the `events` parent and every partition. `CREATE TABLE .. PARTITION OF`
-    // clones parent triggers, but a partition attached with `ATTACH
-    // PARTITION` or created by an older code path would silently escape the
-    // guard, so migration fails closed if any is missing. (The fence probe
-    // re-runs this same check at startup on non-migrating relays.)
-    crate::replica_fence::verify_floor_guard_catalog(&mut *conn).await?;
-    crate::channel::verify_channel_roster_fence_catalog(&mut *conn).await?;
     Ok(())
+}
+
+/// Indexes that a migration verifies but refuses to build on a populated
+/// table, keyed by that migration's version, with the document that describes
+/// its concurrent prebuild, as `(name, definition)`.
+///
+/// Migrations 0076, 0078 and 0081 are checksum-frozen and expect every
+/// populated database to prebuild these indexes with `CREATE INDEX
+/// CONCURRENTLY`. Startup migration builds a missing index here instead, under
+/// the same bounded budgets 0049 uses, so a small populated database upgrades
+/// like an empty one and a large one still fails closed. `CONCURRENTLY` is not
+/// used: a replica blocked on the migration lock holds a snapshot that a
+/// concurrent build would wait for. New migrations build their own indexes
+/// inline (docs/database.md Rule 6); the `frozen_prebuild_guards_have_inline_builds`
+/// test keeps this list equal to the migrations that refuse populated tables.
+type InlineIndexBuilds = &'static [(&'static str, &'static str)];
+
+const INLINE_INDEX_BUILDS: &[(i64, &str, InlineIndexBuilds)] = &[
+    (
+        76,
+        "docs/artifact-sync-deployment.md",
+        &[(
+            "idx_artifact_revisions_artifact",
+            "CREATE INDEX idx_artifact_revisions_artifact \
+             ON public.artifact_revisions (community_id, artifact_id)",
+        )],
+    ),
+    (
+        78,
+        "docs/artifact-sync-deployment.md",
+        &[
+            (
+                "artifact_heads_modified",
+                "CREATE INDEX artifact_heads_modified \
+                 ON public.artifact_heads (community_id, modified_at, artifact_id)",
+            ),
+            (
+                "artifact_heads_channel",
+                "CREATE INDEX artifact_heads_channel \
+                 ON public.artifact_heads (community_id, channel_id, artifact_id)",
+            ),
+            (
+                "channel_members_sync",
+                "CREATE INDEX channel_members_sync \
+                 ON public.channel_members (community_id, pubkey, sync_modified_at, channel_id)",
+            ),
+            (
+                "artifact_revisions_moves",
+                "CREATE INDEX artifact_revisions_moves \
+                 ON public.artifact_revisions (community_id, modified_at, event_id) \
+                 WHERE source_channel_id IS NOT NULL",
+            ),
+        ],
+    ),
+    (
+        81,
+        "docs/profile-search.md",
+        &[(
+            "idx_nip_fi_profile_heads_names",
+            // The exact pg_get_indexdef form migration 0081 verifies.
+            r#"CREATE INDEX idx_nip_fi_profile_heads_names ON public.nip_fi_profile_heads USING gin (to_tsvector('simple'::regconfig, ((((COALESCE((jsonb_path_query_first(event, 'strict $."tags"[*]?(@[0] == "display_name")[1]'::jsonpath, '{}'::jsonb, true) #>> '{}'::text[]), ''::text) || ' '::text) || COALESCE((jsonb_path_query_first(event, 'strict $."tags"[*]?(@[0] == "username")[1]'::jsonpath, '{}'::jsonb, true) #>> '{}'::text[]), ''::text)) || ' '::text) || COALESCE((jsonb_path_query_first(event, 'strict $."tags"[*]?(@[0] == "full_name")[1]'::jsonpath, '{}'::jsonb, true) #>> '{}'::text[]), ''::text))))"#,
+        )],
+    ),
+];
+
+/// Build each missing index in `indexes` in its own bounded transaction
+/// unless migration `version` is already recorded, so no build holds its
+/// writer-conflicting lock past its own budget. An existing index, valid or
+/// not, is left for the migration to verify, and is skipped before
+/// `CREATE INDEX` so a prebuilt deployment never requests that lock.
+async fn build_indexes_before_migration(
+    conn: &mut PgConnection,
+    version: i64,
+    doc: &str,
+    indexes: InlineIndexBuilds,
+) -> Result<()> {
+    let applied: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = $1)")
+            .bind(version)
+            .fetch_one(&mut *conn)
+            .await?;
+    if applied {
+        return Ok(());
+    }
+    let build = async {
+        for (name, definition) in indexes {
+            let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+                .bind(format!("public.{name}"))
+                .fetch_one(&mut *conn)
+                .await?;
+            if !exists {
+                let mut tx = conn.begin().await?;
+                sqlx::raw_sql("SET LOCAL lock_timeout = '1s'; SET LOCAL statement_timeout = '5s'")
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::raw_sql(*definition).execute(&mut *tx).await?;
+                tx.commit().await?;
+            }
+        }
+        Ok::<(), sqlx::Error>(())
+    };
+    build.await.map_err(|error| {
+        // Only a lock or statement timeout means the table is too large or
+        // too busy for the startup budget; pass any other failure through.
+        let over_budget = error
+            .as_database_error()
+            .and_then(|db| db.code())
+            .is_some_and(|code| code == "55P03" || code == "57014");
+        if !over_budget {
+            return error.into();
+        }
+        crate::DbError::InvalidData(format!(
+            "migration {version} blocked: building its indexes within the startup budget failed \
+             ({error}); prebuild them concurrently as described in {doc}, then retry"
+        ))
+    })
 }
 
 /// Run `op` while holding the exclusive schema/destruction session lock.
@@ -186,8 +297,17 @@ async fn reject_legacy_nip_rs_cardinality_ambiguity(conn: &mut PgConnection) -> 
 }
 
 #[cfg(test)]
+#[path = "follow_up_retirement_tests.rs"]
+mod retirement_postgres_tests;
+
+#[cfg(test)]
+#[path = "media_index_prebuild_postgres_tests.rs"]
+mod media_index_prebuild_postgres_tests;
+
+#[cfg(test)]
 mod postgres_tests {
     use super::*;
+    use crate::test_support::ScratchDb;
     use std::{
         collections::BTreeSet,
         fs,
@@ -230,6 +350,66 @@ mod postgres_tests {
             .map(|(_, pass)| pass.to_owned())
             .or_else(|| std::env::var("PGPASSWORD").ok())
             .unwrap_or_default()
+    }
+
+    /// Runs `bin/pgschema <command>` against `db`, which doubles as the plan
+    /// database (`--plan-*`): that avoids the embedded-Postgres download and
+    /// matches start-relay-for-tests.sh. Runs from the repository root, like
+    /// every pgschema caller, so `.pgschemaignore` applies.
+    fn pgschema(conn: &PgConn, db: &str, command: &[&str]) -> std::process::Output {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let port = conn.port.to_string();
+        std::process::Command::new(repo_root.join("bin/pgschema"))
+            .current_dir(&repo_root)
+            .args(command)
+            .args([
+                "--file",
+                "schema/schema.sql",
+                "--host",
+                &conn.host,
+                "--port",
+                &port,
+                "--user",
+                &conn.user,
+                "--password",
+                &conn.password,
+                "--db",
+                db,
+                "--plan-host",
+                &conn.host,
+                "--plan-port",
+                &port,
+                "--plan-user",
+                &conn.user,
+                "--plan-password",
+                &conn.password,
+                "--plan-db",
+                db,
+            ])
+            .output()
+            .expect("run bin/pgschema (hermit env required)")
+    }
+
+    /// Dated monthlies `schema/partitions/` declares, e.g. `events_p2026_01`.
+    fn declared_monthlies() -> BTreeSet<String> {
+        let dir = crate::test_support::desired_state_schema_dir().join("partitions");
+        let mut names = BTreeSet::new();
+        for entry in fs::read_dir(&dir).expect("read schema/partitions") {
+            let sql = fs::read_to_string(entry.expect("partition file").path())
+                .expect("read partition file");
+            names.extend(
+                sql.lines()
+                    .filter_map(|line| line.strip_prefix("CREATE TABLE "))
+                    .filter_map(|rest| rest.split_whitespace().next())
+                    .filter(|name| {
+                        name.rsplit_once("_p").is_some_and(|(_, month)| {
+                            month.starts_with(|c: char| c.is_ascii_digit())
+                        })
+                    })
+                    .map(str::to_owned),
+            );
+        }
+        names
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -479,6 +659,10 @@ mod postgres_tests {
             "product_feedback",
             "replica_heartbeat",
             "community_deletion_requests",
+            "entity_deletion_approvals",
+            "entity_deletion_requests",
+            "entity_deletion_stage_history",
+            "user_deletion_fences",
             "community_deletion_approvals",
             "community_deletion_checkpoints",
             "community_deletion_manifest_keys",
@@ -492,6 +676,7 @@ mod postgres_tests {
             "storage_accounting_snapshots",
             "operator_listener_pubkeys",
             "operator_listener_outbox",
+            "community_auth_upgrades",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -659,17 +844,6 @@ mod postgres_tests {
             .collect()
     }
 
-    fn has_channels_community_id_immutability_guard(sql: &str) -> bool {
-        let normalized = normalize_sql(sql);
-        normalized.contains("create trigger")
-            && normalized.contains("before update")
-            && normalized.contains(" on channels")
-            && normalized.contains("community_id")
-            && normalized.contains("old.community_id")
-            && normalized.contains("new.community_id")
-            && normalized.contains("raise exception")
-    }
-
     fn forbidden_channels_community_id_mutations(sql: &str) -> Vec<String> {
         split_sql_statements(sql)
             .into_iter()
@@ -705,12 +879,233 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 56);
+        assert_eq!(migrations.len(), 104);
+        assert_eq!(migrations[103].version, 104);
+        let event_table_drops = strip_sql_comments(migrations[103].sql.as_str());
+        assert!(event_table_drops
+            .contains("LOCK TABLE events, delivery_log, communities IN ACCESS EXCLUSIVE MODE;"));
+        assert!(event_table_drops.contains("DROP CONSTRAINT events_community_id_fkey;"));
+        assert_eq!(migrations[102].version, 103);
+        assert!(strip_sql_comments(migrations[102].sql.as_str())
+            .contains("ALTER TABLE users DROP CONSTRAINT users_community_id_fkey;"));
+        assert_eq!(migrations[101].version, 102);
+        assert!(strip_sql_comments(migrations[101].sql.as_str()).contains(
+            "ALTER TABLE join_policy_acceptances DROP CONSTRAINT join_policy_acceptances_community_id_pubkey_fkey;"
+        ));
+        assert_eq!(migrations[100].version, 101);
+        assert!(strip_sql_comments(migrations[100].sql.as_str())
+            .contains("DROP CONSTRAINT IF EXISTS push_gateway_delegations_installation_id_fkey"));
+        assert_eq!(migrations[89].version, 90);
+        assert!(migrations[89]
+            .sql
+            .as_str()
+            .contains("DROP FUNCTION enforce_community_write_fence();"));
+        assert!(migrations[83]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN auto_join_pending UUID"));
+        assert!(migrations[84]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN requested_requires_nip_fi BOOLEAN NOT NULL DEFAULT true"));
+        assert!(migrations[85]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE media_uploaders"));
+        assert!(migrations[86]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN cause_source TEXT"));
+        assert!(migrations[87]
+            .sql
+            .as_str()
+            .contains("VALIDATE CONSTRAINT workflow_runs_cause_pubkey_check"));
+        // 0089 retires the deferred created_at floor trigger and its function.
+        assert_eq!(migrations[88].version, 89);
+        let retire_floor = strip_sql_comments(migrations[88].sql.as_str());
+        assert!(retire_floor.contains("DROP TRIGGER IF EXISTS events_created_at_floor ON events;"));
+        assert!(retire_floor.contains("DROP FUNCTION IF EXISTS events_created_at_floor_guard();"));
+        assert_eq!(migrations[92].version, 93);
+        assert!(migrations[92]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN platform TEXT NOT NULL DEFAULT 'ios'"));
+        for (index, migration) in migrations.iter().enumerate() {
+            assert_eq!(migration.version, (index + 1) as i64);
+        }
+        // 0096 retires the five single-table guard triggers and functions.
+        assert_eq!(migrations[95].version, 96);
+        assert!(migrations[95]
+            .sql
+            .as_str()
+            .contains("SET LOCAL lock_timeout = '5s'"));
+        // 0098-0100 undo 0097's community artifact expand without a table
+        // scan under ACCESS EXCLUSIVE.
+        assert_eq!(migrations[97].version, 98);
+        assert!(strip_sql_comments(migrations[97].sql.as_str())
+            .contains("CHECK (channel_id IS NOT NULL) NOT VALID;"));
+        assert_eq!(migrations[98].version, 99);
+        assert!(strip_sql_comments(migrations[98].sql.as_str())
+            .contains("VALIDATE CONSTRAINT artifact_heads_channel_id_not_null;"));
+        assert_eq!(migrations[99].version, 100);
+        let unexpand = strip_sql_comments(migrations[99].sql.as_str());
+        assert!(
+            unexpand.contains("ALTER TABLE artifact_heads ALTER COLUMN channel_id SET NOT NULL;")
+        );
+        assert!(unexpand.contains("ALTER TABLE communities DROP COLUMN artifact_type_policies;"));
+        assert!(migrations[79]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN auto_join BOOLEAN NOT NULL DEFAULT false"));
+        // Listed channel names (0083): a bounded contract index that refuses
+        // to build over unrepaired duplicates. The desired schema carries the
+        // same plain index.
+        assert_eq!(migrations[82].version, 83);
+        let listed_names = strip_sql_comments(migrations[82].sql.as_str());
+        assert!(listed_names.contains("SET LOCAL lock_timeout = '1s';"));
+        assert!(listed_names.contains("SET LOCAL statement_timeout = '5s';"));
+        assert!(listed_names.contains("CREATE UNIQUE INDEX idx_channels_listed_name"));
+        assert!(!listed_names.contains("CONCURRENTLY"));
+        assert!(crate::test_support::desired_state_schema_sql().contains(
+            "CREATE UNIQUE INDEX idx_channels_listed_name ON channels (community_id, lower(name))"
+        ));
+        assert_eq!(migrations[94].version, 95);
+        let retire_roster_fence = strip_sql_comments(migrations[94].sql.as_str());
+        for statement in [
+            "SET LOCAL lock_timeout = '1s';",
+            "SET LOCAL statement_timeout = '5s';",
+            "DROP TRIGGER trg_events_guard_channel_roster_snapshot ON events;",
+            "DROP FUNCTION guard_channel_roster_snapshot();",
+        ] {
+            assert!(
+                retire_roster_fence.contains(statement),
+                "0095 must run {statement}"
+            );
+        }
+        assert!(migrations[70]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN unlisted BOOLEAN NOT NULL DEFAULT FALSE"));
+        assert_eq!(migrations[67].version, 68);
+        assert!(migrations[67]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE entity_deletion_requests"));
+        assert_eq!(migrations[64].version, 65);
+        let retire_ttl = strip_sql_comments(migrations[64].sql.as_str());
+        for statement in [
+            "SET LOCAL lock_timeout = '5s';",
+            "DROP TRIGGER events_refresh_channel_ttl ON events;",
+            "DROP FUNCTION refresh_channel_ttl_after_event_insert();",
+        ] {
+            assert!(retire_ttl.contains(statement), "0065 must run {statement}");
+        }
+        let desired_schema = crate::test_support::desired_state_schema_sql();
+        assert!(!desired_schema.contains("events_refresh_channel_ttl"));
+        assert!(!desired_schema.contains("refresh_channel_ttl_after_event_insert"));
+        assert!(desired_schema.contains("legacy_admission BOOLEAN NOT NULL DEFAULT true"));
+        assert_eq!(migrations[65].version, 66);
+        assert!(migrations[65]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE community_nip_fi_issuers"));
+        assert_eq!(migrations[74].version, 75);
+        let invite_migration = strip_sql_comments(migrations[74].sql.as_str());
+        assert!(invite_migration.contains("SET LOCAL lock_timeout = '5s'"));
+        assert!(invite_migration.contains("SET LOCAL statement_timeout = '30s'"));
+        assert!(
+            invite_migration.contains("ADD COLUMN legacy_admission BOOLEAN NOT NULL DEFAULT true")
+        );
+        assert!(invite_migration.contains("ADD COLUMN revoked_at TIMESTAMPTZ"));
+        assert!(!invite_migration.to_ascii_uppercase().contains("UPDATE "));
+        assert!(!invite_migration
+            .to_ascii_uppercase()
+            .contains("CREATE FUNCTION"));
+        assert!(!desired_schema.contains("invite_admission_lock"));
+
+        assert_eq!(migrations[58].version, 59);
+        assert!(migrations[58].sql.as_str().contains("buzz.push_enabled"));
+        assert_eq!(migrations[59].version, 60);
+        assert!(migrations[59]
+            .sql
+            .as_str()
+            .contains("ALTER TABLE push_leases DROP COLUMN app_profile"));
+        assert_eq!(migrations[60].version, 61);
+        assert!(migrations[60].sql.as_str().contains("ADD COLUMN labels"));
+        assert_eq!(migrations[61].version, 62);
+        assert!(migrations[61]
+            .sql
+            .as_str()
+            .contains("ALTER TYPE channel_type ADD VALUE IF NOT EXISTS 'system'"));
+        assert_eq!(migrations[63].version, 64);
+        assert!(migrations[63]
+            .sql
+            .as_str()
+            .contains("CREATE FUNCTION profile_name_fields"));
+        // The app owns the NIP-RS watermark, retention-free purge and
+        // mention liveness, so 0091 drops the migration-only triggers that
+        // 0009, 0010, 0011 and 0019 installed. Those files stay frozen.
+        assert_eq!(migrations[90].version, 91);
+        let retire_nip_rs = strip_sql_comments(migrations[90].sql.as_str());
+        for statement in [
+            "SET LOCAL lock_timeout = '5s';",
+            "DROP TRIGGER trg_events_nip_rs_watermark ON events;",
+            "DROP TRIGGER trg_events_guard_nip_rs_hard_delete ON events;",
+            "DROP TRIGGER trg_events_purge_soft_deleted_nip_rs ON events;",
+            "DROP TRIGGER trg_events_purge_soft_deleted_buzz_mesh_status ON events;",
+            "DROP TRIGGER trg_event_mentions_require_live_event ON event_mentions;",
+            "DROP FUNCTION guard_nip_rs_watermark();",
+            "DROP FUNCTION guard_nip_rs_hard_delete();",
+            "DROP FUNCTION purge_soft_deleted_nip_rs();",
+            "DROP FUNCTION purge_soft_deleted_buzz_mesh_status();",
+            "DROP FUNCTION guard_event_mention_live();",
+        ] {
+            assert!(
+                retire_nip_rs.contains(statement),
+                "0091 must run {statement}"
+            );
+        }
+        assert!(
+            retire_nip_rs.find("SET LOCAL lock_timeout").unwrap()
+                < retire_nip_rs.find("DROP TRIGGER").unwrap(),
+            "0091 must bound its ACCESS EXCLUSIVE lock on events before the first DROP"
+        );
+        // The relay builds the deletion lock key in Rust and reads profile
+        // names inline, so 0094 drops both plain SQL functions. 0029 and 0064
+        // stay frozen.
+        assert_eq!(migrations[93].version, 94);
+        let retire_functions = strip_sql_comments(migrations[93].sql.as_str());
+        for statement in [
+            "SET LOCAL lock_timeout = '5s';",
+            "DROP FUNCTION community_deletion_lock_key(UUID);",
+            "DROP FUNCTION profile_name_fields(TEXT);",
+        ] {
+            assert!(
+                retire_functions.contains(statement),
+                "0094 must run {statement}"
+            );
+        }
+        assert!(!retire_functions.contains("CASCADE"));
         assert_eq!(migrations[55].version, 56);
         assert!(migrations[55]
             .sql
             .as_str()
             .contains("CREATE TABLE personal_read_accounts"));
+        assert_eq!(migrations[56].version, 57);
+        assert!(migrations[56]
+            .sql
+            .as_str()
+            .contains("ALTER TABLE personal_read_accounts ADD COLUMN started_at"));
+        assert_eq!(migrations[57].version, 58);
+        assert!(migrations[57]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN through_message_id"));
+        assert_eq!(migrations[66].version, 67);
+        assert!(migrations[66]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN join_role TEXT NOT NULL DEFAULT 'member'"));
         assert_eq!(migrations[48].version, 49);
         assert_eq!(migrations[49].version, 50);
         assert_eq!(migrations[50].version, 51);
@@ -792,7 +1187,7 @@ mod postgres_tests {
         assert!(!migrations[0].sql.as_str().contains("idx_events_tags_gin"));
         // schema.sql (CI / isolated relay bootstrap) must carry the same index,
         // or e-tag reads there run on plans prod never sees.
-        assert!(include_str!("../../../../schema/schema.sql").contains(
+        assert!(crate::test_support::desired_state_schema_sql().contains(
             "CREATE INDEX idx_events_tags_gin ON events USING GIN (tags jsonb_path_ops)"
         ));
 
@@ -951,7 +1346,7 @@ mod postgres_tests {
         assert!(migrations[32].sql.as_str().contains("kind = 30179"));
         assert!(migrations[32].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30179"));
-        assert!(include_str!("../../../../schema/schema.sql")
+        assert!(crate::test_support::desired_state_schema_sql()
             .contains("kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200)"));
 
         // Public push-gateway authority is intentionally deployment-global and
@@ -1027,12 +1422,6 @@ mod postgres_tests {
             .as_str()
             .contains("CREATE TABLE join_policy_acceptances"));
 
-        // Replica-fence commit-time floor guard on channel-bearing events.
-        assert_eq!(migrations[20].version, 21);
-        assert!(migrations[20]
-            .sql
-            .as_str()
-            .contains("events_created_at_floor_guard"));
         assert!(!migrations[0]
             .sql
             .as_str()
@@ -1094,7 +1483,7 @@ mod postgres_tests {
             .contains("CREATE INDEX relay_invites_expires_at_idx ON relay_invites (expires_at)"));
         assert!(!relay_invites.contains("_operator_global_tables"));
 
-        let desired_schema = include_str!("../../../../schema/schema.sql");
+        let desired_schema = crate::test_support::desired_state_schema_sql();
         assert!(
             desired_schema.contains("CREATE TABLE join_policy_acceptances"),
             "desired-state schema must include join-policy evidence used by invite claims",
@@ -1148,6 +1537,41 @@ mod postgres_tests {
         assert!(deletion.contains("CREATE FUNCTION attach_community_write_fence"));
         assert!(deletion.contains("community_write_fence_excluded_table"));
         assert!(deletion.contains("CREATE FUNCTION enforce_community_tombstone"));
+        let retirement = migrations
+            .iter()
+            .find(|migration| migration.version == 90)
+            .expect("retirement migration 0090")
+            .sql
+            .as_str();
+        assert!(retirement.starts_with("SET LOCAL lock_timeout = '5s';"));
+        // Tables added after docs/database.md Rule 1 never had a fence.
+        let never_fenced = [
+            "nip_fi_profile_heads",
+            "media_uploaders",
+            "media_publications",
+        ];
+        for table in crate::deletion::EXPECTED_SCOPED_TABLES
+            .iter()
+            .chain(crate::deletion::RETIRING_SCOPED_TABLES)
+            .filter(|table| !never_fenced.contains(table))
+        {
+            assert!(
+                retirement.contains(&format!(
+                    "DROP TRIGGER IF EXISTS community_write_fence_{table} ON {table};"
+                )),
+                "0090 must retire the universal fence on {table}"
+            );
+        }
+        for signature in [
+            "attach_community_write_fence(REGCLASS)",
+            "enforce_community_write_fence()",
+            "assert_community_write_allowed(UUID)",
+            "community_write_allowed(UUID)",
+            "community_write_fence_excluded_table(NAME)",
+        ] {
+            assert!(retirement.contains(&format!("DROP FUNCTION {signature};")));
+        }
+        assert!(!retirement.contains("DROP FUNCTION enforce_community_tombstone"));
         assert!(deletion.contains("community tombstones are permanent"));
         assert!(deletion.contains("SET LOCAL lock_timeout = '5s'"));
         assert!(deletion.contains("'active', 'quiescing', 'fenced', 'tombstone'"));
@@ -1182,20 +1606,8 @@ mod postgres_tests {
         assert!(roster_fence.contains("snapshot_members IS DISTINCT FROM canonical_members"));
         assert!(roster_fence.contains("ERRCODE = '23514'"));
 
-        // Fresh desired-state bootstrap must install the identical executable
-        // fence as migration 0032. CI and isolated relay startup use schema.sql
-        // without running migrations, so drift reopens rolling-deploy races.
-        fn extract_roster_fence(sql: &str) -> &str {
-            let fence_start = "CREATE OR REPLACE FUNCTION guard_channel_roster_snapshot()";
-            let fence_end = "    FOR EACH ROW EXECUTE FUNCTION guard_channel_roster_snapshot();";
-            let start = sql.find(fence_start).expect("roster fence function");
-            let relative_end = sql[start..].find(fence_end).expect("roster fence trigger");
-            &sql[start..start + relative_end + fence_end.len()]
-        }
-        assert_eq!(
-            extract_roster_fence(roster_fence),
-            extract_roster_fence(desired_schema)
-        );
+        // Migration 0095 retires this fence; the desired state never installs it.
+        assert!(!desired_schema.contains("guard_channel_roster_snapshot"));
 
         // The single-row heartbeat table is updated continuously. Prevent
         // autovacuum from truncating its heap so standby queries are not
@@ -1306,7 +1718,7 @@ mod postgres_tests {
         assert!(dogfood_profile
             .contains("DROP CONSTRAINT push_gateway_installations_app_profile_check"));
         assert!(dogfood_profile.contains("CHECK (app_profile = 'buzz-ios-dogfood')"));
-        assert!(desired_schema.contains("CHECK (app_profile = 'buzz-ios-dogfood')"));
+        assert!(!desired_schema.contains("app_profile"));
 
         // Drop the Phase-A NIP-FI relay-side authority ledger (0041 + 0042).
         // OSS Buzz is stateless for identity (spec v2, PR #7214); the durable
@@ -1379,13 +1791,6 @@ mod postgres_tests {
                 "schema.sql must declare {index_shape}"
             );
         }
-        // schema.sql keeps the restored (pre-0041) deletion exclusions and also
-        // leaves the deployment-global listener outbox outside tenant fencing.
-        assert!(
-            desired_schema
-                .contains("'rate_limit_violations', 'operator_listener_outbox'\n    ]::TEXT[])"),
-            "schema.sql must exclude the deployment-global listener outbox from tenant fencing"
-        );
         assert_eq!(migrations[51].version, 52);
         assert!(migrations[51]
             .sql
@@ -1451,6 +1856,75 @@ mod postgres_tests {
         );
     }
 
+    /// pgschema cannot drop a foreign key from a partitioned table, so the
+    /// launcher that reuses its database drops those keys before apply.
+    #[test]
+    fn partitioned_foreign_key_drop_runs_before_reused_apply() {
+        let launcher = include_str!("../../../../scripts/start-relay-for-tests.sh");
+        let drop_at = launcher
+            .find("scripts/drop-partitioned-foreign-keys.sql")
+            .expect("start-relay-for-tests.sh runs scripts/drop-partitioned-foreign-keys.sql");
+        let apply_at = launcher
+            .find("./bin/pgschema apply")
+            .expect("start-relay-for-tests.sh runs pgschema apply");
+        assert!(
+            drop_at < apply_at,
+            "start-relay-for-tests.sh must drop the partitioned foreign keys before pgschema apply"
+        );
+    }
+
+    /// The reconcile script repairs `events_pkey` after every apply, and
+    /// `start-relay-for-tests.sh` runs the same repair before apply so a reused
+    /// database reconciled before the repair existed can still be applied.
+    #[test]
+    fn events_pkey_repair_runs_before_reused_apply_and_matches_reconcile() {
+        let repair = include_str!("../../../../scripts/repair-events-pkey.sql");
+        let block = &repair[repair.find("DO $$").expect("repair script has a DO block")..];
+        assert!(
+            include_str!("../../../../scripts/reconcile-schema-after-pgschema.sql").contains(block),
+            "scripts/reconcile-schema-after-pgschema.sql must carry scripts/repair-events-pkey.sql's \
+             DO block verbatim"
+        );
+
+        let launcher = include_str!("../../../../scripts/start-relay-for-tests.sh");
+        let repair_at = launcher
+            .find("scripts/repair-events-pkey.sql")
+            .expect("start-relay-for-tests.sh runs scripts/repair-events-pkey.sql");
+        let apply_at = launcher
+            .find("./bin/pgschema apply")
+            .expect("start-relay-for-tests.sh runs pgschema apply");
+        assert!(
+            repair_at < apply_at,
+            "start-relay-for-tests.sh must repair events_pkey before pgschema apply"
+        );
+    }
+
+    /// `.pgschemaignore` hides dated monthlies from pgschema so a re-apply
+    /// cannot drop the ones the relay created at runtime. Each monthly
+    /// `schema/partitions/` declares must be exempt, or pgschema would stop
+    /// creating it on a fresh database.
+    #[test]
+    fn pgschemaignore_exempts_exactly_the_declared_monthlies() {
+        let ignore =
+            fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.pgschemaignore"))
+                .expect("read .pgschemaignore");
+        let exempt: BTreeSet<String> = ignore
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .trim_end_matches(',')
+                    .strip_prefix("\"!")?
+                    .strip_suffix('"')
+            })
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            exempt,
+            declared_monthlies(),
+            ".pgschemaignore `!` exemptions must match the monthlies schema/partitions/ declares"
+        );
+    }
+
     #[test]
     fn workflow_run_error_codes_are_additive_and_backfilled_without_parsing_diagnostics() {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
@@ -1469,7 +1943,162 @@ mod postgres_tests {
             .sql
             .as_str()
             .contains("error_code"));
-        assert!(include_str!("../../../../schema/schema.sql").contains("error_code          TEXT"));
+        assert!(
+            crate::test_support::desired_state_schema_sql().contains("error_code          TEXT")
+        );
+    }
+
+    /// `schema/schema.sql` includes every desired-state file exactly once, and
+    /// `schema/tables/public/` (the SchemaBot schema directory's `public`
+    /// namespace) holds only one table per file: its CREATE TABLE plus the
+    /// CREATE INDEX statements on it. Types, functions, partitions, triggers
+    /// and seed rows belong in the sibling directories SchemaBot never reads.
+    #[test]
+    fn desired_state_schema_layout_is_complete_and_schemabot_shaped() {
+        use std::collections::BTreeSet;
+
+        fn sql_files(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("read schema directory") {
+                let path = entry.expect("schema directory entry").path();
+                if path.is_dir() {
+                    sql_files(&path, root, out);
+                } else if path.extension().is_some_and(|ext| ext == "sql") {
+                    let relative = path.strip_prefix(root).expect("schema-relative path");
+                    out.push(relative.to_str().expect("utf-8 path").replace('\\', "/"));
+                }
+            }
+        }
+
+        let schema_dir = crate::test_support::desired_state_schema_dir();
+        let manifest =
+            std::fs::read_to_string(schema_dir.join("schema.sql")).expect("read schema/schema.sql");
+        let mut included = Vec::new();
+        for line in manifest.lines() {
+            if let Some(include) = line.strip_prefix("\\i ") {
+                included.push(include.trim().to_owned());
+            }
+        }
+        let included_set: BTreeSet<_> = included.iter().cloned().collect();
+        assert_eq!(
+            included.len(),
+            included_set.len(),
+            "schema.sql includes a file twice"
+        );
+
+        let mut on_disk = Vec::new();
+        sql_files(&schema_dir, &schema_dir, &mut on_disk);
+        let on_disk: BTreeSet<_> = on_disk.into_iter().filter(|f| f != "schema.sql").collect();
+        assert_eq!(
+            on_disk, included_set,
+            "every schema/ file must be included by schema/schema.sql exactly once"
+        );
+
+        fn strip_comments(text: &str) -> String {
+            text.lines()
+                .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        // Table and index DDL must live in its table file, where SchemaBot
+        // reads it. A merge conflict resolved by pasting DDL into the manifest,
+        // or DDL in a sibling directory, would still build and pass CI.
+        for line in strip_comments(&manifest).lines().map(str::trim) {
+            assert!(
+                line.is_empty()
+                    || line.starts_with("\\i ")
+                    || line.to_ascii_uppercase().starts_with("CREATE EXTENSION "),
+                "schema/schema.sql may only hold \\i includes and CREATE EXTENSION; \
+                 put table DDL in tables/public/<table>.sql: {line:.80}"
+            );
+        }
+        let non_table_files = std::iter::once("schema.sql").chain(
+            included
+                .iter()
+                .map(String::as_str)
+                .filter(|f| !f.starts_with("tables/public/")),
+        );
+        for file in non_table_files {
+            let text = std::fs::read_to_string(schema_dir.join(file)).expect("read schema file");
+            for statement in strip_comments(&text).to_ascii_uppercase().split(';') {
+                let tokens: Vec<_> = statement.split_whitespace().collect();
+                assert!(
+                    !tokens.windows(2).any(|pair| matches!(
+                        pair,
+                        ["CREATE" | "UNIQUE", "INDEX"] | ["DROP" | "ALTER", "TABLE" | "INDEX"]
+                    )),
+                    "{file} may not create, alter or drop tables or indexes; \
+                     change tables/public/<table>.sql instead"
+                );
+                let creates_table = tokens.iter().enumerate().any(|(i, token)| {
+                    *token == "CREATE"
+                        && tokens[i + 1..].iter().find(|t| {
+                            !matches!(**t, "UNLOGGED" | "TEMP" | "TEMPORARY" | "GLOBAL" | "LOCAL")
+                        }) == Some(&"TABLE")
+                });
+                assert!(
+                    !creates_table
+                        || (file.starts_with("partitions/")
+                            && tokens.windows(2).any(|pair| pair == ["PARTITION", "OF"])),
+                    "{file} may not CREATE TABLE; only partitions/ may, and only PARTITION OF. \
+                     Declare tables in tables/public/<table>.sql"
+                );
+            }
+        }
+
+        let tables_dir = schema_dir.join("tables");
+        for entry in std::fs::read_dir(&tables_dir).expect("read schema/tables") {
+            let path = entry.expect("schema/tables entry").path();
+            assert!(
+                path.is_dir() && path.file_name().is_some_and(|name| name == "public"),
+                "schema/tables may contain only the `public` namespace: {}",
+                path.display()
+            );
+        }
+        let mut tables = 0;
+        for file in included.iter().filter(|f| f.starts_with("tables/public/")) {
+            let table = file
+                .strip_prefix("tables/public/")
+                .and_then(|name| name.strip_suffix(".sql"))
+                .expect("table file name");
+            let text = std::fs::read_to_string(schema_dir.join(file)).expect("read table file");
+            let code = strip_comments(&text);
+            let mut creates = 0;
+            for statement in code
+                .split(';')
+                .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+            {
+                if statement.is_empty() {
+                    continue;
+                }
+                if let Some(rest) = statement.strip_prefix("CREATE TABLE ") {
+                    assert!(
+                        rest.starts_with(&format!("{table} (")) && !rest.contains(" PARTITION OF "),
+                        "{file} may only create table {table}: {statement:.80}"
+                    );
+                    creates += 1;
+                } else {
+                    let index = statement
+                        .strip_prefix("CREATE INDEX ")
+                        .or_else(|| statement.strip_prefix("CREATE UNIQUE INDEX "))
+                        .unwrap_or_else(|| {
+                            panic!("{file} may only hold CREATE TABLE/INDEX: {statement:.80}")
+                        });
+                    assert!(
+                        !index.starts_with("IF NOT EXISTS ")
+                            && !index.starts_with("CONCURRENTLY "),
+                        "{file} must use a plain CREATE INDEX (SchemaBot refuses IF NOT EXISTS and CONCURRENTLY): {statement:.80}"
+                    );
+                    assert!(
+                        index.contains(&format!(" ON {table} ")),
+                        "{file} may only index {table}: {statement:.80}"
+                    );
+                }
+            }
+            assert_eq!(creates, 1, "{file} must create exactly one table");
+            tables += 1;
+        }
+        assert!(tables > 0, "schema/tables/public declares no tables");
     }
 
     #[test]
@@ -1483,8 +2112,9 @@ mod postgres_tests {
         assert!(sql.contains("NEW.kind IN (9, 40002, 45001, 45003)"));
         assert!(!sql.contains("NEW.kind IN (7, 9, 1059, 40007, 46010)"));
 
-        let desired_schema = include_str!("../../../../schema/schema.sql");
-        assert!(desired_schema.contains("NEW.kind IN (9, 40002, 45001, 45003)"));
+        let desired_schema = crate::test_support::desired_state_schema_sql();
+        assert!(!desired_schema.contains("enqueue_push_match_job"));
+        assert!(!desired_schema.contains("events_enqueue_push_match"));
         assert!(!desired_schema.contains("NEW.kind IN (7, 9, 1059, 40007, 46010)"));
     }
 
@@ -1625,10 +2255,6 @@ mod postgres_tests {
             "channels.community_id must not be re-tenanted after insert; forbidden migration statements:\n{}",
             forbidden_mutations.join("\n---\n")
         );
-        assert!(
-            has_channels_community_id_immutability_guard(sql),
-            "migrations define channels.community_id but no BEFORE UPDATE trigger/function guard that rejects OLD.community_id <> NEW.community_id was found"
-        );
     }
 
     #[test]
@@ -1688,9 +2314,9 @@ mod postgres_tests {
             if *path == this_file {
                 assert_eq!(
                     (macro_hits, run_hits, run_to_hits),
-                    (1, 1, 1),
+                    (1, 1, 2),
                     "migration.rs must embed the migrator once, run it once in production, \
-                     and expose exactly one test-only bounded run"
+                     and have one test-only and one production bounded run"
                 );
             } else if *path == push_gateway_exception {
                 continue;
@@ -1727,9 +2353,16 @@ mod postgres_tests {
             source[entry..locked].contains("with_exclusive_schema_destruction_lock("),
             "run_migrations must delegate through the exclusive schema/destruction lock"
         );
+        let production_run_to_site = source[run_to_site + 1..]
+            .find(&migrator_run_to)
+            .map(|offset| run_to_site + 1 + offset)
+            .expect("production bounded migrator run site");
         assert!(
-            run_site > locked && run_site < wrapper,
-            "the production migrator run site must live inside run_migrations_locked"
+            run_site > locked
+                && run_site < wrapper
+                && production_run_to_site > locked
+                && production_run_to_site < run_site,
+            "the production migrator run sites must live inside run_migrations_locked"
         );
         assert!(
             run_to_site > entry
@@ -1754,13 +2387,7 @@ mod postgres_tests {
             .sql
             .as_ref()
             .to_ascii_lowercase();
-        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(std::path::Path::parent)
-            .expect("workspace root");
-        let schema = std::fs::read_to_string(workspace_root.join("schema/schema.sql"))
-            .expect("read schema/schema.sql")
-            .to_ascii_lowercase();
+        let schema = crate::test_support::desired_state_schema_sql().to_ascii_lowercase();
 
         for sql in [&migration, &schema] {
             assert!(sql.contains("approval_origin text not null default 'operator'"));
@@ -1782,13 +2409,7 @@ mod postgres_tests {
             .sql
             .as_ref()
             .to_ascii_lowercase();
-        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(std::path::Path::parent)
-            .expect("workspace root");
-        let schema = std::fs::read_to_string(workspace_root.join("schema/schema.sql"))
-            .expect("read schema/schema.sql")
-            .to_ascii_lowercase();
+        let schema = crate::test_support::desired_state_schema_sql().to_ascii_lowercase();
 
         for sql in [&migration, &schema] {
             assert!(sql.contains("community_deletion_requests_owner_quota_reservations"));
@@ -1805,8 +2426,7 @@ mod postgres_tests {
     /// Compares parsed statements, not substrings: every deletion control-
     /// plane table, function, trigger, and index 0028 creates must exist in
     /// schema.sql with an identical normalized definition; every operator-
-    /// global registry row 0028 inserts must be inserted by schema.sql; the
-    /// write-fence attachment target sets must be equal; and every column
+    /// global registry row 0028 inserts must be inserted by schema.sql; every column
     /// 0028 adds to `communities` must exist in the desired-state
     /// `communities` table. A desired-state bootstrap that passes this test
     /// cannot silently omit part of the deletion surface the way the
@@ -1825,7 +2445,6 @@ mod postgres_tests {
             triggers: BTreeMap<String, String>,
             indexes: BTreeSet<String>,
             registry_rows: BTreeSet<(String, String)>,
-            fence_attachments: BTreeSet<String>,
             communities_added_columns: BTreeSet<String>,
         }
 
@@ -1849,6 +2468,41 @@ mod postgres_tests {
                 }
             }
             strings
+        }
+
+        /// Drop foreign-key elements and inline `REFERENCES` clauses from a
+        /// normalized `CREATE TABLE`.
+        fn without_foreign_keys(table: &str) -> String {
+            let open = table.find('(').expect("table body");
+            let close = find_matching_paren(table, open).expect("table body end");
+            let elements: Vec<String> = split_top_level_csv(&table[open + 1..close])
+                .into_iter()
+                .filter(|element| !element.starts_with("foreign key"))
+                .map(|element| {
+                    let Some(start) = element.find(" references ") else {
+                        return element;
+                    };
+                    let paren = start + element[start..].find('(').expect("referenced columns");
+                    let mut end = find_matching_paren(&element, paren).expect("columns end") + 1;
+                    for action in [
+                        " on delete cascade",
+                        " on delete set null",
+                        " on delete restrict",
+                        " on delete no action",
+                    ] {
+                        if element[end..].starts_with(action) {
+                            end += action.len();
+                        }
+                    }
+                    format!("{}{}", &element[..start], &element[end..])
+                })
+                .collect();
+            format!(
+                "{}({}){}",
+                &table[..open],
+                elements.join(", "),
+                &table[close + 1..]
+            )
         }
 
         fn surface(sql: &str) -> DeletionSurface {
@@ -1894,14 +2548,6 @@ mod postgres_tests {
                         surface.communities_added_columns.insert(column);
                     }
                 }
-                if let Some(position) = normalized.find("attach_community_write_fence('") {
-                    let target = normalized[position + "attach_community_write_fence('".len()..]
-                        .split('\'')
-                        .next()
-                        .expect("fence attachment target")
-                        .to_owned();
-                    surface.fence_attachments.insert(target);
-                }
             }
             surface
         }
@@ -1912,21 +2558,9 @@ mod postgres_tests {
             .expect("embedded migration 0029")
             .sql
             .as_ref();
-        let migration_0051: &str = MIGRATOR
-            .iter()
-            .find(|migration| migration.version == 51)
-            .expect("embedded migration 0051")
-            .sql
-            .as_ref();
-        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(std::path::Path::parent)
-            .expect("workspace root");
-        let schema_sql = std::fs::read_to_string(workspace_root.join("schema/schema.sql"))
-            .expect("read schema/schema.sql");
+        let schema_sql = crate::test_support::desired_state_schema_sql();
 
         let migration = surface(migration_0029);
-        let owner_admission_migration = surface(migration_0051);
         let schema = surface(&schema_sql);
 
         assert_eq!(
@@ -1935,7 +2569,6 @@ mod postgres_tests {
             "0029 deletion control plane must define exactly the known tables: {:?}",
             migration.tables.keys().collect::<Vec<_>>()
         );
-        assert!(!migration.fence_attachments.is_empty());
         assert!(!migration.registry_rows.is_empty());
 
         for (table, definition) in &migration.tables {
@@ -1943,9 +2576,11 @@ mod postgres_tests {
                 .tables
                 .get(table)
                 .unwrap_or_else(|| panic!("schema.sql is missing deletion table {table}"));
+            // 0102-0104 dropped every foreign key; the rest must not drift.
             if table != "community_deletion_requests" && table != "community_deletion_approvals" {
                 assert_eq!(
-                    in_schema, definition,
+                    without_foreign_keys(in_schema),
+                    without_foreign_keys(definition),
                     "schema.sql definition of {table} drifted from migration 0029"
                 );
             }
@@ -1958,19 +2593,15 @@ mod postgres_tests {
             .tables
             .get("community_deletion_approvals")
             .expect("schema.sql approval table");
-        for invariant in [
-            "inventory_digest bytea not null check (length(inventory_digest) = 32)",
-            "foreign key (request_id, community_id, inventory_digest) references community_deletion_requests(id, community_id, inventory_digest) on delete restrict",
-        ] {
-            assert!(
-                migration_approval_table.contains(invariant),
-                "0029 deletion approvals are missing {invariant}"
-            );
-            assert!(
-                schema_approval_table.contains(invariant),
-                "schema.sql deletion approvals are missing {invariant}"
-            );
-        }
+        let invariant = "inventory_digest bytea not null check (length(inventory_digest) = 32)";
+        assert!(
+            migration_approval_table.contains(invariant),
+            "0029 deletion approvals are missing {invariant}"
+        );
+        assert!(
+            schema_approval_table.contains(invariant),
+            "schema.sql deletion approvals are missing {invariant}"
+        );
         let migration_request_table = migration
             .tables
             .get("community_deletion_requests")
@@ -1988,30 +2619,35 @@ mod postgres_tests {
             );
         }
         for (function, definition) in &migration.functions {
+            if [
+                "community_write_fence_excluded_table",
+                "community_write_allowed",
+                "assert_community_write_allowed",
+                "enforce_community_write_fence",
+                "attach_community_write_fence",
+                "community_deletion_lock_key",
+                // 0096 retires the four deletion guard functions.
+                "enforce_community_tombstone",
+                "prevent_community_deletion_request_retargeting",
+                "prevent_community_deletion_approval_removal",
+                "protect_community_deletion_manifest_keys",
+            ]
+            .contains(&function.as_str())
+            {
+                assert!(!schema.functions.contains_key(function));
+                continue;
+            }
             let in_schema = schema
                 .functions
                 .get(function)
                 .unwrap_or_else(|| panic!("schema.sql is missing deletion function {function}"));
-            if function != "community_write_fence_excluded_table"
-                && function != "prevent_community_deletion_request_retargeting"
-            {
+            if function != "prevent_community_deletion_request_retargeting" {
                 assert_eq!(
                     in_schema, definition,
                     "schema.sql definition of {function}() drifted from migration 0029"
                 );
             }
         }
-        assert_eq!(
-            schema
-                .functions
-                .get("prevent_community_deletion_request_retargeting")
-                .expect("schema.sql deletion retargeting guard"),
-            owner_admission_migration
-                .functions
-                .get("prevent_community_deletion_request_retargeting")
-                .expect("0051 deletion retargeting guard"),
-            "schema.sql must carry the latest immutable owner-provenance guard"
-        );
         let request_table = schema
             .tables
             .get("community_deletion_requests")
@@ -2029,6 +2665,16 @@ mod postgres_tests {
             );
         }
         for (trigger, definition) in &migration.triggers {
+            if matches!(
+                trigger.as_str(),
+                "communities_deletion_tombstone"
+                    | "community_deletion_request_retargeting_guard"
+                    | "community_deletion_approval_removal_guard"
+                    | "community_deletion_manifest_keys_guard"
+            ) {
+                assert!(!schema.triggers.contains_key(trigger));
+                continue;
+            }
             let in_schema = schema
                 .triggers
                 .get(trigger)
@@ -2050,9 +2696,6 @@ mod postgres_tests {
                 "schema.sql is missing operator-global registry row {row:?}"
             );
         }
-        let mut expected_fences = migration.fence_attachments.clone();
-        expected_fences.remove("product_feedback");
-        expected_fences.remove("rate_limit_violations");
         let personal = surface(
             MIGRATOR
                 .iter()
@@ -2061,19 +2704,55 @@ mod postgres_tests {
                 .sql
                 .as_ref(),
         );
+        // 0057 adds personal_read_accounts.started_at after 0056's CREATE TABLE.
+        let started_at_column = "started_at timestamptz, ";
+        assert!(MIGRATOR
+            .iter()
+            .find(|m| m.version == 57)
+            .expect("personal read start migration")
+            .sql
+            .as_str()
+            .contains("ADD COLUMN started_at TIMESTAMPTZ"));
+        assert!(schema
+            .tables
+            .get("personal_read_accounts")
+            .expect("schema.sql personal read accounts")
+            .contains(started_at_column));
+        // 0058 replaces the frontier's whole-channel cut with its anchor ID.
+        let threads_through_column = "threads_through_timestamp timestamptz \
+            check (threads_through_timestamp is null or root_id = ''::bytea), ";
+        let through_message_column =
+            "through_message_id bytea check (octet_length(through_message_id) = 32), ";
+        let through_message = MIGRATOR
+            .iter()
+            .find(|m| m.version == 58)
+            .expect("personal read anchor migration")
+            .sql
+            .as_str();
+        assert!(through_message.contains("DROP COLUMN threads_through_timestamp"));
         for (table, definition) in personal.tables {
+            // `without_foreign_keys` also normalizes spacing, so apply it to both.
+            let in_schema = schema.tables.get(&table).map(|schema_definition| {
+                let schema_definition = without_foreign_keys(schema_definition);
+                if table == "personal_read_accounts" {
+                    schema_definition.replacen(started_at_column, "", 1)
+                } else {
+                    schema_definition
+                }
+            });
+            // 0102 dropped the foreign keys that 0056 created.
+            let definition = without_foreign_keys(&definition);
+            let definition = if table == "personal_read_frontiers" {
+                definition.replacen(threads_through_column, through_message_column, 1)
+            } else {
+                definition
+            };
             assert_eq!(
-                schema.tables.get(&table),
+                in_schema.as_ref(),
                 Some(&definition),
                 "personal read table {table} differs"
             );
         }
-        expected_fences.extend(personal.fence_attachments);
-        expected_fences.extend(["artifact_heads", "artifact_revisions"].map(str::to_owned));
-        assert_eq!(
-            expected_fences, schema.fence_attachments,
-            "write-fence attachment targets differ after recovery policy"
-        );
 
         // 0029's ALTER TABLE additions are expressed inline by the
         // desired-state `communities` definition; require the columns to
@@ -2169,23 +2848,13 @@ mod postgres_tests {
     async fn cancelled_migration_cannot_expose_shared_lock_while_ddl_backend_lives() {
         use std::time::Instant;
 
-        use sqlx::AssertSqlSafe;
-
         // Dedicated database: the probe table and the orphaned backend must
         // stay invisible to concurrent tests in the shared database.
         let base_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| TEST_DB_URL.to_owned());
-        let admin = PgPool::connect(&base_url)
-            .await
-            .expect("connect admin database");
-        let probe_db = format!("buzz_lock_cancel_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {probe_db}")))
-            .execute(&admin)
-            .await
-            .expect("create probe database");
-        let (base_prefix, _) = base_url.rsplit_once('/').expect("database url has a path");
-        let pool = PgPool::connect(&format!("{base_prefix}/{probe_db}"))
+        let probe_db = ScratchDb::create(&base_url, "buzz_lock_cancel").await;
+        let pool = PgPool::connect(probe_db.url())
             .await
             .expect("connect probe database");
         sqlx::query("CREATE TABLE schema_lock_cancel_probe (id int)")
@@ -2318,17 +2987,9 @@ mod postgres_tests {
             committed,
             "orphaned migration DDL commits after cancellation; the lock must cover it"
         );
-
-        pool.close().await;
-        sqlx::query(AssertSqlSafe(format!(
-            "DROP DATABASE {probe_db} WITH (FORCE)"
-        )))
-        .execute(&admin)
-        .await
-        .expect("drop probe database");
     }
 
-    async fn connect_test_pool() -> PgPool {
+    pub(super) async fn connect_test_pool() -> PgPool {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| TEST_DB_URL.to_owned());
@@ -2338,7 +2999,7 @@ mod postgres_tests {
             .expect("connect to test DB")
     }
 
-    async fn reset_public_schema(pool: &PgPool) {
+    pub(super) async fn reset_public_schema(pool: &PgPool) {
         sqlx::query("DROP SCHEMA IF EXISTS public CASCADE")
             .execute(pool)
             .await
@@ -2366,13 +3027,18 @@ mod postgres_tests {
     ///
     /// This bootstraps one probe database from `schema.sql` **through the real
     /// `bin/pgschema apply` binary** — the exact path CI (`ci.yml`) and both
-    /// test-relay launchers take — and migrates another through 1–38, then
-    /// asserts the three admin tables have identical column definitions (name,
-    /// type, nullability, default) and identical index shapes, including each
-    /// key's catalog sort/null options (`pg_index.indoption`). Columns are keyed
+    /// test-relay launchers take — and migrates another through the latest
+    /// migration, then asserts the admin and entity-intake tables have identical
+    /// column definitions (name, type, nullability, default) and index shapes, including each
+    /// key's catalog sort/null options (`pg_index.indoption`), and that the
+    /// `channels` columns match. Columns are keyed
     /// by name, not ordinal, because migrations append via `ALTER TABLE` while
     /// `schema.sql` declares them inline — positions legitimately differ, shapes
-    /// must not.
+    /// must not. Entity-intake constraints are also compared in the live catalog.
+    /// `events` and its partitions must carry the same primary key on both
+    /// probes, so the reconcile script's `events_pkey` rebuild cannot drift from
+    /// the migrations. Partitions are compared as a set of key definitions
+    /// because the two paths create different months.
     ///
     /// Driving the real binary is load-bearing: `pgschema` 1.7.4 discards
     /// per-key `NULLS FIRST`/`NULLS LAST` when it re-emits an index, so a naive
@@ -2381,11 +3047,13 @@ mod postgres_tests {
     /// drift this test guards against. `indoption` (not just `indexdef` text) is
     /// asserted so a resurrected `NULLS FIRST` in a migration that `pgschema`
     /// cannot represent is caught.
+    ///
+    /// It also asserts the fully migrated `events` and
+    /// `event_mentions` row triggers match `schema/` exactly, so no
+    /// migration-only trigger survives on the event write path.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn admin_schema_parity_between_desired_state_and_migrations() {
-        use sqlx::AssertSqlSafe;
-
         async fn columns(
             pool: &PgPool,
             table: &str,
@@ -2430,63 +3098,68 @@ mod postgres_tests {
             .expect("read index shapes")
         }
 
+        async fn constraints(pool: &PgPool, table: &str) -> Vec<(String, String, bool)> {
+            sqlx::query_as(
+                "SELECT con.conname, pg_get_constraintdef(con.oid), con.convalidated \
+                 FROM pg_constraint con \
+                 JOIN pg_class t ON t.oid = con.conrelid \
+                 JOIN pg_namespace n ON n.oid = t.relnamespace \
+                 WHERE n.nspname = 'public' AND t.relname = $1 \
+                 ORDER BY con.conname",
+            )
+            .bind(table)
+            .fetch_all(pool)
+            .await
+            .expect("read constraint definitions")
+        }
+
+        // Distinct (is the parent, key definition) pairs across events and its
+        // partitions.
+        async fn events_key_defs(pool: &PgPool) -> Vec<(bool, String)> {
+            sqlx::query_as(
+                "SELECT DISTINCT conrelid = 'events'::regclass, pg_get_constraintdef(oid) \
+                 FROM pg_constraint \
+                 WHERE contype = 'p' AND conrelid IN ( \
+                     SELECT 'events'::regclass \
+                     UNION ALL \
+                     SELECT inhrelid FROM pg_inherits WHERE inhparent = 'events'::regclass) \
+                 ORDER BY 1, 2",
+            )
+            .fetch_all(pool)
+            .await
+            .expect("read events key definitions")
+        }
+
+        // Row triggers on a parent table (partition clones follow the parent):
+        // name, function, enable mode and the tgtype bitmask.
+        async fn trigger_shapes(pool: &PgPool, table: &str) -> Vec<(String, String, String, i16)> {
+            sqlx::query_as(
+                "SELECT trigger.tgname::text, procedure.proname::text, \
+                 trigger.tgenabled::text, trigger.tgtype \
+                 FROM pg_trigger trigger \
+                 JOIN pg_class c ON c.oid = trigger.tgrelid \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 JOIN pg_proc procedure ON procedure.oid = trigger.tgfoid \
+                 WHERE n.nspname = 'public' AND c.relname = $1 AND NOT trigger.tgisinternal \
+                 ORDER BY trigger.tgname",
+            )
+            .bind(table)
+            .fetch_all(pool)
+            .await
+            .expect("read trigger shapes")
+        }
+
         let base_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
             .unwrap_or_else(|_| TEST_DB_URL.to_owned());
         let conn = parse_pg_url(&base_url);
-        let admin = PgPool::connect(&base_url)
-            .await
-            .expect("connect admin database");
-        let (base_prefix, _) = base_url.rsplit_once('/').expect("database url has a path");
 
-        let desired_db = format!("buzz_admin_desired_{}", uuid::Uuid::new_v4().simple());
-        let migrated_db = format!("buzz_admin_migrated_{}", uuid::Uuid::new_v4().simple());
-        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {desired_db}")))
-            .execute(&admin)
-            .await
-            .expect("create desired-state probe database");
-        sqlx::query(AssertSqlSafe(format!("CREATE DATABASE {migrated_db}")))
-            .execute(&admin)
-            .await
-            .expect("create migrated probe database");
+        let desired_db = ScratchDb::create(&base_url, "buzz_admin_desired").await;
+        let migrated_db = ScratchDb::create(&base_url, "buzz_admin_migrated").await;
 
-        // Bootstrap the desired-state probe through the real pgschema binary, the
-        // same invocation the test-relay launchers use. The freshly-created probe
-        // db doubles as pgschema's plan database (--plan-*), which avoids the
-        // embedded-Postgres download and matches start-relay-for-tests.sh.
-        let pgschema = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bin/pgschema");
-        let schema_file =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schema/schema.sql");
-        let port = conn.port.to_string();
-        let apply = std::process::Command::new(&pgschema)
-            .args([
-                "apply",
-                "--auto-approve",
-                "--file",
-                schema_file.to_str().expect("schema path utf-8"),
-                "--host",
-                &conn.host,
-                "--port",
-                &port,
-                "--user",
-                &conn.user,
-                "--password",
-                &conn.password,
-                "--db",
-                &desired_db,
-                "--plan-host",
-                &conn.host,
-                "--plan-port",
-                &port,
-                "--plan-user",
-                &conn.user,
-                "--plan-password",
-                &conn.password,
-                "--plan-db",
-                &desired_db,
-            ])
-            .output()
-            .expect("run bin/pgschema apply (hermit env required)");
+        // Bootstrap the desired-state probe the way the test-relay launchers do:
+        // the real pgschema binary, then the post-apply reconcile script.
+        let apply = pgschema(&conn, desired_db.name(), &["apply", "--auto-approve"]);
         assert!(
             apply.status.success(),
             "pgschema apply failed: {}\n{}",
@@ -2494,21 +3167,42 @@ mod postgres_tests {
             String::from_utf8_lossy(&apply.stderr),
         );
 
-        let desired = PgPool::connect(&format!("{base_prefix}/{desired_db}"))
+        let desired = PgPool::connect(desired_db.url())
             .await
             .expect("connect desired-state probe database");
-        let migrated = PgPool::connect(&format!("{base_prefix}/{migrated_db}"))
+        sqlx::raw_sql(include_str!(
+            "../../../../scripts/reconcile-schema-after-pgschema.sql"
+        ))
+        .execute(&desired)
+        .await
+        .expect("reconcile desired-state probe database");
+        let migrated = PgPool::connect(migrated_db.url())
             .await
             .expect("connect migrated probe database");
         MIGRATOR
-            .run_to(55, &migrated)
+            .run(&migrated)
             .await
-            .expect("apply migrations 1-55");
+            .expect("apply migrations for schema parity");
 
         for table in [
+            "media_uploaders",
+            "audit_log",
+            "media_publications",
+            "relay_members",
             "relay_admin_actions",
             "relay_admin_outbox",
             "relay_operator_audit",
+            "community_auth_upgrades",
+            "entity_deletion_approvals",
+            "entity_deletion_requests",
+            "artifact_heads",
+            "artifact_revisions",
+            "channel_members",
+            "communities",
+            "entity_deletion_stage_history",
+            "user_deletion_fences",
+            "workflow_runs",
+            "push_gateway_installations",
         ] {
             assert_eq!(
                 columns(&desired, table).await,
@@ -2525,17 +3219,740 @@ mod postgres_tests {
                  migration and schema.sql must both use a representable shape."
             );
         }
-
-        desired.close().await;
-        migrated.close().await;
-        for probe_db in [desired_db, migrated_db] {
-            sqlx::query(AssertSqlSafe(format!(
-                "DROP DATABASE {probe_db} WITH (FORCE)"
-            )))
-            .execute(&admin)
+        // docs/database.md Rule 2: 0102-0104 dropped every foreign key, and
+        // schema/ declares none, so neither bootstrap path has one.
+        async fn foreign_keys(pool: &PgPool) -> Vec<(String, String)> {
+            sqlx::query_as(
+                "SELECT con.conrelid::regclass::text, con.conname::text \
+                 FROM pg_constraint con \
+                 JOIN pg_namespace n ON n.oid = con.connamespace \
+                 WHERE n.nspname = 'public' AND con.contype = 'f' \
+                 ORDER BY 1, 2",
+            )
+            .fetch_all(pool)
             .await
-            .expect("drop probe database");
+            .expect("read foreign keys")
         }
+        assert_eq!(
+            foreign_keys(&desired).await,
+            Vec::new(),
+            "desired state has a foreign key"
+        );
+        assert_eq!(
+            foreign_keys(&migrated).await,
+            Vec::new(),
+            "migrations leave a foreign key"
+        );
+        async fn media_edit_index(pool: &PgPool) -> (String, String, String) {
+            sqlx::query_as("SELECT pg_get_indexdef(indexrelid),indoption::text,pg_get_expr(indexprs,indrelid) FROM pg_index WHERE indexrelid='public.idx_events_media_edit_target'::regclass AND indisvalid AND indisready AND indislive")
+                .fetch_one(pool).await.expect("valid media edit index")
+        }
+        assert_eq!(
+            media_edit_index(&desired).await,
+            media_edit_index(&migrated).await
+        );
+        // `channels` columns only: pgschema re-emits `idx_channels_id_live`
+        // without its `INCLUDE (community_id)`, an index drift that predates
+        // this check.
+        assert_eq!(
+            columns(&desired, "channels").await,
+            columns(&migrated, "channels").await,
+            "column parity mismatch for channels: schema.sql desired state has drifted \
+             from the migrations; update schema/tables/public/channels.sql to match"
+        );
+        // The listed-name index (0083) is compared on its own for that reason.
+        let listed_name = |shapes: Vec<(String, String, String)>| {
+            shapes
+                .into_iter()
+                .filter(|(name, _, _)| name == "idx_channels_listed_name")
+                .collect::<Vec<_>>()
+        };
+        let desired_listed_name = listed_name(index_shapes(&desired, "channels").await);
+        assert_eq!(desired_listed_name.len(), 1, "desired state has the index");
+        assert_eq!(
+            desired_listed_name,
+            listed_name(index_shapes(&migrated, "channels").await),
+            "idx_channels_listed_name parity mismatch: update \
+             schema/tables/public/channels.sql to match migration 0083"
+        );
+        assert_eq!(
+            events_key_defs(&desired).await,
+            events_key_defs(&migrated).await,
+            "events primary-key parity mismatch: the pgschema-bootstrapped, reconciled \
+             desired state has drifted from the migrations; update the events_pkey block in \
+             scripts/reconcile-schema-after-pgschema.sql and scripts/repair-events-pkey.sql"
+        );
+
+        for table in [
+            "communities",
+            "community_auth_upgrades",
+            "entity_deletion_requests",
+            "entity_deletion_stage_history",
+            "user_deletion_fences",
+            "entity_deletion_approvals",
+            "workflow_runs",
+            "push_gateway_installations",
+            "push_gateway_delegations",
+        ] {
+            assert_eq!(
+                constraints(&desired, table).await,
+                constraints(&migrated, table).await,
+                "constraint parity mismatch for {table}"
+            );
+        }
+
+        // Every migration-only trigger on the event tables is retired, so a
+        // fully migrated database carries exactly the desired-state triggers.
+        for table in ["events", "event_mentions"] {
+            assert_eq!(
+                trigger_shapes(&desired, table).await,
+                trigger_shapes(&migrated, table).await,
+                "trigger parity mismatch for {table}: a migration installs a trigger that \
+                 schema/ does not declare (or the reverse)"
+            );
+        }
+        // Compare columns, keys and remaining triggers on the five guarded tables;
+        // foreign keys must survive 0096 unchanged.
+        for table in [
+            "channels",
+            "communities",
+            "community_deletion_requests",
+            "community_deletion_approvals",
+            "community_deletion_manifest_keys",
+        ] {
+            assert_eq!(
+                columns(&desired, table).await,
+                columns(&migrated, table).await,
+                "single-table guard column parity: {table}"
+            );
+            // pgschema rewrites CHECK expressions (e.g. BETWEEN) into an
+            // equivalent tree with different grouping. Compare key/FK shapes
+            // here; existing CHECK assertions above remain unchanged.
+            let desired_keys: Vec<_> = constraints(&desired, table)
+                .await
+                .into_iter()
+                .filter(|(_, definition, _)| !definition.starts_with("CHECK"))
+                .collect();
+            let migrated_keys: Vec<_> = constraints(&migrated, table)
+                .await
+                .into_iter()
+                .filter(|(_, definition, _)| !definition.starts_with("CHECK"))
+                .collect();
+            assert_eq!(
+                desired_keys, migrated_keys,
+                "single-table guard key parity: {table}"
+            );
+            let query = "SELECT pg_get_triggerdef(oid) FROM pg_trigger \
+                WHERE tgrelid = $1::regclass AND NOT tgisinternal ORDER BY tgname";
+            let desired_triggers: Vec<String> = sqlx::query_scalar(query)
+                .bind(table)
+                .fetch_all(&desired)
+                .await
+                .expect("desired table triggers");
+            let migrated_triggers: Vec<String> = sqlx::query_scalar(query)
+                .bind(table)
+                .fetch_all(&migrated)
+                .await
+                .expect("migrated table triggers");
+            assert_eq!(
+                desired_triggers, migrated_triggers,
+                "remaining trigger parity: {table}"
+            );
+        }
+        // Shared with the isolated desired-template and migration regressions.
+        crate::deletion::postgres_tests::assert_single_table_guards_retired(&desired).await;
+        crate::deletion::postgres_tests::assert_single_table_guards_retired(&migrated).await;
+    }
+
+    /// Re-applying `schema/schema.sql` to a database bootstrapped the way every
+    /// caller does it (pgschema apply, then the reconcile script) and then used
+    /// by a relay plans nothing. pgschema does not compare partition bounds, so
+    /// the advanced catch-alls do not show up in the plan. Two things keep the
+    /// rest of it empty:
+    ///
+    /// - `.pgschemaignore` hides the monthlies the partition manager created
+    ///   at runtime, which pgschema would otherwise drop, rows included, with
+    ///   `DROP TABLE IF EXISTS ... CASCADE`.
+    /// - The reconcile script rebuilds `events_pkey` in its declared order.
+    ///   pgschema creates it with the partition key first, then plans to drop
+    ///   and re-add it and every declared child's key, which fails once the
+    ///   children are attached.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn pgschema_reapply_keeps_runtime_partitions() {
+        use crate::store::partition::{
+            maintain_partitions, PartitionMaintenancePolicy, PARTITION_MANAGER_MONTHS_AHEAD,
+        };
+
+        let base_url = crate::test_support::database_url();
+        let conn = parse_pg_url(&base_url);
+        let database = ScratchDb::create(&base_url, "buzz_pgschema_reapply").await;
+
+        let pool = PgPool::connect(database.url())
+            .await
+            .expect("connect probe database");
+        // The bootstrap every pgschema caller runs; the reconcile script
+        // attaches the declared children.
+        let bootstrap = |round: &str| {
+            let apply = pgschema(&conn, database.name(), &["apply", "--auto-approve"]);
+            assert!(
+                apply.status.success(),
+                "{round} pgschema apply failed: {}\n{}",
+                String::from_utf8_lossy(&apply.stdout),
+                String::from_utf8_lossy(&apply.stderr),
+            );
+            sqlx::raw_sql(include_str!(
+                "../../../../scripts/reconcile-schema-after-pgschema.sql"
+            ))
+            .execute(&pool)
+        };
+        bootstrap("first")
+            .await
+            .expect("first post-apply reconciliation");
+        async fn catch_all_bounds(pool: &PgPool) -> Vec<(String, Option<String>)> {
+            sqlx::query_as(
+                "SELECT relname::text, pg_get_expr(relpartbound, oid) FROM pg_class \
+                 WHERE relname IN ('events_p_future', 'delivery_log_p_future') \
+                 ORDER BY relname",
+            )
+            .fetch_all(pool)
+            .await
+            .expect("read catch-all bounds")
+        }
+        let declared_bounds = catch_all_bounds(&pool).await;
+        assert!(
+            declared_bounds.len() == 2 && declared_bounds.iter().all(|(_, bound)| bound.is_some()),
+            "reconcile did not attach both catch-alls: {declared_bounds:?}"
+        );
+
+        // The relay's default startup pass advances the `events` catch-all into
+        // dated monthlies schema/partitions/ does not declare. `delivery_log` is
+        // retired from partition management, so its catch-all stays as declared.
+        maintain_partitions(
+            &pool,
+            PARTITION_MANAGER_MONTHS_AHEAD,
+            PartitionMaintenancePolicy {
+                create_enabled: true,
+                advance_enabled: true,
+            },
+        )
+        .await
+        .expect("maintain partitions");
+        let advanced_bounds = catch_all_bounds(&pool).await;
+        assert!(
+            advanced_bounds.len() == 2 && advanced_bounds.iter().all(|(_, bound)| bound.is_some()),
+            "maintenance dropped or detached a catch-all: {advanced_bounds:?}"
+        );
+        for (declared, advanced) in declared_bounds.iter().zip(&advanced_bounds) {
+            if declared.0 == "events_p_future" {
+                assert_ne!(declared, advanced, "catch-all did not advance");
+            } else {
+                assert_eq!(declared, advanced, "retired table was partition-managed");
+            }
+        }
+        let children: Vec<(String, String)> = sqlx::query_as(
+            "SELECT p.relname::text, c.relname::text FROM pg_inherits i \
+             JOIN pg_class c ON c.oid = i.inhrelid \
+             JOIN pg_class p ON p.oid = i.inhparent \
+             WHERE p.relname = 'events'",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("list partitions");
+        let declared = declared_monthlies();
+        let runtime: Vec<_> = children
+            .iter()
+            .filter(|(parent, child)| {
+                child.starts_with(&format!("{parent}_p2")) && !declared.contains(child)
+            })
+            .collect();
+        for (catch_all, bound) in declared_bounds
+            .iter()
+            .filter(|(catch_all, _)| catch_all == "events_p_future")
+        {
+            // The first month the declared catch-all served, from its
+            // `FOR VALUES FROM ('YYYY-MM-01 ...')` lower bound.
+            let parent = catch_all
+                .strip_suffix("_p_future")
+                .expect("catch-all is named <parent>_p_future");
+            let month = bound
+                .as_deref()
+                .and_then(|bound| bound.split_once("FROM ('"))
+                .and_then(|(_, rest)| rest.get(..7))
+                .expect("declared catch-all has a dated lower bound");
+            let first = format!("{parent}_p{}", month.replace('-', "_"));
+            assert!(
+                runtime.iter().any(|(_, child)| *child == first),
+                "maintenance did not advance into {first}: {children:?}"
+            );
+        }
+
+        let plan = pgschema(&conn, database.name(), &["plan", "--output-sql", "stdout"]);
+        let plan_sql = String::from_utf8_lossy(&plan.stdout);
+        assert!(
+            plan.status.success(),
+            "pgschema plan failed: {plan_sql}\n{}",
+            String::from_utf8_lossy(&plan.stderr),
+        );
+        assert!(
+            plan_sql.trim().is_empty(),
+            "re-applying schema.sql to a reconciled database must plan nothing; \
+             runtime monthlies {runtime:?}:\n{plan_sql}"
+        );
+        bootstrap("second")
+            .await
+            .expect("second post-apply reconciliation");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn policy_receipt_expand_preserves_populated_rows_and_legacy_inserts() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 84).await.unwrap();
+        let insert = "INSERT INTO community_auth_upgrades
+            (operation_id,target_community_id,expected_host,actor_pubkey,expected_owner_pubkey,
+             expected_issuer,operator_pubkey,policy_generation)
+            VALUES ($1,$2,'team.example.org','actor','owner','https://issuer.example.org','operator',1)";
+        let first = uuid::Uuid::new_v4();
+        sqlx::query(insert)
+            .bind(first)
+            .bind(uuid::Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .unwrap();
+        run_migrations(&pool).await.unwrap();
+        let second = uuid::Uuid::new_v4();
+        sqlx::query(insert)
+            .bind(second)
+            .bind(uuid::Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .unwrap();
+        for id in [first, second] {
+            let row: (bool, Option<i64>, Option<bool>, i64) = sqlx::query_as(
+                "SELECT requested_requires_nip_fi, expected_policy_generation,
+                    expected_requires_nip_fi, policy_generation
+                 FROM community_auth_upgrades WHERE operation_id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(row, (true, None, None, 1));
+        }
+    }
+
+    /// 0087 adds the run-cause columns and NOT VALID checks without scanning
+    /// existing runs, and 0088 validates them. Runs written before the upgrade,
+    /// and inserts from an older relay that omits both columns, keep no cause.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_run_cause_upgrade_preserves_populated_rows_and_legacy_inserts() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 86).await.unwrap();
+        let community_id = uuid::Uuid::new_v4();
+        let workflow_id = uuid::Uuid::new_v4();
+        let owner = vec![7u8; 32];
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("run-cause-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO users (community_id, pubkey) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(&owner)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO workflows (community_id, id, name, owner_pubkey, definition, definition_hash) \
+             VALUES ($1, $2, 'cause', $3, '{}', $4)",
+        )
+        .bind(community_id)
+        .bind(workflow_id)
+        .bind(&owner)
+        .bind(vec![0u8; 32])
+        .execute(&pool)
+        .await
+        .unwrap();
+        let legacy_insert =
+            "INSERT INTO workflow_runs (community_id, id, workflow_id) VALUES ($1, $2, $3)";
+        let insert_legacy_run = |id| {
+            sqlx::query(legacy_insert)
+                .bind(community_id)
+                .bind(id)
+                .bind(workflow_id)
+                .execute(&pool)
+        };
+        let before = uuid::Uuid::new_v4();
+        insert_legacy_run(before).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+        let after = uuid::Uuid::new_v4();
+        insert_legacy_run(after).await.unwrap();
+
+        for id in [before, after] {
+            let cause: (Option<String>, Option<Vec<u8>>) = sqlx::query_as(
+                "SELECT cause_source, cause_pubkey FROM workflow_runs WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(cause, (None, None));
+        }
+        let unvalidated: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_constraint \
+             WHERE conrelid = 'public.workflow_runs'::regclass AND contype = 'c' \
+               AND conname LIKE 'workflow_runs_%' AND NOT convalidated",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(unvalidated, 0, "0088 validates every cause check");
+        let unknown_source = sqlx::query(
+            "INSERT INTO workflow_runs (community_id, id, workflow_id, cause_source) \
+             VALUES ($1, $2, $3, 'relay')",
+        )
+        .bind(community_id)
+        .bind(uuid::Uuid::new_v4())
+        .bind(workflow_id)
+        .execute(&pool)
+        .await;
+        assert!(unknown_source.is_err(), "the trigger source check holds");
+    }
+
+    /// Migrations 0076 and 0078 refuse a populated table whose index was not
+    /// prebuilt concurrently. A relay that auto-migrated through earlier
+    /// releases and holds artifact data must still boot through every migration. When a
+    /// bounded inline build cannot take its lock it must fail closed without
+    /// recording that migration, keeping earlier migrations and each index
+    /// already built in its own transaction.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn populated_artifact_tables_auto_migrate_through_every_migration() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(75, &pool)
+            .await
+            .expect("apply migrations 1-75");
+
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("artifact-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+        let channel_id = uuid::Uuid::new_v4();
+        let artifact_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO artifact_revisions (community_id, event_id, artifact_id) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(community_id)
+        .bind(vec![1_u8; 32])
+        .bind(artifact_id)
+        .execute(&pool)
+        .await
+        .expect("insert artifact revision");
+        sqlx::query(
+            "INSERT INTO artifact_heads \
+             (community_id, artifact_id, event_id, channel_id, artifact_type) \
+             VALUES ($1, $2, $3, $4, 'doc')",
+        )
+        .bind(community_id)
+        .bind(artifact_id)
+        .bind(vec![1_u8; 32])
+        .bind(channel_id)
+        .execute(&pool)
+        .await
+        .expect("insert artifact head");
+
+        let mut holder = pool.begin().await.expect("begin lock holder");
+        sqlx::query("LOCK TABLE artifact_revisions IN ROW EXCLUSIVE MODE")
+            .execute(&mut *holder)
+            .await
+            .expect("hold a writer lock");
+        let blocked = run_migrations(&pool)
+            .await
+            .expect_err("a build that cannot take its lock must fail closed")
+            .to_string();
+        assert!(
+            blocked.contains("migration 76 blocked")
+                && blocked.contains("docs/artifact-sync-deployment.md"),
+            "unexpected error: {blocked}"
+        );
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(75));
+        holder.rollback().await.expect("release writer lock");
+
+        // A prebuilt index is skipped without requesting the build lock, so
+        // the same held writer lock first blocks 0077's ALTER TABLE instead.
+        sqlx::query(
+            "CREATE INDEX idx_artifact_revisions_artifact \
+             ON public.artifact_revisions (community_id, artifact_id)",
+        )
+        .execute(&pool)
+        .await
+        .expect("prebuild the 0076 index");
+        let mut holder = pool.begin().await.expect("begin second lock holder");
+        sqlx::query("LOCK TABLE artifact_revisions IN ROW EXCLUSIVE MODE")
+            .execute(&mut *holder)
+            .await
+            .expect("hold a writer lock again");
+        let blocked = run_migrations(&pool)
+            .await
+            .expect_err("0077 cannot alter a table under a held writer lock")
+            .to_string();
+        assert!(
+            !blocked.contains("migration 76 blocked"),
+            "a prebuilt index must not be rebuilt: {blocked}"
+        );
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(76));
+        holder.rollback().await.expect("release second writer lock");
+
+        // Block the third 0078 build. The two artifact_heads builds before it
+        // commit separately, so neither holds its lock while the third waits.
+        run_migrations_through(&pool, 77)
+            .await
+            .expect("apply migration 77");
+        let mut holder = pool.begin().await.expect("begin third lock holder");
+        sqlx::query("LOCK TABLE channel_members IN ROW EXCLUSIVE MODE")
+            .execute(&mut *holder)
+            .await
+            .expect("hold a channel_members writer lock");
+        let blocked = run_migrations(&pool)
+            .await
+            .expect_err("a blocked 0078 build must fail closed")
+            .to_string();
+        assert!(
+            blocked.contains("migration 78 blocked"),
+            "unexpected error: {blocked}"
+        );
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(77));
+        let committed: bool =
+            sqlx::query_scalar("SELECT to_regclass('public.artifact_heads_modified') IS NOT NULL")
+                .fetch_one(&pool)
+                .await
+                .expect("read earlier 0078 build");
+        assert!(
+            committed,
+            "an earlier build must commit before the next one"
+        );
+        holder.rollback().await.expect("release third writer lock");
+
+        run_migrations(&pool)
+            .await
+            .expect("populated small database auto-migrates");
+        assert_boots_through_every_migration(&pool).await;
+        // 0097 relaxed channel_id and 0098-0100 restore NOT NULL; the channel
+        // head and revision written before both must survive unchanged.
+        let head: (uuid::Uuid, Vec<u8>) = sqlx::query_as(
+            "SELECT channel_id, event_id FROM artifact_heads \
+             WHERE community_id = $1 AND artifact_id = $2",
+        )
+        .bind(community_id)
+        .bind(artifact_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read surviving artifact head");
+        assert_eq!(head, (channel_id, vec![1_u8; 32]));
+        let revisions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM artifact_revisions \
+             WHERE community_id = $1 AND event_id = $2 AND artifact_id = $3",
+        )
+        .bind(community_id)
+        .bind(vec![1_u8; 32])
+        .bind(artifact_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read surviving artifact revision");
+        assert_eq!(revisions, 1, "0097-0100 keep channel artifact revisions");
+        assert_eq!(
+            valid_indexes(
+                &pool,
+                &[
+                    "idx_artifact_revisions_artifact",
+                    "artifact_heads_modified",
+                    "artifact_heads_channel",
+                    "channel_members_sync",
+                    "artifact_revisions_moves",
+                ]
+            )
+            .await,
+            5
+        );
+    }
+
+    /// 0099 validates the channel check while channel artifact writes
+    /// continue: an open writer on `artifact_heads` must not block it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn artifact_unexpand_validates_while_channel_heads_are_written() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 98)
+            .await
+            .expect("apply migrations 1-98");
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("unexpand-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+
+        let mut writer = pool.begin().await.expect("begin channel head writer");
+        sqlx::query(
+            "INSERT INTO artifact_heads \
+             (community_id, artifact_id, event_id, channel_id, artifact_type) \
+             VALUES ($1, $2, $3, $4, 'doc')",
+        )
+        .bind(community_id)
+        .bind(uuid::Uuid::new_v4())
+        .bind(vec![2_u8; 32])
+        .bind(uuid::Uuid::new_v4())
+        .execute(&mut *writer)
+        .await
+        .expect("write a channel head");
+        run_migrations_through(&pool, 99)
+            .await
+            .expect("0099 validates beside an open channel head writer");
+        writer.commit().await.expect("commit channel head");
+
+        run_migrations(&pool)
+            .await
+            .expect("apply the remaining migrations");
+        assert_boots_through_every_migration(&pool).await;
+        let heads: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM artifact_heads WHERE community_id = $1")
+                .bind(community_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count channel heads");
+        assert_eq!(heads, 1);
+    }
+
+    /// 0098 refuses a database whose artifact head key is the scoped key from
+    /// the removed operator contract, before any cleanup runs.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn artifact_unexpand_refuses_scoped_head_key() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 97)
+            .await
+            .expect("apply migrations 1-97");
+        sqlx::query(
+            "ALTER TABLE artifact_heads DROP CONSTRAINT artifact_heads_pkey, \
+             ADD CONSTRAINT artifact_heads_pkey PRIMARY KEY USING INDEX artifact_heads_scoped_identity",
+        )
+        .execute(&pool)
+        .await
+        .expect("attach the scoped key as the contract script did");
+
+        let refused = run_migrations(&pool)
+            .await
+            .expect_err("0098 must refuse the scoped key")
+            .to_string();
+        assert!(
+            refused.contains("artifact_heads primary key is not (community_id, artifact_id)"),
+            "unexpected error: {refused}"
+        );
+        assert_eq!(applied_versions(&pool).await.last().copied(), Some(97));
+        let scope_columns: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM information_schema.columns \
+             WHERE table_schema = 'public' AND table_name = 'artifact_heads' \
+               AND column_name = 'scope'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read artifact_heads columns");
+        assert_eq!(scope_columns, 1, "cleanup must not run");
+    }
+
+    /// Migration 0081 refuses a populated `nip_fi_profile_heads`. A relay that
+    /// has published NIP-FI verified profiles must still boot through every
+    /// migration.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn populated_verified_profiles_auto_migrate_through_every_migration() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(80, &pool)
+            .await
+            .expect("apply migrations 1-80");
+        sqlx::query(
+            "INSERT INTO nip_fi_profile_heads (community_id, pubkey, issuer, issued_at, event) \
+             VALUES ($1, $2, $3, 1, $4)",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind("a".repeat(64))
+        .bind("b".repeat(64))
+        .bind(serde_json::json!({"tags": [["display_name", "Wes Johnson"]]}))
+        .execute(&pool)
+        .await
+        .expect("insert verified profile head");
+
+        run_migrations(&pool)
+            .await
+            .expect("database with verified profiles auto-migrates");
+        assert_boots_through_every_migration(&pool).await;
+        assert_eq!(
+            valid_indexes(&pool, &["idx_nip_fi_profile_heads_names"]).await,
+            1
+        );
+    }
+
+    async fn assert_boots_through_every_migration(pool: &PgPool) {
+        let embedded: Vec<i64> = MIGRATOR.iter().map(|migration| migration.version).collect();
+        assert_eq!(
+            applied_versions(pool).await,
+            embedded,
+            "a populated database must boot through every embedded migration"
+        );
+    }
+
+    async fn valid_indexes(pool: &PgPool, names: &[&str]) -> i64 {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid \
+             WHERE c.relname = ANY($1) AND i.indisvalid AND i.indisready AND i.indislive",
+        )
+        .bind(names)
+        .fetch_one(pool)
+        .await
+        .expect("read index flags")
+    }
+
+    /// A migration that refuses a populated table crash-loops every
+    /// auto-migrating relay with data. Only the frozen ones may, and each must
+    /// have an inline build the startup runner applies first.
+    #[test]
+    fn frozen_prebuild_guards_have_inline_builds() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+        let mut guarded: Vec<i64> = std::fs::read_dir(&dir)
+            .expect("read migrations dir")
+            .filter_map(|entry| {
+                let path = entry.expect("read migration entry").path();
+                let name = path.file_name()?.to_str()?.to_owned();
+                let version: i64 = name.split('_').next()?.parse().ok()?;
+                let sql = std::fs::read_to_string(&path).expect("read migration");
+                sql.contains("RAISE EXCEPTION 'prebuild ")
+                    .then_some(version)
+            })
+            .collect();
+        guarded.sort_unstable();
+        let inline: Vec<i64> = INLINE_INDEX_BUILDS.iter().map(|(v, _, _)| *v).collect();
+        assert_eq!(
+            guarded, inline,
+            "a migration must build its own index instead of refusing a populated table \
+             (docs/database.md Rule 6); only frozen guards listed in INLINE_INDEX_BUILDS may remain"
+        );
+        assert_eq!(inline, [76, 78, 81], "do not add new prebuild guards");
     }
 
     #[tokio::test]
@@ -2602,6 +4019,7 @@ mod postgres_tests {
             .execute(&pool)
             .await
             .expect("repair ambiguous row");
+        crate::test_support::prebuild_media_edit_index(&pool).await;
         run_migrations(&pool)
             .await
             .expect("retry succeeds after operator repair");
@@ -2681,6 +4099,7 @@ mod postgres_tests {
             vec![(1, Some(true)), (30_179, Some(true)), (30_350, None)]
         );
 
+        crate::test_support::prebuild_media_edit_index(&pool).await;
         run_migrations(&pool)
             .await
             .expect("apply remaining migrations to populated database");
@@ -2769,164 +4188,117 @@ mod postgres_tests {
             search_expression.contains("ELSE NULL::tsvector"),
             "fresh installs must default non-allowlisted kinds to NULL: {search_expression}"
         );
+    }
 
-        let active_a = uuid::Uuid::new_v4();
-        let active_b = uuid::Uuid::new_v4();
-        let to_fence = uuid::Uuid::new_v4();
-        for (community, label) in [
-            (active_a, "active-a"),
-            (active_b, "active-b"),
-            (to_fence, "to-fence"),
-        ] {
-            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
-                .bind(community)
-                .bind(format!("late-fence-{label}-{}.example", community.simple()))
-                .execute(&pool)
-                .await
-                .expect("insert late-table test community");
-        }
-        sqlx::query(
-            "CREATE TABLE late_created_scoped (\
-                 community_id UUID NOT NULL, id BIGINT PRIMARY KEY, value TEXT NOT NULL\
-             )",
-        )
-        .execute(&pool)
-        .await
-        .expect("create late scoped table");
-        sqlx::query("SELECT attach_community_write_fence('late_created_scoped'::regclass)")
-            .execute(&pool)
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migrated_catalog_retires_universal_fences_but_keeps_deletion_guards() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        let retirement = MIGRATOR
+            .iter()
+            .find(|m| m.description == "retire community write fence")
+            .expect("fence retirement migration is embedded")
+            .version;
+        MIGRATOR
+            .run_to(retirement - 1, &pool)
             .await
-            .expect("attach late create fence");
-        sqlx::query("CREATE TABLE late_altered_scoped (id BIGINT PRIMARY KEY)")
-            .execute(&pool)
+            .expect("apply pre-retirement migrations");
+        let store = crate::deletion::DeletionStore::new(pool.clone());
+        store
+            .validate_serving_catalog()
             .await
-            .expect("create table before late alter");
-        sqlx::query("ALTER TABLE late_altered_scoped ADD COLUMN community_id UUID NOT NULL")
-            .execute(&pool)
+            .expect("new runtime must accept pre-retirement catalog");
+        store
+            .validate_catalog()
             .await
-            .expect("add late community id");
-        sqlx::query("SELECT attach_community_write_fence('late_altered_scoped'::regclass)")
-            .execute(&pool)
-            .await
-            .expect("attach late alter fence");
-        let attached: Vec<String> = sqlx::query_scalar(
-            "SELECT c.relname FROM pg_trigger trigger \
-             JOIN pg_class c ON c.oid = trigger.tgrelid \
-             JOIN pg_proc procedure ON procedure.oid = trigger.tgfoid \
-             WHERE c.relname IN ('late_created_scoped', 'late_altered_scoped') \
-               AND procedure.proname = 'enforce_community_write_fence' \
-               AND NOT trigger.tgisinternal ORDER BY c.relname",
-        )
-        .fetch_all(&pool)
-        .await
-        .expect("read late trigger catalog");
-        assert_eq!(attached, vec!["late_altered_scoped", "late_created_scoped"]);
-        let malformed_fence_triggers: i64 = sqlx::query_scalar(
-            "SELECT count(*)::BIGINT FROM pg_trigger trigger \
-             JOIN pg_class c ON c.oid = trigger.tgrelid \
-             JOIN pg_proc procedure ON procedure.oid = trigger.tgfoid \
-             WHERE c.relname IN ('late_created_scoped', 'late_altered_scoped') \
-               AND procedure.proname = 'enforce_community_write_fence' \
-               AND NOT trigger.tgisinternal \
-               AND (trigger.tgenabled <> 'O' OR (trigger.tgtype & 31) <> 31)",
+            .expect("deletion must accept pre-retirement catalog");
+        run_migrations(&pool).await.expect("apply all migrations");
+        let fence_triggers: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgname LIKE 'community_write_fence_%'",
         )
         .fetch_one(&pool)
         .await
-        .expect("validate late trigger mode and operations");
-        assert_eq!(malformed_fence_triggers, 0);
-
-        sqlx::query(
-            "INSERT INTO late_created_scoped (community_id, id, value) \
-             VALUES ($1, 1, 'same'), ($2, 2, 'source-fenced'), \
-                    ($1, 3, 'destination-fenced'), ($1, 4, 'opposite-a'), \
-                    ($3, 5, 'opposite-b')",
-        )
-        .bind(active_a)
-        .bind(to_fence)
-        .bind(active_b)
-        .execute(&pool)
-        .await
-        .expect("seed late table while communities active");
-        sqlx::query("UPDATE late_created_scoped SET value = 'same-ok' WHERE id = 1")
-            .execute(&pool)
-            .await
-            .expect("same-tenant active update");
-        sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 1")
-            .bind(active_b)
-            .execute(&pool)
-            .await
-            .expect("active-to-active update");
-
-        let mut fence_connection = pool.acquire().await.expect("fence connection");
-        sqlx::query("BEGIN")
-            .execute(&mut *fence_connection)
-            .await
-            .expect("begin direct fence");
-        sqlx::query(
-            "SELECT set_config('buzz.deletion_executor_community', $1, true), \
-                    set_config('buzz.deletion_fence_generation', '1', true)",
-        )
-        .bind(to_fence.to_string())
-        .execute(&mut *fence_connection)
-        .await
-        .expect("authorize direct fence");
-        sqlx::query(
-            "UPDATE communities SET deletion_state = 'fenced', \
-                    deletion_fence_generation = 1, archived_at = now() WHERE id = $1",
-        )
-        .bind(to_fence)
-        .execute(&mut *fence_connection)
-        .await
-        .expect("fence test destination");
-        sqlx::query("COMMIT")
-            .execute(&mut *fence_connection)
-            .await
-            .expect("commit direct fence");
-
-        let active_to_fenced =
-            sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 3")
-                .bind(to_fence)
-                .execute(&pool)
+        .expect("count retired triggers");
+        assert_eq!(fence_triggers, 0);
+        let fence_functions: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pg_proc WHERE proname = ANY($1)")
+                .bind(
+                    &[
+                        "attach_community_write_fence",
+                        "enforce_community_write_fence",
+                        "assert_community_write_allowed",
+                        "community_write_allowed",
+                        "community_write_fence_excluded_table",
+                    ][..],
+                )
+                .fetch_one(&pool)
                 .await
-                .expect_err("active to fenced destination must fail");
-        assert!(active_to_fenced
-            .to_string()
-            .contains("community write fenced"));
-        let fenced_to_active =
-            sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 2")
-                .bind(active_a)
-                .execute(&pool)
-                .await
-                .expect_err("fenced source to active destination must fail");
-        assert!(fenced_to_active
-            .to_string()
-            .contains("community write fenced"));
-        let row_locations: Vec<(i64, uuid::Uuid)> = sqlx::query_as(
-            "SELECT id, community_id FROM late_created_scoped WHERE id IN (2, 3) ORDER BY id",
+                .expect("count retired functions");
+        assert_eq!(fence_functions, 0);
+        let tombstone: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pg_trigger WHERE tgname = 'communities_deletion_tombstone')",
         )
-        .fetch_all(&pool)
+        .fetch_one(&pool)
         .await
-        .expect("failed moves preserve row location");
-        assert_eq!(row_locations, vec![(2, to_fence), (3, active_a)]);
-
-        let move_a = sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 4")
-            .bind(active_b)
-            .execute(&pool);
-        let move_b = sqlx::query("UPDATE late_created_scoped SET community_id = $1 WHERE id = 5")
-            .bind(active_a)
-            .execute(&pool);
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            let (a, b) = tokio::join!(move_a, move_b);
-            a.expect("opposite active move A");
-            b.expect("opposite active move B");
-        })
-        .await
-        .expect("opposite cross-tenant updates must not deadlock");
-
-        sqlx::query("DROP TABLE late_created_scoped, late_altered_scoped")
-            .execute(&pool)
+        .expect("read retired guard");
+        // 0096 retired the tombstone trigger.
+        assert!(!tombstone);
+        store
+            .validate_serving_catalog()
             .await
-            .expect("drop late-table fixtures");
+            .expect("new code must boot against migrated catalog");
+        store
+            .validate_catalog()
+            .await
+            .expect("deletion catalog must accept post-retirement catalog");
+    }
+
+    /// 0094 drops both plain SQL functions, and the relay boots on either
+    /// side of it: rolling deploys run new code before and after the drop.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_0094_drops_plain_sql_functions() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        let retirement = MIGRATOR
+            .iter()
+            .find(|m| m.description == "drop plain sql functions")
+            .expect("function retirement migration is embedded")
+            .version;
+        async fn present(pool: &PgPool) -> (bool, bool) {
+            sqlx::query_as(
+                "SELECT to_regprocedure('community_deletion_lock_key(uuid)') IS NOT NULL, \
+                 to_regprocedure('profile_name_fields(text)') IS NOT NULL",
+            )
+            .fetch_one(pool)
+            .await
+            .expect("look up plain SQL functions")
+        }
+        let store = crate::deletion::DeletionStore::new(pool.clone());
+        MIGRATOR
+            .run_to(retirement - 1, &pool)
+            .await
+            .expect("apply pre-retirement migrations");
+        assert_eq!(present(&pool).await, (true, true));
+        store
+            .validate_serving_catalog()
+            .await
+            .expect("new code must boot before the drop");
+        store
+            .validate_catalog()
+            .await
+            .expect("deletion must accept the catalog before the drop");
+        run_migrations(&pool).await.expect("apply all migrations");
+        assert_eq!(present(&pool).await, (false, false));
+        store
+            .validate_serving_catalog()
+            .await
+            .expect("new code must boot after the drop");
+        store
+            .validate_catalog()
+            .await
+            .expect("deletion must accept the catalog after the drop");
     }
 
     /// Verify migration 0044 applies cleanly against a DB that has rows in
@@ -3057,6 +4429,168 @@ mod postgres_tests {
                 err.to_string().contains("relay_admin_actions_direct_shape"),
                 "{err}"
             );
+        }
+    }
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_0060_refuses_active_legacy_leases_without_mutation() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 59)
+            .await
+            .expect("legacy schema");
+        let community = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities(id,host) VALUES($1,'push-cutover.example')")
+            .bind(community)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO push_leases(community_id,author,installation_id,source_event_id,source_created_at,generation,active,app_profile,endpoint_hash,endpoint_grant,max_class,subscriptions,expires_at) VALUES($1,$2,'legacy',$3,1,1,true,'buzz-ios-dogfood',$4,'opaque','default','[]',2000000000)")
+            .bind(community).bind(vec![1_u8;32]).bind(vec![2_u8;32]).bind(vec![3_u8;32])
+            .execute(&pool).await.unwrap();
+        let error = run_migrations(&pool)
+            .await
+            .expect_err("active legacy lease blocks cutover");
+        assert!(
+            error.to_string().contains("no active legacy push leases"),
+            "{error}"
+        );
+        let preserved: (bool, String) =
+            sqlx::query_as("SELECT active,app_profile FROM push_leases WHERE community_id=$1")
+                .bind(community)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(preserved, (true, "buzz-ios-dogfood".to_owned()));
+        sqlx::query("UPDATE push_leases SET active=false,app_profile=NULL,endpoint_hash=NULL,endpoint_grant=NULL,max_class=NULL,subscriptions=NULL WHERE community_id=$1")
+            .bind(community).execute(&pool).await.unwrap();
+        run_migrations(&pool)
+            .await
+            .expect("inactive legacy lease permits cutover");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM push_leases WHERE community_id=$1 AND NOT active",
+        )
+        .bind(community)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+        assert!(sqlx::query("SELECT app_profile FROM push_leases")
+            .execute(&pool)
+            .await
+            .is_err());
+    }
+    /// Small populated upgrades build inline; contention stays bounded and a
+    /// verified prebuild avoids requesting the writer-conflicting index lock.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn media_edit_index_upgrade_builds_inline_or_verifies_prebuild() {
+        let pool = connect_test_pool().await;
+        for prebuilt in [false, true] {
+            reset_public_schema(&pool).await;
+            run_migrations_through(&pool, 85).await.unwrap();
+            let community = uuid::Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO communities(id,host) VALUES($1,'media-index-upgrade.example')",
+            )
+            .bind(community)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO events(community_id,id,pubkey,created_at,kind,tags,content,sig) VALUES($1,decode(repeat('a',64),'hex'),decode(repeat('b',64),'hex'),now(),9,'[]','media',decode(repeat('c',128),'hex'))")
+                .bind(community).execute(&pool).await.unwrap();
+            if prebuilt {
+                sqlx::query("CREATE INDEX idx_events_media_edit_target ON events(community_id,id)")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                let error = run_migrations(&pool).await.unwrap_err();
+                assert!(
+                    error.to_string().contains("invalid or wrong definition"),
+                    "{error}"
+                );
+                sqlx::query("DROP INDEX idx_events_media_edit_target")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                crate::test_support::prebuild_media_edit_index(&pool).await;
+            }
+            let mut writer = pool.begin().await.unwrap();
+            sqlx::query("LOCK TABLE public.events IN ROW EXCLUSIVE MODE")
+                .execute(&mut *writer)
+                .await
+                .unwrap();
+            if prebuilt {
+                // Stop at 0088: later trigger retirements take ACCESS
+                // EXCLUSIVE on events, which this held writer lock blocks.
+                run_migrations_through(&pool, 88)
+                    .await
+                    .expect("verified prebuild does not request an index-build lock");
+                writer.rollback().await.unwrap();
+                run_migrations(&pool)
+                    .await
+                    .expect("later migrations apply once the writer is gone");
+            } else {
+                let error = run_migrations(&pool).await.unwrap_err();
+                assert!(
+                    error.to_string().contains("lock timeout"),
+                    "index build must obey its lock budget: {error}"
+                );
+                let applied: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version>=86)",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert!(
+                    !applied,
+                    "failed first new migration must leave version 85 intact"
+                );
+                let old_migrator = sqlx::migrate::Migrator {
+                    migrations: std::borrow::Cow::Owned(
+                        MIGRATOR
+                            .iter()
+                            .filter(|migration| migration.version <= 85)
+                            .cloned()
+                            .collect(),
+                    ),
+                    ..sqlx::migrate::Migrator::DEFAULT
+                };
+                with_exclusive_schema_destruction_lock(&pool, |mut conn| async move {
+                    let result = old_migrator
+                        .run(&mut conn)
+                        .await
+                        .map_err(crate::DbError::from);
+                    (conn, result)
+                })
+                .await
+                .expect("old binary's migrator must still restart after the failed index build");
+                let tables: bool = sqlx::query_scalar("SELECT to_regclass('public.media_uploaders') IS NOT NULL OR to_regclass('public.media_publications') IS NOT NULL")
+                    .fetch_one(&pool).await.unwrap();
+                assert!(
+                    !tables,
+                    "media table expansion must follow the fallible index build"
+                );
+                let recovery_column: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='relay_members' AND column_name='auto_join_pending')")
+                    .fetch_one(&pool).await.unwrap();
+                assert!(recovery_column, "main's migration 84 must remain intact");
+                let policy_columns: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='community_auth_upgrades' AND column_name IN ('requested_requires_nip_fi','expected_policy_generation','expected_requires_nip_fi')")
+                    .fetch_one(&pool).await.unwrap();
+                assert_eq!(policy_columns, 3, "base migration 85 must remain intact");
+                writer.rollback().await.unwrap();
+                run_migrations(&pool).await.expect(
+                    "small populated database builds its index without operator intervention",
+                );
+            }
+            run_migrations(&pool).await.unwrap();
+            let valid: bool = sqlx::query_scalar("SELECT indisvalid AND indisready FROM pg_index WHERE indexrelid='public.idx_events_media_edit_target'::regclass")
+                .fetch_one(&pool).await.unwrap();
+            assert!(valid, "both upgrade paths must leave a valid index");
+            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(count, 1, "upgrade preserves old relay rows");
         }
     }
 }

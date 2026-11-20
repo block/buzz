@@ -16,7 +16,7 @@ void presenceListTests(
     );
     await tester.pumpAndSettle();
     final avatar = find.byWidgetPredicate(
-      (widget) => widget is AvatarImage && widget.radius == 9,
+      (widget) => widget is AvatarImage && widget.radius == 10,
     );
     final dots = find.byWidgetPredicate(
       (widget) =>
@@ -49,5 +49,5 @@ class _ListPresenceFixture extends PresenceCacheNotifier {
   @override
   Map<String, String> build() => {};
   @override
-  void track(List<String> pubkeys) {}
+  void Function() track(List<String> pubkeys) => () {};
 }

@@ -8,6 +8,8 @@ import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
 
+import '../../../helpers/thread_ids.dart';
+
 /// Unit tests for [unreadBadgeProvider].
 ///
 /// Strategy: override [channelsProvider] with a [_StubbedChannelsNotifier] that
@@ -167,7 +169,7 @@ void main() {
     });
 
     test('activity: does not read a thread reply', () async {
-      final result = await badge(stream, event('m', rootId: 'root'), {
+      final result = await badge(stream, event('m', rootId: threadIdRoot), {
         'activity:ch-a': t30,
       });
       expect(result.generalUnreadCount, 1);
@@ -187,12 +189,31 @@ void main() {
       expect(result.highPriorityCount, 1);
     });
 
+    test(
+      'seen: quiets ordinary backlog at the cut, not newer or attention',
+      () async {
+        final quiet = await badge(stream, event('m'), {'seen:ch-a': t20});
+        expect(quiet.generalUnreadCount, 0);
+        expect(quiet.highPriorityCount, 0);
+        final newer = await badge(stream, event('m'), {'seen:ch-a': t10});
+        expect(newer.generalUnreadCount, 1);
+        final mention = await badge(stream, event('m', highPriority: true), {
+          'seen:ch-a': t30,
+        });
+        expect(mention.highPriorityCount, 1);
+        final reply = await badge(stream, event('m', rootId: threadIdRoot), {
+          'seen:ch-a': t30,
+        });
+        expect(reply.generalUnreadCount, 1);
+      },
+    );
+
     test('thread-activity: reads replies in its thread only', () async {
-      final read = await badge(stream, event('m', rootId: 'root'), {
-        'thread-activity:root': t20,
+      final read = await badge(stream, event('m', rootId: threadIdRoot), {
+        'thread-activity:$threadIdRoot': t20,
       });
       expect(read.generalUnreadCount, 0);
-      final other = await badge(stream, event('m', rootId: 'root'), {
+      final other = await badge(stream, event('m', rootId: threadIdRoot), {
         'thread-activity:other': t30,
       });
       expect(other.generalUnreadCount, 1);
@@ -354,19 +375,19 @@ void main() {
     const channelId = 'ch-a';
     final container = buildContainer(
       channels: [makeChannel(id: channelId, lastMessageAtSeconds: t30)],
-      readContexts: {'thread:root-1': t30},
+      readContexts: {'thread:$threadIdRootDash1': t30},
       observedEventsByChannel: {
         channelId: [
           _observed(
             id: 'reply-1',
             createdAt: t20,
-            rootId: 'root-1',
+            rootId: threadIdRootDash1,
             isThreadedReply: true,
           ),
           _observed(
             id: 'reply-2',
             createdAt: t20,
-            rootId: 'root-2',
+            rootId: threadIdRootDash2,
             isThreadedReply: true,
           ),
         ],
@@ -390,13 +411,13 @@ void main() {
           _observed(
             id: 'reply-1',
             createdAt: t20,
-            rootId: 'root-1',
+            rootId: threadIdRootDash1,
             isThreadedReply: true,
           ),
           _observed(
             id: 'reply-2',
             createdAt: t20,
-            rootId: 'root-1',
+            rootId: threadIdRootDash1,
             isThreadedReply: true,
           ),
         ],

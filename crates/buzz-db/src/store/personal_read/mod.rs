@@ -4,8 +4,6 @@
 //! through; the unread horizon alone uses author time. Only fixed context
 //! intents advance frontiers, never a query scan cap.
 
-mod classification;
-mod context;
 mod model;
 mod participation;
 mod projection;

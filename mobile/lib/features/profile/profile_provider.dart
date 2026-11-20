@@ -75,16 +75,36 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
   Future<void> _patchQueue = Future.value();
 
   @override
-  Future<UserProfile?> build() {
+  Future<UserProfile?> build() async {
     final config = ref.watch(relayConfigProvider);
     final pubkey = ref.watch(myPubkeyProvider);
-    ref.watch(relaySessionProvider);
     final context = _ProfileWriteContext(
       config: config,
       pubkey: pubkey,
       session: ref.read(relaySessionProvider.notifier),
     );
     _hasHydrated = false;
+    if (pubkey != null) {
+      final connected = Completer<void>();
+      ref.listen(relaySessionProvider.select((value) => value.status), (
+        previous,
+        next,
+      ) {
+        if (next != SessionStatus.connected) return;
+        if (!connected.isCompleted) {
+          connected.complete();
+        } else if (previous != SessionStatus.connected) {
+          // Revalidate once per authenticated connection. Intermediate socket
+          // states must not enqueue duplicate profile reads or erase the avatar.
+          ref.invalidateSelf();
+        }
+      });
+      if (ref.read(relaySessionProvider).status == SessionStatus.connected) {
+        connected.complete();
+      }
+      await connected.future;
+      _requireCurrentWriteContext(context);
+    }
     return _fetch(context);
   }
 
@@ -133,6 +153,12 @@ class ProfileNotifier extends AsyncNotifier<UserProfile?> {
 
   /// Updates the current user's display name while preserving the other
   /// metadata fields in their latest kind:0 profile event.
+  Future<void> updateSetup(String displayName, String? avatarUrl) =>
+      _publishProfilePatch({
+        'display_name': displayName.trim(),
+        'picture': ?avatarUrl,
+      });
+
   Future<void> updateDisplayName(String displayName) =>
       _publishProfilePatch({'display_name': displayName.trim()});
 
@@ -296,7 +322,7 @@ final profileProvider = AsyncNotifierProvider<ProfileNotifier, UserProfile?>(
 ///
 /// Sends a heartbeat every 60s while the app is active by publishing a
 /// kind:20001 presence event over the relay WebSocket. Watches
-/// [appLifecycleProvider] to send "away" when backgrounded.
+/// [appForegroundProvider] to send "away" when backgrounded.
 class PresenceNotifier extends AsyncNotifier<String> {
   static const _heartbeatInterval = Duration(seconds: 60);
   static const _preferenceKeyPrefix = 'buzz_presence_preference_';
@@ -320,7 +346,7 @@ class PresenceNotifier extends AsyncNotifier<String> {
       _manualPresence = stored == 'away' || stored == 'offline' ? stored : null;
     }
 
-    final lifecycle = ref.watch(appLifecycleProvider);
+    final foreground = ref.watch(appForegroundProvider);
 
     ref.onDispose(() {
       _heartbeatTimer?.cancel();
@@ -334,19 +360,13 @@ class PresenceNotifier extends AsyncNotifier<String> {
       return _setPresence(manualPresence);
     }
 
-    if (lifecycle == AppLifecycleState.resumed) {
+    if (foreground) {
       _startHeartbeat();
       return _setPresence('online');
-    } else if (lifecycle == AppLifecycleState.paused ||
-        lifecycle == AppLifecycleState.detached) {
-      _heartbeatTimer?.cancel();
-      _heartbeatTimer = null;
-      return _setPresence('away');
     }
-
-    // Default: we don't know. Reflect the most recent state we set, or
-    // 'offline' if never set.
-    return Future.value('offline');
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    return _setPresence('away');
   }
 
   void _startHeartbeat() {
@@ -371,8 +391,7 @@ class PresenceNotifier extends AsyncNotifier<String> {
           .setString('$_preferenceKeyPrefix$pubkey', _manualPresence ?? 'auto');
     }
 
-    if (_manualPresence == null &&
-        ref.read(appLifecycleProvider) == AppLifecycleState.resumed) {
+    if (_manualPresence == null && ref.read(appForegroundProvider)) {
       _startHeartbeat();
     } else {
       _heartbeatTimer?.cancel();

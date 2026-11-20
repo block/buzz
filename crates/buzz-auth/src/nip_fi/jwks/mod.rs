@@ -38,6 +38,11 @@ use tokio::sync::Mutex;
 use tracing::warn;
 use url::Url;
 
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_DNS_ANSWERS: Vec<std::net::IpAddr>;
+}
+
 /// Maximum HTTP response body for a JWKS endpoint. Streaming stops at this
 /// limit before any deserialization, preventing OOM from a malicious server.
 pub const MAX_JWKS_RESPONSE_BYTES: usize = 512 * 1024; // 512 KiB
@@ -52,11 +57,10 @@ pub const MAX_JWKS_TIMING_SECONDS: u64 = 365 * 24 * 3600; // 1 year
 /// so a stalled resolver cannot keep `fetch_jwks` pending indefinitely.
 pub const JWKS_REQUEST_TIMEOUT_SECS: u64 = 10;
 
-/// Validate that a JWKS URI is safe to fetch: HTTPS scheme, no credentials,
-/// no fragment, and the host (if a bare IP) is not private/reserved.
-/// Hostname targets are resolved and checked at every fetch in `fetch_jwks`
-/// to prevent DNS rebinding — this check catches the most common
-/// misconfiguration at construction time.
+/// Validate a public HTTPS JWKS URI: no credentials or fragment, and the host
+/// (if a bare IP) is not private/reserved. Hostname targets are resolved and
+/// checked at every raw fetch to prevent DNS rebinding — this check catches the
+/// most common misconfiguration at construction time.
 pub fn validate_jwks_uri(uri: &str) -> Result<(), JwksFetchError> {
     let parsed = Url::parse(uri).map_err(|_| JwksFetchError::InvalidUri)?;
     if parsed.scheme() != "https" {
@@ -87,11 +91,13 @@ pub fn validate_jwks_uri(uri: &str) -> Result<(), JwksFetchError> {
 
 /// The authenticated key-source contract owned by one [`IssuerPolicy`].
 ///
-/// Encodes the three deployment-configured fields whose change alters which
+/// Encodes the deployment-configured fields whose change alters which
 /// keys the runtime trusts and how long it trusts them:
 ///
 /// - `jwks_uri` — selects the authenticated key source; a different endpoint
 ///   may serve different keys even for the same issuer.
+/// - `transport` — selects the public HTTPS boundary or the explicitly
+///   configured mesh boundary.
 /// - `refresh_interval_seconds` — defines bounded refresh behavior; a longer
 ///   interval allows stale keys to persist longer.
 /// - `key_snapshot_hard_deadline_seconds` — defines the source's accepted
@@ -105,8 +111,12 @@ pub fn validate_jwks_uri(uri: &str) -> Result<(), JwksFetchError> {
 /// copies of these fields would let them drift silently; startup validation
 /// detects any mismatch that a compatibility path temporarily introduces.
 ///
-/// All three fields are validated at construction — an invalid value is caught
-/// at configuration time, not at first token verification.
+/// All fields are validated at construction — an invalid value is caught at
+/// configuration time, not at first token verification. The mesh constructor
+/// is an operator assertion: this process cannot prove that mutual TLS peer
+/// authentication and integrity protection are enabled. See the
+/// [NIP-FI JWKS snapshot contract](../../../../../docs/nips/NIP-FI.md#jwks-snapshot)
+/// for the exact mesh address allow-list and operator requirements.
 ///
 /// ## Why these fields are contract, not mutable state
 ///
@@ -114,15 +124,18 @@ pub fn validate_jwks_uri(uri: &str) -> Result<(), JwksFetchError> {
 /// `assertion_policy_id` covers "authenticated key/status-source contracts"
 /// and "time rules". Key additions/removals (JWKS rotation) and per-snapshot
 /// deadlines remain *revalidation dependencies* — they change per-token state
-/// without changing the contract. These three fields define what the contract
-/// *is*; JWKS content is what the contract currently *says*.
+/// without changing the contract. The endpoint, transport, and timing fields
+/// define what the contract *is*; JWKS content is what the contract currently
+/// *says*.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JwksSourceContract {
     /// Validated JWKS endpoint URI normalized to its canonical `Url` serialization.
-    /// `Url::to_string()` lowercases the scheme and host, removes the default
-    /// HTTPS port, and resolves dot-segments — so equivalent URI spellings hash
+    /// `Url::to_string()` lowercases the scheme and host, removes the scheme's
+    /// default port, and resolves dot-segments — so equivalent URI spellings hash
     /// identically. Validated at construction; only stored after parse succeeds.
     jwks_uri: String,
+    /// The network trust boundary for this issuer's configured endpoint.
+    transport: JwksTransport,
     /// Positive, ≤ [`MAX_JWKS_TIMING_SECONDS`], strictly less than
     /// `key_snapshot_hard_deadline_seconds`.
     refresh_interval_seconds: u64,
@@ -131,8 +144,18 @@ pub struct JwksSourceContract {
     key_snapshot_hard_deadline_seconds: u64,
 }
 
+/// The transport modes accepted by a sealed JWKS source contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JwksTransport {
+    /// Public HTTPS with the strict shared public-address SSRF policy.
+    PublicHttps,
+    /// HTTP selected by explicit mesh mode; transport authentication is an
+    /// operator responsibility.
+    Mesh,
+}
+
 impl JwksSourceContract {
-    /// Validate and seal the three JWKS source fields.
+    /// Validate and seal a public HTTPS JWKS source.
     ///
     /// Rejects:
     /// - `jwks_uri` that fails [`validate_jwks_uri`]
@@ -146,6 +169,48 @@ impl JwksSourceContract {
         refresh_interval_seconds: u64,
         key_snapshot_hard_deadline_seconds: u64,
     ) -> Option<Self> {
+        Self::new_with_transport(
+            jwks_uri,
+            refresh_interval_seconds,
+            key_snapshot_hard_deadline_seconds,
+            JwksTransport::PublicHttps,
+        )
+    }
+
+    /// Validate and seal a mesh HTTP JWKS source.
+    ///
+    /// The URI must use HTTP and a DNS hostname rather than an IP literal. It
+    /// must have no userinfo (including an empty userinfo marker), query,
+    /// fragment, or backslash. Every DNS answer is checked before the first
+    /// allowed address is pinned; empty or mixed answers fail closed. See the
+    /// [NIP-FI JWKS snapshot contract](../../../../../docs/nips/NIP-FI.md#jwks-snapshot)
+    /// for the exact address allow-list and operator requirements.
+    ///
+    /// Selecting this mode is an operator assertion that the deployment
+    /// authenticates and protects the HTTP transport. The relay cannot verify
+    /// that assertion. Operators must enforce mutual TLS peer authentication
+    /// and integrity protection, authorize the endpoint, and restrict egress;
+    /// unauthenticated HTTP permits JWKS key substitution and issuer
+    /// impersonation.
+    pub fn new_mesh(
+        jwks_uri: String,
+        refresh_interval_seconds: u64,
+        key_snapshot_hard_deadline_seconds: u64,
+    ) -> Option<Self> {
+        Self::new_with_transport(
+            jwks_uri,
+            refresh_interval_seconds,
+            key_snapshot_hard_deadline_seconds,
+            JwksTransport::Mesh,
+        )
+    }
+
+    fn new_with_transport(
+        jwks_uri: String,
+        refresh_interval_seconds: u64,
+        key_snapshot_hard_deadline_seconds: u64,
+        transport: JwksTransport,
+    ) -> Option<Self> {
         if refresh_interval_seconds == 0
             || key_snapshot_hard_deadline_seconds == 0
             || key_snapshot_hard_deadline_seconds <= refresh_interval_seconds
@@ -154,24 +219,27 @@ impl JwksSourceContract {
         {
             return None;
         }
-        // Parse once, reject via validate_jwks_uri's rule-set, then store the
+        if transport == JwksTransport::Mesh && validate_mesh_jwks_uri(&jwks_uri).is_err() {
+            return None;
+        }
+        // Validate with the selected transport's rule-set, then store the
         // canonical serialization produced by `Url::to_string()`. The `url`
-        // crate lowercases scheme and host, removes the default HTTPS port,
+        // crate lowercases scheme and host, removes the default scheme port,
         // and resolves dot-segments — guaranteeing that equivalent URI spellings
-        // (e.g. uppercase host, explicit `:443`, `.///../`) produce an identical
-        // stored string and therefore an identical `AssertionPolicyId` hash.
+        // (e.g. uppercase host, explicit default port, dot segments) produce an
+        // identical stored string and therefore an identical `AssertionPolicyId`.
         let canonical_uri = match Url::parse(&jwks_uri) {
             Ok(parsed) => parsed.to_string(),
             Err(_) => return None,
         };
-        // Re-validate on the canonical form so that any normalisation that
-        // would introduce a forbidden form (e.g. port stripping that leaves
-        // a bare-IP host) is caught here rather than silently stored.
-        if validate_jwks_uri(&canonical_uri).is_err() {
+        // Re-validate on the canonical form so normalization cannot introduce
+        // a forbidden form before it is sealed into the contract.
+        if validate_jwks_uri_for_transport(&canonical_uri, transport).is_err() {
             return None;
         }
         Some(Self {
             jwks_uri: canonical_uri,
+            transport,
             refresh_interval_seconds,
             key_snapshot_hard_deadline_seconds,
         })
@@ -180,6 +248,11 @@ impl JwksSourceContract {
     /// The validated JWKS endpoint URI.
     pub fn jwks_uri(&self) -> &str {
         &self.jwks_uri
+    }
+
+    /// Whether this issuer explicitly selects mesh HTTP transport.
+    pub const fn uses_mesh_transport(&self) -> bool {
+        matches!(self.transport, JwksTransport::Mesh)
     }
 
     /// Seconds between successive JWKS refreshes.
@@ -193,29 +266,93 @@ impl JwksSourceContract {
     }
 }
 
-/// Resolve `host:port` to IP addresses and reject if any are private/reserved.
+fn validate_jwks_uri_for_transport(
+    uri: &str,
+    transport: JwksTransport,
+) -> Result<(), JwksFetchError> {
+    match transport {
+        JwksTransport::PublicHttps => validate_jwks_uri(uri),
+        JwksTransport::Mesh => validate_mesh_jwks_uri(uri),
+    }
+}
+
+fn validate_mesh_jwks_uri(uri: &str) -> Result<(), JwksFetchError> {
+    let parsed = Url::parse(uri).map_err(|_| JwksFetchError::InvalidUri)?;
+    if parsed.scheme() != "http"
+        || uri.trim() != uri
+        || uri.chars().any(char::is_control)
+        || uri.contains('\\')
+        || authority_contains_userinfo(uri)
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(JwksFetchError::InvalidUri);
+    }
+    match parsed.host() {
+        Some(url::Host::Domain(domain)) if !domain.is_empty() => {
+            // The URL parser canonicalizes alternate numeric IPv4 spellings
+            // into Host::Ipv4. Keep this parse check as a second guard for any
+            // domain representation that is also accepted by IpAddr.
+            if domain.parse::<std::net::IpAddr>().is_ok() {
+                return Err(JwksFetchError::InvalidUri);
+            }
+        }
+        // Mesh names are DNS names, never IPv4/IPv6 literals.
+        _ => return Err(JwksFetchError::InvalidUri),
+    }
+    Ok(())
+}
+
+fn authority_contains_userinfo(uri: &str) -> bool {
+    let Some((scheme, after_scheme)) = uri.split_once("://") else {
+        return true;
+    };
+    if !scheme.eq_ignore_ascii_case("http") {
+        return true;
+    }
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    authority.is_empty() || authority.contains('@')
+}
+
+/// Resolve `host:port` and enforce the selected transport's address policy.
 ///
-/// Returns the first safe address for DNS pinning. Blocks on the OS resolver
-/// via `spawn_blocking` to avoid blocking the async runtime.
+/// Returns the first permitted address for DNS pinning. Blocks on the OS
+/// resolver via `spawn_blocking` to avoid blocking the async runtime.
 ///
 /// Uses the `(host, port)` tuple form of `ToSocketAddrs` — not
-/// `format!("{host}:{port}")` — so IPv6 literal hosts (returned without
-/// brackets by `Url::host_str()`) are handled correctly without socket-address
-/// ambiguity.
+/// `format!("{host}:{port}")` — so bare IPv6 literal hosts are handled
+/// correctly without socket-address ambiguity.
 ///
-/// Rejecting *any* resolved address (not just the first) closes split-horizon
-/// DNS attacks: if an attacker can cause one DNS record to resolve to a private
-/// address, the entire request is blocked even when other records are public.
-pub(crate) async fn resolve_and_check_ssrf(
+/// Every resolved address must satisfy the selected transport's policy; one
+/// disallowed answer blocks the entire request, even when other answers pass.
+async fn resolve_for_transport(
     host: &str,
     port: u16,
+    transport: JwksTransport,
 ) -> Result<std::net::IpAddr, JwksFetchError> {
+    let addrs = resolve_host_addresses(host, port).await?;
+    validate_resolved_addresses(&addrs, transport)
+}
+
+async fn resolve_host_addresses(
+    host: &str,
+    port: u16,
+) -> Result<Vec<std::net::IpAddr>, JwksFetchError> {
     // Fast path: if the host is already a parsed IP literal, skip the resolver.
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if is_not_global_unicast(&ip) {
-            return Err(JwksFetchError::InvalidUri);
-        }
-        return Ok(ip);
+        return Ok(vec![ip]);
+    }
+
+    // Unit tests inject DNS answers through the same resolver path used by the
+    // HTTP fetcher, without changing the production resolver or using DNS.
+    #[cfg(test)]
+    if let Ok(addrs) = TEST_DNS_ANSWERS.try_with(|answers| answers.clone()) {
+        return Ok(addrs);
     }
 
     // Hostname path: use the tuple form to avoid IPv6-bracket ambiguity.
@@ -230,15 +367,42 @@ pub(crate) async fn resolve_and_check_ssrf(
     .map_err(|_| JwksFetchError::NetworkError)?
     .map_err(|_| JwksFetchError::NetworkError)?;
 
+    Ok(addrs)
+}
+
+fn validate_resolved_addresses(
+    addrs: &[std::net::IpAddr],
+    transport: JwksTransport,
+) -> Result<std::net::IpAddr, JwksFetchError> {
     if addrs.is_empty() {
         return Err(JwksFetchError::NetworkError);
     }
-    for ip in &addrs {
-        if is_not_global_unicast(ip) {
-            return Err(JwksFetchError::InvalidUri);
-        }
+    let any_disallowed = match transport {
+        JwksTransport::PublicHttps => addrs.iter().any(is_not_global_unicast),
+        JwksTransport::Mesh => addrs.iter().any(|ip| !is_mesh_address_allowed(ip)),
+    };
+    if any_disallowed {
+        return Err(JwksFetchError::InvalidUri);
     }
     Ok(addrs[0])
+}
+
+fn is_mesh_address_allowed(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(addr) => {
+            let bits = u32::from(*addr);
+            addr.is_loopback()
+                || (bits & 0xff00_0000) == 0x0a00_0000 // 10.0.0.0/8
+                || (bits & 0xfff0_0000) == 0xac10_0000 // 172.16.0.0/12
+                || (bits & 0xffff_0000) == 0xc0a8_0000 // 192.168.0.0/16
+                || (bits & 0xffc0_0000) == 0x6440_0000 // 100.64.0.0/10
+                || ((bits & 0xf000_0000) == 0xf000_0000
+                    && *addr != std::net::Ipv4Addr::BROADCAST)
+        }
+        std::net::IpAddr::V6(addr) => {
+            addr.is_loopback() || (addr.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -328,8 +492,8 @@ pub struct IssuerJwksConfig {
 /// URLs, or raw response content appear in these variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum JwksFetchError {
-    /// Non-HTTPS scheme, embedded credentials, fragment, bare
-    /// private/reserved IP host, or DNS resolved to a private/reserved address.
+    /// The URI or a resolved address violated the selected transport's safety
+    /// rules.
     #[error("JWKS URI failed safety validation")]
     InvalidUri,
     /// Response body exceeded [`MAX_JWKS_RESPONSE_BYTES`].
@@ -349,11 +513,12 @@ pub enum JwksFetchError {
 /// Sealed injection seam for JWKS HTTP fetching. Only types inside `buzz_auth`
 /// may implement it — external types cannot name the private supertrait.
 ///
-/// Implementations MUST:
-/// - validate the URI (scheme, credentials, fragment, bare private-IP host)
-///   before any I/O;
-/// - resolve hostname targets and reject any private/reserved resolved address;
+/// Raw `fetch_jwks` implementations MUST:
+/// - enforce the public HTTPS URI and public-address rules before any I/O;
+/// - resolve hostname targets and reject any address denied by the shared
+///   public-address predicate;
 /// - deny redirects (3xx responses rejected as `NetworkError`);
+/// - disable system proxies;
 /// - enforce a finite per-fetch deadline covering resolution, connect, headers,
 ///   and body streaming — the entire operation must be bounded;
 /// - enforce [`MAX_JWKS_RESPONSE_BYTES`] via incremental streaming;
@@ -364,16 +529,39 @@ pub trait JwksFetcher: super::verifier::sealed::Sealed + Send + Sync + 'static {
         &'a self,
         uri: &'a str,
     ) -> impl std::future::Future<Output = Result<String, JwksFetchError>> + Send + 'a;
+
+    /// Fetch through the sealed JWKS source contract.
+    ///
+    /// The default delegates to raw fetch and therefore uses its public HTTPS
+    /// policy; it does not infer mesh permission from a URI. The production
+    /// HTTP fetcher overrides this method to honor the transport sealed into
+    /// the contract. Raw calls always use public HTTPS. An override MUST select
+    /// URI and address validation only from that sealed mode, resolve once and
+    /// pin one checked address, deny redirects and proxies, bound the complete
+    /// fetch with a finite deadline, stream at most
+    /// [`MAX_JWKS_RESPONSE_BYTES`], reject non-2xx responses, and never fall
+    /// back to another transport or network path. The exact mesh address
+    /// allow-list is defined in the
+    /// [NIP-FI JWKS snapshot contract](../../../../../docs/nips/NIP-FI.md#jwks-snapshot).
+    fn fetch_for_contract<'a>(
+        &'a self,
+        contract: &'a JwksSourceContract,
+    ) -> impl std::future::Future<Output = Result<String, JwksFetchError>> + Send + 'a {
+        self.fetch_jwks(contract.jwks_uri())
+    }
 }
 
-/// Production [`JwksFetcher`] backed by `reqwest`. Each call to `fetch_jwks`
-/// builds a dedicated pinned client — no shared connection state between fetches.
+/// Production [`JwksFetcher`] backed by `reqwest`. Each raw or contract-aware
+/// fetch builds a dedicated pinned client, with no shared connection state.
 ///
 /// Per-fetch boundary enforcement:
-/// - hostname DNS is resolved and every address checked against
-///   `buzz_core::network::is_not_global_unicast` before the request is sent;
-/// - the request is pinned to the validated address to prevent DNS rebinding
-///   TOCTOU (the OS resolver is called once per fetch, not once per URL);
+/// - public HTTPS retains its strict address deny-list; explicit mesh HTTP
+///   checks addresses against the allow-list in the
+///   [NIP-FI JWKS snapshot contract](../../../../../docs/nips/NIP-FI.md#jwks-snapshot);
+/// - every DNS answer is validated, then the first permitted address is pinned
+///   to prevent DNS rebinding TOCTOU (empty or mixed answers fail closed; the
+///   OS resolver is called once per fetch);
+/// - the client disables proxies and never follows redirects;
 /// - the complete operation (resolution, connect, headers, body streaming) is
 ///   bounded by [`JWKS_REQUEST_TIMEOUT_SECS`] via `tokio::time::timeout`;
 /// - 3xx responses are rejected as `NetworkError` — redirects are never followed;
@@ -384,7 +572,8 @@ pub struct HttpJwksFetcher;
 
 impl HttpJwksFetcher {
     /// Builds a new fetcher. Security invariants are enforced per-request in
-    /// `fetch_jwks` — each call constructs a dedicated pinned client.
+    /// `fetch_jwks` and `fetch_for_contract` — each call constructs a dedicated
+    /// pinned client.
     pub fn new() -> Self {
         Self
     }
@@ -400,8 +589,26 @@ impl super::verifier::sealed::Sealed for HttpJwksFetcher {}
 
 impl JwksFetcher for HttpJwksFetcher {
     async fn fetch_jwks<'a>(&'a self, uri: &'a str) -> Result<String, JwksFetchError> {
+        self.fetch_with_transport(uri, JwksTransport::PublicHttps)
+            .await
+    }
+
+    fn fetch_for_contract<'a>(
+        &'a self,
+        contract: &'a JwksSourceContract,
+    ) -> impl std::future::Future<Output = Result<String, JwksFetchError>> + Send + 'a {
+        self.fetch_with_transport(contract.jwks_uri(), contract.transport)
+    }
+}
+
+impl HttpJwksFetcher {
+    async fn fetch_with_transport(
+        &self,
+        uri: &str,
+        transport: JwksTransport,
+    ) -> Result<String, JwksFetchError> {
         with_deadline(
-            fetch_jwks_inner(uri),
+            fetch_jwks_inner_with_transport(uri, transport),
             std::time::Duration::from_secs(JWKS_REQUEST_TIMEOUT_SECS),
         )
         .await
@@ -409,8 +616,9 @@ impl JwksFetcher for HttpJwksFetcher {
 }
 
 /// Bound `fut` with a hard `tokio::time::timeout`. Elapsed maps to
-/// `NetworkError`. Production passes `fetch_jwks_inner(uri)`; tests pass
-/// `std::future::pending()` to verify the seam deterministically.
+/// `NetworkError`. Production passes the complete fetch future. A helper test
+/// uses `pending()`; a local HTTP test also exercises this wrapper while the
+/// actual request waits for a response.
 async fn with_deadline<F>(fut: F, timeout: std::time::Duration) -> Result<String, JwksFetchError>
 where
     F: std::future::Future<Output = Result<String, JwksFetchError>>,
@@ -424,10 +632,10 @@ where
 ///
 /// The host is extracted via the typed `Url::host()` accessor, **not**
 /// `host_str()`. `host_str()` returns IPv6 literals with brackets (e.g.
-/// `[2606:4700::1]`), which breaks `IpAddr::parse`: brackets are not valid,
-/// so the fast path in `resolve_and_check_ssrf` would fail and fall through
-/// to the DNS path, which may attempt to resolve `[2606:4700::1]` as a
-/// hostname instead of an IP literal.
+/// `[2606:4700::1]`), which breaks `IpAddr::parse`: brackets are not valid, so
+/// the literal fast path in `resolve_host_addresses` would fail and fall
+/// through to the DNS path, which may attempt to resolve the bracketed value
+/// as a hostname.
 ///
 /// The extracted bare host string is also the correct input form for
 /// `reqwest::ClientBuilder::resolve(host, addr)`, whose key must match the
@@ -459,19 +667,21 @@ pub(crate) fn extract_url_host_and_port(uri: &str) -> Result<(String, u16), Jwks
     Ok((host, port))
 }
 
-/// Inner fetch logic. Called only by `HttpJwksFetcher::fetch_jwks` via `with_deadline`.
-async fn fetch_jwks_inner(uri: &str) -> Result<String, JwksFetchError> {
-    // Full URI validation first — scheme, credentials, fragment, bare
-    // private-IP host. This enforces the JwksFetcher contract for direct
-    // callers of HttpJwksFetcher regardless of whether ProductionJwksSource
-    // pre-validated the URI.
-    validate_jwks_uri(uri)?;
+/// Inner fetch logic. Called only with the mode sealed in a contract, or the
+/// strict public mode for raw `fetch_jwks` calls.
+async fn fetch_jwks_inner_with_transport(
+    uri: &str,
+    transport: JwksTransport,
+) -> Result<String, JwksFetchError> {
+    // Validate again at the I/O boundary. Raw calls always use public HTTPS;
+    // only the sealed contract method can select mesh HTTP.
+    validate_jwks_uri_for_transport(uri, transport)?;
 
     let (host, port) = extract_url_host_and_port(uri)?;
 
     // Resolve and check every IP before sending. Pins DNS to the validated
     // address to prevent rebinding TOCTOU between check and connect.
-    let safe_ip = resolve_and_check_ssrf(&host, port).await?;
+    let safe_ip = resolve_for_transport(&host, port, transport).await?;
 
     // Build a per-request client that:
     // - denies redirects (a 3xx to an internal host bypasses the URI check);
@@ -552,7 +762,7 @@ impl<F: JwksFetcher> ProductionJwksSource<F> {
     /// Returns `None` when `configs` is empty or any two configs share the
     /// same `issuer` (duplicate issuers make trust configuration ambiguous).
     ///
-    /// Contract fields (`jwks_uri`, `refresh_interval_seconds`,
+    /// Contract fields (`jwks_uri`, transport, `refresh_interval_seconds`, and
     /// `key_snapshot_hard_deadline_seconds`) are pre-validated inside the
     /// embedded [`JwksSourceContract`] — no re-validation is performed here.
     pub fn new(configs: Vec<IssuerJwksConfig>, fetcher: F) -> Option<Self> {
@@ -644,7 +854,7 @@ impl<F: JwksFetcher> ProductionJwksSource<F> {
         prev_generation: u64,
     ) -> Option<(CachedSnapshot, u64)> {
         let config = self.configs.get(issuer)?;
-        let body = match self.fetcher.fetch_jwks(config.contract.jwks_uri()).await {
+        let body = match self.fetcher.fetch_for_contract(&config.contract).await {
             Ok(b) => b,
             Err(err) => {
                 warn!(error = %err, "nip-fi jwks fetch failed; will use cached snapshot if live");
@@ -849,6 +1059,9 @@ impl JwksFetcher for ToggleJwksFetcher {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod mesh_tests;
 
 /// A scripted JWKS fetcher for integration tests outside this crate.
 ///

@@ -44,6 +44,7 @@ fn request_path(path: &str, raw_query: Option<&str>) -> String {
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn authorize_workflow_read(
     state: &Arc<AppState>,
+    slot: &crate::access::AccessSlot,
     headers: &HeaderMap,
     path: &str,
     raw_query: Option<&str>,
@@ -64,14 +65,16 @@ async fn authorize_workflow_read(
     // In NIP-FI enforce/deny-protected mode a real NIP-98 event is mandatory —
     // the X-Pubkey dev-mode fallback must never satisfy the pairing requirement.
     // [NIP-FI.md:594-607, FI-TRACE-HTTP-INGRESS]
-    let nip_fi_active = state.config.nip_fi.mode.restricts();
+    let nip_fi_active = crate::nip_fi_policy::mode(state, headers).await.restricts();
 
     // NIP-FI admission. [FI-TRACE-AUTHORITY-UNIFORM]
     let require_auth = state.config.require_auth_token || nip_fi_active;
     let admission = admit_nip_fi_http_on_state(
         state,
         headers,
+        slot,
         bridge::make_nip98_closure_for_admission(
+            slot.clone(),
             headers.clone(),
             "GET",
             url,
@@ -79,50 +82,65 @@ async fn authorize_workflow_read(
             require_auth,
             false,
         ),
-    )?;
-    let pubkey = *admission.proven_pubkey();
-    let (event_id_bytes, signed_created_at) = admission.into_extra();
-
-    bridge::enforce_http_admission(state, &tenant, &pubkey)
-        .await
-        .map_err(|e| e.into_response())?;
-    bridge::check_nip98_replay(state, &tenant, event_id_bytes)
+    )
+    .await?;
+    let mut caller = bridge::ProvenCaller::new(admission, slot, &tenant);
+    caller
+        .rate_limit_and_replay(state, &tenant)
         .await
         .map_err(|e| e.into_response())?;
 
-    let pubkey_bytes = pubkey.to_bytes().to_vec();
+    let pubkey_bytes = caller.pubkey.to_bytes().to_vec();
     let auth_tag = super::relay_members::extract_auth_tag_header(headers);
-    super::relay_members::enforce_relay_membership(
+    let membership = super::relay_members::enforce_relay_membership(
         state,
-        tenant.community(),
+        &tenant,
         &pubkey_bytes,
         auth_tag,
-        signed_created_at,
+        caller.signed_at,
+        caller.token_owner,
     )
-    .await
-    .map_err(|e| e.into_response())?;
+    .await;
+    caller
+        .admit_member(membership)
+        .map_err(|e| e.into_response())?;
 
-    let workflow = state
-        .db
-        .get_workflow(tenant.community(), workflow_id)
-        .await
-        .map_err(|error| match error {
-            buzz_db::error::DbError::NotFound(_) => {
-                api_error(StatusCode::NOT_FOUND, "workflow not found").into_response()
-            }
-            other => internal_error(&format!("get workflow for run read: {other}")).into_response(),
-        })?;
-    let channel_id = workflow.channel_id.ok_or_else(|| {
-        api_error(StatusCode::FORBIDDEN, "workflow is not channel-scoped").into_response()
-    })?;
+    // A workflow the caller cannot read answers exactly like a missing one, so
+    // the response never reveals which workflow IDs exist.
+    let not_found = || api_error(StatusCode::NOT_FOUND, "workflow not found").into_response();
+    let workflow = match state.db.get_workflow(tenant.community(), workflow_id).await {
+        Ok(workflow) => workflow,
+        Err(buzz_db::error::DbError::NotFound(_)) => return Err(not_found()),
+        Err(other) => {
+            return Err(
+                internal_error(&format!("get workflow for run read: {other}")).into_response(),
+            )
+        }
+    };
+    let channel_id = workflow.channel_id.ok_or_else(not_found)?;
     let accessible = state
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|error| {
             internal_error(&format!("workflow channel access lookup: {error}")).into_response()
         })?;
-    if !accessible.contains(&channel_id) {
-        return Err(api_error(StatusCode::FORBIDDEN, "workflow is not accessible").into_response());
+    // A workflow names its channel, so a readable named-only channel (a
+    // system channel, or a type added later) counts.
+    let readable = accessible.contains(&channel_id)
+        || state
+            .db
+            .get_readable_named_only_channels(tenant.community(), &pubkey_bytes, &[channel_id])
+            .await
+            .map_err(|error| {
+                internal_error(&format!(
+                    "workflow named-only channel access lookup: {error}"
+                ))
+                .into_response()
+            })?
+            .iter()
+            .any(|channel| channel.id == channel_id);
+    if !readable {
+        return Err(not_found());
     }
 
     Ok(tenant)
@@ -131,17 +149,20 @@ async fn authorize_workflow_read(
 /// `GET /workflows/{workflow_id}/runs` — one authorized, keyset-paginated page.
 pub async fn workflow_runs(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     Path(workflow_id): Path<Uuid>,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    workflow_runs_inner(state, workflow_id, headers, raw_query)
+    workflow_runs_inner(state, slot, workflow_id, headers, raw_query)
         .await
         .into_response()
 }
 
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn workflow_runs_inner(
     state: Arc<AppState>,
+    slot: crate::access::AccessSlot,
     workflow_id: Uuid,
     headers: HeaderMap,
     raw_query: Option<String>,
@@ -151,8 +172,15 @@ async fn workflow_runs_inner(
     // over request-validation errors. [FI-TRACE-HTTP-INGRESS]
     // Raw query is preserved here; parsing happens after admission.
     let path = format!("/workflows/{workflow_id}/runs");
-    let tenant =
-        authorize_workflow_read(&state, &headers, &path, raw_query.as_deref(), workflow_id).await?;
+    let tenant = authorize_workflow_read(
+        &state,
+        &slot,
+        &headers,
+        &path,
+        raw_query.as_deref(),
+        workflow_id,
+    )
+    .await?;
 
     // Parse query string after admission so malformed params (e.g. ?limit=abc)
     // cannot 400 before the NIP-FI gate fires.  A parse failure after
@@ -209,22 +237,25 @@ async fn workflow_runs_inner(
 /// `GET /workflows/{workflow_id}/runs/{run_id}/approvals` — approvals for a run.
 pub async fn run_approvals(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     Path((workflow_id, run_id)): Path<(Uuid, Uuid)>,
     headers: HeaderMap,
 ) -> Response {
-    run_approvals_inner(state, workflow_id, run_id, headers)
+    run_approvals_inner(state, slot, workflow_id, run_id, headers)
         .await
         .into_response()
 }
 
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn run_approvals_inner(
     state: Arc<AppState>,
+    slot: crate::access::AccessSlot,
     workflow_id: Uuid,
     run_id: Uuid,
     headers: HeaderMap,
 ) -> Result<Json<Value>, Response> {
     let path = format!("/workflows/{workflow_id}/runs/{run_id}/approvals");
-    let tenant = authorize_workflow_read(&state, &headers, &path, None, workflow_id).await?;
+    let tenant = authorize_workflow_read(&state, &slot, &headers, &path, None, workflow_id).await?;
 
     let run = state
         .db

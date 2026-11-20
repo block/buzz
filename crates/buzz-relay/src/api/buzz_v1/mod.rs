@@ -4,7 +4,10 @@ mod auth;
 mod handlers;
 
 use crate::state::AppState;
-use axum::{routing::get, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use std::sync::Arc;
 
 /// Public accessory prefix, shared by routing and capability discovery.
@@ -14,10 +17,7 @@ pub const BASE_PATH: &str = "/buzz/v1";
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/me/sidebar", get(handlers::sidebar))
-        .route(
-            "/me/read-state",
-            get(handlers::contexts).post(handlers::write),
-        )
+        .route("/me/read-state", post(handlers::write))
         .fallback(|| async { auth::Error::new(axum::http::StatusCode::NOT_FOUND, "not_found") })
         .with_state(state)
 }

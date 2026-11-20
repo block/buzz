@@ -100,6 +100,18 @@ pub enum AdminRoute {
     EventDelete {
         id: Hex64,
     },
+    /// GET /communities — host-prefix directory (`q`, `cursor`, `limit`).
+    CommunitiesList,
+    /// GET /members/search — communityHost, `q`, `limit` in query.
+    MembersSearch,
+    /// GET /members/{pubkey} — communityHost in query.
+    MemberDetail {
+        pubkey: Hex64,
+    },
+    /// GET /events/{id} — communityHost in query.
+    EventDetail {
+        id: Hex64,
+    },
 }
 
 /// A validated 64 lowercase-hex id (a pubkey or an event id) for use as a URL
@@ -158,6 +170,10 @@ impl AdminRoute {
                 format!("/members/{}/timeout", pubkey.as_str())
             }
             AdminRoute::EventDelete { id } => format!("/events/{}/delete", id.as_str()),
+            AdminRoute::CommunitiesList => "/communities".to_string(),
+            AdminRoute::MembersSearch => "/members/search".to_string(),
+            AdminRoute::MemberDetail { pubkey } => format!("/members/{}", pubkey.as_str()),
+            AdminRoute::EventDetail { id } => format!("/events/{}", id.as_str()),
         }
     }
 }
@@ -183,6 +199,8 @@ pub struct AdminQuery {
     pub cursor: Option<String>,
     /// Community host the relay resolves to its tenant (restrictions routes).
     pub community_host: Option<String>,
+    /// Search text (directory host prefix, member name).
+    pub q: Option<String>,
 }
 
 impl AdminQuery {
@@ -219,6 +237,9 @@ impl AdminQuery {
         }
         if let Some(v) = &self.cursor {
             parts.push(format!("cursor={}", urlencoded(v)));
+        }
+        if let Some(v) = &self.q {
+            parts.push(format!("q={}", urlencoded(v)));
         }
         parts.join("&")
     }

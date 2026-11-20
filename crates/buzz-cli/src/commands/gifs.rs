@@ -41,37 +41,6 @@ pub(crate) fn safe_relay_path(path: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Customer ID derivation
-// ---------------------------------------------------------------------------
-
-/// Derive a stable, relay-scoped anonymous `customer_id` from secret key material.
-///
-/// KLIPY requires a per-installation identifier that is stable and anonymous.
-/// Using SHA-256 of the *public* key would be stable but NOT anonymous — the
-/// input is public, so the ID is computable by any observer, and the same value
-/// would appear across all relays (cross-relay linkability).
-///
-/// Instead, we domain-separate with the relay URL and sign with the *secret* key:
-///   `SHA-256(secret_key_bytes || '\0' || relay_url_bytes)`
-/// This is:
-/// - **stable**: deterministic given the same keypair + relay.
-/// - **relay-scoped**: different relay → different ID, no cross-relay correlation.
-/// - **not computable from public data**: requires secret key material.
-/// - **stateless**: no file I/O, no storage.
-///
-/// The first 16 bytes (32 hex chars) give 128 bits of uniqueness, ample for
-/// KLIPY's per-installation needs.
-fn customer_id(secret_key_bytes: &[u8], relay_url: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(secret_key_bytes);
-    hasher.update(b"\0"); // domain separator
-    hasher.update(relay_url.as_bytes());
-    let hash = hasher.finalize();
-    hex::encode(&hash[..16]) // 16 bytes → 32 hex chars
-}
-
-// ---------------------------------------------------------------------------
 // Locale
 // ---------------------------------------------------------------------------
 
@@ -336,10 +305,9 @@ pub(crate) async fn search_entries(
     locale: Option<&str>,
 ) -> Result<Vec<GifEntry>, CliError> {
     let (search_path, _) = resolve_gif_descriptor(client).await?;
-    let cid = customer_id(
-        client.keys().secret_key().as_secret_bytes(),
-        client.relay_url(),
-    );
+    let cid = client
+        .credentials()
+        .relay_scoped_customer_id(client.relay_url());
     let locale = locale.map(|l| l.to_string()).unwrap_or_else(default_locale);
 
     let body = serde_json::json!({
@@ -358,10 +326,9 @@ pub(crate) async fn search_entries(
 /// `{"accepted": true}` on success.
 pub async fn cmd_share(client: &BuzzClient, slug: &str) -> Result<(), CliError> {
     let (_, share_path) = resolve_gif_descriptor(client).await?;
-    let cid = customer_id(
-        client.keys().secret_key().as_secret_bytes(),
-        client.relay_url(),
-    );
+    let cid = client
+        .credentials()
+        .relay_scoped_customer_id(client.relay_url());
 
     let body = serde_json::json!({
         "slug": slug,
@@ -427,51 +394,6 @@ mod tests {
         assert!(!safe_relay_path(""));
         assert!(!safe_relay_path("gifs/search")); // no leading /
         assert!(!safe_relay_path("//"));
-    }
-
-    // -----------------------------------------------------------------------
-    // customer_id
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn customer_id_is_32_hex_chars_and_stable() {
-        let sk = [0xab_u8; 32];
-        let id = customer_id(&sk, "https://relay.example");
-        assert_eq!(id.len(), 32);
-        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_eq!(id, customer_id(&sk, "https://relay.example"));
-    }
-
-    #[test]
-    fn customer_id_is_relay_scoped() {
-        let sk = [0xcd_u8; 32];
-        let id_a = customer_id(&sk, "https://relay-a.example");
-        let id_b = customer_id(&sk, "https://relay-b.example");
-        assert_ne!(
-            id_a, id_b,
-            "same key, different relay → different customer_id"
-        );
-    }
-
-    #[test]
-    fn customer_id_differs_for_different_keys() {
-        let id_a = customer_id(&[0xaa_u8; 32], "https://relay.example");
-        let id_b = customer_id(&[0xbb_u8; 32], "https://relay.example");
-        assert_ne!(id_a, id_b);
-    }
-
-    #[test]
-    fn customer_id_not_equal_to_pubkey_hash() {
-        // The customer_id must NOT be derivable from the public key alone.
-        use sha2::{Digest, Sha256};
-        let sk = [0xde_u8; 32];
-        // What the old pubkey-hash approach would have produced (approximately):
-        let naive_hash = hex::encode(&Sha256::digest(hex::encode(sk).as_bytes())[..16]);
-        let actual = customer_id(&sk, "https://relay.example");
-        assert_ne!(
-            actual, naive_hash,
-            "customer_id must not equal SHA-256(pubkey_hex)[..16]"
-        );
     }
 
     // -----------------------------------------------------------------------
@@ -783,7 +705,11 @@ mod tests {
     /// Client without an auth tag — used for basic NIP-98 / body / path tests.
     fn test_client(base_url: &str) -> BuzzClient {
         let keys = Keys::generate();
-        BuzzClient::new(base_url.to_string(), keys, None, None).unwrap()
+        BuzzClient::new(
+            base_url.to_string(),
+            crate::credentials::Credentials::from_keys(keys),
+        )
+        .unwrap()
     }
 
     /// Client with a synthetic `x-auth-tag` — used to assert that the header
@@ -803,9 +729,7 @@ mod tests {
         let tag = Tag::parse(tag_vec).unwrap();
         let client = BuzzClient::new(
             base_url.to_string(),
-            keys,
-            Some(tag),
-            Some(tag_json.clone()),
+            crate::credentials::Credentials::from_keys(keys).with_auth_tag(tag, tag_json.clone()),
         )
         .unwrap();
         (client, tag_json)

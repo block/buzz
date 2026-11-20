@@ -137,7 +137,14 @@ async function payloadsFor(page: Page, command: string) {
 
 async function menuValues(page: Page, trigger: Locator) {
   await trigger.click();
-  const rows = await page.getByRole("menuitemradio").allTextContents();
+  await expect(trigger).toHaveAttribute("aria-expanded", "true");
+  // A menu that just closed stays mounted during its exit animation, so read
+  // only the menu this trigger controls.
+  const menu = page.locator(
+    `[id="${await trigger.getAttribute("aria-controls")}"]`,
+  );
+  await expect(menu).toBeVisible();
+  const rows = await menu.getByRole("menuitemradio").allTextContents();
   await page.keyboard.press("Escape");
   return rows;
 }

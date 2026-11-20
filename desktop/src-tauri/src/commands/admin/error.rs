@@ -38,6 +38,9 @@ pub struct AdminMutationError {
     pub body_complete: bool,
     /// Refused before sending; see the type docs.
     pub not_sent: bool,
+    /// The complete error body had zero bytes: a relay without the route
+    /// answers this way. Derived from the received bytes, never the message.
+    pub body_empty: bool,
 }
 
 impl AdminMutationError {
@@ -51,12 +54,17 @@ impl AdminMutationError {
 
     /// The relay answered with an HTTP status and its full body was read — an
     /// authoritative verdict.
-    pub(super) fn authoritative(status: reqwest::StatusCode, message: String) -> Self {
+    pub(super) fn authoritative(
+        status: reqwest::StatusCode,
+        message: String,
+        body_empty: bool,
+    ) -> Self {
         Self {
             message,
             relay_status: Some(status.as_u16()),
             body_complete: true,
             not_sent: false,
+            body_empty,
         }
     }
 
@@ -68,6 +76,7 @@ impl AdminMutationError {
             relay_status: Some(status.as_u16()),
             body_complete: false,
             not_sent: false,
+            body_empty: false,
         }
     }
 }
@@ -81,6 +90,48 @@ impl From<String> for AdminMutationError {
             relay_status: None,
             body_complete: false,
             not_sent: false,
+            body_empty: false,
+        }
+    }
+}
+
+/// Error from a staff read command (`/communities`, `/members/...`,
+/// `/events/{id}`), keeping what the UI needs to tell "this relay has no such
+/// route" (complete empty 404/405), "not in this community" (a coded 404) and
+/// "unknown" (truncated body or no answer) apart without reading the message.
+#[derive(Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminReadError {
+    pub message: String,
+    /// The relay's HTTP status; `None` when no response arrived.
+    pub relay_status: Option<u16>,
+    /// Whether the whole error body was read.
+    pub body_complete: bool,
+    /// The complete body had zero bytes (false whenever it is incomplete).
+    pub body_empty: bool,
+    /// The relay envelope's `error.code`, when the complete body carried one.
+    pub code: Option<String>,
+}
+
+impl AdminReadError {
+    /// The relay answered but its body was not fully read.
+    pub(super) fn partial(status: reqwest::StatusCode, message: String) -> Self {
+        Self {
+            relay_status: Some(status.as_u16()),
+            ..Self::from(message)
+        }
+    }
+}
+
+/// Pre-send and transport failures: no relay answer.
+impl From<String> for AdminReadError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            relay_status: None,
+            body_complete: false,
+            body_empty: false,
+            code: None,
         }
     }
 }

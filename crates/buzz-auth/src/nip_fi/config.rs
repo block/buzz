@@ -79,7 +79,12 @@ pub(crate) const MAX_JTI_BYTES: usize = 512;
 /// v2 (PR #7221): `nostr_pubkey` absence now unconditionally rejects — the
 /// per-issuer `require_attested_key` knob is removed and the NIP-FI v2 spec
 /// requirement is always enforced.
-pub(crate) const VERIFIER_CONTRACT_VERSION: u32 = 2;
+///
+/// v3 (PR #8401): dedicated policies also accept the `nip-fi-agent+jwt` agent
+/// type, which requires a `nostr_owner_pubkey` claim (a valid lowercase key
+/// distinct from the asserted key); a `nip-fi+jwt` or `at+jwt` token carrying
+/// `nostr_owner_pubkey` with any value, `null` included, is rejected.
+pub(crate) const VERIFIER_CONTRACT_VERSION: u32 = 4;
 
 /// The transport-contract fingerprint folded into [`TransportContractId`].
 /// **Bump on any change** to the client-attached parsing, attachment,
@@ -89,6 +94,10 @@ pub(crate) const TRANSPORT_CONTRACT_VERSION: u32 = 1;
 /// The fixed name of the Nostr-key claim ([NIP-FI.md](../../../../docs/nips/NIP-FI.md),
 /// "Assertion validation"). Not configurable: other encodings and aliases deny.
 pub const NOSTR_PUBKEY_CLAIM: &str = "nostr_pubkey";
+
+/// The fixed name of the owner-key claim on an agent assertion (NIP-FI.md,
+/// "Agent keys"). Same encoding as [`NOSTR_PUBKEY_CLAIM`].
+pub const NOSTR_OWNER_PUBKEY_CLAIM: &str = "nostr_owner_pubkey";
 
 /// The fixed identity-subject claim. Identity is the exact tuple `(iss, sub)`
 /// (NIP-FI.md:35-41), so the subject coordinate is always the JWT `sub` claim
@@ -326,7 +335,9 @@ pub enum TokenClass {
         /// The mutually exclusive resource-owner/client-subject contract.
         subject_class: SubjectClassContract,
     },
-    /// A dedicated Buzz assertion: protected `typ` is exactly `nip-fi+jwt`.
+    /// A dedicated Buzz assertion: protected `typ` is exactly `nip-fi+jwt`
+    /// (human; `nostr_owner_pubkey` forbidden) or `nip-fi-agent+jwt` (agent;
+    /// `nostr_owner_pubkey` required).
     DedicatedNipFi,
 }
 
@@ -368,21 +379,20 @@ pub struct IssuerPolicy {
     /// Accepted `aud` values for S4 command JWTs only. Assertion `aud` comes
     /// from the per-community [`super::CommunityBinding`], never from here.
     command_audiences: Vec<String>,
-    /// Expected `aud` of every community authorizing this issuer — the
-    /// issuer's side of the community allowlist (NIP-FI.md:145). Empty until
-    /// [`IssuerPolicy::authorized_for_communities`] sets it.
-    community_audiences: Vec<String>,
     token_class: TokenClass,
     freshness: FreshnessClass,
     algorithms: Vec<Algorithm>,
     skew_seconds: u64,
     maximum_assertion_age_seconds: u64,
     maximum_status_age_seconds: Option<u64>,
-    /// The authenticated key-source contract: validated JWKS URI, refresh
-    /// interval, and hard deadline. Included in `derive_assertion_policy_id`
-    /// so that a change to the endpoint, refresh schedule, or hard-deadline
-    /// rule changes the policy ID and invalidates all prepared evidence.
+    /// The authenticated key-source contract: validated JWKS URI, transport,
+    /// refresh interval, and hard deadline. Included in
+    /// `derive_assertion_policy_id` so that a change to the endpoint, trusted
+    /// transport, refresh schedule, or hard-deadline rule changes the policy
+    /// ID and invalidates all prepared evidence.
     jwks_source_contract: JwksSourceContract,
+    public_profile: bool,
+    public_issuer_label: Option<String>,
     id: AssertionPolicyId,
 }
 
@@ -487,7 +497,6 @@ impl IssuerPolicy {
         let mut policy = Self {
             issuer,
             command_audiences: canonical_set(command_audiences),
-            community_audiences: Vec::new(),
             token_class,
             freshness,
             algorithms: canonical_algorithm_set(algorithms),
@@ -495,6 +504,8 @@ impl IssuerPolicy {
             maximum_assertion_age_seconds,
             maximum_status_age_seconds,
             jwks_source_contract,
+            public_profile: false,
+            public_issuer_label: None,
             // Placeholder, overwritten from the fully built policy below.
             id: AssertionPolicyId([0u8; 32]),
         };
@@ -502,15 +513,26 @@ impl IssuerPolicy {
         Ok(policy)
     }
 
-    /// Record the expected `aud` of every community that authorizes this
-    /// issuer and re-derive the policy ID over it, so changing the community
-    /// allowlist moves the ID (NIP-FI.md:145). Set-valued: order and
-    /// duplicates do not affect the ID.
-    #[must_use]
-    pub fn authorized_for_communities(mut self, community_audiences: Vec<String>) -> Self {
-        self.community_audiences = canonical_set(community_audiences);
+    /// Bind output-only profile policy into prepared-evidence identity.
+    pub fn with_public_profile(mut self, enabled: bool, label: Option<String>) -> Self {
+        self.public_profile = enabled;
+        self.public_issuer_label = label;
         self.id = derive_assertion_policy_id(&self);
         self
+    }
+
+    /// The policy ID an assertion verified for the community expecting
+    /// `community_aud` carries: `H(base policy contract, community aud)`. The
+    /// base contract already commits to the issuer. The verifier mints it
+    /// only after the community's allowlist admitted this issuer, so it moves
+    /// exactly when this community's association or the base policy changes,
+    /// never when an unrelated community is added (NIP-FI.md:145).
+    pub fn id_for_community(&self, community_aud: &str) -> AssertionPolicyId {
+        let mut hasher = Sha256::new();
+        hasher.update(b"buzz:nip-fi:community-assertion-policy:v1\0");
+        hasher.update(self.id.0);
+        hash_field(&mut hasher, community_aud.as_bytes());
+        AssertionPolicyId(hasher.finalize().into())
     }
 
     /// The exact `iss` value this policy is selected by.
@@ -521,11 +543,6 @@ impl IssuerPolicy {
     /// The accepted command-JWT audiences; at least one must match its `aud`.
     pub fn command_audiences(&self) -> &[String] {
         &self.command_audiences
-    }
-
-    /// The expected `aud` of each community authorizing this issuer.
-    pub fn community_audiences(&self) -> &[String] {
-        &self.community_audiences
     }
 
     /// The single accepted token class.
@@ -667,7 +684,6 @@ fn derive_assertion_policy_id(policy: &IssuerPolicy) -> AssertionPolicyId {
     let IssuerPolicy {
         issuer,
         command_audiences,
-        community_audiences,
         token_class,
         freshness,
         algorithms,
@@ -675,6 +691,8 @@ fn derive_assertion_policy_id(policy: &IssuerPolicy) -> AssertionPolicyId {
         maximum_assertion_age_seconds,
         maximum_status_age_seconds,
         jwks_source_contract,
+        public_profile,
+        public_issuer_label,
         id: _,
     } = policy;
     let mut hasher = Sha256::new();
@@ -696,12 +714,17 @@ fn derive_assertion_policy_id(policy: &IssuerPolicy) -> AssertionPolicyId {
     ] {
         hasher.update((bound as u64).to_be_bytes());
     }
+    hasher.update([u8::from(*public_profile)]);
+    hasher.update([u8::from(public_issuer_label.is_some())]);
+    hash_field(
+        &mut hasher,
+        public_issuer_label
+            .as_deref()
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     hash_field(&mut hasher, issuer.as_bytes());
     hash_seq(&mut hasher, command_audiences.iter().map(String::as_bytes));
-    hash_seq(
-        &mut hasher,
-        community_audiences.iter().map(String::as_bytes),
-    );
     hash_field(&mut hasher, token_class.discriminant().as_bytes());
     match token_class {
         TokenClass::AccessTokenAtJwt { subject_class } => {
@@ -735,12 +758,16 @@ fn derive_assertion_policy_id(policy: &IssuerPolicy) -> AssertionPolicyId {
     hasher.update(maximum_assertion_age_seconds.to_be_bytes());
     hasher.update((*maximum_status_age_seconds).unwrap_or(0).to_be_bytes());
     // Authenticated key-source contract (NIP-FI.md, "Policy identity and
-    // snapshots"): URI selects the authenticated source; interval defines
-    // bounded refresh; hard deadline defines the accepted time rule. These are
-    // contract, not mutable state — key rotation (JWKS content change) leaves
-    // all three unchanged and must not move the ID.
+    // snapshots"): URI selects the key source; mesh mode delegates transport
+    // authentication to the deployment; interval defines bounded refresh; and
+    // hard deadline defines the accepted time rule. The mesh transport tag is
+    // present only when that mode is selected.
     hasher.update(b"jwks-source-contract\0");
     hash_field(&mut hasher, jwks_source_contract.jwks_uri().as_bytes());
+    if jwks_source_contract.uses_mesh_transport() {
+        hasher.update(b"jwks-transport\0");
+        hasher.update(b"mesh\0");
+    }
     hasher.update(
         jwks_source_contract
             .refresh_interval_seconds()
@@ -765,5 +792,58 @@ fn hash_seq<'a>(hasher: &mut Sha256, items: impl ExactSizeIterator<Item = &'a [u
     hasher.update((items.len() as u64).to_be_bytes());
     for item in items {
         hash_field(hasher, item);
+    }
+}
+
+#[cfg(test)]
+mod jwks_transport_identity_tests {
+    use super::*;
+    use crate::nip_fi::jwks::JwksSourceContract;
+
+    fn policy(contract: JwksSourceContract) -> IssuerPolicy {
+        IssuerPolicy::new(
+            "https://issuer.example".to_owned(),
+            vec!["https://relay.example".to_owned()],
+            TokenClass::DedicatedNipFi,
+            FreshnessClass::OfflineJwt,
+            vec![Algorithm::ES256],
+            60,
+            3600,
+            None,
+            contract,
+        )
+        .expect("valid policy")
+    }
+
+    #[test]
+    fn public_https_policy_id_golden_omits_mesh_transport_tag() {
+        let contract = JwksSourceContract::new(
+            "https://issuer.example/.well-known/jwks.json".to_owned(),
+            300,
+            3600,
+        )
+        .expect("valid public contract");
+
+        assert_eq!(
+            hex::encode(policy(contract).id().as_bytes()),
+            "41616c071239652badb7f75ea060f6ad20de4dee1af665d942b0fdee3dc32c0b",
+            "public_https mode omits the mesh transport tag"
+        );
+    }
+
+    #[test]
+    fn mesh_transport_policy_id_has_a_separate_golden() {
+        let contract = JwksSourceContract::new_mesh(
+            "http://mesh.example.test/.well-known/jwks.json".to_owned(),
+            300,
+            3600,
+        )
+        .expect("valid mesh contract");
+
+        assert_eq!(
+            hex::encode(policy(contract).id().as_bytes()),
+            "14f2cc8f50b6ce76008936321794642dfa1a79fa99150bff7f0f0479b5e7d06f",
+            "mesh transport is part of policy identity"
+        );
     }
 }

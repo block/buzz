@@ -2,10 +2,24 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
-String channelStarsKey(String pubkey) => 'buzz.channel-stars.v1:$pubkey';
+import '../../../shared/read_state/sidebar_flags.dart';
+import '../../../shared/theme/community_theme_preference.dart';
 
-class ChannelStarEntry {
+/// Channel ids belong to one community, so the cache is keyed by relay as
+/// well as identity. One identity can be paired with several communities.
+String channelStarsKey(String pubkey, String relayUrl) =>
+    'buzz.channel-stars.v1:$pubkey:${Uri.encodeComponent(normalizeCommunityRelayUrl(relayUrl))}';
+
+/// The earlier key, shared by every community of the identity.
+String legacyChannelStarsKey(String pubkey) => 'buzz.channel-stars.v1:$pubkey';
+
+class ChannelStarEntry implements SidebarFlagEntry {
   final bool starred;
+
+  @override
+  bool get enabled => starred;
+
+  @override
   final int updatedAt;
 
   const ChannelStarEntry({required this.starred, required this.updatedAt});
@@ -30,34 +44,30 @@ class ChannelStarStore {
     'channels': {for (final e in channels.entries) e.key: e.value.toJson()},
   };
 
-  factory ChannelStarStore.fromJson(Map<String, dynamic> json) {
+  factory ChannelStarStore.fromJson(
+    Map<String, dynamic> json, {
+    bool strict = false,
+  }) {
     final rawChannels = json['channels'];
+    if (strict && (json['version'] != 1 || rawChannels is! Map)) {
+      throw const FormatException('Invalid channel stars record');
+    }
     final channels = <String, ChannelStarEntry>{};
     if (rawChannels is Map) {
       for (final entry in rawChannels.entries) {
         if (entry.key is String && entry.value is Map<String, dynamic>) {
           final v = entry.value as Map<String, dynamic>;
-          if (v['starred'] is bool && v['updatedAt'] is int) {
+          final timestamp = v['updatedAt'];
+          if (v['starred'] is bool && timestamp is int && timestamp >= 0) {
             channels[entry.key as String] = ChannelStarEntry.fromJson(v);
+            continue;
           }
         }
+        if (strict) throw const FormatException('Invalid channel star entry');
       }
     }
     return ChannelStarStore(version: 1, channels: channels);
   }
-}
-
-ChannelStarStore mergeStores(ChannelStarStore local, ChannelStarStore remote) {
-  // Per-channel max-updatedAt merge:
-  // For each channel ID in the union, keep the entry with the highest updatedAt.
-  final merged = <String, ChannelStarEntry>{...local.channels};
-  for (final entry in remote.channels.entries) {
-    final existing = merged[entry.key];
-    if (existing == null || entry.value.updatedAt > existing.updatedAt) {
-      merged[entry.key] = entry.value;
-    }
-  }
-  return ChannelStarStore(channels: merged);
 }
 
 class ChannelStarsStorage {
@@ -65,8 +75,11 @@ class ChannelStarsStorage {
 
   ChannelStarsStorage(this._prefs);
 
-  ChannelStarStore read(String pubkey) {
-    final raw = _prefs.getString(channelStarsKey(pubkey));
+  ChannelStarStore read(String pubkey, String relayUrl) {
+    // The shared entry may hold another community's channels, and the relay
+    // copy is authoritative, so drop it rather than let one community claim it.
+    _prefs.remove(legacyChannelStarsKey(pubkey));
+    final raw = _prefs.getString(channelStarsKey(pubkey, relayUrl));
     if (raw == null || raw.isEmpty) {
       return const ChannelStarStore();
     }
@@ -84,7 +97,4 @@ class ChannelStarsStorage {
       return const ChannelStarStore();
     }
   }
-
-  Future<bool> write(String pubkey, ChannelStarStore store) =>
-      _prefs.setString(channelStarsKey(pubkey), jsonEncode(store.toJson()));
 }

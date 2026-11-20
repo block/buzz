@@ -1,0 +1,50 @@
+# Agents that work in turns, as an agent harness does, against a local
+# relay (`just relay`). Each human owns two agents; agents do not poll.
+#   cargo run -p buzz-test-client --bin buzz-loadgen -- seed perf/scenarios/local-agent-turns.toml
+#   cargo run -p buzz-test-client --bin buzz-loadgen -- run perf/scenarios/local-agent-turns.toml
+run_id = "local-agent-turns"
+
+[target]
+ws_url = "ws://localhost:3000"
+http_url = "http://localhost:3000"
+
+[shape]
+communities = 1
+channels_per_community = 10
+history_messages_per_channel = 20
+thread_roots_per_channel = 1
+thread_depth = 5
+
+[population]
+humans = 20
+agents = 40
+channels_per_member = 3
+connect_rate_per_sec = 50.0
+
+[human]
+messages_per_hour = 30.0
+
+[agent]
+query_interval_secs = 0.0
+events_per_hour = 0.0
+observer_frames_per_hour = 0.0
+presence_interval_secs = 60.0
+channel_subscriptions = true
+
+# Short turns, often, so a short run finishes many of them.
+[agent.turn]
+per_hour = 120.0
+mean_secs = 15.0
+frame_secs = 1.0
+frame_bytes = 1024
+typing_secs = 3.0
+reads = 2
+
+# The same level twice: a sustained hold reported in two windows.
+[[ramp]]
+users = 1.0
+hold_secs = 60
+
+[[ramp]]
+users = 1.0
+hold_secs = 60

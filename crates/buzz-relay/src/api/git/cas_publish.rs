@@ -1,30 +1,34 @@
-//! Push commit point — content-addressed pack + manifest CAS (§Push step 2–7).
+//! Push commit point — content-addressed pack + manifest CAS (§Push steps 3–7
+//! of `docs/git-on-object-storage.md`).
 //!
-//! Pure async function over the spec's commit primitives. Given the post-
-//! receive-pack repository workspace and the object-store client, this:
+//! This module holds the two halves of what happens after `git receive-pack`
+//! returns.
 //!
-//! 1. Reads the current pointer → `(e, d_before)` (§Push step 3).
-//! 2. Fetches `m_before` via `get_verified(d_before)` (§Push step 3) —
-//!    digest-verified so a corrupt manifest fails closed, not silently.
-//! 3. Snapshots refs + HEAD off the workspace (the receive-pack's published
-//!    state, by which point the pre-receive hook has enforced fast-forward /
-//!    branch-protection against the parent's refs).
-//! 4. Normally captures the new objects as a delta pack via `git pack-objects
+//! **Deciding (§Push step 3).** [`snapshot_workspace`] reads the refs and HEAD
+//! that receive-pack left in the workspace, and [`push_disposition`] compares
+//! them with the refs the workspace was hydrated from. Only a push that
+//! changed refs is published.
+//!
+//! **Publishing (§Push steps 4–7).** [`cas_publish`] takes that snapshot and
+//! the [`ParentState`] the workspace was hydrated from. It never re-reads the
+//! pointer before the conditional write. It:
+//!
+//! 1. Normally captures the new objects as a delta pack via `git pack-objects
 //!    --revs --stdout` over `(refs_after) --not (refs_before-tips)` (§Push
-//!    step 1–2). Before the manifest reaches its pack cap, compaction instead
+//!    step 4). Before the manifest reaches its pack cap, compaction instead
 //!    captures the complete `refs_after` closure into bounded replacement
 //!    packs. Empty output for a ref-less repository is allowed.
-//! 5. `put_pack` (content-addressed, create-only, idempotent — §Push step 2).
+//! 2. `put_pack` (content-addressed, create-only, idempotent — §Push step 5).
 //!    The key is derived from `sha256(bytes)` by the store layer.
-//! 6. Composes `m_after`: normal pushes use parent packs ∪ new pack;
+//! 3. Composes `m_after`: normal pushes use parent packs ∪ new pack;
 //!    compaction replaces the pack list with the newly captured full closure.
-//!    Both retain the parent digest and post-push refs (§Push step 5).
-//! 7. `put_manifest` (content-addressed, create-only, idempotent — §Push
-//!    step 6).
-//! 8. `put_pointer(IfMatch(e) | IfNoneMatchStar)` — the CAS (§Push step 7).
+//!    Both retain the parent digest and post-push refs. `put_manifest`
+//!    (content-addressed, create-only, idempotent — §Push step 6).
+//! 4. `put_pointer(IfMatch(e) | IfNoneMatchStar)` — the CAS (§Push step 7),
+//!    with `e` taken from the `ParentState`.
 //!    - `Won` → return `CasSuccess { manifest, manifest_key }`. The caller
-//!      then derives kind:30618 against `m_after` (Sami's
-//!      `manifest_event::build_ref_state_event`) and constructs the
+//!      then derives kind:30618 against `m_after`
+//!      (`manifest_event::build_ref_state_event`) and constructs the
 //!      success response — the *fence* in §Push step 8.
 //!    - `LostRace` → re-read the pointer to fetch the winner's manifest,
 //!      then return `CasError::Conflict { winner_manifest,
@@ -32,11 +36,11 @@
 //!      the caller's diagnostic + future cache; the loser's ephemeral
 //!      tempdir dies on scope exit, so there's no disk to reconcile.
 //!      **No retry.** The losing push's receive-pack output was derived
-//!      against the now-superseded parent; reusing it would violate
-//!      `Inv_RefDerivedFromParent` (§Mechanized Verification). The client
-//!      re-runs `git push`, which re-hydrates and re-runs receive-pack
-//!      against the advanced state — that is the only safe retry, and
-//!      `git`'s own machinery already does it.
+//!      against the now-superseded parent, so nothing computed from it may
+//!      be published (the model's seeded error `stale-base` is that
+//!      mistake; see §Mechanized Verification). The client re-runs
+//!      `git push`, which re-hydrates and re-runs receive-pack against the
+//!      advanced state.
 //!
 //! ## Fence positioning
 //!
@@ -47,11 +51,9 @@
 //!
 //! ## What this function deliberately does *not* do
 //!
-//! - **No retry on `LostRace`.** Per spec §Push step 7 "GOTO 3 (retry) or
-//!   respond non-ff": both arms are safe; we take the non-ff arm because
-//!   reusing receive-pack's output against a moved parent isn't safe and
-//!   re-hydrating from inside the handler is expensive. Sami's TLA-action
-//!   guidance is explicit: retry would change the TLA action.
+//! - **No retry on `LostRace`.** See above: re-using receive-pack's output
+//!   against a moved parent is unsafe, and re-hydrating from inside the
+//!   handler is expensive.
 //! - **No kind:30618 emission.** That is the *derived* publication after a
 //!   successful CAS. Caller passes `m_after` into
 //!   `manifest_event::build_ref_state_event` *after* this returns `Ok`.
@@ -59,7 +61,7 @@
 //!   CAS, never the commit."
 //! - **No advisory lock.** Spec §Push, "No advisory lock in v1": writer
 //!   serialization is the CAS. Adding a per-repo mutex would hide the
-//!   exact contention `Inv_NoFork` proves safe.
+//!   exact contention the refinement check (`Inv_NoFork`) covers.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -72,8 +74,8 @@ use tokio::process::Command;
 use tracing::{debug, warn};
 
 use crate::api::git::manifest::{
-    pointer_key, Manifest, ManifestError, MANIFEST_VERSION, MAX_MANIFEST_PACKS, MAX_MANIFEST_REFS,
-    PACK_COMPACTION_THRESHOLD,
+    next_published_at, pointer_key, Manifest, ManifestError, MANIFEST_VERSION, MAX_MANIFEST_PACKS,
+    MAX_MANIFEST_REFS, PACK_COMPACTION_THRESHOLD,
 };
 use crate::api::git::store::{CasOutcome, ETag, GitStore, Precond, StoreError};
 use buzz_core::TenantContext;
@@ -196,7 +198,7 @@ pub struct CasSuccess {
     pub manifest_key: String,
 }
 
-/// Resolved view of the pre-push pointer (§Push step 3 output).
+/// Resolved view of the pre-push pointer (§Push step 1 output).
 ///
 /// **The CAS write is predicated on `if_match`** — the caller must load
 /// this *before* running receive-pack against the hydrated workspace, and
@@ -239,6 +241,7 @@ impl ParentState {
                 refs: BTreeMap::new(),
                 packs: Vec::new(),
                 parent: None,
+                published_at: None,
             },
         }
     }
@@ -260,16 +263,112 @@ impl ParentState {
     }
 }
 
-/// Read `refs/*` + symbolic-HEAD from the workspace.
+/// Ref state of a workspace: every ref and the symbolic HEAD.
 ///
-/// HEAD is the symref target (e.g. `refs/heads/main`), unprefixed — the
-/// manifest stores published ref state, not protocol formatting. Detached
-/// HEAD or no HEAD yields an empty string.
-async fn snapshot_workspace_state(
-    repo_path: &Path,
-    scratch_dir: &Path,
-) -> Result<(BTreeMap<String, String>, String), CasError> {
+/// This is the relay's only evidence of what `git receive-pack` did. Both the
+/// decision whether to publish ([`push_disposition`]) and the published
+/// manifest ([`cas_publish`]) are computed from one value of this type, so
+/// they cannot disagree about what the push changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceState {
+    /// Every ref in the workspace, mapped to the object id it names.
+    pub refs: BTreeMap<String, String>,
+    /// The symbolic-ref target of `HEAD` (for example `refs/heads/main`), or
+    /// an empty string when `HEAD` is detached or missing.
+    pub head: String,
+}
+
+/// What a finished `git receive-pack` run obliges the relay to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushDisposition {
+    /// The workspace refs equal the refs it was hydrated from. There is
+    /// nothing to publish; the client is answered with git's own output.
+    RelayOnly,
+    /// The workspace refs changed and git exited normally. The change must
+    /// be published before the client is told anything.
+    Publish,
+    /// The workspace refs changed but git exited abnormally. Its report to
+    /// the client may be incomplete, so nothing is published and the request
+    /// fails.
+    Abort,
+}
+
+/// Decide what to do with a finished push from the refs it left behind.
+///
+/// The decision compares the workspace refs with the refs the workspace was
+/// hydrated from. It does not read git's report-status stream, for two
+/// reasons. A client chooses whether that stream exists, and git exits zero
+/// both for a request that carries no commands and for one a hook declined, so
+/// the stream cannot show that a push was authorized. And a push that updates
+/// one ref and is refused another reports both outcomes, so an `ng` line does
+/// not show that nothing changed.
+///
+/// The decision is sound under one assumption about git: `receive-pack`
+/// changes a ref only by applying a command the client submitted, and only
+/// after the pre-receive hook accepted the whole command list. Then changed
+/// refs imply an accepted push. Unchanged refs imply that any `ok` git
+/// reported belongs to a command that asked for the value the ref already
+/// had, which is true of the published state the workspace was hydrated
+/// from, so git's report can be passed on as it is.
+/// `docs/spec/GitOnObjectStore.tla` states this as `Disposition` and checks
+/// it against the legacy rule.
+pub fn push_disposition(
+    exited_ok: bool,
+    parent_refs: &BTreeMap<String, String>,
+    workspace_refs: &BTreeMap<String, String>,
+) -> PushDisposition {
+    if workspace_refs == parent_refs {
+        PushDisposition::RelayOnly
+    } else if exited_ok {
+        PushDisposition::Publish
+    } else {
+        PushDisposition::Abort
+    }
+}
+
+/// Parse `git for-each-ref --format='%(refname) %(objectname)'` output.
+///
+/// Every line must be a ref name, one space, and a 40-hex object id. Anything
+/// else is an error: a line that is skipped would publish a manifest without
+/// that ref, which deletes the ref for every later reader.
+fn parse_ref_snapshot(stdout: &[u8]) -> Result<BTreeMap<String, String>, CasError> {
+    let text = std::str::from_utf8(stdout)
+        .map_err(|e| CasError::PackCapture(format!("for-each-ref output is not UTF-8: {e}")))?;
+    let mut refs = BTreeMap::new();
+    for line in text.lines() {
+        let well_formed = line.split_once(' ').filter(|(name, oid)| {
+            !name.is_empty() && oid.len() == 40 && oid.chars().all(|c| c.is_ascii_hexdigit())
+        });
+        let Some((name, oid)) = well_formed else {
+            return Err(CasError::PackCapture(format!(
+                "for-each-ref returned a malformed line: {line:?}"
+            )));
+        };
+        if refs.len() >= MAX_MANIFEST_REFS && !refs.contains_key(name) {
+            return Err(CasError::ResourceLimit(format!(
+                "workspace contains more than {MAX_MANIFEST_REFS} refs"
+            )));
+        }
+        refs.insert(name.to_string(), oid.to_string());
+    }
+    Ok(refs)
+}
+
+/// Directory for the temporary files of a publication.
+///
+/// Hydrated repositories are direct children of the configured Git scratch
+/// root. Reusing that parent keeps temporary files on the mounted scratch
+/// volume without another path argument.
+fn scratch_dir_of(repo_path: &Path) -> Result<&Path, CasError> {
+    repo_path
+        .parent()
+        .ok_or_else(|| CasError::PackCapture("repository path has no scratch parent".into()))
+}
+
+/// Read every ref and the symbolic HEAD from the workspace at `repo_path`.
+pub async fn snapshot_workspace(repo_path: &Path) -> Result<WorkspaceState, CasError> {
     const MAX_REF_SNAPSHOT_BYTES: u64 = 4 * 1024 * 1024;
+    let scratch_dir = scratch_dir_of(repo_path)?;
 
     let refs_stdout_tmp = tempfile::NamedTempFile::new_in(scratch_dir)
         .map_err(|e| CasError::PackCapture(format!("for-each-ref stdout tempfile: {e}")))?;
@@ -313,26 +412,7 @@ async fn snapshot_workspace_state(
         .await
         .map_err(|e| CasError::PackCapture(format!("for-each-ref stdout read: {e}")))?;
 
-    let mut refs = BTreeMap::new();
-    for line in std::str::from_utf8(&refs_stdout)
-        .unwrap_or_default()
-        .lines()
-    {
-        let mut parts = line.splitn(2, ' ');
-        let (Some(name), Some(oid)) = (parts.next(), parts.next()) else {
-            continue;
-        };
-        if oid.len() != 40 || !oid.chars().all(|c| c.is_ascii_hexdigit()) {
-            warn!(ref_name = %name, oid = %oid, "for-each-ref returned malformed oid; skipping");
-            continue;
-        }
-        if refs.len() >= MAX_MANIFEST_REFS && !refs.contains_key(name) {
-            return Err(CasError::ResourceLimit(format!(
-                "workspace contains more than {MAX_MANIFEST_REFS} refs"
-            )));
-        }
-        refs.insert(name.to_string(), oid.to_string());
-    }
+    let refs = parse_ref_snapshot(&refs_stdout)?;
 
     let mut head_cmd = Command::new("git");
     head_cmd
@@ -349,7 +429,7 @@ async fn snapshot_workspace_state(
         String::new()
     };
 
-    Ok((refs, head))
+    Ok(WorkspaceState { refs, head })
 }
 
 fn resolve_published_head(
@@ -925,6 +1005,7 @@ fn compose_after(
         refs,
         packs,
         parent: parent_digest,
+        published_at: None,
     }
 }
 
@@ -942,6 +1023,7 @@ fn compose_compacted_after(
         refs,
         packs: compacted_pack_keys,
         parent: parent_digest,
+        published_at: None,
     }
 }
 
@@ -977,14 +1059,16 @@ fn record_compaction(
     }
 }
 
-/// The function the §Push step 2–7 protocol distills to.
+/// The function the §Push step 4–7 protocol distills to.
 ///
 /// **Caller contract — `Inv_RefDerivedFromParent` is structural.** The
 /// `parent_state` you pass in must be the same one the workspace was
 /// hydrated from. Concretely: `hydrate::hydrate_for_write(store, ctx, owner,
 /// repo)` returns `(HydratedRepo, ParentState)` from a single pointer
 /// observation → `install_hook(repo.path())` → run `receive-pack`
-/// against the workspace → call this with the **same `parent_state`**.
+/// against the workspace → [`snapshot_workspace`] → call this with the
+/// **same `parent_state`** and that snapshot, and only when
+/// [`push_disposition`] returned [`PushDisposition::Publish`].
 /// The CAS predicate is `parent_state.if_match`, so a concurrent writer
 /// that advanced the pointer between hydrate and CAS reliably surfaces
 /// as `CasError::Conflict { winner_manifest, .. }` (412 → HTTP 409). The
@@ -994,6 +1078,7 @@ fn record_compaction(
 /// at step 7 is the *only* writer serialization (`Inv_NoFork`). No
 /// advisory lock — adding one would hide exactly the interleavings the
 /// model proves safe.
+#[allow(clippy::too_many_arguments)] // the store, the repository identity and the two ref states
 pub async fn cas_publish(
     store: &GitStore,
     ctx: &TenantContext,
@@ -1001,6 +1086,7 @@ pub async fn cas_publish(
     owner: &str,
     repo: &str,
     parent_state: &ParentState,
+    workspace: &WorkspaceState,
     limits: PublishLimits,
 ) -> Result<CasSuccess, CasError> {
     cas_publish_inner(
@@ -1010,6 +1096,7 @@ pub async fn cas_publish(
         owner,
         repo,
         parent_state,
+        workspace,
         PublishOptions {
             limits,
             compaction_threshold: PACK_COMPACTION_THRESHOLD,
@@ -1018,6 +1105,7 @@ pub async fn cas_publish(
     .await
 }
 
+#[allow(clippy::too_many_arguments)] // same parameters as `cas_publish`
 async fn cas_publish_inner(
     store: &GitStore,
     ctx: &TenantContext,
@@ -1025,27 +1113,26 @@ async fn cas_publish_inner(
     owner: &str,
     repo: &str,
     parent_state: &ParentState,
+    workspace: &WorkspaceState,
     options: PublishOptions,
 ) -> Result<CasSuccess, CasError> {
     let limits = options.limits;
     let pkey = pointer_key(ctx.community(), owner, repo);
+    let scratch_dir = scratch_dir_of(repo_path)?;
 
-    // Hydrated repositories are direct children of the configured Git scratch
-    // root. Reuse that parent for publication tempfiles so they remain on the
-    // mounted scratch volume without adding another independent path argument.
-    let scratch_dir = repo_path
-        .parent()
-        .ok_or_else(|| CasError::PackCapture("repository path has no scratch parent".into()))?;
-
-    // Snapshot post-receive-pack state from disk. `parent_state.parent.refs`
+    // `workspace` is the post-receive-pack state. `parent_state.parent.refs`
     // are the refs the workspace was hydrated from — `pack-objects --revs`
     // below uses them as the "negative" set to produce the delta pack.
-    let (refs_after, head_observed) = snapshot_workspace_state(repo_path, scratch_dir).await?;
+    let refs_after = workspace.refs.clone();
 
     // Fresh bare repositories can inherit Git's environment-dependent
     // `master` symref even when the first push creates `main`. Publish a real
     // branch whenever one exists so HEAD never advertises a phantom branch.
-    let head = resolve_published_head(&refs_after, head_observed, &parent_state.parent.head);
+    let head = resolve_published_head(
+        &refs_after,
+        workspace.head.clone(),
+        &parent_state.parent.head,
+    );
 
     let packs_before = parent_state.parent.packs.len();
     let mut compaction_failure = None;
@@ -1167,6 +1254,16 @@ async fn cas_publish_inner(
             refs_after,
             new_pack_key,
         )
+    };
+    // Stamp the publication time on both the compacted and delta-pack paths.
+    // Strictly after the parent's stamp, so the derived kind:30618 events sort
+    // in manifest-chain order whichever instance and clock emit them.
+    let m_after = Manifest {
+        published_at: Some(next_published_at(
+            &parent_state.parent,
+            nostr::Timestamp::now().as_secs(),
+        )),
+        ..m_after
     };
 
     // **Pre-CAS validation** (Sami #2 / Max / Dawn): refuse to commit an
@@ -1389,6 +1486,67 @@ mod tests {
     #[test]
     fn digest_from_key_rejects_unknown_prefix() {
         assert!(digest_from_manifest_key("not/manifests/abc").is_err());
+    }
+
+    #[test]
+    fn push_disposition_publishes_only_changed_refs_from_a_clean_exit() {
+        let parent: BTreeMap<String, String> =
+            [("refs/heads/main".to_string(), "1".repeat(40))].into();
+        let mut advanced = parent.clone();
+        advanced.insert("refs/heads/main".into(), "2".repeat(40));
+        let mut created = parent.clone();
+        created.insert("refs/heads/feature".into(), "1".repeat(40));
+        let deleted = BTreeMap::new();
+
+        for exited_ok in [true, false] {
+            assert_eq!(
+                push_disposition(exited_ok, &parent, &parent),
+                PushDisposition::RelayOnly,
+                "unchanged refs are never published (exited_ok = {exited_ok})"
+            );
+        }
+        for changed in [&advanced, &created, &deleted] {
+            assert_eq!(
+                push_disposition(true, &parent, changed),
+                PushDisposition::Publish
+            );
+            assert_eq!(
+                push_disposition(false, &parent, changed),
+                PushDisposition::Abort
+            );
+        }
+    }
+
+    #[test]
+    fn ref_snapshot_rejects_every_line_it_cannot_read() {
+        let oid = "a".repeat(40);
+        let good = format!("refs/heads/main {oid}\nrefs/tags/v1 {oid}\n");
+        let refs = parse_ref_snapshot(good.as_bytes()).expect("well-formed snapshot");
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs.get("refs/heads/main"), Some(&oid));
+        assert!(parse_ref_snapshot(b"").expect("empty snapshot").is_empty());
+
+        // A skipped line would publish a manifest without that ref. Each of
+        // these used to be skipped, and non-UTF-8 output used to read as an
+        // empty repository.
+        let mut not_utf8 = good.clone().into_bytes();
+        not_utf8.extend_from_slice(b"refs/heads/\xff ");
+        not_utf8.extend_from_slice(oid.as_bytes());
+        not_utf8.push(b'\n');
+        let malformed: [Vec<u8>; 5] = [
+            not_utf8,
+            format!("{good}refs/heads/no-oid\n").into_bytes(),
+            format!("{good}refs/heads/short abc123\n").into_bytes(),
+            format!("{good}refs/heads/not-hex {}\n", "z".repeat(40)).into_bytes(),
+            format!("{good} {oid}\n").into_bytes(),
+        ];
+        for input in malformed {
+            assert!(
+                matches!(parse_ref_snapshot(&input), Err(CasError::PackCapture(_))),
+                "accepted {:?}",
+                String::from_utf8_lossy(&input)
+            );
+        }
     }
 
     #[test]
@@ -1700,6 +1858,8 @@ mod tests {
             refs: parent_refs,
             packs: vec![first_pack_key, second_pack_key],
             parent: None,
+            // Stamped by an instance whose clock runs far ahead of this one.
+            published_at: Some(4_000_000_000),
         };
         parent.validate().expect("parent manifest");
         let parent_key = store
@@ -1764,6 +1924,9 @@ mod tests {
             limits,
             compaction_threshold: 2,
         };
+        let workspace = snapshot_workspace(hydrated.path())
+            .await
+            .expect("snapshot pushed workspace");
         let success = cas_publish_inner(
             &store,
             &ctx,
@@ -1771,6 +1934,7 @@ mod tests {
             &owner,
             repo,
             &parent_state,
+            &workspace,
             test_options,
         )
         .await
@@ -1782,6 +1946,11 @@ mod tests {
         );
         assert!(success.manifest.refs.contains_key("refs/tags/v1"));
         assert_eq!(success.manifest.parent, Some(parent_digest));
+        assert_eq!(
+            success.manifest.published_at,
+            Some(4_000_000_001),
+            "the child's kind:30618 must sort after its parent's"
+        );
 
         let conflict = cas_publish_inner(
             &store,
@@ -1790,6 +1959,7 @@ mod tests {
             &owner,
             repo,
             &parent_state,
+            &workspace,
             test_options,
         )
         .await
