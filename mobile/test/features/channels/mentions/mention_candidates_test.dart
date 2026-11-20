@@ -168,7 +168,7 @@ void main() {
       expect(human.displayName, 'Wes Outside');
     });
 
-    test('offers only owned agents the Agents page lists', () {
+    test('requires a registered owned agent outside the channel', () {
       final listed = '2' * 64;
       final unlisted = '4' * 64;
       final unlistedMember = '5' * 64;
@@ -203,8 +203,8 @@ void main() {
         offerOwnedAgents: offer,
       );
 
-      // Members always stay; an earlier Buzz's agent outside the channel is
-      // offered neither from the directory nor from search.
+      // The unregistered member stays, while neither shared-directory nor
+      // search results can add an unregistered owned agent to the picker.
       for (final offer in [false, true]) {
         final candidates = build(offer: offer);
         expect(candidates.map((c) => c.pubkey), [unlistedMember, listed]);

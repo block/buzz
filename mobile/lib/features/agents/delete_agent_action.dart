@@ -83,7 +83,7 @@ class DeleteAgentAction extends HookConsumerWidget {
       }
       if (!context.mounted) return;
       ref.invalidate(agentDirectoryProvider);
-      ref.invalidate(ownedAgentDirectoryProvider);
+      ref.invalidate(ownedAgentInventoryProvider);
       if (success) {
         Navigator.of(context).pop();
       } else {

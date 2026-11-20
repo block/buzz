@@ -56,7 +56,7 @@ final _voiceInventoryChangesProvider = Provider.autoDispose<void>((ref) {
       unsubscribe = await sync.session.subscribe(
         NostrFilter(kinds: const [30177], authors: [sync.pubkey], limit: 0),
         (_) {
-          if (!disposed) ref.invalidate(ownedAgentDirectoryProvider);
+          if (!disposed) ref.invalidate(ownedAgentInventoryProvider);
           ref.invalidate(identityArchivesProvider);
         },
       );
@@ -102,7 +102,7 @@ Future<String?> resolveDmVoiceAgent(Ref ref, String parentChannelId) async {
       ref.read(dmVoiceCandidateProvider(parentChannelId)) == null) {
     return null;
   }
-  ref.invalidate(ownedAgentDirectoryProvider);
+  ref.invalidate(ownedAgentInventoryProvider);
   ref.invalidate(identityArchivesProvider);
   final agents = await ref.read(ownedCodexVoiceAgentsProvider.future);
   final agent = dmVoiceAgent(channel, ref.read(currentPubkeyProvider), agents);

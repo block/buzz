@@ -14,9 +14,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../helpers/recipient_directory_session.dart';
+import '../../helpers/remote_agents_fixture.dart';
 
 final _alice = 'a' * 64;
-final _bob = 'b' * 64;
+final _bob = fakeAgent;
 final _existing = 'e' * 64;
 final _avatar =
     'data:image/svg+xml,${Uri.encodeComponent('<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72"><rect width="72" height="72" fill="#0000ff"/></svg>')}';
@@ -53,6 +54,7 @@ Future<void> _pump(
   _Actions actions, {
   Map<String, String>? people,
   Set<String>? agents,
+  bool ownedBob = false,
 }) async {
   await tester.pumpWidget(
     ProviderScope(
@@ -61,11 +63,21 @@ Future<void> _pump(
         channelActionsProvider.overrideWithValue(actions),
         channelMembersProvider('channel').overrideWith((ref) async => []),
         appLifecycleProvider.overrideWith(_Lifecycle.new),
+        if (ownedBob) myPubkeyProvider.overrideWithValue(fakeOwner.public),
         relaySessionProvider.overrideWith(
           () => RecipientDirectorySession(
             people ?? {_alice: 'Alice', _bob: 'Bob', _existing: 'Existing'},
-            agents: agents ?? {_bob},
+            agents: agents ?? (ownedBob ? const {} : {_bob}),
             pictures: {_bob: _avatar},
+            registrations: [if (ownedBob) signedAgentRegistration(_bob)],
+            signedProfiles: {
+              if (ownedBob)
+                _bob: signedAgentProfile(
+                  fakeAgentKeys,
+                  fakeOwner,
+                  content: '{"name":"Bob"}',
+                ),
+            },
           ),
         ),
       ],
@@ -206,11 +218,14 @@ void main() {
           });
       try {
         final actions = _Actions()..failBob = true;
-        await _pump(tester, actions);
+        await _pump(tester, actions, ownedBob: true);
         expect(methods.first, 'present');
         expect(find.byType(TextField), findsNothing);
-        // No directory dump: people are found by name, as with `@`.
-        expect(states.last['users'], isEmpty);
+        // The owner sees their registered agent without a desktop runtime.
+        // Other people are found by name, as with `@`.
+        final initial = (states.last['users'] as List).single as Map;
+        expect(initial['pubkey'], _bob);
+        expect(initial['detail'], 'agent · managed by you');
         expect(
           states.last['emptyQueryHint'],
           'Type a name to find people or agents.',

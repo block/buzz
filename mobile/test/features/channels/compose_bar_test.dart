@@ -64,6 +64,9 @@ import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../helpers/recipient_directory_session.dart';
+import '../../helpers/remote_agents_fixture.dart';
+
 part 'compose_bar_test/exact_mention_tests.dart';
 part 'compose_bar_test/ios_controls_tests.dart';
 part 'compose_bar_test/mixed_gallery_tests.dart';
@@ -281,9 +284,9 @@ Widget _buildComposeBar({
     overrides: [
       ...overrides,
       if (ownedAgents != null)
-        ownedAgentDirectoryProvider.overrideWith((ref) async => ownedAgents),
+        ownedAgentRecipientsProvider.overrideWith((ref) async => ownedAgents),
       if (ownedAgentsUnknown)
-        ownedAgentDirectoryProvider.overrideWith(
+        ownedAgentRecipientsProvider.overrideWith(
           (ref) => Completer<List<OwnedAgentDirectoryEntry>>().future,
         ),
       // Directory people by exact query, found after the real typing pause.

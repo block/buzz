@@ -87,6 +87,7 @@ import 'package:buzz/shared/verified_profiles/verified_profile_directory.dart';
 import '../../shared/community/community_storage_test.dart'
     show FakeSecureStorage;
 import '../../helpers/recipient_directory_session.dart';
+import '../../helpers/remote_agents_fixture.dart';
 import '../../helpers/thread_ids.dart';
 
 part 'channels_page_test/presence_tests.dart';
@@ -3755,25 +3756,30 @@ void main() {
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
 
-      final waits = <bool>[];
+      final actions = _PendingDmActions();
       final alice = _dmKey(0);
       final bob = _dmKey(1);
       final charlie = _dmKey(2);
-      final danielle = _dmKey(3);
-      final session = RecipientDirectorySession({
-        alice: 'Alice',
-        bob: 'Bob',
-        charlie: 'Charlie',
-        danielle: 'Danielle',
-      });
+      final danielle = fakeAgent;
+      final session = RecipientDirectorySession(
+        {alice: 'Alice', bob: 'Bob', charlie: 'Charlie', danielle: 'Danielle'},
+        registrations: [signedAgentRegistration(danielle)],
+        signedProfiles: {
+          danielle: signedAgentProfile(
+            fakeAgentKeys,
+            fakeOwner,
+            content: '{"name":"Danielle"}',
+          ),
+        },
+      );
       await tester.pumpWidget(
         buildTestable(
+          profile: _FakeProfileNotifier(pubkey: fakeOwner.public),
           overrides: [
             channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
             relaySessionProvider.overrideWith(() => session),
-            channelActionsProvider.overrideWith(
-              (ref) => _PendingDmActions(waits),
-            ),
+            myPubkeyProvider.overrideWithValue(fakeOwner.public),
+            channelActionsProvider.overrideWithValue(actions),
           ],
         ),
       );
@@ -3806,11 +3812,10 @@ void main() {
       final recipientField = find.byKey(const Key('new-dm-recipient-field'));
       final initialRecipientWidth = tester.getSize(recipientField).width;
       expect(tester.getSize(recipientField).height, greaterThanOrEqualTo(48));
-      // No directory dump: people are found by name, as with `@`.
-      expect(
-        find.text('Type a name to find people or agents.'),
-        findsOneWidget,
-      );
+      // The registered agent is offered before typing. People from outside
+      // the viewer's channels are found by name.
+      expect(find.byKey(Key('new-dm-person-$danielle')), findsOneWidget);
+      expect(find.text('agent · managed by you'), findsOneWidget);
       expect(find.byKey(Key('new-dm-person-$alice')), findsNothing);
       expect(
         tester
@@ -3958,7 +3963,8 @@ void main() {
       // The header action opens the DM without waiting on the full channel list.
       await tester.tap(find.byKey(const Key('new-dm-submit')));
       await tester.pump();
-      expect(waits, [false]);
+      expect(actions.waits, [false]);
+      expect(actions.recipients.single, [alice, charlie, danielle]);
       expect(
         tester
             .widget<IconButton>(find.byKey(const Key('new-dm-submit')))
@@ -5080,9 +5086,8 @@ ChannelFilterManager _filterTestManager({
 }
 
 class _PendingDmActions implements ChannelActions {
-  _PendingDmActions(this.waits);
-
-  final List<bool> waits;
+  final waits = <bool>[];
+  final recipients = <List<String>>[];
 
   @override
   Future<Channel> openDm({
@@ -5090,6 +5095,7 @@ class _PendingDmActions implements ChannelActions {
     bool waitForChannelList = true,
   }) {
     waits.add(waitForChannelList);
+    recipients.add(pubkeys);
     return Completer<Channel>().future;
   }
 
