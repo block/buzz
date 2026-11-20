@@ -57,7 +57,6 @@ loss against the relay writer before purging that channel's saved pages.
 
 An individual message deleted while its channel is closed may still appear
 in an offline preview until the app refreshes that conversation online.
-[Deletion reconciliation for closed channels](https://github.com/block/buzz/issues/9828)
 
 ## Follow-up
 
