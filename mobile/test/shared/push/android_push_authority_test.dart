@@ -7,6 +7,7 @@ import 'package:buzz/shared/push/android_push_keystore.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../../helpers/android_push_fakes.dart';
+import '../community/community_storage_test.dart' show FakeSecureStorage;
 
 class _MemoryStore implements AndroidPushStateStore {
   String? value;
@@ -22,6 +23,7 @@ const _relayA = 'wss://relay-a.example';
 const _relayB = 'wss://relay-b.example';
 final _keyA = 'a' * 64;
 final _keyB = 'b' * 64;
+final _keyC = 'c' * 64;
 
 void main() {
   late int now;
@@ -383,4 +385,85 @@ void main() {
       });
     },
   );
+
+  // ---- delegations are keyed by executor key ----
+
+  test('communities on one relay share the delegation of its key', () async {
+    await enroll(relay: _relayA, pubkey: _keyA);
+    await enroll(relay: _relayB, pubkey: _keyA);
+
+    // The gateway keys a delegation by relay key, so one call serves both.
+    expect(gateway.bodiesFor('/v1/delegations'), hasLength(1));
+    expect(gateway.installations, hasLength(1));
+    final installation = gateway.installations.values.single;
+
+    Future<void> reconcile(Set<String> desired) => authority.reconcile(
+      desiredRelays: () => desired,
+      revokeInstallation: () => false,
+    );
+    await reconcile({_relayB});
+    await reconcile({_relayA});
+    expect(installation.revokedDelegations, isEmpty);
+
+    await reconcile({});
+    expect(installation.revokedDelegations, {'$_keyA/1'});
+    // Tombstones still read each origin's grant afterwards.
+    expect((await authority.grants()).map((g) => g.relayOrigin), {
+      _relayA,
+      _relayB,
+    });
+  });
+
+  test('a rotated relay key is revoked, and so is its successor', () async {
+    await enroll(relay: _relayA, pubkey: _keyA);
+    await enroll(relay: _relayB, pubkey: _keyC);
+    final rotated = await enroll(relay: _relayA, pubkey: _keyB);
+    expect(rotated.relayPubkey, _keyB);
+    final installation = gateway.installations.values.single;
+
+    Future<void> reconcile(Set<String> desired) => authority.reconcile(
+      desiredRelays: () => desired,
+      revokeInstallation: () => false,
+    );
+    await reconcile({_relayA, _relayB});
+    expect(installation.revokedDelegations, {'$_keyA/1'});
+
+    // The community on the other key stays, so only the first one's goes.
+    await reconcile({_relayB});
+    expect(installation.revokedDelegations, {'$_keyA/1', '$_keyB/1'});
+  });
+
+  test('a lost delegation response for a new key is revoked too', () async {
+    await enroll(relay: _relayA, pubkey: _keyA);
+    gateway.loseResponseFor.add('/v1/delegations');
+    await expectLater(
+      enroll(relay: _relayA, pubkey: _keyB),
+      throwsA(isA<Exception>()),
+    );
+
+    await authority.reconcile(
+      desiredRelays: () => {},
+      revokeInstallation: () => false,
+    );
+
+    // The gateway accepted the key's first generation, which was never stored
+    // as accepted, so it is the spent one that is tried.
+    expect(gateway.installations.values.single.revokedDelegations, {
+      '$_keyA/1',
+      '$_keyB/1',
+    });
+  });
+
+  test('state from the previous storage key is dropped', () async {
+    final secure = FakeSecureStorage();
+    await secure.write(key: 'buzz_android_push_authority_v1', value: '{}');
+    final store = SecureAndroidPushStateStore(secure: secure);
+
+    expect(await store.read(), isNull);
+
+    expect(await secure.read(key: 'buzz_android_push_authority_v1'), isNull);
+    await store.write('state');
+    expect(await store.read(), 'state');
+    expect(await secure.read(key: 'buzz_android_push_authority_v2'), 'state');
+  });
 }

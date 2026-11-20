@@ -59,12 +59,20 @@ class SecureAndroidPushStateStore implements AndroidPushStateStore {
   SecureAndroidPushStateStore({FlutterSecureStorage? secure})
     : _secure = secure ?? communitySecureStorage;
 
-  static const _key = 'buzz_android_push_authority_v1';
+  static const _key = 'buzz_android_push_authority_v2';
+
+  /// The state keyed by origin, from before delegations were keyed by executor
+  /// key. Android push had not shipped, so it is dropped rather than migrated.
+  static const _legacyKey = 'buzz_android_push_authority_v1';
 
   final FlutterSecureStorage _secure;
+  Future<void>? _legacyDropped;
 
   @override
-  Future<String?> read() => _secure.read(key: _key);
+  Future<String?> read() async {
+    await (_legacyDropped ??= _secure.delete(key: _legacyKey));
+    return _secure.read(key: _key);
+  }
 
   @override
   Future<void> write(String? value) => value == null
@@ -72,7 +80,7 @@ class SecureAndroidPushStateStore implements AndroidPushStateStore {
       : _secure.write(key: _key, value: value);
 }
 
-/// The Android installation and its per-relay delegations.
+/// The Android installation and its delegations.
 ///
 /// The Keystore key is the installation's only authority: it signs the
 /// enrollment attestation challenge and every later call. Each call is
@@ -80,6 +88,11 @@ class SecureAndroidPushStateStore implements AndroidPushStateStore {
 /// the next delegation generation; an unfinished endpoint rotation), so a
 /// lost response or a killed process is resumed rather than repeated with
 /// different bytes. Calls that change state run one at a time.
+///
+/// The gateway keys a delegation by the relay's executor key, so that is what
+/// is delegated, generated and revoked here. Relay origins only point at the
+/// key they use, which lets communities that share a relay share one
+/// delegation, and a key that no origin points at any more be revoked.
 class AndroidPushAuthority {
   AndroidPushAuthority({
     required this.keystore,
@@ -111,16 +124,19 @@ class AndroidPushAuthority {
     return result;
   }
 
-  /// Every relay's current grant. A plain read of the stored state, outside
-  /// the call queue: it must not wait behind gateway calls or the enrollment
-  /// jitter, and the state is only ever replaced whole.
+  /// Every relay origin's current grant. A plain read of the stored state,
+  /// outside the call queue: it must not wait behind gateway calls or the
+  /// enrollment jitter, and the state is only ever replaced whole.
   Future<List<AndroidPushGrant>> grants() async {
     final state = await _load();
-    return [for (final relay in state.relays.values) ?_grantOf(relay)];
+    return [
+      for (final origin in state.origins.values)
+        ?_grantOf(origin, state.delegations[origin.pubkey]),
+    ];
   }
 
   /// Makes [endpoint] (the FCM token) the installation's endpoint and returns
-  /// a grant from the installation to [relayPubkey] at [relayOrigin],
+  /// a grant from the installation to [relayPubkey] for [relayOrigin],
   /// enrolling, rotating and delegating only as far as the stored state needs.
   Future<AndroidPushGrant> enroll({
     required String relayOrigin,
@@ -131,30 +147,30 @@ class AndroidPushAuthority {
     while (true) {
       await _ensureInstallation(endpoint);
       final state = await _load();
-      final relay = state.relays[relayOrigin];
-      final reusable = relay == null
-          ? null
-          : _reusableGrant(state, relay, relayPubkey);
-      if (reusable != null) return reusable;
-      try {
-        return await _delegate(relayOrigin, relayPubkey);
-      } on AndroidPushGatewayRejection catch (rejection) {
-        // The gateway answers every refused installation call with the same
-        // 404. After the one case we can explain (an endpoint rotation whose
-        // response was lost, which _rotate has already accounted for), a
-        // refused delegation means the installation is gone: revoked,
-        // expired, or enrolled under a key this phone no longer has.
-        if (!rejection.isNotAuthorized || attemptedReset) rethrow;
-        attemptedReset = true;
-        await _reset();
+      final delegation = state.delegations[relayPubkey];
+      if (delegation == null || !_reusable(state, delegation)) {
+        try {
+          await _delegate(relayPubkey);
+        } on AndroidPushGatewayRejection catch (rejection) {
+          // The gateway answers every refused installation call with the same
+          // 404. After the one case we can explain (an endpoint rotation whose
+          // response was lost, which _rotate has already accounted for), a
+          // refused delegation means the installation is gone: revoked,
+          // expired, or enrolled under a key this phone no longer has.
+          if (!rejection.isNotAuthorized || attemptedReset) rethrow;
+          attemptedReset = true;
+          await _reset();
+          continue;
+        }
       }
+      return _pointOrigin(relayOrigin, relayPubkey);
     }
   });
 
-  /// Revokes the delegation of every relay [desiredRelays] no longer lists,
-  /// and, when [revokeInstallation], the installation itself, which frees the
-  /// FCM token and deletes the key. [desiredRelays] is read when the work
-  /// runs, so a relay enabled while this waited is kept.
+  /// Revokes the delegation of every executor key no origin in
+  /// [desiredRelays] uses, and, when [revokeInstallation], the installation
+  /// itself, which frees the FCM token and deletes the key. [desiredRelays] is
+  /// read when the work runs, so a relay enabled while this waited is kept.
   Future<void> reconcile({
     required Set<String> Function() desiredRelays,
     required bool Function() revokeInstallation,
@@ -170,9 +186,13 @@ class AndroidPushAuthority {
     }
     if (state.installation == null) return;
     final desired = desiredRelays();
-    for (final relay in state.relays.values.toList()) {
-      if (relay.delegated && !desired.contains(relay.origin)) {
-        await _revokeDelegation(relay);
+    final referenced = {
+      for (final origin in state.origins.values)
+        if (desired.contains(origin.origin)) origin.pubkey,
+    };
+    for (final delegation in state.delegations.values.toList()) {
+      if (delegation.delegated && !referenced.contains(delegation.pubkey)) {
+        await _revokeDelegation(delegation);
       }
     }
     if (revokeInstallation()) await _revokeInstallation();
@@ -212,7 +232,7 @@ class AndroidPushAuthority {
   }
 
   Future<void> _enrollFresh(String endpoint) async {
-    if ((await _load()).relays.isEmpty &&
+    if ((await _load()).origins.isEmpty &&
         firstEnrollmentJitterMax > Duration.zero) {
       await _sleep(
         Duration(
@@ -330,9 +350,12 @@ class AndroidPushAuthority {
     await _save(
       state.copyWith(
         clearInstallation: true,
-        relays: {
-          for (final relay in state.relays.values)
-            relay.origin: relay.copyWith(generation: 0, delegated: false),
+        delegations: {
+          for (final delegation in state.delegations.values)
+            delegation.pubkey: delegation.copyWith(
+              generation: 0,
+              delegated: false,
+            ),
         },
       ),
     );
@@ -387,34 +410,27 @@ class AndroidPushAuthority {
 
   // ---- delegations ----
 
-  AndroidPushGrant? _reusableGrant(
-    _State state,
-    _Relay relay,
-    String relayPubkey,
-  ) {
+  /// Whether [delegation]'s grant can still be used as is.
+  bool _reusable(_State state, _Delegation delegation) {
     final installation = state.installation!;
-    final grant = relay.grant;
-    if (grant == null ||
-        !relay.delegated ||
-        grant.installationHandle != installation.handle ||
-        grant.relayPubkey != relayPubkey ||
-        grant.endpointEpoch != installation.endpointEpoch ||
+    final grant = delegation.grant;
+    return grant != null &&
+        delegation.delegated &&
+        grant.installationHandle == installation.handle &&
+        grant.endpointEpoch == installation.endpointEpoch &&
         // A higher journaled generation is a delegation that has not
         // finished, after a revocation or a change this grant predates.
-        grant.generation != relay.generation ||
-        grant.expiresAt <= _nowSeconds + _renewWindowSeconds) {
-      return null;
-    }
-    return _grantOf(relay);
+        grant.generation == delegation.generation &&
+        grant.expiresAt > _nowSeconds + _renewWindowSeconds;
   }
 
-  AndroidPushGrant? _grantOf(_Relay relay) {
-    final grant = relay.grant;
+  AndroidPushGrant? _grantOf(_Origin origin, _Delegation? delegation) {
+    final grant = delegation?.grant;
     if (grant == null) return null;
     return AndroidPushGrant(
-      relayOrigin: relay.origin,
-      relayPubkey: grant.relayPubkey,
-      installationId: relay.installationId,
+      relayOrigin: origin.origin,
+      relayPubkey: origin.pubkey,
+      installationId: origin.installationId,
       endpointGrant: grant.endpointGrant,
       endpointHash: grant.endpointHash,
       endpointEpoch: grant.endpointEpoch,
@@ -423,32 +439,43 @@ class AndroidPushAuthority {
     );
   }
 
-  Future<AndroidPushGrant> _delegate(
+  /// Points [relayOrigin] at [relayPubkey], whose delegation is current, and
+  /// returns the origin's grant.
+  Future<AndroidPushGrant> _pointOrigin(
     String relayOrigin,
     String relayPubkey,
   ) async {
+    final state = await _load();
+    final existing = state.origins[relayOrigin];
+    final origin = _Origin(
+      origin: relayOrigin,
+      installationId: existing?.installationId ?? _newInstallationId(),
+      pubkey: relayPubkey,
+    );
+    if (existing?.pubkey != relayPubkey) {
+      await _save(
+        state.copyWith(origins: {...state.origins, relayOrigin: origin}),
+      );
+    }
+    return _grantOf(origin, state.delegations[relayPubkey])!;
+  }
+
+  Future<void> _delegate(String relayPubkey) async {
     var state = await _load();
     final installation = state.installation!;
-    final existing = state.relays[relayOrigin];
+    final existing = state.delegations[relayPubkey];
     // The generation is spent before the call: a response that never arrived
     // may have been accepted, and the gateway needs each one to be higher.
     final generation = (existing?.generation ?? 0) + 1;
-    final relay =
-        (existing ??
-                _Relay(
-                  origin: relayOrigin,
-                  installationId: _newInstallationId(),
-                ))
-            .copyWith(
-              generation: generation,
-              delegated: true,
-              lastRelayPubkey: relayPubkey,
-            );
+    final delegation = (existing ?? _Delegation(pubkey: relayPubkey)).copyWith(
+      generation: generation,
+      delegated: true,
+    );
     final notBefore = _nowSeconds - _clockSkewAllowanceSeconds;
     final expiresAt = notBefore + _lifetimeSeconds;
     await _save(
       state.copyWith(
-        relays: {...state.relays, relayOrigin: relay},
+        delegations: {...state.delegations, relayPubkey: delegation},
         // An accepted delegation extends the installation to the grant's
         // expiry, and its response may be lost, so the extension is recorded
         // first. If the gateway never accepted it, the installation's next
@@ -485,10 +512,9 @@ class AndroidPushAuthority {
       throw const FormatException('Push gateway returned a malformed grant.');
     }
     state = await _load();
-    final granted = relay.copyWith(
-      grant: _RelayGrant(
+    final granted = delegation.copyWith(
+      grant: _DelegationGrant(
         installationHandle: installation.handle,
-        relayPubkey: relayPubkey,
         endpointGrant: endpointGrant,
         endpointHash: crypto.sha256
             .convert(utf8.encode(installation.endpoint))
@@ -499,50 +525,50 @@ class AndroidPushAuthority {
       ),
     );
     await _save(
-      state.copyWith(relays: {...state.relays, relayOrigin: granted}),
+      state.copyWith(delegations: {...state.delegations, relayPubkey: granted}),
     );
-    return _grantOf(granted)!;
   }
 
-  Future<void> _revokeDelegation(_Relay relay) async {
+  Future<void> _revokeDelegation(_Delegation delegation) async {
     final installation = (await _load()).installation!;
-    final pubkey = relay.lastRelayPubkey;
-    if (pubkey != null) {
-      // The highest generation spent may never have been accepted, and the
-      // gateway revokes by the generation it holds: try that one, then the
-      // last one accepted.
-      for (final generation in {relay.generation, ?relay.grant?.generation}) {
-        try {
-          await _signed(
-            '/v1/delegations/revoke',
-            {
-              'installation_handle': installation.handle,
-              'relay_pubkey': pubkey,
-              'generation': generation,
-            },
-            (challenge) => androidRevokeDelegationTranscript(
-              challengeId: challenge.id,
-              challenge: challenge.text,
-              installationHandle: installation.handle,
-              relayPubkey: pubkey,
-              generation: generation,
-            ),
-          );
-          break;
-        } on AndroidPushGatewayRejection catch (rejection) {
-          // Not found at this generation. If no generation matches, the
-          // delegation is already gone or its installation is, and there is
-          // nothing left to revoke.
-          if (!rejection.isNotAuthorized) rethrow;
-        }
+    final pubkey = delegation.pubkey;
+    // The highest generation spent may never have been accepted, and the
+    // gateway revokes by the generation it holds: try that one, then the last
+    // one accepted.
+    for (final generation in {
+      delegation.generation,
+      ?delegation.grant?.generation,
+    }) {
+      try {
+        await _signed(
+          '/v1/delegations/revoke',
+          {
+            'installation_handle': installation.handle,
+            'relay_pubkey': pubkey,
+            'generation': generation,
+          },
+          (challenge) => androidRevokeDelegationTranscript(
+            challengeId: challenge.id,
+            challenge: challenge.text,
+            installationHandle: installation.handle,
+            relayPubkey: pubkey,
+            generation: generation,
+          ),
+        );
+        break;
+      } on AndroidPushGatewayRejection catch (rejection) {
+        // Not found at this generation. If no generation matches, the
+        // delegation is already gone or its installation is, and there is
+        // nothing left to revoke.
+        if (!rejection.isNotAuthorized) rethrow;
       }
     }
     final state = await _load();
     await _save(
       state.copyWith(
-        relays: {
-          ...state.relays,
-          relay.origin: relay.copyWith(delegated: false),
+        delegations: {
+          ...state.delegations,
+          pubkey: delegation.copyWith(delegated: false),
         },
       ),
     );
@@ -586,9 +612,12 @@ class AndroidPushAuthority {
     await _save(
       state.copyWith(
         clearInstallation: true,
-        relays: {
-          for (final relay in state.relays.values)
-            relay.origin: relay.copyWith(generation: 0, delegated: false),
+        delegations: {
+          for (final delegation in state.delegations.values)
+            delegation.pubkey: delegation.copyWith(
+              generation: 0,
+              delegated: false,
+            ),
         },
       ),
     );
@@ -733,10 +762,9 @@ class _Installation {
   );
 }
 
-class _RelayGrant {
-  const _RelayGrant({
+class _DelegationGrant {
+  const _DelegationGrant({
     required this.installationHandle,
-    required this.relayPubkey,
     required this.endpointGrant,
     required this.endpointHash,
     required this.endpointEpoch,
@@ -745,7 +773,6 @@ class _RelayGrant {
   });
 
   final String installationHandle;
-  final String relayPubkey;
   final String endpointGrant;
   final String endpointHash;
   final int endpointEpoch;
@@ -754,7 +781,6 @@ class _RelayGrant {
 
   Map<String, Object?> toJson() => {
     'installationHandle': installationHandle,
-    'relayPubkey': relayPubkey,
     'endpointGrant': endpointGrant,
     'endpointHash': endpointHash,
     'endpointEpoch': endpointEpoch,
@@ -762,80 +788,93 @@ class _RelayGrant {
     'expiresAt': expiresAt,
   };
 
-  factory _RelayGrant.fromJson(Map<String, Object?> json) => _RelayGrant(
-    installationHandle: json['installationHandle']! as String,
-    relayPubkey: json['relayPubkey']! as String,
-    endpointGrant: json['endpointGrant']! as String,
-    endpointHash: json['endpointHash']! as String,
-    endpointEpoch: json['endpointEpoch']! as int,
-    generation: json['generation']! as int,
-    expiresAt: json['expiresAt']! as int,
-  );
+  factory _DelegationGrant.fromJson(Map<String, Object?> json) =>
+      _DelegationGrant(
+        installationHandle: json['installationHandle']! as String,
+        endpointGrant: json['endpointGrant']! as String,
+        endpointHash: json['endpointHash']! as String,
+        endpointEpoch: json['endpointEpoch']! as int,
+        generation: json['generation']! as int,
+        expiresAt: json['expiresAt']! as int,
+      );
 }
 
-/// What the phone holds for one relay origin.
-class _Relay {
-  const _Relay({
-    required this.origin,
-    required this.installationId,
+/// What the phone holds for one executor key, which is what the gateway keys
+/// a delegation by.
+class _Delegation {
+  const _Delegation({
+    required this.pubkey,
     this.generation = 0,
     this.delegated = false,
     this.grant,
-    this.lastRelayPubkey,
   });
 
-  final String origin;
-
-  /// The lease's identity, kept across installations.
-  final String installationId;
+  final String pubkey;
 
   /// The highest delegation generation spent, accepted or not.
   final int generation;
 
-  /// Whether a delegation from this installation to the relay may exist at
-  /// the gateway: set before the first attempt, cleared by revocation.
+  /// Whether a delegation from this installation to the key may exist at the
+  /// gateway: set before the first attempt, cleared by revocation.
   final bool delegated;
 
   /// The last delegation the gateway accepted. It stays after revocation or
   /// a reset, because a lease tombstone still reads it.
-  final _RelayGrant? grant;
+  final _DelegationGrant? grant;
 
-  /// The relay key of the delegation attempted last, for revoking one whose
-  /// response was lost.
-  final String? lastRelayPubkey;
-
-  _Relay copyWith({
+  _Delegation copyWith({
     int? generation,
     bool? delegated,
-    _RelayGrant? grant,
-    String? lastRelayPubkey,
-  }) => _Relay(
-    origin: origin,
-    installationId: installationId,
+    _DelegationGrant? grant,
+  }) => _Delegation(
+    pubkey: pubkey,
     generation: generation ?? this.generation,
     delegated: delegated ?? this.delegated,
     grant: grant ?? this.grant,
-    lastRelayPubkey: lastRelayPubkey ?? this.lastRelayPubkey,
   );
 
   Map<String, Object?> toJson() => {
-    'origin': origin,
-    'installationId': installationId,
+    'pubkey': pubkey,
     'generation': generation,
     'delegated': delegated,
     'grant': grant?.toJson(),
-    'lastRelayPubkey': lastRelayPubkey,
   };
 
-  factory _Relay.fromJson(Map<String, Object?> json) => _Relay(
-    origin: json['origin']! as String,
-    installationId: json['installationId']! as String,
+  factory _Delegation.fromJson(Map<String, Object?> json) => _Delegation(
+    pubkey: json['pubkey']! as String,
     generation: json['generation']! as int,
     delegated: json['delegated']! as bool,
     grant: json['grant'] == null
         ? null
-        : _RelayGrant.fromJson(json['grant']! as Map<String, Object?>),
-    lastRelayPubkey: json['lastRelayPubkey'] as String?,
+        : _DelegationGrant.fromJson(json['grant']! as Map<String, Object?>),
+  );
+}
+
+/// What the phone holds for one relay origin: its lease identity, and the
+/// executor key it currently uses.
+class _Origin {
+  const _Origin({
+    required this.origin,
+    required this.installationId,
+    required this.pubkey,
+  });
+
+  final String origin;
+
+  /// The lease's identity, kept across installations and keys.
+  final String installationId;
+  final String pubkey;
+
+  Map<String, Object?> toJson() => {
+    'origin': origin,
+    'installationId': installationId,
+    'pubkey': pubkey,
+  };
+
+  factory _Origin.fromJson(Map<String, Object?> json) => _Origin(
+    origin: json['origin']! as String,
+    installationId: json['installationId']! as String,
+    pubkey: json['pubkey']! as String,
   );
 }
 
@@ -843,36 +882,44 @@ class _State {
   const _State({
     this.installation,
     this.pendingEnrollment,
-    this.relays = const {},
+    this.delegations = const {},
+    this.origins = const {},
   });
 
   static const empty = _State();
 
   final _Installation? installation;
   final _PendingEnrollment? pendingEnrollment;
-  final Map<String, _Relay> relays;
+  final Map<String, _Delegation> delegations;
+  final Map<String, _Origin> origins;
 
   bool get isEmpty =>
-      installation == null && pendingEnrollment == null && relays.isEmpty;
+      installation == null &&
+      pendingEnrollment == null &&
+      delegations.isEmpty &&
+      origins.isEmpty;
 
   _State copyWith({
     _Installation? installation,
     bool clearInstallation = false,
     _PendingEnrollment? pendingEnrollment,
     bool clearPendingEnrollment = false,
-    Map<String, _Relay>? relays,
+    Map<String, _Delegation>? delegations,
+    Map<String, _Origin>? origins,
   }) => _State(
     installation: clearInstallation ? null : installation ?? this.installation,
     pendingEnrollment: clearPendingEnrollment
         ? null
         : pendingEnrollment ?? this.pendingEnrollment,
-    relays: relays ?? this.relays,
+    delegations: delegations ?? this.delegations,
+    origins: origins ?? this.origins,
   );
 
   Map<String, Object?> toJson() => {
     'installation': installation?.toJson(),
     'pendingEnrollment': pendingEnrollment?.toJson(),
-    'relays': [for (final relay in relays.values) relay.toJson()],
+    'delegations': [for (final value in delegations.values) value.toJson()],
+    'origins': [for (final value in origins.values) value.toJson()],
   };
 
   factory _State.fromJson(Map<String, Object?> json) => _State(
@@ -884,9 +931,14 @@ class _State {
         : _PendingEnrollment.fromJson(
             json['pendingEnrollment']! as Map<String, Object?>,
           ),
-    relays: {
-      for (final value in json['relays']! as List<Object?>)
-        (value! as Map<String, Object?>)['origin']! as String: _Relay.fromJson(
+    delegations: {
+      for (final value in json['delegations']! as List<Object?>)
+        (value! as Map<String, Object?>)['pubkey']! as String:
+            _Delegation.fromJson(value as Map<String, Object?>),
+    },
+    origins: {
+      for (final value in json['origins']! as List<Object?>)
+        (value! as Map<String, Object?>)['origin']! as String: _Origin.fromJson(
           value as Map<String, Object?>,
         ),
     },
