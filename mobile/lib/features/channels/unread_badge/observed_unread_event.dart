@@ -1,3 +1,5 @@
+import 'dart:collection';
+
 import '../../../shared/read_state/read_state_format.dart';
 import '../../../shared/relay/nostr_models.dart';
 
