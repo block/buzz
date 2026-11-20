@@ -276,7 +276,10 @@ void main() {
       for (var frame = 0; frame < 60; frame++) {
         await tester.pump(const Duration(milliseconds: 16));
         if (frame == 0) onMount?.call();
-        expect(videoOpacity(), 0);
+        // A failed player is removed rather than hidden.
+        if (find.byKey(const Key('video')).evaluate().isNotEmpty) {
+          expect(videoOpacity(), 0);
+        }
         expect(posterOpacity(), 1);
       }
     }
@@ -338,6 +341,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    expect(find.byKey(const Key('video')), findsNothing);
     expect(posterOpacity(), 1);
 
     // A new character covers with its own poster, never the previous one
@@ -364,6 +368,21 @@ void main() {
       tester.state(find.byType(AvatarImageContent)),
       isNot(same(previous)),
     );
+
+    // A player that fails after it is showing gives way to the poster.
+    await tester.pumpAndSettle();
+    player.position = const Duration(milliseconds: 300);
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pumpAndSettle();
+    expect(videoOpacity(), 1);
+    expect(posterOpacity(), 0);
+    player.events!.addError(
+      PlatformException(code: 'failed', message: 'playback failed'),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(find.byKey(const Key('video')), findsNothing);
+    expect(posterOpacity(), 1);
     await tester.pumpWidget(const SizedBox.shrink());
     debugDefaultTargetPlatformOverride = null;
   });
