@@ -23,6 +23,7 @@ import 'package:buzz/features/channels/me/me_page.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:flutter/semantics.dart';
 import 'package:buzz/features/channels/message_media_avatar.dart';
+import 'package:buzz/features/channels/saved_channel_page.dart';
 
 import 'dart:async';
 
@@ -135,6 +136,7 @@ part 'channel_detail_page_test/author_visibility_tests.dart';
 part 'channel_detail_page_test/swipe_reply_tests.dart';
 part 'channel_detail_page_test/review_avatar_tests.dart';
 part 'channel_detail_page_test/archive_navigation_tests.dart';
+part 'channel_detail_page_test/saved_channel_preview_tests.dart';
 
 const _channelId = '11111111-2222-4333-8444-555555555555';
 const _huddleChannelId = '8d764100-fd8f-44cf-9c98-6d8fbd739b8c';
@@ -310,6 +312,7 @@ Widget _buildTestable({
   ReadStateNotifier? readStateNotifier,
   InboxLocalStateNotifier? inboxLocalState,
   _FakeMessagesNotifier? messagesNotifier,
+  Future<SavedChannelPreview?>? savedPreview,
 
   /// The channel's own history in a personal chat, which [messagesNotifier]
   /// does not back there.
@@ -395,6 +398,10 @@ Widget _buildTestable({
             ? channelMessagesNotifier ?? _FakeMessagesNotifier(messages)
             : fakeMessagesNotifier,
       ),
+      if (savedPreview != null)
+        savedChannelPreviewProvider(
+          _channelId,
+        ).overrideWith((ref) => savedPreview),
       channelMessagesProvider(_huddleChannelId).overrideWith(
         () => _FakeMessagesNotifier(
           huddleMessages,
@@ -683,6 +690,7 @@ const _directoryAlice =
 const _directoryBob =
     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 void main() {
+  _savedChannelPreviewTests();
   testWidgets('chat Back follows visibility of the conversation list', (
     tester,
   ) async {

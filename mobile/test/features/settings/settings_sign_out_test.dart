@@ -1,12 +1,17 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:buzz/features/settings/settings_page.dart';
 import 'package:buzz/hosted_app_gate.dart';
 import 'package:buzz/onboarding_app_entry.dart';
 import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/channels/saved_message_store.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/shared/hosted/hosted_flow_provider.dart';
+import 'package:buzz/shared/relay/nostr_models.dart';
 import 'package:buzz/shared/relay/relay_session.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
@@ -58,6 +63,47 @@ void main() {
       await storage.save(active);
       await storage.save(other);
       await storage.saveActiveId(active.id);
+      // Deleting saved messages needs real async time, which also lets these
+      // app streams subscribe.
+      final messenger = tester.binding.defaultBinaryMessenger;
+      for (final name in [
+        'com.llfbandit.app_links/events',
+        'dev.fluttercommunity.plus/connectivity_status',
+      ]) {
+        final channel = EventChannel(name);
+        messenger.setMockStreamHandler(
+          channel,
+          MockStreamHandler.inline(onListen: (_, _) {}),
+        );
+        addTearDown(() => messenger.setMockStreamHandler(channel, null));
+      }
+      // Both accounts have saved messages from an earlier launch.
+      final savedRoot = (await tester.runAsync(
+        () => Directory.systemTemp.createTemp('saved_root'),
+      ))!;
+      addTearDown(() => savedRoot.delete(recursive: true));
+      final savedMessages = Directory('${savedRoot.path}/saved_messages');
+      await tester.runAsync(() async {
+        final launch = SavedMessageStore(
+          root: () async => savedRoot,
+          diagnostics: const NoopDiagnosticReporter(),
+        );
+        for (final (community, keys) in [
+          (active, activeKeys),
+          (other, otherKeys),
+        ]) {
+          final scope = (communityId: community.id, pubkey: keys.public);
+          final ticket = launch.capture(scope, _savedPage);
+          await launch.save(ticket, [
+            _savedMessage(keys.secret),
+          ], relayAuthor: null);
+          expect(
+            await launch.read(launch.capture(scope, _savedPage)),
+            hasLength(1),
+          );
+        }
+      });
+      expect(savedMessages.listSync(), isNotEmpty);
 
       HostedCommunitiesFixture? hosted;
       final accountStorage = _AccountStorage();
@@ -104,6 +150,7 @@ void main() {
               () => revocations.future,
             ),
             relaySessionProvider.overrideWith(_OfflineSession.new),
+            savedMessageRootProvider.overrideWith((ref) async => savedRoot),
             if (hosted != null)
               hostedFlowProvider.overrideWithValue(hosted.flow),
           ],
@@ -125,6 +172,7 @@ void main() {
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
       expect(await storage.loadAll(), hasLength(2));
+      expect(savedMessages.listSync(), isNotEmpty);
 
       Future<void> confirmSignOut() async {
         await tester.tap(find.byKey(const Key('settings-sign-out')));
@@ -182,6 +230,18 @@ void main() {
       });
 
       await confirmSignOut();
+      // Saved messages are deleted on a real worker isolate before each
+      // community's credentials.
+      for (
+        var i = 0;
+        i < 100 && find.byType(SettingsPage).evaluate().isNotEmpty;
+        i++
+      ) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
+        );
+        await tester.pump();
+      }
       // The landing animates, so it never settles.
       await _pumpFor(tester);
 
@@ -192,6 +252,8 @@ void main() {
       expect(find.textContaining('Signed in as'), findsNothing);
       // The active community goes last, so nothing switches to the other.
       expect(removed, [other.id, active.id]);
+      // No account's saved messages survive: no database, WAL or shared memory.
+      expect(savedMessages.listSync(), isEmpty);
       final saved = await AccountIdentityStore().identities();
       expect(
         saved.map((identity) => identity.pubkey),
@@ -217,6 +279,20 @@ void main() {
     },
   );
 }
+
+const _savedPage = (channelId: 'saved-channel', rootId: '');
+
+NostrEvent _savedMessage(String secret) => NostrEvent.fromJson(
+  signNostrEvent(
+    kind: EventKind.streamMessage,
+    content: 'saved message',
+    secretKey: secret,
+    createdAt: 1700000000,
+    tags: [
+      ['h', _savedPage.channelId],
+    ],
+  ).toMap(),
+);
 
 Future<void> _pumpFor(WidgetTester tester) async {
   for (var i = 0; i < 20; i++) {

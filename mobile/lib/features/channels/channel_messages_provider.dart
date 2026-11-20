@@ -3,9 +3,11 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/channels/saved_message_store.dart';
 import '../../shared/relay/relay.dart';
 import 'channel_event_order.dart';
 import 'pending_local_messages_provider.dart';
+import 'saved_channel_page.dart';
 import 'channel_window.dart';
 import 'thread_replies_provider.dart';
 import 'thread_summary_refresh_queue.dart';
@@ -230,6 +232,11 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     final initVersion = ++_initVersion;
     _initInFlight = true;
     _clearSubscription();
+    final cacheScope = ref.read(savedMessageScopeProvider);
+    final cache = ref.read(savedMessageStoreProvider);
+    final ticket = cacheScope == null
+        ? null
+        : cache.capture(cacheScope, (channelId: channelId, rootId: ''));
     try {
       final session = ref.read(relaySessionProvider.notifier);
 
@@ -243,7 +250,19 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
             since: _currentUnixSeconds(),
             limit: 200,
           ),
-          _handleLiveEvent,
+          (event) {
+            if (cacheScope != null &&
+                _isCurrentInit(initVersion) &&
+                event.channelId == channelId &&
+                (event.kind == EventKind.deletion ||
+                    event.kind == EventKind.nip29DeleteEvent ||
+                    event.kind == EventKind.streamMessageEdit)) {
+              // A snapshot predating a live delete or edit must never be
+              // shown again. Retire any in-flight save of that snapshot too.
+              unawaited(cache.removeChannel(cacheScope, channelId));
+            }
+            _handleLiveEvent(event);
+          },
         );
         if (!_isCurrentInit(initVersion)) {
           unsubscribe();
@@ -258,7 +277,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       }
 
       final historyVersion = ++_threadQuerySerial;
-      final history = await _fetchNewestHistory(session);
+      final (history, wireEvents) = await _fetchNewestHistory(session);
       if (!_isCurrentInit(initVersion)) return;
       if (!_usingChannelWindow) {
         _legacyHistoryCursor = history.isEmpty
@@ -281,6 +300,17 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       // catching up.
       _initInFlight = false;
       state = AsyncData(merged);
+      if (ticket != null && _hasListeners) {
+        unawaited(
+          saveChannelPage(
+            ref,
+            cache,
+            ticket,
+            wireEvents,
+            isCurrent: () => _isCurrentInit(initVersion),
+          ),
+        );
+      }
       _summaryRefreshes.resume();
       unawaited(_fillNotices());
     } catch (e, st) {
@@ -289,6 +319,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         _lastKnownMessages = null;
         _initInFlight = false;
         state = AsyncError(e, st);
+        if (cacheScope != null) {
+          unawaited(cache.removeChannel(cacheScope, channelId));
+        }
         return;
       }
       final fallbackMessages = state.value ?? _lastKnownMessages;
@@ -313,7 +346,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     }
   }
 
-  Future<List<NostrEvent>> _fetchNewestHistory(
+  Future<(List<NostrEvent>, List<NostrEvent>)> _fetchNewestHistory(
     RelaySessionNotifier session,
   ) async {
     if (flatTimeline) {
@@ -322,12 +355,13 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         NostrFilters.messages(channelId),
       );
       history.sort(compareChannelTimelineEventsChronologically);
-      return history;
+      return (history, history.reversed.toList());
     }
     try {
       _initialWindowQueryInFlight = true;
       final pageVersion = ++_threadQuerySerial;
-      final page = await _fetchWindowPage(session, null);
+      final wireEvents = await session.queryRelay([_channelWindowFilter(null)]);
+      final page = parseChannelWindowResponse(wireEvents, channelId, null);
       _initialWindowQueryInFlight = false;
       _windowStore = replaceNewestChannelWindow(
         _windowStore,
@@ -340,7 +374,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _usingChannelWindow = true;
       _reconcilePageSummaries(page, pageVersion);
       _reachedOldest = !channelWindowHasMore(_windowStore);
-      return _windowEvents();
+      return (_windowEvents(), wireEvents);
     } catch (error) {
       _initialWindowQueryInFlight = false;
       _liveSummaryRootsDuringInitialWindowQuery.clear();
@@ -356,7 +390,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         NostrFilters.messages(channelId),
       );
       history.sort(compareChannelTimelineEventsChronologically);
-      return history;
+      return (history, history.reversed.toList());
     }
   }
 

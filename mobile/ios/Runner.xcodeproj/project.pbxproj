@@ -36,6 +36,7 @@
 		DCAF00000000000000000031 /* NavigationTopEdge.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCAF00000000000000000032 /* NavigationTopEdge.swift */; };
 		1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */ = {isa = PBXBuildFile; fileRef = 1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */; };
 		331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 331C807B294A618700263BE5 /* RunnerTests.swift */; };
+		CACE52900000000000000001 /* SavedMessageCacheLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CACE52900000000000000002 /* SavedMessageCacheLifecycleTests.swift */; };
 		331C809B294A63AB00263BE5 /* MediaSanitizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 331C809A294A618700263BE5 /* MediaSanitizer.swift */; };
 		4A71C0012F40100100A17E01 /* InlinePhotoPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C0022F40100100A17E01 /* InlinePhotoPicker.swift */; };
 		4A71C0032F40200100A17E01 /* NativeAttachmentPopover.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A71C0042F40200100A17E01 /* NativeAttachmentPopover.swift */; };
@@ -68,6 +69,7 @@
 		42C129326CE4E1B8E617B9CD /* Pods_RunnerTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CD6B899582D0416ADBD8A68F /* Pods_RunnerTests.framework */; };
 		74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74858FAE1ED2DC5600515810 /* AppDelegate.swift */; };
 		BZZ00000000000000000023 /* PushNativeState.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000024 /* PushNativeState.swift */; };
+		CACE52900000000000000003 /* SavedMessageCacheLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = CACE52900000000000000004 /* SavedMessageCacheLifecycle.swift */; };
 		BZZ00000000000000000026 /* PushEndpointGrantStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000027 /* PushEndpointGrantStore.swift */; };
 		BZZ00000000000000000029 /* PushSnapshotBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZZ0000000000000000002A /* PushSnapshotBridge.swift */; };
 		BZZ0000000000000000002B /* BuzzCommunicationNotificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZZ0000000000000000002C /* BuzzCommunicationNotificationTests.swift */; };
@@ -152,6 +154,7 @@
 		1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = GeneratedPluginRegistrant.m; sourceTree = "<group>"; };
 		30CE81D3D1E0B195EF2A6390 /* Pods-Runner.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.release.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"; sourceTree = "<group>"; };
 		331C807B294A618700263BE5 /* RunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerTests.swift; sourceTree = "<group>"; };
+		CACE52900000000000000002 /* SavedMessageCacheLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedMessageCacheLifecycleTests.swift; sourceTree = "<group>"; };
 		331C809A294A618700263BE5 /* MediaSanitizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaSanitizer.swift; sourceTree = "<group>"; };
 		4A71C0022F40100100A17E01 /* InlinePhotoPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InlinePhotoPicker.swift; sourceTree = "<group>"; };
 		4A71C0042F40200100A17E01 /* NativeAttachmentPopover.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeAttachmentPopover.swift; sourceTree = "<group>"; };
@@ -187,6 +190,7 @@
 		74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Runner-Bridging-Header.h"; sourceTree = "<group>"; };
 		74858FAE1ED2DC5600515810 /* AppDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		BZZ00000000000000000024 /* PushNativeState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushNativeState.swift; sourceTree = "<group>"; };
+		CACE52900000000000000004 /* SavedMessageCacheLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedMessageCacheLifecycle.swift; sourceTree = "<group>"; };
 		BZZ00000000000000000027 /* PushEndpointGrantStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushEndpointGrantStore.swift; sourceTree = "<group>"; };
 		BZZ0000000000000000002A /* PushSnapshotBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushSnapshotBridge.swift; sourceTree = "<group>"; };
 		BZZ0000000000000000002C /* BuzzCommunicationNotificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuzzCommunicationNotificationTests.swift; sourceTree = "<group>"; };
@@ -251,6 +255,7 @@
 			isa = PBXGroup;
 			children = (
 				331C807B294A618700263BE5 /* RunnerTests.swift */,
+				CACE52900000000000000002 /* SavedMessageCacheLifecycleTests.swift */,
                 A96450000000000000000002 /* DeviceTranscriptionStorageTests.swift */,
 				BC0010000000000000000004 /* BrowserAuthBridgeTests.swift */,
 				F84380010000000000000002 /* ProfileSetupRecoveryTests.swift */,
@@ -340,6 +345,7 @@
 				BBAA00000000000000000012 /* IdentityFilePlugin.swift */,
 				BBAA00000000000000000022 /* PhotoLibrarySaver.swift */,
 				BZZ00000000000000000024 /* PushNativeState.swift */,
+				CACE52900000000000000004 /* SavedMessageCacheLifecycle.swift */,
 				BZZ00000000000000000027 /* PushEndpointGrantStore.swift */,
 				BZZ0000000000000000002A /* PushSnapshotBridge.swift */,
 				ACAF00000000000000000002 /* ToastLayer.swift */,
@@ -727,6 +733,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */,
+				CACE52900000000000000001 /* SavedMessageCacheLifecycleTests.swift in Sources */,
                 A96450000000000000000001 /* DeviceTranscriptionStorageTests.swift in Sources */,
 				BC0010000000000000000003 /* BrowserAuthBridgeTests.swift in Sources */,
 				F84380010000000000000001 /* ProfileSetupRecoveryTests.swift in Sources */,
@@ -748,6 +755,7 @@
 				BBAA00000000000000000011 /* IdentityFilePlugin.swift in Sources */,
 				BBAA00000000000000000021 /* PhotoLibrarySaver.swift in Sources */,
 				BZZ00000000000000000023 /* PushNativeState.swift in Sources */,
+				CACE52900000000000000003 /* SavedMessageCacheLifecycle.swift in Sources */,
 				BZZ00000000000000000026 /* PushEndpointGrantStore.swift in Sources */,
 				BZZ00000000000000000029 /* PushSnapshotBridge.swift in Sources */,
 				ACAF00000000000000000001 /* ToastLayer.swift in Sources */,

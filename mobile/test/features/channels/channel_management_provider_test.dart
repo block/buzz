@@ -1,16 +1,20 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/channels/saved_message_store.dart';
 
 import 'package:buzz/shared/verified_profiles/verified_profile.dart';
 
 import '../../shared/verified_profiles/verified_profile_fixture.dart';
+import '../../helpers/fake_relay.dart';
 
 /// Tests for [channelDetailsFromEvent].
 ///
@@ -20,6 +24,52 @@ import '../../shared/verified_profiles/verified_profile_fixture.dart';
 /// also exposed on `ChannelDetails` MUST be propagated here — otherwise
 /// `mergeDetails` silently clears that state on the merged Channel.
 void main() {
+  test('leaving a channel clears only that channel from disk', () async {
+    final relay = FakeRelay();
+    final scope = (communityId: 'cache-test-community', pubkey: relay.pubkey);
+    const page = (channelId: _channelId, rootId: '');
+    const otherPage = (channelId: 'other-channel', rootId: '');
+    final root = await Directory.systemTemp.createTemp('buzz-leave-cache');
+    addTearDown(() => root.delete(recursive: true));
+    final container = ProviderContainer(
+      overrides: [
+        ...relay.overrides,
+        channelsProvider.overrideWith(_ChannelsAfterLeave.new),
+        savedMessageRootProvider.overrideWith((ref) async => root),
+        savedMessageScopeProvider.overrideWithValue(scope),
+      ],
+    );
+    addTearDown(container.dispose);
+    final store = container.read(savedMessageStoreProvider);
+    Future<NostrEvent> save(SavedMessagePage page) async {
+      final event = relay.sign(
+        kind: EventKind.streamMessage,
+        content: 'Saved history',
+        createdAt: 1700000000,
+        tags: [
+          ['h', page.channelId],
+        ],
+      );
+      await store.save(store.capture(scope, page), [event], relayAuthor: null);
+      return event;
+    }
+
+    final saved = await save(page);
+    final other = await save(otherPage);
+    expect(await store.read(store.capture(scope, page)), [saved]);
+    final connected = Completer<void>();
+    container.listen(relaySessionProvider, (_, state) {
+      if (state.status == SessionStatus.connected && !connected.isCompleted) {
+        connected.complete();
+      }
+    }, fireImmediately: true);
+    await connected.future;
+    await container.read(channelActionsProvider).leaveChannel(_channelId);
+    expect(relay.published.single.kind, 9022);
+    expect(await store.read(store.capture(scope, page)), isNull);
+    expect(await store.read(store.capture(scope, otherPage)), [other]);
+  });
+
   test('shortcut selects only an active exact DM using current membership', () {
     final dm = Channel(
       id: 'dm',
@@ -1094,4 +1144,12 @@ class _HeldRosterRelaySession extends RelaySessionNotifier {
 
   void disconnect() =>
       state = const SessionState(status: SessionStatus.disconnected);
+}
+
+class _ChannelsAfterLeave extends ChannelsNotifier {
+  @override
+  Future<List<Channel>> build() async => const [];
+
+  @override
+  Future<void> refresh({bool fetchDirectory = false}) async {}
 }

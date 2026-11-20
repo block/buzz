@@ -322,6 +322,7 @@ class ChannelActions {
       mayPublish: mayPublish,
     );
     _ensureCommunityValid();
+    await _removeSavedChannel(channelId);
     await _refreshChannelState(channelId);
   }
 
@@ -376,7 +377,16 @@ class ChannelActions {
       tags: buildDeleteChannelTags(channelId),
     );
     _ensureCommunityValid();
+    await _removeSavedChannel(channelId);
     await _refreshChannelState(channelId);
+  }
+
+  Future<void> _removeSavedChannel(String channelId) async {
+    final scope = _ref.read(savedMessageScopeProvider);
+    if (scope == null) return;
+    await _ref.read(savedMessageStoreProvider).removeChannel(scope, channelId);
+    _ensureCommunityValid();
+    _ref.invalidate(savedChannelPreviewProvider(channelId));
   }
 
   Future<void> setCanvas({

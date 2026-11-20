@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:buzz/features/channels/me/me_messages_provider.dart';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart' hide test;
@@ -9,8 +10,11 @@ import 'package:flutter_test/flutter_test.dart' as flutter_test show test;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
 import 'package:buzz/features/channels/pending_local_messages_provider.dart';
+import 'package:buzz/features/channels/saved_channel_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
+import 'package:buzz/shared/channels/saved_message_store.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 import '../../helpers/thread_ids.dart';
@@ -45,6 +49,125 @@ void test(String description, Future<void> Function() body) {
 }
 
 void main() {
+  flutter_test.test('relay access refusal purges the saved channel', () async {
+    const scope = (
+      communityId: 'cache-test-community',
+      pubkey: 'cache-test-user',
+    );
+    const page = (channelId: _channelId, rootId: '');
+    final root = await Directory.systemTemp.createTemp('buzz-access-cache');
+    addTearDown(() => root.delete(recursive: true));
+    final denial = RelayException(403, 'not a member');
+    final relay = _RecordingRelaySessionNotifier(queryResults: [denial]);
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => relay),
+        savedMessageRootProvider.overrideWith((ref) async => root),
+        savedMessageScopeProvider.overrideWithValue(scope),
+      ],
+    );
+    addTearDown(container.dispose);
+    final store = container.read(savedMessageStoreProvider);
+    final ticket = store.capture(scope, page);
+    final event = NostrEvent.fromJson(
+      signNostrEvent(
+        secretKey:
+            '0000000000000000000000000000000000000000000000000000000000000001',
+        kind: EventKind.streamMessage,
+        content: 'Previously accessible',
+        tags: [
+          ['h', _channelId],
+        ],
+      ).toMap(),
+    );
+    await store.save(ticket, [event], relayAuthor: null);
+    expect(await store.read(ticket), [event]);
+    final refused = Completer<void>();
+    container.listen(channelMessagesProvider(_channelId), (_, state) {
+      if (state.error == denial && !refused.isCompleted) refused.complete();
+    });
+    await refused.future;
+    expect(await store.read(store.capture(scope, page)), isNull);
+    expect(relay.historyFilters, isEmpty);
+  });
+
+  for (final kind in [EventKind.deletion, EventKind.streamMessageEdit]) {
+    flutter_test.test('live mutation $kind retires the offline page', () async {
+      const scope = (
+        communityId: 'cache-test-community',
+        pubkey: 'cache-test-user',
+      );
+      const page = (channelId: _channelId, rootId: '');
+      final root = await Directory.systemTemp.createTemp('buzz-live-cache');
+      addTearDown(() => root.delete(recursive: true));
+      final query = Completer<List<NostrEvent>>();
+      final relay = _RecordingRelaySessionNotifier(
+        queryResults: [query.future],
+      );
+      ProviderContainer makeContainer(_RecordingRelaySessionNotifier session) {
+        final container = ProviderContainer(
+          overrides: [
+            relaySessionProvider.overrideWith(() => session),
+            savedMessageRootProvider.overrideWith((ref) async => root),
+            savedMessageScopeProvider.overrideWithValue(scope),
+          ],
+        );
+        addTearDown(container.dispose);
+        return container;
+      }
+
+      final online = makeContainer(relay);
+      final store = online.read(savedMessageStoreProvider);
+      final event = NostrEvent.fromJson(
+        signNostrEvent(
+          secretKey:
+              '0000000000000000000000000000000000000000000000000000000000000001',
+          kind: EventKind.streamMessage,
+          content: 'Saved before the live mutation',
+          tags: [
+            ['h', _channelId],
+          ],
+        ).toMap(),
+      );
+      final ticket = store.capture(scope, page);
+      await store.save(ticket, [event], relayAuthor: null);
+      expect(await store.read(ticket), [event]);
+      final messages = channelMessagesProvider(_channelId);
+      online.listen(messages, (_, _) {});
+      await relay.subscribed;
+      relay.emit(
+        NostrEvent(
+          id: 'live-mutation',
+          pubkey: event.pubkey,
+          kind: kind,
+          createdAt: event.createdAt + 1,
+          tags: [
+            ['h', _channelId],
+            ['e', event.id],
+          ],
+          content: '',
+          sig: '',
+        ),
+      );
+      expect(await store.read(store.capture(scope, page)), isNull);
+
+      // An initial relay query already in flight cannot restore the old page.
+      query.complete([event, _bounds()]);
+      await _pumpEventQueue();
+      expect(store.isCurrent(ticket), isFalse);
+
+      final offlineRelay = _RecordingRelaySessionNotifier();
+      final offline = makeContainer(offlineRelay);
+      offline.read(relaySessionProvider);
+      offlineRelay.setConnected(false);
+      offline.listen(messages, (_, _) {});
+      final preview = savedChannelPreviewProvider(_channelId);
+      offline.listen(preview, (_, _) {});
+      expect(await offline.read(preview.future), isNull);
+      expect(offlineRelay.queryFilters, isEmpty);
+    });
+  }
+
   test(
     'window access denial cannot be masked by a transient WS fallback',
     () async {

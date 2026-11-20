@@ -83,6 +83,8 @@ import 'channel_link_navigation.dart';
 import 'channel_management_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_messages_provider.dart';
+import 'saved_channel_page.dart';
+import '../../shared/channels/saved_message_store.dart';
 import 'channel_typing_provider.dart';
 import 'inline_agent_typing.dart';
 import 'typing_motion_preview.dart';
@@ -234,7 +236,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     final sendMessage = ref.read(
       personalChat ? meSendMessageProvider : sendMessageProvider,
     );
-    final messagesState = ref.watch(messagesProvider);
+    final relayMessagesState = ref.watch(messagesProvider);
     final workspace = useMeWorkspace(
       context,
       ref,
@@ -247,7 +249,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       enabled: personalChat,
       channelId: channel.id,
       initial: initialAssistant,
-      messages: messagesState.value ?? const [],
+      messages: relayMessagesState.value ?? const [],
     );
     final mePlacement = personalChat ? ref.watch(meGroupsProvider) : null;
     final detailsAsync = ref.watch(channelDetailsProvider(channel.id));
@@ -488,6 +490,17 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         !isAgentIdentityUnresolved &&
         (!isAgentDm || voiceAgent != null);
     final messagesNotifier = ref.read(messagesProvider.notifier);
+    final relayError = relayMessagesState.error;
+    final preview =
+        !resolvedChannel.isForum &&
+            (!resolvedChannel.isPrivate || resolvedChannel.isMember) &&
+            !messagesNotifier.hasLoadedMessages &&
+            (relayError == null || !isRelayAccessDenied(relayError))
+        ? ref.watch(savedChannelPreviewProvider(channel.id)).value
+        : null;
+    final messagesState = preview == null
+        ? relayMessagesState
+        : AsyncData(preview.events);
     final isConnectionInProgress =
         sessionStatus == SessionStatus.connecting ||
         sessionStatus == SessionStatus.reconnecting;
@@ -511,7 +524,8 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     final showInitialConnectionSkeleton =
         !resolvedChannel.isForum &&
         isConnectionInProgress &&
-        !messagesNotifier.hasLoadedMessages;
+        !messagesNotifier.hasLoadedMessages &&
+        preview == null;
     final appBarTitleContentHeight =
         defaultTargetPlatform == TargetPlatform.android
         ? max(
@@ -528,7 +542,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     final openReadTimestamp = _openReadTimestamp(
       channel: resolvedChannel,
       personalChat: personalChat,
-      messagesState: messagesState,
+      messagesState: relayMessagesState,
     );
 
     useEffect(() {
@@ -536,6 +550,20 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       return session.registerVisibleChannel(channel.id);
     }, [channel.id]);
     useOpenChannelRoute(ref, channel.id);
+    useEffect(() {
+      if (!resolvedChannel.isForum && messagesNotifier.hasLoadedMessages) {
+        final scope = ref.read(savedMessageScopeProvider);
+        if (scope != null) {
+          final cache = ref.read(savedMessageStoreProvider);
+          unawaited(
+            cache.touch(
+              cache.capture(scope, (channelId: channel.id, rootId: '')),
+            ),
+          );
+        }
+      }
+      return null;
+    }, [channel.id]);
 
     useEffect(
       () {
@@ -685,7 +713,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           )
           .toList(),
       flat: personalChat,
-      relaySummaries: ref.read(messagesProvider.notifier).threadSummaries,
+      relaySummaries: preview?.summaries ?? messagesNotifier.threadSummaries,
     );
 
     return FrostedScaffold(
@@ -742,7 +770,9 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         nativeTitleRefreshing: resolvedChannel.isForum
             ? isConnectionInProgress &&
                   ref.watch(forumPostsProvider(channel.id)).value != null
-            : (isConnectionInProgress && messagesNotifier.hasLoadedMessages) ||
+            : (isConnectionInProgress &&
+                      (messagesNotifier.hasLoadedMessages ||
+                          preview != null)) ||
                   messagesNotifier.isCatchingUp,
         onNativeTitlePressed: openChannelDetails,
         nativeActions: [
