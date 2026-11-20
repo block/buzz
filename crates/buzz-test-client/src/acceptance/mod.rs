@@ -975,6 +975,33 @@ mod tests {
         }
     }
 
+    /// A relay that accepts a write signed by another key is not enforcing
+    /// the NIP-42 binding: `access_control` fails at `pubkey_mismatch_rejected`.
+    #[tokio::test]
+    async fn access_control_fails_when_the_relay_accepts_another_keys_write() {
+        let relay = fake_relay::start(fake_relay::Script {
+            accept_mismatched: true,
+            ..Default::default()
+        })
+        .await;
+        let report = run(&config(relay.url.clone())).await;
+        let access = check(&report, "access_control");
+        assert_eq!(
+            (access.result, access.failed_stage),
+            (Outcome::Failure, Some("pubkey_mismatch_rejected")),
+            "{access:?}"
+        );
+        assert!(
+            access
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("relay accepted the event"),
+            "{access:?}"
+        );
+        assert_eq!(check(&report, "cleanup").result, Outcome::Success);
+    }
+
     /// The create's OK never comes, but the relay stored it: the run fails
     /// at `channel_create`, skips what needed the channel, and still deletes
     /// that exact channel.

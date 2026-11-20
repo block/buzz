@@ -33,6 +33,8 @@ pub struct Script {
     pub close_after: HashSet<u16>,
     /// The answer to a write without AUTH.
     pub unauthenticated: Unauthenticated,
+    /// Accept a write signed by a key other than the authenticated one.
+    pub accept_mismatched: bool,
     /// Serve events of these kinds, stored and live, with altered content
     /// under their original id and signature.
     pub corrupt: HashSet<u16>,
@@ -45,6 +47,7 @@ impl Default for Script {
             no_ack: HashSet::new(),
             close_after: HashSet::new(),
             unauthenticated: Unauthenticated::Reason(format!("{AUTH_REQUIRED} not authenticated")),
+            accept_mismatched: false,
             corrupt: HashSet::new(),
         }
     }
@@ -163,7 +166,7 @@ async fn serve(tcp: tokio::net::TcpStream, shared: Arc<Shared>) {
                     }
                     continue;
                 };
-                if event.pubkey != pubkey {
+                if event.pubkey != pubkey && !shared.script.accept_mismatched {
                     send(&out, json!(["OK", id, false, PUBKEY_MISMATCH]));
                     continue;
                 }
