@@ -531,7 +531,9 @@ image predates the probe.
   of the URL's host, for a probe that runs where the public host is not
   reachable, such as inside the relay's cluster. The URL still sets the `Host`
   header, the NIP-42 relay tag and the NIP-11 request's `Host`, so the relay
-  serves the same community.
+  serves the same community. The chart passes it as `--connect-addr`, so the
+  relay image's probe must have that flag. An older probe exits with an error
+  instead of checking the public URL.
 - `acceptance.privateKeySecret.name` names a Secret with the probe's key
   (hex or nsec), or `acceptance.privateKeyFile` names a file an init
   container writes. Set exactly one: the chart fails to render with neither.

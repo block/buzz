@@ -172,6 +172,8 @@ tests:
             - example.acceptance
             - --tag
             - probe_revision:sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+            - --connect-addr
+            - relay.internal:80
             - --tag
             - env:staging
             - --tag
@@ -189,11 +191,11 @@ tests:
           content:
             name: BUZZ_RELAY_URL
             value: wss://probe.example.com
-      - contains:
+      - notContains:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
             name: BUZZ_ACCEPTANCE_CONNECT_ADDR
-            value: relay.internal:80
+          any: true
       - contains:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
