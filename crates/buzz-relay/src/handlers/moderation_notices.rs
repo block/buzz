@@ -194,6 +194,11 @@ pub async fn send_moderation_notice(
     //    (same pubkey + created_at + kind + tags + content = same SHA256 event ID).
     //    `insert_event`'s ON CONFLICT DO NOTHING ensures exactly one row is
     //    durably persisted regardless of how many workers reach this point.
+    //
+    //    So a notice can be stored more than ingest's 15 minutes after its
+    //    signed time. It is the one message that can, and activity repair
+    //    misses it only when its hand-off to the writer was lost too
+    //    (`LATE_ARRIVAL` in buzz-db's activity fill).
     let tags = vec![
         Tag::parse(["h", &dm_channel_id.to_string()])?,
         Tag::parse([MODERATION_SOURCE_TAG, &source_id.to_string()])?,

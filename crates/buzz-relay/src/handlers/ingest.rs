@@ -2682,7 +2682,10 @@ async fn ingest_event_inner(
         });
     }
 
-    const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
+    // ±15 minutes. Activity repair relies on this bound to find a message
+    // whose hand-off to its writer was lost (`LATE_ARRIVAL` in buzz-db's
+    // activity fill); keep the two in step.
+    const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900;
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
     if (event_ts - now).abs() > MAX_TIMESTAMP_DRIFT_SECS {
