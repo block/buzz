@@ -4,6 +4,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'dart:convert';
 
 import 'package:buzz/app.dart';
+import 'package:buzz/shared/push/app_badge_preference.dart';
 import 'package:buzz/features/age_gate/age_restriction_page.dart';
 import 'package:buzz/features/age_gate/age_signal_push_bootstrap.dart';
 import 'package:buzz/features/age_gate/age_signal_provider.dart';
@@ -239,6 +240,43 @@ void main() {
     expect(badgeCounts.last, 7);
 
     ageSignal.setState(AgeSignalState.restricted);
+    await tester.pump();
+    expect(badgeCounts.last, 0);
+  });
+
+  testWidgets('the app badge follows the mentions-only choice', (tester) async {
+    final badgeCounts = <int>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(appBadgeChannel, (call) async {
+          if (call.method == 'updateBadge') {
+            badgeCounts.add(
+              (call.arguments as Map<Object?, Object?>)['count']! as int,
+            );
+          }
+          return null;
+        });
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          authProvider.overrideWith(() => _UnauthenticatedAuthNotifier()),
+          ageSignalProvider.overrideWith(() => _MutableAgeSignalNotifier()),
+          unreadBadgeProvider.overrideWithValue(
+            const UnreadBadgeState(generalUnreadCount: 3),
+          ),
+          savedPrefsProvider.overrideWithValue(prefs),
+        ],
+        child: const App(),
+      ),
+    );
+    await tester.pump();
+    expect(badgeCounts.last, 1);
+
+    await ProviderScope.containerOf(
+      tester.element(find.byType(App)),
+    ).read(appBadgeMentionsOnlyProvider.notifier).set(true);
     await tester.pump();
     expect(badgeCounts.last, 0);
   });

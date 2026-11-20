@@ -395,7 +395,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('Notifications'), findsNothing);
-      expect(find.byType(Switch), findsNothing);
+      expect(_pushSwitch, findsNothing);
       if (outcome == 'absent') {
         capability.complete(null);
       } else {
@@ -404,7 +404,9 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('Notifications'), findsNothing);
       expect(find.text('Push notifications'), findsNothing);
-      expect(find.byType(Switch), findsNothing);
+      expect(_pushSwitch, findsNothing);
+      // The app icon badge is local, so its choice stays without push.
+      expect(find.text('Badge only mentions and DMs'), findsOneWidget);
       expect(tester.takeException(), isNull);
       debugDefaultTargetPlatformOverride = null;
     });
@@ -448,7 +450,7 @@ void main() {
       find.byKey(const ValueKey('push-notifications-enabled')),
       findsOneWidget,
     );
-    expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+    expect(tester.widget<Switch>(_pushSwitch).value, isTrue);
     debugDefaultTargetPlatformOverride = null;
   });
 
@@ -779,3 +781,8 @@ void _usePhoneViewport(WidgetTester tester) {
     addTearDown(tester.view.reset);
   }
 }
+
+final _pushSwitch = find.descendant(
+  of: find.byKey(const ValueKey('push-notifications-setting')),
+  matching: find.byType(Switch),
+);

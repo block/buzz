@@ -11,6 +11,9 @@ class ObservedUnreadEvent {
   final bool countsTowardBadge;
   final bool countsTowardAppBadge;
 
+  /// A DM, or a message that mentions the viewer.
+  final bool mentionOrDm;
+
   /// `activity:<channel>` reads this event (see `readByChannelCatchUp`).
   final bool channelCatchUp;
 
@@ -29,6 +32,7 @@ class ObservedUnreadEvent {
     required this.highPriority,
     required this.countsTowardBadge,
     required this.countsTowardAppBadge,
+    this.mentionOrDm = false,
     this.channelCatchUp = false,
     this.threadReply,
   });
@@ -71,6 +75,7 @@ ObservedUnreadEvent makeObservedUnreadEvent({
   required bool highPriority,
   required String? channelType,
   required bool isThreadedReply,
+  bool mentioned = false,
   bool isBroadcast = false,
   NostrEvent? threadReply,
 }) {
@@ -82,6 +87,7 @@ ObservedUnreadEvent makeObservedUnreadEvent({
     highPriority: highPriority,
     countsTowardBadge: isDm || isThreadedReply || highPriority,
     countsTowardAppBadge: isDm || (!isThreadedReply && highPriority),
+    mentionOrDm: isDm || mentioned,
     channelCatchUp: readByChannelCatchUp(
       isDm: isDm,
       // A broadcast is read only by its own mark, like any reply, even when

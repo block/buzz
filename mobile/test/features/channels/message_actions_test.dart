@@ -1,3 +1,4 @@
+import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
 import 'package:buzz/shared/read_state/thread_follows_format.dart';
 import 'package:buzz/features/channels/thread_follows/thread_follows_storage.dart';
 import 'package:buzz/shared/widgets/sheet_action_section.dart';
@@ -844,6 +845,50 @@ void main() {
       expect(find.text('Mark unread'), findsOneWidget);
       expect(find.text('Mark read'), findsNothing);
     });
+
+    // Opening a read channel drops its observed events, so marking a
+    // message unread must restore it for the mentions-only app badge.
+    for (final (label, channelType, tags) in [
+      ('a DM', 'dm', const <List<String>>[]),
+      (
+        'a mention',
+        'stream',
+        const [
+          ['p', 'self'],
+        ],
+      ),
+    ]) {
+      testWidgets('marking $label unread badges it with mentions only', (
+        tester,
+      ) async {
+        SharedPreferences.setMockInitialValues({
+          'buzz-app-badge-mentions-only.v1': true,
+        });
+        await _pumpSheet(
+          tester,
+          message: _message(createdAt: 900, tags: tags),
+          prefs: await SharedPreferences.getInstance(),
+          readStateOverride: () =>
+              _FakeReadStateNotifier(_readState(const {_channelId: 2000})),
+          listChannel: true,
+          listedChannelType: channelType,
+        );
+        final container = ProviderScope.containerOf(
+          tester.element(find.text('open')),
+        );
+        expect(container.read(appBadgeCountProvider), 0);
+
+        await tester.tap(find.text('Mark unread'));
+        await tester.pumpAndSettle();
+        expect(container.read(appBadgeCountProvider), 1);
+
+        await tester.tap(find.text('open'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Mark read'));
+        await tester.pumpAndSettle();
+        expect(container.read(appBadgeCountProvider), 0);
+      });
+    }
 
     testWidgets('message-level Mark read leaves a channel-level forced '
         'unread untouched', (tester) async {

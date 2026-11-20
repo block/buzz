@@ -3803,6 +3803,8 @@ void main() {
         final badge = container.read(unreadBadgeProvider);
         expect(badge.highPriorityCount, dotted ? 1 : 0);
         expect(badge.generalUnreadCount, dotted ? 0 : 1);
+        // Mentions-only badges count the mention, not the thread.
+        expect(badge.mentionOrDmCount, mention ? 1 : 0);
 
         void expectHighlights(
           Map<String, int> contexts, {

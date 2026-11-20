@@ -116,19 +116,18 @@ void main() {
             ),
           );
           await tester.pumpAndSettle();
-          expect(
-            find.text('Notifications'),
-            enabled ? findsOneWidget : findsNothing,
-          );
+          // The section stays for the app icon badge choice.
+          expect(find.text('Notifications'), findsOneWidget);
           expect(find.text('Push notifications'), findsNothing);
+          await tester.tap(find.text('Notifications'));
+          await tester.pumpAndSettle();
+          expect(find.text('Badge only mentions and DMs'), findsOneWidget);
           if (enabled) {
-            await tester.tap(find.text('Notifications'));
-            await tester.pumpAndSettle();
-            final toggle = tester.widget<Switch>(find.byType(Switch));
+            final toggle = tester.widget<Switch>(_pushSwitch);
             expect(toggle.value, isTrue);
             expect(toggle.onChanged, isNotNull);
           } else {
-            expect(find.byType(Switch), findsNothing);
+            expect(_pushSwitch, findsNothing);
           }
           expect(tester.takeException(), isNull);
           debugDefaultTargetPlatformOverride = null;
@@ -137,3 +136,8 @@ void main() {
     }
   });
 }
+
+final _pushSwitch = find.descendant(
+  of: find.byKey(const ValueKey('push-notifications-setting')),
+  matching: find.byType(Switch),
+);
