@@ -2,8 +2,9 @@ import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
-/// On-device recognition of a finalized local 16 kHz mono PCM WAV file.
+/// On-device recognition of a finalized local audio file.
 abstract interface class DeviceTranscription {
+  Future<bool> isAvailable();
   Future<void> prepare();
   Future<String> transcribe(String path);
   Future<void> cancel();
@@ -17,6 +18,9 @@ final deviceTranscriptionProvider = Provider<DeviceTranscription Function()>(
 class NativeDeviceTranscription implements DeviceTranscription {
   static const _channel = MethodChannel('buzz/transcription');
   final _id = const Uuid().v4();
+  @override
+  Future<bool> isAvailable() async =>
+      await _channel.invokeMethod<bool>('isAvailable') ?? false;
   @override
   Future<void> prepare() => _channel.invokeMethod('prepare', {'id': _id});
   @override

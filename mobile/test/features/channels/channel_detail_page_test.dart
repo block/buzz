@@ -4534,7 +4534,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        await tester.tap(find.text('Message #general'));
+        await tester.tap(find.text('Message'));
         await tester.pump();
         tester.view.viewInsets = const FakeViewPadding(bottom: 300);
         await tester.pump();
@@ -4847,7 +4847,7 @@ void main() {
       // The old placeholder text should be gone.
       expect(find.text('Forum threads are not on mobile yet'), findsNothing);
       // The compose bar for stream messages should not appear.
-      expect(find.text('Message…'), findsNothing);
+      expect(find.text('Message'), findsNothing);
       final scaffold = tester.widget<FrostedScaffold>(
         find.byType(FrostedScaffold).first,
       );
@@ -5655,7 +5655,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Message…'), findsNothing);
+      expect(find.text('Message'), findsNothing);
       expect(
         find.text('This channel is archived and read-only on mobile.'),
         findsOneWidget,
@@ -5800,7 +5800,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Join channel to send messages'), findsOneWidget);
-      expect(find.text('Message…'), findsNothing);
+      expect(find.text('Message'), findsNothing);
 
       await tester.tap(
         find.byKey(const ValueKey('channel-header-settings-trigger')),
@@ -5817,7 +5817,7 @@ void main() {
       expect(find.text('Join channel'), findsNothing);
       expect(find.text('Join channel to send messages'), findsNothing);
 
-      expect(find.text('Message #general'), findsOneWidget);
+      expect(find.text('Message'), findsOneWidget);
     });
 
     testWidgets('joins an open channel from the footer Join button', (
@@ -5845,13 +5845,13 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Message #general'), findsNothing);
+      expect(find.text('Message'), findsNothing);
       await tester.tap(find.byKey(const ValueKey('channel-join-button')));
       await tester.pumpAndSettle();
 
       expect(joined, [openChannel.id]);
       expect(find.byKey(const ValueKey('channel-join-button')), findsNothing);
-      expect(find.text('Message #general'), findsOneWidget);
+      expect(find.text('Message'), findsOneWidget);
     });
 
     testWidgets(
@@ -5901,14 +5901,14 @@ void main() {
           find.widgetWithText(FilledButton, 'Check again'),
           findsOneWidget,
         );
-        expect(find.text('Message #general'), findsNothing);
+        expect(find.text('Message'), findsNothing);
 
         await tester.tap(joinButton);
         await tester.pumpAndSettle();
         expect(rechecks, [openChannel.id]);
         expect(outcomes, isEmpty);
         expect(joinButton, findsNothing);
-        expect(find.text('Message #general'), findsOneWidget);
+        expect(find.text('Message'), findsOneWidget);
       },
     );
 
@@ -5931,7 +5931,7 @@ void main() {
 
       expect(find.text('This channel is read-only'), findsOneWidget);
       expect(find.byKey(const ValueKey('channel-join-button')), findsNothing);
-      expect(find.text('Message #general'), findsNothing);
+      expect(find.text('Message'), findsNothing);
     });
 
     testWidgets('offers no Join button for a private channel preview', (
@@ -6293,7 +6293,7 @@ void main() {
         find.byKey(const ValueKey('channel-jump-to-latest')),
         findsNothing,
       );
-      await tester.tap(find.text('Message #general'));
+      await tester.tap(find.text('Message'));
       await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('channel-jump-to-latest')),
@@ -6342,7 +6342,7 @@ void main() {
       final rowsBefore = [row('msg1'), row('msg2')];
       final insetBefore = listInset();
 
-      await tester.tap(find.text('Message #general'));
+      await tester.tap(find.text('Message'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'one\ntwo\nthree\nfour');
       await tester.pumpAndSettle();
@@ -7649,7 +7649,7 @@ void main() {
           closeTo(tester.getTopLeft(composerDock).dy, 1),
         );
 
-        await tester.tap(find.text('Message #general'));
+        await tester.tap(find.text('Message'));
         for (var frame = 0; frame < 15; frame += 1) {
           await tester.pump(const Duration(milliseconds: 16));
           expect(
@@ -7664,7 +7664,9 @@ void main() {
 
         expect(
           tester.getSize(composerDock).height,
-          greaterThan(compactDockHeight),
+          defaultTargetPlatform == TargetPlatform.iOS
+              ? equals(compactDockHeight)
+              : greaterThan(compactDockHeight),
         );
         expect(
           tester.getBottomLeft(latestMessage).dy,
@@ -7704,7 +7706,41 @@ void main() {
           find.byKey(const ValueKey('channel-jump-to-latest')),
           findsNothing,
         );
+        if (defaultTargetPlatform == TargetPlatform.iOS) {
+          final originalBottom = tester.getBottomLeft(latestMessage).dy;
+          tester
+              .widget<IosGlassNavigationButton>(
+                find.byWidgetPredicate(
+                  (widget) =>
+                      widget is IosGlassNavigationButton &&
+                      widget.semanticLabel == 'Add attachment',
+                ),
+              )
+              .onPressed!();
+          await tester.pump();
+          for (var frame = 0; frame < 14; frame++) {
+            await tester.pump(const Duration(milliseconds: 16));
+            expect(
+              tester.getBottomLeft(latestMessage).dy,
+              closeTo(originalBottom, 1),
+              reason:
+                  'Opening the native attachment menu must not shift the followed messages.',
+            );
+          }
+          await tester.tap(find.byType(TextField).first);
+          for (var frame = 0; frame < 14; frame++) {
+            await tester.pump(const Duration(milliseconds: 16));
+            expect(
+              tester.getBottomLeft(latestMessage).dy,
+              closeTo(originalBottom, 1),
+            );
+          }
+        }
       },
+      variant: TargetPlatformVariant({
+        TargetPlatform.android,
+        TargetPlatform.iOS,
+      }),
     );
 
     testWidgets(
@@ -7796,7 +7832,7 @@ void main() {
       );
       final composerDock = find.byKey(const ValueKey('channel-composer-dock'));
 
-      await tester.tap(find.text('Message #general'));
+      await tester.tap(find.text('Message'));
       await tester.pumpAndSettle();
 
       expect(
@@ -8308,7 +8344,7 @@ void main() {
           );
           await tester.pumpAndSettle();
 
-          await tester.tap(find.text('Message #general'));
+          await tester.tap(find.text('Message'));
           await tester.pump();
           tester.view.viewInsets = const FakeViewPadding(bottom: 300);
           await tester.pump();
@@ -8437,7 +8473,7 @@ void main() {
           final collapsedGap = latestGap();
           expect(collapsedGap, closeTo(Grid.xs, 0.5));
 
-          await tester.tap(find.text('Message #general'));
+          await tester.tap(find.text('Message'));
           await tester.pump();
           await tester.pump();
           tester.view.viewInsets = const FakeViewPadding(bottom: 300);
@@ -15181,7 +15217,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Message #general'));
+      await tester.tap(find.byType(ComposeBar));
       await tester.pumpAndSettle();
       final editor = find.descendant(
         of: find.byType(ComposeBar),
@@ -15194,12 +15230,19 @@ void main() {
       ]) {
         await tester.enterText(editor, draft);
         await tester.pumpAndSettle();
-        await tester.tap(
-          find.descendant(
-            of: find.byType(ComposeBar),
-            matching: find.byIcon(BuzzIcons.arrowUp),
-          ),
-        );
+        if (defaultTargetPlatform == TargetPlatform.iOS) {
+          tester
+              .widget<IosGlassNavigationButton>(
+                find.byWidgetPredicate(
+                  (widget) =>
+                      widget is IosGlassNavigationButton &&
+                      widget.semanticLabel == 'Send',
+                ),
+              )
+              .onPressed!();
+        } else {
+          await tester.tap(find.byTooltip('Send'));
+        }
         await tester.pumpAndSettle();
         expect(tester.widget<TextField>(editor).controller!.text, isEmpty);
         expect(find.text('Not sent. Community changed.'), findsNothing);
@@ -15880,7 +15923,7 @@ void main() {
       expect(find.byType(TextField), findsNothing);
       expect(find.byIcon(BuzzIcons.arrowUp).hitTestable(), findsOneWidget);
 
-      await tester.tap(find.text('Message #general'));
+      await tester.tap(find.text('Message'));
       await tester.pumpAndSettle();
 
       expect(find.byType(TextField), findsOneWidget);
@@ -15891,7 +15934,7 @@ void main() {
       await tester.pumpWidget(_buildTestable(messages: []));
       await tester.pumpAndSettle();
 
-      expect(find.text('Message #general'), findsOneWidget);
+      expect(find.text('Message'), findsOneWidget);
     });
   });
 
@@ -16173,7 +16216,9 @@ void main() {
       expect(
         payload()['titleMaxWidth'],
         closeTo(
-          tester.getSize(find.byKey(const ValueKey('composer-surface'))).width *
+          tester
+                  .getSize(find.byKey(const ValueKey('ios-composer-controls')))
+                  .width *
               2 /
               3,
           0.5,
@@ -16407,7 +16452,9 @@ void main() {
       expect(
         payload['titleMaxWidth'],
         closeTo(
-          tester.getSize(find.byKey(const ValueKey('composer-surface'))).width *
+          tester
+                  .getSize(find.byKey(const ValueKey('ios-composer-controls')))
+                  .width *
               2 /
               3,
           0.5,
