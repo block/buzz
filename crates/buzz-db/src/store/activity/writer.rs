@@ -685,23 +685,15 @@ pub(super) fn not_future(seen: &str) -> String {
     format!("(CASE WHEN {seen} > clock_timestamp() THEN clock_timestamp() ELSE {seen} END)")
 }
 
-/// `col = CASE WHEN cond THEN EXCLUDED.col ELSE h.col END` for each column.
-fn take_when(columns: &[&str], condition: &str) -> String {
-    columns
-        .iter()
-        .map(|c| format!("{c} = CASE WHEN {condition} THEN EXCLUDED.{c} ELSE h.{c} END"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 /// How far the writer has read the log (`seen_new`), and what it may claim
 /// for a row that has no `seen_at` yet (`seen_first`). Only the fill has read
 /// the history, so only the fill sets the first value: a row made by ingest
-/// stays unverified until a read fills it.
+/// stays unverified until a read fills it. Returns the `seen_at` value and
+/// the condition under which it changes.
 fn seen_sql(seen_new: &str, seen_first: &str) -> (String, String) {
     (
         format!(
-            "seen_at = CASE WHEN {seen_new} > h.seen_at THEN {seen_new} \
+            "CASE WHEN {seen_new} > h.seen_at THEN {seen_new} \
              WHEN h.seen_at IS NULL THEN {seen_first} ELSE h.seen_at END"
         ),
         format!("{seen_new} > h.seen_at OR (h.seen_at IS NULL AND {seen_first} IS NOT NULL)"),
@@ -713,6 +705,9 @@ fn seen_sql(seen_new: &str, seen_first: &str) -> (String, String) {
 /// time, the lower id; of two edits the later, then the higher id, as in the
 /// timeline. `updated_at` moves only when a returned field changes, so
 /// `since` is not woken by reactions or by replies inside a thread.
+///
+/// Every assignment is spelled out, not generated, so the event-floor source
+/// policy can read the `SET` list and see that it never touches `events`.
 pub(super) fn channel_merge_sql(seen_new: &str, seen_first: &str) -> String {
     const HEAD: &str = "((EXCLUDED.head_received_at, h.head_id) \
         > (COALESCE(h.head_received_at, '-infinity'), EXCLUDED.head_id) \
@@ -720,23 +715,22 @@ pub(super) fn channel_merge_sql(seen_new: &str, seen_first: &str) -> String {
     const EDIT: &str = "(EXCLUDED.head_id = h.head_id \
         AND (EXCLUDED.head_edit_at, EXCLUDED.head_edit_id) \
         > (COALESCE(h.head_edit_at, '-infinity'), COALESCE(h.head_edit_id, '\\x')))";
-    let (seen_set, seen_changed) = seen_sql(seen_new, seen_first);
+    let (seen, seen_changed) = seen_sql(seen_new, seen_first);
     let text = format!("({HEAD} OR {EDIT})");
     format!(
-        "ON CONFLICT (community_id, channel_id) DO UPDATE SET {seen_set}, {head}, \
-            {text_set}, \
+        "ON CONFLICT (community_id, channel_id) DO UPDATE SET \
+            seen_at = {seen}, \
+            head_id = CASE WHEN {HEAD} THEN EXCLUDED.head_id ELSE h.head_id END, \
+            head_created_at = CASE WHEN {HEAD} \
+                THEN EXCLUDED.head_created_at ELSE h.head_created_at END, \
+            head_received_at = CASE WHEN {HEAD} \
+                THEN EXCLUDED.head_received_at ELSE h.head_received_at END, \
+            head_pubkey = CASE WHEN {HEAD} THEN EXCLUDED.head_pubkey ELSE h.head_pubkey END, \
+            head_text = CASE WHEN {text} THEN EXCLUDED.head_text ELSE h.head_text END, \
+            head_edit_at = CASE WHEN {text} THEN EXCLUDED.head_edit_at ELSE h.head_edit_at END, \
+            head_edit_id = CASE WHEN {text} THEN EXCLUDED.head_edit_id ELSE h.head_edit_id END, \
             updated_at = CASE WHEN {text} THEN clock_timestamp() ELSE h.updated_at END \
-         WHERE {seen_changed} OR {text}",
-        head = take_when(
-            &[
-                "head_id",
-                "head_created_at",
-                "head_received_at",
-                "head_pubkey"
-            ],
-            HEAD
-        ),
-        text_set = take_when(&["head_text", "head_edit_at", "head_edit_id"], &text),
+         WHERE {seen_changed} OR {text}"
     )
 }
 
@@ -745,21 +739,22 @@ pub(super) fn thread_merge_sql(seen_new: &str, seen_first: &str) -> String {
     const ACTIVITY: &str = "((EXCLUDED.activity_at, h.activity_id) \
         > (COALESCE(h.activity_at, '-infinity'), EXCLUDED.activity_id) \
         OR (EXCLUDED.activity_id IS NOT NULL AND h.activity_id IS NULL))";
-    let (seen_set, seen_changed) = seen_sql(seen_new, seen_first);
+    let (seen, seen_changed) = seen_sql(seen_new, seen_first);
     format!(
-        "ON CONFLICT (community_id, root_id) DO UPDATE SET {seen_set}, {activity}, \
+        "ON CONFLICT (community_id, root_id) DO UPDATE SET \
+            seen_at = {seen}, \
+            activity_at = CASE WHEN {ACTIVITY} \
+                THEN EXCLUDED.activity_at ELSE h.activity_at END, \
+            activity_id = CASE WHEN {ACTIVITY} \
+                THEN EXCLUDED.activity_id ELSE h.activity_id END, \
+            activity_created_at = CASE WHEN {ACTIVITY} \
+                THEN EXCLUDED.activity_created_at ELSE h.activity_created_at END, \
+            activity_pubkey = CASE WHEN {ACTIVITY} \
+                THEN EXCLUDED.activity_pubkey ELSE h.activity_pubkey END, \
+            activity_text = CASE WHEN {ACTIVITY} \
+                THEN EXCLUDED.activity_text ELSE h.activity_text END, \
             updated_at = CASE WHEN {ACTIVITY} THEN clock_timestamp() ELSE h.updated_at END \
-         WHERE {seen_changed} OR {ACTIVITY}",
-        activity = take_when(
-            &[
-                "activity_at",
-                "activity_id",
-                "activity_created_at",
-                "activity_pubkey",
-                "activity_text"
-            ],
-            ACTIVITY
-        ),
+         WHERE {seen_changed} OR {ACTIVITY}"
     )
 }
 
