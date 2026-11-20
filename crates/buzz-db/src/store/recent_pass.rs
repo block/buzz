@@ -667,13 +667,6 @@ mod tests {
                 Some(horizon),
                 None,
             ),
-            (
-                "channel floor",
-                Some(&[9]),
-                Some(channel_floor(at(2026, 3, 1))),
-                Some(midnight(2026, 3, 1)),
-                Some(midnight(2026, 5, 1)),
-            ),
         ];
         for &(label, kinds, earliest, from, to) in cases {
             let window = oldest_for(now, kinds, earliest);
@@ -704,14 +697,14 @@ mod tests {
     /// a row stamped just before the channel existed stays in its first window.
     #[test]
     fn channel_floor_allows_the_write_tolerance() {
-        let created = midnight(2026, 3, 1) + Duration::seconds(10);
-        assert_eq!(
-            channel_floor(created),
-            midnight(2026, 3, 1) + Duration::seconds(10 - CREATED_AT_FLOOR_SECS)
-        );
         let now = at(2026, 11, 4);
-        let window = oldest_for(now, Some(&[9]), Some(channel_floor(created)));
-        assert_eq!(window.from, Some(midnight(2026, 2, 1)));
+        let first = |created| oldest_for(now, Some(&[9]), Some(channel_floor(created))).from;
+        let edge = midnight(2026, 3, 1) + Duration::seconds(CREATED_AT_FLOOR_SECS);
+        assert_eq!(first(edge), Some(midnight(2026, 3, 1)));
+        assert_eq!(
+            first(edge - Duration::seconds(1)),
+            Some(midnight(2026, 2, 1))
+        );
     }
 
     /// A channel page whose cursor is below its floor's month, the head page
