@@ -429,6 +429,20 @@ async fn migration_write_limit_controls_http_and_ws_across_relay_instances() {
         admin(&app_b, Method::GET, Some(&operator), None).await,
         (StatusCode::OK, json!({"eventsPerMinute": 0}))
     );
+    for committed in [&create_event, &first] {
+        let (status, _, body) = add_over_http(&app_b, tenant_a.host(), &owner_a, committed).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["accepted"], true);
+        assert_eq!(body["message"], "duplicate:");
+    }
+    let (mut replay_socket, replay_server) =
+        start_ws(app_b.clone(), tenant_a.host(), &owner_a).await;
+    let replay = send_event(&mut replay_socket, "EVENT", &first).await;
+    assert_eq!(replay[2], true);
+    assert_eq!(replay[3], "duplicate:");
+    drop(replay_socket);
+    replay_server.abort();
+
     let paused = send_event(&mut socket, "EVENT", &ws_event).await;
     assert_eq!(paused[2], false);
     assert_eq!(paused[3], "rate-limited: quota exceeded; retry in 5s");

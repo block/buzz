@@ -244,7 +244,8 @@ defaults to 12, which refills one permit every five seconds. Idle time can
 accumulate at most two permits. This lets an importer create a channel and send
 its first membership batch back-to-back. The relay checks the signature and
 write authorization before taking a permit. A channel create or a batch of
-membership changes uses one permit. The relay queues no writes.
+membership changes uses one permit. An authorized attempt can spend a permit
+even if a storage conflict later prevents the write. The relay queues no writes.
 
 Importers label every event they send with a signed tag of the form
 `["migration","example-import"]`. Channel creation (kind 9007) and each
@@ -258,9 +259,10 @@ side effects, and legacy clients that send untagged events use their
 existing paths.
 
 Set the limit to zero to block new tagged admissions. Writes that already
-received a permit can finish, including their side effects. Raise the limit
-to resume admission. The relay calculates refill since the last grant using
-the new rate. The two-permit cap still applies. No restart is needed.
+received a permit can finish, including their side effects. An authorized retry
+of the same signed event returns `duplicate:` if the event is still stored.
+Raise the limit to resume admission. The relay calculates refill since the last
+grant using the new rate. The two-permit cap still applies. No restart is needed.
 
 All replicas must use the same Redis database. Redis orders changes and
 admissions atomically and supplies the clock. A successful update applies
@@ -269,13 +271,15 @@ to every later check. The override has no expiry. Preserve the Redis key
 limit must survive them. A missing override uses the default. Give each
 independent relay deployment its own Redis database.
 
-HTTP sends `429` for throttled or paused writes and `503` when the migration
-budget cannot be checked. Both carry `Retry-After`. WebSocket sends a negative
-`OK` with the same message as the HTTP error body. The quota message has the
-form `rate-limited: quota exceeded; retry in 5s`. A pause gives a five-second
-delay. A storage failure uses `rate-limited: shared admission unavailable`.
-The HTTP body also includes `"sent": false` and the response gives a
-five-second retry delay.
+The migration limit returns HTTP `429` for throttled or paused writes and `503`
+if it cannot check the budget. Both responses carry `Retry-After`. WebSocket
+sends a negative `OK` with the same message as the HTTP error body. The quota
+message has the form `rate-limited: quota exceeded; retry in 5s`. A pause uses
+a five-second delay. If the migration budget is unavailable, the message is
+`rate-limited: shared admission unavailable`. That `503` includes `"sent": false`
+and a five-second retry delay. When a Redis outage also prevents the earlier
+per-sender admission check on `POST /events`, that check returns `503` with the
+same error message and omits `Retry-After` and `"sent"`.
 Preserve pending work and add jitter before retrying. Sign a fresh NIP-98
 proof for each HTTP attempt.
 

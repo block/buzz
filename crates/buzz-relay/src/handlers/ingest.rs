@@ -3478,6 +3478,31 @@ async fn ingest_event_inner(
     };
 
     if let Some(hashes) = migration_media {
+        // Confirm a committed retry even when the migration budget is paused.
+        // The storage transactions still deduplicate concurrent arrivals.
+        if state
+            .db
+            .live_event_exists_for_event_write(tenant.community(), &event)
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?
+        {
+            if let Some(ch) = channel_id {
+                emit(
+                    tracer,
+                    TraceAction::WriteDuplicate {
+                        msg_id: msg_id_label(event.id.as_bytes()),
+                        channel: channel_label(ch),
+                        claimed_community: claimed_community_from_event(&event),
+                    },
+                    state_for_request(tenant, auth.pubkey()),
+                );
+            }
+            return Ok(IngestResult {
+                event_id: event_id_hex,
+                accepted: true,
+                message: "duplicate:".into(),
+            });
+        }
         // Publication markers consume previews. Keep the authorization reads
         // above and take a shared permit before writing any markers.
         let transport = if auth.is_http() { "http" } else { "websocket" };
