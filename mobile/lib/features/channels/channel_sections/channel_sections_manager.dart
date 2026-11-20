@@ -245,8 +245,9 @@ class ChannelSectionsManager {
     _unsubscribe = null;
   }
 
-  void createSection(String name) {
-    if (!_editable) return;
+  /// Returns the new section's ID, or null when legacy filing is locked.
+  String? createSection(String name) {
+    if (!_editable) return null;
     final maxOrder = _store.sections.fold<int>(
       -1,
       (max, s) => s.order > max ? s.order : max,
@@ -262,6 +263,7 @@ class ChannelSectionsManager {
     );
     _persist();
     markDirty();
+    return section.id;
   }
 
   void renameSection(String sectionId, String? newName, {String? icon}) {

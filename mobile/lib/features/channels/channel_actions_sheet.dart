@@ -680,19 +680,9 @@ Future<void> _showMoveSectionSheet(
                     Navigator.of(sheetContext).pop();
                     final name = await _showSectionNameDialog(context);
                     if (name == null || name.isEmpty) return;
-                    final notifier = container.read(
-                      channelSectionsProvider.notifier,
-                    );
-                    notifier.createSection(name);
-                    final created = container
-                        .read(channelSectionsProvider)
-                        .store
-                        .sections
-                        .where((section) => section.name == name.trim())
-                        .lastOrNull;
-                    if (created != null) {
-                      notifier.assignChannel(channel.id, created.id);
-                    }
+                    container
+                        .read(channelSectionsProvider.notifier)
+                        .createSectionWithChannel(channel.id, name);
                   },
                 ),
                 if (sectionId != null)

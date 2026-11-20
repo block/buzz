@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_actions_sheet.dart';
@@ -10,6 +11,7 @@ import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/manage_channel_sheet.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/buzz_action_tile.dart';
@@ -19,6 +21,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart';
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:shared_preferences/shared_preferences.dart';
 
 const _currentPubkey = 'me';
 
@@ -72,15 +77,18 @@ Widget _modalApp({
   bool details = false,
   String? canvasContent,
   Future<ChannelCanvas>? pendingCanvas,
-  ChannelSectionStore sections = const ChannelSectionStore(),
+  List<Override>? sectionOverrides,
   String? sectionId,
 }) => ProviderScope(
   overrides: [
     currentPubkeyProvider.overrideWith((ref) => _currentPubkey),
     channelMembersProvider(channel.id).overrideWith((ref) => loadMembers()),
-    channelSectionsProvider.overrideWith(
-      () => _FakeChannelSectionsNotifier(sections),
-    ),
+    ...sectionOverrides ??
+        [
+          channelSectionsProvider.overrideWith(
+            () => _FakeChannelSectionsNotifier(const ChannelSectionStore()),
+          ),
+        ],
     agentOwnersProvider.overrideWithValue(
       const AsyncValue.data(<String, String>{}),
     ),
@@ -605,27 +613,54 @@ void main() {
     });
   }
 
-  for (final (label, expected) in [
-    ('Work', 'assign channel-id work'),
-    ('Remove from section', 'unassign channel-id'),
-    ('New section…', 'assign channel-id new'),
+  for (final (pick, laterExists) in [
+    ('Work', false),
+    ('Remove from section', false),
+    ('New section…', false),
+    ('New section…', true),
   ]) {
-    testWidgets('Move to section: $label files the channel after the actions '
-        'sheet closes', (tester) async {
+    testWidgets('Move to section: $pick files the channel after the actions '
+        'sheet closes (a "Later" section already exists: $laterExists)', (
+      tester,
+    ) async {
       tester.view.physicalSize = const Size(1200, 3000);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
+      final keys = nostr.Keys.generate();
+      const relayUrl = 'https://relay.example';
+      final storeKey = channelSectionsKey(keys.public, relayUrl);
+      SharedPreferences.setMockInitialValues({
+        storeKey: jsonEncode(
+          ChannelSectionStore(
+            sections: [
+              const ChannelSection(id: 'work', name: 'Work', order: 0),
+              if (laterExists)
+                const ChannelSection(id: 'old-later', name: 'Later', order: 1),
+            ],
+            assignments: {
+              if (pick == 'Remove from section') 'channel-id': 'work',
+            },
+          ).toJson(),
+        ),
+      });
+      final prefs = await SharedPreferences.getInstance();
       await tester.pumpWidget(
         _modalApp(
           channel: _channel(),
           loadMembers: () async => const [],
           createChannelActions: (ref) => _FakeChannelActions(ref),
-          sections: const ChannelSectionStore(
-            sections: [ChannelSection(id: 'work', name: 'Work', order: 0)],
-            assignments: {'channel-id': 'work'},
-          ),
-          sectionId: 'work',
+          sectionId: pick == 'Remove from section' ? 'work' : null,
+          sectionOverrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            relayConfigProvider.overrideWith(
+              () => _SignedInConfig(relayUrl, keys.nsec),
+            ),
+            activeCommunityProvider.overrideWith((ref) async => null),
+          ],
         ),
+      );
+      final container = ProviderScope.containerOf(
+        tester.element(find.text('Open actions')),
       );
       await tester.tap(find.text('Open actions'));
       await tester.pumpAndSettle();
@@ -633,21 +668,34 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(ChannelActionsSheet), findsNothing);
 
-      await tester.tap(find.text(label));
+      await tester.tap(find.text(pick));
       await tester.pumpAndSettle();
-      if (label == 'New section…') {
+      if (pick == 'New section…') {
         await tester.enterText(find.byType(TextField), 'Later');
         await tester.tap(find.text('Create'));
         await tester.pumpAndSettle();
       }
 
       expect(tester.takeException(), isNull);
-      final notifier =
-          ProviderScope.containerOf(
-                tester.element(find.text('Open actions')),
-              ).read(channelSectionsProvider.notifier)
-              as _FakeChannelSectionsNotifier;
-      expect(notifier.calls.last, expected);
+      // The provider shows the move at once, and it is saved.
+      final shown = container.read(channelSectionsProvider).store;
+      final saved = ChannelSectionStore.fromJson(
+        jsonDecode(prefs.getString(storeKey)!) as Map<String, dynamic>,
+      );
+      for (final store in [shown, saved]) {
+        final filed = store.assignments['channel-id'];
+        switch (pick) {
+          case 'Work':
+            expect(filed, 'work');
+          case 'Remove from section':
+            expect(store.assignments, isNot(contains('channel-id')));
+          default:
+            final created = store.sections.singleWhere(
+              (s) => s.name == 'Later' && s.id != 'old-later',
+            );
+            expect(filed, created.id);
+        }
+      }
     });
   }
 
@@ -1221,34 +1269,23 @@ void main() {
   });
 }
 
+class _SignedInConfig extends RelayConfigNotifier {
+  _SignedInConfig(this.baseUrl, this.nsec);
+  final String baseUrl;
+  final String nsec;
+
+  @override
+  RelayConfig build() => RelayConfig(baseUrl: baseUrl, nsec: nsec);
+}
+
 class _FakeChannelSectionsNotifier extends ChannelSectionsNotifier {
   _FakeChannelSectionsNotifier(this._store);
 
-  ChannelSectionStore _store;
-  final calls = <String>[];
+  final ChannelSectionStore _store;
 
   @override
   ChannelSectionsState build() =>
       ChannelSectionsState(isReady: true, store: _store, version: 1);
-
-  @override
-  void assignChannel(String channelId, String sectionId) =>
-      calls.add('assign $channelId $sectionId');
-
-  @override
-  void unassignChannel(String channelId) => calls.add('unassign $channelId');
-
-  @override
-  void createSection(String name) {
-    calls.add('create $name');
-    _store = ChannelSectionStore(
-      sections: [
-        ..._store.sections,
-        ChannelSection(id: 'new', name: name, order: _store.sections.length),
-      ],
-    );
-    state = ChannelSectionsState(isReady: true, store: _store, version: 2);
-  }
 
   void lock() => state = ChannelSectionsState(
     isReady: true,

@@ -101,7 +101,13 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
     );
   }
 
-  void createSection(String name) => _manager?.createSection(name);
+  void createSection(String name) => _edit((m) => m.createSection(name));
+
+  /// Creates a section and files [channelId] in it, by the new section's ID.
+  void createSectionWithChannel(String channelId, String name) => _edit((m) {
+    final id = m.createSection(name);
+    if (id != null) m.assignChannel(channelId, id);
+  });
 
   void renameSection(String sectionId, String? newName, {String? icon}) =>
       _manager?.renameSection(sectionId, newName, icon: icon);
@@ -119,10 +125,19 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
       _manager?.moveSectionDown(sectionId);
 
   void assignChannel(String channelId, String sectionId) =>
-      _manager?.assignChannel(channelId, sectionId);
+      _edit((m) => m.assignChannel(channelId, sectionId));
 
   void unassignChannel(String channelId) =>
-      _manager?.unassignChannel(channelId);
+      _edit((m) => m.unassignChannel(channelId));
+
+  /// Applies a local edit and emits it at once, as [deleteSection] does,
+  /// rather than waiting for the relay to echo it back.
+  void _edit(void Function(ChannelSectionsManager manager) edit) {
+    final manager = _manager;
+    if (manager == null) return;
+    edit(manager);
+    _emitManagerState(manager);
+  }
 
   void _emitManagerState(ChannelSectionsManager manager) {
     if (_manager != manager) return;
