@@ -10,7 +10,7 @@ When the mobile app crashes or misbehaves, nobody who can fix it finds out. Unca
 
 ## Solution
 
-A build that is given a [reporting destination](../CONTEXT.md#reporting-destination) does [diagnostic reporting](../CONTEXT.md#diagnostic-reporting): it sends crashes, unexpected errors and networking measurements to that destination, tagged with the member who hit them. A build without a reporting destination sends nothing and behaves exactly as today. Reports never contain what people write or the names of the places they write it.
+A build that is given a [reporting destination](../CONTEXT.md#reporting-destination) does [diagnostic reporting](../CONTEXT.md#diagnostic-reporting): it sends crashes, unexpected errors and networking measurements to that destination, tagged with the member who hit them. A build without a reporting destination sends nothing and behaves exactly as today. Reports never contain what people write or the names of the places they write it, with one accepted exception: a value that the app's own code interpolates into a programmer error's message (see the filter below).
 
 ## User stories
 
@@ -30,7 +30,7 @@ A build that is given a [reporting destination](../CONTEXT.md#reporting-destinat
 14. As a distributor of an [internal build](../CONTEXT.md#internal-build), I want to turn reporting on by supplying one build-time setting, so that my organization's reports go to my own destination.
 15. As a distributor, I want stack traces from my release builds to be readable, so that reports are usable.
 16. As someone building the app from source, I want a build with no reporting destination to send nothing and start no reporting code, so that the open-source app reports to no one by default.
-17. As a member, I want reports to never include message content, channel or community names, private keys or other secrets, so that diagnosing faults does not expose what I write.
+17. As a member, I want reports to never include message content, channel or community names, private keys or other secrets, so that diagnosing faults does not expose what I write. The one accepted exception is a value the app's own code interpolates into a programmer error's message; the filter replaces such a line when it looks like a URL or key, but cannot rule out every value.
 18. As a member, I want reporting to never slow the app or block what I am doing, so that diagnosis does not cost me anything.
 19. As a developer, I want signing out or switching accounts to change who later reports are attributed to, so that reports are never tagged with the wrong member.
 20. As a reviewer, I want all reporting to go through one small interface, so that I can check what leaves the device in one place.
