@@ -130,6 +130,7 @@ bool _isRelayOutcome(Object error) =>
 /// the user undo a reaction that landed.
 String? _reactionFailureMessage(Object error, {required bool adding}) {
   final verb = adding ? 'add' : 'remove';
+  final action = adding ? 'Reaction' : 'Removal';
   return switch (error) {
     // The relay already has this exact reaction, as after a double tap or
     // re-picking one of your reactions from the picker.
@@ -138,8 +139,8 @@ String? _reactionFailureMessage(Object error, {required bool adding}) {
       null,
     RelayNotConnectedError() => 'Couldn’t $verb reaction. No connection.',
     RelayAckTimeoutError() =>
-      "Reaction not confirmed. The relay didn't respond.",
-    RelayAckLostError() => 'Reaction not confirmed. Connection lost.',
+      "$action not confirmed. The relay didn't respond.",
+    RelayAckLostError() => '$action not confirmed. Connection lost.',
     _ => 'Couldn’t $verb reaction. Try again.',
   };
 }

@@ -266,6 +266,12 @@ void main() {
       'Reaction not confirmed. Connection lost.',
     ),
     (
+      'a remove whose acknowledgement was lost',
+      true,
+      RelayAckLostError(),
+      'Removal not confirmed. Connection lost.',
+    ),
+    (
       'an add the relay already has',
       false,
       const RelayEventRejectedException('duplicate: reaction already exists'),
