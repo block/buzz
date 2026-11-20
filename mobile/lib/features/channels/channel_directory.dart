@@ -687,7 +687,7 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
         !_isBroadcastReply(event);
     final isHighPriority =
         channel.isDm || (!countQuiet && isHighPriorityEvent(event.tags, myPk));
-    recordObservedUnreadEvent(
+    final inserted = recordObservedUnreadEvent(
       _observedUnreadEventsByChannel,
       channel.id,
       makeObservedUnreadEvent(
@@ -702,7 +702,9 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
       _unreadCatchUpLimit,
     );
 
-    _observedUnreadRevisions.touch(channel.id);
+    // Refresh and reconnect replay history the registry already holds. Only
+    // an insertion changes the channel's events, so only it stamps them.
+    if (inserted) _observedUnreadRevisions.touch(channel.id);
 
     final current = _latestObservedByChannel[channel.id] ?? 0;
     if (event.createdAt > current) {

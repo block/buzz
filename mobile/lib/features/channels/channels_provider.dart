@@ -996,8 +996,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   void clearObservedUnreadForChannel(String channelId) {
     _latestObservedByChannel.remove(channelId);
     _activityRevisions.remove(channelId);
-    _observedUnreadEventsByChannel.remove(channelId);
-    _observedUnreadRevisions.touch(channelId);
+    if (_observedUnreadEventsByChannel.remove(channelId) != null) {
+      _observedUnreadRevisions.touch(channelId);
+    }
     state = state.whenData((channels) => List<Channel>.of(channels));
   }
 
