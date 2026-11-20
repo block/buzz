@@ -83,6 +83,38 @@ void _messageActionsScrollTests() {
           await pull.up();
           await tester.pumpAndSettle();
           expect(animation.value, 1);
+          // A system-cancelled touch after a deep pull restores the menu.
+          final cancelled = await tester.startGesture(start);
+          await cancelled.moveBy(const Offset(0, 24));
+          await cancelled.moveBy(Offset(0, tester.getSize(sheet).height * 0.7));
+          await tester.pump();
+          expect(animation.value, lessThan(0.5));
+          await cancelled.cancel();
+          await tester.pumpAndSettle();
+          expect(animation.value, 1);
+          // A second finger on the handle takes the sheet over: lifting the
+          // body finger leaves it with the handle, which then settles it open.
+          final held = await tester.startGesture(start);
+          await held.moveBy(const Offset(0, 24));
+          await held.moveBy(const Offset(0, 40));
+          final handle = await tester.startGesture(
+            tester.getCenter(
+              find.byKey(const ValueKey('buzz-sheet-drag-handle')),
+            ),
+          );
+          await handle.moveBy(const Offset(0, 24));
+          await handle.moveBy(Offset(0, tester.getSize(sheet).height * 0.6));
+          await tester.pump();
+          final displaced = animation.value;
+          expect(displaced, lessThan(0.5));
+          await held.up();
+          await tester.pumpAndSettle();
+          expect(animation.value, displaced);
+          await handle.moveBy(Offset(0, -tester.getSize(sheet).height * 0.5));
+          await handle.up();
+          await tester.pumpAndSettle();
+          expect(animation.value, 1);
+          expect(position.pixels, 0);
           // Scroll the list up slightly, then swipe down hard: the finger
           // carries content to the top, pulls the sheet a little and the
           // release velocity dismisses the menu. Either as a new touch after

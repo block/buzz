@@ -41,10 +41,22 @@ A parity test releases the same pointer gestures through the stock sheet drag
 and through the body, so a Flutter upgrade that moves either stock threshold
 fails it. The wrapper captures the raw terminal event before Flutter negates it or
 adds carried scroll momentum. Cancellations and activity interruptions reopen,
-including when another active route covers the sheet. Departing routes are not
+including when another active route covers the sheet. Flutter delivers a
+system-cancelled pointer to an accepted drag as an ordinary end, so the body
+listens for the pointer cancellation itself and treats that end as an
+interruption: a deep pull that the system cancels reopens. Departing routes are not
 reopened. Reduced motion preserves direct manipulation but settles immediately.
 The route close callback returns null, leaving message selection and composer
 focus restoration with their existing owners.
+
+The sheet has one drag owner at a time. A body gesture owns the sheet from its
+first sheet movement until it settles it. If anything else moves the route
+animation meanwhile, such as a second finger dragging the handle, the body
+gesture gives the sheet up for the rest of that touch: it neither moves nor
+settles the sheet, and only scrolls content. The handle's own release then
+settles the sheet. A body gesture cannot begin a sheet drag while the sheet is
+already displaced, and a body touch that lands during a handle drag joins the
+stock sheet recognizer rather than the scroll position.
 
 Content shorter than its viewport still uses always-scrollable physics on
 purpose: a downward body drag on a short menu, such as the system-message
@@ -72,7 +84,8 @@ The message-action journey uses a 375×667 viewport, 2× text, management
 permissions, and reminder/thread actions on iOS and Android settings. The
 shared tests cover the release boundaries, releases after scrolled content
 (new touch and same touch), stock parity, interruptions, bouncing offsets,
-carried momentum, layout changes, short bodies, reduced motion, and nested
+carried momentum, a real pointer cancellation, a second finger on the handle,
+layout changes, short bodies, reduced motion, and nested
 scrolling.
 
 ## Manual native checklist
@@ -99,4 +112,7 @@ message. Increase text size until the lower actions start offscreen.
 9. Compare the same drags on the handle; check barrier tap and system back.
 10. Settling open leaves composer focus alone; dismissing restores it. The
     draft survives both.
-11. Repeat on a thread message and on the short system-message reaction menu.
+11. Pull the body down slightly and hold. With a second finger drag the handle
+    past half way, then lift the body finger: the menu stays under the handle
+    finger. Lift that finger above half way: the menu settles open.
+12. Repeat on a thread message and on the short system-message reaction menu.

@@ -23,13 +23,22 @@ class ModalScrollHandoff extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = useMemoized(() => _HandoffController(() => context));
     useEffect(() => controller.dispose, [controller]);
-    return SingleChildScrollView(
-      controller: controller,
-      primary: false,
-      physics: const AlwaysScrollableScrollPhysics(),
-      // Like a primary scroll view, keep nested scrollables off the route's
-      // controller, which this body's position joins below.
-      child: PrimaryScrollController.none(child: child),
+    // A system-cancelled pointer reaches the scroll drag as an ordinary end.
+    // This listener sees each pointer event before the drag recognizer does,
+    // so the release can tell a cancellation from a lift.
+    return Listener(
+      onPointerDown: (_) => controller.pointerCancelled = false,
+      onPointerMove: (_) => controller.pointerCancelled = false,
+      onPointerUp: (_) => controller.pointerCancelled = false,
+      onPointerCancel: (_) => controller.pointerCancelled = true,
+      child: SingleChildScrollView(
+        controller: controller,
+        primary: false,
+        physics: const AlwaysScrollableScrollPhysics(),
+        // Like a primary scroll view, keep nested scrollables off the route's
+        // controller, which this body's position joins below.
+        child: PrimaryScrollController.none(child: child),
+      ),
     );
   }
 }
@@ -90,6 +99,9 @@ class _HandoffController extends ScrollController {
   _HandoffController(this.bodyContext);
   final BuildContext Function() bodyContext;
 
+  /// Whether the body's most recent pointer event was a cancellation.
+  bool pointerCancelled = false;
+
   @override
   ScrollPosition createScrollPosition(
     ScrollPhysics physics,
@@ -142,6 +154,7 @@ class _HandoffPosition extends ScrollPositionWithSingleContext {
   _SheetBinding? _sheet;
   DragStartDetails? _start;
   bool _suppressBallistic = false;
+  bool _movingSheet = false;
 
   // A terminal token is cleared before delegating end/cancel: Flutter disposes
   // its ScrollDragController during normal activity replacement as well.
@@ -173,8 +186,22 @@ class _HandoffPosition extends ScrollPositionWithSingleContext {
     _start = details;
     return _HandoffDrag(drag, (end) {
       if (_gesture != token) return;
-      _finish(end);
+      // A cancelled pointer restores the sheet like any other interruption.
+      _finish(owner.pointerCancelled ? null : end);
     });
+  }
+
+  // The sheet has one drag owner. This gesture owns it from its first sheet
+  // movement until it settles the sheet, or until anything else moves the
+  // route animation: a second finger on the handle, or the route closing. It
+  // then gives the sheet up for good, neither moving nor settling it, and
+  // only scrolls content. It cannot begin while the sheet is displaced.
+  void _yieldSheet() {
+    if (_movingSheet) return;
+    _sheet?.animation.removeListener(_yieldSheet);
+    _sheet = null;
+    _gesture = null;
+    _start = null;
   }
 
   @override
@@ -227,11 +254,18 @@ class _HandoffPosition extends ScrollPositionWithSingleContext {
 
   void _moveSheet(_SheetBinding binding, double progress) {
     if (progress == 0) return;
+    final animation = binding.animation;
     if (_sheet == null) {
       _sheet = binding;
       binding.sheet.onDragStart?.call(_start!);
+      animation.addListener(_yieldSheet);
     }
-    binding.animation.value = (binding.animation.value + progress).clamp(0, 1);
+    _movingSheet = true;
+    try {
+      animation.value = (animation.value + progress).clamp(0, 1);
+    } finally {
+      _movingSheet = false;
+    }
   }
 
   void _finish(DragEndDetails? end) {
@@ -239,6 +273,7 @@ class _HandoffPosition extends ScrollPositionWithSingleContext {
     _start = null;
     final binding = _sheet;
     _sheet = null;
+    binding?.animation.removeListener(_yieldSheet);
     if (binding == null || !binding.recoverable) return;
     final animation = binding.animation;
     final displaced = animation.value < 1;
@@ -283,6 +318,7 @@ class _HandoffPosition extends ScrollPositionWithSingleContext {
   void dispose() {
     // Never animate a departing route from final disposal.
     _gesture = null;
+    _sheet?.animation.removeListener(_yieldSheet);
     _sheet = null;
     super.dispose();
   }

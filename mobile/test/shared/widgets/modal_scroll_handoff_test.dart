@@ -572,6 +572,74 @@ void main() {
     expect(find.text('Handoff'), findsNothing);
   });
 
+  testWidgets('a system-cancelled pointer restores a deeply displaced sheet', (
+    tester,
+  ) async {
+    final h = _Harness();
+    await h.open(tester);
+    final from =
+        tester.getRect(find.byType(ModalScrollHandoff)).topCenter +
+        const Offset(0, 20);
+    // Flutter ends an accepted drag on PointerCancelEvent, it does not cancel.
+    final cancelled = await tester.startGesture(from);
+    await cancelled.moveBy(const Offset(0, 24));
+    await cancelled.moveBy(Offset(0, h.sheetHeight(tester) * 0.7));
+    await tester.pump();
+    expect(h.animation(tester).value, lessThan(0.5));
+    await cancelled.cancel();
+    await tester.pumpAndSettle();
+    expect(find.text('Handoff'), findsOneWidget);
+    expect(h.animation(tester).value, 1);
+    // The cancellation does not outlive its pointer: the same pull, lifted,
+    // closes on progress.
+    final lifted = await tester.startGesture(from);
+    await lifted.moveBy(const Offset(0, 24));
+    await lifted.moveBy(Offset(0, h.sheetHeight(tester) * 0.7));
+    await tester.pump();
+    await lifted.up();
+    await tester.pumpAndSettle();
+    expect(find.text('Handoff'), findsNothing);
+  });
+
+  testWidgets('the sheet has one drag owner across body and handle', (
+    tester,
+  ) async {
+    final h = _Harness();
+    await h.open(tester);
+    final height = h.sheetHeight(tester);
+    // A shallow body pull, then a second finger pulls the handle past half.
+    final body = await tester.startGesture(
+      tester.getRect(find.byType(ModalScrollHandoff)).topCenter +
+          const Offset(0, 20),
+    );
+    await body.moveBy(const Offset(0, 24));
+    await body.moveBy(const Offset(0, 40));
+    final handle = await tester.startGesture(
+      tester.getCenter(find.byKey(const ValueKey('buzz-sheet-drag-handle'))),
+    );
+    await handle.moveBy(const Offset(0, 24));
+    await handle.moveBy(Offset(0, height * 0.6));
+    await tester.pump();
+    final displaced = h.animation(tester).value;
+    expect(displaced, lessThan(0.5));
+    // The handle owns the sheet: the body can no longer move or settle it.
+    await body.moveBy(const Offset(0, 30));
+    await body.up();
+    await tester.pumpAndSettle();
+    expect(find.text('Handoff'), findsOneWidget);
+    expect(h.animation(tester).value, displaced);
+    await handle.moveBy(Offset(0, -height * 0.5));
+    await handle.up();
+    await tester.pumpAndSettle();
+    expect(h.animation(tester).value, 1);
+    // Ownership ends with the gesture: the body's next pull closes.
+    final next = _start(h.position(tester));
+    _move(next, 60);
+    _end(next, 701);
+    await tester.pumpAndSettle();
+    expect(find.text('Handoff'), findsNothing);
+  });
+
   testWidgets('carried scroll momentum cannot promote a raw sheet release', (
     tester,
   ) async {
