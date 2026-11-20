@@ -43,6 +43,14 @@ void showEmojiPicker({
   VoidCallback? onDismiss,
   bool nativeEmojiOnly = false,
 }) {
+  // A caller can open the picker from a context that outlived its widget, such
+  // as the message row behind the actions sheet after the timeline rebuilt it.
+  // There is nothing left to present on or react for, so complete the caller's
+  // lifecycle instead of throwing from the ancestor lookups below.
+  if (!context.mounted) {
+    onDismiss?.call();
+    return;
+  }
   if (defaultTargetPlatform == TargetPlatform.iOS) {
     unawaited(
       _presentIosEmojiPicker(
