@@ -23,6 +23,7 @@ import 'package:buzz/features/channels/me/me_page.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:flutter/semantics.dart';
 import 'package:buzz/features/channels/message_media_avatar.dart';
+import 'package:buzz/features/channels/saved_channel_page.dart';
 
 import 'dart:async';
 
@@ -135,6 +136,7 @@ part 'channel_detail_page_test/author_visibility_tests.dart';
 part 'channel_detail_page_test/swipe_reply_tests.dart';
 part 'channel_detail_page_test/review_avatar_tests.dart';
 part 'channel_detail_page_test/archive_navigation_tests.dart';
+part 'channel_detail_page_test/saved_channel_preview_tests.dart';
 
 const _channelId = '11111111-2222-4333-8444-555555555555';
 const _huddleChannelId = '8d764100-fd8f-44cf-9c98-6d8fbd739b8c';
@@ -310,6 +312,7 @@ Widget _buildTestable({
   ReadStateNotifier? readStateNotifier,
   InboxLocalStateNotifier? inboxLocalState,
   _FakeMessagesNotifier? messagesNotifier,
+  Future<SavedChannelPreview?>? savedPreview,
 
   /// The channel's own history in a personal chat, which [messagesNotifier]
   /// does not back there.
@@ -395,6 +398,10 @@ Widget _buildTestable({
             ? channelMessagesNotifier ?? _FakeMessagesNotifier(messages)
             : fakeMessagesNotifier,
       ),
+      if (savedPreview != null)
+        savedChannelPreviewProvider(
+          _channelId,
+        ).overrideWith((ref) => savedPreview),
       channelMessagesProvider(_huddleChannelId).overrideWith(
         () => _FakeMessagesNotifier(
           huddleMessages,
@@ -683,6 +690,7 @@ const _directoryAlice =
 const _directoryBob =
     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 void main() {
+  _savedChannelPreviewTests();
   testWidgets('chat Back follows visibility of the conversation list', (
     tester,
   ) async {
@@ -7003,6 +7011,48 @@ void main() {
       }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
     }
 
+    testWidgets('status bar jumps within saved rows before history is ready', (
+      tester,
+    ) async {
+      final saved = [
+        for (var i = 1; i <= 35; i++)
+          _textMsg(
+            id: 'saved-$i',
+            pubkey: 'alice',
+            content: i == 1 ? 'Oldest saved message' : 'Saved message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final notifier = _FakeMessagesNotifier(
+        [],
+        hasLoadedMessages: false,
+        failOlderFetch: true,
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: notifier,
+          disableAnimations: true,
+          savedPreview: Future.value((
+            events: saved,
+            summaries: <String, ChannelWindowThreadSummary>{},
+          )),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(findRichText('Oldest saved message'), findsNothing);
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        'flutter/status_bar',
+        const JSONMethodCodec().encodeMethodCall(
+          const MethodCall('handleScrollToTop'),
+        ),
+        (_) {},
+      );
+      await tester.pumpAndSettle();
+      expect(findRichText('Oldest saved message'), findsOneWidget);
+      expect(notifier.fetchOlderCalls, 0);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
     for (final personal in [false, true]) {
       testWidgets(
         'loads history through the oldest unread boundary personal=$personal',
@@ -7036,7 +7086,8 @@ void main() {
               ),
           ];
           final messagesNotifier = _FakeMessagesNotifier(
-            newestPage,
+            personal ? newestPage : const [],
+            hasLoadedMessages: personal,
             olderPages: [olderPage],
           );
           final channelsNotifier = _FakeChannelsNotifier(
@@ -7070,12 +7121,27 @@ void main() {
               messagesNotifier: messagesNotifier,
               channelsNotifier: channelsNotifier,
               readStateNotifier: readState,
+              savedPreview: personal
+                  ? null
+                  : Future.value((
+                      events: newestPage,
+                      summaries: <String, ChannelWindowThreadSummary>{},
+                    )),
               users: const {
                 'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
               },
             ),
           );
           await tester.pumpAndSettle();
+
+          if (!personal) {
+            expect(messagesNotifier.fetchOlderCalls, 0);
+            messagesNotifier.setMessages(newestPage);
+            await tester.pump();
+            await tester.pump(const Duration(milliseconds: 1));
+            await tester.pumpAndSettle();
+            expect(messagesNotifier.fetchOlderCalls, 1);
+          }
 
           await tester.tap(
             find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
@@ -14228,19 +14294,21 @@ void main() {
     testWidgets('pages past a newest page of only hidden notices', (
       tester,
     ) async {
+      final hiddenPage = [
+        for (var i = 0; i < 5; i++)
+          _systemMsg(
+            id: 'join$i',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'user$i',
+              'target': 'user$i',
+            },
+            createdAt: 2000 + i,
+          ),
+      ];
       final messagesNotifier = _FakeMessagesNotifier(
-        [
-          for (var i = 0; i < 5; i++)
-            _systemMsg(
-              id: 'join$i',
-              payload: {
-                'type': 'member_joined',
-                'actor': 'user$i',
-                'target': 'user$i',
-              },
-              createdAt: 2000 + i,
-            ),
-        ],
+        [],
+        hasLoadedMessages: false,
         failOlderFetch: true,
         olderPages: [
           [
@@ -14258,11 +14326,19 @@ void main() {
         _buildTestable(
           messages: const [],
           messagesNotifier: messagesNotifier,
+          savedPreview: Future.value((
+            events: hiddenPage,
+            summaries: <String, ChannelWindowThreadSummary>{},
+          )),
           users: const {
             'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
           },
         ),
       );
+      await tester.pumpAndSettle();
+      expect(messagesNotifier.fetchOlderCalls, 0);
+
+      messagesNotifier.setMessages(hiddenPage);
       await tester.pumpAndSettle();
 
       // A thrown fetch pauses paging once, without retrying on its own.
@@ -22191,6 +22267,9 @@ class _FakeThreadLocalRepliesNotifier extends ThreadLocalRepliesNotifier {
 class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   List<NostrEvent> _messages;
   bool _hasLoadedMessages;
+  bool _historyCompleted;
+  @override
+  bool historyRefreshFailed = false;
   final List<List<NostrEvent>> _olderPages;
   bool failOlderFetch;
 
@@ -22214,6 +22293,7 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
     this.failOlderFetch = false,
     this.summaries = const {},
   }) : _hasLoadedMessages = hasLoadedMessages,
+       _historyCompleted = hasLoadedMessages,
        _olderPages = [...olderPages],
        super(channelId);
 
@@ -22221,7 +22301,16 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   AsyncValue<List<NostrEvent>> build() => AsyncData(_messages);
 
   @override
+  void retryHistoryRefresh() {
+    historyRefreshFailed = false;
+    super.retryHistoryRefresh();
+  }
+
+  @override
   bool get hasLoadedMessages => _hasLoadedMessages;
+
+  @override
+  bool get hasLoadedHistory => _historyCompleted;
 
   @override
   Map<String, ChannelWindowThreadSummary> get threadSummaries => summaries;
@@ -22240,9 +22329,10 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
     return true;
   }
 
-  void setMessages(List<NostrEvent> messages) {
+  void setMessages(List<NostrEvent> messages, {bool historyCompleted = true}) {
     _messages = messages;
     _hasLoadedMessages = true;
+    _historyCompleted = historyCompleted;
     state = AsyncData(messages);
   }
 }

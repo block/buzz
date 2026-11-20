@@ -19,6 +19,7 @@ class _MessageList extends HookConsumerWidget {
   final String channelId;
   final String? welcomeAgent;
   final ChannelMessagesNotifier notifier;
+  final bool relayHistoryReady;
   final bool isDm;
   final bool flat;
   final String? currentPubkey;
@@ -46,6 +47,7 @@ class _MessageList extends HookConsumerWidget {
     required this.channelId,
     this.welcomeAgent,
     required this.notifier,
+    required this.relayHistoryReady,
     required this.isDm,
     required this.flat,
     required this.currentPubkey,
@@ -156,10 +158,10 @@ class _MessageList extends HookConsumerWidget {
         dayStartByReversedIndex[reversedIndex] = currentDayStartIndex;
       }
     }
-
     useEffect(
       () {
-        if (!hasInitialUnread ||
+        if (!relayHistoryReady ||
+            !hasInitialUnread ||
             hasUnreadDeepLink ||
             oldestUnreadMessageId.value != null ||
             unreadBoundaryLoadFailed.value ||
@@ -241,6 +243,7 @@ class _MessageList extends HookConsumerWidget {
         initialForcedUnreadMessageIds,
         entries.length,
         allMessages.length, // A page of hidden notices adds no entry.
+        relayHistoryReady,
         notifier.reachedOldest,
         unreadBoundaryLoadFailed.value,
       ],
@@ -548,7 +551,7 @@ class _MessageList extends HookConsumerWidget {
           } else if (!followsLatest.value && isAtLatest.value) {
             isAtLatest.value = false;
           }
-
+          if (!relayHistoryReady) return;
           final oldestVisible = positions
               .map((position) => position.index)
               .reduce((a, b) => a > b ? a : b);
@@ -602,13 +605,12 @@ class _MessageList extends HookConsumerWidget {
         itemPositionsListener,
         appBarTitleContentHeight,
         composerBottomInset,
+        relayHistoryReady,
         showUnreadNavigation,
         stickyDateHeaderState,
       ],
     );
 
-    // Reading starts once the timeline holds still for the dwell while this
-    // page is in front and the app is in use.
     final appInUse = isAppInUse(useAppLifecycleState());
     final readStateReady = ref.watch(
       readStateProvider.select((state) => state.isReady),
@@ -831,6 +833,7 @@ class _MessageList extends HookConsumerWidget {
       notifier: notifier,
       itemScrollController: itemScrollController,
       displayCount: displayEntries.length,
+      relayHistoryReady: relayHistoryReady,
       isLoadingOlder: isLoadingOlder,
       navigatingOldest: navigatingOldest,
       olderFetchPaused: olderFetchPaused,
@@ -846,6 +849,7 @@ class _MessageList extends HookConsumerWidget {
     final hiddenHistory = _useHiddenHistoryPaging(
       context: context,
       noRows: entries.isEmpty,
+      relayHistoryReady: relayHistoryReady,
       loaded: allMessages,
       notifier: notifier,
       isLoadingOlder: isLoadingOlder,
@@ -971,7 +975,6 @@ class _MessageList extends HookConsumerWidget {
                   displayEntries.length +
                   (isLoadingOlder.value || showLoadEarlier.value ? 1 : 0),
               itemBuilder: (context, index) {
-                // Loading indicator at the top (last index in reversed list).
                 if (index >= displayEntries.length && !isLoadingOlder.value) {
                   return _LoadEarlierButton(
                     onPressed: () {

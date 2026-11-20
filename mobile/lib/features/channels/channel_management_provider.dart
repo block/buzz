@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/auth/auth.dart';
+import '../../shared/channels/saved_message_store.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/crypto/nip_oa.dart';
@@ -18,6 +19,7 @@ import '../profile/profile_provider.dart';
 import 'channel.dart';
 import 'channel_metadata_updates.dart';
 import 'channels_provider.dart';
+import 'saved_channel_page.dart';
 
 export 'channel_metadata_updates.dart';
 
