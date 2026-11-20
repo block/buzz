@@ -3,6 +3,35 @@
 use thiserror::Error;
 use url::{Host, Url};
 
+/// Append an HTTP endpoint to a relay base path without changing its query bytes.
+///
+/// `endpoint` is a relay-relative path, optionally with a query string. Endpoint
+/// query parameters follow the configured relay parameters, without decoding or
+/// re-encoding either query. A base fragment is omitted from the request URL.
+pub fn relay_http_endpoint(base: &str, endpoint: &str) -> Result<Url, url::ParseError> {
+    let mut url = Url::parse(base)?;
+    let (path, query) = endpoint
+        .split_once('?')
+        .map_or((endpoint, None), |(path, query)| (path, Some(query)));
+    url.set_path(&format!(
+        "{}/{}",
+        url.path().trim_end_matches('/'),
+        path.trim_start_matches('/')
+    ));
+    if let Some(query) = query {
+        let combined = match url.query() {
+            Some(base_query) if !base_query.is_empty() && !query.is_empty() => {
+                format!("{base_query}&{query}")
+            }
+            Some(base_query) if query.is_empty() => base_query.to_owned(),
+            _ => query.to_owned(),
+        };
+        url.set_query(Some(&combined));
+    }
+    url.set_fragment(None);
+    Ok(url)
+}
+
 /// Errors returned while canonicalizing a relay URL for runtime identity.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum NormalizeRelayUrlError {
@@ -71,15 +100,54 @@ pub fn normalize_relay_url(raw: &str) -> Result<String, NormalizeRelayUrlError> 
         url.set_port(None)
             .map_err(|_| NormalizeRelayUrlError::InvalidScheme)?;
     }
-    if url.path() == "/" {
+    let had_root_path = url.path() == "/";
+    if had_root_path {
         url.set_path("");
     }
-    Ok(url.to_string().trim_end_matches('/').to_string())
+    let mut serialized = url.to_string();
+    if had_root_path {
+        remove_root_path_separator(&mut serialized);
+    }
+    Ok(serialized)
+}
+
+fn remove_root_path_separator(serialized: &mut String) {
+    let delimiter = serialized.find(['?', '#']);
+    match delimiter {
+        Some(index) if serialized.as_bytes().get(index.wrapping_sub(1)) == Some(&b'/') => {
+            serialized.remove(index - 1);
+        }
+        None if serialized.ends_with('/') => {
+            serialized.pop();
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_endpoints_preserve_base_paths_and_raw_queries() {
+        for (base, endpoint, expected) in [
+            ("https://relay.example", "/query", "https://relay.example/query"),
+            ("https://relay.example/nostr/", "/query", "https://relay.example/nostr/query"),
+            ("https://relay.example?token=abc", "/query", "https://relay.example/query?token=abc"),
+            ("https://relay.example/nostr/?token=abc", "/query", "https://relay.example/nostr/query?token=abc"),
+            ("https://relay.example/n%2Fostr?next=/", "/info", "https://relay.example/n%2Fostr/info?next=/"),
+            ("https://relay.example?token=a%2fb+%20&token=2&url=wss://other/", "/reports?status=open", "https://relay.example/reports?token=a%2fb+%20&token=2&url=wss://other/&status=open"),
+            ("https://relay.example/nostr/?token=abc", "/", "https://relay.example/nostr/?token=abc"),
+            ("http://relay.example:8080?", "/query", "http://relay.example:8080/query?"),
+            ("https://relay.example?", "/reports?status=open", "https://relay.example/reports?status=open"),
+            ("https://relay.example?token=abc", "/query?", "https://relay.example/query?token=abc"),
+            ("https://relay.example", "/reports?status=open", "https://relay.example/reports?status=open"),
+            ("https://relay.example?token=abc#fragment", "/query", "https://relay.example/query?token=abc"),
+        ] {
+            assert_eq!(relay_http_endpoint(base, endpoint).unwrap().as_str(), expected);
+        }
+        assert!(relay_http_endpoint("not a URL", "/query").is_err());
+    }
 
     #[test]
     fn loopback_spellings_have_one_identity() {
@@ -101,6 +169,23 @@ mod tests {
             normalize_relay_url("ws://relay.example:8080/community/?x=1").unwrap(),
             "ws://relay.example:8080/community/?x=1"
         );
+    }
+
+    #[test]
+    fn preserves_queries_when_removing_root_path() {
+        for (input, expected) in [
+            ("wss://relay.example/?next=/", "wss://relay.example?next=/"),
+            (
+                "wss://relay.example/?next=/foo/",
+                "wss://relay.example?next=/foo/",
+            ),
+            (
+                "wss://relay.example/?url=wss://other.example/",
+                "wss://relay.example?url=wss://other.example/",
+            ),
+        ] {
+            assert_eq!(normalize_relay_url(input).unwrap(), expected);
+        }
     }
 
     #[test]
