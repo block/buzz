@@ -105,11 +105,15 @@ Future<ShownMessageStore> _openShownMessageStore() async {
 /// decides.
 Future<Map<String, String>> Function(Community) _headlessRelayHeaders() {
   final organizationOrigin = OrganizationEnvironment.origin;
+  // The foreground app owns these session records; a wake only reads them.
   final auth = HostedRelayAuth(
-    BuilderlabAccountClient(),
+    BuilderlabAccountClient(readOnlySession: true),
     organization: organizationOrigin == null
         ? null
-        : BuilderlabAccountClient(accountOrigin: organizationOrigin),
+        : BuilderlabAccountClient(
+            accountOrigin: organizationOrigin,
+            readOnlySession: true,
+          ),
   );
   return (community) => auth.headers(
     RelayConfig(baseUrl: community.relayUrl, nsec: community.nsec),
