@@ -283,6 +283,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
 
   /// Reads the newest post in each channel's [_activityGap], after the unread
   /// catch-up and apart from it, so its failure only leaves activity unknown.
+  /// A failed gap is not retried: the next list read's catch-up reads it again.
   Future<void> _catchUpActivityGaps(
     RelaySessionNotifier session,
     Map<String, NostrFilter> filtersByChannel,
@@ -323,7 +324,6 @@ extension _UnreadCatchUp on ChannelsNotifier {
     final failed = events == null ? channelIds : failedChannelIds;
     changed |= _activity.noteCatchUp(channelIds, failed, sentAt: sentAt);
     if (changed) _publishUnreadCatchUp(const {});
-    if (failed.isNotEmpty) _unreadCatchUpRetry.schedule(_retryUnreadCatchUp);
   }
 
   /// Where a channel's catch-up starts.
