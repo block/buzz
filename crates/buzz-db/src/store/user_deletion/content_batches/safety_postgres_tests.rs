@@ -389,9 +389,22 @@ async fn ownership_change_after_planning_preserves_agent_content() {
         .unwrap();
     let event = message(&db, c, ch, &agent, "must survive transfer", None).await;
     let before = row(&db, c, &event).await;
+    let relay = Keys::generate();
+    let viewer = agent.public_key().to_hex();
+    let private_state = EventBuilder::new(Kind::Custom(30622), "")
+        .tags([
+            Tag::parse(["d", &viewer]).unwrap(),
+            Tag::parse(["p", &viewer]).unwrap(),
+            Tag::parse(["h", &ch.to_string()]).unwrap(),
+        ])
+        .sign_with_keys(&relay)
+        .unwrap();
+    db.insert_event(c, &private_state, None).await.unwrap();
+    let private_before = row(&db, c, &private_state).await;
     let (planned, ready) = tokio::sync::oneshot::channel();
     let (resume, receive) = std::sync::mpsc::channel();
-    let opts = options(c, &alice);
+    let mut opts = options(c, &alice);
+    opts.relay_pubkey = Some(relay.public_key().to_hex());
     let store = db.user_deletion_store();
     let task = tokio::spawn(async move {
         let mut writer = PauseAfterPlan {
@@ -420,6 +433,7 @@ async fn ownership_change_after_planning_preserves_agent_content() {
         .to_string()
         .contains("ownership changed"));
     assert_eq!(row(&db, c, &event).await, before);
+    assert_eq!(row(&db, c, &private_state).await, private_before);
 }
 
 #[tokio::test]

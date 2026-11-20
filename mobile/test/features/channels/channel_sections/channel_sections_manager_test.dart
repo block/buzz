@@ -353,6 +353,15 @@ class _DelayedSubscribeRelaySession extends RelaySessionNotifier {
   }) async => const [];
 
   @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
+  }) => subscribe(filter, onEvent, onClosed: onClosed);
+
+  @override
   Future<void Function()> subscribe(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
@@ -436,6 +445,15 @@ class _RateLimitedRelaySession extends RelaySessionNotifier {
     }
     return historyEvents;
   }
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
+  }) => subscribe(filter, onEvent, onClosed: onClosed);
 
   @override
   Future<void Function()> subscribe(

@@ -601,9 +601,12 @@ class _ConversationDetailRoute extends MaterialPageRoute<void> {
     Animation<double> animation,
     Animation<double> secondaryAnimation,
     Widget child,
-  ) => _page.animate
-      ? super.buildTransitions(context, animation, secondaryAnimation, child)
-      : child;
+  ) => super.buildTransitions(
+    context,
+    _page.animate ? animation : kAlwaysCompleteAnimation,
+    secondaryAnimation,
+    child,
+  );
 }
 
 /// Opens a result in its workspace's detail pane, or an ordinary pushed route.

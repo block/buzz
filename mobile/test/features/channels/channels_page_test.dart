@@ -46,6 +46,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:buzz/features/channels/channel_stars/channel_stars_provider.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart';
 import 'package:buzz/features/channels/channel_sort/channel_sort_provider.dart';
 import 'package:buzz/features/channels/channel_sort/channel_sort_storage.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
@@ -119,7 +120,6 @@ void main() {
     TextScaler textScaler = TextScaler.noScaling,
     Gradient? topSectionGradient,
     ValueChanged<double>? onSettingsTransitionProgress,
-    ValueListenable<int>? tabReselection,
     _FakeProfileNotifier? profile,
     bool realHome = false,
     Widget? soloSliver,
@@ -172,7 +172,6 @@ void main() {
                     const Scaffold(body: Text('Appearance destination')),
                 onSettingsTransitionProgress:
                     onSettingsTransitionProgress ?? (_) {},
-                tabReselection: tabReselection,
                 soloSliver: soloSliver,
               ),
       ),
@@ -247,8 +246,8 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('general'), findsNothing);
-      expect(find.byTooltip('Channels options'), findsOneWidget);
-      await tester.tap(find.byTooltip('Channels options'));
+      expect(find.byTooltip('Team options'), findsOneWidget);
+      await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
       expect(find.text('general'), findsNothing);
       final all = tester.widget<AppListRow>(
@@ -309,7 +308,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.byTooltip('Channels options'));
+      await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
       // Sort is available while preferences load. A late verified load must
       // update the untouched filter draft and never cause an All publication.
@@ -329,7 +328,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(publications, 0);
       expect(manager.store.modeFor('channels'), ChannelFilterMode.unreads);
-      await tester.tap(find.byTooltip('Channels options'));
+      await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
       final header = find.byType(BuzzSheetHeader);
       final apply = find.widgetWithText(FilledButton, 'Apply');
@@ -353,7 +352,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(manager.store.modeFor('channels'), ChannelFilterMode.active);
       expect(manager.store.windowFor('channels'), 7 * 86400);
-      await tester.tap(find.byTooltip('Channels options'));
+      await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
       final days = tester.widget<AppListRow>(
         find.ancestor(
@@ -400,7 +399,7 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        await tester.tap(find.byTooltip('Channels options'));
+        await tester.tap(find.byTooltip('Team options'));
         await tester.pumpAndSettle();
         await tester.tap(find.text('Active'));
         await tester.pumpAndSettle();
@@ -533,7 +532,7 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  for (final label in ['Channels options', 'Design options']) {
+  for (final label in ['Team options', 'Design options']) {
     testWidgets('$label exposes a labeled button and tap action', (
       tester,
     ) async {
@@ -576,7 +575,7 @@ void main() {
         final title = tester.widget<Text>(
           find.byKey(const ValueKey('buzz-sheet-title')),
         );
-        expect(title.data, label == 'Channels options' ? 'Channels' : 'Design');
+        expect(title.data, label == 'Team options' ? 'Team' : 'Design');
         expect(find.text('Sort'), findsOneWidget);
         expect(find.text('Show'), findsOneWidget);
       } finally {
@@ -609,7 +608,7 @@ void main() {
     );
     await tester.pumpAndSettle();
     final ellipsis = find.descendant(
-      of: find.byTooltip('Channels options'),
+      of: find.byTooltip('Team options'),
       matching: find.byIcon(BuzzIcons.ellipsis),
     );
     expect(
@@ -671,7 +670,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       final ellipsis = find.descendant(
-        of: find.byTooltip('Channels options'),
+        of: find.byTooltip('Team options'),
         matching: find.byIcon(BuzzIcons.ellipsis),
       );
       final clock = tester.getCenter(
@@ -794,15 +793,15 @@ void main() {
     expect(find.text('general'), findsOneWidget);
     expect(find.text('design-forum'), findsNothing);
     expect(find.text('Alice'), findsOneWidget);
-    expect(find.text('Channels'), findsOneWidget);
+    expect(find.text('Team'), findsOneWidget);
     expect(find.text('FORUMS'), findsNothing);
-    expect(find.text('DMs'), findsOneWidget);
+    expect(find.text('Direct messages'), findsOneWidget);
     expect(find.text('Community'), findsNothing);
     expect(find.byTooltip('Create'), findsOneWidget);
-    expect(find.byTooltip('Channels options'), findsOneWidget);
+    expect(find.byTooltip('Team options'), findsOneWidget);
     expect(find.byIcon(BuzzIcons.ellipsis), findsWidgets);
     expect(find.byIcon(BuzzIcons.arrowUpDown), findsNothing);
-    expect(find.byTooltip('DMs options'), findsOneWidget);
+    expect(find.byTooltip('Direct messages options'), findsOneWidget);
 
     // DM identity display: the unnamed counterpart tile renders its
     // compact npub label, but its avatar initial stays keyed to the hex
@@ -828,17 +827,14 @@ void main() {
       tester
           .getTopRight(
             find.descendant(
-              of: find.byTooltip('Channels options'),
+              of: find.byTooltip('Team options'),
               matching: find.byIcon(BuzzIcons.ellipsis),
             ),
           )
           .dx,
-      closeTo(
-        tester.getTopRight(find.byTooltip('Channels options')).dx - 3,
-        0.01,
-      ),
+      closeTo(tester.getTopRight(find.byTooltip('Team options')).dx - 3, 0.01),
     );
-    await tester.tap(find.byTooltip('Channels options'));
+    await tester.tap(find.byTooltip('Team options'));
     await tester.pumpAndSettle();
     expect(find.text('Recent'), findsOneWidget);
     expect(find.text('A–Z'), findsOneWidget);
@@ -858,7 +854,7 @@ void main() {
       expect(text.style?.color, const Color(0xFF404040));
     }
     expect(find.byKey(const ValueKey('channel-icon-1')), findsOneWidget);
-    final sectionTitle = tester.widget<Text>(find.text('Channels'));
+    final sectionTitle = tester.widget<Text>(find.text('Team'));
     expect(sectionTitle.style?.fontSize, navigationSectionTextStyle.fontSize);
     expect(sectionTitle.style?.fontWeight, FontWeight.w500);
   });
@@ -1349,45 +1345,6 @@ void main() {
     );
   }
 
-  testWidgets('scrolls Home to the top when its tab is selected again', (
-    tester,
-  ) async {
-    tester.view.physicalSize = const Size(320, 160);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.reset);
-    final tabReselection = ValueNotifier(0);
-    addTearDown(tabReselection.dispose);
-    await tester.pumpWidget(
-      buildTestable(
-        tabReselection: tabReselection,
-        overrides: [
-          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-        ],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    final scrollable = tester.state<ScrollableState>(
-      find
-          .descendant(
-            of: find.byType(CustomScrollView),
-            matching: find.byType(Scrollable),
-          )
-          .first,
-    );
-    scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
-    tabReselection.value++;
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 130));
-
-    expect(
-      scrollable.position.pixels,
-      lessThan(scrollable.position.maxScrollExtent),
-    );
-    await tester.pumpAndSettle();
-    expect(scrollable.position.pixels, scrollable.position.minScrollExtent);
-  });
-
   testWidgets('truncates long custom section names beside the menu', (
     tester,
   ) async {
@@ -1445,7 +1402,8 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('🎨'), findsNothing);
+      // Desktop draws workspace icons as decoration before the name.
+      expect(find.text('🎨'), findsOneWidget);
       final sectionRow = find
           .ancestor(of: find.text('Design'), matching: find.byType(Row))
           .first;
@@ -1615,7 +1573,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Community'), findsNothing);
-    final sectionLabelX = tester.getTopLeft(find.text('Channels')).dx;
+    final sectionLabelX = tester.getTopLeft(find.text('Team')).dx;
     final rowLabelX = tester.getTopLeft(find.text('general')).dx;
     final rowIconX = tester
         .getTopLeft(find.byKey(const ValueKey('channel-icon-1')))
@@ -4248,11 +4206,11 @@ void main() {
     );
 
     expect(
-      tester.widget<Text>(find.text('Channels')).style?.color,
+      tester.widget<Text>(find.text('Team')).style?.color,
       const Color(0xFFC7C7C7),
     );
     final options = find.descendant(
-      of: find.byTooltip('Channels options'),
+      of: find.byTooltip('Team options'),
       matching: find.byIcon(BuzzIcons.ellipsis),
     );
     expect(tester.widget<Icon>(options).color, const Color(0xFFC7C7C7));
@@ -4352,8 +4310,8 @@ void main() {
         findsOneWidget,
       );
       expect(
-        find.bySemanticsLabel(RegExp(r'general[\s\S]*Needs your attention')),
-        findsOneWidget,
+        tester.getSemantics(find.byKey(const ValueKey('1'))).value,
+        'Needs your attention',
       );
 
       if (viaMenu) {
@@ -4375,14 +4333,14 @@ void main() {
         findsNothing,
       );
       expect(
-        find.bySemanticsLabel(RegExp('Needs your attention')),
-        findsNothing,
+        tester.getSemantics(find.byKey(const ValueKey('1'))).value,
+        isEmpty,
       );
       semantics.dispose();
     });
   }
 
-  for (final (label, events, bold, dot) in [
+  for (final (label, events, seenAt, bold, dot) in [
     (
       'catch-up marks read ordinary messages and thread replies',
       [
@@ -4394,12 +4352,14 @@ void main() {
           isThreadedReply: true,
         ),
       ],
+      null,
       false,
       false,
     ),
     (
       'channel catch-up leaves a mention as a dot',
       [_observed(id: 'mention-1', createdAt: 20, highPriority: true)],
+      null,
       false,
       true,
     ),
@@ -4409,9 +4369,38 @@ void main() {
         _observed(id: 'msg-1', createdAt: 28),
         _observed(id: 'mention-1', createdAt: 20, highPriority: true),
       ],
+      null,
       true,
       true,
     ),
+    (
+      'desktop seen mark quiets ordinary backlog at the cut',
+      [_observed(id: 'msg-1', createdAt: 30)],
+      30,
+      false,
+      false,
+    ),
+    (
+      'desktop seen mark leaves newer backlog bold',
+      [
+        _observed(id: 'msg-1', createdAt: 26),
+        _observed(id: 'msg-2', createdAt: 30),
+      ],
+      29,
+      true,
+      false,
+    ),
+    for (final mentionAt in [26, 30])
+      (
+        'desktop seen mark leaves a dot for a mention at $mentionAt',
+        [
+          _observed(id: 'msg-1', createdAt: 27),
+          _observed(id: 'mention-1', createdAt: mentionAt, highPriority: true),
+        ],
+        28,
+        false,
+        true,
+      ),
   ]) {
     testWidgets(label, (tester) async {
       final channels = [
@@ -4432,17 +4421,26 @@ void main() {
         ),
       ];
       final readState = _FakeReadStateNotifier(
-        const ReadStateState(
+        ReadStateState(
           isReady: true,
           pubkey: 'pk',
           contexts: {
             '1': 10,
             'activity:1': 25,
             'thread-activity:$threadIdRoot': 30,
+            'seen:1': ?seenAt,
           },
           version: 0,
         ),
       );
+      final mutes = _FakeChannelMutesNotifier();
+      final filters = _filterTestManager(
+        cached: ChannelFilterStore.empty().edit(
+          'channels',
+          seenAt == null ? ChannelFilterMode.all : ChannelFilterMode.unreads,
+        ),
+      );
+      addTearDown(filters.dispose);
 
       await tester.pumpWidget(
         buildTestable(
@@ -4454,19 +4452,56 @@ void main() {
               ),
             ),
             readStateProvider.overrideWith(() => readState),
+            channelMutesProvider.overrideWith(() => mutes),
+            channelFilterProvider.overrideWithValue(filters),
           ],
         ),
       );
       await tester.pumpAndSettle();
 
+      final hiddenByUnreads = seenAt != null && !bold && !dot;
+      if (hiddenByUnreads) {
+        expect(find.text('general'), findsNothing);
+        await tester.tap(find.text('Show hidden channels · 1'));
+        await tester.pumpAndSettle();
+      }
+
       expect(
         tester.widget<Text>(find.text('general')).style?.fontWeight,
         bold ? FontWeight.w600 : FontWeight.w400,
       );
-      expect(
-        find.byKey(const ValueKey('channel-attention-dot-1')),
-        dot ? findsOneWidget : findsNothing,
+      final attentionDot = find.byKey(
+        const ValueKey('channel-attention-dot-1'),
       );
+      expect(attentionDot, dot ? findsOneWidget : findsNothing);
+
+      if (hiddenByUnreads) {
+        await tester.longPress(find.text('general'));
+        await tester.pumpAndSettle();
+        expect(find.text('Mark Read'), findsOneWidget);
+      }
+
+      if (dot) {
+        mutes.setMute(muted: true, relayMuted: false);
+        await tester.pump();
+        expect(attentionDot, findsOneWidget);
+
+        mutes.setMute(muted: true, relayMuted: true);
+        await tester.pump();
+        expect(attentionDot, findsNothing);
+        expect(
+          tester.getSemantics(find.byKey(const ValueKey('1'))).value,
+          'Needs your attention',
+        );
+
+        mutes.setMute(muted: false, relayMuted: true);
+        await tester.pump();
+        expect(attentionDot, findsOneWidget);
+
+        mutes.setMute(muted: false, relayMuted: false);
+        await tester.pump();
+        expect(attentionDot, findsOneWidget);
+      }
     });
   }
 
@@ -4517,6 +4552,92 @@ void main() {
 
     expect(readState.seededContexts, {'1': 20});
     expect(readState.markedContexts, isEmpty);
+  });
+
+  group('read-state sync notice', () {
+    const notice = Key('read-state-sync-notice');
+    const retryText =
+        'Unread status isn’t syncing with your other devices. Tap to retry.';
+    const offlineText =
+        'Unread status isn’t syncing with your other devices. It will retry when you’re back online.';
+    const unsupportedText =
+        'Unread status can’t sync with your other devices right now. Sign in again or restart Buzz to try again.';
+
+    Future<(_FakeReadStateNotifier, _ReconnectingRelaySession)> pumpNotice(
+      WidgetTester tester, {
+      SessionStatus status = SessionStatus.connected,
+    }) async {
+      final readState = _FakeReadStateNotifier(
+        const ReadStateState(
+          isReady: true,
+          pubkey: 'pk',
+          contexts: {},
+          version: 0,
+        ),
+      );
+      final relay = _ReconnectingRelaySession(initialStatus: status);
+      await tester.pumpWidget(
+        buildTestable(
+          overrides: [
+            channelsProvider.overrideWith(() => _FakeNotifier(const [])),
+            readStateProvider.overrideWith(() => readState),
+            relaySessionProvider.overrideWith(() => relay),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      return (readState, relay);
+    }
+
+    testWidgets('shows on a sync failure, retries on tap, and clears', (
+      tester,
+    ) async {
+      final (readState, _) = await pumpNotice(tester);
+      expect(find.byKey(notice), findsNothing);
+
+      readState.setSync(failed: true);
+      await tester.pumpAndSettle();
+      expect(find.text(retryText), findsOneWidget);
+      await tester.tap(find.byKey(notice));
+      expect(readState.retries, 1);
+
+      readState.setSync(failed: false);
+      await tester.pumpAndSettle();
+      expect(find.byKey(notice), findsNothing);
+    });
+
+    testWidgets('the unsupported notice stays after an unrelated success', (
+      tester,
+    ) async {
+      final (readState, _) = await pumpNotice(tester);
+      readState.setSync(failed: true, unsupported: true);
+      await tester.pumpAndSettle();
+      expect(find.text(unsupportedText), findsOneWidget);
+
+      readState.setSync(failed: false, unsupported: true);
+      await tester.pumpAndSettle();
+      expect(find.text(unsupportedText), findsOneWidget);
+      await tester.tap(find.byKey(notice));
+      expect(readState.retries, 0);
+    });
+
+    testWidgets('offline it offers no retry and says it resumes on reconnect', (
+      tester,
+    ) async {
+      final (readState, relay) = await pumpNotice(
+        tester,
+        status: SessionStatus.reconnecting,
+      );
+      readState.setSync(failed: true);
+      await tester.pumpAndSettle();
+      expect(find.text(offlineText), findsOneWidget);
+      await tester.tap(find.byKey(notice));
+      expect(readState.retries, 0);
+
+      relay.connect();
+      await tester.pumpAndSettle();
+      expect(find.text(retryText), findsOneWidget);
+    });
   });
 }
 
@@ -4697,12 +4818,43 @@ class _FakePresenceNotifier extends PresenceNotifier {
   Future<String> build() async => 'online';
 }
 
+class _FakeChannelMutesNotifier extends ChannelMutesNotifier {
+  @override
+  ChannelMutesState build() => const ChannelMutesState(isReady: true);
+
+  void setMute({required bool muted, required bool relayMuted}) {
+    state = ChannelMutesState(
+      isReady: true,
+      store: ChannelMuteStore(
+        channels: {'1': ChannelMuteEntry(muted: muted, updatedAt: 40)},
+      ),
+      confirmedMutedChannelIds: relayMuted ? {'1'} : {},
+    );
+  }
+}
+
 class _FakeReadStateNotifier extends ReadStateNotifier {
   final ReadStateState _initialState;
   final Map<String, int> seededContexts = {};
   final Map<String, int> markedContexts = {};
 
+  int retries = 0;
+
   _FakeReadStateNotifier(this._initialState);
+
+  void setSync({required bool failed, bool unsupported = false}) {
+    state = ReadStateState(
+      isReady: state.isReady,
+      pubkey: state.pubkey,
+      contexts: state.contexts,
+      version: state.version + 1,
+      syncFailed: failed,
+      syncUnsupported: unsupported,
+    );
+  }
+
+  @override
+  Future<void> retrySync() async => retries++;
 
   @override
   ReadStateState build() => _initialState;
@@ -4735,6 +4887,7 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
     String contextId,
     int unixTimestamp, {
     bool clearForcedMessages = false,
+    bool explicit = false,
   }) {
     markedContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);

@@ -638,3 +638,5 @@ buzz channels delete --channel "$FORUM_ID" | jq .
 | 60 | `notes ls` | ☐ | Own, --author all, --tag, --limit |
 | 61 | `notes rm` | ☐ | Delete→get 404, double-delete idempotent, missing slug → NotFound |
 | 62 | `users set-status` | ☐ | Text+emoji, text only, emoji-only (`--text ""`), `--clear`, `--clear` + `--text` → exit 1 |
+| 63 | `raw query` | ☐ | Single filter, filter array, stdin (`-`), non-object filter → exit 1 |
+| 64 | `raw publish` | ☐ | `--kind/--tag/--content`, `--event-json`, `auth` tag refused → exit 1 |

@@ -107,6 +107,9 @@ export PGSCHEMA_PLAN_PASSWORD=buzz_dev
 # repair existed would fail apply, so repair it first (see the script).
 docker exec -i -e PGPASSWORD="${PGPASSWORD}" buzz-postgres \
   psql -U "${PGUSER}" -d "${PGDATABASE}" -v ON_ERROR_STOP=1 < scripts/repair-events-pkey.sql
+# pgschema cannot drop the partitioned tables' foreign keys (see the script).
+docker exec -i -e PGPASSWORD="${PGPASSWORD}" buzz-postgres \
+  psql -U "${PGUSER}" -d "${PGDATABASE}" -v ON_ERROR_STOP=1 < scripts/drop-partitioned-foreign-keys.sql
 ./bin/pgschema apply --file schema/schema.sql --auto-approve
 docker exec -i -e PGPASSWORD="${PGPASSWORD}" buzz-postgres \
   psql -U "${PGUSER}" -d "${PGDATABASE}" -v ON_ERROR_STOP=1 < scripts/reconcile-schema-after-pgschema.sql

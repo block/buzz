@@ -1,3 +1,5 @@
+import 'package:buzz/shared/read_state/thread_follows_format.dart';
+import 'package:buzz/features/channels/thread_follows/thread_follows_storage.dart';
 import 'package:buzz/shared/widgets/sheet_action_section.dart';
 import 'package:buzz/shared/widgets/app_list_card.dart';
 import 'dart:ui' as ui;
@@ -8,6 +10,7 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_actions.dart';
 import 'package:buzz/features/channels/message_long_press_region.dart';
+import 'package:buzz/features/channels/message_reply_drag_target.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
@@ -16,6 +19,7 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
@@ -100,6 +104,7 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
     String contextId,
     int unixTimestamp, {
     bool clearForcedMessages = false,
+    bool explicit = false,
   }) {
     markedRead[contextId] = unixTimestamp;
     var forced = {
@@ -116,9 +121,36 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
   }
 
   @override
-  void markContextUnread(String contextId, {required String channelId}) {
+  bool markContextUnread(
+    String contextId, {
+    required String channelId,
+    String? threadRootId,
+    bool channelCatchUp = false,
+  }) {
     markedUnread.add(contextId);
     state = _withForced({...state.forcedUnreadContexts, contextId: channelId});
+    return true;
+  }
+
+  @override
+  Future<bool> setThreadFollow(
+    String channelId,
+    String rootId,
+    bool follow,
+  ) async {
+    state = ReadStateState(
+      isReady: state.isReady,
+      pubkey: state.pubkey,
+      contexts: state.contexts,
+      version: state.version + 1,
+      forcedUnreadContexts: state.forcedUnreadContexts,
+      threadFollows: {
+        ...state.threadFollows,
+        threadFollowKey(channelId, rootId): (follow: follow, at: 1),
+      },
+      threadFollowsIncomplete: false,
+    );
+    return true;
   }
 
   ReadStateState _withForced(Map<String, String> forced) => ReadStateState(
@@ -729,6 +761,156 @@ void main() {
     expect(snapshot.height, 80);
   });
 
+  group('targets-only message long press', () {
+    Widget region({
+      required ValueNotifier<double> bubbleWidth,
+      required VoidCallback onLongPress,
+      required VoidCallback onTap,
+    }) {
+      return MaterialApp(
+        home: Scaffold(
+          body: ListView(
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text('Date'),
+                  Material(
+                    child: MessageLongPressInkWell(
+                      targetsOnly: true,
+                      onTap: onTap,
+                      onLongPress: (_) => onLongPress(),
+                      child: ValueListenableBuilder<double>(
+                        valueListenable: bubbleWidth,
+                        builder: (context, width, _) => Align(
+                          alignment: Alignment.centerLeft,
+                          child: MessageLongPressTarget(
+                            child: SizedBox(
+                              width: width,
+                              height: 40,
+                              child: const Text('Hi'),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    Future<void> holdWhileResizing(
+      WidgetTester tester,
+      ValueNotifier<double> bubbleWidth,
+      double resizedWidth,
+    ) async {
+      final gesture = await tester.startGesture(
+        tester.getTopLeft(find.text('Hi')) + const Offset(150, 20),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      bubbleWidth.value = resizedWidth;
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+      await gesture.up();
+      await tester.pump();
+    }
+
+    testWidgets('a hold that started on the bubble opens after it shrinks', (
+      tester,
+    ) async {
+      var longPresses = 0;
+      var taps = 0;
+      final bubbleWidth = ValueNotifier<double>(200);
+      addTearDown(bubbleWidth.dispose);
+      await tester.pumpWidget(
+        region(
+          bubbleWidth: bubbleWidth,
+          onLongPress: () => longPresses += 1,
+          onTap: () => taps += 1,
+        ),
+      );
+
+      await holdWhileResizing(tester, bubbleWidth, 100);
+
+      expect(longPresses, 1);
+      expect(taps, 0);
+    });
+
+    testWidgets(
+      'a hold that started beside the bubble stays inert after it widens',
+      (tester) async {
+        var longPresses = 0;
+        var taps = 0;
+        final bubbleWidth = ValueNotifier<double>(100);
+        addTearDown(bubbleWidth.dispose);
+        await tester.pumpWidget(
+          region(
+            bubbleWidth: bubbleWidth,
+            onLongPress: () => longPresses += 1,
+            onTap: () => taps += 1,
+          ),
+        );
+
+        await holdWhileResizing(tester, bubbleWidth, 200);
+
+        expect(longPresses, 0);
+        expect(taps, 0);
+      },
+    );
+
+    testWidgets(
+      'the message node has the only screen-reader long press and it opens',
+      (tester) async {
+        var longPresses = 0;
+        final bubbleWidth = ValueNotifier<double>(100);
+        addTearDown(bubbleWidth.dispose);
+        final semantics = tester.ensureSemantics();
+        await tester.pumpWidget(
+          region(
+            bubbleWidth: bubbleWidth,
+            onLongPress: () => longPresses += 1,
+            onTap: () {},
+          ),
+        );
+
+        final longPressNodes = <SemanticsNode>[];
+        void collect(SemanticsNode node) {
+          if (node.getSemanticsData().hasAction(SemanticsAction.longPress)) {
+            longPressNodes.add(node);
+          }
+          node.visitChildren((child) {
+            collect(child);
+            return true;
+          });
+        }
+
+        collect(
+          tester
+              .binding
+              .renderViews
+              .single
+              .owner!
+              .semanticsOwner!
+              .rootSemanticsNode!,
+        );
+
+        expect(longPressNodes, hasLength(1));
+        expect(longPressNodes.single.getSemanticsData().label, 'Hi');
+        tester.binding.renderViews.single.owner!.semanticsOwner!.performAction(
+          longPressNodes.single.id,
+          SemanticsAction.longPress,
+        );
+        await tester.pump();
+        expect(longPresses, 1);
+        semantics.dispose();
+      },
+    );
+  });
+
   group('showMessageActions', () {
     for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
       testWidgets('uses sectioned sheet on $platform even with a snapshot', (
@@ -1190,6 +1372,47 @@ void main() {
       await tester.pumpAndSettle();
       expect(container.read(threadFollowsProvider).followedRootIds, isEmpty);
     });
+  });
+
+  test('an unimported pre-sync follow still shows, and a synced choice '
+      'wins', () async {
+    final prefs = await _mockPrefs();
+    final legacyRoot = 'b' * 64;
+    final syncedRoot = 'c' * 64;
+    ProviderContainer open(Map<String, ThreadFollowChoice> synced) {
+      final container = ProviderContainer(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          myPubkeyProvider.overrideWithValue('self'),
+          readStateProvider.overrideWith(
+            () => _FakeReadStateNotifier(
+              ReadStateState(
+                isReady: true,
+                pubkey: 'self',
+                contexts: const {},
+                version: 1,
+                threadFollows: synced,
+              ),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      return container;
+    }
+
+    final relayUrl = open(const {}).read(relayConfigProvider).baseUrl;
+    ThreadFollowsStorage(prefs).write('self', relayUrl, [
+      ThreadFollowEntry(rootId: legacyRoot, followedAt: 1),
+      ThreadFollowEntry(rootId: syncedRoot, followedAt: 1),
+    ]);
+    final follows = open({
+      threadFollowKey(_channelId, syncedRoot): (follow: false, at: 2),
+    }).read(threadFollowsProvider);
+    expect(follows.followedRootIds, {legacyRoot});
+    expect(follows.unfollowedRootIds, {syncedRoot});
+    // A synced choice names its channel; the pre-sync one has none known.
+    expect(follows.channelByRoot, {syncedRoot: _channelId});
   });
 
   group('showImageActions', () {

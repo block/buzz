@@ -1272,6 +1272,42 @@ mod postgres_tests {
                 true,
             ),
             (
+                "NIP-RS unread record",
+                Path::Parameterized,
+                buzz_core::kind::KIND_READ_STATE as u16,
+                Some(format!("read-state-unread-v2:{}", "a".repeat(32))),
+                vec![["t", "read-state-unread-v2"]],
+                people_p(),
+                true,
+            ),
+            (
+                "NIP-RS unread prefix with read-state tag",
+                Path::Parameterized,
+                buzz_core::kind::KIND_READ_STATE as u16,
+                Some(format!("read-state-unread-v2:{}", "b".repeat(32))),
+                vec![["t", "read-state"]],
+                people_p(),
+                false,
+            ),
+            (
+                "NIP-RS thread follows",
+                Path::Parameterized,
+                buzz_core::kind::KIND_READ_STATE as u16,
+                Some(format!("thread-follows:{}", "a".repeat(32))),
+                vec![["t", "thread-follows"]],
+                people_p(),
+                true,
+            ),
+            (
+                "NIP-RS thread follows with read-state tag",
+                Path::Parameterized,
+                buzz_core::kind::KIND_READ_STATE as u16,
+                Some(format!("thread-follows:{}", "b".repeat(32))),
+                vec![["t", "read-state"]],
+                people_p(),
+                false,
+            ),
+            (
                 "mesh status",
                 Path::Parameterized,
                 buzz_core::kind::KIND_BOOKMARK_SET as u16,
@@ -1465,6 +1501,73 @@ mod postgres_tests {
             (0, 0),
             "deletion is physical and the watermark blocks resurrection"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn thread_follows_replacement_purges_and_refuses_stale_replay() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let base = Timestamp::now().as_secs();
+        let rows = |d_tag: String| {
+            let pool = db.pool.clone();
+            let pubkey = keys.public_key().to_bytes();
+            async move {
+                let count: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM events WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
+                )
+                .bind(community.as_uuid())
+                .bind(pubkey)
+                .bind(&d_tag)
+                .fetch_one(&pool)
+                .await
+                .expect("count rows");
+                count
+            }
+        };
+        // Only the matching `t` tag makes a thread-follows record retention
+        // free; a mismatched one stays an ordinary replaceable event.
+        for (slot, t, conforming) in [("a", "thread-follows", true), ("b", "read-state", false)] {
+            let d_tag = format!("thread-follows:{}", slot.repeat(32));
+            let version = |offset: u64, content: &str| {
+                EventBuilder::new(
+                    Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16),
+                    content,
+                )
+                .tags(vec![
+                    Tag::parse(["d", d_tag.as_str()]).expect("d tag"),
+                    Tag::parse(["t", t]).expect("t tag"),
+                ])
+                .custom_created_at(Timestamp::from(base + offset))
+                .sign_with_keys(&keys)
+                .expect("sign")
+            };
+            let (old, new) = (version(0, "old"), version(1, "new"));
+            for ev in [&old, &new] {
+                assert!(
+                    db.replace_parameterized_event(community, ev, &d_tag, None)
+                        .await
+                        .expect("publish")
+                        .1
+                );
+            }
+            assert_eq!(
+                rows(d_tag.clone()).await,
+                if conforming { 1 } else { 2 },
+                "{t}: only a conforming replaced record is purged"
+            );
+            assert!(
+                !db.replace_parameterized_event(community, &old, &d_tag, None)
+                    .await
+                    .expect("stale replay")
+                    .1,
+                "{t}: a stale resend must be refused"
+            );
+            assert_eq!(rows(d_tag.clone()).await, if conforming { 1 } else { 2 });
+        }
     }
 
     #[tokio::test]
@@ -2247,6 +2350,7 @@ mod postgres_tests {
         let nip_rs = buzz_core::kind::KIND_READ_STATE as u16;
         let mesh = buzz_core::kind::KIND_BOOKMARK_SET as u16;
         let read_state_d = format!("read-state:{}", "b".repeat(32));
+        let unread_d = format!("read-state-unread-v2:{}", "b".repeat(32));
         let mesh_d = "buzz-mesh-member-status:purge-test".to_string();
         let tag = |parts: &[&str]| parts.iter().map(|p| p.to_string()).collect::<Vec<_>>();
         let t_read_state = tag(&["t", "read-state"]);
@@ -2260,6 +2364,30 @@ mod postgres_tests {
                 read_state_d.clone(),
                 vec![tag(&["d", &read_state_d]), t_read_state.clone()],
                 true,
+            ),
+            (
+                "nip-rs unread record",
+                nip_rs,
+                unread_d.clone(),
+                vec![tag(&["d", &unread_d]), tag(&["t", "read-state-unread-v2"])],
+                true,
+            ),
+            (
+                "nip-rs unread record with read-state tag",
+                nip_rs,
+                unread_d.clone(),
+                vec![tag(&["d", &unread_d]), t_read_state.clone()],
+                false,
+            ),
+            (
+                "nip-rs read-state slot with unread tag",
+                nip_rs,
+                read_state_d.clone(),
+                vec![
+                    tag(&["d", &read_state_d]),
+                    tag(&["t", "read-state-unread-v2"]),
+                ],
+                false,
             ),
             (
                 "nip-rs without t tag",

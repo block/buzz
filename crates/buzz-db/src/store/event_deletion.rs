@@ -11,12 +11,16 @@ use crate::{
 };
 
 /// SQL predicate over an `events` row for a conforming NIP-RS read-state
-/// coordinate: kind 30078, a `read-state:<32 lowercase hex>` d-tag carried by
-/// exactly one `d` tag, and exactly one `["t", "read-state"]` tag.
+/// coordinate: kind 30078, a `read-state:<32 lowercase hex>` (read positions),
+/// `read-state-unread-v2:<32 lowercase hex>` (unread record) or
+/// `thread-follows:<32 lowercase hex>` (thread follows) d-tag carried by
+/// exactly one `d` tag, and exactly one tag naming that same namespace
+/// (`["t", "read-state"]`, `["t", "read-state-unread-v2"]` or
+/// `["t", "thread-follows"]`).
 macro_rules! nip_rs_event_predicate {
     () => {
         "(kind = 30078 \
-          AND d_tag ~ '^read-state:[0-9a-f]{32}$' \
+          AND d_tag ~ '^(read-state(-unread-v2)?|thread-follows):[0-9a-f]{32}$' \
           AND (SELECT count(*) \
                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
                WHERE jsonb_typeof(tag) = 'array' AND tag->0 = '\"d\"'::jsonb) = 1 \
@@ -26,7 +30,7 @@ macro_rules! nip_rs_event_predicate {
                  AND jsonb_typeof(tag->1) = 'string' AND tag->>0 = 'd' AND tag->>1 = d_tag) \
           AND (SELECT count(*) \
                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
-               WHERE tag = '[\"t\", \"read-state\"]'::jsonb) = 1)"
+               WHERE tag = jsonb_build_array('t', split_part(d_tag, ':', 1))) = 1)"
     };
 }
 

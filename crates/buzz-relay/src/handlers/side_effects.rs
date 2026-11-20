@@ -105,7 +105,7 @@ pub(crate) async fn apply_kick_live_side_effects(
         .map_err(|e| {
             warn!(
                 channel = %channel_id,
-                target = %hex::encode(target_pubkey),
+                target_pubkey = %hex::encode(target_pubkey),
                 error = %e,
                 "kick live effects: membership_removal_fence failed; \
                  skipping eviction and workflow-disable"
@@ -120,7 +120,7 @@ pub(crate) async fn apply_kick_live_side_effects(
         // legitimately restored.
         tracing::info!(
             channel = %channel_id,
-            target = %hex::encode(target_pubkey),
+            target_pubkey = %hex::encode(target_pubkey),
             "kick live effects: member re-added before fence acquired; \
              skipping eviction and workflow-disable"
         );
@@ -1457,7 +1457,7 @@ async fn emit_typed_membership_notification(
             .invalidate(&(tenant.community(), stored.event.id.to_bytes()));
         warn!(
             channel = %channel_id,
-            target = %target_hex,
+            target_pubkey = %target_hex,
             kind = notification_kind,
             "membership notification Redis publish failed: {e}"
         );
@@ -1470,7 +1470,7 @@ async fn emit_typed_membership_notification(
 
     info!(
         channel = %channel_id,
-        target = %target_hex,
+        target_pubkey = %target_hex,
         kind = notification_kind,
         "membership notification emitted"
     );
@@ -4399,7 +4399,7 @@ async fn publish_nip43_delta(
         .await;
 
     info!(
-        target = %target_pubkey_hex,
+        target_pubkey = %target_pubkey_hex,
         relay = %relay_pubkey_hex,
         "NIP-43 {label} event published"
     );
@@ -4923,7 +4923,7 @@ async fn publish_nipia_delta(
     dispatch_persistent_event(tenant, state, &stored, kind, &relay_pubkey_hex, None).await;
 
     info!(
-        target = %target_pubkey_hex,
+        target_pubkey = %target_pubkey_hex,
         relay = %relay_pubkey_hex,
         kind,
         consent = %consent_path,

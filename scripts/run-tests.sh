@@ -422,6 +422,10 @@ run_unit_tests() {
       community_active::tests::invalidation_fences_an_in_flight_fill_and_its_waiters \
       community_active::tests::errors_are_not_cached \
       state::tests::concurrent_open_channel_misses_share_the_in_flight_read \
+      state::tests::a_member_read_that_straddles_an_invalidation_is_not_cached \
+      state::tests::a_member_snapshot_ages_from_its_read_not_its_insert \
+      state::tests::overlapping_member_reads_cache_the_first_to_finish \
+      state::tests::an_open_read_that_straddles_an_invalidation_is_not_cached \
       state::tests::concurrent_restriction_and_host_misses_share_the_in_flight_read \
       tenant::tests::app_state_resolver_serves_fresh_cached_hosts_only \
       tenant::tests::an_overlong_host_fails_closed_before_the_resolver \

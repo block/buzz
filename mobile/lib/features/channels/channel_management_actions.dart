@@ -231,7 +231,7 @@ class ChannelActions {
 
   void _ensureCommunityValid() {
     if (_isCommunityValid?.call() == false) {
-      throw StateError(
+      throw ActiveCommunityChangedError(
         'Channel action cancelled because the active community changed',
       );
     }
@@ -308,7 +308,10 @@ class ChannelActions {
     if (!shown) throw const ChannelJoinUnconfirmed();
   }
 
-  Future<void> leaveChannel(String channelId) async {
+  Future<void> leaveChannel(
+    String channelId, {
+    Future<bool> Function()? mayPublish,
+  }) async {
     _ensureCommunityValid();
     await _signedEventRelay.submit(
       kind: 9022,
@@ -316,6 +319,7 @@ class ChannelActions {
       tags: [
         ['h', channelId],
       ],
+      mayPublish: mayPublish,
     );
     _ensureCommunityValid();
     await _refreshChannelState(channelId);

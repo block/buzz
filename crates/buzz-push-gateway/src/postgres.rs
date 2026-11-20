@@ -10,7 +10,22 @@ use uuid::Uuid;
 #[path = "postgres/bootstrap_tests.rs"]
 mod bootstrap_postgres_tests;
 
+#[cfg(test)]
+#[path = "postgres/desired_schema_postgres_tests.rs"]
+mod desired_schema_postgres_tests;
+
 static GATEWAY_MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+/// Every gateway authority table. Readiness probes and runtime-role grants
+/// cover exactly this set; the desired-state parity test pins it to `schema/`.
+const GATEWAY_TABLES: [&str; 6] = [
+    "push_gateway_challenges",
+    "push_gateway_installations",
+    "push_gateway_delegations",
+    "push_gateway_endpoint_quotas",
+    "push_gateway_delivery_auth_replays",
+    "push_gateway_delivery_request_replays",
+];
 
 #[cfg(test)]
 async fn migrate_gateway_through(
@@ -58,14 +73,8 @@ impl PostgresAuthorityStore {
              REVOKE CREATE ON SCHEMA public FROM {role};
              GRANT CONNECT ON DATABASE {database} TO {role};
              GRANT USAGE ON SCHEMA public TO {role};
-             GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
-               push_gateway_challenges,
-               push_gateway_installations,
-               push_gateway_delegations,
-               push_gateway_endpoint_quotas,
-               push_gateway_delivery_auth_replays,
-               push_gateway_delivery_request_replays
-             TO {role};"
+             GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {tables} TO {role};",
+            tables = GATEWAY_TABLES.join(", "),
         );
         sqlx::raw_sql(AssertSqlSafe(grants)).execute(pool).await?;
         Ok(())
@@ -93,16 +102,8 @@ fn bytes32(v: Vec<u8>) -> Result<[u8; 32], AuthorityError> {
 #[async_trait]
 impl AuthorityStore for PostgresAuthorityStore {
     async fn ready(&self) -> Result<(), AuthorityError> {
-        const TABLES: [&str; 6] = [
-            "push_gateway_challenges",
-            "push_gateway_installations",
-            "push_gateway_delegations",
-            "push_gateway_endpoint_quotas",
-            "push_gateway_delivery_auth_replays",
-            "push_gateway_delivery_request_replays",
-        ];
         let mut tx = self.pool.begin().await.map_err(db)?;
-        for table in TABLES {
+        for table in GATEWAY_TABLES {
             let ready: bool = sqlx::query_scalar(
                 "SELECT to_regclass($1) IS NOT NULL
                     AND COALESCE(has_table_privilege(current_user, to_regclass($1), 'SELECT'), false)
@@ -732,7 +733,7 @@ mod postgres_tests {
              );
              CREATE TABLE push_gateway_delegations (
                  id UUID PRIMARY KEY,
-                 installation_id UUID NOT NULL REFERENCES push_gateway_installations(id),
+                 installation_id UUID NOT NULL,
                  expires_at TIMESTAMPTZ NOT NULL,
                  revoked_at TIMESTAMPTZ
              );",
@@ -1064,6 +1065,25 @@ mod postgres_tests {
                 .expect("count original tombstone and replacement");
         assert_eq!(installations, 2);
 
+        pool.close().await;
+        drop_schema(&schema).await;
+    }
+
+    // The schema has no foreign keys, so these tests prove the reference
+    // checks run in the gateway's own transactions.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn migrated_schema_has_no_foreign_keys() {
+        let (pool, schema) = full_schema(1).await;
+        let foreign_keys: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_constraint c
+             JOIN pg_namespace n ON n.oid = c.connamespace
+             WHERE c.contype = 'f' AND n.nspname = current_schema()",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count foreign keys");
+        assert_eq!(foreign_keys, 0);
         pool.close().await;
         drop_schema(&schema).await;
     }

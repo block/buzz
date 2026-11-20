@@ -81,6 +81,19 @@ pub(super) async fn event_rows(
         )
         .await?;
     }
+    // Capture copies under surviving subscriptions before erasing the source.
+    rows(
+        conn,
+        output,
+        "delivery_log",
+        "SELECT jsonb_build_object('delivered_at',delivered_at,'id',id) AS row_key,
+            NULL::text AS warning FROM delivery_log
+            WHERE community_id=$1 AND event_id=ANY($2::bytea[])",
+        &ids,
+        &reason,
+        "would_delete",
+    )
+    .await?;
     Ok(())
 }
 

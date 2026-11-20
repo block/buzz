@@ -62,6 +62,39 @@ void main() {
     );
   }
 
+  testWidgets('a wide thread push slides the outgoing chat on iOS', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1000, 800);
+    addTearDown(tester.view.reset);
+    final controller = ConversationPaneController();
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          theme: ThemeData(platform: TargetPlatform.iOS),
+          home: AdaptiveConversationPane(
+            controller: controller,
+            list: const Text('Chat list'),
+          ),
+        ),
+      ),
+    );
+    controller.open('one', (_) => const _Conversation());
+    await tester.pumpAndSettle();
+    final settled = tester.getTopLeft(find.text('Conversation')).dx;
+    await tester.tap(find.text('Thread'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(
+      tester.getTopLeft(find.text('Conversation')).dx,
+      lessThan(settled),
+      reason: 'the covered chat keeps the platform parallax',
+    );
+    await tester.pumpAndSettle();
+  });
+
   testWidgets(
     'wide chat switches retain the native header but reset chat state',
     (tester) async {

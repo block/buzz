@@ -242,7 +242,10 @@ async fn preview_delete_and_retry_preserve_other_users_contributions() {
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(deliveries, vec!["bob-sub"]);
+    assert!(
+        deliveries.is_empty(),
+        "copies of the erased source must go too"
+    );
     let reply_count: i32 = sqlx::query_scalar(
         "SELECT reply_count FROM thread_metadata WHERE community_id=$1 AND event_id=$2",
     )

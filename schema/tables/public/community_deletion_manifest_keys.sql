@@ -5,7 +5,7 @@
 -- verification. The request row keeps only per-prefix count/bytes/digest
 -- summaries; the chunk stream must hash to those frozen digests.
 CREATE TABLE community_deletion_manifest_keys (
-    request_id UUID NOT NULL REFERENCES community_deletion_requests(id) ON DELETE CASCADE,
+    request_id UUID NOT NULL,
     chunk_no BIGINT NOT NULL CHECK (chunk_no >= 0),
     prefix TEXT NOT NULL,
     keys JSONB NOT NULL,

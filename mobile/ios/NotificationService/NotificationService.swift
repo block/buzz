@@ -160,7 +160,11 @@ final class NotificationService: UNNotificationServiceExtension {
     // Only a resolved message offers Reply; the extension sets it below.
     content.categoryIdentifier = ""
 
-    let session = URLSession(configuration: .ephemeral)
+    let configuration = URLSessionConfiguration.ephemeral
+    // The relay's hosts set a Cloudflare cookie the extension must never send back.
+    configuration.httpCookieStorage = nil
+    configuration.httpShouldSetCookies = false
+    let session = URLSession(configuration: configuration)
     self.session = session
     let resolver = makeResolver(session: session)
     self.resolver = resolver
