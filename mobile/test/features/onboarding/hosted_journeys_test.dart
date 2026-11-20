@@ -820,6 +820,7 @@ void main() {
       // During a rolling enforcement change, discovery can reach a relay that
       // needs no assertion while the upgrade reaches one that enforces.
       f.refuseUpgrade = true;
+      f.refusalStatus = 401;
       final attempts = f.socketHeaders.length;
       await session.reconnect();
       await f.settle(tester);
@@ -849,6 +850,104 @@ void main() {
     },
     requiresAuthDomain: true,
   );
+
+  journey('a forbidden upgrade after optional discovery stops retrying', (
+    tester,
+    f,
+  ) async {
+    final reconnects = <_ManualTimer>[];
+    f.reconnectTimerFactory = (_, callback) {
+      final timer = _ManualTimer(callback);
+      reconnects.add(timer);
+      return timer;
+    };
+    f.relayAuthEnabled = true;
+    f.nipFiRequired = false;
+    await f.initialize();
+    final community = Community.create(
+      name: 'One',
+      relayUrl: 'wss://one.communities.buzz.xyz',
+      pubkey: f.keys.public,
+      nsec: f.keys.nsec,
+    );
+    await f.storage.save(community);
+    await f.storage.saveActiveId(community.id);
+    await f.mount(tester, openEntry: false);
+    final sessionSubscription = f.container.listen(
+      relaySessionProvider,
+      (_, _) {},
+    );
+    addTearDown(sessionSubscription.close);
+    final session = f.container.read(relaySessionProvider.notifier);
+    await f.settle(tester);
+
+    // An ingress that forbids upgrades is not a missing assertion, so it
+    // must not retry for as long as the community stays open.
+    f.refuseUpgrade = true;
+    final attempts = f.socketHeaders.length;
+    await session.reconnect();
+    await f.settle(tester);
+    expect(f.socketHeaders.skip(attempts), hasLength(2));
+    expect(
+      f.container.read(relaySessionProvider).status,
+      SessionStatus.disconnected,
+    );
+    expect(reconnects.where((timer) => timer.isActive), isEmpty);
+  }, requiresAuthDomain: true);
+
+  journey('a retry that connects cancels the pending backoff', (
+    tester,
+    f,
+  ) async {
+    final reconnects = <_ManualTimer>[];
+    f.reconnectTimerFactory = (_, callback) {
+      final timer = _ManualTimer(callback);
+      reconnects.add(timer);
+      return timer;
+    };
+    f.relayAuthEnabled = true;
+    f.nipFiRequired = false;
+    await f.initialize();
+    final community = Community.create(
+      name: 'One',
+      relayUrl: 'wss://one.communities.buzz.xyz',
+      pubkey: f.keys.public,
+      nsec: f.keys.nsec,
+    );
+    await f.storage.save(community);
+    await f.storage.saveActiveId(community.id);
+    await f.mount(tester, openEntry: false);
+    final sessionSubscription = f.container.listen(
+      relaySessionProvider,
+      (_, _) {},
+    );
+    addTearDown(sessionSubscription.close);
+    final session = f.container.read(relaySessionProvider.notifier);
+    await f.settle(tester);
+
+    f.refuseUpgrade = true;
+    f.refusalStatus = 401;
+    await session.reconnect();
+    await f.settle(tester);
+    expect(reconnects.where((timer) => timer.isActive), hasLength(1));
+
+    // Retrying by hand before the backoff fires must leave the new
+    // connection alone.
+    f.refuseUpgrade = false;
+    await session.reconnect();
+    await f.settle(tester);
+    expect(
+      f.container.read(relaySessionProvider).status,
+      SessionStatus.connected,
+    );
+    expect(reconnects.where((timer) => timer.isActive), isEmpty);
+    final sockets = f.socketHeaders.length;
+    for (final timer in reconnects) {
+      timer.fire();
+    }
+    await f.settle(tester);
+    expect(f.socketHeaders, hasLength(sockets));
+  }, requiresAuthDomain: true);
 
   journey(
     'saved community signs in again without changing identity or onboarding',

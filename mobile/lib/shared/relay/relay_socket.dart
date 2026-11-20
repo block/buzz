@@ -306,8 +306,12 @@ class RelaySocket {
 }
 
 /// HTTP upgrade failures retain their status through WebSocketChannel.
-bool relayUpgradeRefused(Object? error) {
+int? relayUpgradeStatus(Object? error) {
   if (error is WebSocketChannelException) error = error.inner;
-  return error is WebSocketException &&
-      (error.httpStatusCode == 401 || error.httpStatusCode == 403);
+  return error is WebSocketException ? error.httpStatusCode : null;
+}
+
+bool relayUpgradeRefused(Object? error) {
+  final status = relayUpgradeStatus(error);
+  return status == 401 || status == 403;
 }

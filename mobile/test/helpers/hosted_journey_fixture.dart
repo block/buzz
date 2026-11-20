@@ -88,6 +88,9 @@ class HostedJourneyFixture {
   DateTime? denialDate;
   bool refuseUpgrade = false;
 
+  /// The HTTP status a refused upgrade answers with.
+  int refusalStatus = 403;
+
   /// Replaces the relay session's reconnect timers when set.
   RelayTimerFactory? reconnectTimerFactory;
   String subject = 'journey-owner';
@@ -766,7 +769,7 @@ class _RelaySocket extends RelaySocket {
           : isNull,
     );
     if (fixture.refuseUpgrade) {
-      _disconnected(const WebSocketException('refused', 403));
+      _disconnected(WebSocketException('refused', fixture.refusalStatus));
     } else {
       _connected();
     }
