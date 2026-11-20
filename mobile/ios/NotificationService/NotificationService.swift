@@ -193,8 +193,9 @@ final class NotificationService: UNNotificationServiceExtension {
             // The app also reads it to clear the notification once its
             // message is read; only the selected community's offer Reply.
             userInfo[BuzzNotificationReplyContext.userInfoKey] = replyContext.userInfoValue
-            if navigationTarget.communityID
-              == BuzzSelectedCommunity.id(in: self.appGroupIdentifier.flatMap(UserDefaults.init(suiteName:)))
+            if resolution.offersReply,
+              navigationTarget.communityID
+                == BuzzSelectedCommunity.id(in: self.appGroupIdentifier.flatMap(UserDefaults.init(suiteName:)))
             {
               content.categoryIdentifier = BuzzNotificationReplyContext.categoryIdentifier
             }

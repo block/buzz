@@ -49,6 +49,8 @@ void main() {
         replyRootId: _root,
         createdAt: 1500,
       ),
+      // A forum post or comment, which opening the forum reads.
+      _notification('5', channelId: 'forum', createdAt: 1200),
       // Another community's read state isn't loaded.
       _notification('4', communityId: 'elsewhere', createdAt: 500),
     ];
@@ -79,15 +81,19 @@ void main() {
     container.listen(readNotificationClearerProvider, (_, _) {});
     await pumpEventQueue();
     List<String?> ids() => [for (final n in delivered) n['id']];
-    expect(ids(), ['1', '2', '3', '4']);
+    expect(ids(), ['1', '2', '3', '5', '4']);
 
     // Read on another device up to the first message: a newer one stays.
     final readState = container.read(readStateProvider.notifier) as _ReadState;
     readState.sync('dm', 1000);
     await pumpEventQueue();
-    expect(ids(), ['2', '3', '4']);
+    expect(ids(), ['2', '3', '5', '4']);
 
     readState.sync(threadContextKey(_root), 1500);
+    await pumpEventQueue();
+    expect(ids(), ['2', '5', '4']);
+
+    readState.sync('forum', 1200);
     await pumpEventQueue();
     expect(ids(), ['2', '4']);
   });
