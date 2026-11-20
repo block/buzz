@@ -8,6 +8,7 @@ import type {
 } from "@/features/projects/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useIdentityQuery } from "@/shared/api/hooks";
+import { isRepositoryMaintainer } from "@/features/projects/projectModels";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { CopyCommitHashButton } from "./ProjectCommitCopyButton";
 import {
@@ -47,9 +48,11 @@ export function PullRequestMetaHeader({
   const viewer = viewerPubkey ? normalizePubkey(viewerPubkey) : null;
   const isAuthor = viewer === normalizePubkey(pullRequest.author);
   const isOwner = viewer === normalizePubkey(project.owner);
+  const isMaintainer = isRepositoryMaintainer(project, viewer);
   const isManagedAgentOwner = useIsManagedAgent(project.owner) === true;
   const canRequestReview =
-    Boolean(viewer) && (isAuthor || isOwner || isManagedAgentOwner);
+    Boolean(viewer) &&
+    (isAuthor || isOwner || isMaintainer || isManagedAgentOwner);
   const StatusIcon =
     pullRequest.status === "Merged" ? GitMerge : GitPullRequest;
   const diffStatsCache = React.useRef<{

@@ -15,6 +15,7 @@ import {
   KIND_TEXT_NOTE,
 } from "@/shared/constants/kinds";
 import type { Repository as Project } from "./hooks";
+import { isRepositoryMaintainer } from "./projectModels";
 import {
   nextProjectPullRequestStatusCreatedAt,
   type ProjectPullRequest,
@@ -40,7 +41,8 @@ const PR_STATUS_KIND_BY_LIFECYCLE: Record<
 
 // Same shape as `buzz pr status` (buzz-sdk build_git_status): root `e` tag,
 // repo `a` tag, and `p` tags for the repo owner + PR author. Only the PR
-// author or repo owner are trusted for status changes (allowedActorsForRoot).
+// author, repo owner or a repo maintainer is trusted for status changes
+// (allowedActorsForRoot).
 async function updateProjectPullRequestStatus({
   project,
   pullRequest,
@@ -92,8 +94,8 @@ async function updateProjectPullRequestStatus({
 // Review requests and approvals are labeled kind:1 comments (see
 // projectPullRequests.mjs) — NIP-34 has no dedicated review kinds, and the
 // relay does not register kind 1111. `p` tags on a review request are the
-// requested reviewers; parsing only trusts requests signed by the PR author
-// or repo owner.
+// requested reviewers; parsing only trusts requests signed by the PR author,
+// repo owner or a repo maintainer.
 async function requestProjectPullRequestReview({
   project,
   pullRequest,
@@ -160,6 +162,7 @@ export function canReviewProjectPullRequest(
   if (viewer === normalizePubkey(pullRequest.author)) return false;
   return (
     viewer === normalizePubkey(project.owner) ||
+    isRepositoryMaintainer(project, viewer) ||
     pullRequest.reviewers.some(
       (reviewer) => normalizePubkey(reviewer) === viewer,
     )
