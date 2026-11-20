@@ -494,9 +494,12 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     final preview =
         !resolvedChannel.isForum &&
             (!resolvedChannel.isPrivate || resolvedChannel.isMember) &&
-            !messagesNotifier.hasLoadedMessages &&
+            !messagesNotifier.hasLoadedHistory &&
             (relayError == null || !isRelayAccessDenied(relayError))
-        ? ref.watch(savedChannelPreviewProvider(channel.id)).value
+        ? ref
+              .watch(savedChannelPreviewProvider(channel.id))
+              .unwrapPrevious()
+              .value
         : null;
     final messagesState = preview == null
         ? relayMessagesState

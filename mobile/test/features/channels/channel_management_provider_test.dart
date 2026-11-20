@@ -24,51 +24,61 @@ import '../../helpers/fake_relay.dart';
 /// also exposed on `ChannelDetails` MUST be propagated here — otherwise
 /// `mergeDetails` silently clears that state on the merged Channel.
 void main() {
-  test('leaving a channel clears only that channel from disk', () async {
-    final relay = FakeRelay();
-    final scope = (communityId: 'cache-test-community', pubkey: relay.pubkey);
-    const page = (channelId: _channelId, rootId: '');
-    const otherPage = (channelId: 'other-channel', rootId: '');
-    final root = await Directory.systemTemp.createTemp('buzz-leave-cache');
-    addTearDown(() => root.delete(recursive: true));
-    final container = ProviderContainer(
-      overrides: [
-        ...relay.overrides,
-        channelsProvider.overrideWith(_ChannelsAfterLeave.new),
-        savedMessageRootProvider.overrideWith((ref) async => root),
-        savedMessageScopeProvider.overrideWithValue(scope),
-      ],
-    );
-    addTearDown(container.dispose);
-    final store = container.read(savedMessageStoreProvider);
-    Future<NostrEvent> save(SavedMessagePage page) async {
-      final event = relay.sign(
-        kind: EventKind.streamMessage,
-        content: 'Saved history',
-        createdAt: 1700000000,
-        tags: [
-          ['h', page.channelId],
+  for (final action in ['leave', 'delete']) {
+    test('$action clears only that channel from disk', () async {
+      final relay = FakeRelay();
+      final scope = (communityId: 'cache-test-community', pubkey: relay.pubkey);
+      const page = (channelId: _channelId, rootId: '');
+      const otherPage = (channelId: 'other-channel', rootId: '');
+      final root = await Directory.systemTemp.createTemp('buzz-leave-cache');
+      addTearDown(() => root.delete(recursive: true));
+      final container = ProviderContainer(
+        overrides: [
+          ...relay.overrides,
+          channelsProvider.overrideWith(_ChannelsAfterLeave.new),
+          savedMessageRootProvider.overrideWith((ref) async => root),
+          savedMessageScopeProvider.overrideWithValue(scope),
         ],
       );
-      await store.save(store.capture(scope, page), [event], relayAuthor: null);
-      return event;
-    }
-
-    final saved = await save(page);
-    final other = await save(otherPage);
-    expect(await store.read(store.capture(scope, page)), [saved]);
-    final connected = Completer<void>();
-    container.listen(relaySessionProvider, (_, state) {
-      if (state.status == SessionStatus.connected && !connected.isCompleted) {
-        connected.complete();
+      addTearDown(container.dispose);
+      final store = container.read(savedMessageStoreProvider);
+      Future<NostrEvent> save(SavedMessagePage page) async {
+        final event = relay.sign(
+          kind: EventKind.streamMessage,
+          content: 'Saved history',
+          createdAt: 1700000000,
+          tags: [
+            ['h', page.channelId],
+          ],
+        );
+        await store.save(store.capture(scope, page), [
+          event,
+        ], relayAuthor: null);
+        return event;
       }
-    }, fireImmediately: true);
-    await connected.future;
-    await container.read(channelActionsProvider).leaveChannel(_channelId);
-    expect(relay.published.single.kind, 9022);
-    expect(await store.read(store.capture(scope, page)), isNull);
-    expect(await store.read(store.capture(scope, otherPage)), [other]);
-  });
+
+      final saved = await save(page);
+      final other = await save(otherPage);
+      expect(await store.read(store.capture(scope, page)), [saved]);
+      final connected = Completer<void>();
+      container.listen(relaySessionProvider, (_, state) {
+        if (state.status == SessionStatus.connected && !connected.isCompleted) {
+          connected.complete();
+        }
+      }, fireImmediately: true);
+      await connected.future;
+      final actions = container.read(channelActionsProvider);
+      if (action == 'leave') {
+        await actions.leaveChannel(_channelId);
+        expect(relay.published.single.kind, 9022);
+      } else {
+        await actions.deleteChannel(_channelId);
+        expect(relay.published.single.kind, 9008);
+      }
+      expect(await store.read(store.capture(scope, page)), isNull);
+      expect(await store.read(store.capture(scope, otherPage)), [other]);
+    });
+  }
 
   test('shortcut selects only an active exact DM using current membership', () {
     final dm = Channel(

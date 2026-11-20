@@ -248,38 +248,32 @@ void main() {
     expect(diagnostics.operations, isEmpty);
   });
 
-  test('retries live removals when the cache becomes active', () async {
-    final foreground = StreamController<void>.broadcast(sync: true);
-    addTearDown(foreground.close);
-    var active = true;
+  test('evicts old pages and retries a write at the physical cap', () async {
+    const pageLimit = 24;
     final cache = SavedMessageStore(
       root: () async => temp,
       diagnostics: diagnostics,
-      acquireLease: () async => active ? (id: 0, workerControl: 0) : null,
-      foreground: foreground.stream,
+      databasePageLimit: pageLimit,
     );
-    addTearDown(cache.dispose);
-    final deleted = _message(_channel, 'deleted');
-    final retained = _message(_channel, 'unchanged');
-    final different = _message(_otherChannel, 'other channel');
-    final page = cache.capture(_identity, _channel);
-    final otherPage = cache.capture(_identity, _otherChannel);
-    await cache.save(page, [deleted, retained], relayAuthor: null);
-    await cache.save(otherPage, [different], relayAuthor: null);
+    final tickets = <SavedMessageTicket>[];
+    for (var channel = 0; channel < 16; channel++) {
+      final page = (channelId: 'capacity-channel-$channel', rootId: '');
+      final ticket = cache.capture(_identity, page);
+      tickets.add(ticket);
+      final events = [
+        for (var row = 0; row < 4; row++) _message(page, '$row ${'x' * 1500}'),
+      ];
+      await cache.save(ticket, events, relayAuthor: null);
+      expect(await cache.read(ticket), events, reason: 'channel $channel');
+    }
 
-    active = false;
-    cache.removeChannelEvents(_identity, _channel.channelId, {deleted.id});
-    final currentPage = cache.capture(_identity, _channel);
-    expect(await cache.read(currentPage), isNull);
-    expect(await store.read(store.capture(_identity, _otherChannel)), [
-      different,
-    ]);
-
-    active = true;
-    foreground.add(null);
-    expect(await cache.read(currentPage), [retained]);
-    expect(await cache.read(otherPage), [different]);
+    expect(await cache.read(tickets.first), isNull);
+    expect(await cache.read(tickets.last), isNotEmpty);
     expect(diagnostics.operations, isEmpty);
+    final file = Directory(
+      '${temp.path}/saved_messages',
+    ).listSync().whereType<File>().single;
+    expect(file.lengthSync(), lessThanOrEqualTo(pageLimit * 4096));
   });
 
   test('discards the cache when a targeted SQL removal fails', () async {

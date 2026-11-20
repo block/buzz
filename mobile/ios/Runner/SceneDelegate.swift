@@ -3,21 +3,6 @@ import UIKit
 import app_links
 
 class SceneDelegate: FlutterSceneDelegate {
-  override func sceneDidBecomeActive(_ scene: UIScene) {
-    SavedMessageCacheLifecycle.shared.didBecomeActive()
-    super.sceneDidBecomeActive(scene)
-  }
-
-  override func sceneWillResignActive(_ scene: UIScene) {
-    SavedMessageCacheLifecycle.shared.willResignActive()
-    super.sceneWillResignActive(scene)
-  }
-
-  override func sceneDidEnterBackground(_ scene: UIScene) {
-    SavedMessageCacheLifecycle.shared.didEnterBackground()
-    super.sceneDidEnterBackground(scene)
-  }
-
   override func scene(
     _ scene: UIScene,
     willConnectTo session: UISceneSession,

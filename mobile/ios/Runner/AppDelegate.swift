@@ -86,7 +86,6 @@ import os.log
     }
 
     let messenger = engineBridge.applicationRegistrar.messenger()
-    SavedMessageCacheLifecycle.shared.attach(messenger: messenger)
     let keyboardChannel = FlutterMethodChannel(
       name: "buzz/community_keyboard", binaryMessenger: messenger)
     communityKeyboardChannel = keyboardChannel

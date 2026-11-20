@@ -30,6 +30,11 @@ void _savedChannelPreviewTests() {
       await tester.pumpAndSettle();
       expect(find.text(cached.content), findsOneWidget);
 
+      relayMessages.setMessages([fresh], historyCompleted: false);
+      await tester.pumpAndSettle();
+      expect(find.text(cached.content), findsOneWidget);
+      expect(find.text(fresh.content), findsNothing);
+
       relayMessages.setMessages([fresh]);
       await tester.pumpAndSettle();
       expect(find.text(fresh.content), findsOneWidget);

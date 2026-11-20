@@ -3,7 +3,6 @@ import 'dart:isolate';
 import 'package:flutter/scheduler.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../../shared/channels/saved_message_cache_lifecycle.dart';
 import '../../shared/channels/saved_message_store.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/relay/relay_author_provider.dart';
@@ -23,10 +22,6 @@ final savedChannelPreviewProvider = FutureProvider.autoDispose
       if (scope == null) return null;
       final cache = ref.watch(savedMessageStoreProvider);
       final ticket = cache.capture(scope, (channelId: channelId, rootId: ''));
-      final foreground = SavedMessageCacheLifecycle.foreground.listen((_) {
-        if (ref.mounted) ref.invalidateSelf();
-      });
-      ref.onDispose(foreground.cancel);
       final events = await cache.read(ticket);
       if (events == null) return null;
       final preview = await _preparePreview(events);

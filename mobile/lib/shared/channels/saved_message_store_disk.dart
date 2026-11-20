@@ -12,6 +12,7 @@ final class _DiskRequest {
     required this.path,
     required this.action,
     required this.page,
+    required this.databasePageLimit,
     this.events = const [],
     this.relayAuthor,
     this.payloadBudget = 0,
@@ -21,6 +22,7 @@ final class _DiskRequest {
   final String path;
   final _DiskAction action;
   final SavedMessagePage page;
+  final int databasePageLimit;
   final List<NostrEvent> events;
   final String? relayAuthor;
   final int payloadBudget;
@@ -37,29 +39,10 @@ final class _DiskResult {
 String _path(String directory, String scope) =>
     p.join(directory, '$scope-v$_version.sqlite');
 
-Future<_DiskResult?> _runDisk(
-  _DiskRequest request,
-  Future<SavedMessageCacheLease?> Function() acquireLease,
-) async {
-  final lease = await acquireLease();
-  if (lease == null) return null;
-  try {
-    return await _runOnWorker(lease, request);
-  } finally {
-    await SavedMessageCacheLifecycle.release(lease);
-  }
-}
+Future<_DiskResult> _runDisk(_DiskRequest request) =>
+    Isolate.run(() => _accessDatabase(request));
 
-Future<_DiskResult?> _runOnWorker(
-  SavedMessageCacheLease lease,
-  _DiskRequest request,
-) => Isolate.run(() => _accessDatabase(lease, request));
-
-_DiskResult? _accessDatabase(
-  SavedMessageCacheLease lease,
-  _DiskRequest request,
-) {
-  if (!SavedMessageCacheLifecycle.beginWorker(lease)) return null;
+_DiskResult _accessDatabase(_DiskRequest request) {
   Database? db;
   try {
     final file = File(request.path);
@@ -74,85 +57,45 @@ _DiskResult? _accessDatabase(
     var knownWires = const <String, String>{};
     if (existed && candidates.isNotEmpty) {
       db = sqlite3.open(request.path, mode: OpenMode.readOnly);
-      _registerDatabase(lease, db);
       _checkSchema(db);
       knownWires = _knownWires(db, candidates);
-      _close(lease, db);
+      db.close();
       db = null;
     }
 
     // Signature verification runs with no SQLite connection open.
-    final (wires, byteSize) = _verifiedWires(
-      lease,
-      request,
-      candidates,
-      knownWires,
-    );
-    _checkLease(lease);
+    final (wires, byteSize) = _verifiedWires(request, candidates, knownWires);
     if (!existed) file.parent.createSync(recursive: true);
     db = sqlite3.open(request.path);
-    _registerDatabase(lease, db);
     db.execute('PRAGMA foreign_keys = ON');
     if (!existed) _initializeSchema(db);
     _checkSchema(db);
-    db.execute('PRAGMA max_page_count = $_maxDatabasePages');
+    db.execute('PRAGMA max_page_count = ${request.databasePageLimit}');
     db.execute('PRAGMA journal_size_limit = 0');
-    _checkLease(lease);
     return switch (request.action) {
-      _DiskAction.read => _readPage(db, lease, request.page),
+      _DiskAction.read => _readPage(db, request.page),
       _DiskAction.touch => _touchPage(db, request.page),
-      _DiskAction.save => _savePage(db, lease, request, wires, byteSize),
+      _DiskAction.save => _saveWithEviction(db, request, wires, byteSize),
       _DiskAction.removeChannel => _removeChannel(
         db,
-        lease,
         request.page.channelId,
         request.targets,
       ),
     };
   } on SqliteException catch (error) {
-    if (SavedMessageCacheLifecycle.isCancelled(lease)) return null;
     if (error.resultCode != 11 && error.resultCode != 26) rethrow;
-    _close(lease, db);
+    db?.close();
     db = null;
     _deleteDatabase(request.path);
     return const _DiskResult(reset: true);
   } on FormatException {
-    _close(lease, db);
+    db?.close();
     db = null;
     _deleteDatabase(request.path);
     return const _DiskResult(reset: true);
-  } on _CacheCancelled {
-    return null;
   } finally {
-    try {
-      _close(lease, db);
-    } finally {
-      SavedMessageCacheLifecycle.finishWorker(lease);
-    }
+    db?.close();
   }
-}
-
-void _close(SavedMessageCacheLease lease, Database? db) {
-  if (db == null) return;
-  SavedMessageCacheLifecycle.detachHandle(lease);
-  db.close();
-}
-
-class _CacheCancelled implements Exception {
-  const _CacheCancelled();
-}
-
-void _checkLease(SavedMessageCacheLease lease) {
-  if (SavedMessageCacheLifecycle.isCancelled(lease)) {
-    throw const _CacheCancelled();
-  }
-}
-
-void _registerDatabase(SavedMessageCacheLease lease, Database db) {
-  if (!SavedMessageCacheLifecycle.registerHandle(lease, db.handle)) {
-    throw const _CacheCancelled();
-  }
-  _checkLease(lease);
 }
 
 void _initializeSchema(Database db) {
@@ -189,23 +132,17 @@ void _checkSchema(Database db) {
   if (version != _version) throw const FormatException('cache format');
 }
 
-_DiskResult _readPage(
-  Database db,
-  SavedMessageCacheLease lease,
-  SavedMessagePage page,
-) {
+_DiskResult _readPage(Database db, SavedMessagePage page) {
   final key = [page.channelId, page.rootId];
   final rows = db.select('''
     SELECT wire FROM page_events JOIN events ON events.id = page_events.event_id
     WHERE channel_id = ? AND root_id = ? ORDER BY position
   ''', key);
   if (rows.isEmpty) return const _DiskResult();
-  _checkLease(lease);
   _touchPage(db, page);
   final events = <NostrEvent>[];
   try {
     for (final row in rows) {
-      _checkLease(lease);
       events.add(
         NostrEvent.fromJson(
           jsonDecode(row['wire'] as String) as Map<String, dynamic>,
@@ -240,7 +177,6 @@ Map<String, String> _knownWires(Database db, List<NostrEvent> candidates) {
 }
 
 (Map<String, String>, int) _verifiedWires(
-  SavedMessageCacheLease lease,
   _DiskRequest request,
   List<NostrEvent> candidates,
   Map<String, String> knownWires,
@@ -250,7 +186,6 @@ Map<String, String> _knownWires(Database db, List<NostrEvent> candidates) {
   final rootIds = <String>{};
   var byteSize = 0;
   for (final event in candidates) {
-    _checkLease(lease);
     if (selected.containsKey(event.id)) continue;
     if (!matchesSavedMessageAuthority(event, request.relayAuthor)) continue;
     if (event.kind == EventKind.channelThreadSummary) {
@@ -284,13 +219,35 @@ Map<String, String> _knownWires(Database db, List<NostrEvent> candidates) {
   return (selected, byteSize);
 }
 
-_DiskResult _savePage(
+_DiskResult _saveWithEviction(
   Database db,
-  SavedMessageCacheLease lease,
   _DiskRequest request,
-  Map<String, String> selected,
+  Map<String, String> wires,
   int byteSize,
 ) {
+  try {
+    return _savePage(db, request, wires, byteSize);
+  } on SqliteException catch (error) {
+    if (error.resultCode != SqlError.SQLITE_FULL) rethrow;
+    // Indexes and references can fill the file before the wire budget.
+    // Reclaim space from the least recently opened pages and try once.
+    return _savePage(
+      db,
+      request,
+      wires,
+      byteSize,
+      databasePageBudget: request.databasePageLimit * 3 ~/ 4,
+    );
+  }
+}
+
+_DiskResult _savePage(
+  Database db,
+  _DiskRequest request,
+  Map<String, String> selected,
+  int byteSize, {
+  int? databasePageBudget,
+}) {
   final page = request.page;
   final oldAuthor = db
       .select('SELECT pubkey FROM relay_author')
@@ -299,7 +256,6 @@ _DiskResult _savePage(
       oldAuthor != null &&
       request.relayAuthor != null &&
       oldAuthor != request.relayAuthor;
-  _checkLease(lease);
   db.execute('BEGIN IMMEDIATE');
   try {
     if (rotated) {
@@ -312,7 +268,7 @@ _DiskResult _savePage(
     }
     _deletePage(db, page.channelId, page.rootId);
     if (selected.isNotEmpty && byteSize <= request.payloadBudget) {
-      _evictPages(db, lease, request.payloadBudget - byteSize);
+      _evictPages(db, request.payloadBudget - byteSize, databasePageBudget);
       final insertedAt = DateTime.now().microsecondsSinceEpoch;
       db.execute('INSERT INTO pages VALUES (?, ?, ?, ?)', [
         page.channelId,
@@ -329,7 +285,6 @@ _DiskResult _savePage(
       try {
         var position = 0;
         for (final entry in selected.entries) {
-          _checkLease(lease);
           insertEvent.execute([entry.key, entry.value]);
           insertReference.execute([
             page.channelId,
@@ -343,7 +298,6 @@ _DiskResult _savePage(
         insertEvent.close();
       }
     }
-    _checkLease(lease);
     db.execute('COMMIT');
   } catch (_) {
     if (!db.autocommit) db.execute('ROLLBACK');
@@ -352,18 +306,28 @@ _DiskResult _savePage(
   return const _DiskResult();
 }
 
-void _evictPages(Database db, SavedMessageCacheLease lease, int budget) {
+void _evictPages(Database db, int budget, int? databasePageBudget) {
   final pages = db.select('''
     SELECT channel_id, root_id, byte_size FROM pages ORDER BY opened_at, channel_id, root_id
   ''');
   var total = pages.fold(0, (sum, page) => sum + (page['byte_size'] as int));
   for (final page in pages) {
-    if (total <= budget) break;
-    _checkLease(lease);
+    if (total <= budget &&
+        (databasePageBudget == null ||
+            _allocatedDatabasePages(db) <= databasePageBudget)) {
+      break;
+    }
     _deletePage(db, page['channel_id'] as String, page['root_id'] as String);
     total -= page['byte_size'] as int;
   }
 }
+
+int _allocatedDatabasePages(Database db) =>
+    db.select('''
+  SELECT (SELECT page_count FROM pragma_page_count)
+       - (SELECT freelist_count FROM pragma_freelist_count) AS used
+''').single['used']
+        as int;
 
 Iterable<NostrEvent> _cacheCandidates(
   List<NostrEvent> events,
@@ -394,12 +358,7 @@ Iterable<NostrEvent> _cacheCandidates(
   );
 }
 
-_DiskResult _removeChannel(
-  Database db,
-  SavedMessageCacheLease lease,
-  String channel,
-  Set<String>? targets,
-) {
+_DiskResult _removeChannel(Database db, String channel, Set<String>? targets) {
   db.execute('BEGIN IMMEDIATE');
   try {
     if (targets == null) {
@@ -424,7 +383,6 @@ _DiskResult _removeChannel(
         channel,
       ]);
     }
-    _checkLease(lease);
     db.execute('COMMIT');
   } catch (_) {
     if (!db.autocommit) db.execute('ROLLBACK');

@@ -125,6 +125,79 @@ void main() {
     expect(relay.historyFilters, isEmpty);
   });
 
+  flutter_test.test(
+    'live revocation purges the page before offline reopen',
+    () async {
+      const scope = (
+        communityId: 'cache-test-community',
+        pubkey: 'cache-test-user',
+      );
+      const page = (channelId: _channelId, rootId: '');
+      final root = await Directory.systemTemp.createTemp(
+        'buzz-live-revocation',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final event = NostrEvent.fromJson(
+        signNostrEvent(
+          secretKey:
+              '0000000000000000000000000000000000000000000000000000000000000001',
+          kind: EventKind.streamMessage,
+          content: 'Private history',
+          tags: [
+            ['h', _channelId],
+          ],
+        ).toMap(),
+      );
+      final lateHistory = Completer<List<NostrEvent>>();
+      final relay = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [event, _bounds()],
+          lateHistory.future,
+        ],
+      );
+      ProviderContainer open(_RecordingRelaySessionNotifier session) {
+        final container = ProviderContainer(
+          overrides: [
+            relaySessionProvider.overrideWith(() => session),
+            savedMessageRootProvider.overrideWith((ref) async => root),
+            savedMessageScopeProvider.overrideWithValue(scope),
+          ],
+        );
+        addTearDown(container.dispose);
+        return container;
+      }
+
+      final online = open(relay);
+      final store = online.read(savedMessageStoreProvider);
+      final ticket = store.capture(scope, page);
+      await store.save(ticket, [event], relayAuthor: null);
+      final messages = channelMessagesProvider(_channelId);
+      online.listen(messages, (_, _) {});
+      await _pumpEventQueue();
+      expect(online.read(messages).value, [event]);
+
+      relay.setConnected(false);
+      await _pumpEventQueue();
+      relay.setConnected(true);
+      await _pumpEventQueue();
+      relay.closeLive('restricted: channel access revoked');
+      lateHistory.complete([event, _bounds()]);
+      await _pumpEventQueue();
+      expect(isRelayAccessDenied(online.read(messages).error!), isTrue);
+      expect(online.read(messages).value, isNull);
+      expect(store.isCurrent(ticket), isFalse);
+      expect(await store.read(store.capture(scope, page)), isNull);
+
+      final offlineRelay = _RecordingRelaySessionNotifier();
+      final offline = open(offlineRelay);
+      offline.read(relaySessionProvider);
+      offlineRelay.setConnected(false);
+      final preview = savedChannelPreviewProvider(_channelId);
+      offline.listen(preview, (_, _) {});
+      expect(await offline.read(preview.future), isNull);
+    },
+  );
+
   for (final mutation in ['delete', 'edit', 'unreact']) {
     flutter_test.test('offline page after live $mutation', () async {
       const scope = (
@@ -180,6 +253,18 @@ void main() {
       final messages = channelMessagesProvider(_channelId);
       online.listen(messages, (_, _) {});
       await relay.subscribed;
+      final preview = savedChannelPreviewProvider(_channelId);
+      online.listen(preview, (_, _) {});
+      expect(
+        (await online.read(preview.future))?.events,
+        unorderedEquals(oldPage),
+      );
+
+      final live = signed(EventKind.streamMessage, 'New live message');
+      relay.emit(live);
+      expect(online.read(messages).value, contains(live));
+      expect(online.read(messages.notifier).hasLoadedHistory, isFalse);
+      expect(online.read(preview).value?.events, unorderedEquals(oldPage));
       relay.emit(
         NostrEvent(
           id: 'live-mutation',
@@ -196,8 +281,9 @@ void main() {
           sig: '',
         ),
       );
+      expect(online.read(preview).unwrapPrevious().value, isNull);
       expect(
-        await store.read(store.capture(scope, page)),
+        (await online.read(preview.future))?.events,
         unorderedEquals(expected),
       );
 
@@ -211,7 +297,6 @@ void main() {
       offline.read(relaySessionProvider);
       offlineRelay.setConnected(false);
       offline.listen(messages, (_, _) {});
-      final preview = savedChannelPreviewProvider(_channelId);
       offline.listen(preview, (_, _) {});
       expect(
         (await offline.read(preview.future))?.events,
@@ -6865,9 +6950,19 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
       throw Exception('subscribe failed');
     }
     _listeners.add(onEvent);
+    if (onClosed != null) _closeListeners.add(onClosed);
     return () {
       _listeners.remove(onEvent);
+      if (onClosed != null) _closeListeners.remove(onClosed);
     };
+  }
+
+  final _closeListeners = <void Function(String)>[];
+
+  void closeLive(String message) {
+    for (final listener in List.of(_closeListeners)) {
+      listener(message);
+    }
   }
 
   void emit(NostrEvent event) {
