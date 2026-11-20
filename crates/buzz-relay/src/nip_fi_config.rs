@@ -665,6 +665,13 @@ impl NipFiRelayConfig {
     pub(crate) fn policy_required(&self, community_id: uuid::Uuid, stored: bool) -> bool {
         stored || (self.mode.observes_only() && rollout_bucket(community_id) < self.enforce_percent)
     }
+
+    /// The mode a community runs under: the relay mode narrowed by
+    /// [`Self::policy_required`].
+    pub(crate) fn effective_mode(&self, community_id: uuid::Uuid, stored: bool) -> NipFiMode {
+        self.mode
+            .with_requirement(self.policy_required(community_id, stored))
+    }
 }
 
 /// Stable configured mode name for operator diagnostics and status.

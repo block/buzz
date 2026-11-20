@@ -108,7 +108,7 @@ fn effective_mode_truth_table() {
                 (NipFiMode::Shadow, true) => NipFiMode::Enforce,
                 _ => global,
             };
-            assert_eq!(effective(global, required), expected);
+            assert_eq!(global.with_requirement(required), expected);
         }
     }
 }
@@ -183,7 +183,7 @@ async fn rollout_cohort_matrix_matches_stored_required() {
                     .unwrap();
                 let case = format!("{global:?} stored={stored} cohort={cohort}");
                 assert_eq!(policy.policy_required, widened, "{case}");
-                assert_eq!(policy.mode, effective(global, widened), "{case}");
+                assert_eq!(policy.mode, global.with_requirement(widened), "{case}");
                 assert_eq!(
                     policy.required,
                     !global.is_off() && (widened || global.enforces()),

@@ -81,11 +81,6 @@ pub(crate) async fn with_policy<F: std::future::Future>(policy: Policy, next: F)
     REQUEST_POLICY.scope(policy, next).await
 }
 
-/// Repair mode precedes all policy and evidence failures.
-pub(crate) fn effective(global: NipFiMode, required: bool) -> NipFiMode {
-    global.with_requirement(required)
-}
-
 /// One bounded policy fill. Its serving row also supplies ordinary routing.
 /// Misses, errors, expired reads and invalidated in-flight results are not cached.
 pub(crate) async fn cached_lookup(
@@ -165,7 +160,10 @@ pub(crate) async fn resolve(
         .policy_required(policy.community_id, policy.requires_nip_fi);
     Ok(Policy {
         community_id: policy.community_id,
-        mode: effective(global, policy_required),
+        mode: state
+            .config
+            .nip_fi
+            .effective_mode(policy.community_id, policy.requires_nip_fi),
         required: !global.is_off() && (policy_required || global.enforces()),
         policy_required,
         mapped: true,
@@ -222,7 +220,10 @@ pub(crate) async fn bind_for_upgrade(
         .policy_required(policy.community_id, policy.requires_nip_fi);
     let policy = Policy {
         community_id: policy.community_id,
-        mode: effective(state.config.nip_fi.mode, policy_required),
+        mode: state
+            .config
+            .nip_fi
+            .effective_mode(policy.community_id, policy.requires_nip_fi),
         required: !state.config.nip_fi.mode.is_off()
             && (policy_required || state.config.nip_fi.mode.enforces()),
         policy_required,

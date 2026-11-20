@@ -54,7 +54,7 @@ fn mode_fields(state: &AppState, id: uuid::Uuid, required: Option<bool>) -> Valu
     serde_json::json!({
         "mode": name,
         "effective_required": required
-            .map(|r| mode.with_requirement(state.config.nip_fi.policy_required(id, r)).restricts()),
+            .map(|r| state.config.nip_fi.effective_mode(id, r).restricts()),
     })
 }
 
