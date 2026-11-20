@@ -42,16 +42,28 @@ double _barContentHeight(
   final effectiveTitleHeight = titleContentHeight > scaledTitleHeight
       ? titleContentHeight
       : scaledTitleHeight;
+  final duoTop = _duoTopClearance(context);
+  if (duoTop > 0) {
+    // Match the native Duo bar: a 44-point row below the top clearance.
+    final rowHeight = IosNavigationMetrics.of(
+      context,
+    ).compactHeight.clamp(44.0, double.infinity);
+    return duoTop + max(rowHeight, effectiveTitleHeight);
+  }
   final accessibleHeight = Grid.xxs + effectiveTitleHeight + Grid.xxs;
+  return accessibleHeight > _kBarContentMinHeight
+      ? accessibleHeight
+      : _kBarContentMinHeight;
+}
+
+/// Space above the Flutter bar's row on iOS Duo, which reports no top safe
+/// area beside its strip, on the cover display and in the wide layout alike.
+double _duoTopClearance(BuildContext context) {
   final strip =
       DuoToolbarScope.maybeStripOf(context) ?? FoldGeometry.of(context).strip;
-  final minimumHeight =
-      defaultTargetPlatform == TargetPlatform.iOS &&
-          strip != null &&
-          !isCompactDuoWindow(context)
-      ? _nativeCompactHeight(context)
-      : _kBarContentMinHeight;
-  return accessibleHeight > minimumHeight ? accessibleHeight : minimumHeight;
+  return defaultTargetPlatform == TargetPlatform.iOS && strip != null
+      ? duoHeaderTopClearance
+      : 0;
 }
 
 /// Height for a compact title rail below the app bar's action row.
@@ -495,6 +507,7 @@ class FrostedAppBar extends StatelessWidget {
       height: barContentHeight,
       child: Padding(
         padding: EdgeInsets.only(
+          top: _duoTopClearance(context),
           left: horizontalInset,
           right:
               horizontalInset +

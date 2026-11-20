@@ -20,6 +20,7 @@ import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/shortcuts/home_screen_shortcuts.dart';
+import 'package:buzz/shared/widgets/duo_toolbar.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/features/home/home_page.dart';
 import 'package:buzz/features/home/messages_navigation_bar.dart';
@@ -272,9 +273,11 @@ void main() {
         tester.getCenter(find.text('Messages')).dy,
         tester.getCenter(menu).dy,
       );
+      // Duo reports no top safe area, so the row starts below the clearance.
+      final barHeight = frostedAppBarHeight(tester.element(bar));
       expect(
         tester.getCenter(menu).dy,
-        frostedAppBarHeight(tester.element(bar)) / 2,
+        duoHeaderTopClearance + (barHeight - duoHeaderTopClearance) / 2,
       );
       final originalHeaderRect = tester.getRect(bar);
       final scrollable = find.byType(Scrollable).first;
