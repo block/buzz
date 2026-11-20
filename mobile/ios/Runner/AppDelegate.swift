@@ -35,6 +35,8 @@ import os.log
   private var communityKeyboardChannel: FlutterMethodChannel?
   private var communityKeyboardObserver: NSObjectProtocol?
   private var hapticsChannel: FlutterMethodChannel?
+  private let voiceStartFeedback = UIImpactFeedbackGenerator(style: .medium)
+  private let voiceCancelFeedback = UIImpactFeedbackGenerator(style: .rigid)
   private var appGroupChannel: FlutterMethodChannel?
   private var diagnosticsChannel: FlutterMethodChannel?
   private var shareSuggestions: ShareSuggestions?
@@ -61,6 +63,7 @@ import os.log
   private var photoLibrarySaver: PhotoLibrarySaver?
   private var hostedHpkeChannel: FlutterMethodChannel?
   private var browserAuthBridge: BuzzBrowserAuthBridge?
+  private var deviceTranscriptionPlugin: DeviceTranscriptionPlugin?
   private var huddleMediaPlugin: HuddleMediaPlugin?
 
   override func application(
@@ -131,6 +134,7 @@ import os.log
         result(FlutterError(code: "backup_unavailable", message: nil, details: nil))
       }
     }
+    deviceTranscriptionPlugin = DeviceTranscriptionPlugin(messenger: messenger)
     huddleMediaPlugin = HuddleMediaPlugin(messenger: messenger)
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "BuzzIosNavigationBar") {
       registrar.register(IosNavigationBarFactory(messenger: messenger, parent: registrar.viewController), withId: "buzz/ios_navigation_bar")
@@ -189,14 +193,30 @@ import os.log
       name: "buzz/haptics",
       binaryMessenger: messenger
     )
-    hapticsChannel?.setMethodCallHandler { call, result in
-      guard call.method == "success" || call.method == "error" else {
+    hapticsChannel?.setMethodCallHandler { [weak self] call, result in
+      guard let self else {
         result(FlutterMethodNotImplemented)
         return
       }
-      let generator = UINotificationFeedbackGenerator()
-      generator.prepare()
-      generator.notificationOccurred(call.method == "error" ? .error : .success)
+      switch call.method {
+      case "voicePrepareStart":
+        self.voiceStartFeedback.prepare()
+      case "voicePrepareCancel":
+        self.voiceCancelFeedback.prepare()
+      case "voiceStart":
+        self.voiceStartFeedback.impactOccurred(intensity: 1)
+        self.voiceCancelFeedback.prepare()
+      case "voiceCancel":
+        self.voiceCancelFeedback.impactOccurred(intensity: 1)
+        self.voiceCancelFeedback.prepare()
+      case "success", "error":
+        let generator = UINotificationFeedbackGenerator()
+        generator.prepare()
+        generator.notificationOccurred(call.method == "error" ? .error : .success)
+      default:
+        result(FlutterMethodNotImplemented)
+        return
+      }
       result(nil)
     }
     qrScannerChannel = FlutterMethodChannel(
@@ -306,6 +326,15 @@ import os.log
       skinToneRegistrar.register(
         NativeSkinToneControlFactory(messenger: messenger),
         withId: "buzz/native_skin_tone_control"
+      )
+    }
+
+    if let toolStripRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzComposerToolStripGlass"
+    ) {
+      toolStripRegistrar.register(
+        ComposerToolStripGlassFactory(messenger: toolStripRegistrar.messenger()),
+        withId: "buzz/composer_tool_strip_glass"
       )
     }
 

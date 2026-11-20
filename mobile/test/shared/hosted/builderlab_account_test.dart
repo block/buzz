@@ -1,3 +1,4 @@
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/hosted/known_community_sync.dart';
 import '../community/community_storage_test.dart' show FakeSecureStorage;
 import 'dart:async';
@@ -269,6 +270,61 @@ void main() {
     await tester.pump();
     expect((await retry).subject, 'account-1');
   });
+
+  for (final (name, body) in [
+    ('a body that is not JSON', '{"oops"'),
+    ('a body that is not an object', '[]'),
+  ]) {
+    test('$name is reported as an account response error', () async {
+      final reporter = _RecordingDiagnostics();
+      final client = BuilderlabAccountClient(
+        httpClient: MockClient((_) async => http.Response(body, 200)),
+        diagnostics: reporter,
+      );
+      await expectLater(
+        client.exchange(code: 'code', verifier: verifier),
+        throwsA(AccountFailure.invalidResponse),
+      );
+      expect(reporter.errors, [
+        (FormatException, DiagnosticOperation.accountResponse),
+      ]);
+    });
+  }
+
+  // 200 responses that parse but lack what the client requires.
+  for (final (name, exchange, me) in <(String, Object, Object)>[
+    ('an exchange with no credential', <String, Object>{}, <String, Object>{}),
+    (
+      'a session with no subject',
+      {'session_credential': 'secret', 'expires_at': expiry},
+      {'expires_at': expiry},
+    ),
+    (
+      'a session with an unreadable expiry',
+      {'session_credential': 'secret', 'expires_at': expiry},
+      {'subject': 'account-1', 'expires_at': 'soon'},
+    ),
+  ]) {
+    test('$name is reported as an account response error', () async {
+      final reporter = _RecordingDiagnostics();
+      final client = BuilderlabAccountClient(
+        httpClient: MockClient(
+          (request) async => http.Response(
+            jsonEncode(request.url.path.endsWith('/exchange') ? exchange : me),
+            200,
+          ),
+        ),
+        diagnostics: reporter,
+      );
+      await expectLater(
+        client.exchange(code: 'code', verifier: verifier),
+        throwsA(AccountFailure.invalidResponse),
+      );
+      expect(reporter.errors, [
+        (FormatException, DiagnosticOperation.accountResponse),
+      ]);
+    });
+  }
 
   test('invalid verification cannot persist an exchanged credential', () async {
     final transport = MockClient(
@@ -678,4 +734,15 @@ class _SessionStorage extends FlutterSecureStorage {
     await holdDelete;
     await super.delete(key: key);
   }
+}
+
+class _RecordingDiagnostics extends NoopDiagnosticReporter {
+  final errors = <(Type, DiagnosticOperation)>[];
+
+  @override
+  void reportError(
+    Object error,
+    StackTrace? stackTrace, {
+    required DiagnosticOperation operation,
+  }) => errors.add((error.runtimeType, operation));
 }

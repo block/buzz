@@ -307,7 +307,7 @@ from the native section menu, which also retains its quick-sort actions. Show of
 Active; Active reveals inline 1-, 7-, 30-, and 90-day choices. Apply commits the
 draft; Cancel discards it. A failed filter save keeps the draft for Retry.
 
-Filtered sections offer **Show hidden channels** in the main list, expanding
+Filtered sections offer **Show more** in the main list, expanding
 the original sorted roster without changing the saved filter. Filtered-empty
 sections retain their header, options and recovery control. Section membership
 and sorting ownership are unchanged. Filter mode and duration are confirmed

@@ -88,6 +88,23 @@ bool _queueComposerImages(
 
 enum _AttachmentSurface { closed, menu, camera, photos }
 
+void _toggleComposerAttachments(
+  ValueNotifier<_AttachmentSurface> surface,
+  ValueNotifier<_InputTool?> tool,
+) {
+  surface.value = switch (surface.value) {
+    _AttachmentSurface.closed => _AttachmentSurface.menu,
+    _AttachmentSurface.menu => _AttachmentSurface.closed,
+    _AttachmentSurface.camera ||
+    _AttachmentSurface.photos => _AttachmentSurface.menu,
+  };
+  if (defaultTargetPlatform == TargetPlatform.iOS) {
+    tool.value = surface.value == _AttachmentSurface.closed
+        ? null
+        : _InputTool.attachments;
+  }
+}
+
 bool get _hasCombinedMediaPicker =>
     defaultTargetPlatform == TargetPlatform.iOS ||
     defaultTargetPlatform == TargetPlatform.android;
@@ -124,7 +141,7 @@ class _AttachmentMenuLayout {
       textPainter.height + (Grid.xxs * 2),
     );
     textPainter.dispose();
-    final itemCount = _hasCombinedMediaPicker ? 4 : 5;
+    final itemCount = (_hasCombinedMediaPicker ? 4 : 5);
     final contentHeight =
         (_attachmentMenuPadding * 2) +
         (itemHeight * itemCount) +
@@ -265,6 +282,21 @@ class _AttachmentSurfacePanel extends HookWidget {
     final sizeProgress = morphController.status == AnimationStatus.reverse
         ? const Cubic(0.22, 1, 0.36, 1).transform(rawProgress)
         : Curves.easeInOutCubic.transform(rawProgress);
+
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      if (surface != _AttachmentSurface.menu) {
+        return SizedBox.expand(child: expandedContent);
+      }
+      return _AttachmentMenu(
+        tiled: !_ComposerGlassScope.of(context),
+        layout: menuLayout,
+        onCamera: onCamera,
+        onPhotos: onPhotos,
+        onVideo: onVideo,
+        onVoiceNote: onVoiceNote,
+        onFiles: onFiles,
+      );
+    }
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -472,9 +504,14 @@ Future<BlobDescriptor> _uploadPendingAttachment(
 class _AttachmentTrigger extends StatelessWidget {
   final _AttachmentSurface surface;
   final bool formattingOpen;
+  final double size;
+  final bool enabled;
   final ValueChanged<BuildContext> onTap;
 
   const _AttachmentTrigger({
+    super.key,
+    this.size = 36,
+    this.enabled = true,
     required this.surface,
     required this.formattingOpen,
     required this.onTap,
@@ -482,12 +519,40 @@ class _AttachmentTrigger extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return IosGlassNavigationButton(
+        icon: switch (surface) {
+          _AttachmentSurface.closed =>
+            formattingOpen
+                ? IosGlassNavigationIcon.close
+                : IosGlassNavigationIcon.plus,
+          _AttachmentSurface.menu => IosGlassNavigationIcon.close,
+          _AttachmentSurface.camera ||
+          _AttachmentSurface.photos => IosGlassNavigationIcon.back,
+        },
+        semanticLabel: switch (surface) {
+          _AttachmentSurface.closed =>
+            formattingOpen ? 'Close formatting' : 'Add attachment',
+          _AttachmentSurface.menu => 'Close attachments',
+          _AttachmentSurface.camera ||
+          _AttachmentSurface.photos => 'Back to attachment options',
+        },
+        width: size,
+        height: size,
+        controlSize: size,
+        iconSize: 20,
+        foregroundColor: context.colors.onSurfaceVariant,
+        onPressed: enabled
+            ? () => _runComposerAction(() => onTap(context))
+            : null,
+      );
+    }
     final duration = MediaQuery.disableAnimationsOf(context)
         ? Duration.zero
         : const Duration(milliseconds: 240);
 
     return SizedBox.square(
-      dimension: 36,
+      dimension: size,
       child: DecoratedBox(
         decoration: BoxDecoration(
           color: context.colors.surface,
@@ -505,7 +570,9 @@ class _AttachmentTrigger extends StatelessWidget {
             _AttachmentSurface.camera ||
             _AttachmentSurface.photos => 'Back to attachment options',
           },
-          onPressed: () => _runComposerAction(() => onTap(context)),
+          onPressed: enabled
+              ? () => _runComposerAction(() => onTap(context))
+              : null,
           padding: EdgeInsets.zero,
           visualDensity: VisualDensity.compact,
           icon: AnimatedRotation(
@@ -545,6 +612,7 @@ class _AttachmentTrigger extends StatelessWidget {
 }
 
 class _AttachmentMenu extends StatelessWidget {
+  final bool tiled;
   final _AttachmentMenuLayout layout;
   final VoidCallback onCamera;
   final VoidCallback onPhotos;
@@ -553,6 +621,7 @@ class _AttachmentMenu extends StatelessWidget {
   final VoidCallback onFiles;
 
   const _AttachmentMenu({
+    this.tiled = false,
     required this.layout,
     required this.onCamera,
     required this.onPhotos,
@@ -570,6 +639,41 @@ class _AttachmentMenu extends StatelessWidget {
       (BuzzIcons.mic, 'Voice note', onVoiceNote),
       (BuzzIcons.file, 'Files', onFiles),
     ];
+    if (tiled) {
+      return Padding(
+        key: const ValueKey('attachment-menu'),
+        padding: const EdgeInsets.all(Grid.md),
+        child: LayoutBuilder(
+          builder: (context, constraints) => Wrap(
+            spacing: Grid.xs,
+            runSpacing: Grid.xs,
+            children: [
+              for (final (icon, label, onTap) in items)
+                SizedBox(
+                  width: (constraints.maxWidth - Grid.xs) / 2,
+                  child: FilledButton.icon(
+                    key: ValueKey(
+                      'attachment-menu-item-${label.toLowerCase()}',
+                    ),
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(0, 80),
+                      padding: const EdgeInsets.all(Grid.md),
+                      backgroundColor: context.colors.surfaceContainerHighest,
+                      foregroundColor: context.colors.onSurface,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(Radii.dialog),
+                      ),
+                    ),
+                    onPressed: () => _runComposerAction(onTap),
+                    icon: Icon(icon, size: _attachmentMenuIconSize),
+                    label: Text(label, textAlign: TextAlign.center),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      );
+    }
     return SizedBox(
       key: const ValueKey('attachment-menu'),
       width: _attachmentMenuWidth,
@@ -577,7 +681,7 @@ class _AttachmentMenu extends StatelessWidget {
       child: ListView.separated(
         key: const ValueKey('attachment-menu-scroll'),
         padding: const EdgeInsets.all(_attachmentMenuPadding),
-        physics: layout.isScrollable
+        physics: layout.isScrollable || _ComposerGlassScope.of(context)
             ? null
             : const NeverScrollableScrollPhysics(),
         itemCount: items.length,
@@ -704,14 +808,14 @@ class _AttachmentStrip extends StatelessWidget {
               key: ValueKey('compose-attachment:${attachment.id}'),
               width: thumbWidth,
               decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(Radii.md),
+                borderRadius: BorderRadius.circular(Radii.dialog),
                 border: Border.all(color: context.colors.outlineVariant),
               ),
               child: Stack(
                 fit: StackFit.expand,
                 children: [
                   ClipRRect(
-                    borderRadius: BorderRadius.circular(Radii.md),
+                    borderRadius: BorderRadius.circular(Radii.dialog),
                     child: attachment.kind == _PendingAttachmentKind.video
                         ? _PendingVideoThumbnail(file: attachment.file)
                         : attachment.kind == _PendingAttachmentKind.image &&

@@ -1,5 +1,4 @@
-//! Read-only catalog audit and monthly partition manager for `events` and
-//! `delivery_log`.
+//! Read-only catalog audit and monthly partition manager for `events`.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -20,7 +19,7 @@ pub use maintenance::{
 };
 
 /// Tables that may be partition-managed. The allowlist prevents DDL injection.
-const PARTITIONED_TABLES: &[&str] = &["events", "delivery_log"];
+const PARTITIONED_TABLES: &[&str] = &["events"];
 
 /// Maximum future-month horizon accepted by catalog audits and creation.
 ///
@@ -42,7 +41,6 @@ const PARTITION_AUDIT_CONCURRENT_DROP_RETRIES: usize = 2;
 fn expected_partition_key(table: &str) -> Option<&'static str> {
     match table {
         "events" => Some("RANGE (created_at)"),
-        "delivery_log" => Some("RANGE (delivered_at)"),
         _ => None,
     }
 }
@@ -2053,7 +2051,7 @@ mod tests {
         let mut incomplete = degraded_tables();
         incomplete.pop();
         let error = PartitionAuditError {
-            table: "delivery_log",
+            table: "events",
             error: "statement timeout".to_string(),
         };
         for (tables, errors, outcome) in [
@@ -2405,38 +2403,32 @@ mod tests {
         }
 
         pub(in crate::store::partition) async fn seed_parents(pool: &PgPool) {
-            seed_parents_with_keys(pool, "created_at", "delivered_at").await;
+            seed_parents_with_keys(pool, "created_at").await;
         }
 
-        async fn seed_parents_with_keys(pool: &PgPool, events_key: &str, delivery_log_key: &str) {
+        async fn seed_parents_with_keys(pool: &PgPool, events_key: &str) {
             sqlx::query(
                 "CREATE FUNCTION partition_test_trigger() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
             )
             .execute(pool)
             .await
             .expect("create trigger function");
-            for (table, column, partition_key) in [
-                ("events", "created_at", events_key),
-                ("delivery_log", "delivered_at", delivery_log_key),
-            ] {
-                let create = format!(
-                    "CREATE TABLE {table} (id BIGSERIAL, {column} TIMESTAMPTZ NOT NULL, \
-                     alternate_at TIMESTAMPTZ NOT NULL, \
-                     PRIMARY KEY ({column}, alternate_at, id)) PARTITION BY RANGE ({partition_key})"
-                );
-                sqlx::query(sqlx::AssertSqlSafe(create))
-                    .execute(pool)
-                    .await
-                    .expect("create partitioned parent");
-                let trigger = format!(
-                    "CREATE TRIGGER partition_probe BEFORE INSERT ON {table} \
-                     FOR EACH ROW EXECUTE FUNCTION partition_test_trigger()"
-                );
-                sqlx::query(sqlx::AssertSqlSafe(trigger))
-                    .execute(pool)
-                    .await
-                    .expect("create parent trigger");
-            }
+            let create = format!(
+                "CREATE TABLE events (id BIGSERIAL, created_at TIMESTAMPTZ NOT NULL, \
+                 alternate_at TIMESTAMPTZ NOT NULL, \
+                 PRIMARY KEY (created_at, alternate_at, id)) PARTITION BY RANGE ({events_key})"
+            );
+            sqlx::query(sqlx::AssertSqlSafe(create))
+                .execute(pool)
+                .await
+                .expect("create partitioned parent");
+            sqlx::query(
+                "CREATE TRIGGER partition_probe BEFORE INSERT ON events \
+                 FOR EACH ROW EXECUTE FUNCTION partition_test_trigger()",
+            )
+            .execute(pool)
+            .await
+            .expect("create parent trigger");
         }
 
         pub(in crate::store::partition) async fn create_child(
@@ -2665,7 +2657,7 @@ mod tests {
         #[ignore = "requires Postgres"]
         async fn wrong_root_partition_key_never_proves_coverage() {
             let (pool, _scratch) = scratch_pool().await;
-            seed_parents_with_keys(&pool, "alternate_at", "delivered_at").await;
+            seed_parents_with_keys(&pool, "alternate_at").await;
             for table in PARTITIONED_TABLES {
                 create_child(
                     &pool,
@@ -2693,13 +2685,6 @@ mod tests {
             assert!(!events.serving_safe);
             assert!(events.coverage_leaves.is_empty());
             assert_eq!(events.children[0].kind, PartitionChildKind::Anomalous);
-            let delivery_log = audit
-                .tables
-                .iter()
-                .find(|table| table.table == "delivery_log")
-                .expect("delivery_log audit");
-            assert!(delivery_log.partition_key_valid);
-            assert!(delivery_log.serving_safe);
         }
 
         #[tokio::test]
@@ -2736,15 +2721,6 @@ mod tests {
                 leaf.schema == schema
                     && leaf.name == "events_p_future"
                     && leaf.root_child_schema == schema
-            }));
-            let delivery_log = audit
-                .tables
-                .iter()
-                .find(|table| table.table == "delivery_log")
-                .expect("delivery_log audit");
-            assert_eq!(delivery_log.nonempty_catch_all_count(), 0);
-            assert!(delivery_log.children.iter().any(|child| {
-                child.name == "delivery_log_p_future" && child.catch_all_nonempty == Some(false)
             }));
         }
 
@@ -2828,22 +2804,6 @@ mod tests {
                 "MAXVALUE",
             )
             .await;
-            create_child(
-                &pool,
-                "delivery_log",
-                "delivery_log_p_past",
-                "MINVALUE",
-                "'2026-09-01'",
-            )
-            .await;
-            create_child(
-                &pool,
-                "delivery_log",
-                "delivery_log_p_future",
-                "'2026-09-01'",
-                "MAXVALUE",
-            )
-            .await;
             sqlx::query(sqlx::AssertSqlSafe(format!(
                 "ALTER TABLE ONLY {}.{} DISABLE TRIGGER partition_probe",
                 quote_identifier(&second_schema),
@@ -2906,7 +2866,7 @@ mod tests {
 
         #[tokio::test]
         #[ignore = "requires Postgres"]
-        async fn report_retains_successful_table_when_another_table_errors() {
+        async fn report_surfaces_audit_error_for_unreadable_managed_table() {
             let (pool, scratch) = scratch_pool().await;
             let schema = scratch.name.as_str();
             seed_fresh_layout(&pool).await;
@@ -2915,15 +2875,12 @@ mod tests {
                 .execute(&scratch.admin)
                 .await
                 .expect("create restricted audit role");
-            for statement in [
-                format!("GRANT USAGE ON SCHEMA {schema} TO {role}"),
-                format!("GRANT SELECT ON {schema}.events_p_future TO {role}"),
-            ] {
-                sqlx::query(sqlx::AssertSqlSafe(statement))
-                    .execute(&scratch.admin)
-                    .await
-                    .expect("grant restricted audit access");
-            }
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "GRANT USAGE ON SCHEMA {schema} TO {role}"
+            )))
+            .execute(&scratch.admin)
+            .await
+            .expect("grant restricted audit access");
             let url = crate::test_support::database_url();
             let role_schema = schema.to_owned();
             let role_name = role.clone();
@@ -2947,12 +2904,12 @@ mod tests {
                 .expect("connect restricted audit pool");
 
             let report = audit_partition_catalog_report_at(&restricted, 0, fixed_now()).await;
-            assert_eq!(report.tables.len(), 1);
-            assert_eq!(report.tables[0].table, "events");
+            assert!(report.tables.is_empty());
             assert_eq!(report.errors.len(), 1);
-            assert_eq!(report.errors[0].table, "delivery_log");
+            assert_eq!(report.errors[0].table, "events");
             assert!(report.errors[0].error.contains("permission denied"));
             assert!(!report.serving_safe());
+            assert_eq!(report.outcome(), PartitionAuditOutcome::Error);
 
             restricted.close().await;
         }
@@ -3211,21 +3168,6 @@ mod tests {
                     && leaf.catch_all_nonempty.is_none()
                     && leaf.default_nonempty == Some(true)
             }));
-            let delivery_log = audit
-                .tables
-                .iter()
-                .find(|table| table.table == "delivery_log")
-                .expect("delivery_log audit");
-            assert_eq!(delivery_log.nonempty_default_count(), 0);
-            assert!(delivery_log.children.iter().any(|child| {
-                child.name == "delivery_log_default" && child.default_nonempty == Some(false)
-            }));
-            assert!(delivery_log.coverage_leaves.iter().any(|leaf| {
-                leaf.name == "delivery_log_default"
-                    && leaf.is_default
-                    && leaf.default_routed
-                    && leaf.default_nonempty == Some(false)
-            }));
 
             let recorder = metrics_util::debugging::DebuggingRecorder::new();
             let snapshotter = recorder.snapshotter();
@@ -3260,40 +3202,39 @@ mod tests {
         async fn parent_default_does_not_mask_gap_below_explicit_sibling() {
             let (pool, _scratch) = scratch_pool().await;
             seed_parents(&pool).await;
-            for (table, column) in [("events", "created_at"), ("delivery_log", "delivered_at")] {
-                create_child(
-                    &pool,
-                    table,
-                    &format!("{table}_p_past"),
-                    "MINVALUE",
-                    "'2026-09-01'",
-                )
-                .await;
-                let nested = format!("{table}_nested");
-                create_nested_child(
-                    &pool,
-                    table,
-                    &nested,
-                    column,
-                    "'2026-09-01'",
-                    "'2026-10-01'",
-                )
-                .await;
-                create_child(
-                    &pool,
-                    &nested,
-                    &format!("{table}_nested_late"),
-                    "'2026-09-20'",
-                    "'2026-10-01'",
-                )
-                .await;
-                sqlx::query(sqlx::AssertSqlSafe(format!(
-                    "CREATE TABLE {table}_default PARTITION OF {table} DEFAULT"
-                )))
-                .execute(&pool)
-                .await
-                .expect("create parent default partition");
-            }
+            let (table, column) = ("events", "created_at");
+            create_child(
+                &pool,
+                table,
+                &format!("{table}_p_past"),
+                "MINVALUE",
+                "'2026-09-01'",
+            )
+            .await;
+            let nested = format!("{table}_nested");
+            create_nested_child(
+                &pool,
+                table,
+                &nested,
+                column,
+                "'2026-09-01'",
+                "'2026-10-01'",
+            )
+            .await;
+            create_child(
+                &pool,
+                &nested,
+                &format!("{table}_nested_late"),
+                "'2026-09-20'",
+                "'2026-10-01'",
+            )
+            .await;
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "CREATE TABLE {table}_default PARTITION OF {table} DEFAULT"
+            )))
+            .execute(&pool)
+            .await
+            .expect("create parent default partition");
 
             let audit = audit_partition_catalog_at(&pool, 0, fixed_now())
                 .await
@@ -3319,13 +3260,6 @@ mod tests {
             }));
             assert!(sqlx::query(
                 "INSERT INTO events (created_at, alternate_at) \
-                 VALUES ('2026-09-15', '2026-09-15')",
-            )
-            .execute(&pool)
-            .await
-            .is_err());
-            assert!(sqlx::query(
-                "INSERT INTO delivery_log (delivered_at, alternate_at) \
                  VALUES ('2026-09-15', '2026-09-15')",
             )
             .execute(&pool)
@@ -3489,34 +3423,33 @@ mod tests {
             let (pool, scratch) = scratch_pool().await;
             let schema = scratch.name.as_str();
             seed_parents(&pool).await;
-            for (table, column) in [("events", "created_at"), ("delivery_log", "delivered_at")] {
-                let nested = format!("{table}_nested");
-                create_nested_child(
-                    &pool,
-                    table,
-                    &nested,
-                    column,
-                    "'2026-09-01'",
-                    "'2026-10-01'",
-                )
-                .await;
-                create_child(
-                    &pool,
-                    &nested,
-                    &format!("{table}_nested_first"),
-                    "'2026-09-01'",
-                    "'2026-09-15'",
-                )
-                .await;
-                create_child(
-                    &pool,
-                    &nested,
-                    &format!("{table}_nested_second"),
-                    "'2026-09-15'",
-                    "'2026-10-01'",
-                )
-                .await;
-            }
+            let (table, column) = ("events", "created_at");
+            let nested = format!("{table}_nested");
+            create_nested_child(
+                &pool,
+                table,
+                &nested,
+                column,
+                "'2026-09-01'",
+                "'2026-10-01'",
+            )
+            .await;
+            create_child(
+                &pool,
+                &nested,
+                &format!("{table}_nested_first"),
+                "'2026-09-01'",
+                "'2026-09-15'",
+            )
+            .await;
+            create_child(
+                &pool,
+                &nested,
+                &format!("{table}_nested_second"),
+                "'2026-09-15'",
+                "'2026-10-01'",
+            )
+            .await;
 
             let healthy = audit_partition_catalog_at(&pool, 0, fixed_now())
                 .await
@@ -3665,17 +3598,16 @@ mod tests {
         async fn nested_children_without_leaves_do_not_prove_coverage() {
             let (pool, _scratch) = scratch_pool().await;
             seed_parents(&pool).await;
-            for (table, column) in [("events", "created_at"), ("delivery_log", "delivered_at")] {
-                create_nested_child(
-                    &pool,
-                    table,
-                    &format!("{table}_nested"),
-                    column,
-                    "'2026-09-01'",
-                    "'2026-10-01'",
-                )
-                .await;
-            }
+            let (table, column) = ("events", "created_at");
+            create_nested_child(
+                &pool,
+                table,
+                &format!("{table}_nested"),
+                column,
+                "'2026-09-01'",
+                "'2026-10-01'",
+            )
+            .await;
 
             let before = catalog_snapshot(&pool).await;
             let audit = audit_partition_catalog_at(&pool, 0, fixed_now())
@@ -3696,26 +3628,25 @@ mod tests {
         async fn nested_descendant_leaves_prove_coverage_but_remain_degraded() {
             let (pool, _scratch) = scratch_pool().await;
             seed_parents(&pool).await;
-            for (table, column) in [("events", "created_at"), ("delivery_log", "delivered_at")] {
-                let nested = format!("{table}_nested");
-                create_nested_child(
-                    &pool,
-                    table,
-                    &nested,
-                    column,
-                    "'2026-09-01'",
-                    "'2026-10-01'",
-                )
-                .await;
-                create_child(
-                    &pool,
-                    &nested,
-                    &format!("{table}_nested_leaf"),
-                    "'2026-09-01'",
-                    "'2026-10-01'",
-                )
-                .await;
-            }
+            let (table, column) = ("events", "created_at");
+            let nested = format!("{table}_nested");
+            create_nested_child(
+                &pool,
+                table,
+                &nested,
+                column,
+                "'2026-09-01'",
+                "'2026-10-01'",
+            )
+            .await;
+            create_child(
+                &pool,
+                &nested,
+                &format!("{table}_nested_leaf"),
+                "'2026-09-01'",
+                "'2026-10-01'",
+            )
+            .await;
 
             let before = catalog_snapshot(&pool).await;
             let audit = audit_partition_catalog_at(&pool, 0, fixed_now())
@@ -3737,26 +3668,25 @@ mod tests {
         async fn occupied_nested_catch_all_is_reported_on_leaf_and_root_child() {
             let (pool, _scratch) = scratch_pool().await;
             seed_parents(&pool).await;
-            for (table, column) in [("events", "created_at"), ("delivery_log", "delivered_at")] {
-                let nested = format!("{table}_nested");
-                create_nested_child(
-                    &pool,
-                    table,
-                    &nested,
-                    column,
-                    "'2026-09-01'",
-                    "'2026-10-01'",
-                )
-                .await;
-                create_child(
-                    &pool,
-                    &nested,
-                    &format!("{table}_nested_future"),
-                    "'2026-09-01'",
-                    "MAXVALUE",
-                )
-                .await;
-            }
+            let (table, column) = ("events", "created_at");
+            let nested = format!("{table}_nested");
+            create_nested_child(
+                &pool,
+                table,
+                &nested,
+                column,
+                "'2026-09-01'",
+                "'2026-10-01'",
+            )
+            .await;
+            create_child(
+                &pool,
+                &nested,
+                &format!("{table}_nested_future"),
+                "'2026-09-01'",
+                "MAXVALUE",
+            )
+            .await;
             sqlx::query(
                 "INSERT INTO events (created_at, alternate_at) \
                  VALUES ('2026-09-15', '2026-09-15')",
@@ -3784,15 +3714,6 @@ mod tests {
                     && leaf.nested
                     && !leaf.is_default
                     && leaf.catch_all_nonempty == Some(true)
-            }));
-            let delivery_log = audit
-                .tables
-                .iter()
-                .find(|table| table.table == "delivery_log")
-                .expect("delivery_log audit");
-            assert_eq!(delivery_log.nonempty_catch_all_count(), 0);
-            assert!(delivery_log.coverage_leaves.iter().any(|leaf| {
-                leaf.name == "delivery_log_nested_future" && leaf.catch_all_nonempty == Some(false)
             }));
         }
 

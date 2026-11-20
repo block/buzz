@@ -197,6 +197,19 @@ fn is_moderation_kind(kind: u16) -> bool {
     matches!(kind, 9040..=9044)
 }
 
+/// Returns `true` for command kinds the relay executes on receipt, outside
+/// event storage and its event-ID deduplication: moderation (9040–9044),
+/// relay-admin (9030–9033), identity archive and unarchive requests
+/// (9035–9036) and the NIP-43 leave request (28936). A blind re-send can
+/// repeat the mutation, so they get the non-idempotent retry policy.
+fn executes_without_dedup(kind: u16) -> bool {
+    let kind_u32 = u32::from(kind);
+    is_moderation_kind(kind)
+        || buzz_core::kind::is_relay_admin_kind(kind_u32)
+        || buzz_core::kind::is_identity_archive_request_kind(kind_u32)
+        || kind_u32 == buzz_core::kind::KIND_NIP43_LEAVE_REQUEST
+}
+
 /// Returns `true` for HTTP status codes that indicate a successful response
 /// (equivalent to `reqwest::StatusCode::is_success()` for u16).
 fn resp_was_success(status: u16) -> bool {
@@ -1147,7 +1160,9 @@ impl BuzzClient {
 
     /// Submit a signed Nostr event via POST /events.
     ///
-    /// For non-idempotent moderation command kinds (9040–9044), an ambiguous
+    /// For command kinds the relay executes without deduplication (moderation
+    /// 9040–9044, relay-admin 9030–9033, identity archive 9035–9036, NIP-43
+    /// leave 28936), an ambiguous
     /// outcome (mid-request error, body loss, non-ingest 429, or 502/503/504)
     /// surfaces as `CliError::DeliveryUnknown` instead of being retried.  These
     /// events execute at the relay *before* any dedup check, so a blind re-send
@@ -1158,14 +1173,15 @@ impl BuzzClient {
     /// All other event kinds retain the standard retry policy.
     pub async fn submit_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let kind = event.kind.as_u16();
-        if is_moderation_kind(kind) {
+        if executes_without_dedup(kind) {
             self.submit_moderation_event(event).await
         } else {
             self.submit_stored_event(event).await
         }
     }
 
-    /// Submit a moderation command (kinds 9040–9044) with non-idempotent retry policy.
+    /// Submit a command kind that executes without deduplication (see
+    /// `executes_without_dedup`) with the non-idempotent retry policy.
     async fn submit_moderation_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let url = format!("{}/events", self.relay_url);
         let body = bytes::Bytes::from(
@@ -1210,7 +1226,7 @@ impl BuzzClient {
                         {
                             // Ambiguous: the relay may have executed this command.
                             return Err(CliError::DeliveryUnknown(format!(
-                                "moderation command (kind {}) outcome unknown: {}",
+                                "command (kind {}) outcome unknown: {}",
                                 event.kind.as_u16(),
                                 net_err
                             )));
@@ -1251,7 +1267,7 @@ impl BuzzClient {
                         }
                         // Non-canonical 429 (proxy-level or unrecognised body): outcome unknown.
                         return Err(CliError::DeliveryUnknown(format!(
-                            "moderation command (kind {}) outcome unknown: HTTP 429",
+                            "command (kind {}) outcome unknown: HTTP 429",
                             event.kind.as_u16()
                         )));
                     }
@@ -1259,7 +1275,7 @@ impl BuzzClient {
                         // Proxy-level error: the relay may have received and executed
                         // the command before the proxy failed.
                         return Err(CliError::DeliveryUnknown(format!(
-                            "moderation command (kind {}) outcome unknown: HTTP {status}",
+                            "command (kind {}) outcome unknown: HTTP {status}",
                             event.kind.as_u16()
                         )));
                     }
@@ -1268,7 +1284,7 @@ impl BuzzClient {
                         // Body loss after relay confirmed receipt is ambiguous for
                         // non-idempotent commands.
                         CliError::DeliveryUnknown(format!(
-                            "moderation command (kind {}) outcome unknown: response body lost: {e}",
+                            "command (kind {}) outcome unknown: response body lost: {e}",
                             event.kind.as_u16()
                         ))
                     })?;
@@ -2098,25 +2114,74 @@ mod retry_policy_tests {
         );
     }
 
-    /// A moderation command (kind 9042) that gets HTTP 502 returns `DeliveryUnknown`
-    /// immediately — proxy errors leave relay execution state ambiguous.
+    /// A command the relay executes without deduplication (moderation 9042,
+    /// relay-admin remove-member 9031, identity archive 9035 and unarchive
+    /// 9036, NIP-43 leave 28936) that gets HTTP 502
+    /// returns `DeliveryUnknown` immediately — proxy errors leave relay
+    /// execution state ambiguous.
     #[tokio::test]
-    async fn moderation_kind_502_returns_delivery_unknown() {
-        let (url, attempts) =
-            test_server(|_n| (StatusCode::BAD_GATEWAY, "bad gateway".to_string())).await;
-        let client = test_client(&url);
-        let event = make_moderation_event(&client_keys(&client), 9042);
-        let err = client.submit_event(event).await.unwrap_err();
-        assert!(
-            matches!(err, CliError::DeliveryUnknown(_)),
-            "expected DeliveryUnknown for 502, got {err:?}"
-        );
-        // 502 must not be retried — exactly 1 attempt.
-        assert_eq!(
-            attempts.load(Ordering::SeqCst),
-            1,
-            "must not retry 502 for moderation kind"
-        );
+    async fn non_dedup_command_502_returns_delivery_unknown() {
+        for kind in [9042u16, 9031, 9035, 9036, 28936] {
+            let (url, attempts) =
+                test_server(|_n| (StatusCode::BAD_GATEWAY, "bad gateway".to_string())).await;
+            let client = test_client(&url);
+            let event = make_moderation_event(&client_keys(&client), kind);
+            let err = client.submit_event(event).await.unwrap_err();
+            assert!(
+                matches!(err, CliError::DeliveryUnknown(_)),
+                "kind {kind}: expected DeliveryUnknown for 502, got {err:?}"
+            );
+            // 502 must not be retried — exactly 1 attempt.
+            assert_eq!(
+                attempts.load(Ordering::SeqCst),
+                1,
+                "kind {kind}: must not retry 502"
+            );
+        }
+    }
+
+    /// A command the relay executes without deduplication whose response body
+    /// is lost after 200 headers returns `DeliveryUnknown` after one
+    /// submission: the relay may already have run it.
+    #[tokio::test]
+    async fn non_dedup_command_body_loss_returns_delivery_unknown() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for kind in [9042u16, 9031, 9035, 9036, 28936] {
+            let attempts = Arc::new(AtomicU32::new(0));
+            let attempts2 = attempts.clone();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    attempts2.fetch_add(1, Ordering::SeqCst);
+                    let mut buf = vec![0u8; 8192];
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(200),
+                        stream.read(&mut buf),
+                    )
+                    .await;
+                    let partial = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{\"partial\":";
+                    let _ = stream.write_all(partial).await;
+                }
+            });
+
+            let client = test_client(&format!("http://{addr}"));
+            let event = make_moderation_event(&client_keys(&client), kind);
+            let err = client.submit_event(event).await.unwrap_err();
+            assert!(
+                matches!(err, CliError::DeliveryUnknown(_)),
+                "kind {kind}: expected DeliveryUnknown for body loss, got {err:?}"
+            );
+            assert_eq!(
+                attempts.load(Ordering::SeqCst),
+                1,
+                "kind {kind}: must submit exactly once"
+            );
+        }
     }
 
     /// When all retry attempts are connect-failures (the relay definitively never saw

@@ -404,7 +404,7 @@ struct HuddleActiveTalkerSelector {
   }
 }
 
-/// Foreground-only iOS realtime media engine for the fixed Huddle Opus v2 path.
+/// Real-time iOS media engine for the Huddle Opus v2 protocol.
 ///
 /// AVAudioEngine owns voice-processed capture and per-peer mixed playout.
 /// AVAudioConverter keeps PCM native and moves only Opus packets across Flutter.
@@ -522,9 +522,7 @@ final class HuddleAudioEngine {
         return
       }
       do {
-        if !audioEngine.isRunning {
-          try audioEngine.start()
-        }
+        try startEngineIfNeeded()
         for playback in peerPlaybacks.values {
           playback.resume()
         }
@@ -623,22 +621,7 @@ final class HuddleAudioEngine {
     do {
       let input = audioEngine.inputNode
       try input.setVoiceProcessingEnabled(true)
-      let inputFormat = input.outputFormat(forBus: 0)
-      guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0 else {
-        throw HuddleNativeMediaError.unsupported(
-          "The iOS microphone does not expose an input format."
-        )
-      }
-      input.installTap(
-        onBus: 0,
-        bufferSize: AVAudioFrameCount(HuddleAudioFormats.frameSamples),
-        format: inputFormat
-      ) { [weak self] buffer, _ in
-        self?.acceptCapturedBuffer(buffer)
-      }
-      captureTapInstalled = true
-      audioEngine.prepare()
-      try audioEngine.start()
+      try startEngineIfNeeded()
       startPlaybackTimer()
       if diagnosticsEnabled {
         onDiagnostics(makeDiagnostics())
@@ -647,6 +630,31 @@ final class HuddleAudioEngine {
       stopOnQueue()
       throw error
     }
+  }
+
+  private func startEngineIfNeeded() throws {
+    guard !audioEngine.isRunning else { return }
+    let input = audioEngine.inputNode
+    if captureTapInstalled {
+      input.removeTap(onBus: 0)
+      captureTapInstalled = false
+    }
+    let hardwareFormat = input.inputFormat(forBus: 0)
+    guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0 else {
+      throw HuddleNativeMediaError.unsupported(
+        "The iOS microphone does not expose an input format."
+      )
+    }
+    input.installTap(
+      onBus: 0,
+      bufferSize: AVAudioFrameCount(HuddleAudioFormats.frameSamples),
+      format: hardwareFormat
+    ) { [weak self] buffer, _ in
+      self?.acceptCapturedBuffer(buffer)
+    }
+    captureTapInstalled = true
+    audioEngine.prepare()
+    try audioEngine.start()
   }
 
   private func stopOnQueue() {
@@ -871,9 +879,7 @@ final class HuddleAudioEngine {
     stateLock.unlock()
     guard shouldRestart else { return }
     do {
-      if !audioEngine.isRunning {
-        try audioEngine.start()
-      }
+      try startEngineIfNeeded()
       for playback in peerPlaybacks.values {
         playback.resume()
       }

@@ -13,7 +13,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
-import 'package:pointycastle/digests/sha256.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class _EmptyChannels extends ChannelsNotifier {
@@ -38,9 +37,8 @@ class _Config extends RelayConfigNotifier {
 /// A relay that is not connected until the test says so, accepts every
 /// publish and serves back the DM its open command finds or creates.
 class _Relay extends RelaySessionNotifier {
-  _Relay(this.owner, this.profile);
+  _Relay(this.owner);
   final nostr.Keys owner;
-  final NostrEvent profile;
   final published = <NostrEvent>[];
 
   /// Rejects the next message the way an over-quota relay does.
@@ -82,14 +80,13 @@ class _Relay extends RelaySessionNotifier {
   Future<List<NostrEvent>> queryRelay(
     List<NostrFilter> filters, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => [profile];
+  }) async => const [];
 
   @override
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
-    if (filter.kinds.contains(0)) return [profile];
     final ds = filter.tags['#d'];
     return _stored.reversed
         .where(
@@ -183,28 +180,7 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     final owner = nostr.Keys.generate(), bestie = nostr.Keys.generate();
-    final digest = SHA256Digest()
-        .process(
-          Uint8List.fromList(utf8.encode('nostr:agent-auth:${bestie.public}:')),
-        )
-        .map((v) => v.toRadixString(16).padLeft(2, '0'))
-        .join();
-    final profile = NostrEvent.fromJson(
-      nostr.Event.from(
-        kind: 0,
-        content: jsonEncode({'display_name': 'Bestie'}),
-        secretKey: bestie.secret,
-        tags: [
-          [
-            'auth',
-            owner.public,
-            '',
-            nostr.Schnorr.sign(secretKey: owner.secret, message: digest),
-          ],
-        ],
-      ).toMap(),
-    );
-    final relay = _Relay(owner, profile);
+    final relay = _Relay(owner);
     String? chosenBestie;
     await tester.pumpWidget(
       ProviderScope(
@@ -251,12 +227,8 @@ void main() {
           replied = true;
         },
       );
-      // Ownership verification runs in a real isolate.
       for (var i = 0; i < 100 && !replied; i++) {
         await tester.pump(const Duration(milliseconds: 50));
-        await tester.runAsync(
-          () => Future<void>.delayed(const Duration(milliseconds: 50)),
-        );
       }
       expect(replied, isTrue, reason: '$method never answered');
       return (result, failure);
@@ -278,9 +250,9 @@ void main() {
     await tester.pump();
     final (named, _) = await siri('bestie');
     final scope = (named! as Map)['scope'];
-    expect(named, {'pubkey': bestie.public, 'name': 'Bestie', 'scope': scope});
+    expect(named, {'pubkey': bestie.public, 'scope': scope});
 
-    // A confirmation from before a community switch can't send here.
+    // A Bestie looked up before a community switch can't send here.
     final (_, switched) = await siri('send', {
       'text': 'Remind me to call Sam',
       'bestie': bestie.public,

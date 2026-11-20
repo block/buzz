@@ -122,7 +122,7 @@ pub async fn mint_community_invite(
         })?;
     slot.detail(crate::access::Detail {
         invite_id: Some(invite.invite_id),
-        expires_at: Some(invite.expires_at.timestamp()),
+        expires_at: invite.expires_at.map(|at| at.timestamp()),
         max_uses: invite.max_uses,
         ..Default::default()
     });

@@ -9,6 +9,125 @@ import XCTest
 class RunnerTests: XCTestCase {
 
   @MainActor
+  func testAttachmentDismissalReleasesOwnerWithoutDelegateCallbackOnce() throws {
+    guard #available(iOS 26.0, *) else { throw XCTSkip("Requires iOS 26") }
+    let controller = NativeAttachmentPopoverViewController(
+      channel: FlutterMethodChannel(
+        name: "attachment-dismissal-test", binaryMessenger: NavigationTestMessenger()
+      ),
+      expandedWidth: 320
+    )
+    var dismissals = 0
+    controller.onDismiss = { dismissals += 1 }
+    controller.viewDidDisappear(true)
+    XCTAssertEqual(dismissals, 1)
+    controller.presentationControllerDidDismiss(
+      UIPresentationController(presentedViewController: controller, presenting: nil)
+    )
+    controller.viewDidDisappear(true)
+    XCTAssertEqual(dismissals, 1)
+  }
+
+  @MainActor
+  func testAttachmentZoomUsesVisibleButton() {
+    let host = UIView(frame: CGRect(x: 0, y: 0, width: 400, height: 800))
+    let button = UIButton(frame: CGRect(x: 16, y: 500, width: 44, height: 44))
+    host.addSubview(button)
+    XCTAssertTrue(
+      NativeAttachmentPopoverPresentationLayout.transitionSource(
+        in: host, sourceRect: button.frame
+      ) === button
+    )
+    XCTAssertNil(
+      NativeAttachmentPopoverPresentationLayout.transitionSource(
+        in: host, sourceRect: CGRect(x: 100, y: 500, width: 44, height: 44)
+      )
+    )
+  }
+
+
+  @MainActor
+  func testComposerActionKeepsGlyphsAcrossAppearanceUpdatesAndReversal() throws {
+    let messenger = NavigationTestMessenger()
+    let platform = NavigationGlassButtonPlatformView(
+      frame: CGRect(x: 0, y: 0, width: 44, height: 44), viewIdentifier: 999995,
+      arguments: ["icon": "microphone", "iconSize": 20, "controlSize": 44,
+        "foregroundColor": 0xFF000000, "backgroundColor": 0], messenger: messenger)
+    let views = descendants(of: platform.view())
+    let button = try XCTUnwrap(views.compactMap { $0 as? UIButton }.first)
+    let mic = try XCTUnwrap(views.first { $0.accessibilityIdentifier == "composer-microphone-glyph" })
+    let send = try XCTUnwrap(views.first { $0.accessibilityIdentifier == "composer-send-glyph" })
+    UIView.setAnimationsEnabled(false)
+    defer { UIView.setAnimationsEnabled(true) }
+    for fill in [0xFF000000, 0xFF2463EB] {
+      messenger.invoke("setAppearance", arguments: ["backgroundColor": fill,
+        "foregroundColor": 0xFFFFFFFF, "enabled": true]) { _ in }
+      messenger.invoke("setContent", arguments: ["icon": "send", "iconSize": 18]) { _ in }
+      // A later appearance refresh must leave the arrow visible in the same view.
+      messenger.invoke("setAppearance", arguments: ["backgroundColor": fill,
+        "foregroundColor": 0xFFFFFFFF, "enabled": true]) { _ in }
+      XCTAssertEqual(send.alpha, 1)
+      XCTAssertEqual(send.transform, .identity)
+      XCTAssertEqual(mic.alpha, 0)
+      XCTAssertNil(button.configuration?.image)
+      XCTAssertEqual(button.configuration?.baseBackgroundColor?.cgColor.alpha, 1)
+      messenger.invoke("setContent", arguments: ["icon": "microphone", "iconSize": 20]) { _ in }
+      XCTAssertEqual(mic.alpha, 1)
+      XCTAssertEqual(mic.transform, .identity)
+      XCTAssertEqual(send.alpha, 0)
+    }
+  }
+
+  @MainActor
+  func testLabelledButtonKeepsContentStylingAcrossAppearanceUpdates() throws {
+    guard #available(iOS 26.0, *) else { throw XCTSkip("Requires iOS 26") }
+    let messenger = NavigationTestMessenger()
+    let appearance: [String: Any] = ["brightness": "light",
+      "foregroundColor": 0xFF000000, "backgroundColor": 0, "enabled": true]
+    let content: [String: Any] = ["icon": "more", "label": "Unread", "iconSize": 24]
+    let platform = NavigationGlassButtonPlatformView(
+      frame: CGRect(x: 0, y: 0, width: 100, height: 48), viewIdentifier: 999994,
+      arguments: appearance.merging(content) { _, next in next }
+        .merging(["controlSize": 40, "controlWidth": 100]) { _, next in next },
+      messenger: messenger)
+    let button = try XCTUnwrap(
+      descendants(of: platform.view()).compactMap { $0 as? UIButton }.first)
+    messenger.invoke("setAppearance", arguments: appearance) { _ in }
+    messenger.invoke("setContent", arguments: content) { _ in }
+    let insets = try XCTUnwrap(button.configuration?.contentInsets)
+    XCTAssertNotNil(button.configuration?.titleTextAttributesTransformer)
+    // Selecting a filter chip is an appearance-only update.
+    messenger.invoke("setAppearance",
+      arguments: appearance.merging(["selected": true]) { _, next in next }) { _ in }
+    XCTAssertNotNil(button.configuration?.titleTextAttributesTransformer)
+    XCTAssertEqual(button.configuration?.contentInsets, insets)
+    XCTAssertEqual(button.configuration?.title, "Unread")
+  }
+
+  @MainActor
+  func testMenuActionsSurviveEveryDismissalOrdering() async {
+    for ordering in 0..<3 {
+      let button = NavigationGlassButton(frame: .zero)
+      let interaction = UIContextMenuInteraction(delegate: button)
+      let configuration = UIContextMenuConfiguration(identifier: nil, previewProvider: nil)
+      let animator = MenuDismissalTestAnimator()
+      let delivered = expectation(description: "Action delivered for ordering \(ordering)")
+      delivered.assertForOverFulfill = true
+      var count = 0
+      let select = { count += 1; delivered.fulfill() }
+      button.contextMenuInteraction(interaction, willDisplayMenuFor: configuration, animator: nil)
+      if ordering == 0 { button.afterMenuDismissal(select) }
+      button.contextMenuInteraction(interaction, willEndFor: configuration, animator: animator)
+      if ordering == 1 { button.afterMenuDismissal(select) }
+      XCTAssertEqual(count, 0)
+      animator.complete()
+      if ordering == 2 { button.afterMenuDismissal(select) }
+      await fulfillment(of: [delivered], timeout: 1)
+      XCTAssertEqual(count, 1)
+    }
+  }
+
+  @MainActor
   func testSectionMenuKeepsDisabledSelectionAndDestructiveAttributes() throws {
     let platform = NavigationGlassButtonFactory(messenger: NavigationTestMessenger()).create(
       withFrame: CGRect(x: 0, y: 0, width: 44, height: 44), viewIdentifier: 999996,
@@ -41,6 +160,9 @@ class RunnerTests: XCTestCase {
     view.setNeedsLayout()
     view.layoutIfNeeded()
     let label = try XCTUnwrap(descendants(of: view).compactMap { $0 as? UILabel }.first { $0.text == "Invite to community" })
+    messenger.configure(["title": "Invite to community", "standaloneLargeTitle": true])
+    XCTAssertTrue(descendants(of: view).contains { $0 === label },
+                  "An identical channel attachment must keep the existing native surface")
     XCTAssertEqual(label.numberOfLines, 0)
     XCTAssertTrue(label.font.fontDescriptor.symbolicTraits.contains(.traitBold))
     XCTAssertEqual(label.font.pointSize, UIFont.preferredFont(forTextStyle: .largeTitle).pointSize)
@@ -430,8 +552,11 @@ class RunnerTests: XCTestCase {
     XCTAssertEqual((visibleFrame["y"] as? NSNumber)?.doubleValue, imageFrame.minY)
     try avatar().sendActions(for: .touchUpInside)
     XCTAssertEqual(messenger.actions, ["leading"])
+    let appearance = navigation.navigationBar.standardAppearance
     leading["avatarHidden"] = true
     messenger.configure(["title": "Bravo", "largeTitle": true, "leading": leading])
+    XCTAssertTrue(navigation.navigationBar.standardAppearance === appearance,
+                  "Changing title and avatar content must preserve the blur appearance")
     var landingPrepared = false
     messenger.invoke("prepareForReveal", arguments: [:]) { _ in landingPrepared = true }
     XCTAssertTrue(landingPrepared)
@@ -442,6 +567,17 @@ class RunnerTests: XCTestCase {
     leading["avatarHidden"] = false
     messenger.configure(["title": "Bravo", "largeTitle": true, "leading": leading])
     XCTAssertEqual(try avatar().alpha, 1)
+  }
+
+  @MainActor
+  func testPortraitControlRowDuringRouteTranslation() {
+    let row = CGRect(x: 0, y: 12, width: 620, height: 56)
+    let bar = UIView(frame: CGRect(x: 800, y: 300, width: 720, height: 80))
+    XCTAssertEqual(portraitControlRow(row, in: bar.bounds), row)
+    bar.frame.origin.x = 300
+    XCTAssertEqual(portraitControlRow(row, in: bar.bounds), row)
+    XCTAssertNil(portraitControlRow(row, in: .zero))
+    XCTAssertNil(portraitControlRow(row.offsetBy(dx: 800, dy: 0), in: bar.bounds))
   }
 
   @MainActor
@@ -486,12 +622,28 @@ class RunnerTests: XCTestCase {
     paneArguments["centerTitleInPane"] = true
     paneArguments["portraitTopPadding"] = 12
     paneArguments["alwaysFrosted"] = true
-    messenger.configure(paneArguments)
-    bar.view().layoutIfNeeded()
-    let paneTitle = try XCTUnwrap(bar.view().subviews.compactMap { $0 as? NavigationTitleView }.first)
-    XCTAssertEqual(paneTitle.frame.minY, 12 + 56)
+    for (left, right) in [(0.0, 76.0), (76.0, 0.0), (0.0, 0.0)] {
+      paneArguments["titleInsetLeft"] = left
+      paneArguments["titleInsetRight"] = right
+      messenger.configure(paneArguments)
+      bar.view().layoutIfNeeded()
+      let paneTitle = try XCTUnwrap(bar.view().subviews.compactMap { $0 as? NavigationTitleView }.first)
+      XCTAssertEqual(paneTitle.frame.minY, 12 + 56)
+      XCTAssertEqual(paneTitle.frame.midX, (bar.view().bounds.width + left - right) / 2, accuracy: 0.5)
+    }
     let paneMaterial = try XCTUnwrap(bar.view().subviews.first as? UIVisualEffectView)
     XCTAssertEqual(paneMaterial.frame, bar.view().bounds, "Portrait panes retain the full native navigation backdrop")
+    var chipArguments = arguments
+    chipArguments["inlinePortrait"] = true
+    chipArguments["horizontalControls"] = true
+    chipArguments["back"] = true
+    messenger.configure(chipArguments)
+    bar.view().layoutIfNeeded()
+    let chip = try XCTUnwrap(bar.view().subviews.compactMap { $0 as? NavigationTitleView }.first)
+    let back = try XCTUnwrap(bar.view().subviews.last { $0 !== chip && $0.frame.minX == 16 })
+    XCTAssertNotNil(chip.portraitSlot)
+    XCTAssertEqual(chip.frame.minX, back.frame.maxX + 16, accuracy: 0.5)
+    XCTAssertEqual(chip.frame.midY, back.frame.midY, accuracy: 0.5)
     var animatedArguments = arguments
     animatedArguments["titleHasAnimatedPortrait"] = true
     messenger.configure(animatedArguments)
@@ -1092,10 +1244,7 @@ class RunnerTests: XCTestCase {
     }
     for leadingTitle in [false, true] {
       let parent = UIViewController()
-      let window = UIWindow(frame: UIScreen.main.bounds)
-      window.windowScene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
-      window.rootViewController = parent
-      window.makeKeyAndVisible()
+      let window = try await keyWindow(showing: parent)
       defer { window.isHidden = true }
       let messenger = NavigationTestMessenger()
       let bar = IosNavigationBarFactory(messenger: messenger, parent: parent).create(
@@ -1103,7 +1252,10 @@ class RunnerTests: XCTestCase {
         viewIdentifier: 999992, arguments: ["title": "Home", "largeTitle": true, "alignCollapsedTitleToLeading": leadingTitle])
       parent.view.addSubview(bar.view())
       parent.view.layoutIfNeeded()
-      try await Task.sleep(nanoseconds: 200_000_000)
+      let metricsReady = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+        messenger.metrics != nil
+      }, object: nil)
+      await fulfillment(of: [metricsReady], timeout: 5)
       let navigation = try XCTUnwrap(parent.children.first as? UINavigationController)
       let metrics = try XCTUnwrap(messenger.metrics)
       let expanded = try XCTUnwrap(metrics["expandedHeight"] as? Double)
@@ -1159,20 +1311,29 @@ class RunnerTests: XCTestCase {
       }
       messenger.scroll(to: boundary * 0.7)
       XCTAssertNil(mask.animation(forKey: "titleFade"), "Reversing must cancel the fade")
-      try await Task.sleep(nanoseconds: 240_000_000)
-      XCTAssertEqual(visibleOpacity(of: centeredTitle), 0, accuracy: 0.01)
+
+      // Core Animation may still be rendering intermediate opacity when the
+      // nominal duration elapses, especially on a busy CI simulator.
+      func assertCompactTitleOpacity(_ expected: Float, file: StaticString = #filePath, line: UInt = #line) async {
+        let settled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+          mask.animation(forKey: "titleFade") == nil &&
+            abs(visibleOpacity(of: centeredTitle) - expected) <= 0.01
+        }, object: nil)
+        await fulfillment(of: [settled], timeout: 5)
+        XCTAssertEqual(visibleOpacity(of: centeredTitle), expected, accuracy: 0.01, file: file, line: line)
+      }
+
+      await assertCompactTitleOpacity(0)
       XCTAssertGreaterThan(title.textColor.cgColor.alpha, 0.1)
       messenger.scroll(to: boundary)
-      try await Task.sleep(nanoseconds: 240_000_000)
-      XCTAssertEqual(visibleOpacity(of: centeredTitle), 1, accuracy: 0.01)
+      await assertCompactTitleOpacity(1)
       XCTAssertEqual(navigation.navigationBar.frame.height, compact, accuracy: 0.5)
       messenger.scroll(to: 0)
       bar.view().frame.size.height += boundary * 0.7
       bar.view().setNeedsLayout()
       bar.view().layoutIfNeeded()
-      try await Task.sleep(nanoseconds: 240_000_000)
+      await assertCompactTitleOpacity(0)
       XCTAssertEqual(title.textColor.cgColor.alpha, 1, accuracy: 0.01)
-      XCTAssertEqual(visibleOpacity(of: centeredTitle), 0, accuracy: 0.01)
       XCTAssertEqual(navigation.navigationBar.frame.height, expanded, accuracy: 0.5)
       XCTAssertEqual(title.convert(title.bounds, to: parent.view).minY, initialTitleY, accuracy: 0.5)
     }
@@ -1563,16 +1724,15 @@ class RunnerTests: XCTestCase {
     )
   }
 
-  func testDuoCameraAnchorMovesToComposerCenter() {
+  func testExpandedAttachmentAnchorKeepsTriggerHorizontalPosition() {
     let anchor = CGRect(x: 0, y: 0, width: 44, height: 44)
     XCTAssertEqual(
       NativeAttachmentPopoverAnchorLayout.sourceRect(
         anchorBounds: anchor,
         keyboardDismissalOffset: 200,
-        isExpanded: true,
-        horizontalOffset: 180
+        isExpanded: true
       ),
-      anchor.offsetBy(dx: 180, dy: 240)
+      anchor.offsetBy(dx: 0, dy: 240)
     )
   }
 
@@ -2390,4 +2550,12 @@ extension XCTestCase {
       window.isKeyWindow && root.viewIfLoaded?.window === window
     }, object: nil)
   }
+}
+
+private final class MenuDismissalTestAnimator: NSObject, UIContextMenuInteractionAnimating {
+  var previewViewController: UIViewController? { nil }
+  private var completions: [() -> Void] = []
+  func addAnimations(_ animations: @escaping () -> Void) { animations() }
+  func addCompletion(_ completion: @escaping () -> Void) { completions.append(completion) }
+  func complete() { completions.forEach { $0() }; completions.removeAll() }
 }

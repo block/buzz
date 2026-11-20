@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:buzz/shared/read_state/read_state_format.dart';
+import 'package:buzz/shared/read_state/read_state_manager.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/read_state/read_state_time.dart';
 import 'package:buzz/shared/community/community_provider.dart';
@@ -168,6 +169,29 @@ void main() {
     expect(state().isForcedUnread(msgKey), isTrue);
   });
 
+  test('a reading clear while the socket is down waits for the reconnect '
+      'snapshot', () async {
+    final notifier = await pumpNotifier();
+    session.setStatus(SessionStatus.connected);
+    await flushMicrotasks();
+    notifier.markContextRead(channelId, now);
+    expect(notifier.markContextUnread(channelId, channelId: channelId), isTrue);
+    await notifier.flush();
+
+    session.setStatus(SessionStatus.reconnecting);
+    // A snapshot read while the stream is still down does not count.
+    final fetches = session.fetchCount;
+    notifier.markContextRead(otherChannelId, now);
+    await notifier.flush();
+    expect(session.fetchCount, greaterThan(fetches));
+    expect(notifier.clearForcedUnread(channelId), isFalse);
+    expect(state().locallyForcedChannelIds, {channelId});
+
+    session.setStatus(SessionStatus.connected);
+    await flushMicrotasks();
+    expect(state().locallyForcedChannelIds, isEmpty);
+  });
+
   test('a session rebuild (auth completing) keeps the manager and reopens '
       'its live subscription on connect', () async {
     final notifier = await pumpNotifier();
@@ -298,13 +322,15 @@ void main() {
   });
 
   test(
-    'automatic channel-open read preserves forced message entries',
+    'a channel read that moves no frontier preserves forced message entries',
     () async {
       final notifier = await pumpNotifier();
+      notifier.markContextRead(channelId, now);
 
       notifier.markContextUnread(msgKey, channelId: channelId);
 
-      // Channel open marks the channel read without clearForcedMessages.
+      // Channel open with nothing new marks the channel read at the same
+      // frontier, without clearForcedMessages.
       notifier.markContextRead(channelId, now);
 
       expect(state().isForcedUnread(msgKey), isTrue);
@@ -312,6 +338,38 @@ void main() {
       expect(state().effectiveTimestamp(channelId), now);
     },
   );
+
+  test('a device-local message force ends once the covering frontier moves '
+      'past where it was', () async {
+    final notifier = await pumpNotifier();
+    notifier.markContextRead(channelId, now - 10);
+    notifier.markContextUnread(msgKey, channelId: channelId);
+    expect(state().isForcedUnread(msgKey), isTrue);
+
+    // A frontier advance, here or merged from another device, reads past it.
+    notifier.markContextRead(channelId, now);
+
+    expect(state().isForcedUnread(msgKey), isFalse);
+    expect(state().locallyForcedChannelIds, isEmpty);
+  });
+
+  test('a legacy channel catch-up ends only a force it covers', () async {
+    final notifier = await pumpNotifier();
+    notifier.markContextRead(activityContextKey(channelId), now - 10);
+    notifier.markContextUnread(
+      msgKey,
+      channelId: channelId,
+      channelCatchUp: true,
+    );
+    notifier.markContextUnread(otherMsgKey, channelId: channelId);
+
+    // An older peer advances `activity:<channel>`, not the channel frontier.
+    notifier.markContextRead(activityContextKey(channelId), now);
+
+    expect(state().isForcedUnread(msgKey), isFalse);
+    // A mention, reply or DM is not read by channel catch-up; it stays.
+    expect(state().isForcedUnread(otherMsgKey), isTrue);
+  });
 
   test(
     'clearing a channel force keeps its marker and message forces',
@@ -326,23 +384,80 @@ void main() {
 
       expect(state().isForcedUnread(channelId), isFalse);
       expect(state().isForcedUnread(msgKey), isTrue);
+      // A never-read channel stores no frontier; the floor still reads its
+      // old messages.
       expect(state().contexts[channelId], isNull);
       expect(state().effectiveTimestamp(channelId), state().retentionFloor);
     },
   );
 
+  test('reading to the bottom while read state is not loaded fails, then '
+      'clears once it loads', () async {
+    final notifier = await pumpNotifier();
+    notifier.markContextRead(channelId, now - 10);
+    expect(notifier.markContextUnread(channelId, channelId: channelId), isTrue);
+    await notifier.flush();
+
+    // Restored from the journal, with no snapshot.
+    session.failSnapshots = true;
+    container.invalidate(readStateProvider);
+    await settle();
+    await flushMicrotasks();
+    expect(state().isForcedUnread(channelId), isTrue);
+    expect(notifier.clearForcedUnread(channelId), isFalse);
+    expect(state().failedClears, {channelId});
+    expect(state().syncError, isNotNull);
+
+    session.failSnapshots = false;
+    session.setStatus(SessionStatus.connected);
+    await flushMicrotasks();
+    expect(state().isForcedUnread(channelId), isFalse);
+    expect(state().failedClears, isEmpty);
+    expect(state().syncError, isNull);
+    await notifier.flush();
+
+    final pubkey = state().pubkey!;
+    final crypto = ReadStateCrypto.tryCreate(
+      nsec: config.nsec,
+      pubkey: pubkey,
+    )!;
+    final unread = session.retained.values.singleWhere(hasValidUnreadStateTags);
+    final group = decodeReadStateBlob(
+      crypto.decrypt(unread.content),
+      version: 2,
+    )!.contexts;
+    expect(
+      group['ov_c:$channelId'],
+      greaterThan(group['ov_s:$channelId'] ?? 0),
+    );
+    final peer = ReadStateManager(
+      pubkey: pubkey,
+      relayUrl: 'https://peer.example',
+      prefs: await SharedPreferences.getInstance(),
+      crypto: crypto,
+      relaySession: session,
+      signedEventRelay: SignedEventRelay(session: session, nsec: config.nsec),
+      remoteEnabled: true,
+      onChanged: () {},
+    );
+    addTearDown(() => peer.dispose(flushPending: false));
+    await peer.initialize();
+    expect(peer.activeChannelOverrides, isEmpty);
+  });
+
   test('automatic channel-open read still clears a channel-level force for '
       'the same channel', () async {
     final notifier = await pumpNotifier();
 
-    // Channel forced unread from the tile, message forced from the sheet.
-    notifier.markContextUnread(channelId, channelId: channelId);
+    notifier.markContextRead(channelId, now);
+    // Channel marked unread from the tile, message forced from the sheet.
+    expect(notifier.markContextUnread(channelId, channelId: channelId), isTrue);
     notifier.markContextUnread(msgKey, channelId: channelId);
 
     notifier.markContextRead(channelId, now);
 
-    // Opening the channel satisfies the channel-scoped force, but the
-    // deliberate message-level force survives until acted on.
+    // Opening the channel ends the channel's manual unread even though no
+    // frontier moved, but the message-level force survives until acted on.
     expect(state().isForcedUnread(channelId), isFalse);
     expect(state().isForcedUnread(msgKey), isTrue);
     expect(state().locallyForcedChannelIds, {channelId});
@@ -417,7 +532,25 @@ class _FakeRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     fetchCount++;
-    return [];
+    if (failSnapshots) throw TimeoutException('offline');
+    return retained.values.toList();
+  }
+
+  /// Read-state events published, newest per coordinate, served back as
+  /// the snapshot.
+  final retained = <String, NostrEvent>{};
+
+  /// Makes every snapshot read fail, as offline.
+  bool failSnapshots = false;
+
+  @override
+  Future<NostrEvent> publish(
+    NostrEvent event, {
+    Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
+  }) async {
+    retained[event.tags.firstWhere((tag) => tag.first == 'd')[1]] = event;
+    return event;
   }
 
   @override

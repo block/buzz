@@ -36,6 +36,7 @@ class _Account extends BuilderlabAccountClient {
     String path,
     Map<String, dynamic> body, {
     String? expectedSubject,
+    String? signer,
   }) async {
     if (account?.subject != expectedSubject) {
       throw AccountFailure.differentAccount;

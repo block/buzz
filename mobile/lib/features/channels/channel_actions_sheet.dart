@@ -43,6 +43,7 @@ import 'members_sheet.dart';
 import 'unread_badge/observed_unread_event.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/read_state/read_state_provider.dart';
+import '../activity/inbox_local_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 import '../../shared/widgets/covered_route_keyboard_insets.dart';
 
@@ -142,6 +143,7 @@ void _markChannelReadNow(WidgetRef ref, String channelId) {
       .read(readStateProvider.notifier)
       .markContextRead(channelId, timestamp ?? 0, clearForcedMessages: true);
   if (timestamp != null) {
+    ref.read(inboxLocalStateProvider.notifier).clearScope(channelId);
     channels.clearObservedUnreadCoveredByRead(channelId, timestamp);
   }
 }
@@ -169,6 +171,10 @@ class ChannelActionsSheet extends HookConsumerWidget {
     final isMuted =
         ref.watch(channelMutesProvider).store.channels[channel.id]?.muted ==
         true;
+    // Desktop's unified workspaces are read-only here.
+    final canFile = ref.watch(
+      channelSectionsProvider.select((state) => state.editable),
+    );
     final isStarred =
         !channel.isDm &&
         ref.watch(channelStarsProvider).store.channels[channel.id]?.starred ==
@@ -225,9 +231,19 @@ class ChannelActionsSheet extends HookConsumerWidget {
             if (isUnread) {
               _markChannelReadNow(ref, channel.id);
             } else {
-              ref
+              final marked = ref
                   .read(readStateProvider.notifier)
                   .markContextUnread(channel.id, channelId: channel.id);
+              if (!marked) {
+                ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+                  const SnackBar(
+                    content: Text(
+                      'Couldn’t mark this channel unread. Try again.',
+                    ),
+                  ),
+                  kind: ToastKind.error,
+                );
+              }
             }
           },
         ),
@@ -235,7 +251,7 @@ class ChannelActionsSheet extends HookConsumerWidget {
       ],
       SheetActionSection(
         children: [
-          if (!channel.isDm)
+          if (!channel.isDm && canFile)
             _ChannelSheetRow(
               leading: const Icon(BuzzIcons.folderInput),
               title: const Text('Move to section…'),
@@ -607,75 +623,96 @@ Future<void> _showMoveSectionSheet(
 }) async {
   final sections = [...ref.read(channelSectionsProvider).store.sections]
     ..sort((a, b) => a.order.compareTo(b.order));
+  BuildContext? sheet;
+  // Desktop's unified layout can lock legacy filing while this is open. The
+  // sheet that opened this picker may already be gone, so listen on the
+  // page's container.
+  final container = ProviderScope.containerOf(context, listen: false);
+  final lock = container.listen(
+    channelSectionsProvider.select((state) => state.editable),
+    (_, editable) {
+      final open = sheet;
+      if (!editable && open != null && open.mounted) Navigator.of(open).pop();
+    },
+  );
   await showBuzzModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
-    builder: (sheetContext) => SafeArea(
-      child: IconTheme.merge(
-        data: const IconThemeData(size: 22),
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(
-            Grid.gutter,
-            0,
-            Grid.gutter,
-            Grid.xs,
-          ),
-          child: SheetActionSection(
-            children: [
-              for (final section in sections)
+    builder: (sheetContext) {
+      // A lock that landed before this first frame found no sheet to close.
+      if (sheet == null && !container.read(channelSectionsProvider).editable) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (sheetContext.mounted) Navigator.of(sheetContext).pop();
+        });
+      }
+      sheet = sheetContext;
+      return SafeArea(
+        child: IconTheme.merge(
+          data: const IconThemeData(size: 22),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(
+              Grid.gutter,
+              0,
+              Grid.gutter,
+              Grid.xs,
+            ),
+            child: SheetActionSection(
+              children: [
+                for (final section in sections)
+                  ListTile(
+                    leading: const Icon(BuzzIcons.folder),
+                    title: Text(section.name),
+                    trailing: sectionId == section.id
+                        ? Icon(
+                            BuzzIcons.check,
+                            color: sheetContext.colors.primary,
+                          )
+                        : null,
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      ref
+                          .read(channelSectionsProvider.notifier)
+                          .assignChannel(channel.id, section.id);
+                    },
+                  ),
                 ListTile(
-                  leading: const Icon(BuzzIcons.folder),
-                  title: Text(section.name),
-                  trailing: sectionId == section.id
-                      ? Icon(
-                          BuzzIcons.check,
-                          color: sheetContext.colors.primary,
-                        )
-                      : null,
-                  onTap: () {
+                  leading: const Icon(BuzzIcons.folderPlus),
+                  title: const Text('New section…'),
+                  onTap: () async {
                     Navigator.of(sheetContext).pop();
-                    ref
-                        .read(channelSectionsProvider.notifier)
-                        .assignChannel(channel.id, section.id);
+                    final name = await _showSectionNameDialog(context);
+                    if (name == null || name.isEmpty) return;
+                    final notifier = ref.read(channelSectionsProvider.notifier);
+                    notifier.createSection(name);
+                    final created = ref
+                        .read(channelSectionsProvider)
+                        .store
+                        .sections
+                        .where((section) => section.name == name.trim())
+                        .lastOrNull;
+                    if (created != null) {
+                      notifier.assignChannel(channel.id, created.id);
+                    }
                   },
                 ),
-              ListTile(
-                leading: const Icon(BuzzIcons.folderPlus),
-                title: const Text('New section…'),
-                onTap: () async {
-                  Navigator.of(sheetContext).pop();
-                  final name = await _showSectionNameDialog(context);
-                  if (name == null || name.isEmpty) return;
-                  final notifier = ref.read(channelSectionsProvider.notifier);
-                  notifier.createSection(name);
-                  final created = ref
-                      .read(channelSectionsProvider)
-                      .store
-                      .sections
-                      .where((section) => section.name == name.trim())
-                      .lastOrNull;
-                  if (created != null) {
-                    notifier.assignChannel(channel.id, created.id);
-                  }
-                },
-              ),
-              if (sectionId != null)
-                ListTile(
-                  leading: const Icon(BuzzIcons.folderMinus),
-                  title: const Text('Remove from section'),
-                  onTap: () {
-                    Navigator.of(sheetContext).pop();
-                    ref
-                        .read(channelSectionsProvider.notifier)
-                        .unassignChannel(channel.id);
-                  },
-                ),
-            ],
+                if (sectionId != null)
+                  ListTile(
+                    leading: const Icon(BuzzIcons.folderMinus),
+                    title: const Text('Remove from section'),
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      ref
+                          .read(channelSectionsProvider.notifier)
+                          .unassignChannel(channel.id);
+                    },
+                  ),
+              ],
+            ),
           ),
         ),
-      ),
-    ),
-  );
+      );
+    },
+  ).whenComplete(lock.close);
 }
 
 Future<String?> _showSectionNameDialog(BuildContext context) async {

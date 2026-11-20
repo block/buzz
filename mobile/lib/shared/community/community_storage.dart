@@ -4,6 +4,7 @@ import 'package:crypto/crypto.dart';
 import 'package:uuid/uuid.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../diagnostics/diagnostic_reporter.dart';
 import '../hosted/organization_environment.dart';
 import '../hosted/known_community_address.dart';
 import '../storage/secure_storage.dart';
@@ -29,11 +30,16 @@ class CommunityStorage {
   /// their keys, for a build that can reach them.
   final bool Function(Community community) _visible;
 
+  /// Where saved communities that can't be read back are reported.
+  final DiagnosticReporter _diagnostics;
+
   CommunityStorage({
     FlutterSecureStorage? secure,
     bool Function(Community community)? visible,
+    DiagnosticReporter diagnostics = const NoopDiagnosticReporter(),
   }) : _secure = secure ?? communitySecureStorage,
-       _visible = visible ?? reachableInBuild;
+       _visible = visible ?? reachableInBuild,
+       _diagnostics = diagnostics;
 
   /// An internal build reaches only its organization's community.
   static bool reachableInBuild(Community community) =>
@@ -243,10 +249,19 @@ class CommunityStorage {
   }
 
   List<Community> _decodeList(String raw) {
-    final list = jsonDecode(raw) as List<dynamic>;
-    return list
-        .map((entry) => Community.fromJson(entry as Map<String, dynamic>))
-        .toList();
+    try {
+      final list = jsonDecode(raw) as List<dynamic>;
+      return list
+          .map((entry) => Community.fromJson(entry as Map<String, dynamic>))
+          .toList();
+    } catch (error, stackTrace) {
+      _diagnostics.reportError(
+        error,
+        stackTrace,
+        operation: DiagnosticOperation.storedData,
+      );
+      rethrow;
+    }
   }
 
   /// Replaces the communities this build shows, keeping the others.

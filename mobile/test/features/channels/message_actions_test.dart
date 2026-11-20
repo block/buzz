@@ -1,13 +1,20 @@
+import 'package:buzz/shared/read_state/thread_follows_format.dart';
+import 'package:buzz/features/channels/thread_follows/thread_follows_storage.dart';
 import 'package:buzz/shared/widgets/sheet_action_section.dart';
 import 'package:buzz/shared/widgets/app_list_card.dart';
 import 'dart:ui' as ui;
+import 'dart:convert';
+import 'dart:io';
+import 'package:buzz/shared/emoji/emoji_data.dart';
 import 'package:flutter/services.dart';
+import 'package:buzz/shared/emoji/emoji_data_provider.dart';
 
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_actions.dart';
 import 'package:buzz/features/channels/message_long_press_region.dart';
+import 'package:buzz/features/channels/message_reply_drag_target.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
@@ -15,7 +22,9 @@ import 'package:buzz/shared/reminders/reminder_service.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
@@ -26,392 +35,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/thread_ids.dart';
 
+part 'message_actions_scroll_journeys.dart';
+part 'message_actions_test_helpers.dart';
+
 const _channelId = 'chan-1';
 
-TimelineMessage _message({
-  String id = 'msg-1',
-  String pubkey = 'alice',
-  int createdAt = 1000,
-  bool isSystem = false,
-  String? rootId,
-  List<List<String>> tags = const [],
-  List<TimelineReaction> reactions = const [],
-}) => TimelineMessage(
-  id: id,
-  pubkey: pubkey,
-  createdAt: createdAt,
-  content: 'hello world',
-  isSystem: isSystem,
-  rootId: rootId,
-  tags: tags,
-  reactions: reactions,
-);
-
-class _RecordingReactionActions implements ChannelActions {
-  final added = <String>[];
-  final targetAuthors = <String>[];
-  final removed = <String>[];
-  @override
-  Future<void> addReaction(
-    String eventId,
-    String emoji, {
-    required String targetAuthor,
-  }) async {
-    added.add(emoji);
-    targetAuthors.add(targetAuthor);
-  }
-
-  @override
-  Future<void> removeReaction(String eventId, String emoji) async =>
-      removed.add(eventId);
-  @override
-  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
-}
-
-final _listedChannel = Channel(
-  id: _channelId,
-  name: 'general',
-  channelType: 'stream',
-  visibility: 'open',
-  description: '',
-  createdBy: 'creator',
-  createdAt: DateTime(2026),
-  memberCount: 2,
-  isMember: true,
-);
-
-class _ListedChannelsNotifier extends ChannelsNotifier {
-  @override
-  Future<List<Channel>> build() async => [_listedChannel];
-}
-
-class _FakeReadStateNotifier extends ReadStateNotifier {
-  final ReadStateState _initialState;
-  final Map<String, int> markedRead = {};
-  final List<String> markedUnread = [];
-
-  _FakeReadStateNotifier(this._initialState);
-
-  @override
-  ReadStateState build() => _initialState;
-
-  @override
-  void markContextRead(
-    String contextId,
-    int unixTimestamp, {
-    bool clearForcedMessages = false,
-  }) {
-    markedRead[contextId] = unixTimestamp;
-    var forced = {
-      for (final entry in state.forcedUnreadContexts.entries)
-        if (entry.key != contextId) entry.key: entry.value,
-    };
-    if (clearForcedMessages) {
-      forced = {
-        for (final entry in forced.entries)
-          if (entry.value != contextId) entry.key: entry.value,
-      };
-    }
-    state = _withForced(forced).copyWithContext(contextId, unixTimestamp);
-  }
-
-  @override
-  void markContextUnread(String contextId, {required String channelId}) {
-    markedUnread.add(contextId);
-    state = _withForced({...state.forcedUnreadContexts, contextId: channelId});
-  }
-
-  ReadStateState _withForced(Map<String, String> forced) => ReadStateState(
-    isReady: state.isReady,
-    pubkey: state.pubkey,
-    contexts: state.contexts,
-    version: state.version + 1,
-    forcedUnreadContexts: Map.unmodifiable(forced),
-  );
-}
-
-ReadStateState _readState(Map<String, int> contexts, {bool isReady = true}) =>
-    ReadStateState(
-      isReady: isReady,
-      pubkey: 'self',
-      contexts: contexts,
-      version: 1,
-    );
-
-Future<SharedPreferences> _mockPrefs() async {
-  SharedPreferences.setMockInitialValues({});
-  return SharedPreferences.getInstance();
-}
-
-/// A [ReminderService] whose constructor dependencies are inert until used —
-/// enough for visibility checks on the "Remind me" fast action.
-ReminderService _stubReminderService() {
-  final keys = nostr.Keys.generate();
-  return ReminderService(
-    signedEventRelay: SignedEventRelay(
-      session: RelaySessionNotifier(),
-      nsec: keys.nsec,
-    ),
-    crypto: ReminderCrypto(keys.nsec, keys.public),
-  );
-}
-
-Future<void> _pumpSheet(
-  WidgetTester tester, {
-  required TimelineMessage message,
-  required SharedPreferences prefs,
-  ReadStateNotifier Function()? readStateOverride,
-  bool canManageMessage = false,
-  List<TimelineMessage>? allMessages,
-  ReminderService? reminderService,
-  Rect? anchorRect,
-  bool nativePresentation = false,
-  String? currentPubkey = 'self',
-  bool listChannel = false,
-}) async {
-  Future<void>? presentation;
-  await tester.pumpWidget(
-    ProviderScope(
-      overrides: [
-        savedPrefsProvider.overrideWithValue(prefs),
-        myPubkeyProvider.overrideWithValue('self'),
-        readStateProvider.overrideWith(
-          readStateOverride ??
-              () => _FakeReadStateNotifier(
-                _readState(const {_channelId: 100000}),
-              ),
-        ),
-        // No signing identity → "Remind me" hidden by default; individual
-        // tests opt in by passing a stub service.
-        reminderServiceProvider.overrideWithValue(reminderService),
-        if (listChannel)
-          channelsProvider.overrideWith(_ListedChannelsNotifier.new),
-      ],
-      child: MaterialApp(
-        theme: AppTheme.light(),
-        home: Scaffold(
-          body: Consumer(
-            builder: (context, ref, _) {
-              // The channel page keeps the channel list alive.
-              if (listChannel) ref.watch(channelsProvider);
-              return TextButton(
-                onPressed: () => presentation = showMessageActions(
-                  context: context,
-                  ref: ref,
-                  message: message,
-                  channelId: _channelId,
-                  canManageMessage: canManageMessage,
-                  anchorRect: anchorRect,
-                  captureAnchorSnapshot: nativePresentation
-                      ? _testMessageSnapshot
-                      : null,
-                  allMessages: allMessages,
-                  currentPubkey: currentPubkey,
-                  isMember: true,
-                ),
-                child: const Text('open'),
-              );
-            },
-          ),
-        ),
-      ),
-    ),
-  );
-  if (listChannel) await tester.pump();
-  if (nativePresentation) {
-    await tester.runAsync(() async {
-      await tester.tap(find.text('open'));
-      await presentation;
-    });
-  } else {
-    await tester.tap(find.text('open'));
-  }
-  await tester.pumpAndSettle();
-}
-
-Future<void> _pumpImageSheet(
-  WidgetTester tester, {
-  required TimelineMessage message,
-  bool canManageMessage = false,
-  http.Client? mediaClient,
-}) async {
-  await tester.pumpWidget(
-    ProviderScope(
-      overrides: [
-        if (mediaClient != null)
-          mediaHttpClientProvider.overrideWithValue(mediaClient),
-      ],
-      child: MaterialApp(
-        theme: AppTheme.light(),
-        home: Scaffold(
-          body: Consumer(
-            builder: (context, ref, _) => TextButton(
-              onPressed: () => showImageActions(
-                context: context,
-                ref: ref,
-                message: message,
-                channelId: _channelId,
-                imageUrl: 'https://example.com/photo.png',
-                canManageMessage: canManageMessage,
-              ),
-              child: const Text('open image actions'),
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
-  await tester.tap(find.text('open image actions'));
-  await tester.pumpAndSettle();
-}
-
-Future<ui.Image> _testMessageSnapshot() async {
-  final recorder = ui.PictureRecorder();
-  final canvas = ui.Canvas(recorder);
-  canvas.drawRect(
-    const Rect.fromLTWH(0, 0, 300, 72),
-    ui.Paint()..color = const Color(0xffeeeeee),
-  );
-  return recorder.endRecording().toImage(300, 72);
-}
-
-class _MessageActionsPopoverHarness {
-  final ProviderContainer container;
-  final ValueNotifier<bool> sourceHidden;
-
-  const _MessageActionsPopoverHarness({
-    required this.container,
-    required this.sourceHidden,
-  });
-}
-
-Future<_MessageActionsPopoverHarness> _pumpMessageActionsPopover(
-  WidgetTester tester, {
-  required TimelineMessage message,
-  required SharedPreferences prefs,
-  ReadStateNotifier Function()? readStateOverride,
-  bool canManageMessage = false,
-  List<TimelineMessage>? allMessages,
-  ReminderService? reminderService,
-  bool disableAnimations = false,
-  EdgeInsets viewInsets = EdgeInsets.zero,
-  TextScaler textScaler = TextScaler.noScaling,
-  Future<ui.Image> Function()? captureAnchorSnapshot,
-  FocusNode? composerFocusNode,
-  bool composerInitiallyFocused = false,
-  bool launcherOnNestedRoute = false,
-  ChannelActions Function(Ref ref)? createChannelActions,
-  Rect anchorRect = const Rect.fromLTWH(32, 260, 300, 72),
-  String? currentPubkey = 'self',
-  bool listChannel = false,
-}) async {
-  final sourceHidden = ValueNotifier(false);
-
-  Widget launcherPage() => Scaffold(
-    key: const ValueKey('message-actions-underlying-page'),
-    body: Consumer(
-      builder: (context, ref, _) {
-        // The channel page keeps the channel list alive.
-        if (listChannel) ref.watch(channelsProvider);
-        return Column(
-          children: [
-            if (composerFocusNode != null)
-              TextField(focusNode: composerFocusNode),
-            TextButton(
-              key: const ValueKey('open-message-actions-popover'),
-              onPressed: () => showMessageActions(
-                context: context,
-                ref: ref,
-                message: message,
-                channelId: _channelId,
-                canManageMessage: canManageMessage,
-                allMessages: allMessages,
-                currentPubkey: currentPubkey,
-                isMember: true,
-                anchorRect: anchorRect,
-                captureAnchorSnapshot:
-                    captureAnchorSnapshot ?? _testMessageSnapshot,
-                onPopoverPreviewVisibilityChanged: (visible) =>
-                    sourceHidden.value = visible,
-                onPopoverDismissed: () => sourceHidden.value = false,
-                composerFocusNode: composerFocusNode,
-                restoreComposerFocus: composerFocusNode?.requestFocus,
-              ),
-              child: const Text('open message actions'),
-            ),
-          ],
-        );
-      },
-    ),
-  );
-
-  await tester.pumpWidget(
-    ProviderScope(
-      overrides: [
-        savedPrefsProvider.overrideWithValue(prefs),
-        myPubkeyProvider.overrideWithValue('self'),
-        readStateProvider.overrideWith(
-          readStateOverride ??
-              () => _FakeReadStateNotifier(
-                _readState(const {_channelId: 100000}),
-              ),
-        ),
-        reminderServiceProvider.overrideWithValue(reminderService),
-        if (createChannelActions != null)
-          channelActionsProvider.overrideWith(createChannelActions),
-        if (listChannel)
-          channelsProvider.overrideWith(_ListedChannelsNotifier.new),
-      ],
-      child: MaterialApp(
-        theme: AppTheme.light(),
-        builder: (context, child) => MediaQuery(
-          data: MediaQuery.of(context).copyWith(
-            disableAnimations: disableAnimations,
-            viewInsets: viewInsets,
-            textScaler: textScaler,
-          ),
-          child: child!,
-        ),
-        home: launcherOnNestedRoute
-            ? Builder(
-                builder: (context) => Scaffold(
-                  key: const ValueKey('message-actions-root-page'),
-                  body: TextButton(
-                    key: const ValueKey('push-message-actions-launcher'),
-                    onPressed: () => Navigator.of(context).push(
-                      MaterialPageRoute<void>(builder: (_) => launcherPage()),
-                    ),
-                    child: const Text('push launcher'),
-                  ),
-                ),
-              )
-            : launcherPage(),
-      ),
-    ),
-  );
-  if (launcherOnNestedRoute) {
-    await tester.tap(
-      find.byKey(const ValueKey('push-message-actions-launcher')),
-    );
-    await tester.pumpAndSettle();
-  }
-  if (composerInitiallyFocused) {
-    composerFocusNode!.requestFocus();
-    await tester.pump();
-  }
-  if (listChannel) await tester.pump();
-  await tester.tap(find.byKey(const ValueKey('open-message-actions-popover')));
-  await tester.pumpAndSettle();
-  final container = ProviderScope.containerOf(
-    tester.element(find.byKey(const ValueKey('open-message-actions-popover'))),
-  );
-  return _MessageActionsPopoverHarness(
-    container: container,
-    sourceHidden: sourceHidden,
-  );
-}
-
 void main() {
+  _messageActionsScrollTests();
   testWidgets(
     'quick reactions show selection, label controls, and remove our reaction',
     (tester) async {
@@ -727,6 +357,156 @@ void main() {
 
     expect(snapshot.width, 240);
     expect(snapshot.height, 80);
+  });
+
+  group('targets-only message long press', () {
+    Widget region({
+      required ValueNotifier<double> bubbleWidth,
+      required VoidCallback onLongPress,
+      required VoidCallback onTap,
+    }) {
+      return MaterialApp(
+        home: Scaffold(
+          body: ListView(
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text('Date'),
+                  Material(
+                    child: MessageLongPressInkWell(
+                      targetsOnly: true,
+                      onTap: onTap,
+                      onLongPress: (_) => onLongPress(),
+                      child: ValueListenableBuilder<double>(
+                        valueListenable: bubbleWidth,
+                        builder: (context, width, _) => Align(
+                          alignment: Alignment.centerLeft,
+                          child: MessageLongPressTarget(
+                            child: SizedBox(
+                              width: width,
+                              height: 40,
+                              child: const Text('Hi'),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    Future<void> holdWhileResizing(
+      WidgetTester tester,
+      ValueNotifier<double> bubbleWidth,
+      double resizedWidth,
+    ) async {
+      final gesture = await tester.startGesture(
+        tester.getTopLeft(find.text('Hi')) + const Offset(150, 20),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      bubbleWidth.value = resizedWidth;
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+      await gesture.up();
+      await tester.pump();
+    }
+
+    testWidgets('a hold that started on the bubble opens after it shrinks', (
+      tester,
+    ) async {
+      var longPresses = 0;
+      var taps = 0;
+      final bubbleWidth = ValueNotifier<double>(200);
+      addTearDown(bubbleWidth.dispose);
+      await tester.pumpWidget(
+        region(
+          bubbleWidth: bubbleWidth,
+          onLongPress: () => longPresses += 1,
+          onTap: () => taps += 1,
+        ),
+      );
+
+      await holdWhileResizing(tester, bubbleWidth, 100);
+
+      expect(longPresses, 1);
+      expect(taps, 0);
+    });
+
+    testWidgets(
+      'a hold that started beside the bubble stays inert after it widens',
+      (tester) async {
+        var longPresses = 0;
+        var taps = 0;
+        final bubbleWidth = ValueNotifier<double>(100);
+        addTearDown(bubbleWidth.dispose);
+        await tester.pumpWidget(
+          region(
+            bubbleWidth: bubbleWidth,
+            onLongPress: () => longPresses += 1,
+            onTap: () => taps += 1,
+          ),
+        );
+
+        await holdWhileResizing(tester, bubbleWidth, 200);
+
+        expect(longPresses, 0);
+        expect(taps, 0);
+      },
+    );
+
+    testWidgets(
+      'the message node has the only screen-reader long press and it opens',
+      (tester) async {
+        var longPresses = 0;
+        final bubbleWidth = ValueNotifier<double>(100);
+        addTearDown(bubbleWidth.dispose);
+        final semantics = tester.ensureSemantics();
+        await tester.pumpWidget(
+          region(
+            bubbleWidth: bubbleWidth,
+            onLongPress: () => longPresses += 1,
+            onTap: () {},
+          ),
+        );
+
+        final longPressNodes = <SemanticsNode>[];
+        void collect(SemanticsNode node) {
+          if (node.getSemanticsData().hasAction(SemanticsAction.longPress)) {
+            longPressNodes.add(node);
+          }
+          node.visitChildren((child) {
+            collect(child);
+            return true;
+          });
+        }
+
+        collect(
+          tester
+              .binding
+              .renderViews
+              .single
+              .owner!
+              .semanticsOwner!
+              .rootSemanticsNode!,
+        );
+
+        expect(longPressNodes, hasLength(1));
+        expect(longPressNodes.single.getSemanticsData().label, 'Hi');
+        tester.binding.renderViews.single.owner!.semanticsOwner!.performAction(
+          longPressNodes.single.id,
+          SemanticsAction.longPress,
+        );
+        await tester.pump();
+        expect(longPresses, 1);
+        semantics.dispose();
+      },
+    );
   });
 
   group('showMessageActions', () {
@@ -1190,6 +970,47 @@ void main() {
       await tester.pumpAndSettle();
       expect(container.read(threadFollowsProvider).followedRootIds, isEmpty);
     });
+  });
+
+  test('an unimported pre-sync follow still shows, and a synced choice '
+      'wins', () async {
+    final prefs = await _mockPrefs();
+    final legacyRoot = 'b' * 64;
+    final syncedRoot = 'c' * 64;
+    ProviderContainer open(Map<String, ThreadFollowChoice> synced) {
+      final container = ProviderContainer(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          myPubkeyProvider.overrideWithValue('self'),
+          readStateProvider.overrideWith(
+            () => _FakeReadStateNotifier(
+              ReadStateState(
+                isReady: true,
+                pubkey: 'self',
+                contexts: const {},
+                version: 1,
+                threadFollows: synced,
+              ),
+            ),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+      return container;
+    }
+
+    final relayUrl = open(const {}).read(relayConfigProvider).baseUrl;
+    ThreadFollowsStorage(prefs).write('self', relayUrl, [
+      ThreadFollowEntry(rootId: legacyRoot, followedAt: 1),
+      ThreadFollowEntry(rootId: syncedRoot, followedAt: 1),
+    ]);
+    final follows = open({
+      threadFollowKey(_channelId, syncedRoot): (follow: false, at: 2),
+    }).read(threadFollowsProvider);
+    expect(follows.followedRootIds, {legacyRoot});
+    expect(follows.unfollowedRootIds, {syncedRoot});
+    // A synced choice names its channel; the pre-sync one has none known.
+    expect(follows.channelByRoot, {syncedRoot: _channelId});
   });
 
   group('showImageActions', () {

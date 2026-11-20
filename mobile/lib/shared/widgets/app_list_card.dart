@@ -11,6 +11,7 @@ class AppListCard extends StatelessWidget {
     super.key,
     this.label,
     this.dividerIndent,
+    this.clipBehavior = Clip.antiAlias,
     this.verticalPadding = Grid.xxs,
     this.horizontalPadding = Grid.gutter,
     required this.children,
@@ -18,6 +19,7 @@ class AppListCard extends StatelessWidget {
 
   /// Rendered above the card in sentence case, as written — no uppercasing.
   final String? label;
+  final Clip clipBehavior;
 
   /// Separator inset from the card edge. Defaults to the standard row label
   /// column, clearing a leading icon. Icon-free cards can pass [_inset] so
@@ -94,7 +96,7 @@ class AppListCard extends StatelessWidget {
             color: context.colors.surfaceContainerHighest,
             borderRadius: BorderRadius.circular(Radii.container),
             // Keeps row ripples inside the rounded corners.
-            clipBehavior: Clip.antiAlias,
+            clipBehavior: clipBehavior,
             child: AppListInset(
               horizontal: _inset,
               child: Column(

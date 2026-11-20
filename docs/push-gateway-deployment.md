@@ -44,7 +44,35 @@ sees it.
 | `BUZZ_PUSH_ANDROID_PACKAGE_NAME` | Exact Android application package, for example `com.example.buzz`. |
 | `BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS` | Comma-separated SHA-256 digests (64 hex characters each) of the app's accepted signing certificates. |
 | `BUZZ_PUSH_FCM_PROJECT_ID` | Firebase project that owns the app's registration tokens, for example `example-project`. |
-| `BUZZ_PUSH_FCM_SERVICE_ACCOUNT_PATH` | Read-only mounted service account key JSON the gateway uses to call FCM. Never commit it. |
+| `BUZZ_PUSH_FCM_CREDENTIALS_PATH` | Read-only mounted Google credential JSON the gateway uses to call FCM, dispatched on its `type`: `service_account` (a key file) or `external_account` (keyless, see below). Never commit it. |
+
+### Keyless FCM credentials
+
+Projects that forbid service account keys use Google workload identity
+federation from AWS. Point `BUZZ_PUSH_FCM_CREDENTIALS_PATH` at the standard
+`external_account` config for an AWS provider (`gcloud iam
+workload-identity-pools create-cred-config` writes it, with
+`--service-account` so it carries `service_account_impersonation_url`, which is
+required). Only the AWS credential source (`environment_id` `aws1`) is
+supported; the file's instance metadata fields are ignored.
+
+The pod also needs `AWS_REGION` (or `AWS_DEFAULT_REGION`) and one source of AWS
+credentials: IAM roles for service accounts (`AWS_ROLE_ARN` and
+`AWS_WEB_IDENTITY_TOKEN_FILE`), EKS Pod Identity
+(`AWS_CONTAINER_CREDENTIALS_FULL_URI` and optionally
+`AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`), or static `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`. If several are present, static
+keys win, then web identity, then Pod Identity. EC2
+instance metadata is not used. Startup validates the file and these settings but
+calls neither AWS nor Google. The first successful token mint is logged once,
+and every failed mint logs its hop and status. The pod must reach the regional
+STS endpoint and Google's STS and IAM Credentials APIs.
+
+The Helm chart supports IRSA as shipped: the EKS webhook injects the region and
+web identity settings. Pod Identity works in the gateway, but the chart neither
+sets `AWS_REGION` nor lets its NetworkPolicy reach the Pod Identity agent, so
+with that chart you must supply the region and an egress rule to
+`169.254.170.23/32` on TCP port 80 yourself.
 
 The wake is a high-priority, data-only FCM message with a compiled-in payload,
 one constant collapse key and a time to live taken from the delivery's expiry.
@@ -96,7 +124,7 @@ get no push; there is no software fallback.
 
 With the Helm chart, set `android.enabled=true` together with
 `android.packageName`, `android.signingCertDigests`, `android.fcmProjectId` and
-the Secret holding the service account key. `android.bootKeyDigests` and
+the Secret holding the Google credential JSON. `android.bootKeyDigests` and
 `android.revocationGraceSeconds` map to the settings above. To replace the
 built-in roots, name a Secret holding the PEM bundle in
 `android.attestationRoots.secretName` (and its key in `secretKey`); the chart
@@ -159,7 +187,7 @@ that app identity; omitting it is not a push shutdown mechanism.
 
 The gateway's dedicated pool does not consume the relay-oriented `BUZZ_DB_LOCK_TIMEOUT_MS`, `BUZZ_DB_IDLE_TXN_TIMEOUT_MS`, or `BUZZ_DB_STATEMENT_TIMEOUT_MS` settings. Its session-timeout policy remains separate from the `buzz-db` writer policy and must be designed and rolled out independently.
 
-All replicas must share one PostgreSQL database. Delivery authority, replay admission, and endpoint quota reservation are transactional there, so replica count does not multiply the abuse ceiling. The gateway owns a scoped migration history under `crates/buzz-push-gateway/migrations`; it creates only the six `push_gateway_*` authority tables plus SQLx's migration-history table and never runs relay migrations.
+All replicas must share one PostgreSQL database. Delivery authority, replay admission, and endpoint quota reservation are transactional there, so replica count does not multiply the abuse ceiling. The gateway owns a scoped migration history under `crates/buzz-push-gateway/migrations`; it creates only the six `push_gateway_*` authority tables plus SQLx's migration-history table and never runs relay migrations. `crates/buzz-push-gateway/schema/` mirrors those migrations' end state as declarative desired-state DDL, one file per table; a parity test keeps their `public` tables, columns, table options, constraints, and indexes identical.
 
 The Helm chart runs a single pre-install/pre-upgrade migration Job using `migration.existingSecret`; that secret contains a DDL-capable `DATABASE_URL`. The URL MUST name a dedicated gateway database, not the relay database: SQLx stores its `_sqlx_migrations` history in `public`, so sharing a database would collide with another application's migration history. `migration.runtimeDatabaseRole` names an existing LOGIN role (the default is `buzz_push_gateway_runtime`) used by runtime `DATABASE_URL`. After scoped migrations, the Job revokes database `CREATE` from that role and schema `CREATE` from both `PUBLIC` and the role, then grants only database `CONNECT`, schema `USAGE`, and `SELECT, INSERT, UPDATE, DELETE` on the six gateway tables. The migration role must own the database/schema objects or otherwise be allowed to issue those grants; it is never provided to runtime replicas. Readiness rejects an empty/partial schema, missing DML, or a runtime role that retains database/schema `CREATE`. Helm waits for the migration hook before updating replicas, so rolling deployments never race unconditional startup migration. Readiness must be removed from load-balancer service endpoints before terminating a pod.
 
@@ -177,12 +205,12 @@ The gateway serves Prometheus metrics at `GET /metrics` on the **private health 
 | `push_gateway_fcm_send_attempts_total` | counter | none | Entries into the concrete FCM HTTP send seam. |
 | `push_gateway_fcm_deliveries_total` | counter | `outcome` (the same five classes as APNs) | Terminal FCM send outcomes. |
 | `push_gateway_fcm_delivery_seconds` | histogram | none | FCM send round-trip latency (seconds), including any access token refresh. |
-| `push_gateway_admissions_total` | counter | `result` = `admitted` \| `rejected` \| `unavailable` | Outcome at the `authorize_delivery` replay/quota fence. |
+| `push_gateway_admissions_total` | counter | `result` = `admitted` \| `rejected` \| `unavailable` \| `in_flight` | Outcome at the `authorize_delivery` replay/quota fence. `in_flight` is a retry of a request id whose earlier attempt is still sending; it answers 503 retry. |
 | `push_gateway_delivery_errors_total` | counter | `class` (static) | Selected delivery-handler exit classes only (see note). |
 | `push_gateway_reaper_failures_total` | counter | — | Retention reaper sweep failures. |
 | `push_gateway_readiness_failures_total` | counter | `cause` = `not_accepting` \| `authority` | Readiness probe failures by cause. |
 
-`push_gateway_delivery_errors_total` is intentionally **narrow**: it counts only selected exit classes of the delivery handler (`/v1/deliveries` and its `/v1/deliveries/apns` alias). `class` ∈ `invalid_grant` (grant rejected at the admission seam, before a permit is issued), `rate_limited`, `temporarily_unavailable` (authority unavailable at the admission seam), `profile_mismatch`, `profile_disabled`, `token_custody` (endpoint-token open failure), `finish_failed` (detached disposition/join failure returned as 503). Request/auth/attestation/grant validation on the enrollment, delegation, rotation, and revocation handlers is **not** counted by this metric; it is a delivery-hot-path signal, not a total error rate across the API.
+`push_gateway_delivery_errors_total` is intentionally **narrow**: it counts only selected exit classes of the delivery handler (`/v1/deliveries` and its `/v1/deliveries/apns` alias). `class` ∈ `invalid_grant` (grant rejected at the admission seam, before a permit is issued), `rate_limited`, `temporarily_unavailable` (authority unavailable at the admission seam), `profile_mismatch`, `profile_disabled`, `token_custody` (endpoint-token open failure), `finish_failed` (a detached disposition/join failure, returned as 503, or a failed terminal finish, which still returns the provider's answer). Request/auth/attestation/grant validation on the enrollment, delegation, rotation, and revocation handlers is **not** counted by this metric; it is a delivery-hot-path signal, not a total error rate across the API.
 
 Scraping is **opt-in** and off by default, so the default chart render is unchanged and `8081` keeps no pod ingress. For prometheus-operator, set `podMonitor.enabled=true` and `networkPolicy.monitoring.enabled=true` with `networkPolicy.monitoring.namespaceSelector` / `podSelector` naming your scraper. For Datadog Autodiscovery, leave `podMonitor.enabled=false`, supply the OpenMetrics check through `podAnnotations`, and enable the same narrowly selected NetworkPolicy ingress:
 

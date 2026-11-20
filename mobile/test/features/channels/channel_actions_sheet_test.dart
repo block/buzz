@@ -5,6 +5,7 @@ import 'package:buzz/features/channels/channel_actions_sheet.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
+import 'package:buzz/features/channels/channel_sections/workspace_layout.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/manage_channel_sheet.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
@@ -68,6 +69,7 @@ Widget _modalApp({
   required Future<List<ChannelMember>> Function() loadMembers,
   required ChannelActions Function(Ref ref) createChannelActions,
   bool soloDetails = false,
+  bool details = false,
   String? canvasContent,
   Future<ChannelCanvas>? pendingCanvas,
 }) => ProviderScope(
@@ -96,13 +98,13 @@ Widget _modalApp({
     home: Builder(
       builder: (context) => Scaffold(
         body: TextButton(
-          onPressed: () => soloDetails
+          onPressed: () => soloDetails || details
               ? showChannelDetailsSheet(
                   context: context,
                   channel: channel,
                   currentPubkey: _currentPubkey,
                   onMemberTap: (_, _) {},
-                  personalChat: true,
+                  personalChat: soloDetails,
                 )
               : showChannelActionsSheet(
                   context: context,
@@ -553,6 +555,52 @@ void main() {
     expect(find.text('Archive channel'), findsNothing);
     expect(find.text('Delete channel'), findsNothing);
   });
+
+  for (final (details, early) in [
+    (false, false),
+    (true, false),
+    (true, true),
+  ]) {
+    testWidgets('desktop workspaces close filing (details: $details, '
+        'before the picker draws: $early)', (tester) async {
+      tester.view.physicalSize = const Size(1200, 3000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          details: details,
+          loadMembers: () async => const [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+        ),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      void lock() =>
+          (ProviderScope.containerOf(
+                    tester.element(find.text('Open actions')),
+                  ).read(channelSectionsProvider.notifier)
+                  as _FakeChannelSectionsNotifier)
+              .lock();
+      await tester.tap(find.text('Move to section…'));
+      if (early) lock();
+      await tester.pumpAndSettle();
+      if (!early) {
+        expect(find.text('New section…'), findsOneWidget);
+        // Desktop saves a unified layout while the picker is open.
+        lock();
+        await tester.pumpAndSettle();
+      }
+      expect(find.text('New section…'), findsNothing);
+      // Details stays open beneath the picker; the actions sheet reopens.
+      if (!details) {
+        await tester.tap(find.text('Open actions'));
+        await tester.pumpAndSettle();
+      }
+      expect(find.text('Copy channel name'), findsOneWidget);
+      expect(find.text('Move to section…'), findsNothing);
+    });
+  }
 
   testWidgets('member sees neither owner action', (tester) async {
     await tester.pumpWidget(
@@ -1132,6 +1180,18 @@ class _FakeChannelSectionsNotifier extends ChannelSectionsNotifier {
   @override
   ChannelSectionsState build() =>
       ChannelSectionsState(isReady: true, store: _store, version: 1);
+
+  void lock() => state = ChannelSectionsState(
+    isReady: true,
+    store: _store,
+    workspace: WorkspaceRecord.fromJson({
+      'version': 1,
+      'sections': <Object>[],
+      'assignments': <String, Object>{},
+      'sectionOrder': <String>[],
+    }),
+    version: 2,
+  );
 }
 
 class _FakeChannelActions extends ChannelActions {
@@ -1175,7 +1235,10 @@ class _FakeChannelActions extends ChannelActions {
   String? unarchivedChannelId;
 
   @override
-  Future<void> leaveChannel(String channelId) async {}
+  Future<void> leaveChannel(
+    String channelId, {
+    Future<bool> Function()? mayPublish,
+  }) async {}
 
   @override
   Future<void> archiveChannel(String channelId) async {}
@@ -1224,5 +1287,6 @@ class _RecordingReadState extends ReadStateNotifier {
     String contextId,
     int unixTimestamp, {
     bool clearForcedMessages = false,
+    bool explicit = false,
   }) => marks.add((contextId, unixTimestamp, clearForcedMessages));
 }

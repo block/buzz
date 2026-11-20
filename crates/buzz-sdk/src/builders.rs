@@ -845,21 +845,55 @@ pub fn build_profile(
     Ok(EventBuilder::new(Kind::Custom(0), content).tags([]))
 }
 
+/// Most people one kind:9000 event may name; the relay refuses more.
+pub const MAX_MEMBERS_PER_ADD: usize = 100;
+
 /// Build a NIP-29 add-member event (kind 9000).
 pub fn build_add_member(
     channel_id: Uuid,
     target_pubkey: &str,
     role: Option<MemberRole>,
 ) -> Result<EventBuilder, SdkError> {
-    check_hex_len(target_pubkey, 64, "target_pubkey")?;
-    let mut tags = vec![
-        tag(&["h", &channel_id.to_string()])?,
-        tag(&["p", &target_pubkey.to_ascii_lowercase()])?,
-    ];
+    build_add_members(channel_id, &[target_pubkey], role)
+}
+
+/// Build a NIP-29 add-member event (kind 9000) naming several people: one `p`
+/// tag each, plus one `role` tag that applies to all of them.
+///
+/// Rejects an empty list, more than [`MAX_MEMBERS_PER_ADD`] people, and
+/// duplicates.
+pub fn build_add_members(
+    channel_id: Uuid,
+    target_pubkeys: &[&str],
+    role: Option<MemberRole>,
+) -> Result<EventBuilder, SdkError> {
+    if target_pubkeys.is_empty() {
+        return Err(SdkError::InvalidInput("target_pubkeys is empty".into()));
+    }
+    if target_pubkeys.len() > MAX_MEMBERS_PER_ADD {
+        return Err(SdkError::InvalidInput(format!(
+            "at most {MAX_MEMBERS_PER_ADD} people per add (got {})",
+            target_pubkeys.len()
+        )));
+    }
+    let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
+    let mut seen = std::collections::HashSet::new();
+    for pubkey in target_pubkeys {
+        let pubkey = check_pubkey_hex(pubkey, "target_pubkey")?;
+        if !seen.insert(pubkey.clone()) {
+            return Err(SdkError::InvalidInput(format!(
+                "duplicate target_pubkey {pubkey}"
+            )));
+        }
+        tags.push(tag(&["p", &pubkey])?);
+    }
     if let Some(r) = role {
         tags.push(tag(&["role", r.as_str()])?);
     }
-    Ok(EventBuilder::new(Kind::Custom(9000), "").tags(tags))
+    // The signer may be one of the people named; keep their `p` tag.
+    Ok(EventBuilder::new(Kind::Custom(9000), "")
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a NIP-29 remove-member event (kind 9001).
@@ -3949,6 +3983,75 @@ mod tests {
         let ev = sign(build_add_member(cid, pubkey, None::<MemberRole>).unwrap());
         assert_eq!(ev.kind.as_u16(), 9000);
         assert!(tag_values(&ev, "role").is_empty());
+    }
+
+    fn pk(i: usize) -> String {
+        format!("{i:064x}")
+    }
+
+    #[test]
+    fn add_members_tag_shape() {
+        let cid = uuid();
+        let pks: Vec<String> = (0..3).map(pk).collect();
+        let refs: Vec<&str> = pks.iter().map(String::as_str).collect();
+        let ev = sign(build_add_members(cid, &refs, Some(MemberRole::Member)).unwrap());
+        assert_eq!(ev.kind.as_u16(), 9000);
+        assert_eq!(tag_values(&ev, "p"), pks);
+        assert_eq!(tag_values(&ev, "role"), vec!["member".to_string()]);
+        assert_eq!(tag_values(&ev, "h"), vec![cid.to_string()]);
+    }
+
+    #[test]
+    fn add_members_limits() {
+        let cid = uuid();
+        let pks: Vec<String> = (0..=MAX_MEMBERS_PER_ADD).map(pk).collect();
+        let refs: Vec<&str> = pks.iter().map(String::as_str).collect();
+        assert!(build_add_members(cid, &refs[..MAX_MEMBERS_PER_ADD], None).is_ok());
+        assert!(build_add_members(cid, &refs, None).is_err());
+        assert!(build_add_members(cid, &[], None).is_err());
+    }
+
+    #[test]
+    fn add_members_rejects_bad_input() {
+        let cid = uuid();
+        let a = pk(1);
+        assert!(build_add_members(cid, &[&a, "nothex"], None).is_err());
+        let overlong = format!("{a}00");
+        assert!(build_add_members(cid, &[&overlong], None).is_err());
+        // Duplicates are caught case-insensitively.
+        let upper = a.to_ascii_uppercase();
+        assert!(build_add_members(cid, &[&a, &upper], None).is_err());
+    }
+
+    #[test]
+    fn add_members_keeps_the_signer_as_a_target() {
+        let cid = uuid();
+        let signer = keys();
+        let me = signer.public_key().to_hex();
+        let other = pk(1);
+        let ev = build_add_members(cid, &[&me, &other], None)
+            .unwrap()
+            .sign_with_keys(&signer)
+            .unwrap();
+        assert_eq!(tag_values(&ev, "p"), vec![me, other]);
+    }
+
+    #[test]
+    fn add_member_matches_single_add_members() {
+        let cid = uuid();
+        let a = "ABCD1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
+        let one = build_add_member(cid, a, Some(MemberRole::Bot)).unwrap();
+        let many = build_add_members(cid, &[a], Some(MemberRole::Bot)).unwrap();
+        let (one, many) = (sign(one), sign(many));
+        assert_eq!(one.tags, many.tags);
+        assert_eq!(one.content, many.content);
+        let want = vec![
+            vec!["h".to_string(), cid.to_string()],
+            vec!["p".to_string(), a.to_ascii_lowercase()],
+            vec!["role".to_string(), "bot".to_string()],
+        ];
+        let got: Vec<Vec<String>> = one.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert_eq!(got, want);
     }
 
     #[test]

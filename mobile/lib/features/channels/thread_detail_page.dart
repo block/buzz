@@ -58,6 +58,7 @@ import '../profile/user_profile_sheet.dart';
 import 'message_actions.dart';
 import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
+import 'message_reply_drag_target.dart';
 import 'message_content.dart';
 import 'message_media_avatar.dart';
 import 'reaction_row.dart';
@@ -729,6 +730,19 @@ class ThreadDetailPage extends HookConsumerWidget {
       );
       return null;
     }, [hasFetchedReplies, replies.length, settleGeometry, headHeight.value]);
+    // Reading starts once the thread holds still for the dwell while this
+    // page is in front and the app is in use.
+    final appInUse = isAppInUse(useAppLifecycleState());
+    final readStateReady = ref.watch(
+      readStateProvider.select((state) => state.isReady),
+    );
+    final readingActive =
+        threadViewportVisible &&
+        readStateReady &&
+        appInUse &&
+        (ModalRoute.of(context)?.isCurrent ?? true) &&
+        ConversationPaneScope.isActiveOf(context);
+    final clearCovered = useClearsCoveredUnread(ref, active: readingActive);
     void readVisibleReplies() {
       final readState = ref.read(readStateProvider);
       if (!context.mounted ||
@@ -778,8 +792,10 @@ class ThreadDetailPage extends HookConsumerWidget {
       final isDm =
           ref.read(channelsProvider.notifier).channelById(channelId)?.isDm ??
           false;
+      // Displaying a row ends its device-local unread before it is read.
+      final endCatchUp = clearCovered(visible);
       final marks = readingMarks(
-        readState: readState,
+        readState: ref.read(readStateProvider),
         channelId: channelId,
         isDm: isDm,
         currentPubkey: currentPubkey,
@@ -788,6 +804,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         bottom: atBottom ? replies.last : null,
         threadRootId: queryRootId,
         isRootThread: threadHead.parentId == null,
+        onCatchUp: endCatchUp,
       );
       final notifier = ref.read(readStateProvider.notifier);
       for (final mark in marks.entries) {
@@ -795,20 +812,9 @@ class ThreadDetailPage extends HookConsumerWidget {
       }
     }
 
-    // Reading starts once the thread holds still for the dwell while this
-    // page is in front and the app is in use.
-    final appInUse = isAppInUse(useAppLifecycleState());
-    final readStateReady = ref.watch(
-      readStateProvider.select((state) => state.isReady),
-    );
     useReadingDwell(
       positions: itemPositionsListener.itemPositions,
-      active:
-          threadViewportVisible &&
-          readStateReady &&
-          appInUse &&
-          (ModalRoute.of(context)?.isCurrent ?? true) &&
-          ConversationPaneScope.isActiveOf(context),
+      active: readingActive,
       onDwell: readVisibleReplies,
       keys: [threadHead.id, readingContentKey(allMsgs), navigationBottomInset],
     );

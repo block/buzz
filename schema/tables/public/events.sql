@@ -6,7 +6,7 @@
 -- (community_id, created_at, id) dedupes within one, allows across.
 
 CREATE TABLE events (
-    community_id UUID NOT NULL REFERENCES communities(id),
+    community_id UUID NOT NULL,
     id          BYTEA NOT NULL,
     pubkey      BYTEA NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL,

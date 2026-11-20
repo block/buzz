@@ -3,12 +3,18 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/theme/theme_provider.dart';
 import '../../../shared/community/community_provider.dart';
+import '../../../shared/me/me_sync.dart';
 import 'channel_sections_manager.dart';
 import 'channel_sections_storage.dart';
+import 'workspace_layout.dart';
 
 class ChannelSectionsState {
   final bool isReady;
   final ChannelSectionStore store;
+
+  /// Desktop's unified layout head, when it has saved one. Legacy group edits
+  /// no longer reach desktop once it exists.
+  final WorkspaceRecord? workspace;
 
   /// Bumped on every change to force downstream rebuilds.
   final int version;
@@ -16,8 +22,11 @@ class ChannelSectionsState {
   const ChannelSectionsState({
     this.isReady = false,
     this.store = const ChannelSectionStore(),
+    this.workspace,
     this.version = 0,
   });
+
+  bool get editable => workspace == null;
 }
 
 class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
@@ -87,14 +96,15 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
     return ChannelSectionsState(
       isReady: false,
       store: manager.store,
+      workspace: manager.workspace,
       version: 1,
     );
   }
 
   void createSection(String name) => _manager?.createSection(name);
 
-  void renameSection(String sectionId, String newName) =>
-      _manager?.renameSection(sectionId, newName);
+  void renameSection(String sectionId, String? newName, {String? icon}) =>
+      _manager?.renameSection(sectionId, newName, icon: icon);
 
   void deleteSection(String sectionId) {
     final manager = _manager;
@@ -119,6 +129,7 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
     state = ChannelSectionsState(
       isReady: _isInitialized,
       store: manager.store,
+      workspace: manager.workspace,
       version: state.version + 1,
     );
   }
@@ -141,4 +152,15 @@ final channelSectionsCryptoProvider = Provider<ChannelSectionsCrypto?>((ref) {
   } catch (_) {
     return null;
   }
+});
+
+/// The workspaces and section order the desktop sidebar renders for this
+/// account and community.
+final sidebarLayoutProvider = Provider<WorkspaceLayout>((ref) {
+  final sections = ref.watch(channelSectionsProvider);
+  return effectiveWorkspaceLayout(
+    unified: sections.workspace,
+    team: sections.store,
+    solo: ref.watch(meGroupsProvider).value,
+  );
 });

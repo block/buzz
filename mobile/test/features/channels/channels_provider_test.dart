@@ -21,8 +21,12 @@ import 'package:buzz/shared/channels/open_channel_directory_storage.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart';
+import 'package:buzz/features/channels/channel_unread.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
+import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
+import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
@@ -32,14 +36,17 @@ import 'package:buzz/features/activity/inbox_read_state.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 part 'channels_provider_live_cases.dart';
+part 'channels_provider_huddle_cases.dart';
 part 'channels_provider_deletion_cases.dart';
 part 'channels_provider_terminal_cases.dart';
 part 'channels_provider_readiness_cases.dart';
 part 'channels_provider_request_path_cases.dart';
 part 'channels_provider_activity_cases.dart';
 part 'channels_provider_join_cases.dart';
+part 'channels_provider_follow_cases.dart';
 part 'channels_provider_saved_directory_cases.dart';
 part 'channels_provider_thread_interest_cases.dart';
+part 'channels_provider_unread_revision_cases.dart';
 
 /// Tests for [ChannelsNotifier] in the pure-Nostr world.
 ///
@@ -54,11 +61,14 @@ part 'channels_provider_thread_interest_cases.dart';
 /// records [subscribe] calls so we can assert filter shapes and emit live
 /// events on demand.
 void main() {
+  _huddleNavigationCases();
   _unreadReadinessCases();
   _unreadDeletionCases();
+  _unreadRevisionCases();
   _requestPathCases();
   _threadActivityCases();
   _confirmedJoinCases();
+  _threadFollowCases();
   _savedDirectoryCases();
   _threadInterestCases();
   const myPk = 'me';
@@ -3693,6 +3703,143 @@ void main() {
     await _waitUntil(() => session.subscribeFilters.length == 1);
     expect(session.subscribeFilters, hasLength(1));
   });
+
+  // A reply also sent to the channel shows in the timeline, but it is still a
+  // thread reply: it dots only when it mentions the reader or sits in one of
+  // their threads. Elsewhere it bolds the channel like a top-level post.
+  group('replies also sent to the channel', () {
+    final otherRoot = 'a' * 64;
+    final ownRoot = 'b' * 64;
+    bool isUnread(List<NostrFilter> batch) =>
+        batch.isNotEmpty && batch.every((filter) => filter.since != null);
+    NostrEvent post(
+      String id,
+      int createdAt, {
+      String author = 'alice',
+      String? parentId,
+      bool broadcast = false,
+      bool mention = false,
+    }) => NostrEvent(
+      id: id,
+      pubkey: author,
+      createdAt: createdAt,
+      kind: EventKind.streamMessageV2,
+      tags: [
+        const ['h', _channelA],
+        if (parentId != null) ['e', parentId, '', 'reply'],
+        if (broadcast) const ['broadcast', '1'],
+        if (mention) const ['p', myPk],
+      ],
+      content: 'hi',
+      sig: 'sig',
+    );
+
+    for (final (name, setup, follow, mention, dotted) in [
+      ("someone else's thread", <NostrEvent>[], false, false, false),
+      (
+        "someone else's thread, mentioning the reader",
+        <NostrEvent>[],
+        false,
+        true,
+        true,
+      ),
+      ('a thread the reader follows', <NostrEvent>[], true, false, true),
+      (
+        'a thread the reader started',
+        [post(ownRoot, 10, author: myPk)],
+        false,
+        false,
+        true,
+      ),
+      (
+        'a thread the reader replied in',
+        [post('own-reply', 11, author: myPk, parentId: otherRoot)],
+        false,
+        false,
+        true,
+      ),
+    ]) {
+      test('$name ${dotted ? 'dots' : 'only bolds'} the channel', () async {
+        final root = setup.any((event) => event.id == ownRoot)
+            ? ownRoot
+            : otherRoot;
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [_meta(id: _channelA, name: 'general')],
+        );
+        final follows = _TestFollows();
+        final container = _buildContainer(session: session, follows: follows);
+        addTearDown(container.dispose);
+        await container.read(channelsProvider.future);
+        await _waitUntil(() => session.queryBatches.any(isUnread));
+        await _settle();
+        if (follow) {
+          follows.choose(followed: {root}, channelByRoot: {root: _channelA});
+        }
+        setup.forEach(session.emit);
+        final broadcast = post(
+          'broadcast',
+          20,
+          parentId: root,
+          broadcast: true,
+          mention: mention,
+        );
+        session.emit(broadcast);
+        await _settle();
+
+        final notifier = container.read(channelsProvider.notifier);
+        final channels = container.read(channelsProvider).value!;
+        final observed =
+            notifier.observedUnreadEventsByChannel[_channelA]!['broadcast']!;
+        expect(observed.highPriority, dotted);
+        expect(observed.attention, dotted);
+        // Activity lists the thread only when the reply earns attention.
+        expect(
+          notifier.observedThreadReplies(channels),
+          dotted ? [broadcast] : isEmpty,
+        );
+        // The app icon counts it as attention only when it dots. Otherwise
+        // it is ordinary unread, the same as a new top-level post.
+        final badge = container.read(unreadBadgeProvider);
+        expect(badge.highPriorityCount, dotted ? 1 : 0);
+        expect(badge.generalUnreadCount, dotted ? 0 : 1);
+
+        void expectHighlights(
+          Map<String, int> contexts, {
+          required bool unread,
+          required bool attention,
+        }) {
+          final highlights = computeChannelListHighlights(
+            channels: channels,
+            readState: ReadStateState(
+              isReady: true,
+              pubkey: myPk,
+              contexts: contexts,
+              version: 0,
+            ),
+            channelsNotifier: notifier,
+          );
+          expect(highlights.unread, unread ? {_channelA} : isEmpty);
+          expect(highlights.attention, attention ? {_channelA} : isEmpty);
+        }
+
+        expectHighlights(const {}, unread: !dotted, attention: dotted);
+        // Read by its own mark either way, as desktop reads it: reaching the
+        // bottom of the channel does not read it.
+        expect(observed.channelCatchUp, isFalse);
+        expectHighlights(
+          {activityContextKey(_channelA): 100},
+          unread: !dotted,
+          attention: dotted,
+        );
+        expectHighlights(
+          {msgContextKey('broadcast'): 20},
+          unread: false,
+          attention: false,
+        );
+      });
+    }
+  });
 }
 
 const _channelA = '11111111-1111-4111-8111-111111111111';
@@ -3749,6 +3896,8 @@ NostrEvent _meta({
   String visibility = 'open',
   int createdAt = 1,
   int? ttlSeconds,
+  String? creator,
+  String? description,
   bool archived = false,
   bool unlisted = false,
   List<String> participants = const [],
@@ -3760,6 +3909,8 @@ NostrEvent _meta({
   tags: [
     ['d', id],
     ['name', name],
+    if (creator != null) ['P', creator],
+    if (description != null) ['about', description],
     ['t', channelType],
     [visibility == 'private' ? 'private' : 'public'],
     if (ttlSeconds != null) ['ttl', '$ttlSeconds'],
@@ -3774,6 +3925,7 @@ NostrEvent _meta({
 ProviderContainer _buildContainer({
   required _FakeRelaySession session,
   _TestMutes? mutes,
+  _TestFollows? follows,
   List<Override> overrides = const [],
 }) {
   return ProviderContainer(
@@ -3781,6 +3933,7 @@ ProviderContainer _buildContainer({
     overrides: [
       ...overrides,
       if (mutes != null) channelMutesProvider.overrideWith(() => mutes),
+      if (follows != null) threadFollowsProvider.overrideWith(() => follows),
       appLifecycleProvider.overrideWith(() => _FakeAppLifecycleNotifier()),
       relaySessionProvider.overrideWith(() => session),
       // Route the pubkey through a mutable notifier so tests can switch the
@@ -3859,6 +4012,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     this.maxMetadataPageRequests,
     this.hiddenDmEvents = const [],
     this.huddleStarts = const [],
+    this.creations = const [],
     this.recentMessages = const [],
     this.deletionChannels = const {},
     this.enforceHistoryLimits = false,
@@ -3876,6 +4030,10 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final int? maxMetadataPageRequests;
   final List<NostrEvent> hiddenDmEvents;
   final List<NostrEvent> huddleStarts;
+  final List<NostrEvent> creations;
+  Completer<void>? creationGate;
+  int creationReads = 0;
+  bool failCreations = false;
   List<NostrEvent> recentMessages;
   final Map<String, String> deletionChannels;
   final bool enforceHistoryLimits;
@@ -4146,6 +4304,13 @@ class _FakeRelaySession extends RelaySessionNotifier {
         await paused.future;
       }
       return hiddenDmEvents;
+    }
+    if (filter.kinds.contains(9007)) {
+      creationReads++;
+      await creationGate?.future;
+      if (failCreations) throw Exception('receipt unavailable');
+      final ids = filter.tags['#h'] ?? const <String>[];
+      return creations.where((e) => ids.contains(e.getTagValue('h'))).toList();
     }
     if (filter.kinds.contains(EventKind.huddleStarted)) {
       // Claim the parked slot so the newer refresh's own Huddle query runs

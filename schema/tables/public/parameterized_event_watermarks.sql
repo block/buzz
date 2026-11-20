@@ -1,5 +1,5 @@
 CREATE TABLE parameterized_event_watermarks (
-    community_id  UUID NOT NULL REFERENCES communities(id),
+    community_id  UUID NOT NULL,
     kind          INT NOT NULL,
     pubkey        BYTEA NOT NULL,
     d_tag         TEXT NOT NULL,

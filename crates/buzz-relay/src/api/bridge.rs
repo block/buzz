@@ -1798,13 +1798,20 @@ async fn query_member_events(
     }
 
     // Get channels this user can access — same enforcement as WS REQ handler.
-    let mut accessible_channels = state
-        .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
+    let mut access = state
+        .get_channel_access_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    let mut accessible_channels = std::mem::take(&mut access.implicit);
     // Named-only channels (system, and types added later) are outside
     // `accessible_channels`; a filter that names one reads it in its own
     // scope only (see `handlers::system_channels`).
+    // A strong read must see the caller's own just-accepted write, such as a
+    // system channel it just created, so its named-only access comes from the
+    // database rather than a cached membership a peer pod may not have dropped.
+    let strong = raw_filters
+        .iter()
+        .any(|raw| matches!(extract_consistency(raw), Consistency::Strong));
     let mut named_only =
         crate::handlers::system_channels::readable_named_only_channels_for_filters(
             state,
@@ -1812,6 +1819,7 @@ async fn query_member_events(
             &pubkey_bytes,
             &filters,
             &accessible_channels,
+            (!strong).then_some(&access),
             None,
         )
         .await
@@ -2449,10 +2457,11 @@ async fn count_member_events(
     }
 
     // Get channels this user can access.
-    let mut accessible_channels = state
-        .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
+    let mut access = state
+        .get_channel_access_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    let mut accessible_channels = std::mem::take(&mut access.implicit);
     // Named-only channels (system, and types added later) are outside
     // `accessible_channels`; a filter that names one reads it in its own
     // scope only (see `handlers::system_channels`).
@@ -2463,6 +2472,7 @@ async fn count_member_events(
             &pubkey_bytes,
             &filters,
             &accessible_channels,
+            Some(&access),
             None,
         )
         .await

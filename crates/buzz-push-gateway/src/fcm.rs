@@ -5,7 +5,10 @@
 //! to live derived from the delivery's expiry: no relay-supplied bytes reach it.
 
 use std::{
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -18,6 +21,7 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::apns::{DeliveryAttempt, DeliveryOutcome, PushTransport};
+use crate::fcm_federation::FederatedMinter;
 
 /// The one collapse key every wake carries. FCM replaces a wake it is still
 /// holding for an unreachable phone, so a phone coming back online gets one
@@ -38,6 +42,8 @@ const ACCESS_TOKEN_REFRESH_MARGIN_SECONDS: i64 = 120;
 const TOKEN_FAILURE_BACKOFF: Duration = Duration::from_secs(5);
 /// FCM asks senders to wait at least a minute after a quota error.
 const QUOTA_RETRY_FLOOR_SECONDS: i64 = 60;
+/// The whole of one token mint, however many requests it chains.
+const MINT_DEADLINE: Duration = Duration::from_secs(15);
 
 /// Service account setup failure. It carries no credential material.
 #[derive(Debug, Error)]
@@ -45,6 +51,10 @@ pub enum FcmError {
     /// The service account key is missing a field, malformed or not RSA.
     #[error("invalid FCM service account credential")]
     Credential,
+    /// The credential file or the environment it depends on is unusable. The
+    /// reason is a fixed message and carries no credential material.
+    #[error("invalid FCM credential configuration: {0}")]
+    Configuration(&'static str),
 }
 
 #[derive(Deserialize)]
@@ -79,11 +89,61 @@ impl TokenState {
 }
 
 /// The ways a delivery cannot obtain an access token.
-enum TokenFault {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TokenFault {
     /// The token endpoint answered but refused the credential.
     Rejected,
     /// The token endpoint could not be reached or is unhealthy.
     Unavailable,
+}
+
+/// A failed mint: the fault class deliveries see, and which hop failed, for
+/// the one log line operators get. It carries no credential material.
+#[derive(Debug)]
+pub(crate) struct MintFailure {
+    pub(crate) fault: TokenFault,
+    pub(crate) hop: &'static str,
+    pub(crate) status: Option<u16>,
+}
+
+impl MintFailure {
+    pub(crate) fn rejected(hop: &'static str, status: Option<u16>) -> Self {
+        Self {
+            fault: TokenFault::Rejected,
+            hop,
+            status,
+        }
+    }
+
+    pub(crate) fn unavailable(hop: &'static str, status: Option<u16>) -> Self {
+        Self {
+            fault: TokenFault::Unavailable,
+            hop,
+            status,
+        }
+    }
+}
+
+/// What mints an OAuth access token. Everything else about a token (caching,
+/// refresh, backoff) is `TokenSource`'s and identical for both.
+enum TokenMinter {
+    /// Sign a JWT with a service account key and exchange it at `token_uri`.
+    ServiceAccount(ServiceAccountMinter),
+    /// Exchange the pod's AWS identity through Google workload identity
+    /// federation.
+    Federated(FederatedMinter),
+}
+
+/// A freshly minted token and the seconds Google says it stays valid.
+pub(crate) struct MintedToken {
+    pub(crate) value: String,
+    pub(crate) lifetime_seconds: i64,
+}
+
+struct ServiceAccountMinter {
+    client_email: String,
+    token_uri: String,
+    key: KeyPair,
 }
 
 /// Direct HTTP/1.1+2 FCM HTTP v1 transport authenticated by a service account.
@@ -93,15 +153,17 @@ pub struct FcmTransport {
     tokens: Arc<TokenSource>,
 }
 
-/// The service account's OAuth access tokens. A cached token is served until
+/// The gateway's OAuth access tokens. A cached token is served until
 /// it expires; a replacement is fetched by one background task from
 /// `refresh_at`, so deliveries wait on Google's token endpoint only when no
 /// unexpired token exists (cold start, expiry or a refused token).
 struct TokenSource {
     client: reqwest::Client,
-    client_email: String,
-    token_uri: String,
-    key: KeyPair,
+    minter: TokenMinter,
+    /// Bounds one whole mint.
+    deadline: Duration,
+    /// The first mint's result is logged once.
+    first_mint_logged: AtomicBool,
     now: fn() -> i64,
     /// Never held across a network call.
     state: Mutex<TokenState>,
@@ -110,30 +172,49 @@ struct TokenSource {
 }
 
 impl FcmTransport {
-    /// Build the production transport for `project_id` from a Google service
-    /// account key JSON.
-    pub fn service_account(project_id: &str, key_json: &[u8]) -> Result<Self, FcmError> {
-        Self::with_endpoints(project_id, key_json, FCM_BASE_URL, || {
-            chrono::Utc::now().timestamp()
-        })
+    /// Build the production transport for `project_id` from a Google
+    /// credential JSON: a service account key (`"type": "service_account"`)
+    /// or an AWS workload identity federation config
+    /// (`"type": "external_account"`). Nothing is fetched here.
+    pub fn from_credentials(project_id: &str, credentials_json: &[u8]) -> Result<Self, FcmError> {
+        Self::with_endpoints(
+            project_id,
+            credentials_json,
+            FCM_BASE_URL,
+            || chrono::Utc::now().timestamp(),
+            |name| std::env::var(name).ok(),
+        )
     }
 
+    /// `env` reads the process environment the federated minter takes its AWS
+    /// region and credentials from.
     fn with_endpoints(
         project_id: &str,
-        key_json: &[u8],
+        credentials_json: &[u8],
         base_url: &str,
         now: fn() -> i64,
+        env: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, FcmError> {
-        let account: ServiceAccountKey =
-            serde_json::from_slice(key_json).map_err(|_| FcmError::Credential)?;
-        if project_id.is_empty() || account.client_email.is_empty() || account.token_uri.is_empty()
-        {
+        if project_id.is_empty() {
             return Err(FcmError::Credential);
         }
-        let key = KeyPair::from_pkcs8(&pkcs8_der(&account.private_key)?)
-            .map_err(|_| FcmError::Credential)?;
+        let credentials: serde_json::Value =
+            serde_json::from_slice(credentials_json).map_err(|_| FcmError::Credential)?;
+        let minter = match credentials.get("type").and_then(|t| t.as_str()) {
+            Some("service_account") => TokenMinter::ServiceAccount(service_account_minter(
+                serde_json::from_value(credentials).map_err(|_| FcmError::Credential)?,
+            )?),
+            Some("external_account") => {
+                TokenMinter::Federated(FederatedMinter::from_config(credentials, FCM_SCOPE, env)?)
+            }
+            _ => {
+                return Err(FcmError::Configuration(
+                    "the credential file's type must be service_account or external_account",
+                ))
+            }
+        };
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
+            .timeout(MINT_DEADLINE)
             .build()
             .map_err(|_| FcmError::Credential)?;
         Ok(Self {
@@ -141,15 +222,28 @@ impl FcmTransport {
             send_url: format!("{base_url}/v1/projects/{project_id}/messages:send"),
             tokens: Arc::new(TokenSource {
                 client,
-                client_email: account.client_email,
-                token_uri: account.token_uri,
-                key,
+                minter,
+                deadline: MINT_DEADLINE,
+                first_mint_logged: AtomicBool::new(false),
                 now,
                 state: Mutex::new(TokenState::default()),
                 fetch: Mutex::new(()),
             }),
         })
     }
+}
+
+fn service_account_minter(account: ServiceAccountKey) -> Result<ServiceAccountMinter, FcmError> {
+    if account.client_email.is_empty() || account.token_uri.is_empty() {
+        return Err(FcmError::Credential);
+    }
+    let key =
+        KeyPair::from_pkcs8(&pkcs8_der(&account.private_key)?).map_err(|_| FcmError::Credential)?;
+    Ok(ServiceAccountMinter {
+        client_email: account.client_email,
+        token_uri: account.token_uri,
+        key,
+    })
 }
 
 impl TokenSource {
@@ -201,6 +295,7 @@ impl TokenSource {
     /// Request a token and record the result. Callers hold `fetch`.
     async fn fetch_token(&self) -> Result<String, TokenFault> {
         let result = self.request_access_token((self.now)()).await;
+        self.log_mint(&result);
         let mut state = self.state.lock().await;
         match result {
             Ok(token) => {
@@ -209,10 +304,34 @@ impl TokenSource {
                 state.failed_at = None;
                 Ok(value)
             }
-            Err(fault) => {
+            Err(failure) => {
                 state.failed_at = Some(Instant::now());
-                Err(fault)
+                Err(failure.fault)
             }
+        }
+    }
+
+    /// Log the first successful mint once, and every failed one, so a broken
+    /// setup (or a federation binding removed after startup) shows in the logs.
+    /// The failure backoff bounds how often a failure can log.
+    fn log_mint(&self, result: &Result<CachedToken, MintFailure>) {
+        let credential = match self.minter {
+            TokenMinter::ServiceAccount(_) => "service_account",
+            TokenMinter::Federated(_) => "external_account",
+        };
+        match result {
+            Ok(_) => {
+                if !self.first_mint_logged.swap(true, Ordering::Relaxed) {
+                    tracing::info!(credential, "first FCM access token minted");
+                }
+            }
+            Err(failure) => tracing::warn!(
+                credential,
+                hop = failure.hop,
+                status = failure.status,
+                fault = ?failure.fault,
+                "FCM access token mint failed"
+            ),
         }
     }
 
@@ -225,16 +344,39 @@ impl TokenSource {
         }
     }
 
-    async fn request_access_token(&self, now: i64) -> Result<CachedToken, TokenFault> {
+    async fn request_access_token(&self, now: i64) -> Result<CachedToken, MintFailure> {
+        let minted = tokio::time::timeout(self.deadline, self.mint(now))
+            .await
+            .map_err(|_| MintFailure::unavailable("deadline", None))??;
+        let lifetime = minted
+            .lifetime_seconds
+            .clamp(0, ACCESS_TOKEN_LIFETIME_SECONDS);
+        Ok(CachedToken {
+            value: minted.value,
+            refresh_at: now + lifetime - ACCESS_TOKEN_REFRESH_MARGIN_SECONDS,
+            expires_at: now + lifetime,
+        })
+    }
+
+    async fn mint(&self, now: i64) -> Result<MintedToken, MintFailure> {
+        match &self.minter {
+            TokenMinter::ServiceAccount(minter) => minter.mint(&self.client, now).await,
+            TokenMinter::Federated(minter) => minter.mint(&self.client, now).await,
+        }
+    }
+}
+
+impl ServiceAccountMinter {
+    async fn mint(&self, client: &reqwest::Client, now: i64) -> Result<MintedToken, MintFailure> {
+        const HOP: &str = "service account token";
         let assertion = self
             .signed_assertion(now)
-            .map_err(|_| TokenFault::Rejected)?;
+            .map_err(|_| MintFailure::rejected(HOP, None))?;
         let body = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer")
             .append_pair("assertion", &assertion)
             .finish();
-        let response = self
-            .client
+        let response = client
             .post(&self.token_uri)
             .header(
                 reqwest::header::CONTENT_TYPE,
@@ -243,13 +385,13 @@ impl TokenSource {
             .body(body)
             .send()
             .await
-            .map_err(|_| TokenFault::Unavailable)?;
+            .map_err(|_| MintFailure::unavailable(HOP, None))?;
         let status = response.status();
         if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
-            return Err(TokenFault::Unavailable);
+            return Err(MintFailure::unavailable(HOP, Some(status.as_u16())));
         }
         if !status.is_success() {
-            return Err(TokenFault::Rejected);
+            return Err(MintFailure::rejected(HOP, Some(status.as_u16())));
         }
         #[derive(Deserialize)]
         struct TokenResponse {
@@ -259,15 +401,13 @@ impl TokenSource {
         let token = response
             .json::<TokenResponse>()
             .await
-            .map_err(|_| TokenFault::Unavailable)?;
+            .map_err(|_| MintFailure::unavailable(HOP, None))?;
         if token.access_token.is_empty() {
-            return Err(TokenFault::Rejected);
+            return Err(MintFailure::rejected(HOP, None));
         }
-        let lifetime = token.expires_in.clamp(0, ACCESS_TOKEN_LIFETIME_SECONDS);
-        Ok(CachedToken {
+        Ok(MintedToken {
             value: token.access_token,
-            refresh_at: now + lifetime - ACCESS_TOKEN_REFRESH_MARGIN_SECONDS,
-            expires_at: now + lifetime,
+            lifetime_seconds: token.expires_in,
         })
     }
 
@@ -469,6 +609,7 @@ mod tests {
             .private_key_to_pem_pkcs8()
             .unwrap();
         serde_json::to_vec(&serde_json::json!({
+            "type": "service_account",
             "client_email": "gateway@example-project.iam.example.org",
             "private_key": String::from_utf8(pem).unwrap(),
             "token_uri": token_uri,
@@ -514,6 +655,7 @@ mod tests {
             &service_account(&format!("{base}/token")),
             &base,
             || NOW,
+            |_| None,
         )
         .unwrap();
         (transport, fake)
@@ -665,6 +807,7 @@ mod tests {
             &service_account(&format!("{base}/token")),
             &base,
             now,
+            |_| None,
         )
         .unwrap();
         (Arc::new(transport), server)
@@ -877,13 +1020,37 @@ mod tests {
     fn malformed_service_account_fails_as_a_credential_error() {
         for key in [
             &b""[..],
-            b"{}",
-            br#"{"client_email":"a","private_key":"nope","token_uri":"b"}"#,
+            br#"{"type":"service_account"}"#,
+            br#"{"type":"service_account","client_email":"a","private_key":"nope","token_uri":"b"}"#,
         ] {
             assert!(matches!(
-                FcmTransport::with_endpoints("example-project", key, FCM_BASE_URL, || NOW),
+                FcmTransport::with_endpoints("example-project", key, FCM_BASE_URL, || NOW, |_| None),
                 Err(FcmError::Credential)
             ));
         }
     }
+
+    #[test]
+    fn credential_type_must_be_service_account_or_external_account() {
+        for key in [
+            &b"{}"[..],
+            br#"{"type":"authorized_user"}"#,
+            br#"{"type":7}"#,
+        ] {
+            assert!(matches!(
+                FcmTransport::with_endpoints(
+                    "example-project",
+                    key,
+                    FCM_BASE_URL,
+                    || NOW,
+                    |_| None
+                ),
+                Err(FcmError::Configuration(_))
+            ));
+        }
+    }
 }
+
+#[cfg(test)]
+#[path = "fcm_federation_tests.rs"]
+mod federation_tests;

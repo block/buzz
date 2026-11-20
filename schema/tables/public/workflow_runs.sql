@@ -1,7 +1,7 @@
 -- ── Workflow runs ─────────────────────────────────────────────────────────────
 
 CREATE TABLE workflow_runs (
-    community_id        UUID NOT NULL REFERENCES communities(id),
+    community_id        UUID NOT NULL,
     id                  UUID NOT NULL DEFAULT gen_random_uuid(),
     workflow_id         UUID NOT NULL,
     status              run_status NOT NULL DEFAULT 'pending',
@@ -20,9 +20,7 @@ CREATE TABLE workflow_runs (
     CONSTRAINT workflow_runs_cause_source_check
         CHECK (cause_source IN ('event', 'schedule', 'webhook', 'manual')),
     CONSTRAINT workflow_runs_cause_pubkey_check
-        CHECK (length(cause_pubkey) = 32),
-    FOREIGN KEY (community_id, workflow_id)
-        REFERENCES workflows (community_id, id) ON DELETE CASCADE
+        CHECK (length(cause_pubkey) = 32)
 );
 
 CREATE INDEX idx_workflow_runs_workflow ON workflow_runs (community_id, workflow_id);
