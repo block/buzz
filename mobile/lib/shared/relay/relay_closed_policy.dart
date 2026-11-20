@@ -90,8 +90,20 @@ bool isRelayAccessDenied(Object error) {
 
 /// A channel-level refusal, distinct from a session authorization failure.
 bool isRelayChannelAccessDenied(Object error) {
-  if (error is RelayException && error.statusCode == 403) return true;
-  final message = error.toString().trim().toLowerCase().replaceFirst(
+  var reason = error.toString();
+  if (error is RelayException) {
+    if (error.statusCode != 403) return false;
+    reason = error.body;
+    try {
+      final decoded = jsonDecode(reason);
+      if (decoded is Map<String, dynamic> && decoded['error'] is String) {
+        reason = decoded['error'] as String;
+      }
+    } on FormatException {
+      // Relay admission can return plain text.
+    }
+  }
+  final message = reason.trim().toLowerCase().replaceFirst(
     RegExp(r'^exception:\s*'),
     '',
   );

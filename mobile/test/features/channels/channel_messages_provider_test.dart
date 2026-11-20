@@ -92,7 +92,10 @@ void main() {
     const page = (channelId: _channelId, rootId: '');
     final root = await Directory.systemTemp.createTemp('buzz-access-cache');
     addTearDown(() => root.delete(recursive: true));
-    final denial = RelayException(403, 'not a member');
+    final denial = RelayException(
+      403,
+      '{"error":"restricted: not a channel member"}',
+    );
     final relay = _RecordingRelaySessionNotifier(queryResults: [denial]);
     final container = ProviderContainer(
       overrides: [
@@ -153,6 +156,7 @@ void main() {
       final relay = _RecordingRelaySessionNotifier(
         queryResults: [
           [event, _bounds()],
+          RelayException(403, 'authorization denied\n'),
           lateHistory.future,
         ],
       );
@@ -179,6 +183,16 @@ void main() {
 
       relay.closeLive('restricted: authorization denied');
       await _pumpEventQueue();
+      expect(online.read(messages).value, [event]);
+      expect(store.isCurrent(ticket), isTrue);
+      expect(await store.read(ticket), [event]);
+
+      relay.historyError = Exception('restricted: authorization denied');
+      relay.setConnected(false);
+      await _pumpEventQueue();
+      relay.setConnected(true);
+      await _pumpEventQueue();
+      expect(relay.queryFilters, hasLength(2));
       expect(online.read(messages).value, [event]);
       expect(store.isCurrent(ticket), isTrue);
       expect(await store.read(ticket), [event]);
@@ -334,7 +348,7 @@ void main() {
   test(
     'window access denial cannot be masked by a transient WS fallback',
     () async {
-      final denial = RelayException(403, 'not a member');
+      final denial = RelayException(403, 'restricted: not a channel member');
       final relay = _RecordingRelaySessionNotifier(
         queryResults: [
           [_event(id: 'private-transcript', createdAt: 10), _bounds()],
