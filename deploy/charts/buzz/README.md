@@ -631,11 +631,13 @@ default so long-lived WebSocket connections have time to drain.
 
 ## Upgrades
 
-Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run at startup, gated by `BUZZ_AUTO_MIGRATE` (default `true`). Multiple replicas race-safely behind a Postgres advisory lock. Outside the required stop below, `helm upgrade` is the entire upgrade procedure.
+Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run at startup, gated by `BUZZ_AUTO_MIGRATE` (default `true`). Multiple replicas race-safely behind a Postgres advisory lock. Outside the required stops below, `helm upgrade` is the entire upgrade procedure.
 
 **Required stop before migrations 0089–0091, 0095 and 0096.** These migrations drop database triggers whose work the relay now does in application code. Before you upgrade to a build that contains any of them, every relay pod, job and rollback target must run a stop build. An older relay that keeps serving after they run can write data the dropped triggers used to refuse, and some older builds refuse to start without the 0032 roster trigger or the community tombstone trigger. [`docs/trigger-retirement-deployment.md`](../../../docs/trigger-retirement-deployment.md) names the stop build and gives the procedure and rollback.
 
 **Required stop before migration 0100.** Migrations 0098–0100 undo migration 0097, and 0100 drops the columns and indexes that 0097 added. No tagged relay release reads them. Only rolling images built from commit `eebf62b6` (#9650) up to, but not including, `a4061916` (#9689) do. Their channel artifact reads and writes fail once 0100 runs. If any relay pod, job or rollback target runs one of those images, move all of them to `sha-a406191` or later before you upgrade. To roll back after 0100 has run, set `migrate.autoMigrate=false` first, because an older binary with auto-migration on refuses a database that has migrations it does not know. Then roll back to `sha-a406191` or later, never to an image in that range. Migration 0098 refuses a database whose `artifact_heads` primary key is not `(community_id, artifact_id)`. Recover such a database as #9689 describes before upgrading.
+
+**Required stop before migration 0105.** Migration 0105 drops the unused `delivery_log` and `subscriptions` tables. Builds before commit `7e94503f` (#9746), including `relay-v0.3.0`, still use them: community deletion fails its catalog check, user deletion fails, and startup partition maintenance logs errors. No data is lost. Before you upgrade to a build that contains 0105, move every relay pod, job and rollback target to `sha-7e94503` or later, or to the first tagged relay release that contains #9746. To roll back after 0105 has run, set `migrate.autoMigrate=false` first, then roll back to that build or later.
 
 Apply migrations before rolling the relay; for large installations, prefer a controlled `buzz-admin migrate` job with PostgreSQL lock monitoring before the code rollout.
 

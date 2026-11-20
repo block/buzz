@@ -4349,15 +4349,17 @@ mod postgres_tests {
                 .expect("seed delivery table");
         }
         run_migrations(&pool).await.expect("apply 0105");
-        let present: (bool, bool, bool) = sqlx::query_as(
+        let present: (bool, bool, bool, bool, bool) = sqlx::query_as(
             "SELECT to_regclass('delivery_log') IS NOT NULL, \
              to_regclass('subscriptions') IS NOT NULL, \
-             to_regtype('delivery_method') IS NOT NULL",
+             to_regtype('delivery_method') IS NOT NULL, \
+             to_regtype('subscription_status') IS NOT NULL, \
+             to_regtype('pause_reason') IS NOT NULL",
         )
         .fetch_one(&pool)
         .await
         .expect("look up dropped objects");
-        assert_eq!(present, (false, false, false));
+        assert_eq!(present, (false, false, false, false, false));
     }
 
     /// Verify migration 0044 applies cleanly against a DB that has rows in
