@@ -188,69 +188,129 @@ void main() {
     );
   }
 
+  // Mounts only the push bootstrap over a community with the given relay URL
+  // and opt-in, recording the native registration calls.
+  Future<List<String>> pumpBootstrap(
+    WidgetTester tester, {
+    required TargetPlatform platform,
+    required String relayUrl,
+    required bool enabled,
+  }) async {
+    debugDefaultTargetPlatformOverride = platform;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final storage = CommunityStorage(secure: FakeSecureStorage());
+    final gateway = FakePushGateway(
+      nowSeconds: () => DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    );
+    debugAndroidPushAuthority = AndroidPushAuthority(
+      keystore: FakeAndroidKeystore(),
+      gateway: fakeGatewayClient(gateway),
+      store: _MemoryStore(),
+      sleep: (_) async {},
+    );
+    addTearDown(() => debugAndroidPushAuthority = null);
+    final calls = <String>[];
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    for (final channel in const [
+      MethodChannel('buzz/push_registration'),
+      MethodChannel('buzz/push'),
+    ]) {
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call.method);
+        return null;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    }
+    final community = Community.create(name: 'Team', relayUrl: relayUrl)
+        .copyWith(
+          nsec: nostr.Nip19.encode(
+            prefix: nostr.Nip19Prefix.nsec,
+            data: '1' * 64,
+          ),
+          pushNotificationsEnabled: enabled,
+        );
+    await storage.save(community);
+    await storage.saveActiveId(community.id);
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          authProvider.overrideWith(_Auth.new),
+          communityStorageProvider.overrideWithValue(storage),
+          communitySnapshotWriterProvider.overrideWithValue(
+            (communities) async {},
+          ),
+          buzzPushLeaseRevocationStorageProvider.overrideWithValue(
+            BuzzPushLeaseRevocationStorage(secure: FakeSecureStorage()),
+          ),
+          relaySessionProvider.overrideWith(_Connected.new),
+          myPubkeyProvider.overrideWithValue(nostr.Keys('1' * 64).public),
+          buzzPushDescriptorFetcherProvider.overrideWithValue(
+            (_) async => _descriptor,
+          ),
+          appLifecycleProvider.overrideWith(_Lifecycle.new),
+        ],
+        child: const BuzzPushBootstrap(child: SizedBox()),
+      ),
+    );
+    await tester.pumpAndSettle();
+    return calls;
+  }
+
+  Future<void> unmount(WidgetTester tester) async {
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pumpAndSettle();
+    // Foundation checks its debug variables before teardowns run.
+    debugDefaultTargetPlatformOverride = null;
+  }
+
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
     testWidgets('a relay URL with a path does not break push on $platform', (
       tester,
     ) async {
-      debugDefaultTargetPlatformOverride = platform;
-      addTearDown(() => debugDefaultTargetPlatformOverride = null);
-      SharedPreferences.setMockInitialValues({});
-      final prefs = await SharedPreferences.getInstance();
-      final storage = CommunityStorage(secure: FakeSecureStorage());
-      final gateway = FakePushGateway(
-        nowSeconds: () => DateTime.now().millisecondsSinceEpoch ~/ 1000,
-      );
-      debugAndroidPushAuthority = AndroidPushAuthority(
-        keystore: FakeAndroidKeystore(),
-        gateway: fakeGatewayClient(gateway),
-        store: _MemoryStore(),
-        sleep: (_) async {},
-      );
-      addTearDown(() => debugAndroidPushAuthority = null);
-      const nativePush = MethodChannel('buzz/push_registration');
-      const nativeBridge = MethodChannel('buzz/push');
-      final messenger =
-          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-      for (final channel in [nativePush, nativeBridge]) {
-        messenger.setMockMethodCallHandler(channel, (call) async => null);
-        addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
-      }
-      final community = Community.create(
-        name: 'Team',
+      await pumpBootstrap(
+        tester,
+        platform: platform,
         relayUrl: 'https://relay.example/team',
-      ).copyWith(pushNotificationsEnabled: true);
-      await storage.save(community);
-      await storage.saveActiveId(community.id);
-
-      await tester.pumpWidget(
-        ProviderScope(
-          overrides: [
-            savedPrefsProvider.overrideWithValue(prefs),
-            authProvider.overrideWith(_Auth.new),
-            communityStorageProvider.overrideWithValue(storage),
-            communitySnapshotWriterProvider.overrideWithValue(
-              (communities) async {},
-            ),
-            buzzPushLeaseRevocationStorageProvider.overrideWithValue(
-              BuzzPushLeaseRevocationStorage(secure: FakeSecureStorage()),
-            ),
-            relaySessionProvider.overrideWith(_Connected.new),
-            buzzPushDescriptorFetcherProvider.overrideWithValue(
-              (_) async => _descriptor,
-            ),
-            appLifecycleProvider.overrideWith(_Lifecycle.new),
-          ],
-          child: const BuzzPushBootstrap(child: SizedBox()),
-        ),
+        enabled: true,
       );
-      await tester.pumpAndSettle();
 
       expect(tester.takeException(), isNull);
-      expect(find.byType(SizedBox), findsWidgets);
-      await tester.pumpWidget(const SizedBox.shrink());
-      await tester.pumpAndSettle();
-      debugDefaultTargetPlatformOverride = null;
+      await unmount(tester);
     });
+  }
+
+  for (final enabled in [true, false]) {
+    testWidgets(
+      'resuming the app ${enabled ? 'refreshes' : 'does not fetch'} the FCM '
+      'token',
+      (tester) async {
+        fcmDeviceToken.value = 'test-fcm-token';
+        addTearDown(() => fcmDeviceToken.value = null);
+        final calls = await pumpBootstrap(
+          tester,
+          platform: TargetPlatform.android,
+          relayUrl: 'https://relay.example',
+          enabled: enabled,
+        );
+        calls.clear();
+
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.inactive,
+        );
+        tester.binding.handleAppLifecycleStateChanged(
+          AppLifecycleState.resumed,
+        );
+        await tester.pumpAndSettle();
+
+        expect(calls.contains('refreshToken'), enabled);
+        await unmount(tester);
+      },
+    );
   }
 }
 

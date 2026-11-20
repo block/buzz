@@ -344,6 +344,12 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
       :memberPubkey,
       :descriptor,
     ) = inputs;
+    final shouldRegister =
+        _ready(session, config, community, memberPubkey) &&
+        buzzPushLifecycleEnabled(community: community, descriptor: descriptor);
+    // Read by the resume listener, which outlives a build.
+    final registering = useRef(shouldRegister);
+    registering.value = shouldRegister;
     final enablementEpoch = useRef(0);
     useEffect(() {
       // Each opt-in needs a fresh active lease even when endpoint, executor,
@@ -359,7 +365,9 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
       final listener = AppLifecycleListener(
         onResume: () {
           _runRevocationOutbox(revocationOutbox.trigger);
-          // FCM rotates its token without telling a stopped app.
+          // FCM rotates its token without telling a stopped app. Only a phone
+          // that registers for push has one to refresh.
+          if (!registering.value) return;
           unawaited(
             refreshBuzzPushToken().catchError((
               Object error,
@@ -595,12 +603,7 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     );
 
     return BuzzPushRegistrationBootstrap(
-      shouldRegister:
-          _ready(session, config, community, memberPubkey) &&
-          buzzPushLifecycleEnabled(
-            community: community,
-            descriptor: descriptor,
-          ),
+      shouldRegister: shouldRegister,
       attemptKey: '${community?.id}|${config.baseUrl}',
       child: const SizedBox.shrink(),
     );
