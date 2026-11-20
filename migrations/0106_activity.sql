@@ -1,6 +1,6 @@
 -- Stored state for GET /buzz/v1/me/activity. See docs/buzz-v1-activity.md.
 -- Expand only: two new tables and nullable or constant-default columns. No
--- trigger, function, foreign key or backfill. 0106 adds the index on an
+-- trigger, function, foreign key or backfill. 0107 adds the index on an
 -- existing table.
 --
 -- channel_heads and thread_heads are caches of the event log that a read

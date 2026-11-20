@@ -487,17 +487,17 @@ These are accepted. Each is rare, and the counters above watch the first two.
 - 64 KiB write body; 1 MiB response. DB statement and lock deadlines and an
   eight-second request deadline bound the work.
 
-Apply migrations 0105, 0106 and 0107 (or the equivalent desired schema).
-0107 adds two nullable columns, `event_mentions.read_at` and
-`personal_read_accounts.imported_at`, with no default and no index. 0105 creates
+Apply migrations 0106, 0107 and 0108 (or the equivalent desired schema).
+0108 adds two nullable columns, `event_mentions.read_at` and
+`personal_read_accounts.imported_at`, with no default and no index. 0106 creates
 `channel_heads` and `thread_heads` empty, adds nullable or defaulted columns to
 the three existing tables and makes `personal_read_frontiers.through_timestamp`
 nullable. The two shared tables have no index beyond their primary key: every
-read reaches them by key from the person's own rows. 0106 builds the one new index, on
+read reaches them by key from the person's own rows. 0107 builds the one new index, on
 `event_mentions` by person and arrival, inline and verifies it.
 `event_mentions` is large: a deployment that applies migrations out of band
-should apply 0105, build the index with `CREATE INDEX CONCURRENTLY` (the
-statement is in 0106's header), then apply 0106, which skips an index that
+should apply 0106, build the index with `CREATE INDEX CONCURRENTLY` (the
+statement is in 0107's header), then apply 0107, which skips an index that
 already exists. The previous release never reads or writes the new columns, and its
 inserts keep working against the migrated schema.
 
@@ -571,10 +571,10 @@ must use the established authenticated operational process and explicitly scope
 both community and actor; never equate the read-time horizon with data erasure.
 
 There is no down migration, and disabling the API is not a rollback. A relay
-built before 0105 that restarts with `BUZZ_AUTO_MIGRATE=true` (the Helm default)
+built before 0106 that restarts with `BUZZ_AUTO_MIGRATE=true` (the Helm default)
 refuses to start on the migrated schema. Whole-community deletion run from a
-build before 0105 rejects the two new tables. A deletion approved on the
-earlier schema and not yet fenced fails structural revalidation after 0105:
+build before 0106 rejects the two new tables. A deletion approved on the
+earlier schema and not yet fenced fails structural revalidation after 0106:
 take pending approvals back through operator review before rollout, and do not
 rewrite them.
 

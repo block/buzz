@@ -1036,22 +1036,25 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 107);
+        assert_eq!(migrations.len(), 108);
+        assert_eq!(migrations[107].version, 108);
+        assert!(migrations[107]
+            .sql
+            .as_str()
+            .contains("ADD COLUMN imported_at TIMESTAMPTZ"));
         assert_eq!(migrations[106].version, 107);
         assert!(migrations[106]
             .sql
             .as_str()
-            .contains("ADD COLUMN imported_at TIMESTAMPTZ"));
+            .contains("idx_event_mentions_pubkey_received"));
         assert_eq!(migrations[105].version, 106);
         assert!(migrations[105]
             .sql
             .as_str()
-            .contains("idx_event_mentions_pubkey_received"));
-        assert_eq!(migrations[104].version, 105);
-        assert!(migrations[104]
-            .sql
-            .as_str()
             .contains("CREATE TABLE thread_heads"));
+        assert_eq!(migrations[104].version, 105);
+        assert!(strip_sql_comments(migrations[104].sql.as_str())
+            .contains("ADD COLUMN finished BOOLEAN NOT NULL DEFAULT true;"));
         assert_eq!(migrations[103].version, 104);
         let event_table_drops = strip_sql_comments(migrations[103].sql.as_str());
         assert!(event_table_drops
@@ -3039,21 +3042,21 @@ mod postgres_tests {
             .sql
             .as_str();
         assert!(through_message.contains("DROP COLUMN threads_through_timestamp"));
-        // 0105 adds the activity columns and lets a frontier have no position.
+        // 0106 adds the activity columns and lets a frontier have no position.
         let activity = MIGRATOR
             .iter()
-            .find(|m| m.version == 105)
+            .find(|m| m.version == 106)
             .expect("activity migration")
             .sql
             .as_str();
         assert!(activity.contains("ALTER COLUMN through_timestamp DROP NOT NULL"));
         assert!(activity.contains("ADD COLUMN engaged_at TIMESTAMPTZ"));
         let account_seq_column = "seq bigint not null default 0, ";
-        // 0107 records when the NIP-RS read state was carried over.
+        // 0108 records when the NIP-RS read state was carried over.
         let account_imported_column = "imported_at timestamptz, ";
         assert!(MIGRATOR
             .iter()
-            .find(|m| m.version == 107)
+            .find(|m| m.version == 108)
             .expect("per-message read migration")
             .sql
             .as_str()

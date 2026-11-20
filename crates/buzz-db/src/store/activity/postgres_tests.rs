@@ -1195,7 +1195,7 @@ async fn activity_backfill_restores_history_from_before_the_tables() {
     assert!(before.0.iter().any(|row| row.kind == RowKind::Thread));
     assert_eq!(before.1.len(), 1);
 
-    // As the rows were before migration 0105.
+    // As the rows were before migration 0106.
     f.forget().await;
     for sql in [
         "DELETE FROM personal_read_frontiers WHERE community_id = $1 AND root_id <> ''::bytea",
