@@ -17,6 +17,9 @@ import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/native_media_headers.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/relay/relay_session_types.dart';
+import 'package:buzz/shared/theme/theme_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'dart:convert';
@@ -153,9 +156,68 @@ class _RecordingReactionActions implements ChannelActions {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
+/// Reaction actions whose publish fails as the relay does while offline.
+class _OfflineReactionActions implements ChannelActions {
+  @override
+  Future<void> removeReaction(String eventId, String emoji) async =>
+      throw RelayNotConnectedError();
+  @override
+  Future<void> addReaction(
+    String eventId,
+    String emoji, {
+    required String targetAuthor,
+  }) async => throw RelayNotConnectedError();
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
 void main() {
   combinedReactionTests();
   shortcodeReactionTests();
+
+  for (final mine in [false, true]) {
+    final verb = mine ? 'remove' : 'add';
+    testWidgets('an offline tap to $verb a reaction says so', (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final message = TimelineMessage(
+        id: 'message',
+        pubkey: _alice,
+        createdAt: 1,
+        content: '',
+        reactions: [
+          TimelineReaction(
+            emoji: _fire,
+            count: 1,
+            reactedByCurrentUser: mine,
+            currentUserReactionId: mine ? 'reaction' : null,
+            userPubkeys: const [_alice],
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            channelActionsProvider.overrideWithValue(_OfflineReactionActions()),
+          ],
+          child: Consumer(
+            builder: (context, ref, _) => TextButton(
+              onPressed: () => toggleReaction(context, ref, message, _fire),
+              child: const Text('Toggle'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Toggle'));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      expect(
+        find.text('Couldn’t $verb reaction. No connection.'),
+        findsOneWidget,
+      );
+    });
+  }
 
   testWidgets('removing the sole reaction closes the sheet', (tester) async {
     final reactions = ValueNotifier<List<TimelineReaction>>([
@@ -196,6 +258,7 @@ void main() {
         child: Consumer(
           builder: (context, ref, _) => TextButton(
             onPressed: () => toggleReaction(
+              context,
               ref,
               TimelineMessage(
                 id: 'message',

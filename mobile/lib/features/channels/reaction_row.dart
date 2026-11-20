@@ -15,6 +15,8 @@ import '../../shared/hosted/builderlab_account.dart';
 import '../../shared/hosted/hosted_relay_auth.dart';
 import '../../shared/hosted/native_media_headers.dart';
 import '../../shared/relay/relay_provider.dart';
+import '../../shared/relay/relay_session_types.dart';
+import '../../shared/widgets/feedback_snackbar.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
@@ -53,18 +55,58 @@ const _pillGlyphSize = 16.0;
 ///
 /// Used by channel detail, thread detail, and system message rows to avoid
 /// duplicating the toggle wiring.
-void toggleReaction(WidgetRef ref, TimelineMessage message, String emoji) {
+void toggleReaction(
+  BuildContext context,
+  WidgetRef ref,
+  TimelineMessage message,
+  String emoji,
+) {
   final reaction = message.reactions.where((r) => r.emoji == emoji).firstOrNull;
   if (reaction == null) return;
   final actions = ref.read(channelActionsProvider);
   if (reaction.reactedByCurrentUser && reaction.currentUserReactionId != null) {
-    actions.removeReaction(reaction.currentUserReactionId!, emoji);
+    reportReactionFailure(
+      context,
+      actions.removeReaction(reaction.currentUserReactionId!, emoji),
+      adding: false,
+    );
   } else {
     // Only adding counts as a use — removing a reaction shouldn't promote the
     // emoji in the frequently-used ranking.
     ref.read(recentEmojiProvider.notifier).record(emoji);
-    actions.addReaction(message.id, emoji, targetAuthor: message.pubkey);
+    reportReactionFailure(
+      context,
+      actions.addReaction(message.id, emoji, targetAuthor: message.pubkey),
+      adding: true,
+    );
   }
+}
+
+/// Tells the user when a reaction they just added or removed didn't reach the
+/// relay. Reaction taps don't wait for the publish, so every caller hands its
+/// publish here; otherwise a failure (most often tapping while offline) is an
+/// uncaught error and the pill just doesn't change.
+void reportReactionFailure(
+  BuildContext context,
+  Future<void> publish, {
+  required bool adding,
+}) {
+  final messenger = ScaffoldMessenger.of(context);
+  unawaited(
+    publish.catchError((Object error) {
+      final verb = adding ? 'add' : 'remove';
+      messenger.showFeedbackSnackBar(
+        SnackBar(
+          content: Text(
+            error is RelayNotConnectedError
+                ? 'Couldn’t $verb reaction. No connection.'
+                : 'Couldn’t $verb reaction. Try again.',
+          ),
+        ),
+        kind: ToastKind.error,
+      );
+    }),
+  );
 }
 
 /// Arm a burst for a reaction that is about to be added from somewhere the pill
@@ -96,9 +138,13 @@ void showAddReactionPicker({
     onSelect: (emoji) {
       ref.read(recentEmojiProvider.notifier).record(emoji);
       armReactionBurst(ref, message, emoji);
-      ref
-          .read(channelActionsProvider)
-          .addReaction(message.id, emoji, targetAuthor: message.pubkey);
+      reportReactionFailure(
+        context,
+        ref
+            .read(channelActionsProvider)
+            .addReaction(message.id, emoji, targetAuthor: message.pubkey),
+        adding: true,
+      );
     },
   );
 }

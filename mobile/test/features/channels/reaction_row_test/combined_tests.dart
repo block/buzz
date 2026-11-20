@@ -67,7 +67,7 @@ void combinedReactionTests() {
               messageId: message.id,
               channelId: 'channel',
               reactions: message.reactions,
-              onToggle: (emoji) => toggleReaction(ref, message, emoji),
+              onToggle: (emoji) => toggleReaction(context, ref, message, emoji),
             ),
           ),
         ),
