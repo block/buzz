@@ -651,6 +651,22 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         "Search service ready (Postgres FTS)"
     );
 
+    // With an OpenSearch address, admission queues searchable events in the
+    // search outbox and the indexer (spawned below) drains it. Searches stay
+    // on Postgres for now.
+    let search_indexer = match &config.opensearch {
+        Some(opensearch) => {
+            let index = buzz_search::opensearch::SearchIndex::new(opensearch)
+                .map_err(|e| anyhow::anyhow!("OpenSearch client: {}", e.kind()))?;
+            buzz_db::search_outbox::enable(db.pool())
+                .await
+                .map_err(|e| anyhow::anyhow!("search outbox: {e}"))?;
+            info!(url = %opensearch.url, "search outbox enabled");
+            Some(buzz_search::indexer::Indexer::new(db.clone(), index))
+        }
+        None => None,
+    };
+
     let workflow_config = buzz_workflow::WorkflowConfig {
         agent_mentions: config.workflow_agent_mentions,
         ..Default::default()
@@ -1134,6 +1150,11 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             url,
         ));
         info!("storage-usage delivery worker started");
+    }
+
+    if let Some(indexer) = search_indexer {
+        tokio::spawn(indexer.run());
+        info!("search indexer started");
     }
 
     // Admin outbox delivery worker — drives `relay_admin_outbox` rows.
