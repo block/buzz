@@ -16,6 +16,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 // ignore: depend_on_referenced_packages, implementation_imports
 import 'package:sentry/src/deduplication/deduplication_event_processor.dart';
+// ignore: depend_on_referenced_packages, implementation_imports
+import 'package:sentry/src/exception/dart_exception_type_identifier.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 // The SDK's own processors and integrations, so tests see what it really
 // sends rather than hand-built events.
@@ -195,10 +197,12 @@ void main() {
       transport = _MemoryTransport();
       options = SentryFlutterOptions();
       configureDiagnostics(options, 'https://key@example.org/1');
-      // The processors Sentry.init and SentryFlutter.init install.
+      // The processors and type identifier Sentry.init and SentryFlutter.init
+      // install.
       options
         ..transport = transport
         ..sendClientReports = false
+        ..prependExceptionTypeIdentifier(DartExceptionTypeIdentifier())
         ..addEventProcessor(DeduplicationEventProcessor(options))
         ..addEventProcessor(FlutterExceptionEventProcessor())
         ..addEventProcessor(FlutterEnricherEventProcessor(options))
@@ -212,7 +216,12 @@ void main() {
     final rows = <(String, Object, String)>[
       ('a parse failure', const FormatException('private-marker'), 'Format'),
       ('a bad argument', ArgumentError.value('private-marker'), 'Argument'),
-      ('a server response', StateError('body: private-marker'), 'StateError'),
+      (
+        'a Flutter framework error',
+        FlutterError('private-marker'),
+        'AssertionError',
+      ),
+      ('an ordinary exception', Exception('private-marker'), 'Exception'),
       (
         'a platform failure',
         PlatformException(
@@ -232,6 +241,26 @@ void main() {
         expect(exception['type'], contains(type));
         expect(exception['value'], DiagnosticFilter.removedText);
         expect(exception['stacktrace'], isNotNull);
+      });
+    }
+
+    const link = 'open https://e.org/f?token=private-marker';
+    final kept = <(String, Object, String, String)>[
+      ('a bad state', StateError(link), 'StateError', 'Bad state: open'),
+      ('a failed assertion', AssertionError(link), 'AssertionError', 'open'),
+      ('an unsupported call', UnsupportedError(link), 'Unsupported', 'open'),
+      ('an unimplemented call', UnimplementedError(link), 'Unimpl', 'open'),
+      ('a failed cast', _failedCast(), 'TypeError', 'is not a subtype of'),
+    ];
+    for (final (name, error, type, text) in kept) {
+      test('keeps the text of $name, without a URL query', () async {
+        await hub.captureException(error, stackTrace: StackTrace.current);
+        final sent = transport.events.single;
+
+        final exception = (sent['exception']['values'] as List).last as Map;
+        expect(exception['type'], contains(type));
+        expect(exception['value'], contains(text));
+        expect(jsonEncode(sent), isNot(contains('private-marker')));
       });
     }
 
@@ -554,6 +583,15 @@ class _ReleaseChecker extends RuntimeChecker {
   bool isReleaseMode() => true;
   @override
   bool isProfileMode() => false;
+}
+
+Object _failedCast() {
+  try {
+    // ignore: unnecessary_cast
+    return <Object>[1] as List<String>;
+  } on TypeError catch (error) {
+    return error;
+  }
 }
 
 class _MemoryTransport implements Transport {

@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 
 import 'diagnostic_reporter.dart';
@@ -7,7 +8,8 @@ import 'diagnostic_reporter.dart';
 /// (native crashes, app hangs) do not pass through it.
 ///
 /// It removes URL query strings and fragments, keeps only attributes on the
-/// allowed list, and drops breadcrumbs that are not from the app's fixed list.
+/// allowed list, drops breadcrumbs that are not from the app's fixed list, and
+/// replaces an error's text unless it is a Dart programmer error.
 /// See "One filter before anything leaves" in
 /// `docs/mobile-diagnostic-reporting.md`.
 abstract final class DiagnosticFilter {
@@ -34,7 +36,8 @@ abstract final class DiagnosticFilter {
   /// version, the release, the member, and the operating system and device.
   static const _sdkAttributePrefixes = ['sentry.', 'user.', 'os.', 'device.'];
 
-  /// Fixed wording that replaces an error's own text.
+  /// Fixed wording that replaces an error's own text, except for Dart's
+  /// programmer-error types.
   static const removedText = 'Error text removed before sending.';
 
   static const _breadcrumbCategories = {
@@ -126,6 +129,21 @@ abstract final class DiagnosticFilter {
     'trace',
   };
 
+  /// Whether the text of the error [throwable] may leave the device. Dart's
+  /// programmer-error types qualify because developers write their messages,
+  /// for example "Bad state: ref used after dispose". The risk, accepted, is
+  /// a message that interpolates a value. The SDK names a [FlutterError] an
+  /// `AssertionError` because it implements one, so this checks the error
+  /// itself rather than the type name the report carries.
+  static bool _keepsText(Object? throwable) => switch (throwable) {
+    FlutterError() => false,
+    StateError() ||
+    TypeError() ||
+    AssertionError() ||
+    UnsupportedError() => true,
+    _ => false,
+  };
+
   static final _urlTail = RegExp(
     r'''(\b[a-z][a-z0-9+.-]*://[^\s?#'"]*)[?#][^\s'"]*''',
     caseSensitive: false,
@@ -184,8 +202,13 @@ abstract final class DiagnosticFilter {
     };
     for (final exception in event.exceptions ?? const <SentryException>[]) {
       // An error's text can quote its input, a server's response body or a
-      // URL, so only its type, mechanism type and stack trace are kept.
-      if (exception.value != null) exception.value = removedText;
+      // URL, so only its type, mechanism type and stack trace are kept, and
+      // its text only for the types in [_keepsText].
+      if (exception.value case final value?) {
+        exception.value = _keepsText(exception.throwable)
+            ? stripUrlTails(value)
+            : removedText;
+      }
       exception.mechanism?.data = null;
     }
     event.breadcrumbs = [
