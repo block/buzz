@@ -374,7 +374,7 @@ async fn publish(
 }
 
 /// A second connection subscribes to the channel; the first publishes; the
-/// second must receive it. `receive` is timed from the publish to the moment
+/// second must receive it intact. `receive` is timed from the publish to the moment
 /// the event arrived on the second socket.
 async fn fanout(cfg: &Config, conn: &mut NostrWsConnection, channel: &str) -> CheckReport {
     let mut check = Check::new("fanout", cfg.stage_timeout);
@@ -430,7 +430,10 @@ async fn fanout_on(
                         subscription_id,
                         event,
                     },
-                ) if subscription_id == "fanout" && event.id == id => return Ok(at),
+                ) if subscription_id == "fanout" && event.id == id => {
+                    intact(&event)?;
+                    return Ok(at);
+                }
                 (
                     _,
                     RelayMessage::Closed {
@@ -468,7 +471,8 @@ async fn fanout_on(
     }
 }
 
-/// A fresh REQ for the channel must return the event `publish` stored.
+/// A fresh REQ for the channel must return the event `publish` stored,
+/// intact.
 async fn history(
     cfg: &Config,
     conn: &mut NostrWsConnection,
@@ -487,8 +491,9 @@ async fn history(
                     RelayMessage::Event {
                         subscription_id,
                         event,
-                    } if subscription_id == "history" => {
-                        found |= event.id == id;
+                    } if subscription_id == "history" && event.id == id => {
+                        intact(&event)?;
+                        found = true;
                     }
                     RelayMessage::Eose { subscription_id } if subscription_id == "history" => break,
                     RelayMessage::Closed {
@@ -676,6 +681,14 @@ fn http_url(ws_url: &str) -> anyhow::Result<url::Url> {
     url.set_scheme(scheme)
         .map_err(|()| anyhow!("cannot use {scheme} for {ws_url}"))?;
     Ok(url)
+}
+
+/// Fails unless `event`'s id and signature match its content. A match on
+/// the id field alone would pass an event the relay corrupted.
+fn intact(event: &Event) -> anyhow::Result<()> {
+    event
+        .verify()
+        .with_context(|| format!("event {} failed verification", event.id))
 }
 
 fn channel_filter(channel: &str) -> Filter {
@@ -903,6 +916,31 @@ mod tests {
             ttl.and_then(|t| t.content().map(str::to_owned)).as_deref(),
             Some(CHANNEL_TTL_SECS)
         );
+    }
+
+    /// The relay serves the probe's messages with altered content under
+    /// their original id. `fanout` and `history` must fail, not pass on the
+    /// id alone.
+    #[tokio::test]
+    async fn a_corrupted_event_under_its_original_id_fails_fanout_and_history() {
+        let relay = fake_relay::start(fake_relay::Script {
+            corrupt: [KIND_MESSAGE].into(),
+            ..Default::default()
+        })
+        .await;
+        let report = run(&config(relay.url.clone())).await;
+
+        for (name, stage) in [("fanout", "receive"), ("history", "req_eose")] {
+            let c = check(&report, name);
+            assert_eq!((c.result, c.failed_stage), (Outcome::Failure, Some(stage)));
+            assert!(
+                c.error.as_deref().unwrap().contains("failed verification"),
+                "{c:?}"
+            );
+        }
+        for name in ["channel_create", "publish", "access_control", "cleanup"] {
+            assert_eq!(check(&report, name).result, Outcome::Success, "{name}");
+        }
     }
 
     /// A refusal for another reason, or a closed socket, is not proof the

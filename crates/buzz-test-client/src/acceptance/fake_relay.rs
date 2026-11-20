@@ -1,5 +1,6 @@
 //! A scripted relay for the probe's tests: just enough NIP-01 and NIP-42 to
-//! run every check, with knobs to delay, drop or close on chosen writes.
+//! run every check, with knobs to delay, drop or close on chosen writes,
+//! or to corrupt the events it serves.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -32,6 +33,9 @@ pub struct Script {
     pub close_after: HashSet<u16>,
     /// The answer to a write without AUTH.
     pub unauthenticated: Unauthenticated,
+    /// Serve events of these kinds, stored and live, with altered content
+    /// under their original id and signature.
+    pub corrupt: HashSet<u16>,
 }
 
 impl Default for Script {
@@ -41,11 +45,23 @@ impl Default for Script {
             no_ack: HashSet::new(),
             close_after: HashSet::new(),
             unauthenticated: Unauthenticated::Reason(format!("{AUTH_REQUIRED} not authenticated")),
+            corrupt: HashSet::new(),
         }
     }
 }
 
 type Outbox = mpsc::UnboundedSender<String>;
+
+impl Script {
+    /// `event` as the relay serves it.
+    fn served(&self, event: &Event) -> Value {
+        let mut value = json!(event);
+        if self.corrupt.contains(&event.kind.as_u16()) {
+            value["content"] = json!(format!("{} (corrupted)", event.content));
+        }
+        value
+    }
+}
 
 struct Shared {
     script: Script,
@@ -125,7 +141,7 @@ async fn serve(tcp: tokio::net::TcpStream, shared: Arc<Shared>) {
                     let stored = shared.events.lock().unwrap().clone();
                     for event in stored {
                         if ids.contains(&json!(event.id.to_hex())) {
-                            send(&out, json!(["EVENT", sub, event]));
+                            send(&out, json!(["EVENT", sub, shared.script.served(&event)]));
                         }
                     }
                 }
@@ -153,8 +169,9 @@ async fn serve(tcp: tokio::net::TcpStream, shared: Arc<Shared>) {
                 }
                 let kind = event.kind.as_u16();
                 if kind == super::KIND_MESSAGE {
+                    let served = shared.script.served(&event);
                     for (sub, to) in shared.live.lock().unwrap().iter() {
-                        send(to, json!(["EVENT", sub, event]));
+                        send(to, json!(["EVENT", sub, served]));
                     }
                 }
                 if shared.script.no_ack.contains(&kind) {
