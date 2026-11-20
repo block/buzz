@@ -323,7 +323,8 @@ class ChannelActions {
       mayPublish: mayPublish,
     );
     _ensureCommunityValid();
-    await _removeSavedChannel(channelId, scope);
+    _removeSavedChannel(channelId, scope);
+    _ref.read(channelsProvider.notifier).noteConfirmedRemoval(channelId);
     await _refreshChannelState(channelId);
   }
 
@@ -379,17 +380,18 @@ class ChannelActions {
       tags: buildDeleteChannelTags(channelId),
     );
     _ensureCommunityValid();
-    await _removeSavedChannel(channelId, scope);
+    _removeSavedChannel(channelId, scope);
+    _ref.read(channelsProvider.notifier).noteConfirmedRemoval(channelId);
     await _refreshChannelState(channelId);
   }
 
-  Future<void> _removeSavedChannel(
-    String channelId,
-    SavedMessageScope? scope,
-  ) async {
+  /// Retires the channel's saved pages now; the disk purge runs behind any
+  /// queued cache work without holding up the confirmed action.
+  void _removeSavedChannel(String channelId, SavedMessageScope? scope) {
     if (scope == null) return;
-    await _ref.read(savedMessageStoreProvider).removeChannel(scope, channelId);
-    _ensureCommunityValid();
+    unawaited(
+      _ref.read(savedMessageStoreProvider).removeChannel(scope, channelId),
+    );
     _ref.invalidate(savedChannelPreviewProvider(channelId));
   }
 

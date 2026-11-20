@@ -31,6 +31,18 @@ extension ChannelsNotifierJoins on ChannelsNotifier {
     }
   }
 
+  /// Records [channelId] as a membership this client itself ended (a
+  /// confirmed leave or delete), so the next list read doesn't treat its
+  /// absence as a loss that needs a writer read. The caller already purged
+  /// its saved pages.
+  void noteConfirmedRemoval(String channelId) =>
+      _confirmedRemovals.add(channelId);
+
+  void _forgetConfirmedMemberships() {
+    _confirmedJoins.clear();
+    _confirmedRemovals.clear();
+  }
+
   /// The current user's latest kind:39002 rosters for a list read.
   ///
   /// A writer-pool answer also settles each recorded join: one it lacks was
@@ -42,6 +54,8 @@ extension ChannelsNotifierJoins on ChannelsNotifier {
     String pubkey,
   ) async {
     final scope = _lifecycleRef.read(savedMessageScopeProvider);
+    final removedHere = {..._confirmedRemovals};
+    _confirmedRemovals.clear();
     final previouslyJoined = <String>{
       if (scope != null && _hasLoaded)
         for (final channel in _listState.value ?? const <Channel>[])
@@ -49,7 +63,7 @@ extension ChannelsNotifierJoins on ChannelsNotifier {
       if (scope != null)
         for (final entry in _memberSnapshotsByChannelId.entries)
           if (entry.value.any((member) => member.pubkey == pubkey)) entry.key,
-    };
+    }..removeAll(removedHere);
     Future<List<NostrEvent>> read(bool strong) async => _latestChannelEvents(
       await _fenced(
         fence,

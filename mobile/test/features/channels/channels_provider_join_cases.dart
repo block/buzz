@@ -99,6 +99,33 @@ void _confirmedJoinCases() {
       expect(store.isCurrent(retained), isTrue);
     });
 
+    for (final noted in [true, false]) {
+      test(
+        noted
+            ? 'a removal this client confirmed needs no writer read'
+            : 'an unexplained removal asks the writer pool',
+        () async {
+          const scope = (communityId: 'community', pubkey: 'me');
+          final session = _WriterReplicaRelaySession(
+            memberships: [_membership(_joinedChannel, 'me')],
+            metadata: [_meta(id: _joinedChannel, name: 'joined')],
+          );
+          final container = _buildContainer(
+            session: session,
+            overrides: [savedMessageScopeProvider.overrideWithValue(scope)],
+          );
+          addTearDown(container.dispose);
+          await container.read(channelsProvider.future);
+          final notifier = container.read(channelsProvider.notifier);
+
+          if (noted) notifier.noteConfirmedRemoval(_joinedChannel);
+          session.memberships = const [];
+          await notifier.refresh();
+          expect(session.strongMembershipReads, noted ? 0 : 1);
+        },
+      );
+    }
+
     test(
       'a stale replica neither hides a confirmed join nor a later removal',
       () async {

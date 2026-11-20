@@ -80,6 +80,40 @@ void main() {
     });
   }
 
+  test('leave completes without waiting for the saved-page purge', () async {
+    final relay = FakeRelay();
+    final scope = (communityId: 'cache-test-community', pubkey: relay.pubkey);
+    final root = Completer<Directory>();
+    final container = ProviderContainer(
+      overrides: [
+        ...relay.overrides,
+        channelsProvider.overrideWith(_ChannelsAfterLeave.new),
+        savedMessageRootProvider.overrideWith((ref) => root.future),
+        savedMessageScopeProvider.overrideWithValue(scope),
+      ],
+    );
+    addTearDown(container.dispose);
+    final connected = Completer<void>();
+    container.listen(relaySessionProvider, (_, state) {
+      if (state.status == SessionStatus.connected && !connected.isCompleted) {
+        connected.complete();
+      }
+    }, fireImmediately: true);
+    await connected.future;
+
+    // The store can't open its directory yet, so a purge it waited for
+    // would never finish.
+    await container
+        .read(channelActionsProvider)
+        .leaveChannel(_channelId)
+        .timeout(const Duration(seconds: 5));
+    expect(relay.published.single.kind, 9022);
+    expect(root.isCompleted, isFalse);
+    final dir = await Directory.systemTemp.createTemp('buzz-leave-unblocked');
+    addTearDown(() => dir.delete(recursive: true));
+    root.complete(dir);
+  });
+
   test('shortcut selects only an active exact DM using current membership', () {
     final dm = Channel(
       id: 'dm',
