@@ -1096,7 +1096,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   /// Loads specific deep-link targets that may fall outside the newest window.
   Future<void> loadEventsById(Iterable<String> eventIds) async {
     if (_accessDenial != null) return;
-    final initVersion = _initVersion;
     final ids = eventIds.where((id) => id.isNotEmpty).toSet();
     if (ids.isEmpty) return;
     _retainedDeepLinkEventIds.addAll(ids);
@@ -1117,7 +1116,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
             limit: ids.length,
           ),
         );
-    if (!_isCurrentInit(initVersion)) return;
+    // The session holds a lookup sent while disconnected and answers it after
+    // authentication, past the connect's re-init. Only a denial retires it.
+    if (!ref.mounted || _accessDenial != null) return;
     for (final event in events) {
       if (event.channelId == channelId &&
           _retainedDeepLinkEventIds.contains(event.id)) {

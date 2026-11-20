@@ -1559,6 +1559,68 @@ void main() {
   );
 
   test(
+    'keeps a deep-link target whose lookup was held until connect',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier();
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+      relaySession.setConnected(false);
+      final provider = channelMessagesProvider(_channelId);
+      container.listen(provider, (_, _) {});
+      await _pumpEventQueue();
+
+      // The session holds an ID lookup sent while disconnected and answers it
+      // after authentication, so the reply crosses the connect's re-init.
+      final targetLoad = container.read(provider.notifier).loadEventsById(
+        const ['deep-link'],
+      );
+      relaySession.setConnected(true);
+      await relaySession.subscribed;
+      relaySession.completeHistory([_event(id: 'newer', createdAt: 20)]);
+      await _pumpEventQueue();
+      relaySession.completeTargetHistory([
+        _event(id: 'deep-link', createdAt: 10),
+      ]);
+      await targetLoad;
+      await _pumpEventQueue();
+
+      expect(container.read(provider).value?.map((event) => event.id), [
+        'deep-link',
+        'newer',
+      ]);
+    },
+  );
+
+  test(
+    'drops a deep-link lookup reply that lands after access denial',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier();
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+      final provider = channelMessagesProvider(_channelId);
+      container.listen(provider, (_, _) {});
+      await relaySession.subscribed;
+      relaySession.completeHistory([_event(id: 'newer', createdAt: 20)]);
+      await _pumpEventQueue();
+
+      final targetLoad = container.read(provider.notifier).loadEventsById(
+        const ['deep-link'],
+      );
+      relaySession.closeLive('restricted: channel access revoked');
+      await _pumpEventQueue();
+      relaySession.completeTargetHistory([
+        _event(id: 'deep-link', createdAt: 10),
+      ]);
+      await targetLoad;
+      await _pumpEventQueue();
+
+      expect(isRelayAccessDenied(container.read(provider).error!), isTrue);
+      expect(container.read(provider).value, isNull);
+    },
+  );
+
+  test(
     'adds and rolls back a local message in the websocket timeline',
     () async {
       final relaySession = _RecordingRelaySessionNotifier();
