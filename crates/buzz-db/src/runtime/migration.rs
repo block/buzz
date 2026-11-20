@@ -1741,6 +1741,8 @@ mod postgres_tests {
             "media_uploaders",
             "media_publications",
             "search_outbox",
+            "channel_heads",
+            "thread_heads",
         ];
         for table in crate::deletion::EXPECTED_SCOPED_TABLES
             .iter()
