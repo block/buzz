@@ -5,6 +5,12 @@ bool _notificationsVisible(WidgetRef ref) {
       defaultTargetPlatform != TargetPlatform.android) {
     return false;
   }
+  // Without a gateway an Android build never enrolls, so there is nothing to
+  // switch on. (iOS keeps a saved opt-in visible so it can be turned off.)
+  if (defaultTargetPlatform == TargetPlatform.android &&
+      !Env.pushGatewayConfigured) {
+    return false;
+  }
   final community = ref.watch(activeCommunityProvider).value;
   if (community == null) return false;
   final setup = ref.watch(buzzPushSetupStatusProvider);

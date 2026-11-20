@@ -135,5 +135,38 @@ void main() {
         },
       );
     }
+
+    testWidgets('Settings hides Notifications on Android without a gateway', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            activeCommunityProvider.overrideWith(
+              (ref) async => Community.create(
+                name: 'Team',
+                relayUrl: 'wss://relay.example',
+              ).copyWith(pushNotificationsEnabled: true),
+            ),
+          ],
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            home: SettingsPage(
+              profileHeader: const SizedBox.shrink(),
+              identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Notifications'), findsNothing);
+      expect(tester.takeException(), isNull);
+      debugDefaultTargetPlatformOverride = null;
+    });
   });
 }
