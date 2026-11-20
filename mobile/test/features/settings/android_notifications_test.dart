@@ -196,6 +196,7 @@ void main() {
     required String relayUrl,
     required bool enabled,
     _Connected? session,
+    bool advertisesPush = true,
   }) async {
     debugDefaultTargetPlatformOverride = platform;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -251,7 +252,9 @@ void main() {
           relaySessionProvider.overrideWith(() => session ?? _Connected()),
           myPubkeyProvider.overrideWithValue(nostr.Keys('1' * 64).public),
           buzzPushDescriptorFetcherProvider.overrideWithValue(
-            (_) async => _descriptor,
+            (_) async => advertisesPush
+                ? _descriptor
+                : throw const BuzzPushNotAdvertised(),
           ),
           appLifecycleProvider.overrideWith(_Lifecycle.new),
         ],
@@ -285,33 +288,30 @@ void main() {
     });
   }
 
-  for (final enabled in [true, false]) {
-    testWidgets(
-      'resuming the app ${enabled ? 'refreshes' : 'does not fetch'} the FCM '
-      'token',
-      (tester) async {
-        fcmDeviceToken.value = 'test-fcm-token';
-        addTearDown(() => fcmDeviceToken.value = null);
-        final calls = await pumpBootstrap(
-          tester,
-          platform: TargetPlatform.android,
-          relayUrl: 'https://relay.example',
-          enabled: enabled,
-        );
-        calls.clear();
+  for (final (name, enabled, advertisesPush) in [
+    ('refreshes the FCM token', true, true),
+    ('fetches no token while opted out', false, true),
+    ('fetches no token for a relay without push', true, false),
+  ]) {
+    testWidgets('resuming the app $name', (tester) async {
+      fcmDeviceToken.value = 'test-fcm-token';
+      addTearDown(() => fcmDeviceToken.value = null);
+      final calls = await pumpBootstrap(
+        tester,
+        platform: TargetPlatform.android,
+        relayUrl: 'https://relay.example',
+        enabled: enabled,
+        advertisesPush: advertisesPush,
+      );
+      calls.clear();
 
-        tester.binding.handleAppLifecycleStateChanged(
-          AppLifecycleState.inactive,
-        );
-        tester.binding.handleAppLifecycleStateChanged(
-          AppLifecycleState.resumed,
-        );
-        await tester.pumpAndSettle();
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pumpAndSettle();
 
-        expect(calls.contains('refreshToken'), enabled);
-        await unmount(tester);
-      },
-    );
+      expect(calls.contains('refreshToken'), enabled && advertisesPush);
+      await unmount(tester);
+    });
   }
 
   testWidgets('resuming while the relay reconnects refreshes the FCM token', (

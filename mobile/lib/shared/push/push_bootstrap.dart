@@ -352,12 +352,15 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
         session.status == SessionStatus.connected &&
         optedIn &&
         descriptor != null;
-    // Read by the resume listener, which outlives a build. It leaves out the
-    // relay session and its descriptor: a resume often lands while the relay
-    // reconnects, and the registration attempt after reconnecting reuses its
-    // key, so it would not refresh the token either.
-    final registering = useRef(optedIn);
-    registering.value = optedIn;
+    // Read by the resume listener, which outlives a build. A resume often
+    // lands while the relay reconnects, when its descriptor is gone, and the
+    // registration attempt after reconnecting reuses its key, so it would not
+    // refresh the token either. Remember instead whether this community's
+    // relay advertised push, so a relay without it never fetches a token.
+    final pushRelay = useRef<String?>(null);
+    if (descriptor != null) pushRelay.value = community?.id;
+    final registering = useRef(false);
+    registering.value = optedIn && pushRelay.value == community?.id;
     final enablementEpoch = useRef(0);
     useEffect(() {
       // Each opt-in needs a fresh active lease even when endpoint, executor,
