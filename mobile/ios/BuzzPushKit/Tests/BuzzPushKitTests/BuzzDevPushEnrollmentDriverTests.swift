@@ -1337,17 +1337,37 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
   }
 
   func testExpiredLookingChallengeFromFastClockIsNotContractDrift() async throws {
-    let error = try await challengeFailure { request in
-      // The driver's clock reads `now` plus the skew allowance, past this expiry.
-      Self.response(request, status: 200, json: Self.challengeJSON(expiresAt: Self.now))
+    // The gateway issued gateway-now + 300; this phone runs more than 300 s ahead.
+    let error = try await challengeFailure(
+      now: { Date(timeIntervalSince1970: TimeInterval(Self.now + 300 + 60)) }
+    ) { request in
+      Self.response(request, status: 200, json: Self.challengeJSON(expiresAt: Self.now + 300))
     }
     XCTAssertEqual(error, .invalidResponse(route: "v1/installations/challenges"))
   }
 
+  func testImplausibleChallengeExpiryIsContractDriftWhateverTheClockSays() async throws {
+    // Zero, negative and a relative TTL cannot come from the gateway's absolute now + 300.
+    for expiresAt: Int64 in [0, -1, 300] {
+      let error = try await challengeFailure { request in
+        Self.response(request, status: 200, json: Self.challengeJSON(expiresAt: expiresAt))
+      }
+      XCTAssertEqual(
+        error, .invalidGatewayResponse(route: "v1/installations/challenges"),
+        "expires_at \(expiresAt)")
+    }
+  }
+
   private func challengeFailure(
+    now: (() -> Date)? = nil,
     _ gateway: @escaping (URLRequest) -> (HTTPURLResponse, Data)
   ) async throws -> BuzzDevPushEnrollmentError {
-    let driver = try makeDriver(store: MemoryGrantStore(), appAttest: RecordingAppAttest())
+    let driver =
+      if let now {
+        try makeDriver(store: MemoryGrantStore(), appAttest: RecordingAppAttest(), now: now)
+      } else {
+        try makeDriver(store: MemoryGrantStore(), appAttest: RecordingAppAttest())
+      }
     URLProtocolStub.handler = { request in
       if request.httpMethod == "GET" {
         return Self.response(

@@ -346,6 +346,8 @@ public final class BuzzDevPushEnrollmentDriver {
   /// starts this far in the past, so a fast clock neither signs a `not_before` the gateway
   /// has not reached nor an `expires_at` beyond its maximum lifetime.
   static let clockSkewAllowanceSeconds: Int64 = 120
+  /// 2025-01-01T00:00:00Z. No challenge the gateway issues can expire before this.
+  static let earliestPlausibleChallengeExpiry: Int64 = 1_735_689_600
   private let installationIdBytes: () throws -> Data
 
   /// Creates a driver backed by Apple's App Attest service and persists the
@@ -871,8 +873,14 @@ public final class BuzzDevPushEnrollmentDriver {
     else {
       throw BuzzDevPushEnrollmentError.invalidGatewayResponse(route: "v1/installations/challenges")
     }
-    // A challenge that already looks expired usually means the phone's clock
-    // runs fast, not that the gateway broke its contract.
+    // The gateway issues an absolute Unix time, so a value below any real date
+    // (zero, negative, a relative TTL) is contract drift whatever this phone's
+    // clock says.
+    guard response.expiresAt >= Self.earliestPlausibleChallengeExpiry else {
+      throw BuzzDevPushEnrollmentError.invalidGatewayResponse(route: "v1/installations/challenges")
+    }
+    // A plausible expiry that already looks expired usually means the phone's
+    // clock runs fast, not that the gateway broke its contract.
     guard response.expiresAt > Int64(now().timeIntervalSince1970) else {
       throw BuzzDevPushEnrollmentError.invalidResponse(route: "v1/installations/challenges")
     }
