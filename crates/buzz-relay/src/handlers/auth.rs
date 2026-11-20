@@ -1018,7 +1018,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 .iter()
                 .filter(|id| **id != conn_id)
                 .count();
-            if other_sessions > 0 {
+            if admitted_agent && other_sessions > 0 {
                 warn!(
                     conn_id = %conn_id,
                     pubkey = %pubkey.to_hex(),

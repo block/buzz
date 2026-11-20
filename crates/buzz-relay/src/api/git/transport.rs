@@ -2411,14 +2411,28 @@ async fn rewrite_git_body_limit_413(
     max_bytes: u64,
 ) -> Response {
     let response = next.run(req).await;
-    if response.status() == StatusCode::PAYLOAD_TOO_LARGE {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            git_body_limit_message(max_bytes),
-        )
-            .into_response();
+    if response.status() != StatusCode::PAYLOAD_TOO_LARGE {
+        return response;
     }
-    response
+    // The body-limit layer answers with an empty 413. A handler 413 (resource
+    // limits, for example) already has its own message; leave that body alone.
+    let (parts, body) = response.into_parts();
+    let bytes = axum::body::to_bytes(body, 64 * 1024)
+        .await
+        .unwrap_or_default();
+    if !git_413_is_body_limit(&bytes) {
+        return Response::from_parts(parts, Body::from(bytes));
+    }
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        git_body_limit_message(max_bytes),
+    )
+        .into_response()
+}
+
+/// The limit layer's 413 has no body. A handler that chose 413 already wrote one.
+fn git_413_is_body_limit(body: &[u8]) -> bool {
+    body.is_empty()
 }
 
 fn git_body_limit_message(max_bytes: u64) -> String {
@@ -2426,6 +2440,20 @@ fn git_body_limit_message(max_bytes: u64) -> String {
         "git pack body exceeds relay limit ({max_bytes} bytes; \
          self-hosted relays: BUZZ_GIT_MAX_PACK_BYTES)"
     )
+}
+
+#[cfg(test)]
+mod git_413_tests {
+    use super::{git_413_is_body_limit, git_body_limit_message};
+
+    #[test]
+    fn only_an_empty_413_is_rewritten() {
+        assert!(git_413_is_body_limit(b""));
+        assert!(!git_413_is_body_limit(b"resource limit"));
+        let message = git_body_limit_message(32);
+        assert!(message.contains("32"));
+        assert!(message.contains("BUZZ_GIT_MAX_PACK_BYTES"));
+    }
 }
 
 #[cfg(test)]
