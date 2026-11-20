@@ -37,8 +37,11 @@ final class _DiskResult {
 String _path(String directory, String scope) =>
     p.join(directory, '$scope-v$_version.sqlite');
 
-Future<_DiskResult?> _runDisk(_DiskRequest request) async {
-  final lease = await SavedMessageCacheLifecycle.acquire();
+Future<_DiskResult?> _runDisk(
+  _DiskRequest request,
+  Future<SavedMessageCacheLease?> Function() acquireLease,
+) async {
+  final lease = await acquireLease();
   if (lease == null) return null;
   try {
     return await _runOnWorker(lease, request);

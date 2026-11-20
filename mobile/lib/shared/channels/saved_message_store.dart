@@ -60,10 +60,12 @@ final savedMessageRootProvider = FutureProvider<Directory?>(
 
 /// A single serial queue orders cache operations and privacy deletions.
 final savedMessageStoreProvider = Provider<SavedMessageStore>((ref) {
-  return SavedMessageStore(
+  final store = SavedMessageStore(
     root: () => ref.read(savedMessageRootProvider.future),
     diagnostics: ref.read(diagnosticReporterProvider),
   );
+  ref.onDispose(store.dispose);
+  return store;
 });
 
 /// A bounded, disposable store of previously opened conversations.
@@ -71,16 +73,24 @@ final class SavedMessageStore {
   SavedMessageStore({
     required Future<Directory?> Function() root,
     required DiagnosticReporter diagnostics,
+    Future<SavedMessageCacheLease?> Function()? acquireLease,
+    Stream<void>? foreground,
     this.payloadBudget = 64 * 1024 * 1024,
   }) : _root = root,
-       _diagnostics = diagnostics;
+       _diagnostics = diagnostics,
+       _acquireLease = acquireLease ?? SavedMessageCacheLifecycle.acquire,
+       _foreground = foreground ?? SavedMessageCacheLifecycle.foreground;
 
   final Future<Directory?> Function() _root;
   final DiagnosticReporter _diagnostics;
+  final Future<SavedMessageCacheLease?> Function() _acquireLease;
+  final Stream<void> _foreground;
   final int payloadBudget;
   final _scopeEpochs = <String, int>{};
   final _channelEpochs = <(String, String), int>{};
-  final _pendingEventRemovals = <(String, String), Set<String>>{};
+  final _pendingEventRemovals = <(String, String), _PendingEventRemoval>{};
+  StreamSubscription<void>? _foregroundSubscription;
+  int _foregroundVersion = 0;
   Future<void> _tail = Future.value();
 
   SavedMessageTicket capture(SavedMessageScope scope, SavedMessagePage page) {
@@ -137,7 +147,9 @@ final class SavedMessageStore {
     final key = _scopeKey(scope);
     _retireChannel((key, channelId));
     _pendingEventRemovals.remove((key, channelId));
-    return _enqueue((directory) => _removeFromDisk(directory, key, channelId));
+    return _enqueue((directory) async {
+      await _removeFromDisk(directory, key, channelId);
+    });
   }
 
   /// Drops changed events and keeps the rest of the saved conversation.
@@ -149,44 +161,72 @@ final class SavedMessageStore {
     if (targets.isEmpty) return;
     final key = (_scopeKey(scope), channelId);
     _retireChannel(key);
-    final waiting = _pendingEventRemovals[key];
-    if (waiting != null) {
-      for (final target in targets) {
-        if (waiting.length > _maxWindowEvents) break;
-        waiting.add(target);
+    _foregroundSubscription ??= _foreground.listen((_) {
+      _foregroundVersion++;
+      for (final entry in _pendingEventRemovals.entries) {
+        if (entry.value.deferred) {
+          entry.value.deferred = false;
+          _scheduleEventRemoval(entry.key, entry.value);
+        }
       }
-      return;
-    }
-    final batch = targets.take(_maxWindowEvents + 1).toSet();
-    _pendingEventRemovals[key] = batch;
-    void clearBatch() {
-      if (identical(_pendingEventRemovals[key], batch)) {
-        _pendingEventRemovals.remove(key);
-      }
-    }
+    });
+    final batch = _pendingEventRemovals.putIfAbsent(
+      key,
+      _PendingEventRemoval.new,
+    );
+    batch.addTargets(targets);
+    _scheduleEventRemoval(key, batch);
+  }
 
+  void _scheduleEventRemoval((String, String) key, _PendingEventRemoval batch) {
+    if (batch.queued || batch.deferred) return;
+    batch.queued = true;
+    var started = false;
     unawaited(
-      _enqueue((directory) {
-        clearBatch();
-        return _removeFromDisk(
+      _enqueue((directory) async {
+        if (!identical(_pendingEventRemovals[key], batch)) return;
+        started = true;
+        final targets = batch.targets;
+        batch.targets = {};
+        final foregroundVersion = _foregroundVersion;
+        final removed = await _removeFromDisk(
           directory,
           key.$1,
-          channelId,
-          targets: batch.length > _maxWindowEvents ? null : batch,
+          key.$2,
+          targets: targets.length > _maxWindowEvents ? null : targets,
+          deferIfUnavailable: true,
         );
-      }).whenComplete(clearBatch),
+        if (!removed) {
+          batch.addTargets(targets);
+          batch.deferred = foregroundVersion == _foregroundVersion;
+        }
+      }).whenComplete(() {
+        if (!identical(_pendingEventRemovals[key], batch)) return;
+        batch.queued = false;
+        if (!started || batch.targets.isEmpty) {
+          _pendingEventRemovals.remove(key);
+        } else {
+          _scheduleEventRemoval(key, batch);
+        }
+      }),
     );
+  }
+
+  void dispose() {
+    _pendingEventRemovals.clear();
+    unawaited(_foregroundSubscription?.cancel());
   }
 
   void _retireChannel((String, String) key) {
     _channelEpochs.update(key, (epoch) => epoch + 1, ifAbsent: () => 1);
   }
 
-  Future<void> _removeFromDisk(
+  Future<bool> _removeFromDisk(
     String directory,
     String key,
     String channelId, {
     Set<String>? targets,
+    bool deferIfUnavailable = false,
   }) async {
     try {
       final result = await _runDisk(
@@ -196,14 +236,19 @@ final class SavedMessageStore {
           page: (channelId: channelId, rootId: ''),
           targets: targets,
         ),
+        _acquireLease,
       );
-      if (result != null && !result.reset) return;
-      if (result?.reset ?? false) _reportReset();
+      if (result != null) {
+        if (result.reset) _reportReset();
+        if (deferIfUnavailable || !result.reset) return true;
+      }
     } catch (error, stackTrace) {
       _report(error, stackTrace);
     }
+    if (deferIfUnavailable) return false;
     // If SQL cannot remove that channel's data, discard the disposable scope.
     await _sweep(directory, removedScope: key);
+    return true;
   }
 
   /// Removes retired identity databases from interrupted account cleanup and
@@ -228,6 +273,7 @@ final class SavedMessageStore {
         relayAuthor: relayAuthor,
         payloadBudget: payloadBudget,
       ),
+      _acquireLease,
     );
     if (result?.reset ?? false) _reportReset();
     return result;
@@ -269,6 +315,19 @@ final class SavedMessageStore {
       stackTrace,
       operation: DiagnosticOperation.storedData,
     );
+  }
+}
+
+final class _PendingEventRemoval {
+  Set<String> targets = {};
+  bool queued = false;
+  bool deferred = false;
+
+  void addTargets(Set<String> incoming) {
+    for (final target in incoming) {
+      if (targets.length > _maxWindowEvents) break;
+      targets.add(target);
+    }
   }
 }
 

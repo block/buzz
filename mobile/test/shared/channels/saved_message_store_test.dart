@@ -248,6 +248,40 @@ void main() {
     expect(diagnostics.operations, isEmpty);
   });
 
+  test('retries live removals when the cache becomes active', () async {
+    final foreground = StreamController<void>.broadcast(sync: true);
+    addTearDown(foreground.close);
+    var active = true;
+    final cache = SavedMessageStore(
+      root: () async => temp,
+      diagnostics: diagnostics,
+      acquireLease: () async => active ? (id: 0, workerControl: 0) : null,
+      foreground: foreground.stream,
+    );
+    addTearDown(cache.dispose);
+    final deleted = _message(_channel, 'deleted');
+    final retained = _message(_channel, 'unchanged');
+    final different = _message(_otherChannel, 'other channel');
+    final page = cache.capture(_identity, _channel);
+    final otherPage = cache.capture(_identity, _otherChannel);
+    await cache.save(page, [deleted, retained], relayAuthor: null);
+    await cache.save(otherPage, [different], relayAuthor: null);
+
+    active = false;
+    cache.removeChannelEvents(_identity, _channel.channelId, {deleted.id});
+    final currentPage = cache.capture(_identity, _channel);
+    expect(await cache.read(currentPage), isNull);
+    expect(await store.read(store.capture(_identity, _otherChannel)), [
+      different,
+    ]);
+
+    active = true;
+    foreground.add(null);
+    expect(await cache.read(currentPage), [retained]);
+    expect(await cache.read(otherPage), [different]);
+    expect(diagnostics.operations, isEmpty);
+  });
+
   test(
     'discards an unreadable or incompatible file and refills on the next save',
     () async {
