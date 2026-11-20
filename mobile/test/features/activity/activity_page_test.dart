@@ -193,6 +193,37 @@ void main() {
     );
   }
 
+  testWidgets(
+    'unfolded portrait aligns Activity and Close beside the status cluster',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(669, 951);
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        IosNavigationMetricsHost(
+          child: await buildTestable(
+            mediaPadding: const EdgeInsets.only(top: 82),
+          ),
+        ),
+      );
+      IosNavigationMetrics.updatePortraitHeader(
+        tester.element(find.byType(ActivityPage)),
+        [669, 951, 0, 20, 535, 56],
+      );
+      await tester.pumpAndSettle();
+      expect(tester.getCenter(find.byTooltip('Close activity')).dy, 48);
+      expect(tester.getCenter(find.text('Activity')).dy, 48);
+      expect(
+        tester.getSize(find.byKey(const ValueKey('activity-filters'))).width,
+        669,
+      );
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
   for (final hasRail in [true, false]) {
     testWidgets(
       'expanded iOS Activity Close is in the rail only when present ($hasRail)',

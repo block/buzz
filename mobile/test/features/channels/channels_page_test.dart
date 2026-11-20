@@ -1,5 +1,6 @@
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/shared/widgets/app_list.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_activity.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_provider.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_manager.dart';
@@ -53,6 +54,7 @@ import 'package:buzz/features/channels/channel_sort/channel_sort_provider.dart';
 import 'package:buzz/features/channels/channel_sort/channel_sort_storage.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_actions_sheet.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
@@ -136,7 +138,17 @@ void main() {
     _FakeProfileNotifier? profile,
     bool realHome = false,
     Widget? soloSliver,
+    ConversationPaneController? pane,
   }) {
+    final channelsPage = ChannelsPage(
+      settingsPageBuilder: _buildSettingsPage,
+      communityInvitePageBuilder: (_) =>
+          const Scaffold(body: Text('Invite destination')),
+      communityAppearancePageBuilder: (_) =>
+          const Scaffold(body: Text('Appearance destination')),
+      onSettingsTransitionProgress: onSettingsTransitionProgress ?? (_) {},
+      soloSliver: soloSliver,
+    );
     return ProviderScope(
       overrides: [
         // Provide a fake profile and presence so the avatar doesn't hit the
@@ -177,16 +189,9 @@ void main() {
                 ),
                 settingsPageBuilder: _buildSettingsPage,
               )
-            : ChannelsPage(
-                settingsPageBuilder: _buildSettingsPage,
-                communityInvitePageBuilder: (_) =>
-                    const Scaffold(body: Text('Invite destination')),
-                communityAppearancePageBuilder: (_) =>
-                    const Scaffold(body: Text('Appearance destination')),
-                onSettingsTransitionProgress:
-                    onSettingsTransitionProgress ?? (_) {},
-                soloSliver: soloSliver,
-              ),
+            : pane == null
+            ? channelsPage
+            : ConversationPaneScope(controller: pane, child: channelsPage),
       ),
     );
   }
@@ -1583,6 +1588,42 @@ void main() {
     },
   );
 
+  testWidgets('channel rows keep their full width as the touch target', (
+    tester,
+  ) async {
+    final pane = ConversationPaneController();
+    addTearDown(pane.dispose);
+    await tester.pumpWidget(
+      buildTestable(
+        pane: pane,
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final bounds = tester.getRect(find.byKey(const ValueKey('1')));
+    final edges = [
+      Offset(bounds.left + 6, bounds.center.dy),
+      Offset(bounds.right - 6, bounds.center.dy),
+    ];
+    final navigator = tester.state<NavigatorState>(find.byType(Navigator));
+    for (final edge in edges) {
+      await tester.longPressAt(edge);
+      await tester.pumpAndSettle();
+      expect(find.byType(ChannelActionsSheet), findsOneWidget);
+      navigator.pop();
+      await tester.pumpAndSettle();
+
+      await tester.tapAt(edge);
+      await tester.pump();
+      expect(pane.selectedId, '1');
+      pane.clear();
+      await tester.pumpAndSettle();
+    }
+  });
+
   testWidgets('aligns the top, section, row, and skeleton label columns', (
     tester,
   ) async {
@@ -1604,6 +1645,13 @@ void main() {
     final rowIconX = tester
         .getTopLeft(find.byKey(const ValueKey('channel-icon-1')))
         .dx;
+    final row = find.byKey(const ValueKey('1'));
+    final bounds = tester.getRect(row);
+    final selection = tester.getRect(
+      find.descendant(of: row, matching: find.byType(InkWell)).first,
+    );
+    expect(selection.left - bounds.left, Grid.gutter - Grid.xxs);
+    expect(bounds.right - selection.right, Grid.gutter - Grid.xxs);
     expect(sectionLabelX, rowIconX);
     expect(rowLabelX, greaterThan(rowIconX));
 

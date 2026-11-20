@@ -4853,8 +4853,15 @@ void main() {
       );
       expect(scaffold.resizeToAvoidBottomInset, isTrue);
       final forum = tester.widget<ForumPostsView>(find.byType(ForumPostsView));
-      expect(forum.titleContentHeight, scaffold.appBar.titleContentHeight);
-      expect(forum.titleContentHeight, greaterThanOrEqualTo(104));
+      expect(
+        forum.headerHeight,
+        frostedAppBarHeight(
+          tester.element(find.byType(ForumPostsView)),
+          titleContentHeight: scaffold.appBar.titleContentHeight,
+          alignWithStatusRegion: true,
+        ),
+      );
+      expect(scaffold.appBar.titleContentHeight, greaterThanOrEqualTo(104));
       await tester.pumpWidget(const SizedBox());
       debugDefaultTargetPlatformOverride = null;
     });

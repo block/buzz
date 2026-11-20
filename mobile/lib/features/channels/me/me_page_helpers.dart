@@ -35,7 +35,7 @@ class SoloChatTile extends ConsumerWidget {
     return DecoratedBox(
       decoration: BoxDecoration(
         color: selected ? context.colors.primaryContainer : null,
-        borderRadius: BorderRadius.circular(Radii.md),
+        borderRadius: BorderRadius.circular(Radii.container),
       ),
       child: Semantics(
         selected: selected,
@@ -96,7 +96,7 @@ class _MeChatRow extends ConsumerWidget {
       excludeSemantics: true,
       button: true,
       child: InkWell(
-        borderRadius: BorderRadius.circular(Radii.md),
+        borderRadius: BorderRadius.circular(Radii.container),
         onTap: onTap,
         onLongPress: onLongPress,
         child: Padding(
