@@ -2,13 +2,16 @@ part of '../channels_page_test.dart';
 
 void registerNativeCreationTests(Widget Function(List<Override>) buildPage) {
   testWidgets(
-    'native DM picker searches, limits selection and preserves it on failure',
+    'native DM picker searches, limits selection and opens a draft to them',
     (tester) async {
       const bridge = MethodChannel('buzz/add_members_sheet');
       final states = <Map<Object?, Object?>>[];
+      var dismissals = 0;
       final messenger = tester.binding.defaultBinaryMessenger;
       messenger.setMockMethodCallHandler(bridge, (call) async {
-        if (call.method != 'dismiss') {
+        if (call.method == 'dismiss') {
+          dismissals++;
+        } else {
           states.add(Map<Object?, Object?>.from(call.arguments as Map));
         }
         return null;
@@ -19,8 +22,11 @@ void registerNativeCreationTests(Widget Function(List<Override>) buildPage) {
       });
       final people = {for (var i = 0; i < 10; i++) _dmKey(i): 'Person $i'};
       final actions = _NativeDmActions();
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
       await tester.pumpWidget(
         buildPage([
+          savedPrefsProvider.overrideWithValue(prefs),
           channelsProvider.overrideWith(() => _FakeNotifier([])),
           relaySessionProvider.overrideWith(
             () => RecipientDirectorySession(people),
@@ -84,15 +90,17 @@ void registerNativeCreationTests(Widget Function(List<Override>) buildPage) {
         await event('toggle', {'pubkey': key});
       }
       expect(states.last['selected'] as List, hasLength(8));
+      final chosen = {
+        for (final user in states.last['selected'] as List)
+          (user as Map)['pubkey'],
+      };
       await event('submit');
-      expect(states.last['error'], contains('Try again'));
-      expect(states.last['selected'] as List, hasLength(8));
-      expect(actions.calls.single, hasLength(8));
-      await event('closed');
-      expect(
-        Navigator.of(tester.element(find.byType(ChannelsPage))).canPop(),
-        isFalse,
-      );
+      // Done closes the picker and opens a draft; only its first send creates
+      // the DM.
+      expect(dismissals, isPositive);
+      final draft = tester.widget<DmDraftPage>(find.byType(DmDraftPage));
+      expect(draft.pubkeys.toSet(), chosen);
+      expect(actions.calls, isEmpty);
       await tester.pumpWidget(const SizedBox.shrink());
       debugDefaultTargetPlatformOverride = null;
     },
@@ -107,7 +115,7 @@ class _NativeDmActions implements ChannelActions {
     bool waitForChannelList = true,
   }) async {
     calls.add(pubkeys);
-    throw StateError('Try again');
+    throw StateError('Not expected');
   }
 
   @override

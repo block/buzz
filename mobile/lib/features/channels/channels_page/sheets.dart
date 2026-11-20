@@ -310,9 +310,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
     // `@`: shown rows keep their places only within one query and opening.
     final opening = useState(0);
     final selectedUsers = useState<List<MentionCandidate>>([]);
-    final isSubmitting = useState(false);
-    final submitError = useState<String?>(null);
-    final completedChannel = useState<Channel?>(null);
+    final completed = useState<DmDestination?>(null);
 
     // The same candidates, ranking, debounce and search cache as mention
     // autocomplete, so a name finds the same people and agents in both.
@@ -373,32 +371,18 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
     }
 
     void retry() => ref.invalidate(mentionUserSearchProvider(search));
-    final canSubmit = !isSubmitting.value && selectedUsers.value.isNotEmpty;
+    final canSubmit = selectedUsers.value.isNotEmpty;
 
-    Future<void> submit() async {
-      if (selectedUsers.value.isEmpty || isSubmitting.value) {
-        return;
-      }
-      isSubmitting.value = true;
-      submitError.value = null;
-      try {
-        final channel = await ref
-            .read(channelActionsProvider)
-            .openDm(
-              pubkeys: selectedUsers.value.map((user) => user.pubkey).toList(),
-              waitForChannelList: false,
-            );
-        if (context.mounted) {
-          if (nativePresentation) {
-            completedChannel.value = channel;
-          } else {
-            Navigator.of(context).pop(channel);
-          }
-        }
-      } catch (error) {
-        if (context.mounted) submitError.value = error.toString();
-      } finally {
-        if (context.mounted) isSubmitting.value = false;
+    void submit() {
+      if (selectedUsers.value.isEmpty) return;
+      // Their DM, or a draft to them: only a send creates a DM.
+      final destination = dmDestination(ref, [
+        for (final user in selectedUsers.value) user.pubkey,
+      ]);
+      if (nativePresentation) {
+        completed.value = destination;
+      } else {
+        Navigator.of(context).pop(destination);
       }
     }
 
@@ -456,20 +440,19 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
           'clearQueryOnPick': true,
           'emptyQueryHint': 'Type a name to find people or agents.',
           'selectionLimit': 8,
-          'completed': completedChannel.value != null,
+          'completed': completed.value != null,
           'query': query.value,
           'loading': searching,
           'loadError': searchFailed,
-          'error': submitError.value,
-          'submitting': isSubmitting.value,
+          'error': null,
+          'submitting': false,
           'selected': [for (final user in selectedUsers.value) row(user)],
           'users': [for (final user in availableResults) row(user)],
         },
         onQuery: (value) {
-          if (!isSubmitting.value) query.value = value;
+          query.value = value;
         },
         onToggle: (pubkey) {
-          if (isSubmitting.value) return;
           // The current selection, not this build's: a second tap can land
           // before the rebuild that reflects the first.
           if (selectedUsers.value.any((user) => user.pubkey == pubkey)) {
@@ -487,9 +470,9 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
           }
           select(user);
         },
-        onSubmit: () => unawaited(submit()),
+        onSubmit: submit,
         onRetry: retry,
-        onClose: () => Navigator.of(context).pop(completedChannel.value),
+        onClose: () => Navigator.of(context).pop(completed.value),
       );
     }
 
@@ -497,7 +480,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
       title: 'New DM',
       actionKey: const Key('new-dm-submit'),
       actionLabel: 'Done',
-      busy: isSubmitting.value,
+      busy: false,
       onSubmit: canSubmit ? submit : null,
       child: Padding(
         padding: EdgeInsets.fromLTRB(
@@ -517,9 +500,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
               SliverToBoxAdapter(
                 child: GestureDetector(
                   behavior: HitTestBehavior.translucent,
-                  onTap: isSubmitting.value
-                      ? null
-                      : queryFocusNode.requestFocus,
+                  onTap: queryFocusNode.requestFocus,
                   child: SizedBox(
                     width: double.infinity,
                     child: ConstrainedBox(
@@ -571,7 +552,6 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                                     _SelectedDmRecipientChip(
                                       user: user,
                                       label: labelFor(user),
-                                      enabled: !isSubmitting.value,
                                       onDeleted: () {
                                         selectedUsers.value = [
                                           for (final candidate
@@ -592,12 +572,9 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                                       autofocus: true,
                                       autocorrect: false,
                                       enableSuggestions: false,
-                                      enabled: !isSubmitting.value,
                                       onChanged: (value) => query.value = value,
                                       onSubmitted: (_) {
-                                        if (canSubmit) {
-                                          unawaited(submit());
-                                        }
+                                        if (canSubmit) submit();
                                       },
                                       decoration: InputDecoration(
                                         hintText: hasSelectedUsers
@@ -610,26 +587,6 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                                         contentPadding:
                                             const EdgeInsets.symmetric(
                                               vertical: Grid.half,
-                                            ),
-                                        suffixIcon: isSubmitting.value
-                                            ? const Padding(
-                                                padding: EdgeInsets.all(
-                                                  Grid.half,
-                                                ),
-                                                child: SizedBox.square(
-                                                  dimension: 16,
-                                                  child: BuzzLoadingIndicator(
-                                                    size: 16,
-                                                    semanticLabel:
-                                                        'Creating conversation',
-                                                  ),
-                                                ),
-                                              )
-                                            : null,
-                                        suffixIconConstraints:
-                                            const BoxConstraints(
-                                              minHeight: 32,
-                                              minWidth: 32,
                                             ),
                                       ),
                                       textInputAction: TextInputAction.done,
@@ -740,13 +697,12 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                 ),
-                          onTap: isSubmitting.value || !available
+                          onTap: !available
                               ? null
                               : () {
                                   select(user);
                                   queryController.clear();
                                   query.value = '';
-                                  submitError.value = null;
                                   queryFocusNode.requestFocus();
                                 },
                         ),
@@ -755,17 +711,6 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                   );
                 },
               ),
-              if (submitError.value case final error?) ...[
-                const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
-                SliverToBoxAdapter(
-                  child: Text(
-                    error,
-                    style: context.textTheme.bodySmall?.copyWith(
-                      color: context.colors.error,
-                    ),
-                  ),
-                ),
-              ],
             ],
           ),
         ),
@@ -777,13 +722,11 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
 class _SelectedDmRecipientChip extends StatelessWidget {
   final MentionCandidate user;
   final String label;
-  final bool enabled;
   final VoidCallback onDeleted;
 
   const _SelectedDmRecipientChip({
     required this.user,
     required this.label,
-    required this.enabled,
     required this.onDeleted,
   });
 
@@ -802,12 +745,12 @@ class _SelectedDmRecipientChip extends StatelessWidget {
           clipBehavior: Clip.antiAlias,
           child: Semantics(
             button: true,
-            enabled: enabled,
+            enabled: true,
             excludeSemantics: true,
             label: 'Remove $label',
             child: InkWell(
               customBorder: const StadiumBorder(),
-              onTap: enabled ? onDeleted : null,
+              onTap: onDeleted,
               child: Padding(
                 padding: const EdgeInsets.only(
                   left: Grid.half,

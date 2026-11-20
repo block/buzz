@@ -98,19 +98,16 @@ void archiveNavigationTests() {
       findsOneWidget,
     );
 
-    // The profile still works: Message opens the DM.
+    // The profile still works: Message opens a draft to them, and only a
+    // send creates the DM.
     await tester.ensureVisible(find.text('Message'));
     await tester.tap(find.text('Message'));
     await tester.pumpAndSettle();
-    expect(dmOpened, isTrue);
+    expect(dmOpened, isFalse);
     expect(find.byType(UserProfileSheet), findsNothing);
-    expect(
-      tester
-          .widget<ChannelDetailPage>(find.byType(ChannelDetailPage))
-          .channel
-          .id,
-      dm.id,
-    );
+    expect(tester.widget<DmDraftPage>(find.byType(DmDraftPage)).pubkeys, [
+      'peer',
+    ]);
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pumpAndSettle();
   });

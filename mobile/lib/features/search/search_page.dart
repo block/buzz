@@ -28,6 +28,7 @@ import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
+import '../channels/dm_destination.dart';
 import '../channels/channel_identity_names_provider.dart';
 import '../channels/channel_link_navigation.dart';
 import '../channels/channel_management_provider.dart';
@@ -727,18 +728,7 @@ class _PeopleSection extends ConsumerWidget {
           ),
           onTap: () async {
             onResultSelected();
-            final channel = await ref
-                .read(channelActionsProvider)
-                .openDm(pubkeys: [user.pubkey], waitForChannelList: false);
-            if (!context.mounted) return;
-            await openConversationPane(
-              context,
-              channel.id,
-              (_) => ChannelDetailPage(
-                channel: channel,
-                placement: ChannelRoutePlacement.ordinary,
-              ),
-            );
+            await openDmDestination(context, dmDestination(ref, [user.pubkey]));
           },
         );
       },

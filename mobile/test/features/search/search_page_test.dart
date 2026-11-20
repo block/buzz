@@ -8,6 +8,7 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
+import 'package:buzz/features/channels/dm_draft_page.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/small_avatar.dart';
@@ -27,6 +28,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/widget_helpers.dart';
@@ -235,69 +237,84 @@ void main() {
     }
   }
 
-  testWidgets('a person result opens their DM without waiting on Solo', (
-    tester,
-  ) async {
-    final dm = Channel(
-      id: 'dm-maya',
-      name: 'Maya',
-      channelType: 'dm',
-      visibility: 'private',
-      description: '',
-      memberCount: 2,
-      createdBy: 'test',
-      createdAt: DateTime(2025),
-      isMember: true,
-    );
-    final opened = <List<String>>[];
-    final waits = <bool>[];
-    SharedPreferences.setMockInitialValues({});
-    final prefs = await SharedPreferences.getInstance();
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        overrides: [
-          searchProvider.overrideWith(
-            () => _FakeSearchNotifier(
-              const SearchState(
-                query: 'maya',
-                userResults: [
-                  DirectoryUser(pubkey: 'maya', displayName: 'Maya'),
-                ],
+  for (final hasDm in [true, false]) {
+    testWidgets(
+      'a person result opens ${hasDm ? 'their DM' : 'a draft to them'} '
+      'without waiting on Solo',
+      (tester) async {
+        final dm = Channel(
+          id: 'dm-maya',
+          name: 'Maya',
+          channelType: 'dm',
+          visibility: 'private',
+          description: '',
+          memberCount: 2,
+          createdBy: 'test',
+          createdAt: DateTime(2025),
+          isMember: true,
+          participantPubkeys: const ['self', 'maya'],
+        );
+        final opened = <List<String>>[];
+        final waits = <bool>[];
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        await tester.pumpWidget(
+          WidgetHelpers.testable(
+            overrides: [
+              searchProvider.overrideWith(
+                () => _FakeSearchNotifier(
+                  const SearchState(
+                    query: 'maya',
+                    userResults: [
+                      DirectoryUser(pubkey: 'maya', displayName: 'Maya'),
+                    ],
+                  ),
+                ),
               ),
-            ),
+              recentSearchesProvider.overrideWith(
+                () => _FakeRecentSearchesNotifier(const []),
+              ),
+              profileProvider.overrideWith(() => _FakeProfileNotifier()),
+              currentPubkeyProvider.overrideWith((ref) => 'self'),
+              channelsProvider.overrideWith(
+                () => _FakeChannelsNotifier([if (hasDm) dm]),
+              ),
+              channelActionsProvider.overrideWith(
+                (ref) => _FakeDmActions(dm, opened, waits),
+              ),
+              savedPrefsProvider.overrideWithValue(prefs),
+              // Solo organization is still loading.
+              meGroupsProvider.overrideWith((ref) => const Stream.empty()),
+            ],
+            child: const SearchPage(),
           ),
-          recentSearchesProvider.overrideWith(
-            () => _FakeRecentSearchesNotifier(const []),
-          ),
-          profileProvider.overrideWith(() => _FakeProfileNotifier()),
-          channelsProvider.overrideWith(() => _FakeChannelsNotifier()),
-          channelActionsProvider.overrideWith(
-            (ref) => _FakeDmActions(dm, opened, waits),
-          ),
-          savedPrefsProvider.overrideWithValue(prefs),
-          // Solo organization is still loading.
-          meGroupsProvider.overrideWith((ref) => const Stream.empty()),
-        ],
-        child: const SearchPage(),
-      ),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('search-person-row-maya')));
-    await tester.pump();
-    await tester.pump();
+        );
+        await tester.pumpAndSettle();
+        // The app lists channels long before anyone searches.
+        await ProviderScope.containerOf(
+          tester.element(find.byType(SearchPage)),
+        ).read(channelsProvider.future);
+        await tester.tap(find.byKey(const ValueKey('search-person-row-maya')));
+        await tester.pump();
+        await tester.pump();
 
-    expect(opened, [
-      ['maya'],
-    ]);
-    // The page opens at once instead of waiting on the full channel list.
-    expect(waits, [false]);
-    final page = tester.widget<ChannelDetailPage>(
-      find.byType(ChannelDetailPage),
+        // Choosing a person never creates a DM: only a send does.
+        expect(opened, isEmpty);
+        expect(waits, isEmpty);
+        if (hasDm) {
+          final page = tester.widget<ChannelDetailPage>(
+            find.byType(ChannelDetailPage),
+          );
+          expect(page.channel.id, dm.id);
+        } else {
+          final page = tester.widget<DmDraftPage>(find.byType(DmDraftPage));
+          expect(page.pubkeys, ['maya']);
+        }
+        // The conversation is usable at once, not a placement spinner.
+        expect(find.byType(ComposeBar), findsOneWidget);
+      },
     );
-    expect(page.channel.id, dm.id);
-    // The DM is usable at once, not a placement spinner.
-    expect(find.byType(ComposeBar), findsOneWidget);
-  });
+  }
 
   testWidgets('iOS native filter press selects Channels and filters results', (
     tester,
