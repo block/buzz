@@ -194,9 +194,35 @@ without refusing anything. Shadow labels database-source records
     for its token owner.
 - No-go: any of these fails. Return to `off` and investigate.
 
+### Staged enforce
+
+To enforce for a growing share of communities before switching the whole relay,
+keep `BUZZ_NIP_FI_MODE=shadow` and set `BUZZ_NIP_FI_ENFORCE_PERCENT`, an integer
+from 0 to 100 (default 0). It is read once at startup, so each change is a
+rollout; a malformed or out-of-range value refuses startup.
+
+- It acts only in `shadow`. In `off` it has no effect, and `enforce` ignores it
+  because every community already enforces.
+- A community stored as Optional enforces when its bucket, SHA-256 of the
+  community ID mod 100, is below the percentage. The bucket never changes for a
+  community, so raising the percentage only adds communities, and lowering it
+  removes the most recently added ones.
+- A community stored as Required enforces at any percentage.
+- An enforcing community gets the same treatment as a stored-Required one:
+  logins without valid evidence are refused, its NIP-11 document reports
+  `requires_nip_fi: true`, and open sockets without valid evidence are closed.
+  Its stored flag does not change.
+
+Raise the percentage in steps, holding each one for normal traffic.
+
+- Go: the shadow signals keep holding, the `nip-fi enforce deny` lines on log
+  target `buzz_relay::nip_fi_enforce` are only what you expect to deny, and
+  login 503s stay at their shadow baseline.
+- No-go: set `BUZZ_NIP_FI_ENFORCE_PERCENT=0` and investigate.
+
 ### Enforce
 
-Set `BUZZ_NIP_FI_MODE=enforce`. Watch the same signals, plus the rate of 503
+Set `BUZZ_NIP_FI_MODE=enforce` and unset `BUZZ_NIP_FI_ENFORCE_PERCENT`. Watch the same signals, plus the rate of 503
 responses on login.
 
 - Go: the shadow signals keep holding, and 503s stay at their shadow baseline.
