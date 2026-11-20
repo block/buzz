@@ -273,12 +273,9 @@ void main() {
         tester.getCenter(find.text('Messages')).dy,
         tester.getCenter(menu).dy,
       );
-      // Duo reports no top safe area, so the row starts below the clearance.
-      final barHeight = frostedAppBarHeight(tester.element(bar));
-      expect(
-        tester.getCenter(menu).dy,
-        duoHeaderTopClearance + (barHeight - duoHeaderTopClearance) / 2,
-      );
+      // Duo reports no top safe area, so the 44-point row starts below the
+      // clearance, however tall the native bar is.
+      expect(tester.getCenter(menu).dy, duoHeaderTopClearance + 22);
       final originalHeaderRect = tester.getRect(bar);
       final scrollable = find.byType(Scrollable).first;
       await tester.drag(scrollable, const Offset(0, -250));

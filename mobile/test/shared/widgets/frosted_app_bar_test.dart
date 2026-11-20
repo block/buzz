@@ -739,6 +739,55 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     });
   }
+
+  for (final suppressed in [false, true]) {
+    testWidgets('Duo bar lays out at the largest text size (suppressed: '
+        '$suppressed)', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(466, 678);
+      const padding = FakeViewPadding(right: 84, bottom: 34);
+      tester.view.viewPadding = padding;
+      tester.view.padding = padding;
+      addTearDown(tester.view.reset);
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final suppression = ValueNotifier(true);
+      addTearDown(suppression.dispose);
+      const action = ValueKey('bar-action');
+      await tester.pumpWidget(
+        ProviderScope(
+          child: MaterialApp(
+            theme: AppTheme.light(),
+            // iOS's largest accessibility text size.
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: const TextScaler.linear(47 / 17)),
+              child: child!,
+            ),
+            home: Stack(
+              children: [
+                FrostedAppBar(
+                  useNativeNavigation: suppressed,
+                  nativeViewSuppressed: suppressed ? suppression : null,
+                  automaticallyImplyLeading: false,
+                  title: const Text('Messages'),
+                  actions: const [SizedBox(key: action, width: 44, height: 44)],
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      expect(tester.takeException(), isNull);
+      expect(
+        tester.getRect(find.byKey(action)).top,
+        greaterThanOrEqualTo(duoHeaderTopClearance),
+      );
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
 }
 
 Future<void> _nativeAction(

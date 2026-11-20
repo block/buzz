@@ -49,33 +49,45 @@ double _barContentHeight(
   TextStyle? titleStyle,
   double titleContentHeight,
 ) {
-  final effectiveTitleHeight = _titleHeight(
-    context,
-    titleStyle,
-    titleContentHeight,
-  );
-  final duoTop = _duoTopClearance(context);
-  if (duoTop > 0) {
-    // Keep the native Duo bar's height, which can exceed its 44-point row.
-    final rowHeight = IosNavigationMetrics.of(
-      context,
-    ).compactHeight.clamp(44.0, double.infinity);
-    return duoTop + max(rowHeight, effectiveTitleHeight);
-  }
-  final accessibleHeight = Grid.xxs + effectiveTitleHeight + Grid.xxs;
+  final duo = _duoBarInsets(context, titleStyle, titleContentHeight);
+  if (duo != null) return duo.top + duo.row + duo.bottom;
+  final accessibleHeight =
+      Grid.xxs +
+      _titleHeight(context, titleStyle, titleContentHeight) +
+      Grid.xxs;
   return accessibleHeight > _kBarContentMinHeight
       ? accessibleHeight
       : _kBarContentMinHeight;
 }
 
-/// Space above the Flutter bar's row on iOS Duo, which reports no top safe
-/// area beside its strip, on the cover display and in the wide layout alike.
-double _duoTopClearance(BuildContext context) {
+/// Height of the row that holds a Duo header's 44-point controls.
+const double _kDuoControlRowHeight = 44;
+
+/// The Flutter bar's row on iOS Duo, or null elsewhere.
+///
+/// Duo reports no top safe area beside its strip, on the cover display and in
+/// the wide layout alike. The row starts below the clearance, as on the native
+/// bar, and the bar keeps the native height, which can exceed the row.
+({double top, double row, double bottom})? _duoBarInsets(
+  BuildContext context,
+  TextStyle? titleStyle,
+  double titleContentHeight,
+) {
   final strip =
       DuoToolbarScope.maybeStripOf(context) ?? FoldGeometry.of(context).strip;
-  return defaultTargetPlatform == TargetPlatform.iOS && strip != null
-      ? duoHeaderTopClearance
-      : 0;
+  if (defaultTargetPlatform != TargetPlatform.iOS || strip == null) {
+    return null;
+  }
+  final titleHeight = _titleHeight(context, titleStyle, titleContentHeight);
+  final nativeRow = IosNavigationMetrics.of(
+    context,
+  ).compactHeight.clamp(_kDuoControlRowHeight, double.infinity);
+  final row = max(_kDuoControlRowHeight, titleHeight);
+  return (
+    top: duoHeaderTopClearance,
+    row: row,
+    bottom: max(0.0, max(nativeRow, titleHeight) - row),
+  );
 }
 
 /// Height for a compact title rail below the app bar's action row.
@@ -103,7 +115,7 @@ double _nativeCompactHeight(BuildContext context, [double titleHeight = 0]) {
   final height = IosNavigationMetrics.of(context).compactHeight;
   return strip == null
       ? max(height, titleHeight)
-      : max(height.clamp(44.0, double.infinity), titleHeight) +
+      : max(height.clamp(_kDuoControlRowHeight, double.infinity), titleHeight) +
             duoHeaderTopClearance;
 }
 
@@ -515,20 +527,13 @@ class FrostedAppBar extends StatelessWidget {
                     )
             : null);
 
-    // On Duo, controls start at the clearance as on the native bar, whose
-    // reported height can exceed the 44-point row they occupy.
-    final duoTop = _duoTopClearance(context);
-    final duoBottom = duoTop > 0
-        ? barContentHeight -
-              duoTop -
-              max(44.0, _titleHeight(context, titleStyle, titleContentHeight))
-        : 0.0;
+    final duo = _duoBarInsets(context, titleStyle, titleContentHeight);
     final titleRow = SizedBox(
       height: barContentHeight,
       child: Padding(
         padding: EdgeInsets.only(
-          top: duoTop,
-          bottom: duoBottom,
+          top: duo?.top ?? 0,
+          bottom: duo?.bottom ?? 0,
           left: horizontalInset,
           right:
               horizontalInset +
