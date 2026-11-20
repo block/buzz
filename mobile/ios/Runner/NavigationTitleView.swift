@@ -229,10 +229,19 @@ func duoPortraitHeader(in window: UIWindow?) -> CGRect? {
         && $0.frame.maxX >= bounds.maxX - 1 && $0.frame.minX > bounds.midX
     }
     guard let region = regions.min(by: { $0.frame.minY < $1.frame.minY }) else { return nil }
-    let centerY = region.frame.inset(by: region.margins).midY
+    let status = window.windowScene?.statusBarManager?.statusBarFrame ?? .zero
+    let centerY = !status.isEmpty && region.frame.contains(CGPoint(x: status.midX, y: status.midY))
+      ? status.midY : region.frame.inset(by: region.margins).midY
     let row = CGRect(x: 0, y: max(0, centerY - 28), width: region.frame.minX, height: 56)
     return row
   }
   #endif
   return nil
+}
+
+func portraitControlRow(_ row: CGRect, in bounds: CGRect) -> CGRect? {
+  let clipped = row.intersection(bounds)
+  guard !clipped.isNull, !clipped.isEmpty,
+        clipped.midY.isFinite, clipped.maxX.isFinite else { return nil }
+  return clipped
 }

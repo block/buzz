@@ -259,7 +259,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   func view() -> UIView { container }
 
   private func layout() {
-    var portraitHeader = floatingTitle == nil && !backdropOnly ? nil : duoPortraitHeader(in: container.window)
+    let portraitHeader = floatingTitle == nil && !backdropOnly ? nil : duoPortraitHeader(in: container.window)
 
     if standaloneLargeTitle, let scroll = standaloneSurface as? UIScrollView,
        let label = scroll.subviews.compactMap({ $0 as? UILabel }).first {
@@ -316,18 +316,6 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     navigation.view.setNeedsLayout()
     navigation.view.layoutIfNeeded()
     if floatingTitle != nil || backdropOnly, let window = container.window {
-      if let row = portraitHeader, !horizontalControls {
-        // UIKit owns the control row beside the status cluster. The reserved
-        // region includes clearance and is not the visible time's center.
-        let control = content.navigationItem.leftBarButtonItems?.first?.customView
-          ?? content.navigationItem.rightBarButtonItems?.first?.customView
-        let barFrame = control.map { $0.convert($0.bounds, to: window) }
-          ?? navigation.navigationBar.convert(navigation.navigationBar.bounds, to: window)
-        if barFrame.height > 0, barFrame.midY > 0, barFrame.midY < row.maxY + 56 {
-          portraitHeader = CGRect(x: row.minX, y: max(0, barFrame.midY - 28),
-                                  width: row.width, height: 56)
-        }
-      }
       let values = [window.bounds.width, window.bounds.height,
                     portraitHeader?.minX ?? 0, portraitHeader?.minY ?? 0,
                     portraitHeader?.width ?? 0, portraitHeader?.height ?? 0]
@@ -386,9 +374,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
                            width: size.width, height: size.height)
       title.layoutIfNeeded()
     }
-    let localRow = portraitHeader.flatMap { row in
-      container.window.map { container.convert(row, from: $0).intersection(container.bounds) }
-    }
+    // Portrait uses a full-width route. Keep the controls in its own
+    // coordinate space while Flutter translates the route during navigation.
+    let localRow = portraitHeader.flatMap { portraitControlRow($0, in: container.bounds) }
     if horizontalControls {
       // These native glass groups belong to the Flutter pane, whose bounds
       // already exclude the rail. Avoid UINavigationBar reserving it again.

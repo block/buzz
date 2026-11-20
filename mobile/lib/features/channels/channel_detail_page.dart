@@ -796,7 +796,10 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                         fit: StackFit.expand,
                         children: [
                           ForumPostsView(
-                            titleContentHeight: appBarTitleContentHeight,
+                            headerHeight: _conversationHeaderHeight(
+                              context,
+                              titleContentHeight: appBarTitleContentHeight,
+                            ),
                             channel: resolvedChannel,
                             currentPubkey: currentPubkey,
                           ),
