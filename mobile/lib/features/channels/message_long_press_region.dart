@@ -126,6 +126,7 @@ class _MessageLongPressRegion extends HookWidget {
     final fallbackSnapshotKey = useMemoized(GlobalKey.new, const []);
     final snapshotKey = externalSnapshotKey ?? fallbackSnapshotKey;
     final sourceHidden = useState(false);
+    final onTarget = useRef(false);
 
     void recognize() {
       final renderObject = snapshotKey.currentContext?.findRenderObject();
@@ -198,6 +199,7 @@ class _MessageLongPressRegion extends HookWidget {
     }
 
     return Semantics(
+      container: true,
       onLongPress: recognize,
       child: RawGestureDetector(
         behavior: HitTestBehavior.translucent,
@@ -215,16 +217,21 @@ class _MessageLongPressRegion extends HookWidget {
                 ),
                 // A hold beside the targets still wins the arena, so its
                 // release cannot fall through to the row's tap; it just
-                // opens nothing.
-                (recognizer) => recognizer.onLongPressStart = (details) {
-                  if (!targetsOnly ||
-                      messageLongPressTargetAt(
-                        context.findRenderObject(),
-                        details.globalPosition,
-                      )) {
-                    recognize();
+                // opens nothing. The target is decided at pointer down, so
+                // an edit or reaction that moves the bubble mid-hold doesn't
+                // change the outcome.
+                (recognizer) => recognizer
+                  ..onLongPressDown = (details) {
+                    onTarget.value =
+                        !targetsOnly ||
+                        messageLongPressTargetAt(
+                          context.findRenderObject(),
+                          details.globalPosition,
+                        );
                   }
-                },
+                  ..onLongPressStart = (_) {
+                    if (onTarget.value) recognize();
+                  },
               ),
         },
         child: InkWell(
