@@ -114,6 +114,7 @@ struct Relay {
     fail_history: bool,
     effective_queries: Arc<std::sync::atomic::AtomicUsize>,
     ignore_extension: Arc<std::sync::atomic::AtomicBool>,
+    fail_palette: Arc<std::sync::atomic::AtomicBool>,
 }
 async fn relay(events: Vec<Event>, fail_history: bool) -> (String, Relay) {
     let state = Relay {
@@ -122,12 +123,16 @@ async fn relay(events: Vec<Event>, fail_history: bool) -> (String, Relay) {
         fail_history,
         effective_queries: Default::default(),
         ignore_extension: Default::default(),
+        fail_palette: Default::default(),
     };
     let app = Router::new()
         .route("/query", post(|State(state): State<Relay>, Json(filters): Json<Vec<serde_json::Value>>| async move {
             let filter = &filters[0];
             if filter.get("effective_edit").is_some() {
                 state.effective_queries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            if state.fail_palette.load(std::sync::atomic::Ordering::SeqCst) && filter.get("#d").is_some() {
+                return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"unavailable"})));
             }
             if state.fail_history && filter.get("kinds").is_some() {
                 return (axum::http::StatusCode::FORBIDDEN, Json(serde_json::json!({"error":"denied"})));
@@ -309,43 +314,72 @@ async fn other_channel_kinds_keep_plain_edits_on_older_relays() {
 }
 
 #[tokio::test]
-async fn command_attaches_emoji_tags_for_known_shortcodes() {
+async fn command_attaches_emoji_tags_beside_retained_attachments() {
     let wave = vec![
         "emoji".to_string(),
         "wave".to_string(),
         "https://cdn.example.com/wave.png".to_string(),
     ];
-    for kind in [9, 7] {
-        let keys = Keys::generate();
-        let channel = Uuid::new_v4();
-        let original = EventBuilder::new(Kind::Custom(kind), "original")
-            .tag(Tag::parse(["h", &channel.to_string()]).unwrap())
-            .sign_with_keys(&keys)
+    for (kind, retains_attachments) in [(9, true), (45001, true), (45003, true), (7, false)] {
+        for palette_available in [true, false] {
+            let keys = Keys::generate();
+            let channel = Uuid::new_v4();
+            let original = EventBuilder::new(Kind::Custom(kind), "original")
+                .tags([
+                    Tag::parse(["h", &channel.to_string()]).unwrap(),
+                    Tag::parse(imeta("kept")).unwrap(),
+                ])
+                .sign_with_keys(&keys)
+                .unwrap();
+            let palette =
+                EventBuilder::new(Kind::Custom(buzz_sdk::kind::KIND_EMOJI_SET as u16), "")
+                    .tags([
+                        Tag::parse(["d", buzz_sdk::CUSTOM_EMOJI_SET_D_TAG]).unwrap(),
+                        Tag::parse(wave.clone()).unwrap(),
+                    ])
+                    .sign_with_keys(&keys)
+                    .unwrap();
+            let (url, state) = relay(vec![original.clone(), palette], false).await;
+            state
+                .fail_palette
+                .store(!palette_available, std::sync::atomic::Ordering::SeqCst);
+            let client = client(url, keys);
+            edit_message(
+                &client,
+                &original.id.to_hex(),
+                ":wave: :WAVE: :unknown: :wave: done",
+                false,
+            )
+            .await
             .unwrap();
-        let palette = EventBuilder::new(Kind::Custom(buzz_sdk::kind::KIND_EMOJI_SET as u16), "")
-            .tags([
-                Tag::parse(["d", buzz_sdk::CUSTOM_EMOJI_SET_D_TAG]).unwrap(),
-                Tag::parse(wave.clone()).unwrap(),
-            ])
-            .sign_with_keys(&keys)
-            .unwrap();
-        let (url, state) = relay(vec![original.clone(), palette], false).await;
-        let client = client(url, keys);
-        edit_message(
-            &client,
-            &original.id.to_hex(),
-            ":wave: :unknown: done",
-            false,
-        )
-        .await
-        .unwrap();
-        let submitted = state.submitted.lock().unwrap();
-        let emoji: Vec<_> = submitted[0]
-            .tags
-            .iter()
-            .filter(|t| t.as_slice()[0] == "emoji")
-            .map(|t| t.as_slice().to_vec())
-            .collect();
-        assert_eq!(emoji, vec![wave.clone()], "kind {kind}");
+            let submitted = state.submitted.lock().unwrap();
+            let tags = |name: &str| -> Vec<Vec<String>> {
+                submitted[0]
+                    .tags
+                    .iter()
+                    .filter(|t| t.as_slice()[0] == name)
+                    .map(|t| t.as_slice().to_vec())
+                    .collect()
+            };
+            let case = format!("kind {kind}, palette available {palette_available}");
+            assert_eq!(
+                tags("emoji"),
+                if palette_available {
+                    vec![wave.clone()]
+                } else {
+                    vec![]
+                },
+                "{case}"
+            );
+            assert_eq!(
+                tags("imeta"),
+                if retains_attachments {
+                    vec![imeta("kept")]
+                } else {
+                    vec![]
+                },
+                "{case}"
+            );
+        }
     }
 }
