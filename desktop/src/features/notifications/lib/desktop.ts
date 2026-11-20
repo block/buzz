@@ -438,10 +438,44 @@ export async function revealDesktopAppWindow(): Promise<void> {
   }
 }
 
+let autoPermissionRequest: Promise<DesktopNotificationPermissionState> | null =
+  null;
+let autoPermissionRequestSettled = false;
+
+/**
+ * Desktop alerts default to on, but the OS permission is only requested when
+ * the Settings toggle is switched on — which never happens for a fresh install
+ * because the toggle already reads as on. Without this, channel, thread, and DM
+ * alerts are silently dropped forever while the OS (e.g. macOS Notification
+ * Center) has never even registered the app. Ask once per process, at the
+ * first alert Buzz actually tries to deliver, mirroring the home-feed path.
+ */
+async function resolvePermissionForDelivery(): Promise<DesktopNotificationPermissionState> {
+  const permission = await getDesktopNotificationPermissionState();
+  if (permission !== "default" || !isTauri() || autoPermissionRequestSettled) {
+    return permission;
+  }
+
+  // Alerts that arrive while the prompt is open share its answer; once it has
+  // settled, never prompt again from here (Settings can still re-request).
+  autoPermissionRequest ??= requestDesktopNotificationAccess()
+    .catch((error) => {
+      console.warn(
+        "[desktop] notification permission request failed — notification dropped:",
+        error,
+      );
+      return "default" as const;
+    })
+    .finally(() => {
+      autoPermissionRequestSettled = true;
+    });
+  return autoPermissionRequest;
+}
+
 export async function sendDesktopNotification(
   payload: DesktopNotificationPayload,
 ): Promise<boolean> {
-  if ((await getDesktopNotificationPermissionState()) !== "granted") {
+  if ((await resolvePermissionForDelivery()) !== "granted") {
     return false;
   }
 
