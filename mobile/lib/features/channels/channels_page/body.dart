@@ -433,7 +433,7 @@ class _SliverChannelsList extends HookConsumerWidget {
             .read(channelSectionsProvider.notifier)
             .renameSection(
               section.id,
-              edit.name == section.name ? null : edit.name,
+              edit.name == section.name.trim() ? null : edit.name,
               icon: edit.icon == section.icon ? null : edit.icon,
             );
       },

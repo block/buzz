@@ -1482,6 +1482,13 @@ void main() {
         await tester.pumpWidget(const SizedBox.shrink());
         SharedPreferences.setMockInitialValues({});
         final duoPrefs = await SharedPreferences.getInstance();
+        final sections = _FakeChannelSectionsNotifier(
+          const ChannelSectionStore(
+            sections: [
+              ChannelSection(id: 'section-1', name: 'Design\u0085', order: 0),
+            ],
+          ),
+        );
         await tester.pumpWidget(
           buildTestable(
             realHome: true,
@@ -1489,15 +1496,7 @@ void main() {
               myPubkeyProvider.overrideWithValue('aabb'),
               savedPrefsProvider.overrideWithValue(duoPrefs),
               channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
-              channelSectionsProvider.overrideWith(
-                () => _FakeChannelSectionsNotifier(
-                  const ChannelSectionStore(
-                    sections: [
-                      ChannelSection(id: 'section-1', name: 'Design', order: 0),
-                    ],
-                  ),
-                ),
-              ),
+              channelSectionsProvider.overrideWith(() => sections),
             ],
           ),
         );
@@ -1521,15 +1520,16 @@ void main() {
         MethodCall? rename;
         messenger.setMockMethodCallHandler(editor, (call) async {
           rename = call;
-          return null;
+          return {'name': 'Design', 'icon': '🎨'};
         });
         addTearDown(() => messenger.setMockMethodCallHandler(editor, null));
         nativeMenu().actions.first.onPressed!();
         await tester.pumpAndSettle();
+        expect(sections.lastRename, (name: null, icon: '🎨'));
         expect(rename?.method, 'presentSection');
         expect(rename?.arguments.containsKey('icon'), isTrue);
         expect(rename?.arguments['title'], 'Rename section');
-        expect(rename?.arguments['initialValue'], 'Design');
+        expect(rename?.arguments['initialValue'], 'Design\u0085');
         expect(rename?.arguments['requireNonEmpty'], isTrue);
         expect(nativeMenu().actions[1].onPressed, isNotNull);
         expect(nativeMenu().destructiveIndices, {5});
@@ -4734,6 +4734,13 @@ class _FakeChannelSectionsNotifier extends ChannelSectionsNotifier {
   _FakeChannelSectionsNotifier(this._store);
 
   final ChannelSectionStore _store;
+
+  ({String? name, String? icon})? lastRename;
+
+  @override
+  void renameSection(String sectionId, String? newName, {String? icon}) {
+    lastRename = (name: newName, icon: icon);
+  }
 
   @override
   ChannelSectionsState build() =>
