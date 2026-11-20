@@ -455,6 +455,8 @@ class RunnerTests: XCTestCase {
     let row = CGRect(x: 0, y: 12, width: 620, height: 56)
     let bar = UIView(frame: CGRect(x: 800, y: 300, width: 720, height: 80))
     XCTAssertEqual(portraitControlRow(row, in: bar.bounds), row)
+    bar.frame.origin.x = 300
+    XCTAssertEqual(portraitControlRow(row, in: bar.bounds), row)
     XCTAssertNil(portraitControlRow(row, in: .zero))
     XCTAssertNil(portraitControlRow(row.offsetBy(dx: 800, dy: 0), in: bar.bounds))
   }

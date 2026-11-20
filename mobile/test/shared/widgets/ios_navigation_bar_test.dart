@@ -51,7 +51,11 @@ void main() {
     }
 
     await report('portraitHeaderGeometry', [669, 951, 0, 20, 535, 56]);
-    await report('portraitSlot', [82, 28, 40, 40]);
+    int layout() =>
+        (tester.widget<UiKitView>(bar).creationParams! as Map)['portraitLayout']
+            as int;
+    final firstLayout = layout();
+    await report('portraitSlot', [82, 28, 40, 40, firstLayout]);
     expect(
       tester.widget<UiKitView>(bar).creationParams,
       containsPair('inlinePortrait', true),
@@ -67,6 +71,16 @@ void main() {
       containsPair('inlinePortrait', false),
     );
     expect(tester.getCenter(find.byType(DmHeaderPortrait)).dx, 951 / 2);
+    tester.view.physicalSize = const Size(669, 951);
+    await report('portraitHeaderGeometry', [669, 951, 0, 48, 535, 56]);
+    expect(find.byType(DmHeaderPortrait), findsNothing);
+    await report('portraitSlot', [82, 28, 40, 40, firstLayout]);
+    expect(find.byType(DmHeaderPortrait), findsNothing);
+    await report('portraitSlot', [82, 56, 40, 40, layout()]);
+    expect(
+      tester.getCenter(find.byType(DmHeaderPortrait)),
+      const Offset(102, 76),
+    );
     await tester.pumpWidget(const SizedBox());
     debugDefaultTargetPlatformOverride = null;
   });

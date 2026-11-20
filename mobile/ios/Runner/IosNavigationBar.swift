@@ -192,6 +192,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private var flutterSafeTop: CGFloat = 0
   private var reportedPortraitHeader: [CGFloat]?
   private var inlinePortrait = false
+  private var portraitLayout = 0
   private var reportedPortraitSlot: CGRect?
   private let refreshBar = NavigationRefreshBar()
   private var floatingTitle: NavigationTitleView?
@@ -418,8 +419,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
                            width: 40, height: 40)
         if reportedPortraitSlot != frame {
           reportedPortraitSlot = frame
+          let layout = portraitLayout
           DispatchQueue.main.async { [weak self] in
-            self?.channel.invokeMethod("portraitSlot", arguments: [frame.minX, frame.minY, frame.width, frame.height])
+            self?.channel.invokeMethod("portraitSlot", arguments: [frame.minX, frame.minY, frame.width, frame.height, layout])
           }
         }
       }
@@ -510,6 +512,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     standaloneSurface?.removeFromSuperview()
     standaloneSurface = nil
     horizontalControls = args["horizontalControls"] as? Bool == true
+    portraitLayout = args["portraitLayout"] as? Int ?? 0
     inlinePortrait = args["inlinePortrait"] as? Bool == true
     centerTitleInPane = args["centerTitleInPane"] as? Bool == true
     portraitTopPadding = CGFloat((args["portraitTopPadding"] as? NSNumber)?.doubleValue ?? 0)
