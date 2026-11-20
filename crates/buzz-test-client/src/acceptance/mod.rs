@@ -796,10 +796,16 @@ mod tests {
             tcp.write_all(response.as_bytes()).await.unwrap();
         });
 
+        // The probe's stage timeout bounds this call, so check its result
+        // first: a probe that never sends the request fails here, not in a
+        // server still waiting in `accept`.
         let (report, version) = relay_info(&config(format!("ws://127.0.0.1:{port}"))).await;
-        server.await.unwrap();
         assert_eq!(report.result, Outcome::Success, "{:?}", report.error);
         assert_eq!(version.as_deref(), Some(sha));
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("server finished")
+            .unwrap();
     }
 
     fn config(relay_url: String) -> Config {
