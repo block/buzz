@@ -14,8 +14,10 @@
 //! An event is dropped on this node when its worker's queue is full, when one
 //! delivery attempt runs past [`MAX_DELIVERY_ATTEMPT`] (a database connection
 //! that stops answering would otherwise hold its worker forever), or when the
-//! dispatcher lags the broadcast and skips it. Both are counted, and the
-//! syncs the dropped events would have reached get `CLOSED "resync: ..."`
+//! dispatcher lags the broadcast and skips it. A reaction whose derived
+//! recipients cannot be read reaches only the subscriptions its own tags
+//! match, and is counted as dropped for the rest. Every drop is counted, and
+//! the syncs the dropped events would have reached get `CLOSED "resync: ..."`
 //! (NIP-AR Sync rule 5). A plain subscription is not told. Its client may
 //! replay the event when it next reconnects, but only if later deliveries did
 //! not move its resume cursor past the event by more than the client's replay
@@ -31,7 +33,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{broadcast, mpsc};
 use tracing::warn;
 
-use super::event::{deliver_pubsub_event, pubsub_stored_event, take_local_echo};
+use super::event::{deliver_pubsub_event, pubsub_stored_event, take_local_echo, PubsubDelivery};
 use crate::state::AppState;
 
 /// Delivery workers per node.
@@ -66,13 +68,20 @@ pub fn spawn(
 /// Delivers one worker's queue in order.
 async fn run_worker(state: Arc<AppState>, mut queue: mpsc::Receiver<Queued>) {
     while let Some((community_id, stored)) = queue.recv().await {
-        let delivery = deliver_pubsub_event(&state, community_id, &stored);
-        if tokio::time::timeout(MAX_DELIVERY_ATTEMPT, delivery)
-            .await
-            .is_err()
-        {
-            drop_event(&state, community_id, &stored, "stale");
+        deliver_queued(&state, community_id, &stored).await;
+    }
+}
+
+/// Deliver one queued event, dropping it when the attempt runs past
+/// [`MAX_DELIVERY_ATTEMPT`] or could not match every subscription.
+async fn deliver_queued(state: &Arc<AppState>, community_id: CommunityId, stored: &StoredEvent) {
+    let delivery = deliver_pubsub_event(state, community_id, stored);
+    match tokio::time::timeout(MAX_DELIVERY_ATTEMPT, delivery).await {
+        Ok(PubsubDelivery::Complete) => {}
+        Ok(PubsubDelivery::RecipientsUnread) => {
+            drop_event(state, community_id, stored, "recipients_unread");
         }
+        Err(_) => drop_event(state, community_id, stored, "stale"),
     }
 }
 
@@ -371,6 +380,42 @@ mod tests {
         };
         let v: serde_json::Value = serde_json::from_str(&text).expect("frame JSON");
         assert_eq!(v[2]["id"], id);
+    }
+
+    /// A reaction whose derived recipients cannot be read still reaches the
+    /// subscriptions its own tags match, and is counted as dropped so the
+    /// syncs it matched resync. No connection closes.
+    #[tokio::test]
+    async fn reaction_with_unreadable_recipients_is_delivered_by_its_tags_and_dropped() {
+        let state = crate::state::tests::test_state().await;
+        state.db.pool().close().await;
+        let (_plain, mut frames, plain_cancel) = subscriber(&state, 7);
+        let (synced, sync_cancel) = sync(&state, 7);
+        let reaction = ChannelEvent {
+            event: EventBuilder::new(Kind::Reaction, "+")
+                .sign_with_keys(&Keys::generate())
+                .expect("sign reaction"),
+            ..event(7, 0)
+        };
+        let id = reaction.event.id.to_hex();
+        let stored = pubsub_stored_event(reaction);
+
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _guard = metrics::set_default_local_recorder(&recorder);
+        deliver_queued(&state, community(), &stored).await;
+
+        let Ok(Message::Text(text)) = frames.try_recv() else {
+            panic!("expected the reaction");
+        };
+        let v: serde_json::Value = serde_json::from_str(&text).expect("frame JSON");
+        assert_eq!(v[2]["id"], id);
+        assert_eq!(dropped(&snapshotter, "recipients_unread"), 1);
+        assert_eq!(
+            state.artifact_syncs.pending_resync(synced, "sub"),
+            Some(LAG_RESYNC)
+        );
+        assert!(!plain_cancel.is_cancelled() && !sync_cancel.is_cancelled());
     }
 
     /// A delivery that hangs (here on a database that accepts the connection
