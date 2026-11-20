@@ -79,29 +79,35 @@ class _MentionMd {
 
 String _markdownMentionName(String name) => name.replaceAll(' ', '\u00A0');
 
-/// The pill for an identity link, `[@Name](nostr:npub1…)`: the mention an
-/// edit writes into the body. The link names its own key, so it needs no
-/// tag, shows the name as written and opens that person. Null for any other
-/// link.
-InlineSpan? _identityMentionSpan(
-  LinkBuildDetails link,
-  String url,
-  String text,
-  TextStyle style,
-  Set<String> agentMentionPubkeys,
-  void Function(String pubkey)? onMentionTap,
-) {
-  final pubkey = mentionIdentityLinkKey(url);
-  final label = text.replaceAll('\u00A0', ' ');
-  if (pubkey == null || !isMentionIdentityLabel(label)) return null;
-  final pill = MessageMentionPill(
-    label: label.substring(1),
-    isAgent: agentMentionPubkeys.any((key) => key.toLowerCase() == pubkey),
-    textStyle: style,
-  );
-  return link.asWidgetSpan(
-    onMentionTap == null
-        ? pill
-        : GestureDetector(onTap: () => onMentionTap(pubkey), child: pill),
-  );
+/// Where a message's links are built: an identity link,
+/// `[@Name](nostr:npub1…)`, is that person's pill, and every other link goes
+/// to [MessageContent._buildLink].
+extension _MentionLinks on MessageContent {
+  InlineSpan _buildMentionOrLink(
+    LinkBuildDetails link,
+    WidgetRef ref,
+    String url,
+    TextStyle? fallbackStyle,
+    void Function(String channelId) resolvedChannelTap,
+    Map<String, String> resolvedChannelNames,
+    _LinkTextRecognizers recognizers,
+    Map<String, ImetaEntry> imetaByUrl,
+  ) =>
+      identityMentionSpan(
+        link,
+        url,
+        fallbackStyle ?? link.style,
+        agentMentionPubkeys,
+        onMentionTap,
+      ) ??
+      _buildLink(
+        link,
+        ref,
+        url,
+        fallbackStyle,
+        resolvedChannelTap,
+        resolvedChannelNames,
+        recognizers,
+        imetaByUrl,
+      );
 }
