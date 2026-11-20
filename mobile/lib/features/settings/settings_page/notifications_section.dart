@@ -5,14 +5,17 @@ bool _notificationsVisible(WidgetRef ref) {
       defaultTargetPlatform != TargetPlatform.android) {
     return false;
   }
-  // Without a gateway an Android build never enrolls, so there is nothing to
-  // switch on. (iOS keeps a saved opt-in visible so it can be turned off.)
-  if (defaultTargetPlatform == TargetPlatform.android &&
-      !Env.pushGatewayConfigured) {
-    return false;
-  }
   final community = ref.watch(activeCommunityProvider).value;
   if (community == null) return false;
+  // Without a gateway an Android build never enrolls, so there is nothing to
+  // switch on. A saved opt-in (or an unfinished opt-out) still shows the row:
+  // turning it off is the only move left, and the row goes inert once off.
+  // (iOS keeps a saved opt-in visible the same way.)
+  if (defaultTargetPlatform == TargetPlatform.android &&
+      !Env.pushGatewayConfigured) {
+    return community.pushNotificationsEnabled ||
+        community.pushSubscriptionState.pendingTombstoneGeneration != null;
+  }
   final setup = ref.watch(buzzPushSetupStatusProvider);
   final capability = ref.watch(currentRelayPushDescriptorProvider);
   return (!capability.isLoading &&
