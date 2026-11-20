@@ -56,8 +56,22 @@ final class HomeScreenShortcuts {
   /// Returns false for items this bridge does not own.
   @discardableResult
   func handle(_ item: UIApplicationShortcutItem) -> Bool {
-    guard Self.types.contains(item.type) else { return false }
-    let type = item.type
+    open(item.type)
+  }
+
+  /// Runs the quick action a `buzz://shortcut/<type>` link names. Returns
+  /// false for other links.
+  @discardableResult
+  func open(_ url: URL) -> Bool {
+    guard let type = ShortcutLink.type(of: url) else { return false }
+    return open(type)
+  }
+
+  /// Runs a quick action by type. Returns false for types this bridge does
+  /// not own.
+  @discardableResult
+  func open(_ type: String) -> Bool {
+    guard Self.types.contains(type) else { return false }
     pending = type
     // Sending a tap that is also buffered could reach Dart twice: once from
     // the channel's own buffer and once from takePending.
