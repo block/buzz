@@ -105,45 +105,15 @@ class _MarkdownEditingController extends TextEditingController {
       if (_mentionsInvalid && !text.contains('@')) _mentionsInvalid = false;
       if (_history.isEmpty) _recordHistory(value.text);
       if (_historyDirection == 0) {
-        _carryMentions(value, newValue);
-        _recordHistory(text);
+        final old = value;
+        _carryMentions(old, newValue);
+        if (!_recoverHistory(old, newValue)) _recordHistory(text);
       } else if (!_restoreHistory(text)) {
         _carryMentions(value, newValue);
       }
       _live = _inProse(text, _mentions);
     }
     super.value = _snapSelectionToChips(newValue);
-  }
-
-  /// Notes the bindings now held with [text] as the newest history entry,
-  /// dropping any entries a Redo could have reached.
-  void _recordHistory(String text) {
-    if (_historyAt >= 0 && _history[_historyAt].text == text) {
-      _history[_historyAt] = (text: text, mentions: _mentions);
-      return;
-    }
-    _history.removeRange(_historyAt + 1, _history.length);
-    _history.add((text: text, mentions: _mentions));
-    if (_history.length > _maxHistory) _history.removeAt(0);
-    _historyAt = _history.length - 1;
-  }
-
-  /// Takes the bindings of the nearest entry for [text] in the direction
-  /// Undo or Redo is moving. False when the history holds none, as after it
-  /// was trimmed; the caller then carries the bindings as for any edit.
-  bool _restoreHistory(String text) {
-    for (
-      var i = _historyAt + _historyDirection;
-      i >= 0 && i < _history.length;
-      i += _historyDirection
-    ) {
-      if (_history[i].text != text) continue;
-      _historyAt = i;
-      _mentions = _history[i].mentions;
-      _cachedTextSpan = null;
-      return true;
-    }
-    return false;
   }
 
   /// The picked mentions that are live in [text], in text order: the chips

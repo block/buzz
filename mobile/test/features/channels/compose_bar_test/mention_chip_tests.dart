@@ -763,24 +763,158 @@ void mentionChipTests() {
     await send();
     expect(sent, [both.first.pubkey, both.last.pubkey]);
 
-    // The system's own Undo (an iOS shake or gesture) restores the text
-    // without saying so. The text that came back is unbound and shares its
-    // name, so the send asks for a pick: it never borrows the other chip.
+    // Review of #9699 (system Undo): the system's own Undo (an iOS shake or
+    // gesture) restores the text as a plain change and never reaches the
+    // composer's history action. The text that came back is one the editor
+    // held, so each chip returns with its own key.
+    Future<void> systemHistory(String direction) async {
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        SystemChannels.undoManager.name,
+        SystemChannels.undoManager.codec.encodeMethodCall(
+          MethodCall('UndoManagerClient.handleUndo', [direction]),
+        ),
+        (_) {},
+      );
+      await tester.pump(const Duration(seconds: 1));
+    }
+
     both = await pickBothSams();
     await deleteFirstChip();
-    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
-      SystemChannels.undoManager.name,
-      SystemChannels.undoManager.codec.encodeMethodCall(
-        const MethodCall('UndoManagerClient.handleUndo', ['undo']),
-      ),
-      (_) {},
-    );
-    await tester.pump(const Duration(seconds: 1));
+    await systemHistory('undo');
     expect(controller.text, '@Sam @Sam ');
+    expect(personChip, findsNWidgets(2));
+    expect(saved(), both);
+    await systemHistory('redo');
+    expect(controller.text, ' @Sam ');
+    expect(saved().single.pubkey, both.last.pubkey);
+    await systemHistory('undo');
+    expect(saved(), both);
     sent = null;
     await send();
-    expect(sent, isNull);
-    expect(find.textContaining('is ambiguous'), findsOneWidget);
+    expect(sent, [both.first.pubkey, both.last.pubkey]);
+
+    // A name character typed against a chip unbinds it. Taking it back,
+    // by the system Undo or as the raw text change it arrives as, brings
+    // the pick back: a person outside the channel meets the prompt and is
+    // tagged, and one who shares a member's name is never that member.
+    final outsideAlice = find
+        .descendant(
+          of: find.byKey(const ValueKey('mention-suggestions-popover')),
+          matching: find.textContaining('Alice · '),
+        )
+        .last;
+    for (final (name, target, key, raw) in [
+      ('Quinn', row('Quinn'), quinn.pubkey, false),
+      ('Quinn', row('Quinn'), quinn.pubkey, true),
+      ('Alice', outsideAlice, otherAlice.pubkey, false),
+      ('Alice', outsideAlice, otherAlice.pubkey, true),
+    ]) {
+      final reason = '$name raw=$raw';
+      sent = sentTags = null;
+      await tester.enterText(field, '');
+      await tester.pump(const Duration(seconds: 1));
+      await pickRow('@${name.toLowerCase()}', target);
+      await tester.pump(const Duration(seconds: 1));
+      final end = name.length + 1;
+      final picked = [ComposeDraftMention(start: 0, end: end, pubkey: key)];
+      expect(saved(), picked, reason: reason);
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: '@${name}x ',
+          selection: TextSelection.collapsed(offset: end + 1),
+        ),
+      );
+      await tester.pump(const Duration(seconds: 1));
+      expect(personChip, findsNothing, reason: reason);
+      expect(saved(), isEmpty, reason: reason);
+      if (raw) {
+        tester.testTextInput.updateEditingValue(
+          TextEditingValue(
+            text: '@$name ',
+            selection: TextSelection.collapsed(offset: end + 1),
+          ),
+        );
+        await tester.pump(const Duration(seconds: 1));
+      } else {
+        await systemHistory('undo');
+      }
+      expect(controller.text, '@$name ', reason: reason);
+      expect(personChip, findsOneWidget, reason: reason);
+      expect(saved(), picked, reason: reason);
+      await send();
+      expect(
+        find.text('Mention people outside this channel?'),
+        findsOneWidget,
+        reason: reason,
+      );
+      await tester.tap(
+        find
+            .descendant(
+              of: find.byType(AlertDialog),
+              matching: find.byType(TextButton),
+            )
+            .first,
+      );
+      await tester.pumpAndSettle();
+      expect(sent, isNot(contains(alice)), reason: reason);
+      expect(
+        sentTags,
+        contains(orderedEquals(['mention', key])),
+        reason: reason,
+      );
+      await _expandComposer(tester);
+    }
+
+    // The space after a chip deleted, so the next word runs into the name,
+    // and put back by the system Undo: the chip is Quinn's again.
+    await tester.enterText(field, '');
+    await tester.pump(const Duration(seconds: 1));
+    await pickRow('@quinn', row('Quinn'));
+    await tester.enterText(field, '@Quinn hi');
+    await tester.pump(const Duration(seconds: 1));
+    final beforeHi = [
+      ComposeDraftMention(start: 0, end: 6, pubkey: quinn.pubkey),
+    ];
+    expect(saved(), beforeHi);
+    await deleteBefore(7);
+    await tester.pump(const Duration(seconds: 1));
+    expect(controller.text, '@Quinnhi');
+    expect(saved(), isEmpty);
+    await systemHistory('undo');
+    expect(controller.text, '@Quinn hi');
+    expect(saved(), beforeHi);
+
+    // A name typed by hand where a deleted chip was is typed text, never
+    // that pick again, although the editor held the same text with a chip.
+    await tester.enterText(field, '');
+    await tester.pump(const Duration(seconds: 1));
+    await pickRow('@quinn', row('Quinn'));
+    await deleteBefore(7);
+    expect(controller.text, '@Quinn');
+    expect(saved(), [
+      ComposeDraftMention(start: 0, end: 6, pubkey: quinn.pubkey),
+    ]);
+    await deleteBefore(6);
+    expect(controller.text, '');
+    for (var length = 1; length <= 6; length++) {
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: '@Quinn'.substring(0, length),
+          selection: TextSelection.collapsed(offset: length),
+        ),
+      );
+      await tester.pump();
+    }
+    await tester.pump(mentionSearchDebounce * 2);
+    await tester.pumpAndSettle();
+    expect(controller.text, '@Quinn');
+    expect(personChip, findsNothing);
+    expect(saved(), isEmpty);
+    sent = sentTags = null;
+    await send();
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(sentText, '@Quinn');
+    expect(sentTags, isEmpty);
     await tester.pump(const Duration(seconds: 5));
   });
 }

@@ -80,6 +80,7 @@ part 'compose_bar/suggestions.dart';
 part 'compose_bar/mention_chooser.dart';
 part 'compose_bar/formatting_toolbar.dart';
 part 'compose_bar/attachments.dart';
+part 'compose_bar/binding_history.dart';
 part 'compose_bar/video_thumbnail.dart';
 part 'compose_bar/upload_progress_pill.dart';
 part 'compose_bar/photo_gallery_picker.dart';
