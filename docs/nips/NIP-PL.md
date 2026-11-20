@@ -403,17 +403,17 @@ The relay sends requests to the configured HTTP(S) delivery URL ending in `/v1/d
 
 The relay supplies a NIP-98 `Authorization: Nostr <standard-base64-event-json>` header for method `POST`, the configured delivery URL, and the SHA-256 payload hash of the **received request body bytes**. The gateway verifies the event ID and signature, event kind, timestamp under NIP-98 rules, method, signed URL path, and payload; the event pubkey is the relay identity. It decrypts `endpoint_grant`, requires that signer, current installation/delegation, endpoint epoch and generation, and both `now <= request.expires_at <= grant.expires_at`. Every NIP-98 event id is burned at admission.
 
-The relay's durable job UUID is `request_id` and becomes the stable APNs `apns-id`. Delivery replay/quota reservation is one transaction. The commit of that transaction is send-begin: a revocation or rotation commit that completes first prevents the old-capability send; a send admitted first may finish. Terminal outcomes retain the `(relay_pubkey, request_id)` reservation; transient/configuration outcomes release it only after provider processing so a fresh NIP-98 event may retry the same job. Endpoint quota is charged once per admitted attempt and never refunded. A crash before transient cleanup can reject that id until its bounded request expiry; exactly-once provider delivery is not guaranteed.
+The relay's durable job UUID is `request_id` and becomes the stable APNs `apns-id`. Delivery replay/quota reservation is one transaction. The commit of that transaction is send-begin: a revocation or rotation commit that completes first prevents the old-capability send; a send admitted first may finish. Admission records the `(relay_pubkey, request_id)` reservation as in flight. Terminal outcomes retain it as finished; transient/configuration outcomes release it only after provider processing so a fresh NIP-98 event may retry the same job. A request whose reservation is still in flight is answered with a retry, not a replay rejection: a relay that timed out an attempt and retries while the gateway is still sending it MUST NOT be told the job is finished, since that attempt may yet fail transiently. Endpoint quota is charged once per admitted attempt and never refunded. A crash before cleanup, or a failure to record a terminal outcome, leaves the reservation in flight (the terminal outcome is still returned), so retries of that id keep receiving the retry response until its bounded request expiry; exactly-once provider delivery is not guaranteed.
 
 Responses:
 
 - `200 {"status":"accepted"}` — APNs accepted; terminal reservation retained.
 - `410 {"status":"invalid_endpoint","generation":<integer>,"invalid_at":<unix-seconds-or-null>}` — permanent endpoint invalidation; terminal reservation retained. The relay applies it only if that generation remains current.
-- `503 {"status":"retry","retry_after_seconds":<positive-integer-or-null>}` — transient APNs outcome; request reservation released after processing.
+- `503 {"status":"retry","retry_after_seconds":<positive-integer-or-null>}` — transient APNs outcome, request reservation released after processing; or an earlier attempt of this `request_id` is still in flight, in which case nothing is sent, no quota is charged and `retry_after_seconds` is always set. The relay retries later with a fresh NIP-98 event.
 - `503 {"error":"configuration_fault"}` — provider configuration fault; request reservation released after processing.
 - `400 {"error":"invalid_request"}` — malformed request or permanent APNs request fault; a provider-reached permanent fault is terminal.
 - `401 {"error":"invalid_auth"}` — absent or invalid NIP-98 authorization.
-- `404 {"error":"invalid_grant"}` — capability, signer, authority, replay, or expiry rejection.
+- `404 {"error":"invalid_grant"}` — capability, signer, authority, finished-replay, or expiry rejection.
 - `429 {"error":"rate_limited"}` — endpoint delivery quota exhausted.
 - `503 {"error":"temporarily_unavailable"}` — durable authority/custody/disposition failure.
 

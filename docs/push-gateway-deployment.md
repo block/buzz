@@ -205,7 +205,7 @@ The gateway serves Prometheus metrics at `GET /metrics` on the **private health 
 | `push_gateway_fcm_send_attempts_total` | counter | none | Entries into the concrete FCM HTTP send seam. |
 | `push_gateway_fcm_deliveries_total` | counter | `outcome` (the same five classes as APNs) | Terminal FCM send outcomes. |
 | `push_gateway_fcm_delivery_seconds` | histogram | none | FCM send round-trip latency (seconds), including any access token refresh. |
-| `push_gateway_admissions_total` | counter | `result` = `admitted` \| `rejected` \| `unavailable` | Outcome at the `authorize_delivery` replay/quota fence. |
+| `push_gateway_admissions_total` | counter | `result` = `admitted` \| `rejected` \| `unavailable` \| `in_flight` | Outcome at the `authorize_delivery` replay/quota fence. `in_flight` is a retry of a request id whose earlier attempt is still sending; it answers 503 retry. |
 | `push_gateway_delivery_errors_total` | counter | `class` (static) | Selected delivery-handler exit classes only (see note). |
 | `push_gateway_reaper_failures_total` | counter | — | Retention reaper sweep failures. |
 | `push_gateway_readiness_failures_total` | counter | `cause` = `not_accepting` \| `authority` | Readiness probe failures by cause. |

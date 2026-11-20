@@ -139,6 +139,11 @@ pub enum AuthorityError {
     RateLimited,
     #[error("authority store unavailable")]
     Unavailable,
+    /// The request id was admitted by an attempt that has not finished yet.
+    /// The caller should retry later: the first attempt may still fail
+    /// retryably and release the id.
+    #[error("delivery request is still in flight")]
+    InFlight,
 }
 
 /// Every mutating method is an atomic store operation. Implementations must
@@ -225,8 +230,12 @@ pub trait AuthorityStore: Send + Sync {
         quota_max_deliveries: i64,
         now: i64,
     ) -> Result<DeliveryPermit, AuthorityError>;
-    /// Retain terminal request ids; release retryable request ids while always
-    /// retaining the one-use auth event admitted by `authorize_delivery`.
+    /// Admission records the request id as in flight. A replay of it fails
+    /// with `InFlight` until this call settles it: terminal outcomes retain the
+    /// id as finished (later replays are `Rejected`), retryable outcomes
+    /// release it. The one-use auth event admitted by `authorize_delivery` is
+    /// always retained. If the gateway dies before finishing, the id stays in
+    /// flight until its request expires, so the relay keeps retrying until then.
     async fn finish_delivery(
         &self,
         permit: DeliveryPermit,
@@ -244,7 +253,8 @@ struct MemoryState {
     delegations: HashMap<(Uuid, String), Delegation>,
     delegation_ids: HashMap<Uuid, (Uuid, String)>,
     delivery_auth_replays: HashMap<(String, String), i64>,
-    delivery_request_replays: HashMap<(String, Uuid), i64>,
+    /// Request id to (expires_at, finished).
+    delivery_request_replays: HashMap<(String, Uuid), (i64, bool)>,
     endpoint_quotas: HashMap<[u8; 32], (i64, i64)>,
 }
 
@@ -596,9 +606,12 @@ impl AuthorityStore for MemoryAuthorityStore {
         let fingerprint = i.token_fingerprint;
         let auth_key = (relay.to_owned(), event_id.to_owned());
         let request_key = (relay.to_owned(), request_id);
-        if s.delivery_auth_replays.contains_key(&auth_key)
-            || s.delivery_request_replays.contains_key(&request_key)
-        {
+        match s.delivery_request_replays.get(&request_key) {
+            Some((_, false)) => return Err(AuthorityError::InFlight),
+            Some((_, true)) => return Err(AuthorityError::Rejected),
+            None => {}
+        }
+        if s.delivery_auth_replays.contains_key(&auth_key) {
             return Err(AuthorityError::Rejected);
         }
         let quota = s.endpoint_quotas.entry(fingerprint).or_insert((now, 0));
@@ -611,7 +624,7 @@ impl AuthorityStore for MemoryAuthorityStore {
         quota.1 += 1;
         s.delivery_auth_replays.insert(auth_key, request_expires_at);
         s.delivery_request_replays
-            .insert(request_key, request_expires_at);
+            .insert(request_key, (request_expires_at, false));
         Ok(DeliveryPermit::new(authority, relay.to_owned(), request_id))
     }
 
@@ -620,12 +633,17 @@ impl AuthorityStore for MemoryAuthorityStore {
         permit: DeliveryPermit,
         disposition: DeliveryDisposition,
     ) -> Result<(), AuthorityError> {
-        if disposition == DeliveryDisposition::Retryable {
-            self.0
-                .lock()
-                .map_err(|_| AuthorityError::Unavailable)?
-                .delivery_request_replays
-                .remove(&(permit.relay_pubkey, permit.request_id));
+        let mut s = self.0.lock().map_err(|_| AuthorityError::Unavailable)?;
+        let key = (permit.relay_pubkey, permit.request_id);
+        match disposition {
+            DeliveryDisposition::Retryable => {
+                s.delivery_request_replays.remove(&key);
+            }
+            DeliveryDisposition::Terminal => {
+                if let Some((_, finished)) = s.delivery_request_replays.get_mut(&key) {
+                    *finished = true;
+                }
+            }
         }
         Ok(())
     }
@@ -637,7 +655,7 @@ impl AuthorityStore for MemoryAuthorityStore {
         s.delivery_auth_replays
             .retain(|_, expires_at| *expires_at >= now);
         s.delivery_request_replays
-            .retain(|_, expires_at| *expires_at >= now);
+            .retain(|_, (expires_at, _)| *expires_at >= now);
         s.endpoint_quotas
             .retain(|_, (started_at, _)| now.saturating_sub(*started_at) < 86_400);
         Ok(())
@@ -868,6 +886,25 @@ mod tests {
         admitted(&store, &"33".repeat(32), request)
             .await
             .expect("fresh auth event may retry stable request id");
+    }
+
+    #[tokio::test]
+    async fn replay_of_unfinished_request_is_in_flight_until_it_finishes() {
+        let store = store().await;
+        let request = Uuid::new_v4();
+        let permit = admitted(&store, &"22".repeat(32), request).await.unwrap();
+        assert_eq!(
+            admitted(&store, &"33".repeat(32), request).await.err(),
+            Some(AuthorityError::InFlight)
+        );
+        store
+            .finish_delivery(permit, DeliveryDisposition::Terminal)
+            .await
+            .unwrap();
+        assert_eq!(
+            admitted(&store, &"44".repeat(32), request).await.err(),
+            Some(AuthorityError::Rejected)
+        );
     }
 
     #[tokio::test]
