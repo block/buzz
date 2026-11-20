@@ -50,11 +50,7 @@ final channelFilterProvider = Provider.autoDispose<ChannelFilterManager?>((
   final manager = ChannelFilterManager(
     isGroupLive: (group) =>
         !group.startsWith('section:') ||
-        ref
-            .read(channelSectionsProvider)
-            .store
-            .sections
-            .any((s) => 'section:${s.id}' == group),
+        ref.read(sidebarLayoutProvider).section(group.substring(8)) != null,
     pubkey: pubkey,
     crypto: crypto,
     cached: cached,

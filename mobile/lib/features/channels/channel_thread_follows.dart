@@ -66,12 +66,14 @@ extension _ChannelThreadFollows on ChannelsNotifier {
     for (final MapEntry(key: channelId, value: events)
         in _observedUnreadEventsByChannel.entries) {
       if (dmIds.contains(channelId)) continue;
+      final before = events.length;
       events.removeWhere(
         (_, event) =>
             !event.highPriority &&
             event.rootId != null &&
             unfollowed.contains(event.rootId),
       );
+      if (events.length != before) _observedUnreadRevisions.touch(channelId);
     }
     if (widened.isNotEmpty) {
       // Only the widened threads' channels catch up again; a root whose

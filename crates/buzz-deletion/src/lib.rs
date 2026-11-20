@@ -1421,10 +1421,12 @@ fn validate_approved_schema(
     live: &buzz_db::deletion::SchemaManifest,
     frozen: &FrozenInventory,
 ) -> Result<()> {
-    // The approved catalog binds exactly, with one bounded exception: an
+    // The approved catalog binds exactly, with two bounded exceptions. An
     // expand migration between approval and execution may add a table listed
-    // in APPROVAL_FORWARD_TABLES, which this binary purges and verifies. The
-    // frozen manifest and its digest are never rewritten.
+    // in APPROVAL_FORWARD_TABLES, which this binary purges and verifies. A
+    // contract migration may drop a table listed in RETIRING_SCOPED_TABLES, which
+    // this binary purges and verifies only while it exists. The frozen manifest
+    // and its digest are never rewritten.
     let frozen_tables = frozen
         .schema
         .scoped_tables
@@ -1434,7 +1436,9 @@ fn validate_approved_schema(
         .scoped_tables
         .iter()
         .collect::<std::collections::BTreeSet<_>>();
-    let removed = !frozen_tables.is_subset(&live_tables);
+    let removed = frozen_tables
+        .difference(&live_tables)
+        .any(|table| !buzz_db::deletion::RETIRING_SCOPED_TABLES.contains(&table.as_str()));
     let unlisted_addition = live_tables
         .difference(&frozen_tables)
         .any(|table| !buzz_db::deletion::APPROVAL_FORWARD_TABLES.contains(&table.as_str()));
@@ -1889,6 +1893,69 @@ mod postgres_tests {
     fn submit_host_rejects_empty_or_invalid_values() {
         assert!(resolve_submit_host(Some("   "), Some("wss://relay.example")).is_err());
         assert!(resolve_submit_host(None, Some("not a URL")).is_err());
+    }
+
+    /// An approved catalog tolerates a retiring table vanishing before
+    /// execution, and nothing else: any other frozen table that is gone, or a
+    /// table added after approval and not forward-listed, is still drift.
+    #[test]
+    fn approved_schema_tolerates_only_retiring_tables_vanishing() {
+        use buzz_db::deletion::{SchemaManifest, EXPECTED_SCOPED_TABLES, RETIRING_SCOPED_TABLES};
+
+        let manifest = |tables: &[String]| SchemaManifest {
+            scoped_tables: tables.to_vec(),
+            row_counts: std::collections::BTreeMap::new(),
+            fenced_tables: Vec::new(),
+        };
+        let required: Vec<String> = EXPECTED_SCOPED_TABLES
+            .iter()
+            .map(|table| (*table).to_owned())
+            .collect();
+        let mut with_retiring = required.clone();
+        with_retiring.extend(
+            RETIRING_SCOPED_TABLES
+                .iter()
+                .map(|table| (*table).to_owned()),
+        );
+        let frozen = FrozenInventory {
+            schema: manifest(&with_retiring),
+            storage: empty_storage_manifest(buzz_core::CommunityId::from_uuid(Uuid::new_v4())),
+        };
+
+        validate_approved_schema(&manifest(&with_retiring), &frozen)
+            .expect("retiring tables still live");
+        validate_approved_schema(&manifest(&required), &frozen)
+            .expect("every retiring table dropped after approval");
+        for kept in RETIRING_SCOPED_TABLES {
+            let partial: Vec<String> = with_retiring
+                .iter()
+                .filter(|table| table.as_str() != *kept)
+                .cloned()
+                .collect();
+            validate_approved_schema(&manifest(&partial), &frozen)
+                .expect("one retiring table dropped after approval");
+        }
+
+        // A required table that is gone is drift, with or without the
+        // retiring tables beside it.
+        for live in [&with_retiring, &required] {
+            let missing: Vec<String> = live
+                .iter()
+                .filter(|table| table.as_str() != "workflows")
+                .cloned()
+                .collect();
+            assert!(validate_approved_schema(&manifest(&missing), &frozen).is_err());
+        }
+        // An unlisted addition is drift, and a retiring table is not exempt
+        // from that when the approval never froze it.
+        let mut unknown = required.clone();
+        unknown.push("unknown_tenant_table".to_owned());
+        assert!(validate_approved_schema(&manifest(&unknown), &frozen).is_err());
+        let without_retiring = FrozenInventory {
+            schema: manifest(&required),
+            storage: frozen.storage.clone(),
+        };
+        assert!(validate_approved_schema(&manifest(&with_retiring), &without_retiring).is_err());
     }
 
     fn empty_storage_manifest(community: buzz_core::CommunityId) -> StorageManifest {
@@ -2517,6 +2584,15 @@ mod postgres_tests {
         validate_approved_schema(&live, &decoded)
             .expect("legacy fence list is no longer structural");
 
+        // A retiring table the approval froze may be dropped before execution.
+        let mut dropped = live.clone();
+        dropped
+            .scoped_tables
+            .retain(|table| !buzz_db::deletion::RETIRING_SCOPED_TABLES.contains(&table.as_str()));
+        assert!(dropped.scoped_tables.len() < live.scoped_tables.len());
+        validate_approved_schema(&dropped, &decoded)
+            .expect("a dropped retiring table is not drift");
+
         // Only a listed forward table may appear after approval. A required
         // table the approval lacks is drift, and so is a removed frozen table.
         let forward = buzz_db::deletion::APPROVAL_FORWARD_TABLES[0];
@@ -2850,6 +2926,7 @@ mod postgres_tests {
     /// runs to completion through the executor: the target's rows in the added
     /// tables are purged and verified and a bystander's survive. A table added
     /// after approval that is not listed still stops the request before fencing.
+    /// A retiring table dropped after approval does not stop it.
     async fn approval_before_an_expand_migration_completes() {
         let redis_url = std::env::var("BUZZ_TEST_REDIS_URL")
             .or_else(|_| std::env::var("REDIS_URL"))
@@ -2978,6 +3055,51 @@ mod postgres_tests {
             .await
             .expect("load request");
         assert!(request.fence_generation.is_none());
+
+        // A retiring table the approval froze may be dropped before execution.
+        // The request is inventoried and approved while `delivery_log` and
+        // `subscriptions` exist, then the contract migration drops them, and
+        // the executor still advances through the Approved stage on the
+        // original digest.
+        let (db, services, claim) =
+            claimed_test_deletion_in(scratch.clone(), "deletion-retired").await;
+        let services = services_with_infra(services);
+        let request_id = claim.request.id;
+        let approved_digest = claim
+            .request
+            .inventory_digest
+            .clone()
+            .expect("approval froze an inventory digest");
+        let frozen = validate_frozen_inventory(&claim.request).expect("frozen inventory");
+        for table in buzz_db::deletion::RETIRING_SCOPED_TABLES {
+            assert!(
+                frozen
+                    .schema
+                    .scoped_tables
+                    .iter()
+                    .any(|t| t.as_str() == *table),
+                "approval froze {table}"
+            );
+            sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE {table}")))
+                .execute(db.pool())
+                .await
+                .expect("drop retiring table");
+        }
+        let output = execute_claim(&services, LoopMode::Run, claim, &CancellationToken::new())
+            .await
+            .expect("execute deletion");
+        assert_eq!(
+            output.stage,
+            DeletionStage::RetentionPending,
+            "{:?}",
+            output.blocked_reason.or(output.last_error)
+        );
+        let request = db
+            .deletion_store()
+            .get(request_id)
+            .await
+            .expect("load request");
+        assert_eq!(request.inventory_digest.as_deref(), Some(&*approved_digest));
         drop_scratch_test_db(scratch, &scratch_name).await;
     }
 

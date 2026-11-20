@@ -60,7 +60,7 @@ a successful partial preview. SQL statements have a 30-second timeout and locks
 a three-second timeout; large accounts can require a separately reviewed plan.
 
 Before mutations, the command rejects remaining credentials, memberships,
-workflows, subscriptions, non-profile authored content other than repository
+workflows, non-profile authored content other than repository
 announcements/state (30617/30618), and unresolved archive references. Repository
 events and name mappings remain intact and do not block identity removal.
 It retains replay watermarks, deletion fences, requests, approvals,

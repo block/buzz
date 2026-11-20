@@ -46,6 +46,7 @@ part 'channels_provider_join_cases.dart';
 part 'channels_provider_follow_cases.dart';
 part 'channels_provider_saved_directory_cases.dart';
 part 'channels_provider_thread_interest_cases.dart';
+part 'channels_provider_unread_revision_cases.dart';
 
 /// Tests for [ChannelsNotifier] in the pure-Nostr world.
 ///
@@ -63,6 +64,7 @@ void main() {
   _huddleNavigationCases();
   _unreadReadinessCases();
   _unreadDeletionCases();
+  _unreadRevisionCases();
   _requestPathCases();
   _threadActivityCases();
   _confirmedJoinCases();

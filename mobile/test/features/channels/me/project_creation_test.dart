@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/features/channels/me/me_workspace_picker.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
+import 'package:buzz/features/channels/channel_sections/workspace_layout.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
 import 'package:buzz/features/channels/me/new_me_project.dart';
@@ -38,6 +40,7 @@ class _Channels extends ChannelsNotifier {
 class _Relay extends RelaySessionNotifier {
   List<NostrEvent> events = [];
   VoidCallback? beforeRead;
+  VoidCallback? beforeSend;
   bool failRead = false;
   bool failAfterPublish = false;
   int writes = 0;
@@ -57,6 +60,10 @@ class _Relay extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
     Future<bool> Function()? mayPublish,
   }) async {
+    beforeSend?.call();
+    if (mayPublish != null && !await mayPublish()) {
+      throw StateError('Event no longer wanted');
+    }
     events = [event];
     writes++;
     if (failAfterPublish) throw StateError('lost acknowledgement');
@@ -90,12 +97,33 @@ class _WorkspaceHeader extends HookConsumerWidget {
               error.message,
               contains('Project setup saved on this phone'),
             );
+          } on MeFilingClosed catch (error) {
+            _closed = error;
           }
         },
         child: const Text('Open workspace creation'),
       ),
     );
   }
+}
+
+MeFilingClosed? _closed;
+
+/// Starts on legacy Solo filings; [lock] delivers desktop's unified layout.
+class _Sections extends ChannelSectionsNotifier {
+  @override
+  ChannelSectionsState build() => const ChannelSectionsState(isReady: true);
+
+  void lock() => state = ChannelSectionsState(
+    isReady: true,
+    workspace: WorkspaceRecord.fromJson({
+      'version': 1,
+      'sections': <Object>[],
+      'assignments': <String, Object>{},
+      'sectionOrder': <String>[],
+    }),
+    version: 2,
+  );
 }
 
 void main() {
@@ -120,6 +148,7 @@ void main() {
             meGroupsProvider.overrideWith(
               (ref) => Stream.value(const MeGroups()),
             ),
+            channelSectionsProvider.overrideWith(_Sections.new),
           ],
           child: MaterialApp(
             theme: AppTheme.light(),
@@ -217,6 +246,29 @@ void main() {
         isFalse,
       );
       expect(find.text('Conflicting Solo changes'), findsNothing);
+
+      // Desktop's unified layout arrives as the workspace is being sent:
+      // desktop now owns filings, so nothing is written or left to replay.
+      final writes = relay.writes;
+      // Solo refuses two saves in the same second.
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 1100)),
+      );
+      await open();
+      await tester.enterText(find.byType(TextField), 'Too late');
+      await tester.pumpAndSettle();
+      final sections =
+          ProviderScope.containerOf(
+                tester.element(find.byType(_WorkspaceHeader)),
+              ).read(channelSectionsProvider.notifier)
+              as _Sections;
+      relay.beforeSend = sections.lock;
+      await tester.tap(find.widgetWithText(FilledButton, 'Create workspace'));
+      await tester.pumpAndSettle();
+      expect(_closed, isNotNull);
+      expect(relay.writes, writes);
+      expect(MeProjectCreation.pending(sync), isNull);
+      expect(prefs.getString(sync.pendingKey), isNull);
     },
     variant: TargetPlatformVariant.only(TargetPlatform.android),
   );

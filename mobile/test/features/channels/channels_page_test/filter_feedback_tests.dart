@@ -211,7 +211,7 @@ void _filterFeedbackTests(
 
       // A push lease write lands while a filter save awaits confirmation: the
       // save completes and the co-staged sort still applies.
-      await tester.tap(find.byTooltip('Channels options'));
+      await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Recent'));
       await tester.tap(find.text('Unreads'));
@@ -236,7 +236,7 @@ void _filterFeedbackTests(
       // while it is in flight, then the old read fails. The sheet and manager
       // survive, a sort-only Apply goes through after a reverted filter edit,
       // and the replacement's queued refresh restores write access.
-      await tester.tap(find.byTooltip('Channels options'));
+      await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('All'));
       await tester.tap(find.text('Unreads'));
@@ -265,7 +265,7 @@ void _filterFeedbackTests(
       expect(manager.store.modeFor('channels'), ChannelFilterMode.unreads);
 
       // A failed load leaves a staged filter edit recoverable from the sheet.
-      await tester.tap(find.byTooltip('Channels options'));
+      await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('All'));
       relay.setReconnecting();
@@ -290,7 +290,7 @@ void _filterFeedbackTests(
       expect(manager.store.modeFor('channels'), ChannelFilterMode.all);
 
       // Switching community still abandons the sheet.
-      await tester.tap(find.byTooltip('Channels options'));
+      await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
       final other = Community.create(
         name: 'Other community',

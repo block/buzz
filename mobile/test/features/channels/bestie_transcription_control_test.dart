@@ -110,6 +110,8 @@ class _Speech implements DeviceTranscription {
   int transcriptions = 0;
   bool cancelled = false;
   @override
+  Future<bool> isAvailable() async => true;
+  @override
   Future<void> prepare() async {
     await preparation?.future;
     if (preparationFailure case final failure?) throw failure;

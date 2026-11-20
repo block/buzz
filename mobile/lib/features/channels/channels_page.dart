@@ -88,6 +88,12 @@ import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
 import 'channel_mutes/channel_mutes_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
+import 'channel_sections/workspace_layout.dart';
+import '../../shared/custom_emoji/custom_emoji.dart' show normalizeShortcode;
+import '../../shared/custom_emoji/custom_emoji_provider.dart';
+import '../../shared/custom_emoji/custom_emoji_render.dart';
+import 'me/me_page.dart' show SoloChatTile;
+import 'me/me_unread_provider.dart';
 import 'channel_sections/channel_sections_storage.dart';
 import 'channel_sort/channel_sort_provider.dart';
 import 'channel_sort/channel_sort_storage.dart';
@@ -135,32 +141,24 @@ class ChannelsPage extends HookConsumerWidget {
   const ChannelsPage({
     required this.settingsPageBuilder,
     this.onSearch,
-    this.messagesFilters,
     this.messagesActionsBuilder,
-    this.messagesActionsWidth = 0,
     this.soloSliver,
-    this.showTeam = true,
-    this.showTeamHeading = false,
     this.newChannelAction,
     this.newDmAction,
     this.onInbox,
     this.communityInvitePageBuilder,
     this.communityAppearancePageBuilder,
     required this.onSettingsTransitionProgress,
-    this.tabReselection,
     super.key,
   });
 
   final WidgetBuilder settingsPageBuilder;
-  final Widget Function(bool isCollapsed)? messagesFilters;
+
+  /// Builds Home's Messages header actions. Without it, the page uses the
+  /// standalone Channels header.
   final List<Widget> Function(VoidCallback openSwitcher, GlobalKey avatarKey)?
   messagesActionsBuilder;
-
-  /// Width of the trailing controls that collapsed filters must leave clear.
-  final double messagesActionsWidth;
   final Widget? soloSliver;
-  final bool showTeam;
-  final bool showTeamHeading;
   final ValueNotifier<VoidCallback?>? newChannelAction;
   final ValueNotifier<VoidCallback?>? newDmAction;
 
@@ -180,9 +178,6 @@ class ChannelsPage extends HookConsumerWidget {
   /// render from the same timeline.
   final ValueChanged<double> onSettingsTransitionProgress;
 
-  /// Notifies this page when its already-selected tab is tapped again.
-  final ValueListenable<int>? tabReselection;
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     // Resolve permissions before the community menu is opened.
@@ -200,24 +195,19 @@ class ChannelsPage extends HookConsumerWidget {
       fontWeight: FontWeight.w600,
       color: navigationPrimaryForeground(context),
     );
+    final messages = messagesActionsBuilder != null;
     final nativeDuoTitle =
-        messagesFilters != null &&
+        messages &&
         defaultTargetPlatform == TargetPlatform.iOS &&
         (DuoToolbarScope.maybeStripOf(context) ??
                 FoldGeometry.of(context).strip) !=
             null;
-    final filterContentHeight = messagesFilters == null
-        ? 0.0
-        : max(48.0, MediaQuery.textScalerOf(context).scale(16) * 1.4 + 16) +
-              Grid.xxs;
     final topSectionHeight = frostedAppBarHeight(
       context,
       titleStyle: headerTitleStyle,
 
-      bottomHeight: messagesFilters == null
-          ? _kTopSectionBottomPadding
-          : filterContentHeight,
-      useNativeNavigation: messagesFilters == null,
+      bottomHeight: _kTopSectionBottomPadding,
+      useNativeNavigation: !messages,
     );
     // A sheet's dim barrier can't composite over Home's native soft edge, so
     // use the Flutter backdrop while another route covers this page.
@@ -230,74 +220,21 @@ class ChannelsPage extends HookConsumerWidget {
     final bodyReady = useRef(false);
     final communityFlightActive = useState(false);
     final channelsScrollController = useScrollController();
-    final reducedMotion = MediaQuery.disableAnimationsOf(context);
     // Scroll updates belong to the header, not the channel inventory below it.
-    final headerTreatment = useValueNotifier((
-      collapse: 0.0,
-      frostProgress: 0.0,
-    ));
-    useEffect(
-      () {
-        void updateHeaderTreatment() {
-          final collapse =
-              messagesFilters == null ||
-                  nativeDuoTitle ||
-                  !channelsScrollController.hasClients
-              ? 0.0
-              : channelsScrollController.offset
-                    .clamp(0.0, filterContentHeight)
-                    .toDouble();
-          final nextProgress = !channelsScrollController.hasClients
-              ? 0.0
-              : (channelsScrollController.offset / _kHeaderFrostScrollDistance)
-                    .clamp(0.0, 1.0)
-                    .toDouble();
-          final previous = headerTreatment.value;
-          final frostProgress =
-              (previous.frostProgress - nextProgress).abs() > 0.001
-              ? nextProgress
-              : previous.frostProgress;
-          headerTreatment.value = (
-            collapse: collapse,
-            frostProgress: frostProgress,
-          );
-        }
-
-        channelsScrollController.addListener(updateHeaderTreatment);
-        return () =>
-            channelsScrollController.removeListener(updateHeaderTreatment);
-      },
-      [
-        channelsScrollController,
-        messagesFilters != null,
-        filterContentHeight,
-        nativeDuoTitle,
-      ],
-    );
+    final headerFrost = useValueNotifier(0.0);
     useEffect(() {
-      final tabReselection = this.tabReselection;
-      if (tabReselection == null) return null;
-
-      void scrollToTop() {
-        if (!channelsScrollController.hasClients) return;
-        final position = channelsScrollController.position;
-        if (position.pixels <= position.minScrollExtent + 0.5) return;
-        if (reducedMotion) {
-          channelsScrollController.jumpTo(position.minScrollExtent);
-          return;
-        }
-        unawaited(
-          channelsScrollController.animateTo(
-            position.minScrollExtent,
-            duration: const Duration(milliseconds: 260),
-            curve: Curves.easeOutCubic,
-          ),
-        );
+      void updateHeaderFrost() {
+        final next = !channelsScrollController.hasClients
+            ? 0.0
+            : (channelsScrollController.offset / _kHeaderFrostScrollDistance)
+                  .clamp(0.0, 1.0)
+                  .toDouble();
+        if ((headerFrost.value - next).abs() > 0.001) headerFrost.value = next;
       }
 
-      tabReselection.addListener(scrollToTop);
-      return () => tabReselection.removeListener(scrollToTop);
-    }, [tabReselection, channelsScrollController, reducedMotion]);
+      channelsScrollController.addListener(updateHeaderFrost);
+      return () => channelsScrollController.removeListener(updateHeaderFrost);
+    }, [channelsScrollController]);
 
     // Cache the last successfully loaded channels so the UI never flashes
     // back to a loading state when the provider rebuilds (e.g. reconnect).
@@ -316,11 +253,7 @@ class ChannelsPage extends HookConsumerWidget {
     if (channelsAsync.asData?.value case final data?) {
       cachedChannels.value = data;
     }
-    final personalIds =
-        ref.watch(meGroupsProvider).asData?.value.channels ?? const <String>[];
-    final channels = cachedChannels.value
-        ?.where((channel) => !channel.isSoloChat(personalIds))
-        .toList();
+    final channels = cachedChannels.value;
     Future<void> openChannel(Channel channel) async {
       if (!context.mounted) return;
       // A lookup, not a dependency: the page doesn't rebuild with the pane.
@@ -368,8 +301,7 @@ class ChannelsPage extends HookConsumerWidget {
     }, [canSurfaceError]);
 
     Rect? measureCommunityAvatar() {
-      if (messagesFilters == null &&
-          defaultTargetPlatform == TargetPlatform.iOS) {
+      if (!messages && defaultTargetPlatform == TargetPlatform.iOS) {
         final header = headerKey.currentContext?.findRenderObject();
         final bounds = nativeCommunityAvatarBounds.value;
         return header is RenderBox && bounds != null
@@ -381,7 +313,7 @@ class ChannelsPage extends HookConsumerWidget {
           ? MatrixUtils.transformRect(
               avatar.getTransformTo(null),
               // The menu keeps a larger touch target around its 36dp avatar.
-              messagesFilters != null
+              messages
                   ? Rect.fromCenter(
                       center: avatar.size.center(Offset.zero),
                       width: 36,
@@ -426,7 +358,7 @@ class ChannelsPage extends HookConsumerWidget {
         final ready =
             ref.read(_communityContentReadyProvider).value == true &&
             bodyReady.value &&
-            (messagesFilters != null ||
+            (messages ||
                 defaultTargetPlatform != TargetPlatform.iOS ||
                 nativeHeaderReady.value);
         final bounds = ready ? measureCommunityAvatar() : null;
@@ -665,13 +597,11 @@ class ChannelsPage extends HookConsumerWidget {
     }, [newChannelAction, newDmAction, currentPubkey]);
 
     final page = ValueListenableBuilder(
-      valueListenable: headerTreatment,
+      valueListenable: headerFrost,
       // Retain the inventory during header animation. Provider and parent
       // updates still construct a fresh body with current channel data.
       child: _ChannelsBody(
         soloSliver: soloSliver,
-        showTeam: showTeam,
-        showTeamHeading: showTeamHeading,
         onInbox: onInbox,
         onReadyChanged: (ready) => bodyReady.value = ready,
         channels: channels,
@@ -694,7 +624,7 @@ class ChannelsPage extends HookConsumerWidget {
         },
         onSelectChannel: openChannel,
       ),
-      builder: (context, treatment, child) => FrostedScaffold(
+      builder: (context, frostProgress, child) => FrostedScaffold(
         backgroundColor: usesPinnedGradient
             ? Colors.transparent
             : context.colors.surface,
@@ -703,9 +633,9 @@ class ChannelsPage extends HookConsumerWidget {
           key: headerKey,
           onNativeReadyChanged: (ready) => nativeHeaderReady.value = ready,
           nativeTitle: nativeDuoTitle ? 'Messages' : '',
-          useNativeNavigation: messagesFilters == null,
+          useNativeNavigation: !messages,
           nativeViewSuppressed: headerNativeSuppressed,
-          nativeLeading: messagesFilters != null
+          nativeLeading: messages
               ? null
               : IosNavigationAction(
                   label: 'Community settings',
@@ -727,7 +657,7 @@ class ChannelsPage extends HookConsumerWidget {
                       : communityName.substring(0, 1).toUpperCase(),
                   onPressed: openCommunitySwitcher,
                 ),
-          nativeActions: messagesFilters != null
+          nativeActions: messages
               ? const []
               : [
                   if (onSearch != null)
@@ -764,12 +694,9 @@ class ChannelsPage extends HookConsumerWidget {
           // without adding the usual white frosted wash. The Buzz list is
           // transparent, so the blurred pixels remain a continuation of the
           // pinned gradient instead of turning into a white header.
-          frosted:
-              messagesFilters != null ||
-              !usesPinnedGradient ||
-              treatment.frostProgress > 0,
-          alwaysFrosted: messagesFilters != null,
-          leading: messagesFilters != null
+          frosted: messages || !usesPinnedGradient || frostProgress > 0,
+          alwaysFrosted: messages,
+          leading: messages
               ? null
               : _CommunityIndicator(
                   onTap: openCommunitySwitcher,
@@ -779,47 +706,14 @@ class ChannelsPage extends HookConsumerWidget {
           centerTitle: false,
           titleStyle: headerTitleStyle,
 
-          automaticallyImplyLeading: messagesFilters == null,
-          title: messagesFilters == null
-              ? const SizedBox.shrink()
-              : ExcludeSemantics(
-                  excluding: treatment.collapse >= filterContentHeight,
-                  child: ShaderMask(
-                    blendMode: BlendMode.dstIn,
-                    shaderCallback: (bounds) => LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [
-                        treatment.collapse == 0
-                            ? Colors.white
-                            : Colors.transparent,
-                        Colors.white,
-                      ],
-                      stops: [
-                        0,
-                        (treatment.collapse.clamp(0.0, Grid.sm) / bounds.height)
-                            .clamp(0.0, 1.0),
-                      ],
-                    ).createShader(bounds),
-                    // Keep the original upward motion, but fade the glyphs at
-                    // status-area boundary instead of the text’s own tight bounds.
-                    child: ClipRect(
-                      child: Opacity(
-                        opacity: 1 - treatment.collapse / filterContentHeight,
-                        child: SizedBox.expand(
-                          child: Align(
-                            alignment: Alignment.centerLeft,
-                            child: Transform.translate(
-                              offset: Offset(0, -treatment.collapse),
-                              child: Text('Messages', style: headerTitleStyle),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-          actions: messagesFilters != null
+          automaticallyImplyLeading: !messages,
+          title: messages
+              ? Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('Messages', style: headerTitleStyle),
+                )
+              : const SizedBox.shrink(),
+          actions: messages
               ? messagesActionsBuilder?.call(
                       openCommunityGrid,
                       communityAvatarKey,
@@ -831,32 +725,8 @@ class ChannelsPage extends HookConsumerWidget {
                     onCreate: openCreateMenu,
                   ),
                 ],
-          bottomHeight: messagesFilters == null
-              ? _kTopSectionBottomPadding
-              : filterContentHeight - treatment.collapse,
-          bottomOverlap: messagesFilters == null ? 0 : treatment.collapse,
-          bottom: messagesFilters == null
-              ? const SizedBox.expand()
-              : Padding(
-                  padding: EdgeInsets.only(
-                    // As soon as the rows overlap, keep the entire action
-                    // cluster clear. Interpolating this inset blocks the bell
-                    // during partial collapse even when the final layout fits.
-                    right: treatment.collapse > 0
-                        ? messagesActionsWidth + _kTopSectionInset
-                        : 0,
-                  ),
-                  child: ClipRect(
-                    // Native glass paints its shadows outside the viewport, but
-                    // scrolled filters must not paint over the header actions.
-                    clipBehavior: treatment.collapse > 0
-                        ? Clip.hardEdge
-                        : Clip.none,
-                    child: messagesFilters!(
-                      treatment.collapse >= filterContentHeight,
-                    ),
-                  ),
-                ),
+          bottomHeight: _kTopSectionBottomPadding,
+          bottom: const SizedBox.expand(),
         ),
         body: child!,
       ),
@@ -864,7 +734,7 @@ class ChannelsPage extends HookConsumerWidget {
     return _RouteCurrencySync(
       current: routeCurrent,
       nativeSuppressed: headerNativeSuppressed,
-      suppressesNative: messagesFilters != null,
+      suppressesNative: messages,
       child: page,
     );
   }

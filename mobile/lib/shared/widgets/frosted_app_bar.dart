@@ -142,11 +142,6 @@ class FrostedAppBar extends StatelessWidget {
   /// Height reserved for [bottom].
   final double bottomHeight;
 
-  /// Extends [bottom] upward into the title row without moving the app bar's
-  /// outer bounds. This keeps overlapping controls inside the app bar's hit
-  /// test region as well as its paint region.
-  final double bottomOverlap;
-
   /// Widgets displayed on the trailing (right) side.
   final List<Widget> actions;
 
@@ -243,15 +238,12 @@ class FrostedAppBar extends StatelessWidget {
     this.titleContentHeight = 0,
     this.bottom,
     this.bottomHeight = 0,
-    this.bottomOverlap = 0,
     this.actions = const [],
     this.horizontalInset = Grid.xxs,
     this.iconColor,
     this.frosted = true,
     this.alwaysFrosted = false,
-  }) : assert(bottom == null || bottomHeight + bottomOverlap > 0),
-       assert(bottomOverlap >= 0),
-       assert(bottom != null || bottomOverlap == 0);
+  }) : assert(bottom == null || bottomHeight > 0);
 
   @override
   Widget build(BuildContext context) {
@@ -394,13 +386,13 @@ class FrostedAppBar extends StatelessWidget {
                   AnimatedPositioned(
                     duration: layoutDuration,
                     curve: Curves.easeInOutCubic,
-                    top: barHeight - bottomOverlap,
+                    top: barHeight,
                     left: 0,
                     right: 0,
-                    height: bottomHeight + bottomOverlap,
+                    height: bottomHeight,
                     child: Padding(
                       padding: railInsets,
-                      child: bottomOverlap > 0 || bottom is SizedBox
+                      child: bottom is SizedBox
                           ? bottom!
                           : ColoredBox(
                               color: context.colors.surface,
@@ -520,10 +512,10 @@ class FrostedAppBar extends StatelessWidget {
               children: [
                 Positioned(top: 0, left: 0, right: 0, child: titleRow),
                 Positioned(
-                  top: barContentHeight - bottomOverlap,
+                  top: barContentHeight,
                   left: 0,
                   right: 0,
-                  height: bottomHeight + bottomOverlap,
+                  height: bottomHeight,
                   child: bottom!,
                 ),
               ],
@@ -697,6 +689,9 @@ IosNavigationAction? _nativeAction(Widget? widget) {
   }
   if (widget is IosGlassNavigationButton) {
     final symbol = switch (widget.icon) {
+      IosGlassNavigationIcon.plus => 'plus',
+      IosGlassNavigationIcon.send => 'arrow.up',
+      IosGlassNavigationIcon.microphone => 'mic',
       IosGlassNavigationIcon.more => 'ellipsis',
       IosGlassNavigationIcon.bell => 'bell',
       IosGlassNavigationIcon.trash => 'trash',
