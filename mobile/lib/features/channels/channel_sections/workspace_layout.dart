@@ -25,11 +25,16 @@ class WorkspaceSection {
   final String? icon;
   final num order;
 
+  /// The legacy Team section this workspace projects, whose ID can differ
+  /// from [id] when a Solo project shares it.
+  final String? teamId;
+
   const WorkspaceSection({
     required this.id,
     required this.name,
     this.icon,
     required this.order,
+    this.teamId,
   });
 }
 
@@ -358,6 +363,7 @@ WorkspaceLayout legacyWorkspaceLayout(ChannelSectionStore team, MeGroups solo) {
         name: s.name,
         icon: s.icon,
         order: s.order,
+        teamId: s.id,
       ),
     ),
     team.assignments,
@@ -375,14 +381,25 @@ WorkspaceLayout legacyWorkspaceLayout(ChannelSectionStore team, MeGroups solo) {
   }
   final sections = [
     for (final group in solo.groups)
-      (id: group['id'] as String, name: group['name'] as String, icon: null),
+      (
+        id: group['id'] as String,
+        name: group['name'] as String,
+        icon: null,
+        teamId: null,
+      ),
     for (final s in teamLayout.sections)
-      (id: renamed[s.id] ?? s.id, name: s.name, icon: s.icon),
+      (id: renamed[s.id] ?? s.id, name: s.name, icon: s.icon, teamId: s.id),
   ];
   return WorkspaceLayout.project(
     [
       for (final (index, s) in sections.indexed)
-        WorkspaceSection(id: s.id, name: s.name, icon: s.icon, order: index),
+        WorkspaceSection(
+          id: s.id,
+          name: s.name,
+          icon: s.icon,
+          order: index,
+          teamId: s.teamId,
+        ),
     ],
     {
       for (final entry in teamLayout.assignments.entries)

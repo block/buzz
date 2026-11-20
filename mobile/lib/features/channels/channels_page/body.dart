@@ -390,6 +390,13 @@ class _SliverChannelsList extends HookConsumerWidget {
             ..sort((a, b) => a.order.compareTo(b.order)))
         : const <ChannelSection>[];
     final teamSectionIds = {for (final s in teamSections) s.id};
+    // A Team workspace's layout ID differs from its section ID when a Solo
+    // project shares that ID.
+    String? teamIdOf(String key) => switch (layout.section(key.substring(6))) {
+      WorkspaceSection(:final teamId?) when teamSectionIds.contains(teamId) =>
+        teamId,
+      _ => null,
+    };
     Widget row(Channel channel, String key) => isSoloRow(channel)
         ? Padding(
             key: ValueKey(channel.id),
@@ -407,13 +414,7 @@ class _SliverChannelsList extends HookConsumerWidget {
             isMuted: mutedChannelIds.contains(channel.id),
             currentPubkey: currentPubkey,
             onTap: () => openFilteredChannel(channel),
-            sectionId: switch (key) {
-              final k
-                  when k.startsWith('group:') &&
-                      teamSectionIds.contains(k.substring(6)) =>
-                k.substring(6),
-              _ => null,
-            },
+            sectionId: key.startsWith('group:') ? teamIdOf(key) : null,
           );
 
     _SectionEdits editsFor(ChannelSection section) => (
@@ -455,7 +456,11 @@ class _SliverChannelsList extends HookConsumerWidget {
             ],
           ),
         );
-        if (confirmed == true && context.mounted) {
+        // Desktop can lock legacy edits while the confirmation is open; the
+        // section and its saved filter then both stay.
+        if (confirmed == true &&
+            context.mounted &&
+            ref.read(channelSectionsProvider).editable) {
           // Local section removal must work without filter-read/write
           // authority. Cleanup is optional for this never-reused ID.
           ref.read(channelSectionsProvider.notifier).deleteSection(section.id);
@@ -516,7 +521,8 @@ class _SliverChannelsList extends HookConsumerWidget {
       }
       final section = layout.section(key.substring(6));
       if (section == null) return null;
-      final team = teamSections.where((s) => s.id == section.id).firstOrNull;
+      final teamId = teamIdOf(key);
+      final team = teamSections.where((s) => s.id == teamId).firstOrNull;
       return _CustomChannelSection(
         key: ValueKey(section.id),
         section: section,

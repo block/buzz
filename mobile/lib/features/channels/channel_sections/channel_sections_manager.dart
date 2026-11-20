@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../shared/crypto/nip44.dart';
+import '../../../shared/relay/read_state_snapshot.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/read_state/read_state_time.dart';
 import 'channel_sections_storage.dart';
@@ -43,6 +44,10 @@ class ChannelSectionsManager {
   final VoidCallback _onChanged;
 
   ChannelSectionStore _store;
+
+  /// The Team layout as last read from or accepted by the relay, without
+  /// unpublished edits: what desktop imports once it saves a unified layout.
+  late ChannelSectionStore _confirmed;
   ChannelSectionStore? _lastPublishedStore;
 
   /// Desktop's unified layout head. Once one exists, desktop no longer reads
@@ -88,6 +93,7 @@ class ChannelSectionsManager {
        _onChanged = onChanged,
        _startupRetryBaseDelay = startupRetryBaseDelay,
        _store = ChannelSectionsStorage(prefs).read(pubkey, relayUrl) {
+    _confirmed = _store;
     final cached = _storage.readWorkspace(pubkey, relayUrl);
     if (cached != null) {
       try {
@@ -172,9 +178,9 @@ class ChannelSectionsManager {
     final wasSubscribed = _unsubscribe != null;
     final subscribed = wasSubscribed || await _startLiveSubscription();
     if (_disposed) return;
-    if (subscribed && !wasSubscribed) _caughtUpSinceSubscribe = false;
-    // Read again once live: a head saved between the first read and the
-    // subscription would otherwise wait for the next resume.
+    // Read again only when the live replay did not complete: a head saved
+    // between the first read and the subscription would otherwise wait for
+    // the next resume.
     if (subscribed && !_caughtUpSinceSubscribe && _startupFetchSucceeded) {
       _caughtUpSinceSubscribe = await _fetchAndMerge();
       if (_disposed) return;
@@ -386,8 +392,9 @@ class ChannelSectionsManager {
   Future<bool> _startLiveSubscription() async {
     if (_relaySession == null || _disposed) return false;
     final generation = ++_subscriptionGeneration;
+    _caughtUpSinceSubscribe = false;
     try {
-      final unsubscribe = await _relaySession.subscribe(
+      final unsubscribe = await _relaySession.subscribeWithStatus(
         NostrFilter(
           kinds: const [EventKind.readState],
           authors: [pubkey],
@@ -398,6 +405,15 @@ class ChannelSectionsManager {
         ),
         _handleIncomingEvent,
         onClosed: (message) => _handleSubscriptionClosed(generation, message),
+        // Its EOSE has delivered both retained heads.
+        onStatusChanged: (status) {
+          if (status == RelaySubscriptionStatus.ready &&
+              generation == _subscriptionGeneration) {
+            _caughtUpSinceSubscribe = true;
+          }
+        },
+        // One coordinate's newer head must not bound the other's replay.
+        resumeSince: false,
       );
       if (_disposed || generation != _subscriptionGeneration) {
         unsubscribe();
@@ -453,6 +469,7 @@ class ChannelSectionsManager {
         _lastRemoteCreatedAt = event.createdAt;
         _lastRemoteEventId = event.id;
         _store = incoming;
+        _confirmed = incoming;
         _persist();
         // A pending debounce stays armed: its republish re-converges an OK
         // that later wins the cursor after this head replaced the store.
@@ -463,7 +480,10 @@ class ChannelSectionsManager {
   }
 
   void _mergeWorkspace(NostrEvent event) {
-    if (event.createdAt < _workspaceCreatedAt ||
+    // The cursor and lock trust this head's timestamp and ID, which only a
+    // checked signature vouches for.
+    if (!isAuthenticReadStateEvent(event, viewer: pubkey) ||
+        event.createdAt < _workspaceCreatedAt ||
         (event.createdAt == _workspaceCreatedAt &&
             event.id.compareTo(_workspaceEventId) >= 0)) {
       return;
@@ -473,6 +493,14 @@ class ChannelSectionsManager {
       _workspace = WorkspaceRecord.decode(plaintext);
       _workspaceCreatedAt = event.createdAt;
       _workspaceEventId = event.id;
+      // Desktop never saw an unpublished Team edit, so its layout omits it.
+      _publishDebounce?.cancel();
+      _publishDebounce = null;
+      _publishPending = false;
+      if (!identical(_store, _confirmed)) {
+        _store = _confirmed;
+        _persist();
+      }
       if (!_disposed) {
         _storage.writeWorkspace(pubkey, relayUrl, (
           plaintext: plaintext,
@@ -587,6 +615,7 @@ class ChannelSectionsManager {
           if (!_disposed) _onChanged();
         }
       }
+      _confirmed = submitted;
       _lastPublishedStore = ChannelSectionStore(
         sections: List.of(submitted.sections),
         assignments: Map.of(submitted.assignments),

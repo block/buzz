@@ -71,7 +71,8 @@ void main() {
             (ref) => Stream.value(
               const MeGroups(
                 groups: [
-                  {'id': 'focus', 'name': 'Focus', 'defaultTemplateId': ''},
+                  // Shares Newer's ID, so Newer projects under another.
+                  {'id': 'newer', 'name': 'Focus', 'defaultTemplateId': ''},
                 ],
               ),
             ),
@@ -118,6 +119,15 @@ void main() {
     expect(option('Move down').enabled, isFalse);
     await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
+    // Team actions follow the Team section, not the Solo project sharing its
+    // ID.
+    for (final (header, team) in [('Newer', true), ('Focus', false)]) {
+      await tester.tap(find.byTooltip('$header options'));
+      await tester.pumpAndSettle();
+      expect(find.text('Rename section'), team ? findsOneWidget : findsNothing);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+    }
 
     // A Solo project header tells a screen reader whether it is expanded.
     final semantics = tester.ensureSemantics();

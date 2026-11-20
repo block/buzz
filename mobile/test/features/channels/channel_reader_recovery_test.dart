@@ -145,6 +145,15 @@ class _InitializingSortSession extends ConnectedRelaySession {
     onEvent = callback;
     return () => onEvent = null;
   }
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
+  }) => subscribe(filter, onEvent, onClosed: onClosed);
 }
 
 /// Missed heads, one per lane, each marked with `zz` so the persisted

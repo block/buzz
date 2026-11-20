@@ -7,6 +7,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../shared/crypto/nip44.dart';
+import '../../../shared/relay/read_state_snapshot.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/read_state/read_state_time.dart';
 import 'channel_sort_storage.dart';
@@ -231,15 +232,18 @@ class ChannelSortManager {
   Future<bool> _startLiveSubscription() async {
     if (_relaySession == null) return false;
     try {
-      _unsubscribe = await _relaySession.subscribe(
+      _unsubscribe = await _relaySession.subscribeWithStatus(
         _filter(),
         _handleIncomingEvent,
+        onStatusChanged: (_) {},
         onClosed: (_) {
           if (_disposed) return;
           _unsubscribe?.call();
           _unsubscribe = null;
           _scheduleStartupRetry();
         },
+        // One coordinate's newer head must not bound the other's replay.
+        resumeSince: false,
       );
       return true;
     } catch (error) {
@@ -258,7 +262,10 @@ class ChannelSortManager {
   );
 
   void _applyWorkspace(NostrEvent event) {
-    if (event.createdAt > currentUnixSeconds() + _maxClockDriftSeconds ||
+    // The cursor and lock trust this head's timestamp and ID, which only a
+    // checked signature vouches for.
+    if (!isAuthenticReadStateEvent(event, viewer: pubkey) ||
+        event.createdAt > currentUnixSeconds() + _maxClockDriftSeconds ||
         event.createdAt < _workspaceCreatedAt ||
         (event.createdAt == _workspaceCreatedAt &&
             event.id.compareTo(_workspaceEventId) >= 0)) {

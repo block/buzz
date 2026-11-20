@@ -623,75 +623,89 @@ Future<void> _showMoveSectionSheet(
 }) async {
   final sections = [...ref.read(channelSectionsProvider).store.sections]
     ..sort((a, b) => a.order.compareTo(b.order));
+  BuildContext? sheet;
+  // Desktop's unified layout can lock legacy filing while this is open. The
+  // sheet that opened this picker may already be gone, so listen on the
+  // page's container.
+  final lock = ProviderScope.containerOf(context, listen: false).listen(
+    channelSectionsProvider.select((state) => state.editable),
+    (_, editable) {
+      final open = sheet;
+      if (!editable && open != null && open.mounted) Navigator.of(open).pop();
+    },
+  );
   await showBuzzModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
-    builder: (sheetContext) => SafeArea(
-      child: IconTheme.merge(
-        data: const IconThemeData(size: 22),
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(
-            Grid.gutter,
-            0,
-            Grid.gutter,
-            Grid.xs,
-          ),
-          child: SheetActionSection(
-            children: [
-              for (final section in sections)
+    builder: (sheetContext) {
+      sheet = sheetContext;
+      return SafeArea(
+        child: IconTheme.merge(
+          data: const IconThemeData(size: 22),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(
+              Grid.gutter,
+              0,
+              Grid.gutter,
+              Grid.xs,
+            ),
+            child: SheetActionSection(
+              children: [
+                for (final section in sections)
+                  ListTile(
+                    leading: const Icon(BuzzIcons.folder),
+                    title: Text(section.name),
+                    trailing: sectionId == section.id
+                        ? Icon(
+                            BuzzIcons.check,
+                            color: sheetContext.colors.primary,
+                          )
+                        : null,
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      ref
+                          .read(channelSectionsProvider.notifier)
+                          .assignChannel(channel.id, section.id);
+                    },
+                  ),
                 ListTile(
-                  leading: const Icon(BuzzIcons.folder),
-                  title: Text(section.name),
-                  trailing: sectionId == section.id
-                      ? Icon(
-                          BuzzIcons.check,
-                          color: sheetContext.colors.primary,
-                        )
-                      : null,
-                  onTap: () {
+                  leading: const Icon(BuzzIcons.folderPlus),
+                  title: const Text('New section…'),
+                  onTap: () async {
                     Navigator.of(sheetContext).pop();
-                    ref
-                        .read(channelSectionsProvider.notifier)
-                        .assignChannel(channel.id, section.id);
+                    final name = await _showSectionNameDialog(context);
+                    if (name == null || name.isEmpty) return;
+                    final notifier = ref.read(channelSectionsProvider.notifier);
+                    notifier.createSection(name);
+                    final created = ref
+                        .read(channelSectionsProvider)
+                        .store
+                        .sections
+                        .where((section) => section.name == name.trim())
+                        .lastOrNull;
+                    if (created != null) {
+                      notifier.assignChannel(channel.id, created.id);
+                    }
                   },
                 ),
-              ListTile(
-                leading: const Icon(BuzzIcons.folderPlus),
-                title: const Text('New section…'),
-                onTap: () async {
-                  Navigator.of(sheetContext).pop();
-                  final name = await _showSectionNameDialog(context);
-                  if (name == null || name.isEmpty) return;
-                  final notifier = ref.read(channelSectionsProvider.notifier);
-                  notifier.createSection(name);
-                  final created = ref
-                      .read(channelSectionsProvider)
-                      .store
-                      .sections
-                      .where((section) => section.name == name.trim())
-                      .lastOrNull;
-                  if (created != null) {
-                    notifier.assignChannel(channel.id, created.id);
-                  }
-                },
-              ),
-              if (sectionId != null)
-                ListTile(
-                  leading: const Icon(BuzzIcons.folderMinus),
-                  title: const Text('Remove from section'),
-                  onTap: () {
-                    Navigator.of(sheetContext).pop();
-                    ref
-                        .read(channelSectionsProvider.notifier)
-                        .unassignChannel(channel.id);
-                  },
-                ),
-            ],
+                if (sectionId != null)
+                  ListTile(
+                    leading: const Icon(BuzzIcons.folderMinus),
+                    title: const Text('Remove from section'),
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      ref
+                          .read(channelSectionsProvider.notifier)
+                          .unassignChannel(channel.id);
+                    },
+                  ),
+              ],
+            ),
           ),
         ),
-      ),
-    ),
-  );
+      );
+    },
+  ).whenComplete(lock.close);
 }
 
 Future<String?> _showSectionNameDialog(BuildContext context) async {

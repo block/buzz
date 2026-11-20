@@ -79,47 +79,74 @@ void main() {
         : live
         ? 'while an edit waits'
         : 'before any edit';
-    fakeAsyncTest('sections stay unpublished when the unified head arrives '
-        '$arrival', (clock) {
-      final relay = SidebarRelay();
-      final head = relay.event('channel-workspaces', workspaces, nowSeconds());
-      if (!live && !failedRead) relay.stored.add(head);
-      final m = ChannelSectionsManager(
-        pubkey: relay.pubkey,
-        relayUrl: 'https://relay.example',
-        prefs: prefs,
-        crypto: ChannelSectionsCrypto(relay.keys.nsec, relay.pubkey),
-        relaySession: relay.session,
-        signedEventRelay: relay.signer,
-        remoteEnabled: true,
-        onChanged: () {},
-      )..initialize();
-      clock.flushMicrotasks();
-      m.createSection('mine');
-      if (failedRead) {
-        relay
-          ..historyFailures = 1
-          ..stored.add(head);
-      }
-      if (live) {
-        relay
-          ..stored.add(head)
-          ..emit(head);
+    for (final retained in [false, true]) {
+      fakeAsyncTest('sections stay unpublished when the unified head arrives '
+          '$arrival${retained ? ' over a legacy head' : ''}', (clock) {
+        final relay = SidebarRelay();
+        final head = relay.event(
+          'channel-workspaces',
+          workspaces,
+          nowSeconds(),
+        );
+        if (!live && !failedRead) relay.stored.add(head);
+        if (retained) {
+          relay.stored.add(
+            relay.event('channel-sections', {
+              'version': 1,
+              'sections': [
+                {'id': 'old', 'name': 'Old', 'order': 0},
+              ],
+              'assignments': <String, String>{},
+            }, nowSeconds() - 60),
+          );
+        }
+        ChannelSectionsManager manager({bool online = true}) =>
+            ChannelSectionsManager(
+              pubkey: relay.pubkey,
+              relayUrl: 'https://relay.example',
+              prefs: prefs,
+              crypto: ChannelSectionsCrypto(relay.keys.nsec, relay.pubkey),
+              relaySession: online ? relay.session : null,
+              signedEventRelay: online ? relay.signer : null,
+              remoteEnabled: online,
+              onChanged: () {},
+            )..initialize();
+        final m = manager();
         clock.flushMicrotasks();
-      }
-      if (!failedRead) {
-        m
-          ..createSection('later')
-          ..assignChannel('general', 'launch');
-      }
-      clock.elapse(const Duration(seconds: 60));
+        m.createSection('mine');
+        if (failedRead) {
+          relay
+            ..historyFailures = 1
+            ..stored.add(head);
+        }
+        if (live) {
+          relay
+            ..stored.add(head)
+            ..emit(head);
+          clock.flushMicrotasks();
+        }
+        if (!failedRead) {
+          m
+            ..createSection('later')
+            ..assignChannel('general', 'launch');
+        }
+        clock.elapse(const Duration(seconds: 60));
 
-      expect(m.workspace, isNotNull);
-      expect(relay.published, isEmpty);
-      m.dispose();
-      clock.flushMicrotasks();
-      expect(relay.published, isEmpty);
-    });
+        expect(m.workspace, isNotNull);
+        expect(relay.published, isEmpty);
+        // Desktop imports only what the relay holds, so the unsent edits are
+        // gone here too, and after a restart.
+        final confirmed = [if (retained) 'Old'];
+        expect(m.store.sections.map((s) => s.name), confirmed);
+        m.dispose();
+        clock.flushMicrotasks();
+        expect(relay.published, isEmpty);
+        final restarted = manager(online: false);
+        clock.flushMicrotasks();
+        expect(restarted.store.sections.map((s) => s.name), confirmed);
+        restarted.dispose();
+      });
+    }
 
     // For sort, the third row retains the head where only the publish
     // preflight finds it: no live EVENT ever arrives.
