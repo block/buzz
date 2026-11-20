@@ -17,6 +17,7 @@ import '../hosted/hosted_relay_auth.dart';
 import '../hosted/builderlab_account.dart';
 import 'nostr_filters.dart';
 import 'nostr_models.dart';
+import 'relay_call_error.dart';
 import 'relay_client.dart';
 import 'relay_closed_policy.dart';
 import 'relay_http_query_client.dart';
@@ -282,7 +283,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         response.headers['content-type'],
       );
       _activateRateLimitGateFromHttpError(body);
-      throw RelayException(response.statusCode, body);
+      throw RelayQueryException(response.statusCode, body);
     }
     // Decoding runs off the UI isolate, so the session can retire meanwhile.
     // A retired session reports that, not whatever its bytes decoded to.
@@ -340,7 +341,12 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       final sub = _historySubscriptions.remove(subId);
       if (sub != null && !sub.completer.isCompleted) {
         sub.completer.completeError(
-          TimeoutException('Relay history request timed out after $timeout'),
+          RelayTimeoutException(
+            RelayCall.history,
+            'Relay history request timed out after $timeout',
+            timeout,
+          ),
+          sub.callSite,
         );
       }
       if (sub?.heldFilter == null) _sendClose(subId);
@@ -469,7 +475,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         pending.completer.completeError(
           RelayAckTimeoutError(
             'Event ${event.id} not acknowledged within $timeout',
+            timeout,
           ),
+          pending.callSite,
         );
       }
     });
@@ -905,7 +913,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       }
       historySub.timeout.cancel();
       if (!historySub.completer.isCompleted) {
-        historySub.completer.completeError(Exception(message));
+        historySub.completer.completeError(
+          RelayClosedException(RelayCall.history, message),
+          historySub.callSite,
+        );
       }
       return;
     }
@@ -922,7 +933,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     if (closedClass == RelayClosedClass.terminal &&
         !isRelayDeadlineError(message)) {
       if (readyCompleter != null && !readyCompleter.isCompleted) {
-        readyCompleter.completeError(Exception(message));
+        readyCompleter.completeError(
+          RelayClosedException(RelayCall.subscribe, message),
+          liveSub.callSite,
+        );
       }
       liveSub.onClosed?.call(message);
       _removeLiveSubscription(subId, liveSub);
@@ -1044,6 +1058,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
           RelayEventRejectedException(
             message.isNotEmpty ? message : 'Event rejected',
           ),
+          pending.callSite,
         );
       }
     }
@@ -1122,7 +1137,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     for (final entry in _historySubscriptions.values) {
       entry.timeout.cancel();
       if (!entry.completer.isCompleted) {
-        entry.completer.completeError(error ?? Exception('Connection lost'));
+        entry.completer.completeError(
+          error ?? Exception('Connection lost'),
+          entry.callSite,
+        );
       }
     }
     _historySubscriptions.clear();
@@ -1132,7 +1150,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     for (final entry in _pendingEvents.values) {
       entry.timeout.cancel();
       if (!entry.completer.isCompleted) {
-        entry.completer.completeError(RelayAckLostError(error));
+        entry.completer.completeError(RelayAckLostError(error), entry.callSite);
       }
     }
     _pendingEvents.clear();

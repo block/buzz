@@ -10,6 +10,7 @@ import 'package:uuid/uuid.dart';
 
 import 'diagnostic_filter.dart';
 import 'diagnostic_reporter.dart';
+import 'relay_error_tags.dart';
 import 'sentry_diagnostic_reporter.dart';
 
 /// The build's reporting destination, a Sentry DSN supplied at build time.
@@ -142,7 +143,8 @@ void configureDiagnostics(SentryFlutterOptions options, String destination) {
     ..enableAppHangTracking = true
     ..anrEnabled = true
     ..enableWatchdogTerminationTracking = true
-    ..beforeSend = ((event, hint) => DiagnosticFilter.filterEvent(event))
+    ..beforeSend = ((event, hint) =>
+        DiagnosticFilter.filterEvent(RelayErrorTags.apply(event)))
     ..beforeBreadcrumb = ((crumb, hint) =>
         DiagnosticFilter.filterBreadcrumb(crumb))
     ..beforeSendMetric = ((metric, hint) =>

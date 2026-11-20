@@ -24,7 +24,12 @@ extension on RelaySessionNotifier {
       }
     }
 
-    Future<http.Response> send(http.Request request, int maxBytes) async {
+    // Only the `/query` POST is a [RelayCall.query]; the discovery GET is not.
+    Future<http.Response> send(
+      http.Request request,
+      int maxBytes, {
+      bool query = false,
+    }) async {
       final response = await _httpQueryClient.sendBounded(
         request,
         maxBytes: maxBytes,
@@ -45,7 +50,9 @@ extension on RelaySessionNotifier {
           maxInflatedBytes: maxBytes,
         );
         _activateRateLimitGateFromHttpError(text);
-        throw RelayException(response.statusCode, text);
+        throw query
+            ? RelayQueryException(response.statusCode, text)
+            : RelayException(response.statusCode, text);
       }
       return response;
     }
@@ -91,7 +98,11 @@ extension on RelaySessionNotifier {
           nsec: nsec,
         ),
       });
-    final response = await send(request, readStateSnapshotMaxEnvelopeBytes);
+    final response = await send(
+      request,
+      readStateSnapshotMaxEnvelopeBytes,
+      query: true,
+    );
     // Inflating, parsing and Schnorr verification must not block Flutter's
     // UI isolate.
     final List<NostrEvent> events;

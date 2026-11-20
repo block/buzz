@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
+import 'package:buzz/shared/relay/relay_call_error.dart';
 import 'package:buzz/shared/relay/relay_closed_policy.dart';
 import 'package:buzz/shared/relay/signed_event_relay.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -87,6 +89,51 @@ void main() {
       ]);
     });
   }
+  test('a deadline that passes while authenticating reaches the caller, '
+      'and the event is never sent', () async {
+    final events = <Object?>[];
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((request) async {
+      final ws = await WebSocketTransformer.upgrade(request);
+      ws.add(jsonEncode(['AUTH', 'challenge']));
+      ws.listen((raw) {
+        final frame = jsonDecode(raw as String) as List<dynamic>;
+        final id = (frame[1] as Map<String, dynamic>)['id'];
+        if (frame[0] == 'EVENT') events.add(id);
+        if (frame[0] == 'AUTH') {
+          // Authentication answers only after the caller's deadline.
+          Timer(const Duration(milliseconds: 600), () {
+            ws.add(jsonEncode(['OK', id, true, '']));
+          });
+        }
+      });
+    });
+    final watch = Stopwatch()..start();
+
+    await expectLater(
+      submitSignedEventOnce(
+        wsUrl: 'ws://127.0.0.1:${server.port}',
+        nsec: nostr.Keys.generate().nsec,
+        kind: 1,
+        content: '',
+        tags: const [],
+        timeout: const Duration(milliseconds: 200),
+      ),
+      throwsA(
+        isA<RelayTimeoutException>().having(
+          (error) => error.call,
+          'call',
+          RelayCall.publish,
+        ),
+      ),
+    );
+    expect(watch.elapsed, lessThan(const Duration(milliseconds: 550)));
+    // Outlive the late authentication: an uncaught error would fail the test.
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+
+    expect(events, isEmpty);
+  });
 }
 
 class _RecordingDiagnostics extends NoopDiagnosticReporter {

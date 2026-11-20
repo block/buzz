@@ -1,5 +1,7 @@
 import 'package:sentry_flutter/sentry_flutter.dart';
 
+import 'relay_error_tags.dart';
+
 /// The one filter every Dart report, breadcrumb and count passes through
 /// before it leaves the device. Reports the native SDKs capture themselves
 /// (native crashes, app hangs) do not pass through it.
@@ -126,11 +128,14 @@ abstract final class DiagnosticFilter {
   static bool allowsAttribute(String key) =>
       appAttributes.contains(key) || _sdkAttributePrefixes.any(key.startsWith);
 
-  /// The app tags a report with where it came from and which installation
-  /// sent it; the SDK tags it with its origin and environment.
+  /// The app tags a report with where it came from, which installation sent
+  /// it and, for a relay error, the call and reason class; the SDK tags it
+  /// with its origin and environment.
   static bool _allowsTag(String key) =>
       key == 'operation' ||
       key == installIdTag ||
+      key == RelayErrorTags.callTag ||
+      key == RelayErrorTags.reasonTag ||
       key.startsWith('event.') ||
       allowsAttribute(key);
 

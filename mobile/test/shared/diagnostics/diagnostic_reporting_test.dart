@@ -8,7 +8,7 @@ import 'package:buzz/shared/diagnostics/diagnostic_member_binding.dart';
 import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/diagnostics/diagnostic_startup.dart';
 import 'package:buzz/shared/diagnostics/sentry_diagnostic_reporter.dart';
-import 'package:buzz/shared/relay/relay_provider.dart';
+import 'package:buzz/shared/relay/relay.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -240,6 +240,89 @@ void main() {
       await transport.count(2);
 
       expect(transport.events, hasLength(2));
+    });
+
+    group('an error that escapes from a relay call', () {
+      Future<Map<String, dynamic>> escaped(Object error) async {
+        // As an uncaught asynchronous error reaches the SDK: straight to the
+        // hub, not through the app's reporter.
+        await hub.captureException(error, stackTrace: StackTrace.current);
+        return transport.events.single;
+      }
+
+      test(
+        'is tagged with the call and the reason class, not the text',
+        () async {
+          final sent = await escaped(
+            const RelayEventRejectedException('rate-limited: private-marker'),
+          );
+
+          expect(sent['tags']['relay.call'], 'publish');
+          expect(sent['tags']['relay.reason'], 'rate-limited');
+          expect(jsonEncode(sent), isNot(contains('private-marker')));
+          final exception = (sent['exception']['values'] as List).last as Map;
+          expect(exception['type'], 'RelayEventRejectedException');
+          expect(exception['value'], DiagnosticFilter.removedText);
+        },
+      );
+
+      test('is grouped by call and reason on top of its stack', () async {
+        final sent = await escaped(
+          RelayClosedException(RelayCall.history, 'error: private-marker'),
+        );
+
+        expect(sent['tags']['relay.call'], 'history');
+        expect(sent['tags']['relay.reason'], 'error');
+        expect(sent['fingerprint'], [
+          '{{ default }}',
+          'relay.call:history',
+          'relay.reason:error',
+        ]);
+      });
+
+      test('names a timeout as one', () async {
+        final sent = await escaped(
+          RelayTimeoutException(RelayCall.query, 'private-marker'),
+        );
+
+        expect(sent['tags']['relay.call'], 'query');
+        expect(sent['tags']['relay.reason'], 'timeout');
+        expect(jsonEncode(sent), isNot(contains('private-marker')));
+      });
+
+      test('with an unknown prefix has the reason other', () async {
+        final sent = await escaped(
+          const RelayEventRejectedException('teapot: private-marker'),
+        );
+
+        expect(sent['tags']['relay.reason'], 'other');
+        expect(jsonEncode(sent), isNot(contains('private-marker')));
+      });
+
+      test('is tagged when reported through the reporter too', () async {
+        SentryDiagnosticReporter(hub: hub).reportError(
+          const RelayEventRejectedException('invalid: private-marker'),
+          StackTrace.current,
+          operation: DiagnosticOperation.relayRejection,
+        );
+        await transport.first();
+
+        final sent = transport.events.single;
+        expect(sent['tags']['operation'], 'relayRejection');
+        expect(sent['tags']['relay.call'], 'publish');
+        expect(sent['tags']['relay.reason'], 'invalid');
+      });
+
+      test(
+        'is the only kind of error that gets the tags or the grouping',
+        () async {
+          final sent = await escaped(StateError('private-marker'));
+
+          expect(sent['tags'], isNot(contains('relay.call')));
+          expect(sent['tags'], isNot(contains('relay.reason')));
+          expect(sent, isNot(contains('fingerprint')));
+        },
+      );
     });
 
     testWidgets('sends only the allowed contexts', (tester) async {
