@@ -678,6 +678,9 @@ pub async fn cmd_send_message(
     // bugs for agent and human users alike.
     p.content = read_or_stdin(&p.content)?;
     validate_content_size(&p.content)?;
+    if p.content.trim().is_empty() && p.files.is_empty() {
+        return Err(CliError::Usage("content must not be empty".into()));
+    }
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
     }
@@ -1937,6 +1940,25 @@ mod tests {
             mentions: vec![],
             from_thread: None,
         }
+    }
+
+    #[tokio::test]
+    async fn cmd_send_message_rejects_blank_content_without_attachments() {
+        let (url, query_count, captured_event) = fake_send_relay("[]".into()).await;
+        let client = BuzzClient::new(
+            url,
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
+
+        for content in ["", " \t\n"] {
+            assert!(matches!(
+                cmd_send_message(&client, send_params(content)).await,
+                Err(CliError::Usage(message)) if message == "content must not be empty"
+            ));
+        }
+        assert_eq!(query_count.load(Ordering::Relaxed), 0);
+        assert!(captured_event.lock().unwrap().is_none());
     }
 
     #[tokio::test]
