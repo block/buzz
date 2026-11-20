@@ -393,8 +393,9 @@ for a person until it has.
 
 The event log is the truth. The two shared tables are caches of it that prove
 their own freshness: each row records the newest stored event it accounts for
-(`seen_at`), and a read asks the log, with one index probe per row, whether
-anything newer exists. A row that is missing, behind, or names a deleted
+(`seen_at`), and a read asks the log, with index probes per row, whether
+anything newer exists, or whether a message signed in the 15 minutes before
+`seen_at` arrived after the cached one. A row that is missing, behind, or names a deleted
 message is rebuilt from history before it is returned. So a lost write is
 found by the next read (the exceptions are under Limits), and history from
 before these tables is filled once by an operator (Rollout, below) so that
@@ -455,11 +456,17 @@ These are accepted. Each is rare, and the counters above watch the first two.
 - **A lost write of a shared row is repaired by the next read, with a
   hole.** After eight failed attempts the rows are marked unverified and
   changed, so the next read of any kind rebuilds them. After a killed process
-  the next read still finds the gap, unless another event in that channel was
-  written first (a reaction, a reply inside a thread, a message for agents
-  only) or the lost message carries an author time older than one already seen
-  (a slow sender clock, up to 15 minutes). Then the row is stale until the
-  channel's next top-level message, and right again from it on.
+  the next read still finds the gap, even for a message signed in the same
+  second as, or up to 15 minutes before, the newest event the row accounts
+  for. It misses it when another event in that channel, signed more than 15
+  minutes after it, was written first (a reaction, a reply inside a thread, a
+  message for agents only). Then the row is stale until the channel's next
+  top-level message, and right again from it on.
+- **Moderation notices can arrive late.** The relay signs a moderation notice
+  with the time its outbox row was created, so that racing workers build the
+  same event. A notice retried, or held up by an outage, can be stored more
+  than 15 minutes after its signed time, which no other message can. The
+  repair above misses such a notice only if its hand-off was lost too.
 - A message with an author time ahead of the relay's clock is checked for only
   once that time has passed.
 - Threads you neither muted nor flagged leave the list 30 days after

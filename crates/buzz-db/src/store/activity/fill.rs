@@ -38,21 +38,86 @@ const WARM_ATTEMPTS: u8 = 4;
 /// The span of history one step of the thread pass covers.
 const WARM_WINDOW_HOURS: i64 = 24;
 
+/// How long after its signed time an event may still arrive. Ingest refuses
+/// an event signed more than 900 s from the relay's clock
+/// (`MAX_TIMESTAMP_DRIFT_SECS` in `buzz-relay`'s ingest handler).
+///
+/// The one known exception is a moderation notice: the relay signs it with
+/// its outbox row's time, so a notice retried or delayed by an outage can
+/// arrive later than this. Repair can miss such a notice only when its
+/// hand-off to the writer was lost too.
+const LATE_ARRIVAL: &str = "interval '900 seconds'";
+
 /// A channel row `h` of channel `c` that is missing, behind the log, or names
 /// a deleted message or edit. "Behind" is one index probe, pruned to the
-/// partitions after `seen_at`: is any stored event newer than the row accounts
-/// for?
-const CHANNEL_WANTING: &str = "(h.channel_id IS NULL
+/// partitions after `seen_at`: is any stored event newer than the row
+/// accounts for? A second probe covers the last [`LATE_ARRIVAL`] before
+/// `seen_at`: did a message that could be the head arrive after the head? It
+/// finds a message signed at or before `seen_at` whose hand-off was lost. It
+/// looks only at the newest [`FILL_SCAN`] events, the ones a rebuild reads, so
+/// it costs at most that many rows and a rebuild always clears it.
+fn channel_wanting() -> String {
+    format!(
+        "(h.channel_id IS NULL
     OR EXISTS (SELECT 1 FROM events n
         WHERE n.community_id = c.community_id AND n.channel_id = c.id
             AND n.created_at > COALESCE(h.seen_at, '-infinity')
             AND n.created_at <= clock_timestamp())
+    OR EXISTS (SELECT 1 FROM (
+            SELECT id, created_at, received_at, kind, deleted_at, tags FROM events
+            WHERE community_id = c.community_id AND channel_id = c.id
+                AND created_at > h.seen_at - {LATE_ARRIVAL}
+            ORDER BY created_at DESC, id LIMIT {FILL_SCAN}
+        ) n
+        LEFT JOIN thread_metadata tm ON tm.community_id = c.community_id
+            AND tm.event_created_at = n.created_at AND tm.event_id = n.id
+        WHERE n.received_at > COALESCE(h.head_received_at, '-infinity')
+            AND n.kind IN ({kinds}) AND n.deleted_at IS NULL
+            AND (tm.depth IS NULL OR tm.depth = 0 OR (tm.depth = 1 AND tm.broadcast))
+            AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(n.tags) AS tag
+                WHERE tag->>0 = 'audience' AND tag->>1 = 'agents'))
     OR (h.head_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM events e
         WHERE e.community_id = h.community_id AND e.created_at = h.head_created_at
             AND e.id = h.head_id AND e.deleted_at IS NULL))
     OR (h.head_edit_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM events e
         WHERE e.community_id = h.community_id AND e.created_at = h.head_edit_at
-            AND e.id = h.head_edit_id AND e.deleted_at IS NULL)))";
+            AND e.id = h.head_edit_id AND e.deleted_at IS NULL)))",
+        kinds = eligible_sql(),
+    )
+}
+
+/// A thread row `h` of thread `root` in `channel` (community `$1`) that is
+/// missing, behind the log, or names a deleted reply: the channel checks of
+/// [`channel_wanting`], over the thread's replies (the newest [`FILL_SCAN`]
+/// of them for the arrival probe, as a rebuild reads).
+fn thread_wanting(root: &str, channel: &str) -> String {
+    format!(
+        "(h.root_id IS NULL
+    OR EXISTS (SELECT 1 FROM thread_metadata n
+        WHERE n.community_id = $1 AND n.root_event_id = {root}
+            AND n.event_created_at > COALESCE(h.seen_at, '-infinity')
+            AND n.event_created_at <= clock_timestamp())
+    OR EXISTS (SELECT 1 FROM (
+            SELECT event_id, event_created_at FROM thread_metadata
+            WHERE community_id = $1 AND root_event_id = {root}
+                AND event_created_at > h.seen_at - {LATE_ARRIVAL}
+            ORDER BY event_created_at DESC, event_id LIMIT {FILL_SCAN}
+        ) n
+        JOIN events e ON e.community_id = $1 AND e.created_at = n.event_created_at
+            AND e.id = n.event_id
+        WHERE e.received_at > COALESCE(h.activity_at, '-infinity')
+            AND e.kind IN ({kinds}) AND e.deleted_at IS NULL AND e.channel_id = {channel})
+    OR (h.activity_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM events e
+        WHERE e.community_id = $1 AND e.created_at = h.activity_created_at
+            AND e.id = h.activity_id AND e.deleted_at IS NULL)))",
+        kinds = eligible_sql(),
+    )
+}
+
+/// [`ELIGIBLE_KINDS`] as an SQL list. Constants, so safe to inline.
+fn eligible_sql() -> String {
+    ELIGIBLE_KINDS.map(|kind| kind.to_string()).join(", ")
+}
 
 /// What [`Db::warm_activity`] rebuilt.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -98,8 +163,9 @@ pub(super) async fn wanting(
             WHERE cm.community_id = $1 AND cm.pubkey = $2 AND cm.removed_at IS NULL
                 AND c.deleted_at IS NULL
                 AND ($3::uuid[] IS NULL OR c.id = ANY($3))
-                AND {CHANNEL_WANTING}
-            ORDER BY c.id LIMIT $4"#
+                AND {wanting}
+            ORDER BY c.id LIMIT $4"#,
+        wanting = channel_wanting(),
     )))
     .bind(community.as_uuid())
     .bind(actor.as_slice())
@@ -110,7 +176,7 @@ pub(super) async fn wanting(
     for row in rows {
         wanting.channels.push(row.try_get("id")?);
     }
-    let rows = sqlx::query(
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"SELECT f.channel_id, f.root_id FROM (
                 SELECT f.channel_id, f.root_id FROM personal_read_frontiers f
                 WHERE f.community_id = $1 AND f.actor = $2 AND f.root_id <> ''::bytea
@@ -122,16 +188,10 @@ pub(super) async fn wanting(
             JOIN channel_members cm ON cm.community_id = $1 AND cm.channel_id = f.channel_id
                 AND cm.pubkey = $2 AND cm.removed_at IS NULL
             LEFT JOIN thread_heads h ON h.community_id = $1 AND h.root_id = f.root_id
-            WHERE h.root_id IS NULL
-                OR EXISTS (SELECT 1 FROM thread_metadata n
-                    WHERE n.community_id = $1 AND n.root_event_id = f.root_id
-                        AND n.event_created_at > COALESCE(h.seen_at, '-infinity')
-                        AND n.event_created_at <= clock_timestamp())
-                OR (h.activity_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM events e
-                    WHERE e.community_id = $1 AND e.created_at = h.activity_created_at
-                        AND e.id = h.activity_id AND e.deleted_at IS NULL))
+            WHERE {wanting}
             ORDER BY f.channel_id, f.root_id LIMIT $4"#,
-    )
+        wanting = thread_wanting("f.root_id", "f.channel_id"),
+    )))
     .bind(community.as_uuid())
     .bind(actor.as_slice())
     .bind(only_roots)
@@ -287,8 +347,9 @@ impl Db {
                  LEFT JOIN channel_heads h ON h.community_id = c.community_id \
                     AND h.channel_id = c.id \
                  WHERE c.community_id = $1 AND c.deleted_at IS NULL \
-                    AND ($2::uuid IS NULL OR c.id > $2) AND {CHANNEL_WANTING} \
-                 ORDER BY c.id LIMIT $3"
+                    AND ($2::uuid IS NULL OR c.id > $2) AND {wanting} \
+                 ORDER BY c.id LIMIT $3",
+                wanting = channel_wanting(),
             )))
             .bind(community.as_uuid())
             .bind(after)
@@ -313,7 +374,7 @@ impl Db {
             let to = (from + chrono::Duration::hours(WARM_WINDOW_HOURS)).min(now);
             let mut after: Option<Vec<u8>> = None;
             loop {
-                let rows = sqlx::query(
+                let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
                     "SELECT DISTINCT ON (tm.root_event_id) tm.channel_id, tm.root_event_id \
                      FROM thread_metadata tm \
                      LEFT JOIN thread_heads h ON h.community_id = $1 \
@@ -322,18 +383,10 @@ impl Db {
                         AND tm.event_created_at < $3 AND tm.depth >= 1 \
                         AND tm.root_event_id IS NOT NULL \
                         AND ($4::bytea IS NULL OR tm.root_event_id > $4) \
-                        AND (h.root_id IS NULL \
-                            OR EXISTS (SELECT 1 FROM thread_metadata n \
-                                WHERE n.community_id = $1 \
-                                    AND n.root_event_id = tm.root_event_id \
-                                    AND n.event_created_at > COALESCE(h.seen_at, '-infinity') \
-                                    AND n.event_created_at <= clock_timestamp()) \
-                            OR (h.activity_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM events e \
-                                WHERE e.community_id = $1 \
-                                    AND e.created_at = h.activity_created_at \
-                                    AND e.id = h.activity_id AND e.deleted_at IS NULL))) \
+                        AND {wanting} \
                      ORDER BY tm.root_event_id LIMIT $5",
-                )
+                    wanting = thread_wanting("tm.root_event_id", "tm.channel_id"),
+                )))
                 .bind(community.as_uuid())
                 .bind(from)
                 .bind(to)

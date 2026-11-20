@@ -1086,6 +1086,59 @@ async fn activity_writer_off_leaves_rows_to_the_next_read() {
     assert_eq!(preview_text(&f.conversation().await), Some("while off"));
 }
 
+/// A message signed in the same second as the head, whose hand-off to the
+/// writer was lost, is found by the next read: its conversation shows it and
+/// is unread again, and so is a thread's. Arrival, not signed time, decides
+/// the head, so the check looks back over the ingest clock window.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn activity_read_finds_a_lost_message_signed_in_the_heads_second() {
+    let f = fixture().await;
+    f.list().await;
+    let root = f.post(&f.me, "root", 10).await;
+    let first = f.post(&f.other, "first", 20).await;
+    let first_reply = f.reply(&f.other, &root, "first reply", 20).await;
+    assert!(matches!(
+        f.mark_through(None, &first).await,
+        IntentOutcome::Applied
+    ));
+    assert!(matches!(
+        f.mark_through(Some(&root), &first_reply).await,
+        IntentOutcome::Applied
+    ));
+    assert!(!f.conversation().await.unread);
+    assert!(!f.row(&root.id.to_hex()).await.unread);
+
+    // The same second as the heads; the writer loses both hand-offs.
+    set_writer_enabled(false);
+    f.post(&f.other, "same second", 20).await;
+    let late = f.reply(&f.other, &root, "same second reply", 20).await;
+    set_writer_enabled(true);
+
+    let conversation = f.conversation().await;
+    assert_eq!(preview_text(&conversation), Some("same second"));
+    assert!(conversation.unread);
+    let thread = f.row(&root.id.to_hex()).await;
+    assert_eq!(
+        thread.preview.as_ref().map(|p| p.id.clone()),
+        Some(late.id.to_hex())
+    );
+    assert!(thread.unread);
+
+    // The rebuild clears the check: the next read finds nothing to repair.
+    let mut conn = f.pool.acquire().await.expect("connection");
+    let wanting = super::fill::wanting(
+        &mut conn,
+        f.community,
+        &f.me.public_key().to_bytes(),
+        None,
+        None,
+    )
+    .await
+    .expect("wanting");
+    assert!(wanting.is_empty());
+}
+
 /// Every writer of the activity tables goes through community admission: once
 /// a community's deletion has started (quiescing) or fenced it, the
 /// background writer, its distrust pass and the on-read repair are all
