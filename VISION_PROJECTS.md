@@ -76,16 +76,16 @@ The cost is stated plainly: a third-party NIP-34 client sees the member repos in
 
 A feature branch is a conversation.
 
-When you create a branch, Buzz creates a channel. The branch's patches, review comments, CI results, and merge decision all live in that channel. When the branch merges, the channel archives. The conversation becomes the permanent record of why that code exists.
+When you create a branch, Buzz creates a channel. The branch's pull request, review comments, CI results, and merge decision all live in that channel. When the branch merges, the channel archives. The conversation becomes the permanent record of why that code exists.
 
 ```
 #feat-auth-fix
 ├── 🧑 alice: "Starting OAuth2 PKCE implementation"
 ├── 🤖 ci-agent: "Build triggered — commit a1b2c3d"
 ├── 🤖 ci-agent: "✅ All 47 tests pass (12.3s)"
-├── 📎 kind:1617 patch — src/auth/pkce.rs (+120 lines)
+├── 📎 kind:1618 pull request — src/auth/pkce.rs (+120 lines)
 ├── 🧑 bob: "One nit on error handling line 45"
-├── 📎 kind:1617 patch v2 — addressed review
+├── ⬆️ alice pushed d4e5f6a — addressed review
 ├── 🤖 review-agent: "LGTM — error variants match trait spec"
 ├── ✅ bob: Approval event (kind:46011)
 ├── 🔀 Merged to main — kind:1631
@@ -135,11 +135,11 @@ The approval event is signed by the maintainer's npub. The merge status referenc
 
 Every contributor — human or agent — has a verifiable identity and a queryable contribution history across every project on the network. Within Buzz, that history is queried through a community boundary: one community can choose to surface reputation from other communities later, but profiles, DMs, memberships, and project records are not implicitly shared across hosts.
 
-A new contributor submits a patch. Before you read the code:
+A new contributor opens a pull request. Before you read the code:
 
-1. **Query their npub** — patches submitted, patches merged, projects contributed to.
+1. **Query their npub** — pull requests opened, pull requests merged, projects contributed to.
 2. **Check your trust graph** — have maintainers you trust vouched for this person? Signed approval events are public and queryable.
-3. **Assess risk** — fresh npub with no history gets scrutiny. An npub with 50 merged patches across projects you respect gets fast-tracked.
+3. **Assess risk** — fresh npub with no history gets scrutiny. An npub with 50 merged pull requests across projects you respect gets fast-tracked.
 
 This works because identity is cryptographic and portable. Your npub, your contribution history, and your trust relationships travel with you. No platform owns your reputation.
 
@@ -192,7 +192,7 @@ Living documents, collaboratively editable by humans and agents via MCP tools. N
 
 ### Releases → Agent + Workflow
 
-An agent in `#releases` watches `main`. When a release is needed — triggered by a workflow or by a human posting "ship it" — it assembles the changelog from every merged patch since the last tag, posts a draft. The maintainer approves. The workflow builds artifacts, pushes to content-addressed storage (Blossom/S3), and publishes. Logged, signed, traceable.
+An agent in `#releases` watches `main`. When a release is needed — triggered by a workflow or by a human posting "ship it" — it assembles the changelog from every merged pull request since the last tag, posts a draft. The maintainer approves. The workflow builds artifacts, pushes to content-addressed storage (Blossom/S3), and publishes. Logged, signed, traceable.
 
 ---
 
@@ -211,10 +211,10 @@ Agents are project members with npubs, contribution histories, and reputations. 
 | Role | Watches | Does |
 |------|---------|------|
 | **Triage** | Issues (kind:1621) | Labels, assigns, detects duplicates, pre-screens |
-| **Review** | Patches (kind:1617) | First-pass code review, style checks, dependency audit |
+| **Review** | Pull requests (kind:1618) | First-pass code review, style checks, dependency audit |
 | **Docs** | Ref updates (kind:30618) | Keeps docs in sync after merges |
 | **Merge coordinator** | CI results | Runs the merge train, requests human sign-off |
-| **Coding agent** | Jobs (kind:43001) | Implements tasks, submits patches for review |
+| **Coding agent** | Jobs (kind:43001) | Implements tasks, pushes branches for review |
 
 ---
 
@@ -236,7 +236,7 @@ Standard kinds as substrate. Custom kinds only where genuinely novel.
 | **Multi-repo projects** | — | 30621 ([NIP-MP](docs/nips/NIP-MP.md)) | Cross-owner grouping is unexpressible in per-repo tags |
 | **Audit** | — | 48001 | Hash-chain tamper-evident log |
 
-If Buzz disappears tomorrow, your repos still work on gitworkshop.dev, your patches still work with ngit-cli, your identities still work on any nostr client. Centralized deployment, decentralized protocol.
+If Buzz disappears tomorrow, your repos still work on gitworkshop.dev, your pull requests still work with ngit-cli, your identities still work on any nostr client. Centralized deployment, decentralized protocol.
 
 ---
 
