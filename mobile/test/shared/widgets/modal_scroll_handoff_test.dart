@@ -218,95 +218,66 @@ void main() {
         await h.close(tester);
       }
     }
-    // A gesture that scrolled content closes on progress, never on velocity:
-    // whether it began mid-content or scrolled away from the top and back in
-    // the same touch.
+    // Scrolled content does not change the policy. A gesture that began
+    // mid-content, or scrolled away from the top and back in the same touch,
+    // releases exactly as one that began at the top: by a little or a lot.
     for (final sameTouch in [false, true]) {
-      for (final (progress, velocity, closes) in [
-        (0.9, 2000.0, false),
-        (0.501, 700.01, false),
-        (0.499, 2000.0, true),
-        (0.499, 0.0, true),
-        (0.499, -700.01, false),
-      ]) {
-        final h = _Harness();
-        await h.open(tester);
-        final position = h.position(tester);
-        if (!sameTouch) position.jumpTo(30);
-        final drag = _start(position);
-        if (sameTouch) _move(drag, -30);
-        expect(position.pixels, 30);
-        _move(drag, 30 + (1 - progress) * h.sheetHeight(tester));
-        expect(position.pixels, 0);
-        expect(h.animation(tester).value, closeTo(progress, 1e-9));
-        _end(drag, velocity);
-        await tester.pumpAndSettle();
-        expect(
-          find.text('Handoff'),
-          closes ? findsNothing : findsOneWidget,
-          reason:
-              '${sameTouch ? 'same-touch scroll' : 'mid-content start'}, '
-              'progress=$progress, velocity=$velocity',
-        );
-        if (!closes) {
-          expect(h.animation(tester).value, 1);
-          expect(position.pixels, 0);
-        }
-        await h.close(tester);
-      }
-    }
-  });
-
-  testWidgets(
-    'content within the scroll tolerance of the top counts as there',
-    (tester) async {
-      // Just inside the tolerance still closes on velocity; just outside is
-      // mid-content. Both where the gesture begins and where it scrolls to.
-      for (final sameTouch in [false, true]) {
-        for (final (factor, closes) in [(0.9, true), (1.5, false)]) {
+      for (final offset in [6.0, 30.0, 300.0]) {
+        for (final (progress, velocity, closes) in [
+          (0.9, 2000.0, true),
+          (0.501, 700.01, true),
+          (0.501, 700.0, false),
+          (0.499, 0.0, true),
+          (0.499, -700.01, false),
+          (1.0, 2000.0, false),
+        ]) {
           final h = _Harness();
           await h.open(tester);
           final position = h.position(tester);
-          final offset =
-              factor * position.physics.toleranceFor(position).distance;
-          expect(offset, greaterThan(0));
           if (!sameTouch) position.jumpTo(offset);
           final drag = _start(position);
           if (sameTouch) _move(drag, -offset);
-          expect(position.pixels, closeTo(offset, 1e-9));
-          _move(drag, offset + 60);
+          expect(position.pixels, offset);
+          _move(drag, offset + (1 - progress) * h.sheetHeight(tester));
           expect(position.pixels, 0);
-          expect(h.animation(tester).value, inExclusiveRange(0.5, 1));
-          _end(drag, 700.01);
+          expect(h.animation(tester).value, closeTo(progress, 1e-9));
+          _end(drag, velocity);
           await tester.pumpAndSettle();
           expect(
             find.text('Handoff'),
             closes ? findsNothing : findsOneWidget,
-            reason: 'sameTouch=$sameTouch, tolerance factor=$factor',
+            reason:
+                '${sameTouch ? 'same-touch scroll' : 'mid-content start'}, '
+                'offset=$offset, progress=$progress, velocity=$velocity',
           );
+          if (!closes) {
+            expect(h.animation(tester).value, 1);
+            if (progress < 1) expect(position.pixels, 0);
+          }
           await h.close(tester);
         }
       }
-    },
-  );
+    }
+  });
 
-  testWidgets('trailing bounce counts as scrolled content only when content '
-      'can scroll', (tester) async {
+  testWidgets('a downward flick closes through trailing bounce', (
+    tester,
+  ) async {
     // A short menu under bouncing physics overscrolls on an upward drag
-    // although nothing scrolled, so a downward flick still closes on velocity:
-    // in the same touch, and in a new touch during the spring-back. A long
-    // menu overscrolled past its trailing edge is away from the top.
-    for (final (scenario, closes) in [
-      ('short, same-touch nudge', true),
-      ('short, spring-back', true),
-      ('long, trailing overscroll', false),
+    // although nothing scrolled: in the same touch, and in a new touch during
+    // the spring-back. A long menu can be overscrolled past its last action.
+    // One update repays the bounce and any content, then moves the sheet, and
+    // the flick closes in every case.
+    for (final scenario in [
+      'short, same-touch nudge',
+      'short, spring-back',
+      'long, trailing overscroll',
     ]) {
       final h = _Harness();
       await h.open(tester, short: scenario.startsWith('short'));
       h.bouncing.value = true;
       await tester.pumpAndSettle();
       final position = h.position(tester);
-      final tolerance = position.physics.toleranceFor(position).distance;
       var drag = _start(position);
       switch (scenario) {
         case 'short, same-touch nudge':
@@ -324,10 +295,9 @@ void main() {
       }
       expect(
         position.pixels - position.maxScrollExtent,
-        greaterThan(tolerance),
+        greaterThan(1),
         reason: scenario,
       );
-      // One update repays the bounce and any content, then moves the sheet.
       _move(drag, position.pixels + 60);
       expect(position.pixels, 0, reason: scenario);
       expect(
@@ -337,11 +307,7 @@ void main() {
       );
       _end(drag, 700.01);
       await tester.pumpAndSettle();
-      expect(
-        find.text('Handoff'),
-        closes ? findsNothing : findsOneWidget,
-        reason: scenario,
-      );
+      expect(find.text('Handoff'), findsNothing, reason: scenario);
       await h.close(tester);
     }
   });
@@ -436,9 +402,17 @@ void main() {
       },
     );
 
-    testWidgets(
-      'pointer flicks dismiss from the top but not after scrolling: $platform',
-      (tester) async {
+    // The hand-tested gesture: scroll the list up, slightly or a long way,
+    // then swipe down hard so the finger carries content to the top and pulls
+    // the sheet. A new touch after lifting, or the same touch that scrolled.
+    for (final scenario in [
+      'from the top',
+      'new touch after a slight scroll',
+      'same touch after a slight scroll',
+      'same touch after a long scroll',
+      'slow return across the top',
+    ]) {
+      testWidgets('pointer swipe down, $scenario: $platform', (tester) async {
         debugDefaultTargetPlatformOverride = platform;
         try {
           final h = _Harness();
@@ -448,54 +422,71 @@ void main() {
           final from =
               tester.getRect(find.byType(ModalScrollHandoff)).topCenter +
               const Offset(0, 20);
-          h.position(tester).jumpTo(40);
-          await tester.pumpAndSettle();
-          // 40 px of content, then a small sheet displacement, at 2000 px/s.
-          await release(tester, from, 120, 2000);
-          expect(find.text('Handoff'), findsOneWidget);
-          expect(h.animation(tester).value, 1);
-          expect(h.position(tester).pixels, 0);
-          // One touch from the top: scroll content down, then flick back
-          // across the top without lifting. Scrolled content vetoes velocity.
-          final touch = await tester.startGesture(from + const Offset(0, 200));
-          for (var i = 1; i <= 6; i++) {
-            await touch.moveBy(
-              const Offset(0, -25),
-              timeStamp: Duration(milliseconds: 40 * i),
-            );
+          final long = scenario.contains('long');
+          final sameTouch = scenario.startsWith('same touch');
+          TestGesture? touch;
+          var elapsed = 0;
+          if (scenario != 'from the top') {
+            // Scroll up slowly and rest, so the scroll itself carries no fling.
+            touch = await tester.startGesture(from + const Offset(0, 200));
+            for (var i = 1; i <= 6; i++) {
+              elapsed = 40000 * i;
+              await touch.moveBy(
+                Offset(0, long ? -40 : -8),
+                timeStamp: Duration(microseconds: elapsed),
+              );
+            }
+            await tester.pump(const Duration(milliseconds: 200));
+            elapsed += 200000;
+            if (!sameTouch) {
+              await touch.up(timeStamp: Duration(microseconds: elapsed));
+              await tester.pumpAndSettle();
+              touch = null;
+            }
+            final scrolled = h.position(tester).pixels;
+            expect(scrolled, long ? greaterThan(150) : inExclusiveRange(5, 50));
           }
-          await tester.pump();
           final scrolled = h.position(tester).pixels;
-          expect(scrolled, greaterThan(100));
-          const steps = 10;
-          final back = scrolled + 60;
-          for (var i = 1; i <= steps; i++) {
-            await touch.moveBy(
-              Offset(0, back / steps),
-              timeStamp: Duration(
-                microseconds: 240000 + (back / 2000 * 1e6 * i / steps).round(),
-              ),
+          if (touch == null) {
+            await release(
+              tester,
+              from,
+              scrolled + 80,
+              scenario.startsWith('slow') ? 0 : 2000,
             );
+          } else {
+            const steps = 10;
+            final back = scrolled + 80;
+            final micros = (back / 2000 * 1e6).round();
+            for (var i = 1; i <= steps; i++) {
+              await touch.moveBy(
+                Offset(0, back / steps),
+                timeStamp: Duration(
+                  microseconds: elapsed + micros * i ~/ steps,
+                ),
+              );
+            }
+            await tester.pump();
+            expect(h.position(tester).pixels, 0);
+            expect(h.animation(tester).value, inExclusiveRange(0.5, 1));
+            await touch.up(timeStamp: Duration(microseconds: elapsed + micros));
+            await tester.pumpAndSettle();
           }
-          await tester.pump();
-          expect(h.position(tester).pixels, 0);
-          expect(h.animation(tester).value, inExclusiveRange(0.5, 1));
-          await touch.up(
-            timeStamp: Duration(
-              microseconds: 240000 + (back / 2000 * 1e6).round(),
-            ),
-          );
-          await tester.pumpAndSettle();
-          expect(find.text('Handoff'), findsOneWidget);
-          expect(h.animation(tester).value, 1);
-          expect(h.position(tester).pixels, 0);
-          await release(tester, from, 80, 2000);
-          expect(find.text('Handoff'), findsNothing);
+          if (scenario.startsWith('slow')) {
+            // The finger displaced the sheet less than half way and rested:
+            // neither rule closes, and the menu settles open at the top.
+            expect(find.text('Handoff'), findsOneWidget);
+            expect(h.animation(tester).value, 1);
+            expect(h.position(tester).pixels, 0);
+            await h.close(tester);
+          } else {
+            expect(find.text('Handoff'), findsNothing);
+          }
         } finally {
           debugDefaultTargetPlatformOverride = null;
         }
-      },
-    );
+      });
+    }
   }
 
   testWidgets('interruptions restore deeply displaced sheets without closing', (

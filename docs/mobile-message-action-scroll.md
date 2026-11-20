@@ -16,21 +16,26 @@ start/end callbacks, and cancellation close callback. Entrance must finish
 before handoff can begin. Geometry is read again for every update. The route
 owns animation disposal; the helper owns only its controller and gesture token.
 
-Release policy follows Flutter 3.47.9's `material/bottom_sheet.dart`, with two
-deliberate differences. As in the stock sheet, downward velocity strictly above
-700 logical px/s closes, and otherwise progress strictly below 0.5 of the sheet
-height closes. The differences:
+Release policy follows Flutter 3.47.9's `material/bottom_sheet.dart`, with one
+deliberate difference. As in the stock sheet, a release with the sheet displaced
+closes when downward velocity is strictly above 700 logical px/s, and otherwise
+when progress is strictly below 0.5 of the sheet height. The difference: a raw
+upward velocity strictly below -700 vetoes the progress rule.
 
-- The velocity rule applies only to a gesture that never scrolled content.
-  Content away from its leading edge at any update, whether the gesture began
-  mid-content or scrolled down from the top and back in the same touch, leaves
-  the gesture closing on progress alone. A fast flick back to the top that
-  carries the sheet a little way then settles open with content at the top
-  instead of dismissing the menu. Content within the scroll physics distance
-  tolerance of the leading edge counts as at the top. Only the in-range offset
-  counts, so the trailing bounce of a menu too short to scroll (iOS) is not
-  scrolled content; a long menu bounced past its last action still is.
-- A raw upward velocity strictly below -700 vetoes the progress rule.
+Where the gesture began does not matter. A swipe that starts with content
+scrolled away from the top, by a little or a lot, or that scrolls content down
+and back in the same touch, closes on velocity like one that began at the top,
+provided the finger has carried content to the top and displaced the sheet by
+the time it lifts. The guards against accidental dismissal are these:
+
+- A release with the sheet not displaced by the finger never closes, however
+  fast. A flick that leaves content short of the top only scrolls.
+- Ballistic and programmatic scrolling cannot start a sheet drag, so a content
+  fling that reaches the top after the finger lifted stops there.
+- Scroll momentum carried into a new touch is not added to the release
+  velocity.
+- A slow return across the top that displaces the sheet less than half way
+  settles open.
 
 A parity test releases the same pointer gestures through the stock sheet drag
 and through the body, so a Flutter upgrade that moves either stock threshold
@@ -65,9 +70,10 @@ flutter test test/features/channels/message_actions_test.dart \
 
 The message-action journey uses a 375×667 viewport, 2× text, management
 permissions, and reminder/thread actions on iOS and Android settings. The
-shared tests cover the release boundaries, scrolled-gesture releases, the
-leading-edge tolerance, stock parity, interruptions, bouncing offsets, carried
-momentum, layout changes, short bodies, reduced motion, and nested scrolling.
+shared tests cover the release boundaries, releases after scrolled content
+(new touch and same touch), stock parity, interruptions, bouncing offsets,
+carried momentum, layout changes, short bodies, reduced motion, and nested
+scrolling.
 
 ## Manual native checklist
 
@@ -79,13 +85,14 @@ message. Increase text size until the lower actions start offscreen.
 2. From the top, drag the body down slowly past half the sheet and release: the
    menu closes. Release before half: it settles open.
 3. From the top, flick the body down: the menu closes.
-4. Scroll down, then flick back up the list so the sheet moves slightly: the
-   menu stays open, settled at the top.
-5. From the top, in one touch, drag up to scroll the list, then flick back
-   down without lifting so the sheet moves slightly: the menu stays open,
-   settled at the top.
-6. Drag the list back to the top by finger and lift, then flick the body down:
-   the menu closes on the first flick.
+4. Scroll the list up slightly and lift, then swipe the body down hard so the
+   sheet moves: the menu closes. Repeat after scrolling to the last action.
+5. From the top, in one touch, drag up to scroll the list slightly, then swipe
+   down hard without lifting so the sheet moves: the menu closes.
+6. Scroll down and lift, then flick so the list flings to the top after the
+   finger has lifted: the sheet does not move and the menu stays open. Drag
+   slowly back across the top so the sheet moves less than half way and
+   release: it settles open.
 7. Cross the top without lifting, then reverse: the sheet reopens fully before
    content scrolls, and it follows the finger throughout.
 8. Pull the sheet down, then release with a strong upward flick: it stays open.

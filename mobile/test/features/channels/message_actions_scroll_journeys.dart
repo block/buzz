@@ -1,9 +1,15 @@
 part of 'message_actions_test.dart';
 
 void _messageActionsScrollTests() {
-  for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
+  for (final (platform, sameTouch) in [
+    (TargetPlatform.iOS, false),
+    (TargetPlatform.iOS, true),
+    (TargetPlatform.android, false),
+    (TargetPlatform.android, true),
+  ]) {
     testWidgets(
-      'overflowing message actions hand off in both directions: $platform',
+      'overflowing message actions hand off in both directions: $platform, '
+      '${sameTouch ? 'same-touch' : 'new-touch'} swipe dismissal',
       (tester) async {
         debugDefaultTargetPlatformOverride = platform;
         tester.view.physicalSize = const Size(375, 667);
@@ -58,54 +64,8 @@ void _messageActionsScrollTests() {
           await tester.drag(body, const Offset(0, -900));
           await tester.pumpAndSettle();
           expect(find.text('Delete message').hitTestable(), findsOneWidget);
-          // A fast flick back from mid-content that only just crosses the top
-          // settles there: velocity alone must not dismiss this gesture.
-          position.jumpTo(60);
+          position.jumpTo(0);
           await tester.pumpAndSettle();
-          final flick = await tester.startGesture(start);
-          for (var i = 1; i <= 8; i++) {
-            await flick.moveBy(
-              const Offset(0, 25),
-              timeStamp: Duration(milliseconds: 8 * i),
-            );
-          }
-          await tester.pump();
-          expect(position.pixels, 0);
-          expect(animation.value, inExclusiveRange(0.5, 1));
-          await flick.up(timeStamp: const Duration(milliseconds: 64));
-          await tester.pumpAndSettle();
-          expect(sheet, findsOneWidget);
-          expect(animation.value, 1);
-          expect(position.pixels, 0);
-          // The menu opens at the top, so the first touch can scroll down to
-          // the lower actions and flick back across the top without lifting.
-          // Content it scrolled keeps velocity from dismissing it too.
-          final touch = await tester.startGesture(
-            Offset(start.dx, viewport.bottom - 40),
-          );
-          for (var i = 1; i <= 6; i++) {
-            await touch.moveBy(
-              const Offset(0, -25),
-              timeStamp: Duration(milliseconds: 40 * i),
-            );
-          }
-          await tester.pump();
-          final scrolled = position.pixels;
-          expect(scrolled, greaterThan(100));
-          for (var i = 1; i <= 8; i++) {
-            await touch.moveBy(
-              Offset(0, (scrolled + 60) / 8),
-              timeStamp: Duration(milliseconds: 240 + 8 * i),
-            );
-          }
-          await tester.pump();
-          expect(position.pixels, 0);
-          expect(animation.value, inExclusiveRange(0.5, 1));
-          await touch.up(timeStamp: const Duration(milliseconds: 304));
-          await tester.pumpAndSettle();
-          expect(sheet, findsOneWidget);
-          expect(animation.value, 1);
-          expect(position.pixels, 0);
           await tester.drag(
             find.byKey(const ValueKey('quick-reaction-👍')),
             const Offset(-120, 0),
@@ -123,10 +83,40 @@ void _messageActionsScrollTests() {
           await pull.up();
           await tester.pumpAndSettle();
           expect(animation.value, 1);
-          // After all of those pointer gestures an action still takes a tap
-          // and closes the menu with it. Fling dismissal from the top is
-          // pinned by the shared pointer-flick test on both platforms.
-          await tester.tap(find.text('Copy link').hitTestable());
+          // Scroll the list up slightly, then swipe down hard: the finger
+          // carries content to the top, pulls the sheet a little and the
+          // release velocity dismisses the menu. Either as a new touch after
+          // lifting or without lifting at all.
+          final touch = await tester.startGesture(
+            Offset(start.dx, viewport.bottom - 40),
+          );
+          for (var i = 1; i <= 6; i++) {
+            await touch.moveBy(
+              const Offset(0, -8),
+              timeStamp: Duration(milliseconds: 40 * i),
+            );
+          }
+          await tester.pump(const Duration(milliseconds: 200));
+          var swipe = touch;
+          var elapsed = 440;
+          if (!sameTouch) {
+            await touch.up(timeStamp: const Duration(milliseconds: 440));
+            await tester.pumpAndSettle();
+            swipe = await tester.startGesture(start);
+            elapsed = 0;
+          }
+          final scrolled = position.pixels;
+          expect(scrolled, inExclusiveRange(5, 50));
+          for (var i = 1; i <= 8; i++) {
+            await swipe.moveBy(
+              Offset(0, (scrolled + 80) / 8),
+              timeStamp: Duration(milliseconds: elapsed + 8 * i),
+            );
+          }
+          await tester.pump();
+          expect(position.pixels, 0);
+          expect(animation.value, inExclusiveRange(0.5, 1));
+          await swipe.up(timeStamp: Duration(milliseconds: elapsed + 64));
           await tester.pumpAndSettle();
           expect(sheet, findsNothing);
         } finally {

@@ -34,8 +34,7 @@ class ModalScrollHandoff extends HookConsumerWidget {
 
 // Flutter 3.47.9, material/bottom_sheet.dart: _kMinFlingVelocity and
 // _kCloseProgressThreshold. Keep the body policy aligned with the stock handle,
-// except that a deliberate upward release vetoes the distance-based close and
-// that velocity alone closes only a gesture that never scrolled content.
+// except that a deliberate upward release vetoes the distance-based close.
 const _minFlingVelocity = 700.0;
 const _closeProgressThreshold = 0.5;
 
@@ -120,10 +119,6 @@ class _HandoffPosition extends ScrollPositionWithSingleContext {
   Object? _gesture;
   _SheetBinding? _sheet;
   DragStartDetails? _start;
-  // Whether content has been away from its leading edge at any point in the
-  // current gesture. A flick that scrolled content back to the top must not
-  // dismiss on velocity alone.
-  bool _scrolledContent = false;
   bool _suppressBallistic = false;
 
   // A terminal token is cleared before delegating end/cancel: Flutter disposes
@@ -148,7 +143,6 @@ class _HandoffPosition extends ScrollPositionWithSingleContext {
     final drag = super.drag(details, dragCancelCallback);
     // A displaced release that never went ballistic belongs to the old gesture.
     _suppressBallistic = false;
-    _scrolledContent = false;
     final token = Object();
     _gesture = token;
     _start = details;
@@ -158,19 +152,8 @@ class _HandoffPosition extends ScrollPositionWithSingleContext {
     });
   }
 
-  // Within the physics tolerance content counts as resting at the top, so a
-  // finger-placed fraction of a pixel does not disable the velocity close.
-  // Only the in-range offset counts: trailing bounce on content too short to
-  // scroll is not scrolled content.
-  bool get _awayFromLeadingEdge =>
-      math.min(pixels, maxScrollExtent) - minScrollExtent >
-      physics.toleranceFor(this).distance;
-
   @override
   void applyUserOffset(double delta) {
-    // Sampled before every update, so it sees content the gesture began on
-    // and content an earlier update scrolled, before this one returns it.
-    _scrolledContent |= _awayFromLeadingEdge;
     if (_gesture == null ||
         axisDirection != AxisDirection.down ||
         owner.positions.length != 1) {
@@ -235,11 +218,14 @@ class _HandoffPosition extends ScrollPositionWithSingleContext {
     final animation = binding.animation;
     final displaced = animation.value < 1;
     final velocity = end?.velocity.pixelsPerSecond.dy ?? 0.0;
+    // Only a release with the sheet still displaced by the finger can close.
+    // Where the gesture began, and whether it scrolled content on the way to
+    // the top, does not matter.
     final closing =
         end != null &&
         binding.route.isCurrent &&
         displaced &&
-        ((!_scrolledContent && velocity > _minFlingVelocity) ||
+        (velocity > _minFlingVelocity ||
             (velocity >= -_minFlingVelocity &&
                 animation.value < _closeProgressThreshold));
     binding.sheet.onDragEnd?.call(end ?? DragEndDetails(), isClosing: closing);
