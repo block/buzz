@@ -52,18 +52,22 @@ class SentryDiagnosticReporter implements DiagnosticReporter {
 
   @override
   void leaveBreadcrumb(DiagnosticBreadcrumb breadcrumb) => _drop(
-    () => _hub.addBreadcrumb(
-      Breadcrumb(
+    () => _hub.addBreadcrumb(switch (breadcrumb) {
+      NetworkBreadcrumb(:final event) => Breadcrumb(
         category: DiagnosticFilter.networkCategory,
-        level: breadcrumb.event.outcome == NetworkOutcome.failure
+        level: event.outcome == NetworkOutcome.failure
             ? SentryLevel.warning
             : SentryLevel.info,
         data: {
-          for (final entry in _attributes(breadcrumb.event).entries)
+          for (final entry in _attributes(event).entries)
             entry.key: entry.value.value,
         },
       ),
-    ),
+      ScreenBreadcrumb(:final screen) => Breadcrumb(
+        category: DiagnosticFilter.navigationCategory,
+        data: {DiagnosticFilter.screenKey: screen.name},
+      ),
+    }),
   );
 
   @override
