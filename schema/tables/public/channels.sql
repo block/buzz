@@ -47,10 +47,12 @@ CREATE TABLE channels (
 );
 
 -- nip29 group id and DM participant hash are unique WITHIN a community, not globally.
+-- The DM hash is unique among live channels only: a soft-deleted DM keeps its
+-- hash and must not block reopening the same participant set.
 CREATE UNIQUE INDEX idx_channels_nip29_group ON channels (community_id, nip29_group_id)
     WHERE nip29_group_id IS NOT NULL;
 CREATE UNIQUE INDEX idx_channels_dm_hash ON channels (community_id, participant_hash)
-    WHERE participant_hash IS NOT NULL;
+    WHERE participant_hash IS NOT NULL AND deleted_at IS NULL;
 CREATE INDEX idx_channels_community_type ON channels (community_id, channel_type);
 CREATE INDEX idx_channels_community_visibility ON channels (community_id, visibility);
 CREATE INDEX idx_channels_created_by ON channels (community_id, created_by);

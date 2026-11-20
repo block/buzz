@@ -147,3 +147,55 @@ async fn cluster_global_concurrent_dm_creation_reports_only_the_inserter() {
         db.pool().close().await;
     }
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn deleted_dm_does_not_block_reopening_the_same_pair() {
+    let url = crate::test_support::database_url();
+    let db = Db::from_pool(PgPool::connect(&url).await.expect("database"));
+    let author = nostr::Keys::generate().public_key().to_bytes();
+    let recipient = nostr::Keys::generate().public_key().to_bytes();
+    let community = match db
+        .create_community_with_owner(
+            &format!("dm-reopen-{}.example.org", Uuid::new_v4().simple()),
+            &hex::encode(author),
+            &nostr::Keys::generate(),
+        )
+        .await
+        .expect("community")
+        .outcome
+    {
+        CreateCommunityWithOwnerResult::Created(row) => row.id,
+        other => panic!("unexpected community: {other:?}"),
+    };
+    for key in [&author, &recipient] {
+        db.ensure_user(community, key).await.expect("user");
+    }
+
+    let (first, created) = db
+        .open_dm(community, &[&recipient], &author, false, ALLOW)
+        .await
+        .expect("open dm");
+    assert!(created);
+    assert!(db
+        .soft_delete_channel(community, first.id)
+        .await
+        .expect("delete dm"));
+
+    // The deleted DM keeps its participant_hash; reopening must create a new
+    // DM instead of failing on the unique index.
+    let (second, created) = db
+        .open_dm(community, &[&recipient], &author, false, ALLOW)
+        .await
+        .expect("reopen dm after delete");
+    assert!(created);
+    assert_ne!(second.id, first.id);
+
+    // Two live DMs for one pair stay impossible.
+    let (again, created) = db
+        .open_dm(community, &[&recipient], &author, false, ALLOW)
+        .await
+        .expect("open dm again");
+    assert!(!created);
+    assert_eq!(again.id, second.id);
+}
