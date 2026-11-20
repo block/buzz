@@ -373,6 +373,22 @@ impl Drop for Draining {
     }
 }
 
+/// Whether [`submit`] hands work to the background writer. On by default;
+/// the relay turns it off at startup while `/buzz/v1` is off.
+static WRITER_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Turn the background activity writer on or off for this process.
+///
+/// Off, committed messages leave the shared and personal rows alone and the
+/// writer takes no serving-pool connections. A read rebuilds the shared rows.
+/// Nothing rebuilds the personal ones (authors' read positions, who is part of
+/// a thread), so turning the API on later is the same as starting from tables
+/// created empty: run the backfill, which restores 30 days of them, and
+/// `warm_activity` first. Call it once, before serving.
+pub fn set_writer_enabled(enabled: bool) {
+    WRITER_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Hand a committed transaction's contributions to the background writer.
 ///
 /// Never waits and never fails the caller: the message is already committed.
@@ -380,8 +396,12 @@ impl Drop for Draining {
 /// writes them a moment later in its own admitted transactions. So a busy
 /// channel costs one write per interval per relay process, and no message
 /// transaction ever holds or waits for a shared row. A shared row lost here
-/// (a failure, the bound, a process exit) is rebuilt by the next read.
+/// (a failure, the bound, a process exit) is rebuilt by the next read. With
+/// the writer off ([`set_writer_enabled`]) the contributions are dropped.
 pub(crate) fn submit(pool: &sqlx::PgPool, community: CommunityId, staged: BTreeMap<Uuid, Staged>) {
+    if !WRITER_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     let writer = writer();
     let mut pending = lock_pending(writer);
     pending.submitted += 1;

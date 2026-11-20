@@ -406,7 +406,8 @@ first reads do not have to.
   transaction. A busy channel costs one write per interval per relay process,
   and no message transaction holds or waits for a shared row. The same write
   moves the author's read position and marks the thread as one the parent's
-  author and the people tagged are part of.
+  author and the people tagged are part of. A relay with `BUZZ_V1_ENABLED`
+  off does none of this, so the API costs nothing until it is turned on.
 - **On shutdown.** Once a relay has stopped serving it waits up to three
   seconds for the writes still in memory, so a deploy or a restart loses none.
   Only a process that is killed, or crashes, loses them.
@@ -496,8 +497,10 @@ inserts keep working against the migrated schema.
 
 ### Rollout
 
-History stored before the release that writes these rows is filled once, by an
-operator, after every relay runs that release. Best before clients read the
+Relays write these rows only while `BUZZ_V1_ENABLED=true`. History stored
+before that is filled once, by an operator, after every relay runs with it on:
+both when the release arrives with the API on, and when the API is turned on
+later, for the messages stored while it was off. Best before clients read the
 list, though not required: a client that already holds a marker gets the
 threads the backfill adds from its next `since` read, and the mentions when it
 next reads the feed.
@@ -516,8 +519,8 @@ next reads the feed.
    that keeps failing is skipped and reported, with a non-zero exit; run it
    again, or leave those rows to the first read.
 
-Skipping either is safe: mentions and threads from before the release stay off
-the lists, and first reads rebuild the shared rows themselves, 2.5 seconds at a
+Skipping either is safe: mentions and threads from before the API was on stay
+off the lists, and first reads rebuild the shared rows themselves, 2.5 seconds at a
 time.
 
 ## Compatibility
