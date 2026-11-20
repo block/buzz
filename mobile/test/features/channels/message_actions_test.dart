@@ -10,6 +10,7 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/message_actions.dart';
 import 'package:buzz/features/channels/message_long_press_region.dart';
+import 'package:buzz/features/channels/message_reply_drag_target.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
@@ -18,6 +19,7 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
@@ -757,6 +759,156 @@ void main() {
 
     expect(snapshot.width, 240);
     expect(snapshot.height, 80);
+  });
+
+  group('targets-only message long press', () {
+    Widget region({
+      required ValueNotifier<double> bubbleWidth,
+      required VoidCallback onLongPress,
+      required VoidCallback onTap,
+    }) {
+      return MaterialApp(
+        home: Scaffold(
+          body: ListView(
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const Text('Date'),
+                  Material(
+                    child: MessageLongPressInkWell(
+                      targetsOnly: true,
+                      onTap: onTap,
+                      onLongPress: (_) => onLongPress(),
+                      child: ValueListenableBuilder<double>(
+                        valueListenable: bubbleWidth,
+                        builder: (context, width, _) => Align(
+                          alignment: Alignment.centerLeft,
+                          child: MessageLongPressTarget(
+                            child: SizedBox(
+                              width: width,
+                              height: 40,
+                              child: const Text('Hi'),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    Future<void> holdWhileResizing(
+      WidgetTester tester,
+      ValueNotifier<double> bubbleWidth,
+      double resizedWidth,
+    ) async {
+      final gesture = await tester.startGesture(
+        tester.getTopLeft(find.text('Hi')) + const Offset(150, 20),
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      bubbleWidth.value = resizedWidth;
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+      await gesture.up();
+      await tester.pump();
+    }
+
+    testWidgets('a hold that started on the bubble opens after it shrinks', (
+      tester,
+    ) async {
+      var longPresses = 0;
+      var taps = 0;
+      final bubbleWidth = ValueNotifier<double>(200);
+      addTearDown(bubbleWidth.dispose);
+      await tester.pumpWidget(
+        region(
+          bubbleWidth: bubbleWidth,
+          onLongPress: () => longPresses += 1,
+          onTap: () => taps += 1,
+        ),
+      );
+
+      await holdWhileResizing(tester, bubbleWidth, 100);
+
+      expect(longPresses, 1);
+      expect(taps, 0);
+    });
+
+    testWidgets(
+      'a hold that started beside the bubble stays inert after it widens',
+      (tester) async {
+        var longPresses = 0;
+        var taps = 0;
+        final bubbleWidth = ValueNotifier<double>(100);
+        addTearDown(bubbleWidth.dispose);
+        await tester.pumpWidget(
+          region(
+            bubbleWidth: bubbleWidth,
+            onLongPress: () => longPresses += 1,
+            onTap: () => taps += 1,
+          ),
+        );
+
+        await holdWhileResizing(tester, bubbleWidth, 200);
+
+        expect(longPresses, 0);
+        expect(taps, 0);
+      },
+    );
+
+    testWidgets(
+      'the message node has the only screen-reader long press and it opens',
+      (tester) async {
+        var longPresses = 0;
+        final bubbleWidth = ValueNotifier<double>(100);
+        addTearDown(bubbleWidth.dispose);
+        final semantics = tester.ensureSemantics();
+        await tester.pumpWidget(
+          region(
+            bubbleWidth: bubbleWidth,
+            onLongPress: () => longPresses += 1,
+            onTap: () {},
+          ),
+        );
+
+        final longPressNodes = <SemanticsNode>[];
+        void collect(SemanticsNode node) {
+          if (node.getSemanticsData().hasAction(SemanticsAction.longPress)) {
+            longPressNodes.add(node);
+          }
+          node.visitChildren((child) {
+            collect(child);
+            return true;
+          });
+        }
+
+        collect(
+          tester
+              .binding
+              .renderViews
+              .single
+              .owner!
+              .semanticsOwner!
+              .rootSemanticsNode!,
+        );
+
+        expect(longPressNodes, hasLength(1));
+        expect(longPressNodes.single.getSemanticsData().label, 'Hi');
+        tester.binding.renderViews.single.owner!.semanticsOwner!.performAction(
+          longPressNodes.single.id,
+          SemanticsAction.longPress,
+        );
+        await tester.pump();
+        expect(longPresses, 1);
+        semantics.dispose();
+      },
+    );
   });
 
   group('showMessageActions', () {
