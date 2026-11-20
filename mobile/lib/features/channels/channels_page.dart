@@ -110,6 +110,7 @@ import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 
 part 'channels_page/body.dart';
+part 'channels_page/activity_recovery.dart';
 part 'channels_page/sections.dart';
 part 'channels_page/rename_section.dart';
 
