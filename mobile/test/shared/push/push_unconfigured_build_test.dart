@@ -22,6 +22,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../community/community_storage_test.dart';
 
+const _turningOff =
+    'Turning off. Notifications may continue until this finishes.';
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   group('artifact without a gateway define', () {
@@ -215,9 +218,10 @@ void main() {
         await tester.tap(find.byType(Switch));
         await tester.pumpAndSettle();
 
-        // The relay rejected the tombstone: the row stays, inert, until a
-        // retry gets through.
+        // The relay rejected the tombstone: the row stays, inert, and says so
+        // until a retry gets through.
         expect(find.text('Notifications'), findsOneWidget);
+        expect(find.text(_turningOff), findsOneWidget);
         final offSwitch = tester.widget<Switch>(find.byType(Switch));
         expect(offSwitch.value, isFalse);
         expect(offSwitch.onChanged, isNull);
@@ -238,6 +242,7 @@ void main() {
               .pendingTombstoneGeneration,
           isNull,
         );
+        expect(find.text(_turningOff), findsNothing);
         expect(find.text('Notifications'), findsNothing);
         expect(tester.takeException(), isNull);
         debugDefaultTargetPlatformOverride = null;

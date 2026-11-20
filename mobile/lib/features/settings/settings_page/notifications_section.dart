@@ -80,6 +80,15 @@ class _NotificationsSection extends ConsumerWidget {
               AppListRow(
                 key: const ValueKey('push-notifications-enabled'),
                 title: 'Notifications',
+                subtitle:
+                    !community.pushNotificationsEnabled &&
+                        community
+                                .pushSubscriptionState
+                                .pendingTombstoneGeneration !=
+                            null
+                    ? 'Turning off. Notifications may continue until this '
+                          'finishes.'
+                    : null,
                 // Reserve horizontal room without letting the switch's 48dp
                 // layout height expand this single-line row.
                 trailing: const SizedBox(width: 60),
