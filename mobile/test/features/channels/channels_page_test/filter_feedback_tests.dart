@@ -3,6 +3,80 @@ part of '../channels_page_test.dart';
 void _filterFeedbackTests(
   Widget Function({required List<Override> overrides}) buildTestable,
 ) {
+  for (final manualRetry in [true, false]) {
+    testWidgets(
+      'activity toast follows recovery (manual retry: $manualRetry)',
+      (tester) async {
+        final manager = _filterTestManager(
+          cached: ChannelFilterStore.empty().edit(
+            'channels',
+            ChannelFilterMode.active,
+          ),
+        );
+        final recovery = Completer<int?>();
+        final reads = <String, int>{};
+        const ids = ['failed', 'loaded'];
+        await tester.pumpWidget(
+          buildTestable(
+            overrides: [
+              channelsProvider.overrideWith(
+                () => _FakeNotifier([
+                  for (final id in ids)
+                    Channel(
+                      id: id,
+                      name: id,
+                      channelType: 'stream',
+                      visibility: 'open',
+                      description: '',
+                      memberCount: 1,
+                      createdBy: 'pk',
+                      createdAt: DateTime(2025),
+                      isMember: true,
+                    ),
+                ]),
+              ),
+              relaySessionProvider.overrideWith(
+                () => _ReconnectingRelaySession(
+                  initialStatus: SessionStatus.connected,
+                ),
+              ),
+              channelFilterProvider.overrideWithValue(manager),
+              for (final id in ids)
+                channelFilterActivityProvider(id).overrideWith((_) async {
+                  final count = reads.update(
+                    id,
+                    (value) => value + 1,
+                    ifAbsent: () => 1,
+                  );
+                  if (id == 'failed') {
+                    if (count == 1) throw StateError('Activity unavailable');
+                    return recovery.future;
+                  }
+                  return DateTime.now().millisecondsSinceEpoch ~/ 1000;
+                }),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text('failed'), findsOneWidget);
+        expect(find.text('Some activity couldn’t load'), findsOneWidget);
+        if (manualRetry) {
+          await tester.tap(find.text('Retry'));
+        } else {
+          await tester.pump(const Duration(seconds: 10));
+        }
+        await tester.pumpAndSettle();
+        expect(find.text('Some activity couldn’t load'), findsOneWidget);
+        recovery.complete(DateTime.now().millisecondsSinceEpoch ~/ 1000);
+        await tester.pumpAndSettle();
+        expect(reads, {'failed': 2, 'loaded': 1});
+        expect(find.text('Some activity couldn’t load'), findsNothing);
+        await tester.pumpWidget(const SizedBox());
+        manager.dispose();
+      },
+    );
+  }
+
   testWidgets(
     'deleting an unfiltered section persists offline without filter publication',
     (tester) async {
@@ -137,12 +211,47 @@ void _filterFeedbackTests(
     );
     await tester.pumpAndSettle();
     expect(find.text('history'), findsNothing);
-    await tester.tap(find.text('Show hidden channels · 1'));
+    await tester.tap(find.text('Show more'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 70));
+    expect(
+      tester
+          .widget<SizeTransition>(
+            find
+                .ancestor(
+                  of: find.byKey(const ValueKey('history')),
+                  matching: find.byType(SizeTransition),
+                )
+                .first,
+          )
+          .sizeFactor
+          .value,
+      allOf(greaterThan(0), lessThan(1)),
+    );
     await tester.pumpAndSettle();
     expect(
       tester.widget<Text>(find.text('history')).style?.fontWeight,
       FontWeight.w400,
     );
+    await tester.tap(find.text('Show fewer'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 70));
+    expect(
+      tester
+          .widget<SizeTransition>(
+            find
+                .ancestor(
+                  of: find.byKey(const ValueKey('history')),
+                  matching: find.byType(SizeTransition),
+                )
+                .first,
+          )
+          .sizeFactor
+          .value,
+      allOf(greaterThan(0), lessThan(1)),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('history'), findsNothing);
     await tester.pumpWidget(const SizedBox());
     manager.dispose();
   });
@@ -205,27 +314,29 @@ void _filterFeedbackTests(
       final manager = container.read(channelFilterProvider)!;
       expect(manager.ready, isTrue);
       const reopen = 'Preferences changed. Reopen section options to continue.';
-      FilledButton applyButton() => tester.widget<FilledButton>(
-        find.widgetWithText(FilledButton, 'Apply'),
+      IconButton applyButton() => tester.widget<IconButton>(
+        find.byWidgetPredicate(
+          (widget) => widget is IconButton && widget.tooltip == 'Apply changes',
+        ),
       );
 
       // A push lease write lands while a filter save awaits confirmation: the
       // save completes and the co-staged sort still applies.
       await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Recent'));
-      await tester.tap(find.text('Unreads'));
-      await tester.tap(find.text('Apply'));
+      await _chooseSectionOption(tester, 'Sort', 'Recent');
+      await _chooseSectionOption(tester, 'Show', 'Unreads');
+      await tester.tap(find.byTooltip('Apply changes'));
       await tester.pumpAndSettle();
       expect(relay.filterPublishes, 1);
-      expect(find.text('Saving…'), findsOneWidget);
+      expect(find.byTooltip('Saving…'), findsOneWidget);
       await communities.reservePushLeaseGeneration(community.id);
       await tester.pumpAndSettle();
       expect(container.read(channelFilterProvider), same(manager));
       expect(find.text(reopen), findsNothing);
       relay.releaseHeld();
       await tester.pumpAndSettle();
-      expect(find.text('Cancel'), findsNothing);
+      expect(find.byTooltip('Apply changes'), findsNothing);
       expect(manager.store.modeFor('channels'), ChannelFilterMode.unreads);
       expect(
         container.read(channelSortProvider).sortModeFor('channels'),
@@ -238,9 +349,9 @@ void _filterFeedbackTests(
       // and the replacement's queued refresh restores write access.
       await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('All'));
-      await tester.tap(find.text('Unreads'));
-      await tester.tap(find.text('A–Z'));
+      await _chooseSectionOption(tester, 'Show', 'All');
+      await _chooseSectionOption(tester, 'Show', 'Unreads');
+      await _chooseSectionOption(tester, 'Sort', 'A–Z');
       relay.holdNextFilterRead = true;
       unawaited(manager.refresh());
       relay.setReconnecting();
@@ -251,9 +362,9 @@ void _filterFeedbackTests(
       expect(manager.busy, isTrue);
       expect(find.text(reopen), findsNothing);
       expect(applyButton().onPressed, isNotNull);
-      await tester.tap(find.text('Apply'));
+      await tester.tap(find.byTooltip('Apply changes'));
       await tester.pumpAndSettle();
-      expect(find.text('Cancel'), findsNothing);
+      expect(find.byTooltip('Apply changes'), findsNothing);
       expect(
         container.read(channelSortProvider).sortModeFor('channels'),
         ChannelSortMode.alpha,
@@ -267,7 +378,7 @@ void _filterFeedbackTests(
       // A failed load leaves a staged filter edit recoverable from the sheet.
       await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('All'));
+      await _chooseSectionOption(tester, 'Show', 'All');
       relay.setReconnecting();
       await tester.pumpAndSettle();
       relay.holdNextFilterRead = true;
@@ -276,17 +387,17 @@ void _filterFeedbackTests(
       relay.releaseHeld(fail: true);
       await tester.pumpAndSettle();
       expect(manager.ready, isFalse);
-      await tester.tap(find.text('Apply'));
+      await tester.tap(find.byTooltip('Apply changes'));
       await tester.pumpAndSettle();
       await tester.ensureVisible(find.text('Retry loading preferences'));
       await tester.tap(find.text('Retry loading preferences'));
       await tester.pumpAndSettle();
       expect(manager.ready, isTrue);
-      await tester.tap(find.widgetWithText(FilledButton, 'Apply'));
+      await tester.tap(find.byTooltip('Apply changes'));
       await tester.pumpAndSettle();
       relay.releaseHeld();
       await tester.pumpAndSettle();
-      expect(find.text('Cancel'), findsNothing);
+      expect(find.byTooltip('Apply changes'), findsNothing);
       expect(manager.store.modeFor('channels'), ChannelFilterMode.all);
 
       // Switching community still abandons the sheet.

@@ -53,6 +53,22 @@ class BottomUpPageRoute<T> extends PageRouteBuilder<T> {
   static ValueListenable<int> sheetsAbove(ModalRoute<dynamic> route) =>
       _coveringSheets[route] ??= ValueNotifier(0);
 
+  static final _retained = Expando<int>();
+
+  static bool hasRetainedControls(ModalRoute<dynamic>? route) =>
+      route != null && (_retained[route] ?? 0) > 0;
+
+  /// Keep the presenting route's controls mounted through a modal's exit.
+  static VoidCallback retainControlsForSheet(ModalRoute<dynamic> route) {
+    final count = _coveringSheets[route] ??= ValueNotifier(0);
+    count.value++;
+    _retained[route] = (_retained[route] ?? 0) + 1;
+    return () {
+      _retained[route] = _retained[route]! - 1;
+      count.value--;
+    };
+  }
+
   ModalRoute<dynamic>? _coveredRoute;
 
   void _setCoveredRoute(ModalRoute<dynamic>? route) {

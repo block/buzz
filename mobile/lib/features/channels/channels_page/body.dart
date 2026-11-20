@@ -383,8 +383,7 @@ class _SliverChannelsList extends HookConsumerWidget {
     }
 
     // Only the team sections record can be edited, and only until desktop's
-    // unified workspaces exist. Sorted as displayed, so Move up and Move down
-    // follow what the user sees, not storage order.
+    // unified workspaces exist. The mobile display order is stored separately.
     final teamSections = sectionsState.editable
         ? (sectionsState.store.sections.toList()
             ..sort((a, b) => a.order.compareTo(b.order)))
@@ -421,6 +420,31 @@ class _SliverChannelsList extends HookConsumerWidget {
     // section's ID when a Solo project shares that ID.
     _SectionEdits editsFor(ChannelSection section, String layoutId) => (
       onRename: () async {
+        if (defaultTargetPlatform == TargetPlatform.iOS) {
+          final config = ref.read(relayConfigProvider);
+          await showTextEditor(
+            context: context,
+            title: 'Rename section',
+            initialValue: section.name,
+            hintText: 'Section name',
+            requireNonEmpty: true,
+            onSave: (value) async {
+              if (!context.mounted) return;
+              final current = ref.read(relayConfigProvider);
+              if (current.storedOrigin != config.storedOrigin ||
+                  current.nsec != config.nsec) {
+                return;
+              }
+              final name = value.trim();
+              if (name.isNotEmpty) {
+                ref
+                    .read(channelSectionsProvider.notifier)
+                    .renameSection(section.id, name);
+              }
+            },
+          );
+          return;
+        }
         final name = await showBuzzDialog<String>(
           context: context,
           builder: (_) => _SectionNameDialog(
@@ -481,11 +505,6 @@ class _SliverChannelsList extends HookConsumerWidget {
           }
         }
       },
-      onMoveUp: () =>
-          ref.read(channelSectionsProvider.notifier).moveSectionUp(section.id),
-      onMoveDown: () => ref
-          .read(channelSectionsProvider.notifier)
-          .moveSectionDown(section.id),
     );
 
     Widget? sectionFor(String key) {
@@ -532,8 +551,6 @@ class _SliverChannelsList extends HookConsumerWidget {
         isVisible: (c) => visible(group, c),
         buildRow: (c) => row(c, key),
         expanded: sectionExpanded(section.id),
-        isFirst: team == null || teamSections.first.id == team.id,
-        isLast: team == null || teamSections.last.id == team.id,
         onToggle: () => toggleSection(section.id),
         edits: team == null ? null : editsFor(team, section.id),
         sortMode: mode(),
@@ -541,33 +558,108 @@ class _SliverChannelsList extends HookConsumerWidget {
       );
     }
 
-    final sections = [for (final key in layout.sectionKeys) ?sectionFor(key)];
-    final empty = sectionKeyOf.isEmpty && layout.sections.isEmpty;
+    final storageKey =
+        'section-order:${ref.watch(relayConfigProvider).baseUrl}:$currentPubkey';
+    final notice = useMemoized(() => ObjectRef<OverlayEntry?>(null), [
+      storageKey,
+    ]);
+    final failures = useMemoized(() => <String>{}, [storageKey]);
+    failures.retainAll(activity.keys);
+    for (final MapEntry(key: id, value: status) in activity.entries) {
+      if (status.hasError) {
+        failures.add(id);
+      } else if (!status.isLoading) {
+        failures.remove(id);
+      }
+    }
+    final unavailable = failures.isNotEmpty;
+    void retryFailures() {
+      for (final id in failures.toList()) {
+        final provider = channelFilterActivityProvider(id);
+        if (!ref.read(provider).isLoading) ref.invalidate(provider);
+      }
+    }
 
-    return SliverPadding(
-      padding: EdgeInsets.zero,
-      sliver: SliverMainAxisGroup(
-        slivers: [
-          if (activity.values.any((value) => value.hasError))
-            SliverToBoxAdapter(
-              child: ListTile(
-                title: const Text(
-                  'Some channel activity is unavailable. Channels remain visible.',
-                ),
-                trailing: TextButton(
-                  onPressed: () {
-                    for (final entry in activity.entries) {
-                      if (entry.value.hasError) {
-                        ref.invalidate(
-                          channelFilterActivityProvider(entry.key),
-                        );
-                      }
-                    }
-                  },
-                  child: const Text('Retry'),
-                ),
+    final canRetry =
+        ref.watch(appLifecycleProvider) == AppLifecycleState.resumed &&
+        ref.watch(relaySessionProvider.select((s) => s.status)) ==
+            SessionStatus.connected;
+    useEffect(() {
+      if (!unavailable || !canRetry) return null;
+      final timer = Timer.periodic(
+        const Duration(seconds: 10),
+        (_) => retryFailures(),
+      );
+      return timer.cancel;
+    }, [unavailable, canRetry, failures]);
+
+    void removeNotice() {
+      notice.value?.remove();
+      notice.value?.dispose();
+      notice.value = null;
+    }
+
+    useEffect(() => removeNotice, [notice]);
+    useEffect(() {
+      var active = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!active || !context.mounted) return;
+        if (notice.value != null) {
+          notice.value!.markNeedsBuild();
+        } else if (unavailable) {
+          final entry = OverlayEntry(
+            builder: (_) => IosCompositionLayer(
+              child: Stack(
+                children: [
+                  ReconnectCapsule(
+                    visible: failures.isNotEmpty,
+                    message: 'Some activity couldn’t load',
+                    actionLabel: 'Retry',
+                    onHidden: () {
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (failures.isEmpty) removeNotice();
+                      });
+                    },
+                    onSignIn: () {
+                      if (!context.mounted) return;
+                      retryFailures();
+                    },
+                  ),
+                ],
               ),
             ),
+          );
+          notice.value = entry;
+          Overlay.of(context, rootOverlay: true).insert(entry);
+          unawaited(toastHaptic(ToastKind.error));
+        }
+      });
+      return () => active = false;
+    }, [notice, unavailable]);
+    final keys = layout.sectionKeys;
+    final saved =
+        ref.watch(mobileSectionOrderProvider(storageKey)).value ??
+        const <String>[];
+    final labels = <String, String>{};
+    final sections = <Widget>[];
+    for (final key in {...saved.where(keys.contains), ...keys}) {
+      final section = sectionFor(key);
+      if (section == null) continue;
+      sections.add(section);
+      labels[key] = switch (key) {
+        'starred' => 'Starred',
+        'solo' => 'Solo',
+        'channels' => 'Team',
+        'dms' => 'Direct messages',
+        _ => layout.section(key.substring(6))!.name,
+      };
+    }
+    final empty = sectionKeyOf.isEmpty && layout.sections.isEmpty;
+    return SectionOrderScope(
+      labels: labels,
+      storageKey: storageKey,
+      child: SliverMainAxisGroup(
+        slivers: [
           if (empty) ...[
             ?soloSliver,
             const SliverToBoxAdapter(child: _EmptyState()),

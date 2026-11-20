@@ -1,4 +1,5 @@
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_filter/channel_filter_activity.dart';
 import 'package:buzz/features/channels/channel_stars/channel_stars_provider.dart';
 import 'package:buzz/features/channels/channel_stars/channel_stars_storage.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
@@ -12,9 +13,11 @@ import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/app_list.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -67,6 +70,9 @@ void main() {
             ),
           ),
           channelsProvider.overrideWith(_Channels.new),
+          channelFilterActivityProvider(
+            'solo-scratch',
+          ).overrideWith((_) async => now - 8 * 86400),
           meGroupsProvider.overrideWith(
             (ref) => Stream.value(
               const MeGroups(
@@ -112,12 +118,16 @@ void main() {
     await tester.tap(find.byTooltip('Old options'));
     await tester.pumpAndSettle();
     expect(find.text('Rename section'), findsOneWidget);
-    ListTile option(String label) => tester.widget<ListTile>(
-      find.ancestor(of: find.text(label), matching: find.byType(ListTile)),
+    await tester.tap(find.text('Reorder sections'));
+    await tester.pumpAndSettle();
+    final list = tester.widget<ReorderableListView>(
+      find.byType(ReorderableListView),
     );
-    expect(option('Move up').enabled, isTrue);
-    expect(option('Move down').enabled, isFalse);
-    await tester.tap(find.text('Cancel'));
+    list.onReorderItem!(0, 1);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Discard order'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Discard changes'));
     await tester.pumpAndSettle();
     // Team actions follow the Team section, not the Solo project sharing its
     // ID.
@@ -125,7 +135,7 @@ void main() {
       await tester.tap(find.byTooltip('$header options'));
       await tester.pumpAndSettle();
       expect(find.text('Rename section'), team ? findsOneWidget : findsNothing);
-      await tester.tap(find.text('Cancel'));
+      await tester.tap(find.byTooltip('Discard changes'));
       await tester.pumpAndSettle();
     }
 
@@ -189,6 +199,24 @@ void main() {
         reason: '$label follows ${order[index - 1]}',
       );
     }
+    Finder menuIcon(String label) => find.descendant(
+      of: find.byTooltip('$label options'),
+      matching: find.byIcon(BuzzIcons.ellipsis),
+    );
+    final teamIcon = menuIcon('Team');
+    for (final label in ['Solo', 'Direct messages', 'Launch']) {
+      final icon = menuIcon(label);
+      expect(tester.getCenter(icon).dx, tester.getCenter(teamIcon).dx);
+      expect(tester.getSize(icon), tester.getSize(teamIcon));
+      expect(
+        tester.widget<Icon>(icon).color,
+        tester.widget<Icon>(teamIcon).color,
+      );
+    }
+    expect(
+      tester.getTopLeft(find.byIcon(BuzzIcons.messageCircle).first).dx,
+      tester.getTopLeft(find.byKey(const ValueKey('channel-icon-general'))).dx,
+    );
     expect(inList('🚀'), findsOneWidget);
     // A workspace holds team and Solo rows alike, in desktop's sort.
     for (final filed in ['design-crit', 'solo-plan']) {
@@ -199,16 +227,21 @@ void main() {
     expect(inList('No chats yet'), findsNothing);
 
     // Desktop owns these workspaces and their sort: only filters remain.
-    await tester.tap(find.byTooltip('Launch options'));
+    final launchOptions = tester.getRect(find.byTooltip('Launch options'));
+    expect(launchOptions.size, const Size(64, 48));
+    await tester.tapAt(launchOptions.bottomRight - const Offset(2, 2));
     await tester.pumpAndSettle();
     expect(find.text('Show'), findsOneWidget);
     expect(find.text('Rename section'), findsNothing);
     expect(find.text('Delete section'), findsNothing);
-    final sortChoice = find.byKey(const ValueKey('section-choice-Sort-Recent'));
+    final sortChoice = find.byKey(const ValueKey('section-menu-Sort'));
     expect(tester.widget<AppListRow>(sortChoice).onTap, isNull);
     // Unreads keeps the unread Solo chat its row shows as unread.
+    await tester.tap(find.byKey(const ValueKey('section-menu-Show')));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Unreads'));
-    await tester.tap(find.text('Apply'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Apply changes'));
     await tester.pumpAndSettle();
     expect(inList('solo-plan'), findsOneWidget);
     expect(inList('design-crit'), findsNothing);
@@ -216,6 +249,68 @@ void main() {
     // Only the filter choice was saved; no layout or sort record desktop
     // would have to reconcile.
     expect(relay.published.map((e) => e.getTagValue('d')), ['channel-filter']);
+    await tester.tap(find.byTooltip('Solo options'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('section-menu-Show')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Active'));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('section-menu-Active in the past')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('7 days'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Apply changes'));
+    await tester.pumpAndSettle();
+    expect(inList('solo-scratch'), findsNothing);
+    expect(inList('solo-plan'), findsOneWidget);
+    await tester.tap(find.byTooltip('Solo options'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Reorder sections'));
+    await tester.pumpAndSettle();
+    Finder handle(String id) => find.descendant(
+      of: find.byKey(ValueKey(id)).last,
+      matching: find.byIcon(Icons.drag_handle),
+    );
+    final haptics = <Object?>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'HapticFeedback.vibrate') {
+          haptics.add(call.arguments);
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+    final start = tester.getCenter(handle('solo'));
+    final gesture = await tester.startGesture(start);
+    await tester.pump();
+    for (var step = 1; step <= 18; step++) {
+      await gesture.moveTo(start - Offset(0, step * 10));
+      await tester.pump(const Duration(milliseconds: 24));
+    }
+    await tester.pumpAndSettle();
+    expect(haptics.first, 'HapticFeedbackType.mediumImpact');
+    expect(haptics.skip(1), isNotEmpty);
+    expect(haptics.skip(1), everyElement('HapticFeedbackType.selectionClick'));
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(
+      tester.getCenter(handle('solo')).dy,
+      lessThan(tester.getCenter(handle('channels')).dy),
+    );
+    await tester.tap(find.byTooltip('Save order'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Discard changes'));
+    await tester.pumpAndSettle();
+    expect(top('Solo'), lessThan(top('Team')));
     await tester.pumpWidget(const SizedBox());
   });
 }

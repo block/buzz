@@ -74,6 +74,7 @@ final class NativeProfileTextEditorCoordinator: NSObject,
         pageBackgroundColor: UIColor(argb: pageBackgroundArgb.uint32Value),
         containerBackgroundColor: UIColor(argb: containerBackgroundArgb.uint32Value),
         containerCornerRadius: CGFloat(containerCornerRadius.doubleValue),
+        requireNonEmpty: arguments["requireNonEmpty"] as? Bool ?? false,
         allowUnchangedSubmission: allowUnchangedSubmission,
         channelDescription: call.method == "presentChannel" ? arguments["description"] as? String : nil,
         originalName: arguments["originalName"] as? String,
@@ -131,6 +132,7 @@ final class NativeProfileTextEditorCoordinator: NSObject,
     pageBackgroundColor: UIColor,
     containerBackgroundColor: UIColor,
     containerCornerRadius: CGFloat,
+    requireNonEmpty: Bool = false,
     allowUnchangedSubmission: Bool,
     channelDescription: String?,
     originalName: String?,
@@ -175,6 +177,7 @@ final class NativeProfileTextEditorCoordinator: NSObject,
       pageBackgroundColor: pageBackgroundColor,
       containerBackgroundColor: containerBackgroundColor,
       containerCornerRadius: containerCornerRadius,
+      requireNonEmpty: requireNonEmpty,
       allowUnchangedSubmission: allowUnchangedSubmission,
       channelDescription: channelDescription,
       originalName: originalName,
@@ -281,6 +284,7 @@ final class NativeProfileTextEditorViewController:
   private let pageBackgroundColor: UIColor
   private let containerBackgroundColor: UIColor
   private let containerCornerRadius: CGFloat
+  private let requireNonEmpty: Bool
   private let allowUnchangedSubmission: Bool
   private let onCancel: () -> Void
   private let onSet: (Any) -> Void
@@ -350,6 +354,7 @@ final class NativeProfileTextEditorViewController:
     pageBackgroundColor: UIColor,
     containerBackgroundColor: UIColor,
     containerCornerRadius: CGFloat,
+    requireNonEmpty: Bool = false,
     allowUnchangedSubmission: Bool,
     channelDescription: String?,
     originalName: String?,
@@ -368,6 +373,7 @@ final class NativeProfileTextEditorViewController:
     self.pageBackgroundColor = pageBackgroundColor
     self.containerBackgroundColor = containerBackgroundColor
     self.containerCornerRadius = containerCornerRadius
+    self.requireNonEmpty = requireNonEmpty
     self.allowUnchangedSubmission = allowUnchangedSubmission
     self.channelDescription = channelDescription
     self.originalName = originalName
@@ -460,7 +466,7 @@ final class NativeProfileTextEditorViewController:
   }
 
   private func updateNavigation() {
-    navigationItem.rightBarButtonItem?.isEnabled = canEditDetails && hasUnsavedChanges
+    navigationItem.rightBarButtonItem?.isEnabled = canEditDetails && hasUnsavedChanges && validText
       && (!isChannelEditor || !canonicalChannelName.isEmpty)
       && (!isProjectEditor || (
         !currentValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -498,8 +504,12 @@ final class NativeProfileTextEditorViewController:
       .trimmingCharacters(in: .whitespacesAndNewlines)
   }
 
+  private var validText: Bool {
+    !requireNonEmpty || !currentValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
   @objc private func setTapped() {
-    guard canEditDetails && hasUnsavedChanges else { return }
+    guard canEditDetails && hasUnsavedChanges && validText else { return }
     if isProjectEditor {
       let name = currentValue.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !name.isEmpty, currentValue.count <= 120 else { return }

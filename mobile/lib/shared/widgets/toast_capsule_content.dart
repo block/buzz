@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../theme/theme.dart';
 
@@ -52,7 +55,10 @@ class ToastCapsuleContent extends StatelessWidget {
       bool destructive = false,
       bool secondary = false,
     }) => FilledButton(
-      onPressed: onPressed,
+      onPressed: () {
+        unawaited(HapticFeedback.selectionClick());
+        onPressed();
+      },
       style: FilledButton.styleFrom(
         backgroundColor: destructive
             ? lightColorScheme.error

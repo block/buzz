@@ -43,7 +43,17 @@ private final class JumpToLatestGlassButton: UIButton {
 final class NavigationGlassButton: UIButton {
   var opensMenuAbove = false
   var hitTargetInsets = UIEdgeInsets.zero
-  var pendingMenuAction: (() -> Void)?
+  private static weak var visibleMenuButton: NavigationGlassButton?
+  private var menuIsPresenting = false
+  private var pendingMenuAction: (() -> Void)?
+
+  func afterMenuDismissal(_ action: @escaping () -> Void) {
+    if menuIsPresenting {
+      pendingMenuAction = action
+    } else {
+      action()
+    }
+  }
   var menuVisibilityChanged: ((Bool) -> Void)?
   var animateMenu: ((Bool, UIContextMenuInteractionAnimating?) -> Void)?
   weak var glassPreview: UIView?
@@ -68,6 +78,11 @@ final class NavigationGlassButton: UIButton {
     animator: UIContextMenuInteractionAnimating?
   ) {
     super.contextMenuInteraction(interaction, willDisplayMenuFor: configuration, animator: animator)
+    if let previous = Self.visibleMenuButton, previous !== self, previous.window === window {
+      previous.contextMenuInteraction?.dismissMenu()
+    }
+    Self.visibleMenuButton = self
+    menuIsPresenting = true
     animateMenu?(true, animator)
     menuVisibilityChanged?(true)
     UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -81,14 +96,20 @@ final class NavigationGlassButton: UIButton {
     super.contextMenuInteraction(interaction, willEndFor: configuration, animator: animator)
     animateMenu?(false, animator)
     menuVisibilityChanged?(false)
-    let action = pendingMenuAction
-    pendingMenuAction = nil
+    let finish = { [weak self] in
+      guard let self else { return }
+      if Self.visibleMenuButton === self { Self.visibleMenuButton = nil }
+      self.menuIsPresenting = false
+      let action = self.pendingMenuAction
+      self.pendingMenuAction = nil
+      action?()
+    }
     // Flutter routes must start after UIKit removes the glass menu and its
     // source-button preview from the window's overlay hierarchy.
     if let animator {
-      animator.addCompletion { action?() }
+      animator.addCompletion(finish)
     } else {
-      action?()
+      finish()
     }
   }
 
@@ -499,7 +520,8 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     }
     if let menu = arguments?["menu"] as? [[String: Any]] {
       // Keep titled sections in reading order even above a bottom-bar trigger.
-      button.preferredMenuElementOrder = menu.contains { $0["sectionTitle"] is String } ? .fixed : .automatic
+      let hasImages = menu.contains { !(($0["symbol"] as? String) ?? "").isEmpty }
+      button.preferredMenuElementOrder = !hasImages || menu.contains { $0["sectionTitle"] is String } ? .fixed : .automatic
       var groups: [[UIMenuElement]] = [[]]
       var groupTitles = [""]
       for item in menu {
@@ -511,7 +533,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
         if let title = item["sectionTitle"] as? String {
           groupTitles[groupTitles.count - 1] = title
         }
-        let symbol = (item["symbol"] as? String).flatMap {
+        let symbol = (hasImages ? item["symbol"] as? String : nil).flatMap {
           // A transparent image keeps the native menu's icon column aligned.
           $0.isEmpty
             ? UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24)).image { _ in }
@@ -531,7 +553,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
             // begin dismissing the menu before invoking its selected UIAction.
             select()
           } else {
-            self?.button.pendingMenuAction = { select() }
+            self?.button.afterMenuDismissal { select() }
           }
         }
         groups[groups.count - 1].append(action)

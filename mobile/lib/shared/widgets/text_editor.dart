@@ -18,6 +18,7 @@ Future<void> showTextEditor({
   required String hintText,
   required Future<void> Function(String value) onSave,
   bool multiline = false,
+  bool requireNonEmpty = false,
   String keyPrefix = 'text-editor',
   bool Function(Object error)? shouldRetryOnError,
 }) async {
@@ -29,6 +30,7 @@ Future<void> showTextEditor({
         initialValue: initialValue,
         placeholder: hintText,
         multiline: multiline,
+        requireNonEmpty: requireNonEmpty,
         brightness: sheetTheme.brightness,
         pageBackgroundColor: sheetTheme.colorScheme.surface,
         containerBackgroundColor:
@@ -61,6 +63,7 @@ Future<void> showTextEditor({
       initialValue: initialValue,
       hintText: hintText,
       multiline: multiline,
+      requireNonEmpty: requireNonEmpty,
       onSave: onSave,
       shouldRetryOnError: shouldRetryOnError,
       keyPrefix: keyPrefix,
@@ -80,6 +83,7 @@ class _TextEditSheet extends HookWidget {
     required this.initialValue,
     required this.hintText,
     required this.multiline,
+    required this.requireNonEmpty,
     required this.onSave,
     this.shouldRetryOnError,
     required this.keyPrefix,
@@ -89,6 +93,7 @@ class _TextEditSheet extends HookWidget {
   final String initialValue;
   final String hintText;
   final bool multiline;
+  final bool requireNonEmpty;
   final Future<void> Function(String value) onSave;
   final bool Function(Object error)? shouldRetryOnError;
 
@@ -98,7 +103,10 @@ class _TextEditSheet extends HookWidget {
     useListenable(controller);
     final isSaving = useState(false);
     final error = useState<String?>(null);
-    final hasChanges = controller.text.trim() != initialValue.trim();
+    final trimmed = controller.text.trim();
+    final hasChanges =
+        trimmed != initialValue.trim() &&
+        (!requireNonEmpty || trimmed.isNotEmpty);
 
     Future<void> save() async {
       if (!hasChanges || isSaving.value) return;
