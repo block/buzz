@@ -50,6 +50,14 @@ class _SectionViewSheet extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final manager = ref.watch(channelFilterProvider);
     useListenable(manager);
+    // Watched, not captured: a sheet opened before desktop's unified records
+    // arrive turns read-only when they do.
+    final sortEditable = ref.watch(
+      channelSortProvider.select((state) => state.editable),
+    );
+    final layoutEditable = ref.watch(
+      channelSectionsProvider.select((state) => state.editable),
+    );
     final originalManager = useRef(manager);
     final sort = useState(initialSort);
     final mode = useState(
@@ -120,7 +128,7 @@ class _SectionViewSheet extends HookConsumerWidget {
           );
         }
         if (!context.mounted) return;
-        if (sort.value != initialSort) onSort(sort.value);
+        if (sortEditable && sort.value != initialSort) onSort(sort.value);
         Navigator.of(context).pop();
       } catch (_) {
         if (context.mounted) failed.value = true;
@@ -199,7 +207,9 @@ class _SectionViewSheet extends HookConsumerWidget {
                             ChannelSortMode.recent: 'Recent',
                           },
                           sort.value,
-                          saving.value ? null : (value) => sort.value = value,
+                          saving.value || !sortEditable
+                              ? null
+                              : (value) => sort.value = value,
                         ),
                         choices<ChannelFilterMode>(
                           'Show',
@@ -247,7 +257,7 @@ class _SectionViewSheet extends HookConsumerWidget {
                                   },
                             child: const Text('Retry loading preferences'),
                           ),
-                        if (custom) ...[
+                        if (custom && layoutEditable) ...[
                           const Divider(),
                           for (final action in {
                             'rename': ('Rename section', BuzzIcons.pencil),

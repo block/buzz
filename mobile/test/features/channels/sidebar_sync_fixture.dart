@@ -100,7 +100,9 @@ class SidebarRelay {
 
   List<List<dynamic>> reqsFor(String dTag, String prefix) => [
     for (final req in reqs)
-      if ((req[1] as String).startsWith(prefix) && _dTagOf(req) == dTag) req,
+      if ((req[1] as String).startsWith(prefix) &&
+          (_dTagsOf(req)?.contains(dTag) ?? false))
+        req,
   ];
 
   /// Delivers [event] on the live subscription for its `d` tag, or else on
@@ -137,10 +139,14 @@ class SidebarRelay {
     reqs.add(message);
     final subId = message[1] as String;
     if (subId.startsWith('h-')) {
-      unawaited(_answerHistory(subId, _dTagOf(message)));
+      unawaited(_answerHistory(subId, _dTagsOf(message)));
       return;
     }
-    _liveSubIds[_dTagOf(message)] = subId;
+    final dTags = _dTagsOf(message);
+    if (dTags == null) _liveSubIds[null] = subId;
+    for (final dTag in dTags ?? const <String>[]) {
+      _liveSubIds[dTag] = subId;
+    }
     final rejection = rejectLive;
     if (rejection == null && withholdEose) return;
     scheduleMicrotask(
@@ -150,26 +156,29 @@ class SidebarRelay {
     );
   }
 
-  Future<void> _answerHistory(String subId, String? dTag) async {
+  Future<void> _answerHistory(String subId, List<String>? dTags) async {
     await holdHistory?.future;
     if (historyFailures > 0) {
       historyFailures--;
       return _reply(['CLOSED', subId, 'error: overloaded']);
     }
-    // A `#t` filter reaches every slot it tags; a `#d` filter, one head.
-    if (dTag == null) {
+    // A `#t` filter reaches every slot it tags; a `#d` filter, one head per
+    // coordinate it names.
+    if (dTags == null) {
       for (final e in stored.where((e) => e.getTagValue('t') != null)) {
         _reply(['EVENT', subId, e.toJson()]);
       }
       return _reply(['EOSE', subId]);
     }
-    final heads = stored.where((e) => e.getTagValue('d') == dTag).toList()
-      ..sort(
-        (a, b) => a.createdAt != b.createdAt
-            ? b.createdAt.compareTo(a.createdAt)
-            : a.id.compareTo(b.id),
-      );
-    if (heads.isNotEmpty) _reply(['EVENT', subId, heads.first.toJson()]);
+    for (final dTag in dTags) {
+      final heads = stored.where((e) => e.getTagValue('d') == dTag).toList()
+        ..sort(
+          (a, b) => a.createdAt != b.createdAt
+              ? b.createdAt.compareTo(a.createdAt)
+              : a.id.compareTo(b.id),
+        );
+      if (heads.isNotEmpty) _reply(['EVENT', subId, heads.first.toJson()]);
+    }
     _reply(['EOSE', subId]);
   }
 
@@ -259,8 +268,8 @@ class SidebarRelay {
   void _reply(List<dynamic> message) => session.debugHandleMessage(message);
 
   /// Null for a filter by `#t` alone, such as read state's slot discovery.
-  static String? _dTagOf(List<dynamic> req) =>
-      ((req[2] as Map<String, dynamic>)['#d'] as List?)?.single as String?;
+  static List<String>? _dTagsOf(List<dynamic> req) =>
+      ((req[2] as Map<String, dynamic>)['#d'] as List?)?.cast<String>();
 }
 
 class ConnectedRelaySession extends RelaySessionNotifier {
