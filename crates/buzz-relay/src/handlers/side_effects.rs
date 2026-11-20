@@ -4490,20 +4490,19 @@ pub async fn reconcile_large_channel_member_snapshots(
     })
 }
 
-/// Reconcile channels that exist in the DB but don't have kind:39000 events.
+/// Reconcile channels that exist in the DB but lack any of their
+/// relay-signed discovery events (kinds 39000, 39001 and 39002).
 ///
 /// This handles the case where channels were created via direct SQL inserts
 /// (e.g. test seed scripts) rather than through the Nostr event pipeline.
-/// Emits kind:39000 (metadata) and kind:39002 (members) for each channel
-/// that is missing its discovery events.
+/// Production relays repair recent channels with
+/// [`super::discovery_repair::reconcile_missing_channel_discovery`] instead.
 ///
-/// Idempotent: checks for existing kind:39000 events before emitting.
+/// Idempotent: checks for the live discovery events before emitting.
 pub async fn reconcile_channel_events(
     tenant: &TenantContext,
     state: &Arc<AppState>,
 ) -> anyhow::Result<()> {
-    use buzz_db::event::EventQuery;
-
     let channels = state
         .db
         .list_channels_for_bootstrap(tenant.community(), None)
@@ -4514,39 +4513,22 @@ pub async fn reconcile_channel_events(
 
     let mut reconciled = 0u32;
     for channel in &channels {
-        // Check if kind:39000 event already exists for this channel.
-        let channel_id_str = channel.id.to_string();
-        let existing = match state
-            .db
-            .query_events_for_bootstrap(&EventQuery {
-                kinds: Some(vec![39000]),
-                d_tag: Some(channel_id_str.clone()),
-                limit: Some(1),
-                ..EventQuery::for_community(tenant.community())
-            })
-            .await
+        match super::discovery_repair::republish_missing_discovery(
+            tenant,
+            state,
+            channel.id,
+            "bootstrap",
+        )
+        .await
         {
-            Ok(v) => v,
+            Ok(true) => reconciled += 1,
+            Ok(false) => {}
             Err(e) => {
                 tracing::warn!(
                     channel_id = %channel.id,
                     error = %e,
-                    "reconcile: failed to query existing discovery events"
+                    "reconcile: failed to repair discovery events"
                 );
-                continue;
-            }
-        };
-
-        if existing.is_empty() {
-            // No discovery event — emit one.
-            if let Err(e) = emit_group_discovery_events(tenant, state, channel.id).await {
-                tracing::warn!(
-                    channel_id = %channel.id,
-                    error = %e,
-                    "reconcile: failed to emit discovery events"
-                );
-            } else {
-                reconciled += 1;
             }
         }
     }

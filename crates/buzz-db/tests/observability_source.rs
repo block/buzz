@@ -206,7 +206,9 @@ fn p0_pool_acquisitions_use_typed_operation_pairs_without_other() {
         .0;
     assert!(dm_snapshot.contains("tx: &mut buzz_db::AdmittedTx"));
     assert!(dm_snapshot.contains("buzz_db::dm::lock_dm_visibility(tx,"));
-    assert!(side_effects.contains("query_events_for_bootstrap"));
+    let group_discovery = include_str!("../src/store/group_discovery.rs");
+    assert!(group_discovery
+        .contains("acquire_writer(pool, observability::WriterOperation::Maintenance)"));
     assert!(side_effects.contains(".list_channels_for_bootstrap("));
 
     let deletion = include_str!("../src/store/deletion.rs");
