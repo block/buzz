@@ -17,11 +17,17 @@ import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/onboarding_step_page.dart';
 import '../../shared/widgets/onboarding_loading_page.dart';
 import '../../shared/widgets/buzz_titled_sheet_layout.dart';
+import '../../shared/diagnostics/diagnostic_reporter.dart';
 
 /// The socket boundary every entry probe connects through.
 final relayProbeProvider =
     Provider<Future<void> Function(Community, Map<String, String>)>(
-      (ref) => SelfHostedEntry.probeRelay,
+      (ref) =>
+          (community, headers) => SelfHostedEntry.probeRelay(
+            community,
+            headers,
+            ref.read(diagnosticReporterProvider),
+          ),
     );
 
 /// Local preparation seam; the production service validates and retains keys.

@@ -879,7 +879,10 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 104);
+        assert_eq!(migrations.len(), 105);
+        assert_eq!(migrations[104].version, 105);
+        assert!(strip_sql_comments(migrations[104].sql.as_str())
+            .contains("ADD COLUMN finished BOOLEAN NOT NULL DEFAULT true;"));
         assert_eq!(migrations[103].version, 104);
         let event_table_drops = strip_sql_comments(migrations[103].sql.as_str());
         assert!(event_table_drops
@@ -1552,6 +1555,7 @@ mod postgres_tests {
         ];
         for table in crate::deletion::EXPECTED_SCOPED_TABLES
             .iter()
+            .chain(crate::deletion::RETIRING_SCOPED_TABLES)
             .filter(|table| !never_fenced.contains(table))
         {
             assert!(
@@ -3424,8 +3428,9 @@ mod postgres_tests {
             "reconcile did not attach both catch-alls: {declared_bounds:?}"
         );
 
-        // The relay's default startup pass advances each catch-all into dated
-        // monthlies schema/partitions/ does not declare.
+        // The relay's default startup pass advances the `events` catch-all into
+        // dated monthlies schema/partitions/ does not declare. `delivery_log` is
+        // retired from partition management, so its catch-all stays as declared.
         maintain_partitions(
             &pool,
             PARTITION_MANAGER_MONTHS_AHEAD,
@@ -3442,13 +3447,17 @@ mod postgres_tests {
             "maintenance dropped or detached a catch-all: {advanced_bounds:?}"
         );
         for (declared, advanced) in declared_bounds.iter().zip(&advanced_bounds) {
-            assert_ne!(declared, advanced, "catch-all did not advance");
+            if declared.0 == "events_p_future" {
+                assert_ne!(declared, advanced, "catch-all did not advance");
+            } else {
+                assert_eq!(declared, advanced, "retired table was partition-managed");
+            }
         }
         let children: Vec<(String, String)> = sqlx::query_as(
             "SELECT p.relname::text, c.relname::text FROM pg_inherits i \
              JOIN pg_class c ON c.oid = i.inhrelid \
              JOIN pg_class p ON p.oid = i.inhparent \
-             WHERE p.relname IN ('events', 'delivery_log')",
+             WHERE p.relname = 'events'",
         )
         .fetch_all(&pool)
         .await
@@ -3460,7 +3469,10 @@ mod postgres_tests {
                 child.starts_with(&format!("{parent}_p2")) && !declared.contains(child)
             })
             .collect();
-        for (catch_all, bound) in &declared_bounds {
+        for (catch_all, bound) in declared_bounds
+            .iter()
+            .filter(|(catch_all, _)| catch_all == "events_p_future")
+        {
             // The first month the declared catch-all served, from its
             // `FOR VALUES FROM ('YYYY-MM-01 ...')` lower bound.
             let parent = catch_all

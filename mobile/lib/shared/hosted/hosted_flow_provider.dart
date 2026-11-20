@@ -14,6 +14,7 @@ import 'hosted_community_connection.dart';
 import 'hosted_flow.dart';
 import 'hosted_identity_service.dart';
 import 'hosted_relay_auth.dart';
+import '../diagnostics/diagnostic_reporter.dart';
 
 // Set by a community-entry surface while it owns setup presentation.
 final hostedInlineEntryProvider = NotifierProvider<HostedInlineEntry, bool>(
@@ -58,6 +59,7 @@ HostedFlow createHostedFlow(
   late final HostedFlow flow;
   final admission = HostedAdmission(
     relayAuth: ref.read(hostedRelayAuthProvider),
+    diagnostics: ref.read(diagnosticReporterProvider),
     account: account,
     store: store,
     confirmPolicy: (policy) => flow.confirmJoinPolicy(policy),

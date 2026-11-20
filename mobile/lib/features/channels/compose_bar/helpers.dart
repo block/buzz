@@ -136,6 +136,7 @@ void _useComposerKeyboardMetrics({
   required ObjectRef<Timer?> androidImeFallbackTimer,
   required ValueNotifier<bool> androidImeTransitionStarted,
   required VoidCallback collapseComposer,
+  bool Function()? keepKeyboardSpace,
 }) {
   final appView = View.of(context);
   useEffect(() {
@@ -150,6 +151,7 @@ void _useComposerKeyboardMetrics({
         if (defaultTargetPlatform == TargetPlatform.android) {
           androidImeTransitionStarted.value = false;
         }
+        if (keepKeyboardSpace?.call() ?? false) return;
         voiceNote.onKeyboardHidden();
         collapseComposer();
         focusNode.unfocus();
@@ -167,6 +169,7 @@ class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
   final FlutterView view;
   final VoidCallback onKeyboardShown;
   final VoidCallback onKeyboardHidden;
+  final ValueChanged<double>? onKeyboardInsetChanged;
   bool _wasVisible;
   Timer? _restoreGrace;
 
@@ -174,6 +177,7 @@ class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
     required this.view,
     required this.onKeyboardShown,
     required this.onKeyboardHidden,
+    this.onKeyboardInsetChanged,
   }) : _wasVisible = view.viewInsets.bottom > 0;
 
   // iOS drops the keyboard inset while the app is inactive (Control Center,
@@ -217,6 +221,7 @@ class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
   }
 
   void _reconcile() {
+    onKeyboardInsetChanged?.call(view.viewInsets.bottom);
     final isVisible = view.viewInsets.bottom > 0;
     if (!_wasVisible && isVisible) onKeyboardShown();
     if (_wasVisible && !isVisible) onKeyboardHidden();
@@ -251,6 +256,7 @@ void _chooseComposerAttachment(
   ValueNotifier<_AttachmentSurface> attachmentSurface,
   ValueNotifier<String?> uploadError,
   Future<void> Function() choose, {
+  ValueNotifier<_InputTool?>? inputTool,
   String? errorMessage,
 }) {
   attachmentSurface.value = _AttachmentSurface.closed;
@@ -260,6 +266,12 @@ void _chooseComposerAttachment(
     } catch (error) {
       if (context.mounted) {
         uploadError.value = errorMessage ?? _formatUploadError(error);
+      }
+    } finally {
+      if (context.mounted &&
+          inputTool?.value == _InputTool.attachments &&
+          attachmentSurface.value == _AttachmentSurface.closed) {
+        attachmentSurface.value = _AttachmentSurface.menu;
       }
     }
   }());
@@ -358,7 +370,7 @@ Widget _composerSuggestionPanel({
       )
     : const SizedBox.shrink(key: ValueKey('no-suggestions'));
 
-Widget _composerAttachmentPanel({
+_AttachmentSurfacePanel _composerAttachmentPanel({
   required _AttachmentSurface surface,
   required Widget suggestionPanel,
   required VoidCallback onBack,
@@ -875,12 +887,50 @@ class _OutgoingMentions {
   }
 }
 
-/// Insert an emoji at the cursor without replacing the draft.
+VoidCallback _composerEmojiAction(
+  BuildContext context,
+  FocusNode focusNode,
+  ValueNotifier<_InputTool?> inputTool,
+  ValueNotifier<_AttachmentSurface> attachmentSurface,
+  ValueNotifier<bool> isEmojiPickerOpen,
+  ValueChanged<String> insertEmoji,
+) => () {
+  if (isEmojiPickerOpen.value) return;
+  _dismissComposerKeyboard(focusNode);
+  inputTool.value = null;
+  attachmentSurface.value = _AttachmentSurface.closed;
+  isEmojiPickerOpen.value = true;
+  _showComposerEmojiPicker(context, insertEmoji, () {
+    if (!context.mounted) return;
+    isEmojiPickerOpen.value = false;
+    focusNode.requestFocus();
+    // Native sheets can hide the keyboard without removing Flutter focus.
+    // Wait for an unfocused draft to reconnect before showing its keyboard.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!context.mounted || !focusNode.hasFocus) return;
+      unawaited(SystemChannels.textInput.invokeMethod<void>('TextInput.show'));
+    });
+  });
+};
+
+OverlayPortalController _useComposerSuggestionPortal(BuildContext context) {
+  final controller = useMemoized(OverlayPortalController.new);
+  useEffect(() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (context.mounted) controller.show();
+    });
+    return null;
+  }, [controller]);
+  return controller;
+}
+
+/// Insert an emoji without restoring the keyboard underneath a native picker.
 void _insertComposerEmoji(
   TextEditingController controller,
   FocusNode focusNode,
-  String emoji,
-) {
+  String emoji, {
+  required bool restoreFocus,
+}) {
   final text = controller.text;
   final selection = controller.selection;
   final cursor = selection.isValid
@@ -893,39 +943,5 @@ void _insertComposerEmoji(
     replacement: emoji,
     caret: cursor + emoji.length,
   );
-  focusNode.requestFocus();
-}
-
-// Wrap or insert markdown formatting around the current selection.
-void _applyComposerFormat(
-  TextEditingController controller,
-  FocusNode focusNode,
-  ObjectRef<bool> isModifyingText,
-  String prefix,
-  String? suffix,
-) {
-  suffix ??= prefix;
-  final text = controller.text;
-  final sel = controller.selection;
-  if (!sel.isValid) return;
-
-  isModifyingText.value = true;
-  try {
-    // The selected text is kept between the delimiters, so a chip in it
-    // keeps its recipient; an empty selection gets the caret between them.
-    final selected = text.substring(sel.start, sel.end);
-    _replaceComposerRange(
-      controller,
-      start: sel.start,
-      end: sel.end,
-      replacement: '$prefix$selected$suffix',
-      caret: sel.isCollapsed
-          ? sel.start + prefix.length
-          : sel.start + prefix.length + selected.length + suffix.length,
-      keptShift: prefix.length,
-    );
-  } finally {
-    isModifyingText.value = false;
-  }
-  focusNode.requestFocus();
+  if (restoreFocus) focusNode.requestFocus();
 }

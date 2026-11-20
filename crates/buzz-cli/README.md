@@ -117,6 +117,10 @@ buzz users get                          # your own profile
 buzz users get --pubkey <hex>           # single user
 buzz users get --pubkey <hex> --pubkey <hex>  # batch (max 200)
 buzz users get --name Honey --owner me  # exact-name lookup in your managed agents
+buzz users get --name Alice --include-archived  # --name leaves out archived identities unless asked
+# Archived identities (the relay's NIP-IA list, see `buzz agents archived`) carry
+# "archived": true; --pubkey lookups always return them. If the list can't be
+# read, results are unfiltered and a warning goes to stderr.
 # Where the community advertises verified profiles, `users get` adds a "verified"
 # object ({username, display_name, full_name?, issuer_label, verified_at}) from a
 # kind:30382 signed by the relay's NIP-11 `self` key. Where it is also `searchable`, --name finds verified usernames.

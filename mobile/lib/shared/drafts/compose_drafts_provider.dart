@@ -105,6 +105,10 @@ class ComposeDraft {
   /// Set when the saved bindings could not be read. Send must refuse while
   /// the text still holds an `@`, since nothing says who it was for.
   final bool mentionsInvalid;
+
+  /// Recording whose transcript is included in this same persisted snapshot.
+  final String? transcriptionId;
+
   final int updatedAt; // unix seconds
 
   const ComposeDraft({
@@ -115,6 +119,7 @@ class ComposeDraft {
     required this.updatedAt,
     this.mentions = const [],
     this.mentionsInvalid = false,
+    this.transcriptionId,
   });
 
   Map<String, dynamic> toJson() => {
@@ -126,6 +131,7 @@ class ComposeDraft {
     'mentions': mentionsInvalid
         ? null
         : [for (final mention in mentions) mention.toJson()],
+    if (transcriptionId != null) 'transcription_id': transcriptionId,
     'updated_at': updatedAt,
   };
 
@@ -147,6 +153,9 @@ class ComposeDraft {
       mentions: mentions,
       mentionsInvalid: invalid,
       text: text,
+      transcriptionId: raw['transcription_id'] is String
+          ? raw['transcription_id'] as String
+          : null,
       updatedAt: updatedAt is int ? updatedAt : 0,
     );
   }
@@ -229,6 +238,7 @@ String composeDraftKey(String channelId, {String? threadHeadId}) =>
 /// identity's draft text.
 class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
   late String _prefsKey;
+  Future<bool> _pendingWrite = Future.value(true);
 
   @override
   List<ComposeDraft> build() {
@@ -237,6 +247,7 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
     final config = ref.watch(relayConfigProvider);
     final pubkey = ref.watch(myPubkeyProvider) ?? 'anon';
     _prefsKey = _storeKey(config.baseUrl, pubkey);
+    _pendingWrite = Future.value(true);
     return _readStore(config, pubkey);
   }
 
@@ -290,6 +301,7 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
       text: existingText.isEmpty ? text : '$existingText\n\n$text',
       mentions: existing?.mentions ?? const [],
       mentionsInvalid: existing?.mentionsInvalid ?? false,
+      transcriptionId: existing?.transcriptionId,
       updatedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
     );
     final next = [draft, ...drafts.where((d) => d.key != key)];
@@ -308,14 +320,17 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
     required String text,
     List<ComposeDraftMention> mentions = const [],
     bool mentionsInvalid = false,
+    String? transcriptionId,
   }) {
     if (text.trim().isEmpty) {
       remove(key);
       return;
     }
     final existing = state.where((d) => d.key == key).firstOrNull;
+    final insertion = transcriptionId ?? existing?.transcriptionId;
     if (existing?.text == text &&
         existing?.mentionsInvalid == mentionsInvalid &&
+        existing?.transcriptionId == insertion &&
         listEquals(existing?.mentions, mentions)) {
       return;
     }
@@ -326,6 +341,7 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
       text: text,
       mentions: List.unmodifiable(mentions),
       mentionsInvalid: mentionsInvalid,
+      transcriptionId: insertion,
       updatedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
     );
     final next = [draft, ...state.where((d) => d.key != key)];
@@ -343,9 +359,31 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
 
   String? textFor(String key) => draftFor(key)?.text;
 
+  /// Confirms the draft snapshot reached storage before dropping its source.
+  Future<bool> ensurePersisted() async {
+    final scope = _prefsKey;
+    await _pendingWrite;
+    if (_prefsKey != scope) return false;
+    // A rebuilt provider may have read a cache entry from a failed platform
+    // write. Confirm the current snapshot durably before releasing its audio.
+    return _pendingWrite = _writeDrafts(state);
+  }
+
   void _persist(List<ComposeDraft> drafts) {
     state = List.unmodifiable(drafts);
-    _write(_prefsKey, drafts);
+    _pendingWrite = _writeDrafts(drafts);
+  }
+
+  Future<bool> _writeDrafts(List<ComposeDraft> drafts) async {
+    final prefs = ref.read(savedPrefsProvider);
+    try {
+      return await prefs.setString(
+        _prefsKey,
+        jsonEncode([for (final d in drafts) d.toJson()]),
+      );
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> _write(String prefsKey, List<ComposeDraft> drafts) => ref

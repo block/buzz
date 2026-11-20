@@ -662,7 +662,12 @@ void main() {
 
       await container.read(channelsProvider.future);
       await container.read(activityProvider.future);
-      await Future<void>.delayed(const Duration(milliseconds: 10));
+      await _waitFor(
+        () => session._subscriptions.any(
+          (subscription) =>
+              subscription.filter.tags['#p']?.contains('me_pk') == true,
+        ),
+      );
       expect(container.read(inboxItemsProvider), isEmpty);
 
       session.emit(
@@ -679,7 +684,11 @@ void main() {
           sig: '',
         ),
       );
-      await Future<void>.delayed(const Duration(milliseconds: 100));
+      await _waitFor(
+        () => container
+            .read(inboxItemsProvider)
+            .any((item) => item.id == 'live-mention'),
+      );
 
       expect(container.read(inboxItemsProvider).single.id, 'live-mention');
     },

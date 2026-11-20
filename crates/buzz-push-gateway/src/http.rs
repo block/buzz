@@ -148,7 +148,7 @@ fn authority_error(e: AuthorityError) -> Response {
         AuthorityError::Rejected => error(StatusCode::NOT_FOUND, "not_authorized"),
         AuthorityError::Conflict => installation_conflict(),
         AuthorityError::RateLimited => error(StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
-        AuthorityError::Unavailable => {
+        AuthorityError::Unavailable | AuthorityError::InFlight => {
             error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable")
         }
     }
@@ -248,6 +248,11 @@ struct EnrollTranscript<'a> {
 /// Domain of the Android enrollment transcript, which the attestation
 /// challenge binds.
 const ANDROID_ENROLL_DOMAIN: &str = "buzz.push.enroll.android.v1";
+/// How long a relay should wait before retrying a request whose earlier
+/// attempt is still in flight. Long enough for a send that is minting or
+/// waiting on the push service to finish, short enough to keep wakes prompt.
+/// The relay backs off from this value; its schedule lives in the relay.
+const IN_FLIGHT_RETRY_AFTER_SECONDS: i64 = 5;
 
 /// The Android enrollment transcript: the iOS one without `key_id`, since the
 /// key is generated after (and from) this transcript's digest.
@@ -903,6 +908,19 @@ async fn deliver(
             crate::metrics::record_delivery_error("temporarily_unavailable");
             return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
         }
+        // The relay gave up waiting on an earlier attempt of this request and
+        // retried while that attempt is still sending. A 404 here would tell
+        // the relay the wake was delivered; ask it to retry instead, after the
+        // first attempt has had time to finish.
+        Err(AuthorityError::InFlight) => {
+            crate::metrics::record_admission(crate::metrics::Admission::InFlight);
+            return delivery_outcome_response(
+                DeliveryOutcome::Retry {
+                    retry_after_seconds: Some(IN_FLIGHT_RETRY_AFTER_SECONDS),
+                },
+                grant.generation,
+            );
+        }
     };
     let platform = permit.authority.platform;
     // An Android installation can exist only on a gateway configured for
@@ -956,13 +974,19 @@ async fn deliver(
             | DeliveryOutcome::InvalidEndpoint { .. }
             | DeliveryOutcome::PermanentRequestFault => DeliveryDisposition::Terminal,
         };
-        authority_store
-            .finish_delivery(permit, disposition)
-            .await
-            .map(|()| outcome)
+        let finished = authority_store.finish_delivery(permit, disposition).await;
+        (outcome, disposition, finished)
     });
     let outcome = match delivery.await {
-        Ok(Ok(outcome)) => outcome,
+        Ok((outcome, _, Ok(()))) => outcome,
+        // The provider has answered for good, so report that answer. The id
+        // stays in flight until its request expires, which only makes a
+        // replay retry later; it can never cause a second send.
+        Ok((outcome, DeliveryDisposition::Terminal, Err(err))) => {
+            crate::metrics::record_delivery_error("finish_failed");
+            tracing::warn!(error = %err, "failed to mark a terminal delivery finished");
+            outcome
+        }
         _ => {
             crate::metrics::record_delivery_error("finish_failed");
             return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");

@@ -158,10 +158,15 @@ class _ToastBubble extends HookWidget {
         if (persistent) {
           if (reduceMotion) {
             controller.value = visible ? 1 : 0;
+            if (!visible) onDismiss();
           } else if (visible) {
             controller.forward();
           } else {
-            controller.reverse();
+            // An interrupted outro must not remove a notice that became
+            // relevant again. Reverse also completes if already dismissed.
+            controller.reverse().whenCompleteOrCancel(() {
+              if (context.mounted && controller.isDismissed) onDismiss();
+            });
           }
           return null;
         }

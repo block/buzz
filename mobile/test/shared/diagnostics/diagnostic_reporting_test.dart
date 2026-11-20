@@ -100,6 +100,19 @@ void main() {
         'failed https://e.org/p and wss://r.org/x',
       ),
       (
+        'an event without a message gets none',
+        () async => (await event(SentryEvent())).message,
+        null,
+      ),
+      (
+        'additional data is dropped',
+        () async => (await event(
+          // ignore: deprecated_member_use
+          SentryEvent(extra: {'body': 'private-marker'}),
+        )).extra, // ignore: deprecated_member_use
+        null,
+      ),
+      (
         'a tag not on the list is dropped',
         () async => (await event(
           SentryEvent(

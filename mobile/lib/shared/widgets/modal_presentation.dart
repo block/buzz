@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../theme/theme.dart';
 import 'buzz_sheet_header.dart';
+import 'ios_composition_layer.dart';
 import 'duo_toolbar.dart';
 import 'ios_navigation_bar.dart';
 import 'buzz_titled_sheet_layout.dart';
@@ -42,6 +43,7 @@ Future<T?> showBuzzModalBottomSheet<T>({
   Clip? clipBehavior,
   BoxConstraints? constraints,
   Color? barrierColor,
+  bool nativeIosBarrier = false,
   bool isScrollControlled = false,
   double scrollControlDisabledMaxHeightRatio = 9.0 / 16.0,
   bool useRootNavigator = false,
@@ -80,73 +82,68 @@ Future<T?> showBuzzModalBottomSheet<T>({
       sheetTheme.colorScheme.surface;
   final reduceMotion = MediaQuery.disableAnimationsOf(context);
 
-  return showModalBottomSheet<T>(
-    context: context,
-    builder: (sheetContext) {
-      // Read the current window on every posture change. Keeping these values
-      // outside the builder leaves Close owned by a rail that may disappear.
-      final strip =
-          DuoToolbarScope.maybeOf(sheetContext)?.strip ??
-          FoldGeometry.of(sheetContext).strip;
-      final fullWidth = strip != null && useDuoFullWidth;
-      final content = _SheetLocalSafeArea(
-        localize: strip != null && !fullWidth,
-        child: DuoToolbarScope(
-          strip: strip,
-          active: true,
-          child: DuoToolbarPortal(
-            strip: isIos && fullWidth ? strip : null,
-            active: ModalRoute.isCurrentOf(sheetContext) ?? true,
-            actions: [
-              if (showCloseButton || showRailCloseButton)
-                IosNavigationAction(
-                  label: 'Close ${title ?? 'sheet'}',
-                  symbol: 'xmark',
-                  onPressed: () => Navigator.of(sheetContext).pop(),
-                ),
-            ],
-            child: DuoSheetCloseScope(
-              inRail:
-                  isIos &&
-                  fullWidth &&
-                  (showCloseButton || showRailCloseButton),
-              child: Theme(
-                data: sheetTheme,
-                child: Builder(
-                  builder: (themedContext) => ConcentricSheetSurface(
-                    enabled: isIos,
-                    padding: fullWidth
-                        ? EdgeInsets.zero
-                        : const EdgeInsets.only(
-                            left: Grid.xxs,
-                            right: Grid.xxs,
-                            bottom: Grid.xxs,
+  Widget buildSheet(BuildContext sheetContext) {
+    // Read the current window on every posture change. Keeping these values
+    // outside the builder leaves Close owned by a rail that may disappear.
+    final strip =
+        DuoToolbarScope.maybeOf(sheetContext)?.strip ??
+        FoldGeometry.of(sheetContext).strip;
+    final fullWidth = strip != null && useDuoFullWidth;
+    final content = _SheetLocalSafeArea(
+      localize: strip != null && !fullWidth,
+      child: DuoToolbarScope(
+        strip: strip,
+        active: true,
+        child: DuoToolbarPortal(
+          strip: isIos && fullWidth ? strip : null,
+          active: ModalRoute.isCurrentOf(sheetContext) ?? true,
+          actions: [
+            if (showCloseButton || showRailCloseButton)
+              IosNavigationAction(
+                label: 'Close ${title ?? 'sheet'}',
+                symbol: 'xmark',
+                onPressed: () => Navigator.of(sheetContext).pop(),
+              ),
+          ],
+          child: DuoSheetCloseScope(
+            inRail:
+                isIos && fullWidth && (showCloseButton || showRailCloseButton),
+            child: Theme(
+              data: sheetTheme,
+              child: Builder(
+                builder: (themedContext) => ConcentricSheetSurface(
+                  enabled: isIos,
+                  padding: fullWidth
+                      ? EdgeInsets.zero
+                      : const EdgeInsets.only(
+                          left: Grid.xxs,
+                          right: Grid.xxs,
+                          bottom: Grid.xxs,
+                        ),
+                  color: surfaceColor,
+                  child: SafeArea(
+                    top: false,
+                    bottom: false,
+                    left: fullWidth && padHorizontal,
+                    right: fullWidth && padHorizontal,
+                    child: _SheetContent(
+                      title: title,
+                      showCloseButton: showCloseButton,
+                      showDragHandle: showDragHandle == true,
+                      surfaceColor: surfaceColor,
+                      // Keep the entire scroll viewport above gesture navigation. The
+                      // inner builder sees a consumed bottom inset, so sheet-local safe
+                      // areas and scroll padding do not reserve that system inset twice.
+                      child: SafeArea(
+                        top: false,
+                        left: false,
+                        right: false,
+                        bottom: padBottom,
+                        child: Padding(
+                          padding: EdgeInsets.only(
+                            bottom: padBottom ? Grid.half : 0,
                           ),
-                    color: surfaceColor,
-                    child: SafeArea(
-                      top: false,
-                      bottom: false,
-                      left: fullWidth && padHorizontal,
-                      right: fullWidth && padHorizontal,
-                      child: _SheetContent(
-                        title: title,
-                        showCloseButton: showCloseButton,
-                        showDragHandle: showDragHandle == true,
-                        surfaceColor: surfaceColor,
-                        // Keep the entire scroll viewport above gesture navigation. The
-                        // inner builder sees a consumed bottom inset, so sheet-local safe
-                        // areas and scroll padding do not reserve that system inset twice.
-                        child: SafeArea(
-                          top: false,
-                          left: false,
-                          right: false,
-                          bottom: padBottom,
-                          child: Padding(
-                            padding: EdgeInsets.only(
-                              bottom: padBottom ? Grid.half : 0,
-                            ),
-                            child: Builder(builder: builder),
-                          ),
+                          child: Builder(builder: builder),
                         ),
                       ),
                     ),
@@ -156,46 +153,78 @@ Future<T?> showBuzzModalBottomSheet<T>({
             ),
           ),
         ),
-      );
-      if (!isIos || !useDuoFullWidth) return content;
-      // The route cannot change useSafeArea after presentation. Apply it here
-      // so rail-owned sheets can use the full window after unfolding.
-      final media = MediaQuery.of(sheetContext);
-      final window = MediaQueryData.fromView(View.of(sheetContext));
-      return MediaQuery(
-        data: media.copyWith(
-          padding: media.padding.copyWith(
-            top: useSafeArea && !fullWidth
-                ? window.padding.top
-                : media.padding.top,
+      ),
+    );
+    if (!isIos || !useDuoFullWidth) return content;
+    // The route cannot change useSafeArea after presentation. Apply it here
+    // so rail-owned sheets can use the full window after unfolding.
+    final media = MediaQuery.of(sheetContext);
+    final window = MediaQueryData.fromView(View.of(sheetContext));
+    return MediaQuery(
+      data: media.copyWith(
+        padding: media.padding.copyWith(
+          top: useSafeArea && !fullWidth
+              ? window.padding.top
+              : media.padding.top,
+        ),
+      ),
+      child: SafeArea(
+        top: useSafeArea && !fullWidth,
+        left: useSafeArea && !fullWidth,
+        right: useSafeArea && !fullWidth,
+        bottom: false,
+        child: Align(
+          alignment: Alignment.bottomCenter,
+          widthFactor: 1,
+          heightFactor: 1,
+          child: ConstrainedBox(
+            constraints:
+                constraints ??
+                (fullWidth
+                    ? const BoxConstraints(maxWidth: double.infinity)
+                    : sheetTheme.bottomSheetTheme.constraints ??
+                          BoxConstraints(
+                            maxWidth: sheetTheme.useMaterial3
+                                ? 640
+                                : double.infinity,
+                          )),
+            child: content,
           ),
         ),
-        child: SafeArea(
-          top: useSafeArea && !fullWidth,
-          left: useSafeArea && !fullWidth,
-          right: useSafeArea && !fullWidth,
-          bottom: false,
-          child: Align(
-            alignment: Alignment.bottomCenter,
-            widthFactor: 1,
-            heightFactor: 1,
-            child: ConstrainedBox(
-              constraints:
-                  constraints ??
-                  (fullWidth
-                      ? const BoxConstraints(maxWidth: double.infinity)
-                      : sheetTheme.bottomSheetTheme.constraints ??
-                            BoxConstraints(
-                              maxWidth: sheetTheme.useMaterial3
-                                  ? 640
-                                  : double.infinity,
-                            )),
-              child: content,
-            ),
-          ),
+      ),
+    );
+  }
+
+  if (isIos && nativeIosBarrier) {
+    final navigator = Navigator.of(context, rootNavigator: true);
+    final localizations = MaterialLocalizations.of(context);
+    return navigator.push(
+      _NativeBarrierSheetRoute<T>(
+        builder: buildSheet,
+        capturedThemes: InheritedTheme.capture(
+          from: context,
+          to: navigator.context,
         ),
-      );
-    },
+        isScrollControlled: isScrollControlled,
+        isDismissible: isDismissible,
+        enableDrag: enableDrag,
+        barrierLabel: barrierLabel ?? localizations.scrimLabel,
+        barrierOnTapHint: localizations.scrimOnTapHint(
+          localizations.bottomSheetLabel,
+        ),
+        scrimColor:
+            barrierColor ??
+            theme.bottomSheetTheme.modalBarrierColor ??
+            Colors.black54,
+        sheetAnimationStyle: reduceMotion
+            ? AnimationStyle.noAnimation
+            : (sheetAnimationStyle ?? buzzModalAnimationStyle),
+      ),
+    );
+  }
+  return showModalBottomSheet<T>(
+    context: context,
+    builder: buildSheet,
     backgroundColor: isIos || title != null ? Colors.transparent : surfaceColor,
     barrierLabel: barrierLabel,
     elevation: elevation,
@@ -223,6 +252,46 @@ Future<T?> showBuzzModalBottomSheet<T>({
         ? AnimationStyle.noAnimation
         : (sheetAnimationStyle ?? buzzModalAnimationStyle),
     requestFocus: requestFocus,
+  );
+}
+
+/// Paint the section sheet's dimming in the barrier entry, above Home's
+/// retained UIKit controls and below the sheet's own controls.
+class _NativeBarrierSheetRoute<T> extends ModalBottomSheetRoute<T> {
+  _NativeBarrierSheetRoute({
+    required super.builder,
+    required super.capturedThemes,
+    required super.isScrollControlled,
+    required super.isDismissible,
+    required super.enableDrag,
+    required super.barrierLabel,
+    required super.barrierOnTapHint,
+    required super.sheetAnimationStyle,
+    required this.scrimColor,
+  }) : super(
+         modalBarrierColor: Colors.transparent,
+         backgroundColor: Colors.transparent,
+         showDragHandle: false,
+         constraints: const BoxConstraints(maxWidth: double.infinity),
+       );
+
+  final Color scrimColor;
+
+  @override
+  Widget buildModalBarrier() => Stack(
+    fit: StackFit.expand,
+    children: [
+      IgnorePointer(
+        child: FadeTransition(
+          opacity: animation!.drive(CurveTween(curve: barrierCurve)),
+          child: IosCompositionLayer(
+            color: scrimColor,
+            child: const SizedBox(),
+          ),
+        ),
+      ),
+      super.buildModalBarrier(),
+    ],
   );
 }
 

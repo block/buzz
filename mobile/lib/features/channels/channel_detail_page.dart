@@ -86,6 +86,7 @@ import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
 import 'inline_agent_typing.dart';
 import 'typing_motion_preview.dart';
+import 'huddle_agents_provider.dart';
 import 'channel_ids_by_name_provider.dart';
 import 'channels_provider.dart';
 import 'unread_badge/observed_unread_event.dart';
@@ -180,7 +181,11 @@ enum InitialThreadRouteBehavior {
 double _conversationHeaderHeight(
   BuildContext context, {
   double titleContentHeight = 0,
-}) => frostedAppBarHeight(context, titleContentHeight: titleContentHeight);
+}) => frostedAppBarHeight(
+  context,
+  titleContentHeight: titleContentHeight,
+  alignWithStatusRegion: true,
+);
 
 class _ResolvedChannelDetailPage extends HookConsumerWidget {
   final Channel channel;
@@ -714,6 +719,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
         nativeTitleInsets: duoContentInsetsOf(context),
+        alignWithStatusRegion: true,
         automaticallyImplyLeading:
             !ConversationPaneScope.isBaseRouteOf(context) ||
             !usesConversationPanes(
@@ -791,7 +797,10 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                         fit: StackFit.expand,
                         children: [
                           ForumPostsView(
-                            titleContentHeight: appBarTitleContentHeight,
+                            headerHeight: _conversationHeaderHeight(
+                              context,
+                              titleContentHeight: appBarTitleContentHeight,
+                            ),
                             channel: resolvedChannel,
                             currentPubkey: currentPubkey,
                           ),

@@ -31,6 +31,9 @@ const KINDS: &[i32] = &[
     30175, 30176, 30178, 30030, 30180, 30621,
     // Private per-viewer state: only the trusted relay's matching d/p snapshot.
     30622, 1063,
+    // NIP-PM pin and unpin commands. A recent one keeps its ID and timestamp
+    // (`crate::pins::keeps_replay_record`).
+    40010, 40011,
 ];
 const PAGE_SIZE: i64 = 100;
 use super::agent_ownership::MAX_TARGETS;
@@ -246,9 +249,9 @@ async fn plan(
         "excluded_agents": excluded_agents,
         "target_pubkeys": target_pubkeys, "trusted_relay_pubkey": relay, "included_event_kinds": KINDS,
         "batch_size": options.batch_size, "max_items": options.max_items,
-        "scope": "user- and owned-agent-attributed events (including persona, team, emoji and project definitions), trusted-relay private hidden-DM snapshots, reactions, owned subscriptions and notification delivery; unused owned workflows and recorded personal workflow inputs/notes",
+        "scope": "user- and owned-agent-attributed events (including persona, team, emoji and project definitions), trusted-relay private hidden-DM snapshots, reactions and notification delivery; unused owned workflows and recorded personal workflow inputs/notes",
         "hidden_dm_selection": "kind 30622 requires a trusted relay signer, no channel, and exactly one matching canonical d/p viewer; ambiguous or untrusted snapshots are not selected",
-        "preserved": "other users' events and reactions; member repositories; workflow history except recorded personal trigger inputs and approval notes; other owners' delivery logs unrelated to selected events",
+        "preserved": "other users' events and reactions; member repositories; workflow history except recorded personal trigger inputs and approval notes",
         "relay_attribution": if relay.is_some() { "enabled" } else { "not included; supply --relay-pubkey for relay-authored history" },
         "execution": "preview only; --delete prints and commits batches after execution checks",
         "thread_repairs": "reported separately from row items; metadata mutations are not expanded",
@@ -306,11 +309,15 @@ async fn plan(
     // whose selected ancestor was already physically removed.
     let metadata = retention::metadata(conn, options.community, &selected).await?;
     let selected = retention::children_first(selected, &metadata)?;
+    let now = Utc::now();
+    let mut scrubbed_events = 0;
     for page in selected.chunks(PAGE_SIZE as usize) {
         rows::event_rows(conn, page, &mut output).await?;
         for event in page {
             let id = hex::encode(&event.id);
-            let scrub = needed.contains(&id);
+            let scrub = needed.contains(&id)
+                || crate::pins::keeps_replay_record(event.kind, event.created_at, now);
+            scrubbed_events += usize::from(scrub);
             output
                 .repairs
                 .push(json!({"event_id": id, "channel_id": event.channel_id,
@@ -347,7 +354,7 @@ async fn plan(
         batches: output.batches,
         items: output.seen.len(),
         warnings: output.warnings,
-        scrubbed_events: needed.len(),
+        scrubbed_events,
         excluded_event_kinds: excluded,
     };
     Ok(Plan {
@@ -376,7 +383,7 @@ mod private_state_postgres_tests;
 mod workflow_postgres_tests;
 
 #[cfg(test)]
-mod copies_postgres_tests;
+mod files_postgres_tests;
 
 #[cfg(test)]
 mod schedule_postgres_tests;

@@ -22,6 +22,7 @@ class ConcentricSheetSurface extends HookWidget {
     ),
     this.providesSheetSurface = true,
     this.usesGlass = false,
+    this.animateGeometry = false,
     this.capsule = false,
     this.glassTintColor,
     this.minimumRadius = Radii.dialog,
@@ -35,6 +36,9 @@ class ConcentricSheetSurface extends HookWidget {
   final EdgeInsetsGeometry padding;
   final bool providesSheetSurface;
   final bool usesGlass;
+
+  /// Animates native material corner changes, respecting Reduce Motion.
+  final bool animateGeometry;
 
   /// Rounds the native surface into a capsule independent of screen corners.
   final bool capsule;
@@ -251,6 +255,7 @@ class ConcentricSheetSurface extends HookWidget {
                     'independentCorners': providesSheetSurface,
                     if (providesSheetSurface) 'topRadius': sheetTopRadius,
                     'usesGlass': usesGlass,
+                    'animateGeometry': animateGeometry,
                     if (glassTintColor case final tint?)
                       'glassTintColor': tint.toARGB32(),
                     'brightness': brightness.name,

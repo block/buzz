@@ -71,7 +71,7 @@ void agentPrefillTests() {
         ? tester.widget<TextField>(find.byType(TextField)).controller!.text
         : find.text('@$agentName').evaluate().isNotEmpty
         ? '@$agentName '
-        : find.text('Message\u2026').evaluate().isNotEmpty
+        : find.text('Message').evaluate().isNotEmpty
         ? ''
         : 'unexpected';
     ComposeDraft? savedDraft() =>
@@ -278,7 +278,7 @@ void agentPrefillTests() {
     await tester.pumpWidget(build());
     await tester.pumpAndSettle();
     expect(shows('@Scout'), isFalse);
-    expect(shows('Message…'), isTrue);
+    expect(shows('Message'), isTrue);
 
     // So does the last tagged agent leaving the channel.
     scope = [
@@ -291,7 +291,7 @@ void agentPrefillTests() {
     dropAgent();
     await tester.pumpAndSettle();
     expect(shows('@Scout'), isFalse);
-    expect(shows('Message…'), isTrue);
+    expect(shows('Message'), isTrue);
 
     // Text the viewer wrote is theirs, and stays.
     agentInChannel = true;

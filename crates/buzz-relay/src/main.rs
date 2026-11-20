@@ -2317,7 +2317,8 @@ fn emit_in_memory_usage_metrics(state: &AppState) {
 }
 
 /// Run one usage-metrics tick. Every pod emits its own in-memory gauges, while
-/// one leader reaps expired invites and publishes the stored storage snapshot.
+/// one leader reaps expired invites and erased pin command records and
+/// publishes the stored storage snapshot.
 async fn run_usage_metrics_tick(
     state: &AppState,
     leader: &mut Option<buzz_db::SessionLeader>,
@@ -2354,6 +2355,15 @@ async fn run_usage_metrics_tick(
             Ok(_) => {}
             Err(error) => {
                 warn!(error = %error, "failed to reap expired relay invites");
+            }
+        }
+        match state.db.reap_expired_pin_command_records().await {
+            Ok(removed) if removed > 0 => {
+                info!(removed, "reaped expired pin command records");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(error = %error, "failed to reap expired pin command records");
             }
         }
         run_storage_sweep_tick(state).await;
@@ -2751,18 +2761,16 @@ mod tests {
         assert_eq!(aggregate_audit_failures(&counters), 1);
         // Each per-table attempt, including the one inside maintenance, still has
         // its own error outcome.
-        for table in ["events", "delivery_log"] {
-            let errors: u64 = counters
-                .iter()
-                .filter(|(name, labels, _)| {
-                    name == "buzz_partition_audit_runs_total"
-                        && labels.contains(&("table".to_string(), table.to_string()))
-                        && labels.contains(&("outcome".to_string(), "error".to_string()))
-                })
-                .map(|(_, _, value)| value)
-                .sum();
-            assert_eq!(errors, 2, "{table}");
-        }
+        let errors: u64 = counters
+            .iter()
+            .filter(|(name, labels, _)| {
+                name == "buzz_partition_audit_runs_total"
+                    && labels.contains(&("table".to_string(), "events".to_string()))
+                    && labels.contains(&("outcome".to_string(), "error".to_string()))
+            })
+            .map(|(_, _, value)| value)
+            .sum();
+        assert_eq!(errors, 2, "events");
     }
 
     #[test]

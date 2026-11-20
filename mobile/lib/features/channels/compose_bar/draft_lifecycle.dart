@@ -165,6 +165,7 @@ void _useComposeDraftLifecycle({
             text: text,
             mentions: bindings,
             mentionsInvalid: invalid,
+            transcriptionId: voiceNote.value.insertedTranscriptionId.value,
           );
     }
 

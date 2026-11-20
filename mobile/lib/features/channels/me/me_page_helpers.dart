@@ -35,7 +35,7 @@ class SoloChatTile extends ConsumerWidget {
     return DecoratedBox(
       decoration: BoxDecoration(
         color: selected ? context.colors.primaryContainer : null,
-        borderRadius: BorderRadius.circular(Radii.md),
+        borderRadius: BorderRadius.circular(Radii.container),
       ),
       child: Semantics(
         selected: selected,
@@ -96,13 +96,15 @@ class _MeChatRow extends ConsumerWidget {
       excludeSemantics: true,
       button: true,
       child: InkWell(
-        borderRadius: BorderRadius.circular(Radii.md),
+        borderRadius: BorderRadius.circular(Radii.container),
         onTap: onTap,
         onLongPress: onLongPress,
         child: Padding(
-          padding: const EdgeInsets.symmetric(
-            horizontal: Grid.xxs,
-            vertical: Grid.inventoryRowInset,
+          padding: const EdgeInsets.fromLTRB(
+            Grid.xxs,
+            Grid.inventoryRowInset,
+            Grid.xxs + Grid.half,
+            Grid.inventoryRowInset,
           ),
           child: Row(
             children: [
@@ -125,10 +127,20 @@ class _MeChatRow extends ConsumerWidget {
                   ),
                 ),
               ),
-              if (working.isNotEmpty) ...[
-                const SizedBox(width: Grid.xs),
-                SoloWorkingDots(color: color),
-              ],
+              SizedBox(
+                width: Grid.inventoryAccessoryWidth,
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: SizedBox(
+                    width: 20,
+                    child: Center(
+                      child: working.isEmpty
+                          ? null
+                          : SoloWorkingDots(color: color),
+                    ),
+                  ),
+                ),
+              ),
             ],
           ),
         ),

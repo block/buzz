@@ -23,6 +23,7 @@ import '../../shared/emoji/native_emoji_glyph.dart';
 import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/modal_scroll_handoff.dart';
 import '../../shared/reminders/remind_me_later_sheet.dart';
 import '../../shared/reminders/reminder_service.dart';
 import 'channel_management_provider.dart';
@@ -108,7 +109,7 @@ Future<void> showMessageActions({
           constraints: BoxConstraints(
             maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.7,
           ),
-          child: SingleChildScrollView(
+          child: ModalScrollHandoff(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(
                 Grid.gutter,
@@ -562,7 +563,14 @@ bool messageActionShowsUnread(
       channel != null &&
       readByChannelCatchUp(
         isDm: channel.isDm,
-        isReply: message.parentId != null,
+        // A message also sent to the channel is read only by its own mark,
+        // with or without a parent.
+        isReply:
+            message.parentId != null ||
+            message.tags.any(
+              (tag) =>
+                  tag.length >= 2 && tag[0] == 'broadcast' && tag[1] == '1',
+            ),
         highPriority: isHighPriorityEvent(message.tags, readerPubkey),
       );
   return isMessageUnread(

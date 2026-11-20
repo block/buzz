@@ -10,6 +10,7 @@ import 'channel_filter_store.dart';
 /// Whole-record LWW, with an explicit preflight and confirmed readback. Cached
 /// data is display-only. No automatic publication or retry of failed edits.
 class ChannelFilterManager extends ChangeNotifier {
+  final String coordinate;
   final String pubkey;
   final ChannelSortCrypto crypto;
   final Future<List<NostrEvent>> Function() fetch;
@@ -25,6 +26,7 @@ class ChannelFilterManager extends ChangeNotifier {
   int _createdAt = 0;
 
   ChannelFilterManager({
+    this.coordinate = 'channel-filter',
     required this.pubkey,
     required this.crypto,
     required this.fetch,
@@ -46,7 +48,7 @@ class ChannelFilterManager extends ChangeNotifier {
               (e) =>
                   e.kind == EventKind.readState &&
                   e.pubkey == pubkey &&
-                  e.getTagValue('d') == 'channel-filter' &&
+                  e.getTagValue('d') == coordinate &&
                   e.createdAt <=
                       DateTime.now().millisecondsSinceEpoch ~/ 1000 + 300,
             )

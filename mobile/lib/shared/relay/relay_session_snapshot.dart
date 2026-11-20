@@ -94,12 +94,24 @@ extension on RelaySessionNotifier {
     final response = await send(request, readStateSnapshotMaxEnvelopeBytes);
     // Inflating, parsing and Schnorr verification must not block Flutter's
     // UI isolate.
-    final events = await _snapshotDecoder((
-      bytes: response.bodyBytes,
-      contentType: response.headers['content-type'],
-      viewer: viewer,
-      community: community,
-    ));
+    final List<NostrEvent> events;
+    try {
+      events = await _snapshotDecoder((
+        bytes: response.bodyBytes,
+        contentType: response.headers['content-type'],
+        viewer: viewer,
+        community: community,
+      ));
+    } catch (error, stackTrace) {
+      // A retired session reports that, not whatever its bytes decoded to.
+      checkContext();
+      _diagnostics.reportError(
+        error,
+        stackTrace,
+        operation: DiagnosticOperation.relayQuery,
+      );
+      rethrow;
+    }
     checkContext();
     return events;
   }

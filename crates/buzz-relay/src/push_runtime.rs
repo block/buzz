@@ -748,6 +748,8 @@ async fn deliver_one(
         // A timed-out terminal attempt burns the stable request id. Its replay
         // is indistinguishable from another invalid-grant 404, but sending a
         // fresh id would double-deliver and defeat the gateway replay fence.
+        // A gateway that is still sending the timed-out attempt answers 503
+        // retry instead, so a 404 here means that attempt already finished.
         Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND && outcome.attempt > 1 => {
             let _ = state
                 .db

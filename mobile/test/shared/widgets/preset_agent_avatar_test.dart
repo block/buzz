@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:buzz/shared/widgets/dm_header_portrait.dart';
 import 'package:buzz/shared/widgets/preset_agent_avatar.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
@@ -16,15 +18,27 @@ class _Player extends VideoPlayerPlatform {
   Future<void> init() async {}
   @override
   Future<int?> createWithOptions(VideoCreationOptions options) async => 1;
+
+  /// The newest player's events, for injecting playback errors.
+  StreamController<VideoEvent>? events;
   @override
   Stream<VideoEvent> videoEventsFor(int id) {
-    return Stream.value(
-      VideoEvent(
-        eventType: VideoEventType.initialized,
-        duration: const Duration(seconds: 2),
-        size: const Size(100, 100),
-      ),
-    );
+    final events = this.events = StreamController<VideoEvent>()
+      ..add(
+        VideoEvent(
+          eventType: VideoEventType.initialized,
+          duration: const Duration(seconds: 2),
+          size: const Size(100, 100),
+        ),
+      );
+    return events.stream;
+  }
+
+  /// Seeks land after a platform round trip, as on AVFoundation.
+  @override
+  Future<void> seekTo(int id, Duration position) async {
+    await Future<void>.delayed(const Duration(milliseconds: 1));
+    this.position = position;
   }
 
   @override
@@ -247,21 +261,84 @@ void main() {
     // poster waits for playback to advance from where it actually is.
     player.position = const Duration(milliseconds: 700);
     await tester.pumpAndSettle();
-    navigator.pop();
-    // Step real frames: the baseline lands before the first poll does.
-    for (var frame = 0; frame < 60; frame++) {
-      await tester.pump(const Duration(milliseconds: 16));
-      if (find.byKey(const Key('video')).evaluate().isNotEmpty) {
+    // Step real frames from the video's mount: the baseline lands before the
+    // first poll does.
+    Future<void> returnCovered({void Function()? onMount}) async {
+      navigator.pop();
+      for (
+        var frame = 0;
+        frame < 60 && find.byKey(const Key('video')).evaluate().isEmpty;
+        frame++
+      ) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(find.byKey(const Key('video')), findsOneWidget);
+      for (var frame = 0; frame < 60; frame++) {
+        await tester.pump(const Duration(milliseconds: 16));
+        if (frame == 0) onMount?.call();
         expect(videoOpacity(), 0);
         expect(posterOpacity(), 1);
       }
     }
-    expect(find.byKey(const Key('video')), findsOneWidget);
+
+    Future<void> cover() async {
+      navigator.push<void>(
+        PageRouteBuilder<void>(
+          opaque: false,
+          pageBuilder: (_, _, _) => const SizedBox.shrink(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('video')), findsNothing);
+      expect(posterOpacity(), 1);
+    }
+
+    await returnCovered();
     player.position = const Duration(milliseconds: 800);
     await tester.pump(const Duration(milliseconds: 600));
     await tester.pumpAndSettle();
     expect(videoOpacity(), 1);
     expect(posterOpacity(), 0);
+
+    // A loop that finished just before the cover restarts from zero on
+    // return, which is not yet playback advancing.
+    player.position = const Duration(seconds: 2);
+    await tester.pump(const Duration(milliseconds: 200));
+    await cover();
+    await returnCovered();
+    player.position = const Duration(milliseconds: 100);
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pumpAndSettle();
+    expect(videoOpacity(), 1);
+    expect(posterOpacity(), 0);
+
+    // The same while the app is inactive: the restart waits for resume.
+    player.position = const Duration(seconds: 2);
+    await tester.pump(const Duration(milliseconds: 200));
+    await cover();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await returnCovered();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    for (var frame = 0; frame < 60; frame++) {
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(videoOpacity(), 0);
+      expect(posterOpacity(), 1);
+    }
+    player.position = const Duration(milliseconds: 100);
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pumpAndSettle();
+    expect(videoOpacity(), 1);
+    expect(posterOpacity(), 0);
+
+    // A player that fails on return never shows; the poster stays.
+    await cover();
+    await returnCovered(
+      onMount: () => player.events!.addError(
+        PlatformException(code: 'failed', message: 'playback failed'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(posterOpacity(), 1);
 
     // A new character covers with its own poster, never the previous one
     // kept by gapless playback.

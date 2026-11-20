@@ -26,6 +26,7 @@ async fn missing_metadata_lookup_can_use_existing_tags_index() {
         [["e", root.id.to_hex().to_ascii_uppercase()]]
     ]))
     .bind(10001_i64)
+    .bind(crate::pins::COMMAND_KINDS.as_slice())
     .fetch_one(&mut *tx)
     .await
     .unwrap();

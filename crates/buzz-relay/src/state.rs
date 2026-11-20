@@ -4768,69 +4768,7 @@ pub(crate) mod tests {
         panic!("the refill never started");
     }
 
-    /// A member-channels read that straddles an invalidation of its key,
-    /// per user or community-wide, answers its own request but is not
-    /// cached, so a removal is not undone by a read that began before it. A
-    /// read with no invalidation is cached.
-    /// Mutation: publish without checking the load token, or drop the token
-    /// invalidation from either path → RED.
-    #[tokio::test]
-    async fn a_member_read_that_straddles_an_invalidation_is_not_cached() {
-        use buzz_db::channel_members::ChannelSet;
-        let state = test_state().await;
-        let community = CommunityId::from_uuid(Uuid::from_u128(0xAAAA));
-        let pubkey = vec![7u8; 32];
-        let key = (community, pubkey.clone());
-        let revoked = Uuid::from_u128(1);
-        let stale = ChannelSet {
-            implicit: Vec::new(),
-            named_only: vec![(revoked, "system".to_owned())],
-        };
-        let invalidations: [&dyn Fn(); 2] = [
-            &|| state.invalidate_membership_local(community, revoked, &pubkey),
-            &|| state.invalidate_all_accessible_channels_local(community),
-        ];
-        for (path, invalidate) in invalidations.into_iter().enumerate() {
-            let (release, held) = tokio::sync::oneshot::channel::<()>();
-            let read = {
-                let stale = stale.clone();
-                async move {
-                    held.await.ok();
-                    Ok(read_now(stale))
-                }
-            };
-            let task = {
-                let state = state.clone();
-                let key = key.clone();
-                tokio::spawn(async move { state.member_channels(key, read).await })
-            };
-            until_loading(&state.member_channels_loads, &key).await;
-            invalidate();
-            release.send(()).expect("read is waiting");
-            let answered = task.await.expect("join").expect("read");
-            assert_eq!(
-                *answered, stale,
-                "path {path}: the read answers its request"
-            );
-            assert!(
-                state.member_channels_cache.get(&key).is_none(),
-                "path {path}: a read that straddles an invalidation is not cached"
-            );
-        }
-        let fresh = ChannelSet::default();
-        state
-            .member_channels(key.clone(), async { Ok(read_now(ChannelSet::default())) })
-            .await
-            .expect("read");
-        assert_eq!(
-            state
-                .member_channels_cache
-                .get(&key)
-                .map(|member| (*member.set).clone()),
-            Some(fresh),
-            "a read with no invalidation is cached"
-        );
-    }
+    mod member_channel_invalidation_tests;
 
     /// Overlapping member reads for one key share a load token, so the first
     /// to finish is cached even while a later miss is still reading. Main

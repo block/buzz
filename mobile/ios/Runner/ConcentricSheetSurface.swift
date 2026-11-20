@@ -33,6 +33,7 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
   private let independentCorners: Bool
   private let channel: FlutterMethodChannel
   private let usesGlass: Bool
+  private let animateGeometry: Bool
   private let topRadius: Double?
 
   init(
@@ -47,6 +48,7 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
     topRadius = (arguments?["topRadius"] as? NSNumber)?.doubleValue
     independentCorners = (arguments?["independentCorners"] as? NSNumber)?.boolValue == true
     usesGlass = (arguments?["usesGlass"] as? NSNumber)?.boolValue == true
+    animateGeometry = arguments?["animateGeometry"] as? Bool == true
 
     rootView = ConcentricSurfaceRootView(frame: frame)
     rootView.isUserInteractionEnabled = false
@@ -131,10 +133,16 @@ final class ConcentricSheetSurfacePlatformView: NSObject, FlutterPlatformView {
           return
         }
         self.applyInterfaceStyle(from: arguments["brightness"])
-        self.applyCornerConfiguration(
-          minimumRadius: minimumRadius.doubleValue,
-          capsule: arguments["capsule"] as? Bool == true
-        )
+        let update = {
+          self.applyCornerConfiguration(
+            minimumRadius: minimumRadius.doubleValue,
+            capsule: arguments["capsule"] as? Bool == true
+          )
+          self.surfaceView.layoutIfNeeded()
+        }
+        if self.animateGeometry && !UIAccessibility.isReduceMotionEnabled {
+          UIView.animate(withDuration: 0.18, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseInOut], animations: update)
+        } else { update() }
         result(nil)
       default:
         result(FlutterMethodNotImplemented)
