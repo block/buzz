@@ -503,7 +503,8 @@ class IosNavigationBar extends HookConsumerWidget {
             await current.invokeMethod<void>('configure', payload);
             if (!active) return;
             if (latest.value.onReadyChanged != null ||
-                latest.value.titleAvatars.isNotEmpty) {
+                latest.value.titleAvatars.isNotEmpty ||
+                latest.value.backdropOnly) {
               await current.invokeMethod<void>('prepareForReveal');
             }
             report(true);

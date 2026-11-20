@@ -106,6 +106,11 @@ double frostedAppBarHeight(
     return max(MediaQuery.paddingOf(context).top, portraitHeader.bottom) +
         bottomHeight;
   }
+  if (portraitHeader != null) {
+    return portraitHeader.top +
+        _barContentHeight(context, titleStyle, titleContentHeight) +
+        bottomHeight;
+  }
   if (useNativeNavigation && defaultTargetPlatform == TargetPlatform.iOS) {
     return MediaQuery.paddingOf(context).top +
         _nativeCompactHeight(context, titleContentHeight) +
@@ -203,7 +208,7 @@ class FrostedAppBar extends StatelessWidget {
   /// use the native soft backdrop on iOS.
   final bool useNativeNavigation;
 
-  /// Places the chat header beside the unfolded portrait status cluster.
+  /// Places the header beside the unfolded portrait status cluster.
   final bool alignWithStatusRegion;
 
   /// Duration for coordinated native header and overlapping control movement.
@@ -435,7 +440,13 @@ class FrostedAppBar extends StatelessWidget {
               builder: (context, value, child) => buildNative(value),
             );
     }
-    final topPadding = MediaQuery.paddingOf(context).top;
+    final portraitHeader =
+        alignWithStatusRegion && defaultTargetPlatform == TargetPlatform.iOS
+        ? IosNavigationMetrics.of(context).portraitHeaderFor(
+            View.of(context).physicalSize / View.of(context).devicePixelRatio,
+          )
+        : null;
+    final topPadding = portraitHeader?.top ?? MediaQuery.paddingOf(context).top;
     final scrollUnder = FrostedScrollUnderScope.maybeOf(context);
     final isScrolledUnder =
         alwaysFrosted || (scrollUnder?.isScrolledUnder ?? false);
@@ -482,7 +493,17 @@ class FrostedAppBar extends StatelessWidget {
     final titleRow = SizedBox(
       height: barContentHeight,
       child: Padding(
-        padding: EdgeInsets.symmetric(horizontal: horizontalInset),
+        padding: EdgeInsets.only(
+          left: horizontalInset,
+          right:
+              horizontalInset +
+              (portraitHeader == null
+                  ? 0
+                  : max(
+                      0.0,
+                      MediaQuery.sizeOf(context).width - portraitHeader.right,
+                    )),
+        ),
         child: IconTheme.merge(
           data: IconThemeData(color: effectiveIconColor),
           child: _CenteredNavigationLayout(

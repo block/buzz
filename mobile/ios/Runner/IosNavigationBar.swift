@@ -242,7 +242,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     }
     configure(args as? [String: Any] ?? [:])
     #if canImport(UIKit, _version: 9127.0.85)
-    if #available(iOS 27.1, *), standaloneControl || floatingTitle != nil {
+    if #available(iOS 27.1, *), standaloneControl || floatingTitle != nil || backdropOnly {
       container.addInteraction(UIHingeInteraction { [weak self] _, _ in
         guard let self else { return }
         self.container.setNeedsLayout()
@@ -259,7 +259,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   func view() -> UIView { container }
 
   private func layout() {
-    var portraitHeader = floatingTitle == nil ? nil : duoPortraitHeader(in: container.window)
+    var portraitHeader = floatingTitle == nil && !backdropOnly ? nil : duoPortraitHeader(in: container.window)
 
     if standaloneLargeTitle, let scroll = standaloneSurface as? UIScrollView,
        let label = scroll.subviews.compactMap({ $0 as? UILabel }).first {
@@ -315,7 +315,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     }
     navigation.view.setNeedsLayout()
     navigation.view.layoutIfNeeded()
-    if floatingTitle != nil, let window = container.window {
+    if floatingTitle != nil || backdropOnly, let window = container.window {
       if let row = portraitHeader, !horizontalControls {
         // UIKit owns the control row beside the status cluster. The reserved
         // region includes clearance and is not the visible time's center.
@@ -748,6 +748,16 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       }
     } else {
       item.rightBarButtonItems = groups.reversed().map(makeControlGroup)
+    }
+    if backdropOnly {
+      // A transparent item measures UIKit's actual control center for the
+      // Flutter Home row; UINavigationBar's own bounds include extra padding.
+      let probe = UIView(frame: CGRect(x: 0, y: 0, width: 44, height: 44))
+      probe.isUserInteractionEnabled = false
+      probe.accessibilityElementsHidden = true
+      let probeItem = UIBarButtonItem(customView: probe)
+      if #available(iOS 26.0, *) { probeItem.hidesSharedBackground = true }
+      item.leftBarButtonItems = [probeItem]
     }
     if let metrics {
       channel.invokeMethod("metrics", arguments: metrics)
