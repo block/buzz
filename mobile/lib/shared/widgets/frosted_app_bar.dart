@@ -516,12 +516,20 @@ class FrostedAppBar extends StatelessWidget {
             : null);
 
     // On Duo, controls start at the clearance as on the native bar, whose
-    // reported height can exceed the 44-point row they occupy.
+    // reported height can exceed the 44-point row they occupy. The clamp
+    // absorbs rounding: when the title sets the bar height, (24 + T) - 24 - T
+    // can come out a hair below zero, which Padding rejects.
     final duoTop = _duoTopClearance(context);
     final duoBottom = duoTop > 0
-        ? barContentHeight -
-              duoTop -
-              max(44.0, _titleHeight(context, titleStyle, titleContentHeight))
+        ? max(
+            0.0,
+            barContentHeight -
+                duoTop -
+                max(
+                  44.0,
+                  _titleHeight(context, titleStyle, titleContentHeight),
+                ),
+          )
         : 0.0;
     final titleRow = SizedBox(
       height: barContentHeight,

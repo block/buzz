@@ -739,6 +739,47 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     });
   }
+
+  testWidgets('Duo fallback bar lays out at the largest text size', (
+    tester,
+  ) async {
+    // At 47/17 the default title is 60.82... points, taller than the row, and
+    // the bottom inset used to round to -7.1e-15.
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(466, 678);
+    tester.view.viewPadding = const FakeViewPadding(right: 84, bottom: 34);
+    tester.view.padding = tester.view.viewPadding;
+    addTearDown(tester.view.reset);
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final suppressNativeView = ValueNotifier(true);
+    addTearDown(suppressNativeView.dispose);
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(
+              context,
+            ).copyWith(textScaler: const TextScaler.linear(47 / 17)),
+            child: IosNavigationMetricsHost(child: child!),
+          ),
+          home: Stack(
+            children: [
+              FrostedAppBar(
+                nativeViewSuppressed: suppressNativeView,
+                automaticallyImplyLeading: false,
+                title: const Text('Create agent'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
 }
 
 Future<void> _nativeAction(
