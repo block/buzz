@@ -2519,17 +2519,6 @@ impl Db {
         .await
     }
 
-    /// Query authoritative event state for startup reconciliation.
-    #[datastore_span(name = "query_events_for_bootstrap", system = "postgresql")]
-    pub async fn query_events_for_bootstrap(&self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
-        crate::event::query_events_with_operation(
-            &self.pool,
-            q,
-            crate::observability::WriterOperation::Bootstrap,
-        )
-        .await
-    }
-
     /// Query authoritative event state for background reconciliation or repair.
     #[datastore_span(name = "query_events_for_maintenance", system = "postgresql")]
     pub async fn query_events_for_maintenance(&self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
