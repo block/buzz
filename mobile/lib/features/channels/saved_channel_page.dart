@@ -1,5 +1,6 @@
 import 'dart:isolate';
 
+import 'package:flutter/scheduler.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/channels/saved_message_cache_lifecycle.dart';
@@ -83,6 +84,9 @@ Future<void> saveChannelPage(
   try {
     final root = await ref.read(savedMessageRootProvider.future);
     if (root == null || !isCurrent() || !store.isCurrent(ticket)) return;
+    // Let the relay timeline paint before copying the page to the worker.
+    await SchedulerBinding.instance.endOfFrame;
+    if (!isCurrent() || !store.isCurrent(ticket)) return;
     final author = events.isEmpty
         ? null
         : await ref.read(_savedMessageRelayAuthorProvider.future);

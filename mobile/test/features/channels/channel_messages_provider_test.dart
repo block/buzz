@@ -15,6 +15,7 @@ import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/channels/saved_message_store.dart';
 import 'package:buzz/shared/crypto/event_signing.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 import '../../helpers/thread_ids.dart';
@@ -49,6 +50,39 @@ void test(String description, Future<void> Function() body) {
 }
 
 void main() {
+  testWidgets('the saved page write waits for a frame', (tester) async {
+    final container = ProviderContainer(
+      overrides: [
+        savedMessageRootProvider.overrideWith(
+          (ref) async => Directory.systemTemp,
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    var writing = false;
+    final store = SavedMessageStore(
+      root: () async {
+        writing = true;
+        return null;
+      },
+      diagnostics: const NoopDiagnosticReporter(),
+    );
+    final ticket = store.capture(
+      (communityId: 'frame-test', pubkey: 'viewer'),
+      (channelId: _channelId, rootId: ''),
+    );
+    final save = Provider(
+      (ref) => saveChannelPage(ref, store, ticket, [], isCurrent: () => true),
+    );
+
+    final saved = container.read(save);
+    await tester.idle();
+    expect(writing, isFalse);
+    await tester.pump();
+    await saved;
+    expect(writing, isTrue);
+  });
+
   flutter_test.test('relay access refusal purges the saved channel', () async {
     const scope = (
       communityId: 'cache-test-community',
