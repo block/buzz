@@ -19,6 +19,7 @@ import {
   formatOwnerLabel,
   ownsAuthorAgent,
 } from "@/features/profile/lib/identity";
+import { runtimeLabel } from "@/features/profile/lib/runtimeLabel";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { useAgentAvailability } from "@/features/agents/lib/useAgentAvailability";
 import {
@@ -70,17 +71,6 @@ type UserProfilePopoverProps = {
 };
 
 const HOVER_CLOSE_DELAY_MS = 200;
-
-const RUNTIME_LABELS: Record<string, string> = {
-  goose: "Goose",
-  "claude-code": "Claude Code",
-  "codex-acp": "Codex",
-  aider: "Aider",
-};
-
-function runtimeLabel(command: string): string {
-  return RUNTIME_LABELS[command] ?? command;
-}
 
 function InfoBadge({ children }: { children: React.ReactNode }) {
   return (
