@@ -40,10 +40,10 @@ class _RecordingReactionActions implements ChannelActions {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-final _listedChannel = Channel(
+Channel _listedChannel([String channelType = 'stream']) => Channel(
   id: _channelId,
   name: 'general',
-  channelType: 'stream',
+  channelType: channelType,
   visibility: 'open',
   description: '',
   createdBy: 'creator',
@@ -53,8 +53,12 @@ final _listedChannel = Channel(
 );
 
 class _ListedChannelsNotifier extends ChannelsNotifier {
+  _ListedChannelsNotifier([this.channelType = 'stream']);
+
+  final String channelType;
+
   @override
-  Future<List<Channel>> build() async => [_listedChannel];
+  Future<List<Channel>> build() async => [_listedChannel(channelType)];
 }
 
 class _FakeReadStateNotifier extends ReadStateNotifier {
@@ -168,6 +172,7 @@ Future<void> _pumpSheet(
   bool nativePresentation = false,
   String? currentPubkey = 'self',
   bool listChannel = false,
+  String listedChannelType = 'stream',
 }) async {
   Future<void>? presentation;
   await tester.pumpWidget(
@@ -185,7 +190,9 @@ Future<void> _pumpSheet(
         // tests opt in by passing a stub service.
         reminderServiceProvider.overrideWithValue(reminderService),
         if (listChannel)
-          channelsProvider.overrideWith(_ListedChannelsNotifier.new),
+          channelsProvider.overrideWith(
+            () => _ListedChannelsNotifier(listedChannelType),
+          ),
       ],
       child: MaterialApp(
         theme: AppTheme.light(),

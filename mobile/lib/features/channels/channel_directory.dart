@@ -661,6 +661,17 @@ Set<String> _readRootIdSet(String? raw) {
 
 String _encodeRootIdSet(Set<String> values) => jsonEncode(values.toList());
 
+/// Badges count observed events, and opening a read channel drops them.
+extension MarkedUnreadObservation on ChannelsNotifier {
+  /// Records [event] again when [myPk] marks it unread, so badges that count
+  /// events, such as a mentions-only app badge, see it. Call before marking
+  /// it unread: that read-state change recomputes the badges.
+  void observeMarkedUnread(String channelId, NostrEvent event, String myPk) {
+    final channel = channelById(channelId);
+    if (channel != null) _recordUnreadEvent(channel, event, myPk);
+  }
+}
+
 /// Records one observed unread event for a channel's badge state.
 ///
 /// An extension in this part file rather than a method on the notifier because
