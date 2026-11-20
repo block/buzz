@@ -64,7 +64,9 @@ async fn drop_discovery(state: &AppState, tenant: &TenantContext, channel: Uuid,
 }
 
 /// Mark `channel`'s discovery events of `kinds` deleted, as a replacement
-/// leaves the events it supersedes.
+/// leaves the events it supersedes. They are dated a minute earlier, as a
+/// superseded event is: republished in the same second with the same tags,
+/// an event would have the deleted one's id.
 async fn soft_delete_discovery(
     state: &AppState,
     tenant: &TenantContext,
@@ -72,7 +74,7 @@ async fn soft_delete_discovery(
     kinds: &[i32],
 ) {
     sqlx::query(
-        "UPDATE events SET deleted_at = NOW()
+        "UPDATE events SET deleted_at = NOW(), created_at = created_at - INTERVAL '1 minute'
          WHERE community_id = $1 AND channel_id = $2 AND kind = ANY($3)",
     )
     .bind(tenant.community().as_uuid())
