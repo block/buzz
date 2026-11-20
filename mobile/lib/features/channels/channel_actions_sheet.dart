@@ -748,6 +748,15 @@ class _SectionNameDialog extends HookConsumerWidget {
     ref.listen(relayConfigProvider, (_, _) {
       if (!inScope()) Navigator.of(context).pop();
     });
+    // A switch that landed before this first frame found no dialog to close.
+    useEffect(() {
+      if (!inScope()) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (context.mounted) Navigator.of(context).pop();
+        });
+      }
+      return null;
+    }, const []);
     return AlertDialog(
       title: const Text('New Section'),
       content: TextField(controller: controller, autofocus: true),

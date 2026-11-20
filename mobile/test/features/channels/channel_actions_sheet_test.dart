@@ -710,16 +710,18 @@ void main() {
     });
   }
 
-  for (final (pick, newKey) in [
-    ('Work', true),
-    ('Work', false),
-    ('New section…', true),
-    ('New section…', false),
+  for (final (pick, newKey, beforeDialog) in [
+    ('Work', true, false),
+    ('Work', false, false),
+    ('New section…', true, false),
+    ('New section…', false, false),
+    // The switch lands after the tap but before the name dialog's first frame.
+    ('New section…', true, true),
+    ('New section…', false, true),
   ]) {
     testWidgets('Move to section: $pick closes and files nothing once the '
-        'community changes behind it (new signing key: $newKey)', (
-      tester,
-    ) async {
+        'community changes behind it (new signing key: $newKey, before the '
+        'dialog builds: $beforeDialog)', (tester) async {
       tester.view.physicalSize = const Size(1200, 3000);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
@@ -770,7 +772,9 @@ void main() {
                 newKey ? other.nsec : keys.nsec,
                 baseUrl: newKey ? relayUrl : otherRelayUrl,
               );
-      if (pick == 'New section…') {
+      if (beforeDialog) {
+        await tester.tap(find.text(pick));
+      } else if (pick == 'New section…') {
         await tester.tap(find.text(pick));
         await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField), 'Later');
