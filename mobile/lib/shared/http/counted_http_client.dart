@@ -3,11 +3,12 @@ part of 'app_http_client.dart';
 /// Where the shared HTTP client counts its requests.
 ///
 /// The client is created outside Riverpod, so [runWithDiagnostics] sets this
-/// once at startup, to the same reporter the app's root scope uses. Requests
-/// are then attributed to whichever member that reporter currently names. It
-/// is read when a request finishes, not when its client is created, so
-/// clients made earlier count too. A build with no reporting destination
-/// leaves the do-nothing reporter in place.
+/// once at startup, to the same reporter the app's root scope uses. Each
+/// request is attributed to the member that reporter names when the request
+/// starts, and is dropped if it finishes after another member has signed in.
+/// It is read per request, not when a client is created, so clients made
+/// earlier count too. A build with no reporting destination leaves the
+/// do-nothing reporter in place.
 DiagnosticReporter appHttpDiagnostics = const NoopDiagnosticReporter();
 
 /// Counts every request that goes through [_inner]: its backend (the host),
@@ -26,6 +27,12 @@ class _CountedClient extends http.BaseClient {
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
     final stopwatch = Stopwatch()..start();
+    // A request can outlive a community switch; what it saw belongs to the
+    // member who started it, not to the next one.
+    final diagnostics = SignerDiagnosticReporter(
+      appHttpDiagnostics,
+      signer: appHttpDiagnostics.member,
+    );
     final http.StreamedResponse response;
     try {
       response = await _inner.send(request);
@@ -33,11 +40,17 @@ class _CountedClient extends http.BaseClient {
       if (_deadlinePassed[request] ?? false) {
         // Its owner gave up waiting, whether by aborting it or by closing the
         // client it was on.
-        _count(request, stopwatch, failure: NetworkFailure.timeout);
+        _count(
+          diagnostics,
+          request,
+          stopwatch,
+          failure: NetworkFailure.timeout,
+        );
       } else if (!_closed && error is! http.RequestAbortedException) {
         // An abort or close with no deadline behind it is the app cancelling
         // (a view closed, an image scrolled away), not a network failure.
         _count(
+          diagnostics,
           request,
           stopwatch,
           failure: classifyTransportError(error) ?? NetworkFailure.other,
@@ -45,18 +58,24 @@ class _CountedClient extends http.BaseClient {
       }
       rethrow;
     }
-    _count(request, stopwatch, failure: httpStatusFailure(response.statusCode));
+    _count(
+      diagnostics,
+      request,
+      stopwatch,
+      failure: httpStatusFailure(response.statusCode),
+    );
     return response;
   }
 
   void _count(
+    DiagnosticReporter diagnostics,
     http.BaseRequest request,
     Stopwatch stopwatch, {
     required NetworkFailure? failure,
   }) {
     final host = request.url.host;
     if (host.isEmpty) return;
-    appHttpDiagnostics.noteNetworkEvent(
+    diagnostics.noteNetworkEvent(
       NetworkEvent(
         backend: host,
         endpoint: httpEndpoint(request.method, request.url, _traffic),

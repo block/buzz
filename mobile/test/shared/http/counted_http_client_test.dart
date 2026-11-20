@@ -228,6 +228,26 @@ void main() {
     expect(diagnostics.breadcrumbs, hasLength(1));
   });
 
+  test('a request that finishes after another member signs in is not '
+      'counted for them', () async {
+    diagnostics.setMember('a' * 64);
+    final answer = Completer<http.Response>();
+    final pending = send(
+      'https://relay.example.org/query',
+      (_) => answer.future,
+    );
+    await pumpEventQueue();
+    diagnostics.setMember('b' * 64);
+    answer.complete(http.Response('', 503));
+    await pending;
+
+    expect(diagnostics.counts, isEmpty);
+    expect(diagnostics.breadcrumbs, isEmpty);
+
+    await send('https://relay.example.org/query', (_) => status(503));
+    expect(diagnostics.counts.single.member, 'b' * 64);
+  });
+
   test('a deadline that passes after headers leaves the success', () async {
     final client = http.runWithClient(
       newAppHttpClient,
