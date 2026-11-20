@@ -15,7 +15,8 @@ abstract final class DiagnosticFilter {
   /// Breadcrumb category of the SDK's foreground/background entries.
   static const lifecycleCategory = 'app.lifecycle';
 
-  /// Tag carrying the random per-installation identifier on every report.
+  /// Tag carrying the random per-installation identifier on every report, and
+  /// the attribute that carries it on every count.
   static const installIdTag = 'install.id';
 
   /// Attributes the app itself sets on counts and breadcrumbs.
@@ -124,7 +125,9 @@ abstract final class DiagnosticFilter {
 
   /// Whether an attribute [key] may leave the device.
   static bool allowsAttribute(String key) =>
-      appAttributes.contains(key) || _sdkAttributePrefixes.any(key.startsWith);
+      appAttributes.contains(key) ||
+      key == installIdTag ||
+      _sdkAttributePrefixes.any(key.startsWith);
 
   /// The app tags a report with where it came from and which installation
   /// sent it; the SDK tags it with its origin and environment.

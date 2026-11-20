@@ -134,6 +134,14 @@ void main() {
         })).keys.toSet(),
         {'backend', 'user.id'},
       ),
+      (
+        'a count keeps the install ID',
+        () async => (await metric({
+          'backend': SentryAttribute.string('relay.example.org'),
+          'install.id': SentryAttribute.string('i'),
+        })).keys.toSet(),
+        {'backend', 'install.id'},
+      ),
     ];
 
     for (final (name, input, expected) in rows) {

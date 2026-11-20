@@ -35,10 +35,14 @@ Future<void> runWithDiagnostics({
     (options) => configureDiagnostics(options, destination),
     appRunner: () {
       // A scope tag also reaches the native SDKs, so native crashes and
-      // hangs carry it too.
+      // hangs carry it too. Counts carry scope attributes, not tags.
       if (installId != null) {
         Sentry.configureScope(
-          (scope) => scope.setTag(DiagnosticFilter.installIdTag, installId),
+          (scope) => scope
+            ..setTag(DiagnosticFilter.installIdTag, installId)
+            ..setAttributes({
+              DiagnosticFilter.installIdTag: SentryAttribute.string(installId),
+            }),
         );
       }
       final reporter = SentryDiagnosticReporter();
