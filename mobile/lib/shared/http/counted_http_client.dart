@@ -4,17 +4,48 @@ part of 'app_http_client.dart';
 ///
 /// The client is created outside Riverpod, so [runWithDiagnostics] sets this
 /// once at startup, to the same reporter the app's root scope uses. Each
-/// request is attributed to the member that reporter names when the request
-/// starts, and is dropped if it finishes after another member has signed in.
-/// It is read per request, not when a client is created, so clients made
-/// earlier count too. A build with no reporting destination leaves the
+/// request is attributed to the member this reporter names when the request
+/// starts, and is dropped if it finishes while it names anyone else, including
+/// no one. It is read per request, not when a client is created, so clients
+/// made earlier count too. A build with no reporting destination leaves the
 /// do-nothing reporter in place.
 DiagnosticReporter appHttpDiagnostics = const NoopDiagnosticReporter();
 
-/// Counts every request that goes through [_inner]: its backend (the host),
+/// Hosts whose requests are counted under their own name: the relays this
+/// run has used and the build's own services. `DiagnosticMemberBinding`
+/// fills it.
+final appHttpFirstPartyHosts = <String>{};
+
+/// Domains whose subdomains are first party too, such as a build's hosted
+/// relay domains.
+final appHttpFirstPartyDomains = <String>{};
+
+/// The backend a request to any other host is counted under, so a remote
+/// image's host (which can name a person) never leaves the phone, and the
+/// label stays a short fixed list.
+const externalHttpBackend = 'external';
+
+/// The backend label for [host]: the host itself when it is first party,
+/// otherwise [externalHttpBackend].
+@visibleForTesting
+String httpBackend(String host) {
+  final name = host.toLowerCase();
+  if (appHttpFirstPartyHosts.contains(name)) return name;
+  for (final domain in appHttpFirstPartyDomains) {
+    if (name == domain || name.endsWith('.$domain')) return name;
+  }
+  return externalHttpBackend;
+}
+
+/// Counts every request that goes through [_inner]: its backend
+/// ([httpBackend]),
 /// endpoint (from a fixed list), outcome, kind of failure and how long it took
-/// to get response headers. A response whose body fails later is still the
-/// success it was at its headers.
+/// to get response headers.
+///
+/// A failure status is counted at its headers. A success is counted once its
+/// body is read to the end or its reader stops early, or as a timeout if the
+/// body fails or is cancelled after the caller's deadline passed
+/// ([noteHttpDeadline]). A body that is never read is not counted.
 ///
 /// Counting happens as the request finishes and never changes its result.
 class _CountedClient extends http.BaseClient {
@@ -27,12 +58,14 @@ class _CountedClient extends http.BaseClient {
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
     final stopwatch = Stopwatch()..start();
-    // A request can outlive a community switch; what it saw belongs to the
-    // member who started it, not to the next one.
-    final diagnostics = SignerDiagnosticReporter(
-      appHttpDiagnostics,
-      signer: appHttpDiagnostics.member,
-    );
+    // A request can outlive a sign-out or a community switch; what it saw
+    // belongs to the member who started it, not to whoever is next.
+    final member = appHttpDiagnostics.member;
+    void count(NetworkFailure? failure, Duration duration) {
+      if (appHttpDiagnostics.member != member) return;
+      _count(request, duration, failure: failure);
+    }
+
     final http.StreamedResponse response;
     try {
       response = await _inner.send(request);
@@ -40,50 +73,56 @@ class _CountedClient extends http.BaseClient {
       if (_deadlinePassed[request] ?? false) {
         // Its owner gave up waiting, whether by aborting it or by closing the
         // client it was on.
-        _count(
-          diagnostics,
-          request,
-          stopwatch,
-          failure: NetworkFailure.timeout,
-        );
+        count(NetworkFailure.timeout, stopwatch.elapsed);
       } else if (!_closed && error is! http.RequestAbortedException) {
         // An abort or close with no deadline behind it is the app cancelling
         // (a view closed, an image scrolled away), not a network failure.
-        _count(
-          diagnostics,
-          request,
-          stopwatch,
-          failure: classifyTransportError(error) ?? NetworkFailure.other,
+        count(
+          classifyTransportError(error) ?? NetworkFailure.other,
+          stopwatch.elapsed,
         );
       }
       rethrow;
     }
-    _count(
-      diagnostics,
-      request,
-      stopwatch,
-      failure: httpStatusFailure(response.statusCode),
+    final headers = stopwatch.elapsed;
+    if (httpStatusFailure(response.statusCode) case final failure?) {
+      count(failure, headers);
+      return response;
+    }
+    var settled = false;
+    void settle({required bool complete}) {
+      if (settled) return;
+      settled = true;
+      count(
+        !complete && (_deadlinePassed[request] ?? false)
+            ? NetworkFailure.timeout
+            : null,
+        headers,
+      );
+    }
+
+    return _withStream(
+      response,
+      _settledStream(response.stream, onEnd: settle),
     );
-    return response;
   }
 
   void _count(
-    DiagnosticReporter diagnostics,
     http.BaseRequest request,
-    Stopwatch stopwatch, {
+    Duration duration, {
     required NetworkFailure? failure,
   }) {
     final host = request.url.host;
     if (host.isEmpty) return;
-    diagnostics.noteNetworkEvent(
+    appHttpDiagnostics.noteNetworkEvent(
       NetworkEvent(
-        backend: host,
+        backend: httpBackend(host),
         endpoint: httpEndpoint(request.method, request.url, _traffic),
         outcome: failure == null
             ? NetworkOutcome.success
             : NetworkOutcome.failure,
         failure: failure,
-        duration: stopwatch.elapsed,
+        duration: duration,
       ),
       // Successes are the bulk of requests and would push the trail's useful
       // entries out of the SDK's limited buffer.
@@ -98,15 +137,94 @@ class _CountedClient extends http.BaseClient {
   }
 }
 
+/// [body] unchanged, calling [onEnd] when it ends (complete), or fails or its
+/// listener cancels (not complete). A failure is passed through as it was.
+Stream<List<int>> _settledStream(
+  Stream<List<int>> body, {
+  required void Function({required bool complete}) onEnd,
+}) {
+  late final StreamController<List<int>> controller;
+  StreamSubscription<List<int>>? subscription;
+  controller = StreamController<List<int>>(
+    sync: true,
+    onListen: () {
+      subscription = body.listen(
+        controller.add,
+        onError: (Object error, StackTrace stack) {
+          onEnd(complete: false);
+          controller.addError(error, stack);
+        },
+        onDone: () {
+          onEnd(complete: true);
+          controller.close();
+        },
+      );
+    },
+    onPause: () => subscription?.pause(),
+    onResume: () => subscription?.resume(),
+    onCancel: () {
+      onEnd(complete: false);
+      return subscription?.cancel();
+    },
+  );
+  return controller.stream;
+}
+
+/// [response] with its body replaced by [stream], keeping everything else.
+http.StreamedResponse _withStream(
+  http.StreamedResponse response,
+  Stream<List<int>> stream,
+) => response is http.BaseResponseWithUrl
+    ? _StreamedResponseWithUrl(
+        stream,
+        response.statusCode,
+        url: (response as http.BaseResponseWithUrl).url,
+        contentLength: response.contentLength,
+        request: response.request,
+        headers: response.headers,
+        isRedirect: response.isRedirect,
+        persistentConnection: response.persistentConnection,
+        reasonPhrase: response.reasonPhrase,
+      )
+    : http.StreamedResponse(
+        stream,
+        response.statusCode,
+        contentLength: response.contentLength,
+        request: response.request,
+        headers: response.headers,
+        isRedirect: response.isRedirect,
+        persistentConnection: response.persistentConnection,
+        reasonPhrase: response.reasonPhrase,
+      );
+
+class _StreamedResponseWithUrl extends http.StreamedResponse
+    implements http.BaseResponseWithUrl {
+  _StreamedResponseWithUrl(
+    super.stream,
+    super.statusCode, {
+    required this.url,
+    super.contentLength,
+    super.request,
+    super.headers,
+    super.isRedirect,
+    super.persistentConnection,
+    super.reasonPhrase,
+  });
+
+  @override
+  final Uri url;
+}
+
 final _deadlinePassed = Expando<bool>('HTTP deadline passed');
 
 /// Records that [request]'s deadline passed. Call it before aborting the
 /// request, or closing its client, because the caller stopped waiting.
 ///
-/// The shared client then counts the request as a timeout if it had no
-/// response headers yet; one with headers was already counted as the success
-/// it was. An abort or close without this is the app cancelling and is not
-/// counted.
+/// The shared client then counts the request as a timeout, whether it was
+/// still waiting for headers or reading a successful response's body. A
+/// response already read to the end, or a failure status counted at its
+/// headers, keeps its count. An abort or close without this is the app
+/// cancelling and is not counted.
 void noteHttpDeadline(http.BaseRequest request) =>
     _deadlinePassed[request] = true;
 
@@ -201,6 +319,11 @@ NetworkFailure? classifyTransportError(Object? error) {
     }
     if (code == 101 || code == 51 || text.contains('network is unreachable')) {
       return NetworkFailure.offline;
+    }
+    // ECONNRESET. Dart's HTTP client throws a socket error that is also a
+    // ClientException, so the reset check below never sees it.
+    if (code == 104 || code == 54 || text.contains('connection reset')) {
+      return NetworkFailure.disconnected;
     }
     return NetworkFailure.unreachable;
   }

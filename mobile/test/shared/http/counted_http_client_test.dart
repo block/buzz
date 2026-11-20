@@ -11,6 +11,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../helpers/recording_diagnostics.dart';
 
@@ -20,7 +21,12 @@ void main() {
   setUp(() {
     diagnostics = RecordingDiagnostics();
     appHttpDiagnostics = diagnostics;
-    addTearDown(() => appHttpDiagnostics = const NoopDiagnosticReporter());
+    appHttpFirstPartyHosts.addAll({'relay.example.org', 'account.example.org'});
+    addTearDown(() {
+      appHttpDiagnostics = const NoopDiagnosticReporter();
+      appHttpFirstPartyHosts.clear();
+      appHttpFirstPartyDomains.clear();
+    });
   });
 
   /// One request through the app's shared client, answered by [handler].
@@ -35,9 +41,9 @@ void main() {
       () => MockClient(handler),
     );
     try {
-      return (await client.send(
-        http.Request(method, Uri.parse(url)),
-      )).statusCode;
+      final response = await client.send(http.Request(method, Uri.parse(url)));
+      await response.stream.drain<void>();
+      return response.statusCode;
     } catch (error) {
       return error;
     } finally {
@@ -46,6 +52,51 @@ void main() {
   }
 
   Future<http.Response> status(int code) async => http.Response('', code);
+
+  test('remote media hosts are counted as external, never by name', () async {
+    appHttpFirstPartyDomains.add('communities.example.com');
+    for (final url in [
+      'https://alice-smith.photos.example.net/a.jpg',
+      'https://u-81f3c2.cdn.example.net/b.png',
+      'https://ALICE.example.net/c.gif',
+      'https://relay.example.org/media/d.jpg',
+      'https://team-x.communities.example.com/media/e.jpg',
+    ]) {
+      await send(url, (_) => status(200), traffic: HttpTraffic.media);
+    }
+    await send(
+      'https://bob.example.net/f.jpg',
+      (_) => status(404),
+      traffic: HttpTraffic.media,
+    );
+
+    expect(
+      [for (final event in diagnostics.events) event.backend],
+      [
+        externalHttpBackend,
+        externalHttpBackend,
+        externalHttpBackend,
+        'relay.example.org',
+        'team-x.communities.example.com',
+        externalHttpBackend,
+      ],
+    );
+    expect(diagnostics.breadcrumbs.single.backend, externalHttpBackend);
+  });
+
+  test('a relay WebSocket reset is a disconnect', () {
+    expect(
+      classifyTransportError(
+        WebSocketChannelException.from(
+          const SocketException(
+            'Connection failed',
+            osError: OSError('Connection reset by peer', 54),
+          ),
+        ),
+      ),
+      NetworkFailure.disconnected,
+    );
+  });
 
   test('every response is counted by its status', () async {
     final cases = <int, NetworkFailure?>{
@@ -120,7 +171,7 @@ void main() {
     );
     expect(
       {for (final event in diagnostics.events) event.backend},
-      {'relay.example.org', 'account.example.org', 'cdn.example.org'},
+      {'relay.example.org', 'account.example.org', externalHttpBackend},
     );
   });
 
@@ -150,6 +201,16 @@ void main() {
           'Connection failed',
           osError: OSError('Operation timed out', 60),
         ): NetworkFailure.timeout,
+        const SocketException(
+          'Connection failed',
+          osError: OSError('Connection reset by peer', 54),
+        ): NetworkFailure.disconnected,
+        const SocketException(
+          'Connection failed',
+          osError: OSError('Connection reset by peer', 104),
+        ): NetworkFailure.disconnected,
+        _SocketClientException('Connection reset by peer'):
+            NetworkFailure.disconnected,
         const HandshakeException('CERTIFICATE_VERIFY_FAILED'):
             NetworkFailure.insecure,
         http.ClientException(
@@ -248,23 +309,151 @@ void main() {
     expect(diagnostics.counts.single.member, 'b' * 64);
   });
 
-  test('a deadline that passes after headers leaves the success', () async {
+  /// A client whose one response has a 200 status and the body [body].
+  http.Client streamingClient(Stream<List<int>> body) {
     final client = http.runWithClient(
       newAppHttpClient,
-      () => MockClient((_) async => http.Response('', 200)),
+      () => MockClient.streaming(
+        (_, _) async => http.StreamedResponse(body, 200),
+      ),
     );
     addTearDown(client.close);
-    final request = http.Request(
-      'GET',
-      Uri.parse('https://relay.example.org/'),
-    );
-    await client.send(request);
-    noteHttpDeadline(request);
+    return client;
+  }
 
-    expect(diagnostics.events.map((event) => event.outcome), [
-      NetworkOutcome.success,
+  test(
+    'a success is counted when its body ends, with header latency',
+    () async {
+      final body = StreamController<List<int>>();
+      final client = streamingClient(body.stream);
+      final response = await client.send(
+        http.Request('GET', Uri.parse('https://relay.example.org/')),
+      );
+      final read = response.stream.drain<void>();
+      await pumpEventQueue();
+      expect(diagnostics.events, isEmpty);
+
+      body
+        ..add([1])
+        ..close();
+      await read;
+
+      expect(diagnostics.events.single.outcome, NetworkOutcome.success);
+      expect(diagnostics.breadcrumbs, isEmpty);
+    },
+  );
+
+  test('a deadline that passes mid-body counts one timeout', () async {
+    final body = StreamController<List<int>>();
+    final client = streamingClient(body.stream);
+    final request = http.Request(
+      'POST',
+      Uri.parse('https://relay.example.org/query'),
+    );
+    final response = await client.send(request);
+    final read = response.stream.drain<void>().then<void>(
+      (_) {},
+      onError: (_) {},
+    );
+    body.add([1]);
+    await pumpEventQueue();
+    noteHttpDeadline(request);
+    body.addError(http.RequestAbortedException());
+    await read;
+
+    expect(diagnostics.events.map((event) => event.failure), [
+      NetworkFailure.timeout,
     ]);
+    expect(diagnostics.breadcrumbs, hasLength(1));
   });
+
+  test(
+    'a body that fails with no deadline behind it stays a success',
+    () async {
+      final client = streamingClient(
+        Stream.error(http.ClientException('Connection closed')),
+      );
+      final response = await client.send(
+        http.Request('GET', Uri.parse('https://relay.example.org/')),
+      );
+      await response.stream.drain<void>().then<void>((_) {}, onError: (_) {});
+
+      expect(diagnostics.events.single.outcome, NetworkOutcome.success);
+    },
+  );
+
+  test('a reader that stops early counts the success once', () async {
+    final body = StreamController<List<int>>();
+    final client = streamingClient(body.stream);
+    final response = await client.send(
+      http.Request('GET', Uri.parse('https://relay.example.org/')),
+    );
+    final subscription = response.stream.listen((_) {});
+    body.add([1]);
+    await pumpEventQueue();
+    await subscription.cancel();
+
+    expect(diagnostics.events.single.outcome, NetworkOutcome.success);
+  });
+
+  test(
+    'a deadline that passes after the body ends leaves the success',
+    () async {
+      final client = http.runWithClient(
+        newAppHttpClient,
+        () => MockClient((_) async => http.Response('', 200)),
+      );
+      addTearDown(client.close);
+      final request = http.Request(
+        'GET',
+        Uri.parse('https://relay.example.org/'),
+      );
+      await (await client.send(request)).stream.drain<void>();
+      noteHttpDeadline(request);
+
+      expect(diagnostics.events.map((event) => event.outcome), [
+        NetworkOutcome.success,
+      ]);
+    },
+  );
+
+  test('a request held across a sign-out is not counted, even after the '
+      'member signs back in or another member signs in', () async {
+    for (final next in ['a' * 64, 'b' * 64]) {
+      diagnostics.setMember('a' * 64);
+      final answer = Completer<http.Response>();
+      final pending = send(
+        'https://relay.example.org/query',
+        (_) => answer.future,
+      );
+      await pumpEventQueue();
+      diagnostics.setMember(null);
+      answer.complete(http.Response('', 503));
+      await pending;
+      diagnostics.setMember(next);
+    }
+
+    expect(diagnostics.counts, isEmpty);
+    expect(diagnostics.breadcrumbs, isEmpty);
+  });
+
+  test(
+    'a success whose body ends after a member switch is not counted',
+    () async {
+      diagnostics.setMember('a' * 64);
+      final body = StreamController<List<int>>();
+      final client = streamingClient(body.stream);
+      final response = await client.send(
+        http.Request('GET', Uri.parse('https://relay.example.org/')),
+      );
+      final read = response.stream.drain<void>();
+      diagnostics.setMember('b' * 64);
+      await body.close();
+      await read;
+
+      expect(diagnostics.counts, isEmpty);
+    },
+  );
 
   test(
     'a counting call that fails does not fail or delay the request',
@@ -318,4 +507,39 @@ void main() {
       expect(members[2], isNull);
     },
   );
+
+  test('each relay the app uses is named in HTTP counts', () async {
+    addTearDown(appHttpFirstPartyHosts.clear);
+    final container = ProviderContainer(
+      overrides: [activeCommunityProvider.overrideWith((ref) async => null)],
+    );
+    addTearDown(container.dispose);
+    container.listen(diagnosticBackendsProvider, (_, _) {});
+    final relay = container.read(relayConfigProvider.notifier);
+
+    relay.update(baseUrl: 'https://one.example.org');
+    container.read(diagnosticBackendsProvider);
+    relay.update(baseUrl: 'https://Two.example.org:8443');
+    container.read(diagnosticBackendsProvider);
+
+    expect(httpBackend('one.example.org'), 'one.example.org');
+    expect(httpBackend('two.example.org'), 'two.example.org');
+    expect(httpBackend('photos.example.net'), externalHttpBackend);
+  });
+}
+
+/// Like Dart's own HTTP client error for a failed socket: both a
+/// [SocketException] and an [http.ClientException].
+class _SocketClientException extends http.ClientException
+    implements SocketException {
+  _SocketClientException(super.message);
+
+  @override
+  InternetAddress? get address => null;
+
+  @override
+  OSError? get osError => null;
+
+  @override
+  int? get port => null;
 }

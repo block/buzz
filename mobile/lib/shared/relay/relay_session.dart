@@ -101,6 +101,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   DateTime? _backgroundedAt;
   DateTime? _connectedAt;
   DateTime? _connectStartedAt;
+  // The relay sent its terminal authorization denial on this connection.
+  bool _authorizationDenied = false;
   DateTime? _lastInboundAt;
   int _reconnectDelayMs = _baseReconnectDelayMs;
   int _subIdCounter = 0;
@@ -600,6 +602,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _markLiveSubscriptionsClosed();
     _connectedAt = null;
     _connectStartedAt = _now();
+    _authorizationDenied = false;
     if (!renewed &&
         (_connectedRelay == config.baseUrl || state.reconnectAttempt > 0)) {
       _noteNetwork(NetworkEndpoint.relayReconnect);
@@ -633,6 +636,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
             terminal: renewed,
           );
           if (!renewed) {
+            // The renewal restarts the clock, so the refusal is counted now.
+            _noteUpgradeRefused();
             unawaited(_connect(config, renewed: true));
             return;
           }
@@ -676,7 +681,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     if (_disposed || generation != _connectionGeneration) return;
     _socketConnected = false;
     final connectedAt = _connectedAt;
-    _noteDisconnected(error);
+    _noteDisconnected(error, denied: _authorizationDenied);
+    _noteLostOperations();
     _connectedAt = null;
     if (connectedAt != null &&
         isRelayConnectionStable(_now().difference(connectedAt))) {
@@ -821,6 +827,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         _handleEose(data);
       case 'CLOSED':
         _handleClosed(data);
+      case 'NOTICE':
+        _noteAuthorizationDenied(data);
       case 'OK':
         _handleOk(data);
     }

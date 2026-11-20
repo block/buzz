@@ -29,16 +29,58 @@ extension _RelaySessionDiagnostics on RelaySessionNotifier {
 
   /// Counts the end of a connect attempt or of an open connection, once: a
   /// socket that fails while authenticating reports it twice.
-  void _noteDisconnected(Object? error) {
+  ///
+  /// [denied] says the relay announced it was refusing the member, which
+  /// outranks however the socket then ended.
+  void _noteDisconnected(Object? error, {bool denied = false}) {
     final since = _connectStartedAt;
     if (since == null && _connectedAt == null) return;
     _connectStartedAt = null;
     _noteNetwork(
       NetworkEndpoint.relayConnection,
-      failure: _connectionFailure(error),
+      failure: denied ? NetworkFailure.authRefused : _connectionFailure(error),
       // How long a failed attempt took. A lost connection has no duration.
       since: _connectedAt == null ? since : null,
     );
+  }
+
+  /// Counts a connect attempt a protected relay refused at the upgrade, which
+  /// the session retries once with a renewed assertion.
+  void _noteUpgradeRefused() => _noteNetwork(
+    NetworkEndpoint.relayConnection,
+    failure: NetworkFailure.authRefused,
+    since: _connectStartedAt,
+  );
+
+  /// Remembers the relay's terminal denial, which an expired hosted session
+  /// also gets, so the close that follows is counted as a refusal. A bare
+  /// NOTICE changes nothing else.
+  void _noteAuthorizationDenied(List<dynamic> data) {
+    if (data.length > 1 && data[1] == _authorizationDeniedNotice) {
+      _authorizationDenied = true;
+    }
+  }
+
+  /// Counts the queries and publishes that were sent or waiting when the
+  /// socket dropped, once each: their timers and futures end with the socket.
+  /// Closing the session on purpose never comes through here.
+  void _noteLostOperations() {
+    for (final subscription in _historySubscriptions.values) {
+      if (subscription.completer.isCompleted) continue;
+      _noteNetwork(
+        NetworkEndpoint.relayQuery,
+        failure: NetworkFailure.disconnected,
+        since: subscription.startedAt,
+      );
+    }
+    for (final pending in _pendingEvents.values) {
+      if (pending.completer.isCompleted) continue;
+      _noteNetwork(
+        NetworkEndpoint.relayPublish,
+        failure: NetworkFailure.disconnected,
+        since: pending.startedAt,
+      );
+    }
   }
 
   NetworkFailure _connectionFailure(Object? error) {
@@ -55,6 +97,10 @@ extension _RelaySessionDiagnostics on RelaySessionNotifier {
     return classifyTransportError(error) ?? NetworkFailure.disconnected;
   }
 }
+
+/// The relay's NOTICE for a refused or expired authorization, sent just before
+/// it closes the connection with 1008.
+const _authorizationDeniedNotice = 'restricted: authorization denied';
 
 /// The failure kind of a relay `OK` or `CLOSED` reason. Only the prefix is
 /// read: the rest is free text.

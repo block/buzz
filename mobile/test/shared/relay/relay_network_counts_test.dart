@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
+import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -18,10 +20,14 @@ const _publish = NetworkEndpoint.relayPublish;
 /// What the session counts for what the network and the relay do, with only
 /// the socket and HTTP boundary fake. None of it is an error report.
 void main() {
-  void journey(String name, void Function(FakeAsync async, _Session s) body) {
+  void journey(
+    String name,
+    void Function(FakeAsync async, _Session s) body, {
+    bool protectedRelay = false,
+  }) {
     test(name, () {
       fakeAsync((async) {
-        final session = _Session(async);
+        final session = _Session(async, protectedRelay: protectedRelay);
         addTearDown(session.container.dispose);
         body(async, session);
       });
@@ -142,6 +148,129 @@ void main() {
     expect(s.counts.errors, isEmpty);
   });
 
+  journey('operations lost with the socket are counted once each', (async, s) {
+    s.settle();
+    s.counts.clear();
+
+    void sendAndHold() {
+      s.relay.holdReq();
+      s.run(() => s.session.fetchHistory(const NostrFilter(kinds: [1])));
+      s.relay.holdOk();
+      s.run(() => s.session.publish(s.relay.sign(kind: 1, tags: const [])));
+      s.settle();
+    }
+
+    // A query and a publish already sent when the connection drops.
+    sendAndHold();
+    s.relay.drop();
+    // Past the backoff and every timeout: nothing is counted a second time.
+    s.settle(const Duration(seconds: 40));
+    expect(s.counts.outcomes, [
+      (_connection, NetworkFailure.disconnected),
+      (_query, NetworkFailure.disconnected),
+      (_publish, NetworkFailure.disconnected),
+      (NetworkEndpoint.relayReconnect, null),
+      (_connection, null),
+    ]);
+    expect(s.counts.errors, isEmpty);
+
+    // Moving to the background ends them on purpose, which is not a failure.
+    s.counts.clear();
+    sendAndHold();
+    s.session.onAppPaused();
+    s.settle(const Duration(seconds: 40));
+    expect(s.counts.outcomes, isEmpty);
+    s.session.onAppResumed();
+    s.settle(const Duration(seconds: 40));
+
+    // Nor is switching community.
+    s.counts.clear();
+    sendAndHold();
+    s.container
+        .read(relayConfigProvider.notifier)
+        .update(baseUrl: 'https://other.test', nsec: s.relay.keys.nsec);
+    s.settle(const Duration(seconds: 40));
+    expect(s.counts.outcomes, [(_connection, null)]);
+  });
+
+  journey('a protected relay\'s refusals are counted before the renewal', (
+    async,
+    s,
+  ) {
+    // The first upgrade is refused after 2 s. Renewing the assertion works,
+    // so the refusal would otherwise leave no trace.
+    s.relay.holdAuth();
+    s.settle(const Duration(seconds: 2));
+    s.relay.drop(const WebSocketException('refused', 403));
+    s.settle();
+    expect(s.counts.outcomes, [
+      (_connection, NetworkFailure.authRefused),
+      (_connection, null),
+    ]);
+    expect(s.counts.events.first.duration, const Duration(seconds: 2));
+    // The renewed attempt is its own measurement.
+    expect(s.counts.events.last.duration, lessThan(const Duration(seconds: 1)));
+
+    // When the renewal is refused too, both refusals are counted and the
+    // session gives up.
+    s.counts.clear();
+    s.relay.holdAuth();
+    s.run(() => s.session.reconnect());
+    s.settle(const Duration(seconds: 3));
+    s.relay.holdAuth();
+    s.relay.drop(const WebSocketException('refused', 403));
+    s.settle(const Duration(seconds: 1));
+    s.relay.drop(const WebSocketException('refused', 403));
+    s.settle(const Duration(seconds: 40));
+    expect(s.counts.outcomes, [
+      (NetworkEndpoint.relayReconnect, null),
+      (_connection, NetworkFailure.authRefused),
+      (_connection, NetworkFailure.authRefused),
+    ]);
+    expect(s.counts.events.skip(1).map((e) => e.duration), [
+      const Duration(seconds: 3),
+      const Duration(seconds: 1),
+    ]);
+    expect(s.session.state.status, SessionStatus.disconnected);
+  }, protectedRelay: true);
+
+  journey('the relay\'s authorization denial is counted as a refusal', (
+    async,
+    s,
+  ) {
+    s.settle();
+    s.counts.clear();
+
+    // An ordinary NOTICE says nothing about the close that follows.
+    s.session.debugHandleMessage(['NOTICE', 'still here']);
+    s.relay.drop();
+    s.settle(const Duration(seconds: 40));
+
+    // The denial an expired hosted session gets comes before its close.
+    s.session.debugHandleMessage([
+      'NOTICE',
+      'restricted: authorization denied',
+    ]);
+    s.relay.drop();
+    s.settle(const Duration(seconds: 40));
+
+    // It describes one connection only.
+    s.relay.drop();
+    s.settle(const Duration(seconds: 40));
+
+    expect(s.counts.outcomes, [
+      (_connection, NetworkFailure.disconnected),
+      (NetworkEndpoint.relayReconnect, null),
+      (_connection, null),
+      (_connection, NetworkFailure.authRefused),
+      (NetworkEndpoint.relayReconnect, null),
+      (_connection, null),
+      (_connection, NetworkFailure.disconnected),
+      (NetworkEndpoint.relayReconnect, null),
+      (_connection, null),
+    ]);
+  });
+
   journey('a community switch\'s first connect is not a reconnect', (async, s) {
     s.settle();
     s.counts.clear();
@@ -168,10 +297,12 @@ void main() {
 }
 
 class _Session {
-  _Session(this.async) {
+  _Session(this.async, {bool protectedRelay = false}) {
     container = ProviderContainer(
       overrides: [
         ...relay.overrides,
+        if (protectedRelay)
+          hostedRelayAuthProvider.overrideWithValue(_ProtectedAuth()),
         diagnosticReporterProvider.overrideWithValue(counts),
       ],
     );
@@ -179,7 +310,8 @@ class _Session {
   }
 
   final FakeAsync async;
-  final relay = FakeRelay();
+  // On the fake clock, so durations are the time that passed in the test.
+  late final relay = FakeRelay(now: async.getClock(DateTime.utc(2026)).now);
   final counts = RecordingDiagnostics();
   late final ProviderContainer container;
 
@@ -191,4 +323,24 @@ class _Session {
   /// Starts [action], whose failure is part of the journey, not the test's.
   void run(Future<Object?> Function() action) =>
       unawaited(action().then<void>((_) {}, onError: (_) {}));
+}
+
+/// A hosted relay that wants an assertion, which it always gets.
+class _ProtectedAuth extends HostedRelayAuth {
+  _ProtectedAuth() : super(BuilderlabAccountClient()) {
+    addTearDown(() {
+      dispose();
+      account.dispose();
+    });
+  }
+
+  @override
+  bool protects(RelayConfig config) => true;
+
+  @override
+  Future<Map<String, String>> headers(
+    RelayConfig config, {
+    bool background = false,
+    bool fresh = false,
+  }) async => {'Nostr-Federated-Identity': 'assertion'};
 }
