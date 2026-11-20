@@ -216,6 +216,31 @@ class RunnerTests: XCTestCase {
   }
 
   @MainActor
+  func testCompactVerticalNavigationGlassMatchesRailControls() async {
+    // Duo's cover rail: three 48-point surfaces with 12-point gaps.
+    let glass = MergingNavigationGlass(
+      frame: CGRect(x: 0, y: 0, width: 48, height: 168), controlSize: 48, mergeSpacing: 8
+    )
+    glass.vertical = true
+    glass.setNeedsLayout()
+    glass.layoutIfNeeded()
+    for surface in [glass.leftSurface, glass.centerSurface, glass.rightSurface] {
+      XCTAssertEqual(surface.bounds.size, CGSize(width: 48, height: 48))
+      XCTAssertEqual(surface.center.x, 24)
+    }
+    XCTAssertEqual(glass.leftSurface.center.y, 24)
+    XCTAssertEqual(glass.centerSurface.center.y, 84)
+    XCTAssertEqual(glass.rightSurface.center.y, 144)
+    glass.setMenuOpen(true, animator: nil)
+    let merged = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+      glass.leftSurface.alpha == 0 && glass.rightSurface.alpha == 0
+    }, object: nil)
+    await fulfillment(of: [merged], timeout: 2)
+    XCTAssertEqual(glass.leftSurface.transform.ty, 60, accuracy: 0.01)
+    XCTAssertEqual(glass.rightSurface.transform.ty, -60, accuracy: 0.01)
+  }
+
+  @MainActor
   func testRejectedCommunityEntryPresentationCompletesAndAllowsRetry() async throws {
     let messenger = NavigationTestMessenger()
     let presenter = RejectedCommunityEntryPresenter()
