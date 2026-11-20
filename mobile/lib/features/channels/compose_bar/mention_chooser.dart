@@ -176,7 +176,7 @@ _MentionChooser _useMentionChooser(
     }
     var open = findMentionQuery(text, sel.baseOffset);
     if (open != null &&
-        _startsSelectedMention(controller.mentions, open.start)) {
+        _startsSelectedMention(controller.bindings, open.start)) {
       open = null;
     }
 

@@ -287,7 +287,7 @@ class ComposeBar extends HookConsumerWidget {
         );
         final pubkeys = [
           ...memberList.map((m) => m.pubkey),
-          for (final m in controller.mentions)
+          for (final m in controller.bindings)
             if (m.candidate.requiresRevalidation) m.candidate.pubkey,
           ...?relayAgents?.map((a) => a.pubkey),
           ...?agentOwners?.values,
@@ -603,7 +603,7 @@ class ComposeBar extends HookConsumerWidget {
 
         final draftText = controller.value;
         final draftAttachments = List<_PendingAttachment>.of(attachments.value);
-        final draftMentions = controller.mentions;
+        final draftMentions = controller.bindings;
         final draftMentionsInvalid = controller.mentionsInvalid;
         clearComposer();
         final clearedDraftRevision = draftRevision.value;

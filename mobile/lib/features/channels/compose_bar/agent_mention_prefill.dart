@@ -140,7 +140,7 @@ void _useAgentMentionPrefill({
     // prefill: the keys and their places must match too.
     if (text == controller.text &&
         listEquals(
-          [for (final m in controller.mentions) (m.start, m.end, m.pubkey)],
+          [for (final m in controller.bindings) (m.start, m.end, m.pubkey)],
           [for (final m in bindings) (m.start, m.end, m.pubkey)],
         )) {
       return null;

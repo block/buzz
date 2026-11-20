@@ -315,6 +315,8 @@ void mentionChipTests() {
     final samB = '2' * 64;
     final bobBot = '3' * 64;
     final quinn = UserProfile(pubkey: 'c' * 64, displayName: 'Quinn');
+    // A person outside the channel who shares the member Alice's name.
+    final otherAlice = UserProfile(pubkey: 'd' * 64, displayName: 'Alice');
     final signer = nostr.Keys.generate();
     List<String>? sent;
     String? sentText;
@@ -345,6 +347,7 @@ void mentionChipTests() {
         ],
         searchPeople: (query) async => [
           if (query.toLowerCase().startsWith('q')) quinn,
+          if (query.toLowerCase().startsWith('ali')) otherAlice,
         ],
         onSend: (text, keys, {mediaTags = const []}) async {
           sentText = text;
@@ -443,9 +446,10 @@ void mentionChipTests() {
     }
 
     // Review of #9699 (mentions in code): code is literal text. A chip the
-    // Code or Code block button wraps stops being a chip and loses its
-    // recipient, so the composer shows what the send does: nobody is
-    // notified, and a person outside the channel raises no prompt.
+    // Code or Code block button wraps stops being a chip and its binding
+    // goes dormant, so the composer shows what the send does: nobody is
+    // notified, and a person outside the channel raises no prompt. The
+    // saved draft keeps the dormant binding.
     for (final (icon, open, close) in [
       (BuzzIcons.code, '`', '`'),
       (BuzzIcons.squareCode, '```\n', '\n```'),
@@ -457,7 +461,13 @@ void mentionChipTests() {
       await format(icon);
       expect(controller.text, '$open@Bob$close ');
       expect(personChip, findsNothing, reason: open);
-      expect(saved(), isEmpty, reason: open);
+      expect(saved(), [
+        ComposeDraftMention(
+          start: open.length,
+          end: open.length + 4,
+          pubkey: bob,
+        ),
+      ], reason: open);
       await send();
       expect(sentText, '$open@Bob$close');
       expect(sent, isEmpty, reason: open);
@@ -488,25 +498,84 @@ void mentionChipTests() {
     await pickRow('`see @Bob ` @bo', row('Bob'));
     expect(controller.text, '`see @Bob ` @Bob ');
     expect(personChip, findsOneWidget);
-    expect(saved(), [ComposeDraftMention(start: 12, end: 16, pubkey: bob)]);
+    expect(saved(), [
+      ComposeDraftMention(start: 5, end: 9, pubkey: bob),
+      ComposeDraftMention(start: 12, end: 16, pubkey: bob),
+    ]);
     await send();
+    expect(sentText, '`see @Bob ` @Bob');
     expect(sent, [bob]);
-    // Taking the code away by hand leaves a typed name: a member's notifies
-    // by the typed rules, a person outside the channel is not brought back.
-    for (final (name, keys) in [
-      ('Bob', [bob]),
-      ('Quinn', <String>[]),
-    ]) {
-      sent = null;
-      await pickRow('@${name.toLowerCase()}', row(name));
-      await select(0, name.length + 1);
-      await format(BuzzIcons.code);
-      await tester.enterText(field, '@$name ');
+    // Review of #9699 (pick lost after a Code round trip): the toolbar
+    // cannot take Code off, so the backticks are deleted by hand. The pick
+    // is live again as picked: a member is notified, a person outside the
+    // channel meets the prompt, and an outsider who shares a member's name
+    // is still that outsider, never the member.
+    Future<void> deleteBefore(int caret) async {
+      controller.selection = TextSelection.collapsed(offset: caret);
       await tester.pump();
+      backspace(tester, controller);
+      await tester.pump();
+    }
+
+    for (final (name, target, key, outside) in [
+      ('Bob', row('Bob'), bob, false),
+      ('Quinn', row('Quinn'), quinn.pubkey, true),
+      (
+        'Alice',
+        // The member's row comes first; the outsider's is "not in channel".
+        find
+            .descendant(
+              of: find.byKey(const ValueKey('mention-suggestions-popover')),
+              matching: find.textContaining('Alice · '),
+            )
+            .last,
+        otherAlice.pubkey,
+        true,
+      ),
+    ]) {
+      sent = sentTags = null;
+      await pickRow('@${name.toLowerCase()}', target);
+      final end = name.length + 1;
+      expect(saved(), [
+        ComposeDraftMention(start: 0, end: end, pubkey: key),
+      ], reason: name);
+      await select(0, end);
+      await format(BuzzIcons.code);
+      expect(controller.text, '`@$name` ', reason: name);
       expect(personChip, findsNothing, reason: name);
+      expect(saved(), [
+        ComposeDraftMention(start: 1, end: end + 1, pubkey: key),
+      ], reason: name);
+      await deleteBefore(end + 2);
+      await deleteBefore(1);
+      expect(controller.text, '@$name ', reason: name);
+      expect(personChip, findsOneWidget, reason: name);
+      expect(saved(), [
+        ComposeDraftMention(start: 0, end: end, pubkey: key),
+      ], reason: name);
       await send();
-      expect(find.byType(AlertDialog), findsNothing, reason: name);
-      expect(sent, keys, reason: name);
+      if (!outside) {
+        expect(find.byType(AlertDialog), findsNothing, reason: name);
+        expect(sent, [key], reason: name);
+        continue;
+      }
+      expect(
+        find.text('Mention people outside this channel?'),
+        findsOneWidget,
+        reason: name,
+      );
+      await tester.tap(
+        find
+            .descendant(
+              of: find.byType(AlertDialog),
+              matching: find.byType(TextButton),
+            )
+            .first,
+      );
+      await tester.pumpAndSettle();
+      expect(sent, isNot(contains(alice)), reason: name);
+      expect(sentTags, contains(orderedEquals(['mention', key])), reason: name);
+      await _expandComposer(tester);
     }
     // A typed, unpicked member name inside code notifies nobody either.
     for (final typed in [
@@ -540,12 +609,43 @@ void mentionChipTests() {
       await tester.enterText(field, '[see @$name ](https://example.org)');
       await tester.pump();
       expect(personChip, findsNothing, reason: name);
-      expect(saved(), isEmpty, reason: name);
+      final key = name == 'Bob' ? bob : quinn.pubkey;
+      final dormant = [
+        ComposeDraftMention(start: 5, end: 6 + name.length, pubkey: key),
+      ];
+      expect(saved(), dormant, reason: name);
       await send();
       expect(find.byType(AlertDialog), findsNothing, reason: name);
       expect(sentText, '[see @$name ](https://example.org)', reason: name);
       expect(sent, isEmpty, reason: name);
       expect(sentTags, isEmpty, reason: name);
+
+      // Taking the link away again brings the pick back as picked.
+      sent = sentTags = null;
+      await pickRow('[see @${name.toLowerCase()}', row(name));
+      await tester.enterText(field, '[see @$name ](https://example.org)');
+      await tester.pump();
+      await tester.enterText(field, '[see @$name ');
+      await tester.pump();
+      expect(personChip, findsOneWidget, reason: name);
+      expect(saved(), dormant, reason: name);
+      await send();
+      if (name == 'Bob') {
+        expect(sent, [bob]);
+        continue;
+      }
+      expect(find.text('Mention people outside this channel?'), findsOneWidget);
+      await tester.tap(
+        find
+            .descendant(
+              of: find.byType(AlertDialog),
+              matching: find.byType(TextButton),
+            )
+            .first,
+      );
+      await tester.pumpAndSettle();
+      expect(sentTags, contains(orderedEquals(['mention', quinn.pubkey])));
+      await _expandComposer(tester);
     }
     sent = null;
     await pickRow('[see @Bob](https://example.org) and @bo', row('Bob'));

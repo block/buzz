@@ -49,7 +49,7 @@ Future<void> _sendTextOnlyDraft({
     // appear simultaneously during the send transition.
     if (context.mounted) {
       clearedDraftText = controller.value;
-      clearedDraftMentions = controller.mentions;
+      clearedDraftMentions = controller.bindings;
       clearedDraftMentionsInvalid = controller.mentionsInvalid;
       clearComposer();
       clearedDraftRevision = draftRevision.value;
@@ -140,7 +140,7 @@ void _useComposeDraftLifecycle({
     }
 
     var lastPersistedText = controller.text;
-    var lastBindings = [for (final m in controller.mentions) m.toDraft()];
+    var lastBindings = [for (final m in controller.bindings) m.toDraft()];
     var lastInvalid = controller.mentionsInvalid;
     void persistDraft() {
       if (!identical(currentOwner.value, owner)) return;
@@ -149,7 +149,7 @@ void _useComposeDraftLifecycle({
       if (text == prefillText.value) return;
       // The editor already carried the bindings across the edit, so text and
       // bindings are one snapshot here.
-      final bindings = [for (final m in controller.mentions) m.toDraft()];
+      final bindings = [for (final m in controller.bindings) m.toDraft()];
       final invalid = controller.mentionsInvalid;
       if (text == lastPersistedText &&
           invalid == lastInvalid &&

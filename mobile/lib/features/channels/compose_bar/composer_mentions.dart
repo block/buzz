@@ -217,8 +217,8 @@ bool _startsSelectedMention(List<_ComposerMention> mentions, int start) =>
 /// same name too: text restored without its binding, as by a system Undo,
 /// needs a pick rather than borrowing the surviving chip's key. A typed
 /// name inside [code], the spans and blocks the composer styles as code, is
-/// literal text and notifies nobody; the controller has already dropped any
-/// binding there.
+/// literal text and notifies nobody; a binding there is dormant and is not
+/// among [mentions].
 ///
 /// The text is scanned once, against the chips' names, the names their
 /// recipients go by now and the [members] index. `nameEnds` is that scan:
@@ -301,9 +301,9 @@ _resolveComposerMentions(
 /// as that other person. [nameEnds] says where the longest name at each `@`
 /// ends, among the chips, the recipients and the channel's members; it is
 /// the send's one scan, from [_resolveComposerMentions]. One key under a
-/// name stays bare. No bound mention sits inside code, which the controller
-/// keeps unbound, so code is sent as typed. The composer itself never
-/// showed the key.
+/// name stays bare. No live mention sits inside code, where the controller
+/// keeps a binding dormant, so code is sent as typed. The composer itself
+/// never showed the key.
 String _qualifiedMentionContent(
   String text,
   List<_ComposerMention> mentions, {

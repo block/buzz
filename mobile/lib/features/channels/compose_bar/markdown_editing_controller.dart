@@ -18,8 +18,12 @@ class _MarkdownEditingController extends TextEditingController {
   /// Picked mentions bound to their recipients, in text order. The editor
   /// stores the literal `@Label` the relay receives; each binding is carried
   /// across edits by position, so two namesakes can both read `@Sam` and
-  /// still notify two people, and no key ever enters the text.
+  /// still notify two people, and no key ever enters the text. Holds the
+  /// dormant bindings too; see [bindings].
   List<_ComposerMention> _mentions = const [];
+
+  /// The bindings of [_mentions] that sit in prose; see [mentions].
+  List<_ComposerMention> _live = const [];
 
   /// Set when a saved draft's bindings could not be read. The send refuses
   /// until no `@` is left in the text, since nothing says who it was for.
@@ -102,12 +106,11 @@ class _MarkdownEditingController extends TextEditingController {
       if (_history.isEmpty) _recordHistory(value.text);
       if (_historyDirection == 0) {
         _carryMentions(value, newValue);
-        _mentions = _inProse(text, _mentions);
         _recordHistory(text);
       } else if (!_restoreHistory(text)) {
         _carryMentions(value, newValue);
-        _mentions = _inProse(text, _mentions);
       }
+      _live = _inProse(text, _mentions);
     }
     super.value = _snapSelectionToChips(newValue);
   }
@@ -143,8 +146,17 @@ class _MarkdownEditingController extends TextEditingController {
     return false;
   }
 
-  /// The picked mentions bound in [text], in text order.
-  List<_ComposerMention> get mentions => _mentions;
+  /// The picked mentions that are live in [text], in text order: the chips
+  /// drawn, the recipients of a send and the identity links of a saved
+  /// edit. A binding inside code or a web link is dormant and not here.
+  List<_ComposerMention> get mentions => _live;
+
+  /// Every picked mention bound in [text], in text order: [mentions] and
+  /// the dormant ones inside code or a web link. A dormant binding keeps
+  /// its recipient and moves with the text like any other, so a pick
+  /// wrapped in code and then unwrapped by hand is the same person again
+  /// and not a typed name. Saved drafts and restored text carry these.
+  List<_ComposerMention> get bindings => _mentions;
 
   /// Whether a restored draft's bindings were unreadable; see [replaceDraft].
   bool get mentionsInvalid => _mentionsInvalid;
@@ -177,10 +189,10 @@ class _MarkdownEditingController extends TextEditingController {
   /// and blocks drawn in it, and outside every Markdown link, image and URL
   /// ([mentionsInsideMarkdownLinks]). Code and link text are literal: a name
   /// there draws no pill in the bubble and notifies nobody, so a binding
-  /// that lands there is dropped, whether a command wrapped a chip, the
+  /// that lands there is dormant, whether a command wrapped a chip, the
   /// syntax was typed around it, a pick was made inside it or a saved draft
-  /// or edited message held it. Taking the syntax away again leaves a typed
-  /// name. Text without a backtick, a `]` or a `://` costs three searches.
+  /// held it. Text without a backtick, a `]` or a `://` costs three
+  /// searches.
   List<_ComposerMention> _inProse(
     String text,
     List<_ComposerMention> mentions,
@@ -215,12 +227,10 @@ class _MarkdownEditingController extends TextEditingController {
     bool mentionsInvalid = false,
   }) {
     if (_history.isEmpty) _recordHistory(value.text);
-    _mentions = _inProse(
-      newValue.text,
-      List.unmodifiable(
-        mentions.toList()..sort((a, b) => a.start.compareTo(b.start)),
-      ),
+    _mentions = List.unmodifiable(
+      mentions.toList()..sort((a, b) => a.start.compareTo(b.start)),
     );
+    _live = _inProse(newValue.text, _mentions);
     _mentionsInvalid = mentionsInvalid;
     _cachedTextSpan = null;
     _recordHistory(newValue.text);
@@ -931,7 +941,7 @@ class _MarkdownEditingController extends TextEditingController {
     if (tokenSpans != null) return tokenSpans;
     final segmentEnd = sourceOffset + source.length;
     final inSegment = [
-      for (final mention in _mentions)
+      for (final mention in _live)
         if (mention.start >= sourceOffset && mention.end <= segmentEnd) mention,
     ];
     if (inSegment.isEmpty) return [TextSpan(text: source, style: style)];
