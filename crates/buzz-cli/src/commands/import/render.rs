@@ -2,8 +2,31 @@
 
 use std::collections::HashMap;
 
-use super::export::SlackAttachment;
+use super::export::{SlackAttachment, SlackMessage};
 use super::mrkdwn;
+
+/// The markdown body of a message: its text or, without text, its blocks,
+/// then its attachments and file links. Empty when nothing in the record can
+/// be shown.
+pub(super) fn render_message_body(msg: &SlackMessage, names: &HashMap<String, String>) -> String {
+    let mut parts = Vec::new();
+    if msg.text.trim().is_empty() {
+        parts.push(render_slack_blocks(&msg.blocks, names));
+    } else {
+        parts.push(mrkdwn::convert(&msg.text, names));
+    }
+    parts.extend(
+        msg.attachments
+            .iter()
+            .map(|attachment| render_attachment(attachment, names)),
+    );
+    parts.extend(msg.files.iter().map(|file| match file.link() {
+        Some(link) => format!("📎 [{}]({link})", file.label()),
+        None => format!("📎 {}", file.label()),
+    }));
+    parts.retain(|part| !part.trim().is_empty());
+    parts.join("\n\n").trim().to_string()
+}
 
 /// Render a classic Slack attachment to readable Markdown. Interactive
 /// buttons/actions are intentionally omitted; their visible label and context

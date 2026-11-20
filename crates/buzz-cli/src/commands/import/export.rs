@@ -15,6 +15,7 @@ use std::path::{Component, Path, PathBuf};
 pub(super) use super::model::{
     SlackAttachment, SlackChannel, SlackConversationKind, SlackMessage, SlackUser,
 };
+use super::render::render_message_body;
 use crate::error::CliError;
 
 /// A loaded Slack export: user/channel indexes plus the directory root for
@@ -501,11 +502,8 @@ fn message_disposition(msg: &SlackMessage) -> SlackMessageDisposition {
     ) {
         return SlackMessageDisposition::System;
     }
-    if msg.text.trim().is_empty()
-        && msg.files.is_empty()
-        && !msg.attachments.iter().any(SlackAttachment::has_content)
-        && msg.blocks.is_empty()
-    {
+    // Names only change how a mention reads, never whether there is a body.
+    if render_message_body(msg, &HashMap::new()).is_empty() {
         return SlackMessageDisposition::Contentless;
     }
     SlackMessageDisposition::Import
@@ -611,6 +609,16 @@ mod tests {
         assert!(is_importable(&msg(
             r#"{"type":"message","subtype":"bot_message","bot_id":"B1","text":"","ts":"1.000",
                 "attachments":[{"fallback":"build passed","title":"CI"}]}"#
+        )));
+        // Blocks that hold only interactive elements render to nothing, so
+        // the record is contentless; blocks with visible text are not.
+        assert!(!is_importable(&msg(
+            r#"{"type":"message","bot_id":"B1","text":"","ts":"1.000",
+                "blocks":[{"type":"actions","elements":[{"type":"button"}]}]}"#
+        )));
+        assert!(is_importable(&msg(
+            r#"{"type":"message","bot_id":"B1","text":"","ts":"1.000",
+                "blocks":[{"type":"section","fields":[{"type":"mrkdwn","text":"*Status:* ok"}]}]}"#
         )));
         // Unknown future subtypes are accepted when they carry renderable
         // content; known membership/system events remain excluded.

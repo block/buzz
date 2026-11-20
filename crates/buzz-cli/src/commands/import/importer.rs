@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use buzz_core::kind::KIND_STREAM_MESSAGE;
+use buzz_core::kind::{KIND_NIP29_CREATE_GROUP, KIND_STREAM_MESSAGE};
 use nostr::{EventBuilder, EventId, Timestamp};
 use uuid::Uuid;
 
@@ -17,9 +17,8 @@ use super::dm::{
     build_import_dm_open, ensure_dm_uuid_unclaimed, mapped_dm_participants, response_payload,
 };
 use super::export::{ts_seconds, SlackChannel, SlackExport, SlackMessage};
-use super::mrkdwn;
 use super::print_json;
-use super::render::{emoji_for_shortcode, render_attachment, render_slack_blocks};
+use super::render::{emoji_for_shortcode, render_message_body};
 use super::state::{ChannelState, ImportState, Journal, JournalRecord};
 use crate::client::BuzzClient;
 use crate::error::CliError;
@@ -203,65 +202,14 @@ impl<'a> Importer<'a> {
             ),
             None => {
                 let uuid = channel_uuid(self.team_id, &channel.id);
-                let about = if channel.purpose.value.is_empty() {
-                    None
-                } else {
-                    Some(channel.purpose.value.as_str())
-                };
-                let builder = buzz_sdk::build_create_channel(
-                    uuid,
-                    &channel.name,
-                    Some(if channel.kind.is_private() {
-                        buzz_sdk::Visibility::Private
-                    } else {
-                        buzz_sdk::Visibility::Open
-                    }),
-                    Some(channel.kind.buzz_channel_kind()),
-                    about,
-                    None,
-                    false,
-                )
-                .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
-                let (_, response) =
-                    submit_with_response(self.client, builder)
-                        .await
-                        .map_err(|e| {
-                            // The relay keeps listed channel names unique, so a
-                            // workspace that already has this name needs the
-                            // operator to say which channel receives the history.
-                            let hint = if e.to_string().contains("already exists") {
-                                "; to import into an existing channel, name it with --channel-map"
-                            } else {
-                                ""
-                            };
-                            CliError::Other(format!(
-                                "channel create failed for #{}: {e}{hint}",
-                                channel.name
-                            ))
-                        })?;
-                // The UUID is derived from public Slack ids, so a channel that
-                // already holds it may belong to someone else. Never write
-                // history into a channel this ledger did not create: adopting
-                // one is the operator's explicit choice. The relay refuses a
-                // new create for a taken UUID, but confirms this same event
-                // sent again after a lost answer, and that channel is ours.
-                if !was_accepted(&response) {
-                    return Err(CliError::Usage(format!(
-                        "Buzz channel {uuid} already exists but is not in the state file {}, \
-                         so Slack conversation {} was not imported into it. If an earlier \
-                         import of this workspace used another state file, pass it with \
-                         --state; adopting the channel instead would import its history \
-                         again. Only when the channel holds no imported history, adopt it \
-                         with --channel-map ({},{uuid})",
-                        self.state_path.display(),
-                        channel.id,
-                        channel.id
-                    )));
+                if !self.create_already_stored(channel).await? {
+                    self.create_channel(channel, uuid).await?;
                 }
 
                 // Persist the UUID before the separate topic write. If that
                 // write or the process fails, a re-run resumes metadata on the
                 // same channel instead of creating a duplicate.
+                self.state.pending_channels.remove(&channel.id);
                 self.state.channels.insert(
                     channel.id.clone(),
                     ChannelState {
@@ -343,6 +291,84 @@ impl<'a> Importer<'a> {
         }
 
         Ok(uuid)
+    }
+
+    /// Whether the relay stored the channel create an earlier run signed for
+    /// this conversation but never saw confirmed. That channel is this
+    /// ledger's own, and it holds no history yet.
+    async fn create_already_stored(&self, channel: &SlackChannel) -> Result<bool, CliError> {
+        let Some(id) = self.state.pending_channels.get(&channel.id) else {
+            return Ok(false);
+        };
+        let filter = serde_json::json!({
+            "ids": [id],
+            "kinds": [KIND_NIP29_CREATE_GROUP],
+            "limit": 1,
+        });
+        let response = self.client.query(&filter).await?;
+        Ok(stored_event_ids(&response)?.contains(id))
+    }
+
+    /// Create the Buzz channel for a Slack channel under its derived UUID.
+    async fn create_channel(&mut self, channel: &SlackChannel, uuid: Uuid) -> Result<(), CliError> {
+        let about = if channel.purpose.value.is_empty() {
+            None
+        } else {
+            Some(channel.purpose.value.as_str())
+        };
+        let builder = buzz_sdk::build_create_channel(
+            uuid,
+            &channel.name,
+            Some(if channel.kind.is_private() {
+                buzz_sdk::Visibility::Private
+            } else {
+                buzz_sdk::Visibility::Open
+            }),
+            Some(channel.kind.buzz_channel_kind()),
+            about,
+            None,
+            false,
+        )
+        .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
+        // Journal the signed id before the relay sees it: if the answer is
+        // lost, the next run can tell whether this exact create was stored.
+        let event = self.client.sign_event(builder).await?;
+        self.record(JournalRecord::ChannelIntent {
+            channel: channel.id.clone(),
+            id: event.id.to_hex(),
+        })?;
+        let response = submit_signed(self.client, event).await.map_err(|e| {
+            // The relay keeps listed channel names unique, so a workspace that
+            // already has this name needs the operator to say which channel
+            // receives the history.
+            let hint = if e.to_string().contains("already exists") {
+                "; to import into an existing channel, name it with --channel-map"
+            } else {
+                ""
+            };
+            CliError::Other(format!(
+                "channel create failed for #{}: {e}{hint}",
+                channel.name
+            ))
+        })?;
+        // The UUID is derived from public Slack ids, so a channel that already
+        // holds it may belong to someone else. Never write history into a
+        // channel this ledger did not create: adopting one is the operator's
+        // explicit choice. The relay refuses a new create for a taken UUID,
+        // but confirms this same event sent again after a lost answer.
+        if !was_accepted(&response) {
+            return Err(CliError::Usage(format!(
+                "Buzz channel {uuid} already exists but is not in the state file {}, so Slack \
+                 conversation {} was not imported into it. If an earlier import of this \
+                 workspace used another state file, pass it with --state; adopting the \
+                 channel instead would import its history again. Only when the channel \
+                 holds no imported history, adopt it with --channel-map ({},{uuid})",
+                self.state_path.display(),
+                channel.id,
+                channel.id
+            )));
+        }
+        Ok(())
     }
 
     /// History cannot be written into an archived channel. Reopen one the
@@ -824,42 +850,22 @@ pub(super) fn build_imported_message(
     team_id: &str,
     thread_ref: Option<&buzz_sdk::ThreadRef>,
 ) -> Result<EventBuilder, CliError> {
-    let mut content_parts = Vec::new();
-    if !msg.text.trim().is_empty() {
-        content_parts.push(mrkdwn::convert(&msg.text, names));
-    } else {
-        let blocks = render_slack_blocks(&msg.blocks, names);
-        if !blocks.is_empty() {
-            content_parts.push(blocks);
-        }
-    }
-    for attachment in &msg.attachments {
-        let rendered = render_attachment(attachment, names);
-        if !rendered.is_empty() {
-            content_parts.push(rendered);
-        }
-    }
-    for file in &msg.files {
-        match file.link() {
-            Some(link) => content_parts.push(format!("📎 [{}]({link})", file.label())),
-            None => content_parts.push(format!("📎 {}", file.label())),
-        }
-    }
-    let body = content_parts.join("\n\n");
-    let body = body.trim();
-    // Blocks that hold only interactive elements render to nothing; a header
-    // with no message under it is not worth publishing.
+    let body = render_message_body(msg, names);
+    // The export scan leaves out records that render to nothing; a header
+    // with no message under it is never worth publishing.
     if body.is_empty() {
         return Err(CliError::Other("no renderable content".into()));
     }
     let header = attribution_header(&author_display(msg, names), &msg.ts);
-    let content = with_header(&header, body);
+    let content = with_header(&header, &body);
 
     let broadcast = matches!(
         msg.subtype.as_deref(),
         Some("thread_broadcast" | "reply_broadcast")
     );
     let provenance = imported_from_tag(&format!("{team_id}/{}/{}", channel.id, msg.ts))?;
+    // The SDK stamps the build time and its `ms` offset; the caller replaces
+    // the second. Each message owns its second, so the offset orders nothing.
     buzz_sdk::build_message(channel_uuid, &content, thread_ref, &[], broadcast, &[], &[])
         .map(|builder| builder.tags([provenance]))
         .map_err(|e| CliError::Other(format!("build_message failed: {e}")))
@@ -1005,7 +1011,7 @@ fn was_accepted(response: &str) -> bool {
 fn stored_event_ids(response: &str) -> Result<HashSet<String>, CliError> {
     let events: Vec<serde_json::Value> = serde_json::from_str(response).map_err(|e| {
         CliError::Other(format!(
-            "could not parse the relay's answer about unconfirmed messages: {e}"
+            "could not parse the relay's answer about unconfirmed events: {e}"
         ))
     })?;
     Ok(events
@@ -1047,9 +1053,10 @@ fn unix_now() -> u64 {
 
 /// Deterministic Buzz channel UUID for a Slack channel, derived from the
 /// workspace + Slack channel id. Making it a pure function of stable Slack ids
-/// means a run that lost track of a channel it created (a crash between the
-/// create and the state save, or a different state file) asks for the same
-/// UUID again and is refused, instead of minting a second channel. The
+/// means a run that lost track of a channel it created asks for the same UUID
+/// again instead of minting a second channel: a create journaled in this
+/// ledger is recognised and resumed, and one from another state file is
+/// refused. The
 /// `team_id` prefix keeps channel ids from two workspaces from colliding onto
 /// one UUID.
 pub(super) fn channel_uuid(team_id: &str, channel_id: &str) -> Uuid {

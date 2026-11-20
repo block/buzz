@@ -31,9 +31,12 @@ struct RelayState {
     lose_answer_for: Option<String>,
     /// Refuse the next message containing this text without storing it.
     refuse_once: Option<String>,
-    /// Create the next channel, but answer 503: the client sends the same
-    /// create again.
-    lose_create_answer: bool,
+    /// Create the next channel, but answer with this status: what an
+    /// importer observes when the relay's answer is lost. The client sends
+    /// the same create again after a 503 and gives up after a 500.
+    lose_create_answer: Option<StatusCode>,
+    /// How many channel creates were submitted, resends included.
+    create_requests: usize,
 }
 
 #[derive(Clone, Default)]
@@ -107,6 +110,9 @@ async fn accept_event(State(relay): State<FakeRelay>, Json(event): Json<Value>) 
     let content = event["content"].as_str().unwrap_or_default().to_string();
     let channel = tag_value(&event, "h").unwrap_or_default().to_string();
     let mut relay = relay.state();
+    if event["kind"] == 9007 {
+        relay.create_requests += 1;
+    }
     if relay.events.iter().any(|held| held["id"] == event["id"]) {
         // The relay confirms a channel create it already stored.
         if event["kind"] == 9007 {
@@ -124,12 +130,9 @@ async fn accept_event(State(relay): State<FakeRelay>, Json(event): Json<Value>) 
                 return not_accepted(&id, "duplicate: channel already exists");
             }
             relay.channels.insert(channel, false);
-            if std::mem::take(&mut relay.lose_create_answer) {
+            if let Some(status) = relay.lose_create_answer.take() {
                 relay.events.push(event);
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({"error": "unavailable"})),
-                );
+                return (status, Json(json!({"error": "answer lost"})));
             }
         }
         Some(9002) => match (tag_value(&event, "archived"), relay.channels.get(&channel)) {
@@ -408,7 +411,7 @@ async fn a_channel_create_the_relay_confirms_on_resend_is_the_importers_own() {
     let dir = write_messages(&["first"]);
     // The relay creates the channel and its answer is lost, so the client
     // sends the same create again and the relay confirms it as a duplicate.
-    relay.state().lose_create_answer = true;
+    relay.state().lose_create_answer = Some(StatusCode::SERVICE_UNAVAILABLE);
 
     cmd_import_slack(&client, params(&dir))
         .await
@@ -420,13 +423,49 @@ async fn a_channel_create_the_relay_confirms_on_resend_is_the_importers_own() {
 }
 
 #[tokio::test]
+async fn a_channel_create_whose_answer_was_lost_is_resumed_by_the_next_run() {
+    let (relay, client) = spawn_relay().await;
+    let dir = write_messages(&["first"]);
+    // The relay creates the channel, but the run never learns it.
+    relay.state().lose_create_answer = Some(StatusCode::INTERNAL_SERVER_ERROR);
+
+    cmd_import_slack(&client, params(&dir))
+        .await
+        .expect_err("an unconfirmed create is not a finished import");
+    let interrupted = ledger(&dir);
+    assert!(interrupted.channels.is_empty());
+    assert_eq!(interrupted.pending_channels.len(), 1);
+    assert!(relay.messages().is_empty());
+
+    // The next run finds its own create on the relay and carries on in that
+    // channel, without asking the operator to adopt it.
+    cmd_import_slack(&client, params(&dir))
+        .await
+        .expect("resume completes");
+    let resumed = ledger(&dir);
+    assert_eq!(
+        resumed.channels["C1"].uuid,
+        channel_uuid("T1", "C1").to_string()
+    );
+    assert!(resumed.pending_channels.is_empty());
+    assert_eq!(relay.texts(), ["first"]);
+    assert_eq!(
+        relay.state().create_requests,
+        1,
+        "the stored create is recognised, not submitted again"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
 async fn a_reply_to_a_root_that_can_never_be_imported_does_not_fail_every_run() {
     let (relay, client) = spawn_relay().await;
     let oversize = "x".repeat(70 * 1024);
     let mut reply = record(1, "the reply");
     reply["thread_ts"] = json!(ts(0));
     // A record whose blocks hold only interactive elements has nothing to
-    // show; it is skipped too, not published as a bare attribution header.
+    // show; it is left out, not published as a bare attribution header.
     let mut buttons = record(2, "");
     buttons["blocks"] = json!([{"type": "actions", "elements": [{"type": "button"}]}]);
     let dir = write_export(general(), &[record(0, &oversize), reply, buttons]);
@@ -439,7 +478,6 @@ async fn a_reply_to_a_root_that_can_never_be_imported_does_not_fail_every_run() 
     assert_eq!(relay.texts(), ["the reply"]);
     assert_eq!(tag_value(&relay.messages()[0], "e"), None);
     assert!(ledger(&dir).skipped.contains(&format!("C1:{}", ts(0))));
-    assert!(ledger(&dir).skipped.contains(&format!("C1:{}", ts(2))));
 
     let events_before = relay.state().events.len();
     cmd_import_slack(&client, params(&dir))

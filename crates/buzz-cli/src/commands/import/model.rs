@@ -252,27 +252,6 @@ pub struct SlackAttachment {
     pub from_url: String,
 }
 
-impl SlackAttachment {
-    /// Whether the attachment has a non-interactive representation worth
-    /// importing.
-    pub fn has_content(&self) -> bool {
-        [
-            &self.pretext,
-            &self.text,
-            &self.title,
-            &self.fallback,
-            &self.author_name,
-            &self.image_url,
-            &self.original_url,
-            &self.from_url,
-        ]
-        .iter()
-        .any(|value| !value.trim().is_empty())
-            || !self.fields.is_empty()
-            || !self.blocks.is_empty()
-    }
-}
-
 /// One title/value pair in a classic Slack attachment.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct SlackAttachmentField {

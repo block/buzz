@@ -18,7 +18,9 @@
 //! matching *message* record lands, the intent stays pending. The next run
 //! asks the relay for that id and either adopts the stored event or signs the
 //! message afresh. Compacting the journal into the snapshot keeps pending
-//! intents, so an unresolved one is never dropped.
+//! intents, so an unresolved one is never dropped. A channel create is
+//! journaled the same way, so a run can tell a channel its own lost create
+//! made from one that belongs to someone else.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -84,6 +86,10 @@ pub struct ImportState {
     /// without a confirmed outcome.
     #[serde(default)]
     pub pending: HashMap<String, String>,
+    /// Slack conversation id → id of a channel-create event that was signed
+    /// and handed to the relay without a confirmed outcome.
+    #[serde(default)]
+    pub pending_channels: HashMap<String, String>,
 }
 
 impl Default for ImportState {
@@ -96,6 +102,7 @@ impl Default for ImportState {
             reactions: HashSet::new(),
             skipped: HashSet::new(),
             pending: HashMap::new(),
+            pending_channels: HashMap::new(),
         }
     }
 }
@@ -106,6 +113,9 @@ impl Default for ImportState {
 pub enum JournalRecord {
     /// A message was signed as event `id` and is about to be submitted.
     Intent { key: String, id: String },
+    /// The create for this Slack conversation's channel was signed as event
+    /// `id` and is about to be submitted.
+    ChannelIntent { channel: String, id: String },
     /// The relay stored the message as event `id`.
     Message { key: String, id: String },
     /// The relay stored (or already held) the reaction with this dedupe key.
@@ -167,6 +177,11 @@ impl ImportState {
             JournalRecord::Intent { key, id } => {
                 if !self.messages.contains_key(&key) {
                     self.pending.insert(key, id);
+                }
+            }
+            JournalRecord::ChannelIntent { channel, id } => {
+                if !self.channels.contains_key(&channel) {
+                    self.pending_channels.insert(channel, id);
                 }
             }
             JournalRecord::Message { key, id } => {

@@ -90,7 +90,7 @@ conservative: it imports genuine conversation and skips system noise.
 | `file_share`, `file_comment`, `me_message`, huddle/canvas sharing content | Imported when renderable |
 | `channel_join` / `channel_leave` / `channel_topic` / `channel_purpose` and other system notices | Skipped |
 | `message_changed` (edits) and `message_deleted` / tombstones | Skipped — only final, still-present text is imported |
-| Message with empty top-level `text` | Block Kit rich text, classic attachment fallback/text/fields, and files are rendered; only genuinely contentless records are skipped. A record whose blocks hold only interactive elements renders to nothing and is counted in `skipped` |
+| Message with empty top-level `text` | Block Kit rich text, classic attachment fallback/text/fields, and files are rendered; only genuinely contentless records are skipped, including one whose blocks hold only interactive elements |
 
 Unknown future subtypes are accepted when they carry renderable conversation
 content. A dry run makes the filtering auditable: it reports raw record totals
@@ -110,8 +110,11 @@ creating new ones. The file is CSV with `slack_channel_id` and
 `buzz_channel_id` columns (extra columns are ignored), or a JSON array of
 objects with those two fields. Every Slack id must exist in the loaded export,
 Buzz UUIDs must be unique, and a map cannot override a different UUID already
-recorded in the state file. An adopted archived channel is unarchived for the
-import and archived again afterwards. DMs and MPIMs cannot be adopted this way:
+recorded in the state file. An adopted channel is brought in line with Slack's
+copy: a non-empty Slack topic replaces its topic, a private Slack channel makes
+it private, and a channel Slack had archived is archived once its history is
+in. An adopted archived channel is unarchived for the import and archived again
+afterwards. DMs and MPIMs cannot be adopted this way:
 they are opened through Buzz's native DM command so the relay can enforce the
 exact participant set.
 
@@ -165,7 +168,8 @@ membership, not attribution:
 - **A message is never published twice.** Its signed event id is journaled
   before it is sent. If the run is interrupted, or the relay's answer is lost,
   the next run looks that id up on the relay and either adopts the stored event
-  or signs the message again.
+  or signs the message again. A channel create is journaled the same way, so
+  the next run carries on in a channel its own lost create made.
 - **A run stops at the first message the relay does not confirm.** A message
   retried later would be stamped later and land after everything imported in
   between, so the importer does not carry on past a gap. Run the same command
