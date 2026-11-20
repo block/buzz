@@ -251,8 +251,7 @@ const ANDROID_ENROLL_DOMAIN: &str = "buzz.push.enroll.android.v1";
 /// How long a relay should wait before retrying a request whose earlier
 /// attempt is still in flight. Long enough for a send that is minting or
 /// waiting on the push service to finish, short enough to keep wakes prompt.
-/// The relay doubles it on each attempt, so its retries land about 4, 14, 34
-/// and 74 seconds after the first attempt, not every 5 seconds.
+/// The relay backs off from this value; its schedule lives in the relay.
 const IN_FLIGHT_RETRY_AFTER_SECONDS: i64 = 5;
 
 /// The Android enrollment transcript: the iOS one without `key_id`, since the
