@@ -1098,17 +1098,24 @@ async fn handle_workflow_def(
         .await
         .map_err(|e| IngestError::Internal(format!("error: retire definitions: {}", e.kind())))?;
 
-    // Drop the trigger-path cache entry so the new/updated definition fires on
-    // the next matching event instead of after the cache TTL.
+    // One commit for the definition event, the workflow row and the retired
+    // spellings.
+    let committed = tx.commit().await;
+
+    // Drop the trigger-path cache entry only once the commit has returned. An
+    // event that missed the cache while this transaction was open read the
+    // previously committed workflow and cached it; invalidating before the
+    // commit would leave that entry in place for the cache TTL. A save that
+    // fails before the commit changes nothing and returns above without
+    // invalidating. A commit that reports an error may still have been applied,
+    // so the entry is dropped on either outcome. A trigger lookup whose SELECT
+    // is already in flight can still cache its result after this point; the
+    // TTL bounds that (see `WorkflowEngine::workflow_cache`).
     state
         .workflow_engine
         .invalidate_channel_workflows(community_id, channel_id);
 
-    // One commit for the definition event, the workflow row and the retired
-    // spellings.
-    tx.commit()
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
+    committed.map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
 
     // 5. Return response
     let mut resp = serde_json::json!({

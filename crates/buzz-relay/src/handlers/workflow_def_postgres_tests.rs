@@ -1,6 +1,7 @@
 //! Postgres-backed tests for kind 30620 workflow definition saves: the
 //! definition event, the executable workflow row and the retirement of other
-//! stored `d` spellings commit together, or not at all.
+//! stored `d` spellings commit together, or not at all, and the channel
+//! trigger cache is invalidated only after that commit.
 
 use std::sync::Arc;
 
@@ -15,10 +16,22 @@ use crate::state::AppState;
 
 /// A signed definition named `name`, stored under the `d` spelling `d_tag`.
 fn definition(keys: &Keys, channel_id: Uuid, d_tag: &str, name: &str, created_at: u64) -> Event {
+    definition_on(keys, channel_id, d_tag, name, "message_posted", created_at)
+}
+
+/// [`definition`] with the trigger `on`.
+fn definition_on(
+    keys: &Keys,
+    channel_id: Uuid,
+    d_tag: &str,
+    name: &str,
+    on: &str,
+    created_at: u64,
+) -> Event {
     EventBuilder::new(
         Kind::Custom(KIND_WORKFLOW_DEF as u16),
         format!(
-            "name: {name}\ntrigger:\n  on: message_posted\nsteps:\n  - id: pause\n    \
+            "name: {name}\ntrigger:\n  on: {on}\nsteps:\n  - id: pause\n    \
              action: delay\n    duration: 1s\n"
         ),
     )
@@ -178,4 +191,172 @@ async fn failed_save_changes_no_representation() {
     assert_eq!(after.alias, Vec::<Vec<u8>>::new());
     assert_eq!(after.workflow.0, "second");
     assert_ne!(after.workflow.2, before.workflow.2);
+}
+
+/// Run the workflow engine's trigger lookup for a channel event of `kind`, as
+/// the relay does after storing one, and return how many runs the workflow
+/// then has. The engine creates a matching run before `on_event` returns.
+async fn runs_after_channel_event(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    keys: &Keys,
+    channel_id: Uuid,
+    workflow_id: Uuid,
+    kind: u32,
+) -> usize {
+    let event = EventBuilder::new(Kind::Custom(kind as u16), "+")
+        .tags([Tag::parse(["h", &channel_id.to_string()]).expect("h tag")])
+        .sign_with_keys(keys)
+        .expect("sign channel event");
+    state
+        .workflow_engine
+        .on_event(
+            tenant.community(),
+            &buzz_core::StoredEvent::new(event, Some(channel_id)),
+        )
+        .await
+        .expect("trigger lookup");
+    state
+        .db
+        .list_workflow_runs(tenant.community(), workflow_id, 100)
+        .await
+        .expect("list runs")
+        .len()
+}
+
+/// A save invalidates the channel trigger cache after its transaction commits,
+/// so an entry filled from the previously committed workflow while the save
+/// was open does not outlive the save. The first definition fires on messages,
+/// the second only on reactions. A deferred test trigger holds the second
+/// save at its commit, after every statement has run. A message arriving then
+/// reads the first definition and caches it. Once the save is accepted, the
+/// next message must find no matching workflow and a reaction must start a
+/// run. Before, the save invalidated the cache ahead of its commit, so the
+/// entry cached while it was open kept the first definition firing on
+/// messages for the cache TTL. Mutation: invalidate before `tx.commit()` → RED.
+///
+/// Every lookup here has returned before the save commits. A lookup whose
+/// SELECT is still in flight when the save invalidates can cache its older
+/// result afterwards; that case is bounded by the TTL and not tested here.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn save_invalidates_the_trigger_cache_after_its_commit() {
+    let state = state().await;
+    let tenant = community(&state, "workflow-save-cache").await;
+    let owner = Keys::generate();
+    let channel_id = create_channel(&state, &tenant, &owner, &[]).await;
+    let workflow_id = Uuid::new_v4();
+    let canonical_d = workflow_id.to_string();
+    let now = Timestamp::now().as_secs();
+    let message = buzz_core::kind::KIND_STREAM_MESSAGE;
+    let reaction = buzz_core::kind::KIND_REACTION;
+
+    let first = definition_on(
+        &owner,
+        channel_id,
+        &canonical_d,
+        "first",
+        "message_posted",
+        now - 10,
+    );
+    assert_eq!(save(&state, &tenant, &owner, &first).await, Ok(true));
+
+    // Hold the next save of this workflow at its commit: a deferred trigger,
+    // scoped to this workflow row, waits for an advisory lock this test holds.
+    let suffix = workflow_id.simple();
+    let (gate_a, gate_b) = {
+        let bytes = workflow_id.as_bytes();
+        let half = |at: usize| {
+            i32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]) & i32::MAX
+        };
+        (half(0), half(4))
+    };
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION workflow_save_gate_{suffix}() RETURNS trigger LANGUAGE plpgsql AS          $$ BEGIN PERFORM pg_advisory_xact_lock({gate_a}, {gate_b}); RETURN NULL; END $$;          CREATE CONSTRAINT TRIGGER workflow_save_gate_{suffix} AFTER INSERT OR UPDATE          ON workflows DEFERRABLE INITIALLY DEFERRED FOR EACH ROW          WHEN (NEW.id = '{workflow_id}'::uuid)          EXECUTE FUNCTION workflow_save_gate_{suffix}()"
+    )))
+    .execute(state.db.pool())
+    .await
+    .expect("install commit gate");
+    let mut gate = state.db.pool().acquire().await.expect("gate connection");
+    sqlx::query("SELECT pg_advisory_lock($1, $2)")
+        .bind(gate_a)
+        .bind(gate_b)
+        .execute(&mut *gate)
+        .await
+        .expect("close commit gate");
+
+    let second = definition_on(
+        &owner,
+        channel_id,
+        &canonical_d,
+        "second",
+        "reaction_added",
+        now,
+    );
+    let saving = tokio::spawn({
+        let (state, tenant, owner) = (Arc::clone(&state), tenant.clone(), owner.clone());
+        async move { save(&state, &tenant, &owner, &second).await }
+    });
+
+    // The save is at its commit once its transaction waits on the gate.
+    let mut at_commit = false;
+    for _ in 0..3000 {
+        at_commit = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory'              AND NOT granted AND classid::bigint = $1 AND objid::bigint = $2)",
+        )
+        .bind(i64::from(gate_a))
+        .bind(i64::from(gate_b))
+        .fetch_one(state.db.pool())
+        .await
+        .expect("read gate waiters");
+        if at_commit || saving.is_finished() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // While the save is open, a message reads the committed first definition
+    // (and caches it): it starts the workflow's first run.
+    let runs_while_open = if at_commit {
+        Some(
+            runs_after_channel_event(&state, &tenant, &owner, channel_id, workflow_id, message)
+                .await,
+        )
+    } else {
+        None
+    };
+
+    sqlx::query("SELECT pg_advisory_unlock($1, $2)")
+        .bind(gate_a)
+        .bind(gate_b)
+        .execute(&mut *gate)
+        .await
+        .expect("open commit gate");
+    drop(gate);
+    let saved = saving.await.expect("save task");
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP TRIGGER workflow_save_gate_{suffix} ON workflows;          DROP FUNCTION workflow_save_gate_{suffix}()"
+    )))
+    .execute(state.db.pool())
+    .await
+    .expect("remove commit gate");
+
+    assert!(at_commit, "the save never reached its commit gate");
+    assert_eq!(
+        runs_while_open,
+        Some(1),
+        "a message during the open save must run the committed first definition"
+    );
+    assert_eq!(saved, Ok(true));
+
+    assert_eq!(
+        runs_after_channel_event(&state, &tenant, &owner, channel_id, workflow_id, message).await,
+        1,
+        "a message after the save ran the definition the save replaced"
+    );
+    assert_eq!(
+        runs_after_channel_event(&state, &tenant, &owner, channel_id, workflow_id, reaction).await,
+        2,
+        "a reaction after the save must run the saved definition"
+    );
 }
