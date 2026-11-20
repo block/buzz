@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:buzz/shared/push/android_push_authority.dart';
@@ -93,6 +94,25 @@ void main() {
     final renewed = await enroll();
     expect(renewed.generation, 2);
     expect(renewed.endpointGrant, isNot(first.endpointGrant));
+  });
+
+  test('reading grants does not wait behind a queued enrollment', () async {
+    final release = Completer<void>();
+    authority = AndroidPushAuthority(
+      keystore: keystore,
+      gateway: fakeGatewayClient(gateway),
+      store: store,
+      now: () => DateTime.fromMillisecondsSinceEpoch(now * 1000),
+      sleep: (_) => release.future,
+    );
+    final enrolling = enroll();
+    await pumpEventQueue();
+
+    expect(await authority.grants(), isEmpty);
+
+    release.complete();
+    await enrolling;
+    expect(await authority.grants(), hasLength(1));
   });
 
   test('a lost enrollment response is resumed with the same request', () async {

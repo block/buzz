@@ -79,7 +79,7 @@ class SecureAndroidPushStateStore implements AndroidPushStateStore {
 /// journaled before its first network attempt (the exact enrollment request;
 /// the next delegation generation; an unfinished endpoint rotation), so a
 /// lost response or a killed process is resumed rather than repeated with
-/// different bytes. All calls run one at a time.
+/// different bytes. Calls that change state run one at a time.
 class AndroidPushAuthority {
   AndroidPushAuthority({
     required this.keystore,
@@ -111,11 +111,13 @@ class AndroidPushAuthority {
     return result;
   }
 
-  /// Every relay's current grant.
-  Future<List<AndroidPushGrant>> grants() => _serialized(() async {
+  /// Every relay's current grant. A plain read of the stored state, outside
+  /// the call queue: it must not wait behind gateway calls or the enrollment
+  /// jitter, and the state is only ever replaced whole.
+  Future<List<AndroidPushGrant>> grants() async {
     final state = await _load();
     return [for (final relay in state.relays.values) ?_grantOf(relay)];
-  });
+  }
 
   /// Makes [endpoint] (the FCM token) the installation's endpoint and returns
   /// a grant from the installation to [relayPubkey] at [relayOrigin],
