@@ -533,7 +533,11 @@ class ChannelSectionsManager {
     // the legacy record must not follow.
     var read = await _fetchAndMerge(allowDisposed: allowDisposed);
     // A retired manager cannot schedule a retry, so its flush re-reads here.
-    for (var i = 0; !read && allowDisposed && i < 2; i++) {
+    for (
+      var i = 0;
+      !read && allowDisposed && _servesThisCommunity && i < 2;
+      i++
+    ) {
       read = await _fetchAndMerge(allowDisposed: true);
     }
     if (!read) {
