@@ -576,8 +576,8 @@ class IosNavigationBar extends HookConsumerWidget {
                 MediaQuery.viewPaddingOf(context).top +
                 portraitTopPadding -
                 (payload['titleHasAnimatedPortrait'] == true ? 4 : 0),
-            left: 0,
-            right: 0,
+            left: titleInsets.left,
+            right: titleInsets.right,
             child: Center(
               child: ExcludeSemantics(
                 child: GestureDetector(

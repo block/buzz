@@ -16,7 +16,6 @@ class _ChannelTile extends ConsumerWidget {
   final String? sectionId;
 
   const _ChannelTile({
-    super.key,
     required this.channel,
     required this.isUnread,
     required this.boldUnread,
@@ -46,19 +45,19 @@ class _ChannelTile extends ConsumerWidget {
     return DecoratedBox(
       decoration: BoxDecoration(
         color: selected ? context.colors.primaryContainer : null,
-        borderRadius: BorderRadius.circular(Radii.md),
+        borderRadius: BorderRadius.circular(Radii.container),
       ),
       child: Semantics(
         selected: selected,
         value: hasAttention ? 'Needs your attention' : null,
         child: InkWell(
-          borderRadius: BorderRadius.circular(Radii.md),
+          borderRadius: BorderRadius.circular(Radii.container),
           onTap: onTap,
           onLongPress: () => _showChannelActions(context, ref),
           child: Padding(
             padding: const EdgeInsets.only(
-              left: _kChannelSectionInset,
-              right: _kChannelSectionInset,
+              left: Grid.xxs,
+              right: Grid.xxs,
               top: _kChannelRowVerticalPadding,
               bottom: _kChannelRowVerticalPadding,
             ),

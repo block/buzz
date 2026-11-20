@@ -517,9 +517,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       ? [0, NSNumber(value: Double(max(0, height - 12) / max(1, height))), 1]
       : [0, 0.55, 1]
     CATransaction.commit()
+    let titleWidth = max(0, container.bounds.width - titleInsetLeft - titleInsetRight)
+    let center = titleInsetLeft + titleWidth / 2
     if let title = paneTitle {
-      let titleWidth = max(0, container.bounds.width - titleInsetLeft - titleInsetRight)
-      let center = titleInsetLeft + titleWidth / 2
       var availableWidth = max(0, titleWidth - 32)
       if horizontalControls && !alignCollapsedTitleToLeading {
         let leadingWidth = headerLeading?.systemLayoutSizeFitting(UIView.layoutFittingCompressedSize).width ?? 0
@@ -531,7 +531,7 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       let size = title.sizeThatFits(CGSize(width: availableWidth, height: 44))
       title.frame = CGRect(x: alignCollapsedTitleToLeading
                            ? navigation.navigationBar.layoutMargins.left
-                           : titleInsetLeft + (titleWidth - size.width) / 2,
+                           : center - size.width / 2,
                            y: alignCollapsedTitleToLeading
                              ? flutterSafeTop + 24 + (44 - size.height) / 2
                              : (container.bounds.height - size.height) / 2,
@@ -553,9 +553,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
       }
     }
     if let title = floatingTitle {
-      let available = max(0, container.bounds.width - 48)
+      let available = max(0, titleWidth - 48)
       let width = min(title.intrinsicContentSize.width, min(available, titleMaxWidth ?? available))
-      title.frame = CGRect(x: (container.bounds.width - width) / 2,
+      title.frame = CGRect(x: center - width / 2,
                            y: flutterSafeTop + portraitTopPadding + 56 - floatingTitleLift, width: width, height: 44)
       // This overlay is outside UINavigationBar, which normally lays out the
       // effect content after constraining its title. Apply that pass here too.

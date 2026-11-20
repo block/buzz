@@ -1578,6 +1578,13 @@ void main() {
     final rowIconX = tester
         .getTopLeft(find.byKey(const ValueKey('channel-icon-1')))
         .dx;
+    final row = find.byKey(const ValueKey('1'));
+    final bounds = tester.getRect(row);
+    final selection = tester.getRect(
+      find.descendant(of: row, matching: find.byType(InkWell)).first,
+    );
+    expect(selection.left - bounds.left, Grid.gutter - Grid.xxs);
+    expect(bounds.right - selection.right, Grid.gutter - Grid.xxs);
     expect(sectionLabelX, rowIconX);
     expect(rowLabelX, greaterThan(rowIconX));
 

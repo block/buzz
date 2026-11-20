@@ -393,7 +393,7 @@ class _MessageImageStack extends HookConsumerWidget {
                     },
                     onHorizontalDragUpdate: (details) {
                       if (!dragging.value || opening.value) return;
-                      distance.value += details.delta.dx;
+                      distance.value += details.delta.dx * (mirrored ? 1 : -1);
                       if (!reducedMotion) {
                         position.value = start.value - distance.value / 140;
                       }
@@ -402,7 +402,8 @@ class _MessageImageStack extends HookConsumerWidget {
                       if (!dragging.value || opening.value) return;
                       dragging.value = false;
                       final dx = distance.value;
-                      final speed = details.primaryVelocity ?? 0;
+                      final speed =
+                          (details.primaryVelocity ?? 0) * (mirrored ? 1 : -1);
                       final step = dx.abs() > 48 || speed.abs() > 500
                           ? (dx == 0 ? -speed.sign : -dx.sign) *
                                 math.max(1, (dx.abs() / 140).round())

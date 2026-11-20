@@ -1,5 +1,7 @@
 import 'package:buzz/shared/widgets/dm_header_portrait.dart';
+
 import 'dart:async';
+
 import 'package:buzz/shared/relay/media_image.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -64,31 +66,43 @@ void main() {
         find.byKey(const ValueKey('navigation-header-avatar-settings')),
       );
       expect(settingsOpened, 1);
-      await tester.pumpWidget(
-        _testApp(
-          home: const MediaQuery(
-            data: MediaQueryData(),
-            child: SizedBox(
-              width: 951,
-              height: 128,
-              child: IosNavigationBar(
-                title: 'Alice',
-                centerTitleInPane: true,
-                titleAvatars: [IosNavigationAction(label: 'Alice')],
+      for (final insets in const [
+        EdgeInsets.zero,
+        EdgeInsets.only(left: 76),
+        EdgeInsets.only(right: 76),
+      ]) {
+        await tester.pumpWidget(
+          _testApp(
+            home: MediaQuery(
+              data: const MediaQueryData(),
+              child: SizedBox(
+                width: 951,
+                height: 128,
+                child: IosNavigationBar(
+                  title: 'Alice',
+                  centerTitleInPane: true,
+                  titleInsets: insets,
+                  titleAvatars: const [IosNavigationAction(label: 'Alice')],
+                ),
               ),
             ),
           ),
-        ),
-      );
-      final paneParams =
-          tester.widget<UiKitView>(find.byType(UiKitView)).creationParams!
-              as Map;
-      expect(paneParams['portraitTopPadding'], 12);
-      expect(
-        tester.getTopLeft(find.byType(DmHeaderPortrait)).dy -
-            tester.getTopLeft(find.byType(UiKitView)).dy,
-        12,
-      );
+        );
+        final paneParams =
+            tester.widget<UiKitView>(find.byType(UiKitView)).creationParams!
+                as Map;
+        expect(paneParams['portraitTopPadding'], 12);
+        expect(
+          tester.getTopLeft(find.byType(DmHeaderPortrait)).dy -
+              tester.getTopLeft(find.byType(UiKitView)).dy,
+          12,
+        );
+        final bar = tester.getRect(find.byType(UiKitView));
+        expect(
+          tester.getCenter(find.byType(DmHeaderPortrait)).dx,
+          (bar.left + insets.left + bar.right - insets.right) / 2,
+        );
+      }
       await tester.pumpWidget(const SizedBox());
       debugDefaultTargetPlatformOverride = null;
     },

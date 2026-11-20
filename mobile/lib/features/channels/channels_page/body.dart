@@ -397,25 +397,22 @@ class _SliverChannelsList extends HookConsumerWidget {
         teamId,
       _ => null,
     };
-    Widget row(Channel channel, String key) => isSoloRow(channel)
-        ? Padding(
-            key: ValueKey(channel.id),
-            padding: const EdgeInsets.symmetric(
-              horizontal: Grid.gutter - Grid.xxs,
+    Widget row(Channel channel, String key) => Padding(
+      key: ValueKey(channel.id),
+      padding: const EdgeInsets.symmetric(horizontal: Grid.gutter - Grid.xxs),
+      child: isSoloRow(channel)
+          ? SoloChatTile(channel: channel)
+          : _ChannelTile(
+              channel: channel,
+              isUnread: unreadChannelIds.contains(channel.id),
+              boldUnread: rowUnreadChannelIds.contains(channel.id),
+              hasAttention: attentionChannelIds.contains(channel.id),
+              isMuted: mutedChannelIds.contains(channel.id),
+              currentPubkey: currentPubkey,
+              onTap: () => openFilteredChannel(channel),
+              sectionId: key.startsWith('group:') ? teamIdOf(key) : null,
             ),
-            child: SoloChatTile(channel: channel),
-          )
-        : _ChannelTile(
-            key: ValueKey(channel.id),
-            channel: channel,
-            isUnread: unreadChannelIds.contains(channel.id),
-            boldUnread: rowUnreadChannelIds.contains(channel.id),
-            hasAttention: attentionChannelIds.contains(channel.id),
-            isMuted: mutedChannelIds.contains(channel.id),
-            currentPubkey: currentPubkey,
-            onTap: () => openFilteredChannel(channel),
-            sectionId: key.startsWith('group:') ? teamIdOf(key) : null,
-          );
+    );
 
     // [layoutId] keys the workspace's saved filter; it differs from the Team
     // section's ID when a Solo project shares that ID.

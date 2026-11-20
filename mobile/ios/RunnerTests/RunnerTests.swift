@@ -492,10 +492,15 @@ class RunnerTests: XCTestCase {
     paneArguments["centerTitleInPane"] = true
     paneArguments["portraitTopPadding"] = 12
     paneArguments["alwaysFrosted"] = true
-    messenger.configure(paneArguments)
-    bar.view().layoutIfNeeded()
-    let paneTitle = try XCTUnwrap(bar.view().subviews.compactMap { $0 as? NavigationTitleView }.first)
-    XCTAssertEqual(paneTitle.frame.minY, 12 + 56)
+    for (left, right) in [(0.0, 76.0), (76.0, 0.0), (0.0, 0.0)] {
+      paneArguments["titleInsetLeft"] = left
+      paneArguments["titleInsetRight"] = right
+      messenger.configure(paneArguments)
+      bar.view().layoutIfNeeded()
+      let paneTitle = try XCTUnwrap(bar.view().subviews.compactMap { $0 as? NavigationTitleView }.first)
+      XCTAssertEqual(paneTitle.frame.minY, 12 + 56)
+      XCTAssertEqual(paneTitle.frame.midX, (bar.view().bounds.width + left - right) / 2, accuracy: 0.5)
+    }
     let paneMaterial = try XCTUnwrap(bar.view().subviews.first as? UIVisualEffectView)
     XCTAssertEqual(paneMaterial.frame, bar.view().bounds, "Portrait panes retain the full native navigation backdrop")
     var animatedArguments = arguments
