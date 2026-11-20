@@ -10,6 +10,7 @@ import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/push/push_bootstrap.dart';
 import 'package:buzz/shared/push/push_lease_revocation_outbox.dart';
 import 'package:buzz/shared/crypto/nip44.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/relay/nostr_models.dart';
 import 'package:buzz/shared/relay/signed_event_relay.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
@@ -128,6 +129,7 @@ void main() {
       }
       await storage.saveActiveId(community.id);
 
+      final reports = _RecordingDiagnostics();
       final cleanup = Completer<void>();
       final showingSettings = ValueNotifier(true);
       addTearDown(showingSettings.dispose);
@@ -172,6 +174,7 @@ void main() {
               discoveries++;
               return _descriptor;
             }),
+            diagnosticReporterProvider.overrideWithValue(reports),
             appLifecycleProvider.overrideWith(_Lifecycle.new),
           ],
           child: BuzzPushBootstrap(
@@ -307,12 +310,51 @@ void main() {
       await tester.pumpAndSettle();
       expect(discoveries, 5);
       expect(tester.widget<Switch>(find.byType(Switch)).onChanged, isNotNull);
+      // A gateway reply the app cannot read is reported while the signing
+      // member is still the reported member, and not after a community switch.
+      messenger.setMockMethodCallHandler(
+        nativePush,
+        (call) async => switch (call.method) {
+          'enrollPush' => throw PlatformException(
+            code: 'gateway_response_invalid',
+          ),
+          'startRegistration' ||
+          'syncPushSnapshot' ||
+          'takePendingNotificationResponse' => null,
+          _ => throw StateError('Unexpected native call ${call.method}'),
+        },
+      );
+      reports.member = nostr.Keys('1' * 64).public;
+      apnsDeviceToken.value = 'test-apns-token-2';
+      await tester.pumpAndSettle();
+      expect(reports.operations, [DiagnosticOperation.pushGatewayResponse]);
+      reports.member = 'e' * 64;
+      apnsDeviceToken.value = 'test-apns-token-3';
+      await tester.pumpAndSettle();
+      expect(reports.operations, hasLength(1));
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
       semantics.dispose();
       debugDefaultTargetPlatformOverride = null;
     });
+  }
+}
+
+class _RecordingDiagnostics extends NoopDiagnosticReporter {
+  final operations = <DiagnosticOperation>[];
+
+  @override
+  String? member;
+
+  @override
+  void reportError(
+    Object error,
+    StackTrace? stackTrace, {
+    required DiagnosticOperation operation,
+  }) {
+    operations.add(operation);
+    super.reportError(error, stackTrace, operation: operation);
   }
 }
 
