@@ -943,16 +943,25 @@ mod postgres_tests {
                     words.extend(sql_words(&body, start_line));
                 }
             } else if c == '$' {
-                // Skip a `$tag$` delimiter; its body is read as SQL.
+                // A `$tag$ ... $tag$` body is read as SQL on its own, so a
+                // stray quote inside it cannot hide the rest of the file.
                 let end = chars[i + 1..]
                     .iter()
                     .position(|&ch| !is_word(ch))
                     .map_or(chars.len(), |offset| i + 1 + offset);
-                i = if chars.get(end) == Some(&'$') {
-                    end + 1
+                if chars.get(end) == Some(&'$') {
+                    let delimiter = &chars[i..=end];
+                    let body_start = end + 1;
+                    let body_end = (body_start..chars.len())
+                        .find(|&j| chars[j..].starts_with(delimiter))
+                        .unwrap_or(chars.len());
+                    let body: String = chars[body_start..body_end].iter().collect();
+                    words.extend(sql_words(&body, line));
+                    line += body.matches('\n').count();
+                    i = (body_end + delimiter.len()).min(chars.len());
                 } else {
-                    i + 1
-                };
+                    i += 1;
+                }
             } else if is_word(c) {
                 let start = i;
                 while i < chars.len() && is_word(chars[i]) {
@@ -2099,8 +2108,9 @@ mod postgres_tests {
     /// `schema/schema.sql` includes every desired-state file exactly once, and
     /// `schema/tables/public/` (the SchemaBot schema directory's `public`
     /// namespace) holds only one table per file: its CREATE TABLE plus the
-    /// CREATE INDEX statements on it. Types, functions, partitions, triggers
-    /// and seed rows belong in the sibling directories SchemaBot never reads.
+    /// CREATE INDEX statements on it. Types, partitions and seed rows belong
+    /// in the sibling directories SchemaBot never reads, and no file declares a
+    /// trigger, function, procedure, rule or foreign key.
     #[test]
     fn desired_state_schema_layout_is_complete_and_schemabot_shaped() {
         use std::collections::BTreeSet;
@@ -2140,12 +2150,6 @@ mod postgres_tests {
             on_disk, included_set,
             "every schema/ file must be included by schema/schema.sql exactly once"
         );
-        for retired in ["functions", "triggers"] {
-            assert!(
-                !schema_dir.join(retired).exists(),
-                "docs/database.md Rule 1: schema/{retired}/ must not exist"
-            );
-        }
         let violations: Vec<String> = std::iter::once("schema.sql")
             .chain(included.iter().map(String::as_str))
             .flat_map(|file| {
@@ -2381,7 +2385,12 @@ mod postgres_tests {
                    COMMENT ON TABLE widgets IS 'Never CREATE TRIGGER here; it''s FOREIGN KEY free';\n\
                    ALTER TABLE widgets ADD COLUMN \"references\" text;\n\
                    DO $body$ BEGIN EXECUTE format('CREATE TRIGGER %I AFTER INSERT ON widgets', 't3'); END $body$;\n\
-                   DO $$ BEGIN EXECUTE E'CREATE RULE r2 AS ON INSERT TO widgets DO INSTEAD NOTHING'; END $$;\n";
+                   DO $$ BEGIN EXECUTE E'CREATE RULE r2 AS ON INSERT TO widgets DO INSTEAD NOTHING'; END $$;\n\
+                   COMMENT ON COLUMN widgets.owner IS $$Owner's id$$;\n\
+                   ALTER TABLE widgets ADD COLUMN owner2 UUID REFERENCES widgets (parent);\n\
+                   DO $outer$ BEGIN EXECUTE $inner$CREATE FUNCTION i() RETURNS int LANGUAGE sql AS 'SELECT 1'$inner$;\n\
+                   END $outer$;\n\
+                   SELECT $1 FROM widgets; CREATE RULE r3 AS ON INSERT TO widgets DO INSTEAD NOTHING;\n";
         let found = forbidden_schema_objects(sql);
         let found: Vec<_> = found.iter().map(|(line, c)| (*line, c.as_str())).collect();
         assert_eq!(
@@ -2400,6 +2409,9 @@ mod postgres_tests {
                 (15, "FOREIGN KEY"),
                 (21, "CREATE TRIGGER"),
                 (22, "CREATE RULE"),
+                (24, "REFERENCES"),
+                (25, "CREATE FUNCTION"),
+                (27, "CREATE RULE"),
             ]
         );
     }
