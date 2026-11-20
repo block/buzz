@@ -45,7 +45,6 @@ class _MessageEditSheet extends HookConsumerWidget {
       [controller, focusNode],
     );
     useEffect(() => stylusHandwriting.dispose, [stylusHandwriting]);
-    final stylusHandwritingEnabled = useValueListenable(stylusHandwriting);
     final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
 
@@ -142,6 +141,9 @@ class _MessageEditSheet extends HookConsumerWidget {
       seeded.value = (text: seed.text, bound: seedBound);
       return null;
     }, [controller, seedBound.join(',')]);
+    // Read after seeding, so a long message opens with handwriting already off
+    // and the first frame never measures it.
+    final stylusHandwritingEnabled = useValueListenable(stylusHandwriting);
 
     _usePlatformUndoBindings(controller, focusNode);
     final chooser = _useMentionChooser(

@@ -646,6 +646,11 @@ void main() {
       message: _message('a' * (stylusHandwritingMaxLength + 1)),
     );
     expect(handwriting(), isFalse);
+    // Opening never measured the message, not even on the first frame.
+    expect(
+      tester.testTextInput.log.map((call) => call.method),
+      isNot(contains('TextInput.setSelectionRects')),
+    );
     await tester.enterText(field, 'short');
     await tester.pump();
     expect(handwriting(), isTrue);

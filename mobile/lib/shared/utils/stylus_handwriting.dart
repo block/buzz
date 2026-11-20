@@ -26,7 +26,7 @@ bool stylusHandwritingEnabledFor(String text) =>
 /// Flutter stops sending character rectangles once handwriting turns off, but
 /// iOS keeps the last ones it received, so the two-finger trackpad gesture and
 /// the autocorrect highlight would use positions from the shorter text. When
-/// the text grows past the cutoff while [focusNode] has focus, this clears
+/// the text grows past the cutoff while [focusNode] has primary focus, this clears
 /// them. iOS holds rectangles only for the focused field, so a field crossing
 /// the cutoff without focus has none to clear.
 class StylusHandwritingCutoff extends ValueNotifier<bool> {
@@ -40,7 +40,7 @@ class StylusHandwritingCutoff extends ValueNotifier<bool> {
 
   void _update() {
     final enabled = stylusHandwritingEnabledFor(_controller.text);
-    if (value && !enabled && _focusNode.hasFocus) {
+    if (value && !enabled && _focusNode.hasPrimaryFocus) {
       SystemChannels.textInput.invokeMethod<void>(
         'TextInput.setSelectionRects',
         const <Object>[],
