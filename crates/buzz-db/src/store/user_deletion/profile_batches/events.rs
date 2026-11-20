@@ -8,7 +8,8 @@ use std::sync::Arc;
 pub(super) struct Snapshot {
     signer: String,
     time: u64,
-    survivors: Arc<Vec<String>>,
+    /// Each surviving archived pubkey and its replacement, if any.
+    survivors: Arc<Vec<(String, Option<String>)>>,
 }
 pub(super) struct Selected {
     pub id: Vec<u8>,
@@ -84,8 +85,20 @@ pub(super) async fn select(
             "profile candidates exceed max-items; no deletion performed",
         ));
     }
-    let survivors:Vec<String>=sqlx::query_scalar("SELECT pubkey FROM archived_identities WHERE community_id=$1 AND NOT(pubkey=ANY($2::text[])) ORDER BY pubkey LIMIT 10001")
+    let survivors:Vec<(String,Option<String>)>=sqlx::query_as("SELECT pubkey,replaced_by FROM archived_identities WHERE community_id=$1 AND NOT(pubkey=ANY($2::text[])) ORDER BY pubkey LIMIT 10001")
         .bind(scope.community).bind(&scope.targets).fetch_all(&mut *conn).await?;
+    // The rebuilt snapshot lists each survivor's replacement, so it must not
+    // name a deleted identity.
+    if survivors.iter().any(|(_, replacement)| {
+        replacement.as_deref().is_some_and(|replacement| {
+            scope
+                .targets
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(replacement))
+        })
+    }) {
+        return Err(invalid("archive replacement on a surviving identity names a target; shared-history disposition required"));
+    }
     let survivors = Arc::new(survivors);
     let mut out: Vec<Selected> = Vec::new();
     // Every replacement is strictly newer than every current snapshot from that signer.
@@ -216,10 +229,12 @@ pub(super) fn sign_snapshots(
             ));
         }
         let mut tags = vec![Tag::parse(["-"]).map_err(|_| invalid("invalid archive marker"))?];
-        for p in snapshot.survivors.iter() {
-            tags.push(
-                Tag::parse(["p", p.as_str()]).map_err(|_| invalid("invalid archive subject"))?,
-            );
+        for (p, replacement) in snapshot.survivors.iter() {
+            let tag = match replacement {
+                Some(replacement) => Tag::parse(["p", p.as_str(), replacement.as_str()]),
+                None => Tag::parse(["p", p.as_str()]),
+            };
+            tags.push(tag.map_err(|_| invalid("invalid archive subject"))?);
         }
         let event = EventBuilder::new(Kind::Custom(13535), "")
             .tags(tags)
@@ -243,19 +258,20 @@ pub(super) async fn replace_snapshot(
     let event = replacements
         .get(&op.key.to_string())
         .ok_or_else(|| invalid("missing signed archive replacement"))?;
-    let current: Vec<String> = sqlx::query_scalar(
-        "SELECT pubkey FROM archived_identities WHERE community_id=$1 ORDER BY pubkey LIMIT 10001",
+    let current: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT pubkey,replaced_by FROM archived_identities WHERE community_id=$1 ORDER BY pubkey LIMIT 10001",
     )
     .bind(scope.community)
     .fetch_all(tx.conn())
     .await?;
-    let expected: Vec<String> = event
+    // A replacement added since the preview changes the snapshot too.
+    let expected: Vec<(String, Option<String>)> = event
         .tags
         .iter()
         .filter_map(|t| {
             let t = t.as_slice();
             (t.first().map(String::as_str) == Some("p"))
-                .then(|| t.get(1).cloned())
+                .then(|| t.get(1).map(|p| (p.clone(), t.get(2).cloned())))
                 .flatten()
         })
         .collect();

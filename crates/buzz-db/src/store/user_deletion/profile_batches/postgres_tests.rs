@@ -904,3 +904,62 @@ async fn historical_archive_request_replacement_blocks_after_unarchive() {
 async fn historical_archive_delta_replacement_blocks_after_unarchive() {
     historical_replacement_blocks_cleanup_after_unarchive(8002).await;
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn rebuilt_snapshot_keeps_a_survivor_replacement_and_never_names_a_target() {
+    let f = Fixture::new().await;
+    f.profiles().await;
+    let replacement = Keys::generate().public_key().to_hex();
+    sqlx::query(
+        "UPDATE archived_identities SET replaced_by=$3 WHERE community_id=$1 AND pubkey=$2",
+    )
+    .bind(f.community)
+    .bind(f.other.public_key().to_hex())
+    .bind(&replacement)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    f.store
+        .run_profile_batches(
+            &f.options(2),
+            true,
+            Some(&f.relay.secret_key().to_secret_hex()),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap();
+    let tags: Value =
+        sqlx::query_scalar("SELECT tags FROM events WHERE community_id=$1 AND kind=13535")
+            .bind(f.community)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        tags,
+        json!([["-"], ["p", f.other.public_key().to_hex(), replacement]])
+    );
+
+    let f = Fixture::new().await;
+    f.profiles().await;
+    sqlx::query(
+        "UPDATE archived_identities SET replaced_by=$3 WHERE community_id=$1 AND pubkey=$2",
+    )
+    .bind(f.community)
+    .bind(f.other.public_key().to_hex())
+    .bind(f.human.public_key().to_hex())
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let before = export(&f.pool).await;
+    let error = f
+        .store
+        .run_profile_batches(&f.options(2), false, None, &mut Vec::new())
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("names a target"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(before, export(&f.pool).await);
+}

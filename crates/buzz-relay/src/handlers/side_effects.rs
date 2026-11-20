@@ -4579,7 +4579,9 @@ pub(crate) mod publish_test_hooks {
         release: Arc<Notify>,
     }
 
-    static GATE: Mutex<Option<Gate>> = Mutex::new(None);
+    /// One armed gate per community, so tests running in parallel never
+    /// replace each other's gate.
+    static GATES: Mutex<Vec<Gate>> = Mutex::new(Vec::new());
 
     /// Arm a one-shot barrier for `community`. Await the returned receiver to
     /// learn when the held publisher has reached the hook (i.e. has read
@@ -4589,7 +4591,9 @@ pub(crate) mod publish_test_hooks {
     pub(crate) fn arm(community: CommunityId) -> (oneshot::Receiver<()>, Arc<Notify>) {
         let (tx, rx) = oneshot::channel();
         let release = Arc::new(Notify::new());
-        *GATE.lock().unwrap() = Some(Gate {
+        let mut gates = GATES.lock().unwrap();
+        gates.retain(|gate| gate.community != community);
+        gates.push(Gate {
             community,
             arrived: tx,
             release: release.clone(),
@@ -4599,11 +4603,11 @@ pub(crate) mod publish_test_hooks {
 
     pub(super) async fn after_list_archived(community: CommunityId) {
         let gate = {
-            let mut slot = GATE.lock().unwrap();
-            match slot.as_ref() {
-                Some(gate) if gate.community == community => slot.take(),
-                _ => None,
-            }
+            let mut gates = GATES.lock().unwrap();
+            gates
+                .iter()
+                .position(|gate| gate.community == community)
+                .map(|index| gates.swap_remove(index))
         };
         if let Some(gate) = gate {
             let _ = gate.arrived.send(());
@@ -4615,7 +4619,9 @@ pub(crate) mod publish_test_hooks {
 /// Publish a kind:13535 archived identities list event (NIP-IA).
 ///
 /// Queries all current archived identities and emits a relay-signed,
-/// NIP-70-protected replaceable-by-convention snapshot with bare `p` tags.
+/// NIP-70-protected replaceable-by-convention snapshot with one `p` tag per
+/// archived identity, carrying its replacement as a third element when it has
+/// one.
 pub async fn publish_nipia_archival_list(
     tenant: &TenantContext,
     state: &Arc<AppState>,
@@ -4639,10 +4645,11 @@ pub async fn publish_nipia_archival_list(
         tags.push(Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?);
 
         for identity in &archived {
-            tags.push(
-                Tag::parse(["p", &identity.pubkey])
-                    .map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?,
-            );
+            let tag = match &identity.replaced_by {
+                Some(replacement) => Tag::parse(["p", &identity.pubkey, replacement]),
+                None => Tag::parse(["p", &identity.pubkey]),
+            };
+            tags.push(tag.map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?);
         }
 
         // NIP-IA: each snapshot's created_at is strictly past the previous
@@ -4678,13 +4685,14 @@ pub async fn publish_nipia_archival_list(
         }
 
         let current_archived = state.db.list_archived(tenant.community()).await?;
-        let snapshot_is_current =
-            archived
-                .iter()
-                .map(|identity| identity.pubkey.as_str())
-                .eq(current_archived
-                    .iter()
-                    .map(|identity| identity.pubkey.as_str()));
+        // A replacement added while this list was built changes the state too.
+        let listed = |identity: &buzz_db::archived_identities::ArchivedIdentity| {
+            (identity.pubkey.clone(), identity.replaced_by.clone())
+        };
+        let snapshot_is_current = archived
+            .iter()
+            .map(listed)
+            .eq(current_archived.iter().map(listed));
         if !snapshot_is_current {
             continue;
         }

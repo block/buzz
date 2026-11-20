@@ -703,6 +703,201 @@ mod tests {
     mod postgres_tests {
         use super::*;
 
+        /// The snapshot carries each replacement, so a publisher that read the
+        /// archive before a replacement was added must not leave its older list as
+        /// the newest one. Same barrier as the test above. RED-on-revert: compare
+        /// only the archived pubkeys in `snapshot_is_current`, and the released
+        /// publisher's list without the replacement stays newest.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires Postgres and Redis"]
+        async fn concurrent_archival_publishers_converge_on_an_added_replacement() {
+            // Ignored, so it runs only where Postgres and Redis are provided: a
+            // missing one is a failure, never a silent pass.
+            let pool = test_pool().await.expect("Postgres for an ignored test");
+            let state = test_state(pool.clone())
+                .await
+                .expect("Redis for an ignored test");
+            let tenant = seed_test_community(&pool).await;
+            let target_hex = Keys::generate().public_key().to_hex();
+            let successor_hex = Keys::generate().public_key().to_hex();
+            let archive = |replaced_by: Option<String>, request: &'static str| {
+                let state = state.clone();
+                let community = tenant.community();
+                let target_hex = target_hex.clone();
+                async move {
+                    state
+                        .db
+                        .archive(
+                            community,
+                            &target_hex,
+                            "self",
+                            &target_hex,
+                            None,
+                            replaced_by.as_deref(),
+                            &request.repeat(64),
+                        )
+                        .await
+                        .expect("archive identity")
+                }
+            };
+            assert!(archive(None, "b").await);
+
+            let (reached_hook, release) =
+                crate::handlers::side_effects::publish_test_hooks::arm(tenant.community());
+            let stale_tenant = tenant.clone();
+            let stale_state = state.clone();
+            let stale_publisher = tokio::spawn(async move {
+                publish_nipia_archival_list(&stale_tenant, &stale_state).await
+            });
+            reached_hook
+                .await
+                .expect("stale publisher reached the post-list_archived hook");
+
+            assert!(archive(Some(successor_hex.clone()), "c").await);
+            publish_nipia_archival_list(&tenant, &state)
+                .await
+                .expect("publish after the added replacement");
+
+            release.notify_one();
+            stale_publisher
+                .await
+                .expect("join stale publisher")
+                .expect("stale publisher converges without error");
+
+            let final_snapshot = state
+                .db
+                .query_events(&EventQuery {
+                    kinds: Some(vec![buzz_core::kind::KIND_IA_ARCHIVED_LIST as i32]),
+                    pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                    global_only: true,
+                    limit: Some(1),
+                    ..EventQuery::for_community(tenant.community())
+                })
+                .await
+                .expect("query final snapshot")
+                .into_iter()
+                .next()
+                .expect("final snapshot exists");
+            let listed: Vec<Vec<String>> = final_snapshot
+                .event
+                .tags
+                .iter()
+                .map(|tag| tag.as_slice().to_vec())
+                .filter(|fields| fields.first().map(String::as_str) == Some("p"))
+                .collect();
+            assert_eq!(
+                listed,
+                vec![vec![
+                    "p".to_string(),
+                    target_hex.clone(),
+                    successor_hex.clone()
+                ]],
+                "the newest snapshot must carry the replacement added during the race"
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres and Redis"]
+        async fn rotated_archive_publishes_replacement_once_successor_exists() {
+            // Ignored, so it runs only where Postgres and Redis are provided: a
+            // missing one is a failure, never a silent pass.
+            let pool = test_pool().await.expect("Postgres for an ignored test");
+            let state = test_state(pool.clone())
+                .await
+                .expect("Redis for an ignored test");
+            let tenant = seed_test_community(&pool).await;
+            let old_keys = Keys::generate();
+            let old_hex = old_keys.public_key().to_hex();
+            let successor_hex = Keys::generate().public_key().to_hex();
+            let request = |replaced_by: Option<&str>| {
+                let mut tags = vec![
+                    Tag::parse(["-"]).expect("protected tag"),
+                    Tag::parse(["p", old_hex.as_str()]).expect("p tag"),
+                    Tag::parse(["reason", "rotated"]).expect("reason tag"),
+                ];
+                if let Some(successor) = replaced_by {
+                    tags.push(Tag::parse(["replaced-by", successor]).expect("replaced-by tag"));
+                }
+                EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVE_REQUEST as u16), "")
+                    .tags(tags)
+                    .allow_self_tagging()
+                    .sign_with_keys(&old_keys)
+                    .expect("sign archive request")
+            };
+            let deltas = || async {
+                state
+                    .db
+                    .query_events(&EventQuery {
+                        kinds: Some(vec![buzz_core::kind::KIND_IA_ARCHIVED as i32]),
+                        pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                        global_only: true,
+                        ..EventQuery::for_community(tenant.community())
+                    })
+                    .await
+                    .expect("query archive deltas")
+            };
+            let replacement = |event: &Event| {
+                event.tags.iter().find_map(|tag| {
+                    let fields = tag.as_slice();
+                    (fields.first().map(String::as_str) == Some("replaced-by"))
+                        .then(|| fields.get(1).cloned())
+                        .flatten()
+                })
+            };
+
+            for replaced_by in [
+                None,
+                None,
+                Some(successor_hex.as_str()),
+                Some(successor_hex.as_str()),
+            ] {
+                handle_identity_archive_event(&tenant, &state, &request(replaced_by))
+                    .await
+                    .expect("self archive accepted");
+            }
+
+            let published = deltas().await;
+            assert_eq!(
+                published.len(),
+                2,
+                "one delta for the archive and one for the added replacement; repeats publish nothing"
+            );
+            let mut replacements: Vec<_> =
+                published.iter().map(|e| replacement(&e.event)).collect();
+            replacements.sort();
+            assert_eq!(replacements, vec![None, Some(successor_hex.clone())]);
+            let row = state
+                .db
+                .list_archived(tenant.community())
+                .await
+                .expect("list archived")
+                .into_iter()
+                .find(|row| row.pubkey == old_hex)
+                .expect("archived row");
+            assert_eq!(row.replaced_by.as_deref(), Some(successor_hex.as_str()));
+
+            // The snapshot carries the replacement next to the archived key.
+            let snapshot = state
+                .db
+                .query_events(&EventQuery {
+                    kinds: Some(vec![buzz_core::kind::KIND_IA_ARCHIVED_LIST as i32]),
+                    pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+                    global_only: true,
+                    limit: Some(1),
+                    ..EventQuery::for_community(tenant.community())
+                })
+                .await
+                .expect("query snapshot")
+                .into_iter()
+                .next()
+                .expect("snapshot exists");
+            assert!(
+                snapshot.event.tags.iter().any(|tag| tag.as_slice()
+                    == ["p".to_string(), old_hex.clone(), successor_hex.clone()]),
+                "snapshot lists the archived key with its replacement"
+            );
+        }
+
         /// NIP-IA: every snapshot's `created_at` is strictly past the previous
         /// one's, even when publishers race on one head. Concurrent publishers
         /// each read the head behind the replacement lock. The head is first
