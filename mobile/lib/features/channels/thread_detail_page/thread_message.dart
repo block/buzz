@@ -95,10 +95,12 @@ class _ThreadMessage extends HookConsumerWidget {
       directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
       agentMentionPubkeys: agentMentionPubkeys,
     );
-    final mentionLabels = watchChannelIdentityLabels(ref, channelId, {
-      ...message.mentionPubkeys,
-      ...linkedPubkeys,
-    });
+    final mentionLabels = watchChannelIdentityLabels(
+      ref,
+      channelId,
+      message.mentionPubkeys,
+      linkedPubkeys: linkedPubkeys,
+    );
 
     void openMessageActions(MessageLongPressDetails details) {
       showMessageActions(

@@ -45,7 +45,8 @@ class ForumPostCard extends HookConsumerWidget {
     );
     // Identity links name their own keys: resolve those for display only.
     final linkedPubkeys = useMemoized(
-      () => mentionIdentityLinkKeys(post.content),
+      // Only the visible preview's links render, so only those resolve.
+      () => mentionIdentityLinkKeys(_previewText(post.content)),
       [post.content],
     );
     final mentionPubkeysKey = (mentionPubkeys.toList()..sort()).join('\u0000');
@@ -96,12 +97,14 @@ class ForumPostCard extends HookConsumerWidget {
       directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
       agentMentionPubkeys: agentMentionPubkeys,
     );
-    final mentionLabels = watchChannelIdentityLabels(ref, post.channelId, {
-      ...post.mentionPubkeys,
-      ...linkedPubkeys,
-    });
-    final preview = post.content.length > 200
-        ? '${post.content.substring(0, 200)}...'
+    final mentionLabels = watchChannelIdentityLabels(
+      ref,
+      post.channelId,
+      post.mentionPubkeys,
+      linkedPubkeys: linkedPubkeys,
+    );
+    final preview = post.content.length > _previewLength
+        ? '${_previewText(post.content)}...'
         : post.content;
     final summary = post.threadSummary;
 
@@ -384,3 +387,9 @@ Map<String, String> _buildMentionNames(
   }
   return names;
 }
+
+const _previewLength = 200;
+
+String _previewText(String content) => content.length > _previewLength
+    ? content.substring(0, _previewLength)
+    : content;

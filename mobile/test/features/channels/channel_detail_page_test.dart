@@ -14832,6 +14832,7 @@ void main() {
       final mallory = '2' * 64;
       final scoutA = '3' * 64;
       final scoutB = '4' * 64;
+      final unknown = '5' * 64;
       String link(String label, String key) =>
           '[@$label](nostr:${fullNpub(key)})';
       await tester.pumpWidget(
@@ -14848,7 +14849,8 @@ void main() {
               targetId: 'linked',
               content:
                   'ok ${link('Wes', mallory)} '
-                  '${link('Scout', scoutA)} ${link('Scout', scoutB)}',
+                  '${link('Scout', scoutA)} ${link('Scout', scoutB)} '
+                  '${link('Previous', unknown)}',
               createdAt: 1100,
             ),
           ],
@@ -14875,10 +14877,12 @@ void main() {
           .widgetList<MessageMentionPill>(find.byType(MessageMentionPill))
           .map((pill) => pill.label)
           .toList();
-      expect(pills, hasLength(3));
+      expect(pills, hasLength(4));
       expect(pills.first, 'Mallory');
-      expect(pills.skip(1).toSet(), hasLength(2));
-      expect(pills.skip(1), everyElement(startsWith('Scout ')));
+      expect(pills.skip(1).take(2).toSet(), hasLength(2));
+      expect(pills.skip(1).take(2), everyElement(startsWith('Scout ')));
+      // A key with no name here keeps the label written into its link.
+      expect(pills.last, 'Previous');
     });
 
     testWidgets('edited messages show updated content and (edited) label', (

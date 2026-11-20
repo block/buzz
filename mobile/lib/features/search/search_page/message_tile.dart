@@ -32,23 +32,29 @@ class _MessageTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final rich = hit.content.length <= _richSearchPreviewLimit;
     // Identity links name their own keys: resolve those for display only.
-    final mentionedPubkeys = rich
-        ? {
-            ...mentionedPubkeysFromTags(hit.tags),
-            ...mentionIdentityLinkKeys(hit.content),
-          }
+    final taggedPubkeys = rich
+        ? mentionedPubkeysFromTags(hit.tags)
         : <String>{};
+    final linkedPubkeys = rich
+        ? mentionIdentityLinkKeys(hit.content)
+        : const <String>{};
     // A hit is labelled within its channel, as it would be there.
     final hitChannelId = channel?.id ?? hit.channelId;
-    final labelPubkeys = {hit.pubkey.toLowerCase(), ...mentionedPubkeys};
+    final labelPubkeys = {hit.pubkey.toLowerCase(), ...taggedPubkeys};
     final Map<String, String> labels;
     if (hitChannelId == null) {
-      final names = watchIdentityNames(ref, labelPubkeys);
-      labels = {
-        for (final pubkey in labelPubkeys) pubkey: names.labelFor(pubkey),
-      };
+      final names = watchIdentityNames(ref, {
+        ...labelPubkeys,
+        ...linkedPubkeys,
+      });
+      labels = identityLabels(names, labelPubkeys, linkedPubkeys);
     } else {
-      labels = watchChannelIdentityLabels(ref, hitChannelId, labelPubkeys);
+      labels = watchChannelIdentityLabels(
+        ref,
+        hitChannelId,
+        labelPubkeys,
+        linkedPubkeys: linkedPubkeys,
+      );
     }
     final authorName =
         labels[hit.pubkey.toLowerCase()] ??

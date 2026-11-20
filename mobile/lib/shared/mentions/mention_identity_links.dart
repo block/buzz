@@ -54,10 +54,20 @@ List<({int start, int end, String label, String pubkey})> mentionIdentityLinks(
       (start: match.start, end: match.end, label: label, pubkey: pubkey),
 ];
 
-/// The lowercase keys that identity links in [content] name, so a message
-/// row can resolve their names and agent icons as it does for tagged keys.
-/// Most messages carry no link, and a substring check skips the scan.
+final _definition = RegExp(
+  r'^ {0,3}\[[^\]\n]+\]:[ \t]*<?(nostr:npub1[02-9ac-hj-np-z]+)>?[ \t]*$',
+  multiLine: true,
+);
+
+/// The lowercase keys that identity links in [content] name, inline or as
+/// reference definitions (`[ref]: nostr:npub1…`), so a message row can
+/// resolve their names and agent icons as it does for tagged keys. Most
+/// messages carry no key, and a substring check skips the scan.
 Set<String> mentionIdentityLinkKeys(String content) =>
-    content.contains('](nostr:npub1')
-    ? {for (final link in mentionIdentityLinks(content)) link.pubkey}
+    content.contains('nostr:npub1')
+    ? {
+        for (final link in mentionIdentityLinks(content)) link.pubkey,
+        for (final match in _definition.allMatches(content))
+          ?mentionIdentityLinkKey(match[1]!),
+      }
     : const {};

@@ -56,15 +56,15 @@ class _InboxRow extends HookConsumerWidget {
     if (channelId == null) {
       // No channel: the row's own identities are the comparison context.
       final names = watchIdentityNames(ref, relevantPubkeys);
-      contextualLabels = {
-        for (final key in names.candidates) key: names.labelFor(key),
-      };
+      contextualLabels = identityLabels(names, {
+        senderPubkey,
+        ...mentionPubkeys,
+      }, linkedPubkeys);
     } else {
-      contextualLabels = watchChannelIdentityLabels(
-        ref,
-        channelId,
-        relevantPubkeys,
-      );
+      contextualLabels = watchChannelIdentityLabels(ref, channelId, {
+        senderPubkey,
+        ...mentionPubkeys,
+      }, linkedPubkeys: linkedPubkeys);
     }
     final senderLabel =
         contextualLabels[senderPubkey] ??

@@ -125,7 +125,8 @@ class _MessageBubble extends HookConsumerWidget {
     final mentionLabels = watchChannelIdentityLabels(
       ref,
       currentChannelId,
-      displayedPubkeys,
+      normalizedMentionPubkeys,
+      linkedPubkeys: linkedPubkeys,
     );
 
     void openMessageActions(MessageLongPressDetails details) {

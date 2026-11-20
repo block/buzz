@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../../shared/deeplink/deep_link.dart';
 import '../../../shared/mentions/mention_bindings.dart';
+import '../../../shared/mentions/mention_identity_links.dart';
 import '../message_media.dart';
 import 'buzz_link_label.dart';
 import 'channel_token_pattern.dart';
@@ -258,6 +259,7 @@ final _hasDelimiter = RegExp(r'[*_~<]');
 // Look ahead so adjacent tokens sharing a colon are both considered.
 final _shortcode = RegExp(r'(?=:([a-z0-9_-]+):)', caseSensitive: false);
 final _qualifier = RegExp(r'\(([0-9a-f]{64})\)');
+final _escapedPunctuation = RegExp(r'\\([!-/:-@\[-`{-~])');
 
 class _PreviewBuilder {
   final Map<String, Set<String>> mentionBindings;
@@ -367,6 +369,11 @@ class _PreviewBuilder {
         add(PreviewMedia(kind));
         continue;
       }
+      final identity = _identityMention(label, url);
+      if (identity != null) {
+        add(identity);
+        continue;
+      }
       final uri = Uri.tryParse(url);
       final deepLink = uri?.scheme == 'buzz'
           ? parseBuzzDeepLink(uri!) ?? parseEntityDeepLink(uri)
@@ -441,6 +448,29 @@ class _PreviewBuilder {
     text(unshieldMarkdownEscapes(source.substring(cursor)));
   }
 
+  /// Mirrors the thread view's identity-link pill: the name its key resolves
+  /// to, else the label written into the link. Null for any other link.
+  PreviewMention? _identityMention(String label, String url) {
+    final pubkey = mentionIdentityLinkKey(url);
+    if (pubkey == null) return null;
+    final written = decodeMarkdownLabelSyntax(label)
+        .replaceAllMapped(_escapedPunctuation, (m) => m[1]!)
+        .replaceAll('\u00A0', ' ');
+    if (!isMentionIdentityLabel(written)) return null;
+    final name = mentionLabels[pubkey] ?? mentionNames[pubkey];
+    final fullLabel = name ?? written.substring(1);
+    return PreviewMention(
+      pubkey: pubkey,
+      label: _shortQualifier(fullLabel),
+      semanticsLabel: fullLabel,
+    );
+  }
+
+  static String _shortQualifier(String label) => label.replaceAllMapped(
+    _qualifier,
+    (m) => '(${m[1]!.substring(0, 8)}…${m[1]!.substring(60)})',
+  );
+
   /// Mirrors the thread view's mention chip: an ambiguous label stays text.
   PreviewMention? _mention(String label, String typed) {
     final matches = mentionBindings[label] ?? const <String>{};
@@ -452,10 +482,7 @@ class _PreviewBuilder {
     final fullLabel = displayName ?? typed;
     return PreviewMention(
       pubkey: pubkey,
-      label: fullLabel.replaceAllMapped(
-        _qualifier,
-        (m) => '(${m[1]!.substring(0, 8)}…${m[1]!.substring(60)})',
-      ),
+      label: _shortQualifier(fullLabel),
       semanticsLabel: fullLabel,
     );
   }

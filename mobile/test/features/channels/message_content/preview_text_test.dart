@@ -1,5 +1,6 @@
 import 'package:buzz/features/channels/message_content/preview_text.dart';
 import 'package:buzz/features/channels/message_media.dart';
+import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 const _alice =
@@ -13,6 +14,7 @@ List<PreviewPiece> _pieces(
   int maxLines = 2,
   Map<String, Set<String>> mentionBindings = const {},
   Map<String, String> mentionNames = const {},
+  Map<String, String> mentionLabels = const {},
   Map<String, String> customEmoji = const {},
   Map<String, String> channelNames = const {},
 }) => messagePreviewPieces(
@@ -20,6 +22,7 @@ List<PreviewPiece> _pieces(
   maxLines: maxLines,
   mentionBindings: mentionBindings,
   mentionNames: mentionNames,
+  mentionLabels: mentionLabels,
   customEmoji: customEmoji,
   channelNames: channelNames,
 );
@@ -315,5 +318,26 @@ void main() {
         const PreviewMedia(MessageMediaKind.video),
       ]);
     });
+  });
+
+  test('an identity link previews the name its key resolves to', () {
+    final link = '[@Prev\\.ious](nostr:${fullNpub(_alice)})';
+    expect(_pieces('hi $link', mentionLabels: const {_alice: 'Current'}), [
+      const PreviewText('hi '),
+      const PreviewMention(
+        pubkey: _alice,
+        label: 'Current',
+        semanticsLabel: 'Current',
+      ),
+    ]);
+    // Unknown here: the label written into the link, escapes removed.
+    expect(_pieces('hi $link'), [
+      const PreviewText('hi '),
+      const PreviewMention(
+        pubkey: _alice,
+        label: 'Prev.ious',
+        semanticsLabel: 'Prev.ious',
+      ),
+    ]);
   });
 }

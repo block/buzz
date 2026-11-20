@@ -178,6 +178,16 @@ class IdentityNames {
   String labelFor(String pubkey) =>
       resolve(pubkey)?.name ?? _plainName(pubkey.toLowerCase());
 
+  /// Whether [pubkey] has a real name here: a profile, directory or view
+  /// fallback name, not just the compact npub [labelFor] falls back to.
+  bool hasName(String pubkey) {
+    final key = pubkey.toLowerCase();
+    return _nonBlank(_sources.verifiedNames[key]) != null ||
+        _nonBlank(_sources.profiles[key]?.displayName) != null ||
+        _nonBlank(_sources.agentDisplayNames[key]) != null ||
+        _nonBlank(_fallbackNames[key]) != null;
+  }
+
   String _plainName(String key) =>
       _nonBlank(_sources.verifiedNames[key])?.trim() ??
       _nonBlank(_sources.profiles[key]?.displayName)?.trim() ??

@@ -368,8 +368,9 @@ class _OriginalPost extends ConsumerWidget {
     final mentionLabels = watchChannelIdentityLabels(
       ref,
       post.channelId,
+      post.mentionPubkeys,
       // Identity links name their own keys: resolve those for display only.
-      {...post.mentionPubkeys, ...mentionIdentityLinkKeys(post.content)},
+      linkedPubkeys: mentionIdentityLinkKeys(post.content),
     );
 
     return Padding(
@@ -489,8 +490,9 @@ class _ReplyRow extends ConsumerWidget {
     final mentionLabels = watchChannelIdentityLabels(
       ref,
       channelId,
+      reply.mentionPubkeys,
       // Identity links name their own keys: resolve those for display only.
-      {...reply.mentionPubkeys, ...mentionIdentityLinkKeys(reply.content)},
+      linkedPubkeys: mentionIdentityLinkKeys(reply.content),
     );
 
     return Padding(

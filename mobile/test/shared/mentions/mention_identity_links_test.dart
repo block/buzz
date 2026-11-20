@@ -45,4 +45,17 @@ void main() {
     expect(mentionIdentityLinkKey(target), key);
     expect(mentionIdentityLinkKey(target.toUpperCase()), isNull);
   });
+
+  test('a row collects the keys of inline and reference identity links', () {
+    final other = 'c' * 64;
+    final otherTarget =
+        'nostr:${nostr.Nip19.encode(prefix: nostr.Nip19Prefix.npub, data: other)}';
+    expect(
+      mentionIdentityLinkKeys(
+        'hi [@Honey]($target) and [@Ref][r]\n\n[r]: <$otherTarget>',
+      ),
+      {key, other},
+    );
+    expect(mentionIdentityLinkKeys('plain @Honey text'), isEmpty);
+  });
 }
