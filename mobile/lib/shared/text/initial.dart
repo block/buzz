@@ -7,7 +7,7 @@ import 'package:characters/characters.dart';
 /// when [label] has none.
 ///
 /// `label[0]` and `label.substring(0, 1)` return one UTF-16 code unit. Anything
-/// outside the Basic Multilingual Plane — every emoji, and CJK Extension B,
+/// outside the Basic Multilingual Plane — most emoji, and CJK Extension B,
 /// which appears in ordinary Chinese and Japanese given names — is stored as a
 /// surrogate pair, so those return half of one: not a character, and drawn as
 /// `\u{FFFD}` in the avatar.
