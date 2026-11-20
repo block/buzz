@@ -115,12 +115,12 @@ class ChannelWindowStore {
 ChannelWindowPage parseChannelWindowResponse(
   List<NostrEvent> events,
   String channelId,
-  ChannelPageCursor? startCursor,
-) {
+  ChannelPageCursor? startCursor, {
+  List<int> contentKinds = EventKind.channelTimelineContentKinds,
+}) {
   var rows = [
     for (final event in events)
-      if (EventKind.channelTimelineContentKinds.contains(event.kind))
-        ChannelWindowRow(event: event),
+      if (contentKinds.contains(event.kind)) ChannelWindowRow(event: event),
   ];
   final rowIndexesById = <String, int>{
     for (var i = 0; i < rows.length; i++) rows[i].event.id: i,
