@@ -147,6 +147,7 @@ class _HuddleHistoryMessages extends HookConsumerWidget {
           hasInitialUnread: false,
           channelId: channelId,
           notifier: ref.read(provider.notifier),
+          relayHistoryReady: ref.read(provider.notifier).hasLoadedHistory,
           isDm: false,
           flat: false,
           currentPubkey: currentPubkey,

@@ -3,9 +3,11 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/channels/saved_message_store.dart';
 import '../../shared/relay/relay.dart';
 import 'channel_event_order.dart';
 import 'pending_local_messages_provider.dart';
+import 'saved_channel_page.dart';
 import 'channel_window.dart';
 import 'thread_replies_provider.dart';
 import 'thread_summary_refresh_queue.dart';
@@ -39,6 +41,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   void Function()? _unsubscribe;
   bool _reachedOldest = false;
   bool _initInFlight = false;
+  bool _hasLoadedHistory = false;
+  bool _historyRefreshFailed = false;
+  AsyncError<List<NostrEvent>>? _accessDenial;
   Future<bool>? _olderInFlight;
   bool _usingChannelWindow = false;
   ChannelPageCursor? _legacyHistoryCursor;
@@ -112,11 +117,22 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   /// UI can show stale data instead of a blank loading spinner.
   List<NostrEvent>? _lastKnownMessages;
 
-  /// Whether this channel has completed at least one message history load.
+  /// Whether any live or historical messages have been loaded.
   ///
   /// This distinguishes a genuinely loaded empty channel from the synthetic
   /// empty value returned while the relay is not yet connected.
   bool get hasLoadedMessages => _lastKnownMessages != null;
+
+  /// A complete history response can replace the saved preview.
+  bool get hasLoadedHistory => _hasLoadedHistory;
+
+  bool get historyRefreshFailed => _historyRefreshFailed;
+
+  void retryHistoryRefresh() {
+    _historyRefreshFailed = false;
+    ref.notifyListeners();
+    ref.invalidateSelf();
+  }
 
   /// Whether a loaded timeline is resubscribing and fetching its newest
   /// history, as after a reconnect, to become current again.
@@ -193,7 +209,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _initInFlight = false;
       _initialWindowQueryInFlight = false;
       _liveSummaryRootsDuringInitialWindowQuery.clear();
-      return AsyncData(_lastKnownMessages ?? const []);
+      return _accessDenial ?? AsyncData(_lastKnownMessages ?? const []);
     }
 
     _reachedOldest = false;
@@ -220,6 +236,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     _initialWindowQueryInFlight = false;
     _liveSummaryRootsDuringInitialWindowQuery.clear();
     _init();
+    if (_accessDenial case final denial?) return denial;
     if (_lastKnownMessages case final cached? when cached.isNotEmpty) {
       return AsyncData(cached);
     }
@@ -229,7 +246,13 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   Future<void> _init() async {
     final initVersion = ++_initVersion;
     _initInFlight = true;
+    _historyRefreshFailed = false;
     _clearSubscription();
+    final cacheScope = ref.read(savedMessageScopeProvider);
+    final cache = ref.read(savedMessageStoreProvider);
+    final ticket = cacheScope == null
+        ? null
+        : cache.capture(cacheScope, (channelId: channelId, rootId: ''));
     try {
       final session = ref.read(relaySessionProvider.notifier);
 
@@ -243,7 +266,41 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
             since: _currentUnixSeconds(),
             limit: 200,
           ),
-          _handleLiveEvent,
+          (event) {
+            if (!_isCurrentInit(initVersion) || _accessDenial != null) return;
+            if (cacheScope != null &&
+                (event.channelId == null || event.channelId == channelId) &&
+                (event.kind == EventKind.deletion ||
+                    event.kind == EventKind.nip29DeleteEvent ||
+                    event.kind == EventKind.streamMessageEdit)) {
+              // Remove stale rows and retire a pending save of the old page.
+              final targets = {
+                for (final tag in event.tags)
+                  if (tag.length > 1 && tag[0] == 'e') tag[1],
+              };
+              cache.removeChannelEvents(cacheScope, channelId, targets);
+            }
+            _handleLiveEvent(event);
+          },
+          onClosed: (message) {
+            if (!_isCurrentInit(initVersion) ||
+                !isRelayChannelAccessDenied(message)) {
+              return;
+            }
+            if (isRelayChannelSubscriptionRevoked(message)) {
+              // Auto-archive also closes live delivery. Retire this read and
+              // let a fresh history request establish whether access remains.
+              _detachLive();
+              ref.invalidateSelf();
+              return;
+            }
+            _denyAccess(
+              Exception(message),
+              StackTrace.current,
+              cache,
+              cacheScope,
+            );
+          },
         );
         if (!_isCurrentInit(initVersion)) {
           unsubscribe();
@@ -258,7 +315,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       }
 
       final historyVersion = ++_threadQuerySerial;
-      final history = await _fetchNewestHistory(session);
+      final (history, wireEvents) = await _fetchNewestHistory(
+        session,
+        initVersion,
+      );
       if (!_isCurrentInit(initVersion)) return;
       if (!_usingChannelWindow) {
         _legacyHistoryCursor = history.isEmpty
@@ -274,6 +334,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         ...history.where((event) => existingIds.add(event.id)),
       ]);
       _lastKnownMessages = merged;
+      _hasLoadedHistory = true;
+      _accessDenial = null;
       _reconnectSummaries = const {};
       _reconcileRetainedSummaryPayloads(merged);
       _reconcileRetainedAggregates(historyVersion);
@@ -281,16 +343,27 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       // catching up.
       _initInFlight = false;
       state = AsyncData(merged);
+      if (ticket != null && _hasListeners) {
+        unawaited(
+          saveChannelPage(
+            ref,
+            cache,
+            ticket,
+            wireEvents,
+            isCurrent: () => _isCurrentInit(initVersion),
+          ),
+        );
+      }
       _summaryRefreshes.resume();
       unawaited(_fillNotices());
     } catch (e, st) {
       if (!_isCurrentInit(initVersion)) return;
-      if (isRelayAccessDenied(e)) {
-        _lastKnownMessages = null;
-        _initInFlight = false;
-        state = AsyncError(e, st);
+      if (isRelayChannelAccessDenied(e)) {
+        _denyAccess(e, st, cache, cacheScope);
         return;
       }
+      if (_accessDenial != null) return;
+      _historyRefreshFailed = true;
       final fallbackMessages = state.value ?? _lastKnownMessages;
       if (fallbackMessages != null) {
         debugPrint(
@@ -313,8 +386,36 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     }
   }
 
-  Future<List<NostrEvent>> _fetchNewestHistory(
+  void _denyAccess(
+    Object error,
+    StackTrace stackTrace,
+    SavedMessageStore cache,
+    SavedMessageScope? scope,
+  ) {
+    _detachLive();
+    _lastKnownMessages = null;
+    _hasLoadedHistory = false;
+    _windowStore = const ChannelWindowStore.empty();
+    _usingChannelWindow = false;
+    _legacyHistoryCursor = null;
+    _reconnectSummaries = const {};
+    _queryThreadSummaries.clear();
+    _overflowFloors.clear();
+    _deepLinkEvents.clear();
+    _notices.clear();
+    _noticeAux.clear();
+    if (scope != null) {
+      unawaited(cache.removeChannel(scope, channelId));
+      ref.invalidate(savedChannelPreviewProvider(channelId));
+    }
+    final denial = AsyncError<List<NostrEvent>>(error, stackTrace);
+    _accessDenial = denial;
+    state = denial;
+  }
+
+  Future<(List<NostrEvent>, List<NostrEvent>)> _fetchNewestHistory(
     RelaySessionNotifier session,
+    int initVersion,
   ) async {
     if (flatTimeline) {
       _usingChannelWindow = false;
@@ -322,12 +423,16 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         NostrFilters.messages(channelId),
       );
       history.sort(compareChannelTimelineEventsChronologically);
-      return history;
+      return (history, history.reversed.toList());
     }
     try {
       _initialWindowQueryInFlight = true;
       final pageVersion = ++_threadQuerySerial;
-      final page = await _fetchWindowPage(session, null);
+      final wireEvents = await session.queryRelay([_channelWindowFilter(null)]);
+      if (!_isCurrentInit(initVersion)) {
+        return const (<NostrEvent>[], <NostrEvent>[]);
+      }
+      final page = parseChannelWindowResponse(wireEvents, channelId, null);
       _initialWindowQueryInFlight = false;
       _windowStore = replaceNewestChannelWindow(
         _windowStore,
@@ -340,14 +445,17 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       _usingChannelWindow = true;
       _reconcilePageSummaries(page, pageVersion);
       _reachedOldest = !channelWindowHasMore(_windowStore);
-      return _windowEvents();
+      return (_windowEvents(), wireEvents);
     } catch (error) {
+      if (!_isCurrentInit(initVersion)) rethrow;
       _initialWindowQueryInFlight = false;
       _liveSummaryRootsDuringInitialWindowQuery.clear();
       // Legacy history would re-run the timed-out work another way.
       // An access refusal must reach the outer cache-clearing handler. A
       // second transport cannot turn that refusal into a transient failure.
-      if (isRelayDeadlineError(error) || isRelayAccessDenied(error)) rethrow;
+      if (isRelayDeadlineError(error) || isRelayChannelAccessDenied(error)) {
+        rethrow;
+      }
       debugPrint(
         '[ChannelMessagesNotifier] channel window unavailable for $channelId, falling back to WS history: $error',
       );
@@ -356,7 +464,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         NostrFilters.messages(channelId),
       );
       history.sort(compareChannelTimelineEventsChronologically);
-      return history;
+      return (history, history.reversed.toList());
     }
   }
 
@@ -388,6 +496,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     bool authoritative = true,
     int? summaryVersion,
   }) {
+    if (_accessDenial != null) return;
     final before = _lastKnownMessages ?? const <NostrEvent>[];
     _replyOwnership.record([event]);
     // Invalidate the thread query independently of the selected channel-history
@@ -973,6 +1082,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
   /// Stops live work for a chat that stayed hidden; resume catches it up.
   void _detachLive() {
+    _liveDetachTimer?.cancel();
     _liveDetachTimer = null;
     _liveDetached = true;
     // Retire an unfinished init so its subscription can't install later.
@@ -992,6 +1102,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
   /// Loads specific deep-link targets that may fall outside the newest window.
   Future<void> loadEventsById(Iterable<String> eventIds) async {
+    if (_accessDenial != null) return;
     final ids = eventIds.where((id) => id.isNotEmpty).toSet();
     if (ids.isEmpty) return;
     _retainedDeepLinkEventIds.addAll(ids);
@@ -1012,6 +1123,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
             limit: ids.length,
           ),
         );
+    // The session holds a lookup sent while disconnected and answers it after
+    // authentication, past the connect's re-init. Only a denial retires it.
+    if (!ref.mounted || _accessDenial != null) return;
     for (final event in events) {
       if (event.channelId == channelId &&
           _retainedDeepLinkEventIds.contains(event.id)) {

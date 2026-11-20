@@ -44,6 +44,88 @@ void _confirmedJoinCases() {
   });
 
   group('confirmed joins', () {
+    test('a writer-confirmed removal retires the saved channel', () async {
+      const scope = (communityId: 'community', pubkey: 'me');
+      const page = (channelId: _joinedChannel, rootId: '');
+      final session = _WriterReplicaRelaySession(
+        memberships: [_membership(_joinedChannel, 'me')],
+        metadata: [_meta(id: _joinedChannel, name: 'joined')],
+      );
+      final directory = await Directory.systemTemp.createTemp('buzz-lost-join');
+      addTearDown(() => directory.delete(recursive: true));
+      final purgeStarted = Completer<void>();
+      final allowPurge = Completer<void>();
+      final store = SavedMessageStore(
+        root: () async {
+          if (!purgeStarted.isCompleted) purgeStarted.complete();
+          await allowPurge.future;
+          return directory;
+        },
+        diagnostics: const NoopDiagnosticReporter(),
+      );
+      final container = _buildContainer(
+        session: session,
+        overrides: [
+          savedMessageScopeProvider.overrideWithValue(scope),
+          savedMessageStoreProvider.overrideWithValue(store),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      final ticket = store.capture(scope, page);
+      final retained = store.capture(scope, (
+        channelId: _otherJoinedChannel,
+        rootId: '',
+      ));
+      final notifier = container.read(channelsProvider.notifier);
+
+      session.memberships = const [];
+      session.writerMemberships = [_membership(_joinedChannel, 'me')];
+      await notifier.refresh();
+      expect(store.isCurrent(ticket), isTrue);
+
+      session.writerMemberships = const [];
+      var published = false;
+      final refresh = notifier.refresh().then((_) => published = true);
+      try {
+        await purgeStarted.future;
+        await _settle();
+        expect(published, isFalse);
+      } finally {
+        allowPurge.complete();
+        await refresh;
+      }
+      expect(store.isCurrent(ticket), isFalse);
+      expect(store.isCurrent(retained), isTrue);
+    });
+
+    for (final noted in [true, false]) {
+      test(
+        noted
+            ? 'a removal this client confirmed needs no writer read'
+            : 'an unexplained removal asks the writer pool',
+        () async {
+          const scope = (communityId: 'community', pubkey: 'me');
+          final session = _WriterReplicaRelaySession(
+            memberships: [_membership(_joinedChannel, 'me')],
+            metadata: [_meta(id: _joinedChannel, name: 'joined')],
+          );
+          final container = _buildContainer(
+            session: session,
+            overrides: [savedMessageScopeProvider.overrideWithValue(scope)],
+          );
+          addTearDown(container.dispose);
+          await container.read(channelsProvider.future);
+          final notifier = container.read(channelsProvider.notifier);
+
+          if (noted) notifier.noteConfirmedRemoval(_joinedChannel);
+          session.memberships = const [];
+          await notifier.refresh();
+          expect(session.strongMembershipReads, noted ? 0 : 1);
+        },
+      );
+    }
+
     test(
       'a stale replica neither hides a confirmed join nor a later removal',
       () async {

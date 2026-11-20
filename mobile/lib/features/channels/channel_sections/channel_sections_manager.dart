@@ -245,7 +245,8 @@ class ChannelSectionsManager {
     _unsubscribe = null;
   }
 
-  void createSection(String name) {
+  /// Files [channelId] in the new section in the same write, when given.
+  void createSection(String name, {String? channelId}) {
     if (!_editable) return;
     final maxOrder = _store.sections.fold<int>(
       -1,
@@ -258,7 +259,9 @@ class ChannelSectionsManager {
     );
     _store = ChannelSectionStore(
       sections: [..._store.sections, section],
-      assignments: _store.assignments,
+      assignments: channelId == null
+          ? _store.assignments
+          : {..._store.assignments, channelId: section.id},
     );
     _persist();
     markDirty();

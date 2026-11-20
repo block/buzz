@@ -2,15 +2,21 @@ import 'dart:async';
 import 'package:buzz/features/channels/me/me_messages_provider.dart';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart' hide test;
 import 'package:flutter_test/flutter_test.dart' as flutter_test show test;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
+import 'package:buzz/features/channels/channel_timeline_projection.dart';
 import 'package:buzz/features/channels/pending_local_messages_provider.dart';
+import 'package:buzz/features/channels/saved_channel_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
+import 'package:buzz/shared/channels/saved_message_store.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 import '../../helpers/thread_ids.dart';
@@ -45,10 +51,396 @@ void test(String description, Future<void> Function() body) {
 }
 
 void main() {
+  testWidgets('preview starts its read after one connected grace period', (
+    tester,
+  ) async {
+    const scope = (communityId: 'preview-delay', pubkey: 'viewer');
+    final pendingHistory = Completer<List<NostrEvent>>();
+    final relay = _RecordingRelaySessionNotifier(
+      queryResults: [pendingHistory.future],
+    );
+    var cacheOperations = 0;
+    final store = SavedMessageStore(
+      root: () async {
+        cacheOperations++;
+        return null;
+      },
+      diagnostics: const NoopDiagnosticReporter(),
+    );
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => relay),
+        savedMessageScopeProvider.overrideWithValue(scope),
+        savedMessageStoreProvider.overrideWithValue(store),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.listen(channelMessagesProvider(_channelId), (_, _) {});
+    await tester.idle();
+    await relay.subscribed;
+    final preview = savedChannelPreviewProvider(_channelId);
+    container.listen(preview, (_, _) {});
+
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(cacheOperations, 0);
+    relay.emit(
+      NostrEvent(
+        id: 'preview-delay-edit',
+        pubkey: 'author',
+        kind: EventKind.streamMessageEdit,
+        createdAt: 1,
+        tags: const [
+          ['h', _channelId],
+          ['e', 'target'],
+        ],
+        content: 'Edited text',
+        sig: '',
+      ),
+    );
+    await tester.idle();
+    expect(cacheOperations, 1);
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(cacheOperations, 2);
+    expect(await container.read(preview.future), isNull);
+  });
+
+  testWidgets('the saved page write waits for a frame', (tester) async {
+    final container = ProviderContainer(
+      overrides: [
+        savedMessageRootProvider.overrideWith(
+          (ref) async => Directory.systemTemp,
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    var writing = false;
+    final store = SavedMessageStore(
+      root: () async {
+        writing = true;
+        return null;
+      },
+      diagnostics: const NoopDiagnosticReporter(),
+    );
+    final ticket = store.capture(
+      (communityId: 'frame-test', pubkey: 'viewer'),
+      (channelId: _channelId, rootId: ''),
+    );
+    final save = Provider(
+      (ref) => saveChannelPage(ref, store, ticket, [], isCurrent: () => true),
+    );
+
+    final saved = container.read(save);
+    await tester.idle();
+    expect(writing, isFalse);
+    await tester.pump();
+    await saved;
+    expect(writing, isTrue);
+  });
+
+  flutter_test.test('relay access refusal purges the saved channel', () async {
+    const scope = (
+      communityId: 'cache-test-community',
+      pubkey: 'cache-test-user',
+    );
+    const page = (channelId: _channelId, rootId: '');
+    final root = await Directory.systemTemp.createTemp('buzz-access-cache');
+    addTearDown(() => root.delete(recursive: true));
+    final denial = RelayException(
+      403,
+      '{"error":"restricted: not a channel member"}',
+    );
+    final relay = _RecordingRelaySessionNotifier(queryResults: [denial]);
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => relay),
+        savedMessageRootProvider.overrideWith((ref) async => root),
+        savedMessageScopeProvider.overrideWithValue(scope),
+      ],
+    );
+    addTearDown(container.dispose);
+    final store = container.read(savedMessageStoreProvider);
+    final ticket = store.capture(scope, page);
+    final event = NostrEvent.fromJson(
+      signNostrEvent(
+        secretKey:
+            '0000000000000000000000000000000000000000000000000000000000000001',
+        kind: EventKind.streamMessage,
+        content: 'Previously accessible',
+        tags: [
+          ['h', _channelId],
+        ],
+      ).toMap(),
+    );
+    await store.save(ticket, [event], relayAuthor: null);
+    expect(await store.read(ticket), [event]);
+    final refused = Completer<void>();
+    container.listen(channelMessagesProvider(_channelId), (_, state) {
+      if (state.error == denial && !refused.isCompleted) refused.complete();
+    });
+    await refused.future;
+    expect(await store.read(store.capture(scope, page)), isNull);
+    expect(relay.historyFilters, isEmpty);
+  });
+
+  flutter_test.test(
+    'live revocation rechecks history before purging the saved page',
+    () async {
+      const scope = (
+        communityId: 'cache-test-community',
+        pubkey: 'cache-test-user',
+      );
+      const page = (channelId: _channelId, rootId: '');
+      final root = await Directory.systemTemp.createTemp(
+        'buzz-live-revocation',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final event = NostrEvent.fromJson(
+        signNostrEvent(
+          secretKey:
+              '0000000000000000000000000000000000000000000000000000000000000001',
+          kind: EventKind.streamMessage,
+          content: 'Private history',
+          tags: [
+            ['h', _channelId],
+          ],
+        ).toMap(),
+      );
+      final lateHistory = Completer<List<NostrEvent>>();
+      final relay = _RecordingRelaySessionNotifier(
+        queryResults: [
+          [event, _bounds()],
+          RelayException(403, 'authorization denied\n'),
+          lateHistory.future,
+          [event, _bounds()],
+          const <NostrEvent>[],
+        ],
+      );
+      ProviderContainer open(
+        _RecordingRelaySessionNotifier session, {
+        Future<Directory>? blockedRoot,
+      }) {
+        final container = ProviderContainer(
+          overrides: [
+            relaySessionProvider.overrideWith(() => session),
+            savedMessageRootProvider.overrideWith(
+              (ref) async => blockedRoot == null ? root : await blockedRoot,
+            ),
+            savedMessageScopeProvider.overrideWithValue(scope),
+          ],
+        );
+        addTearDown(container.dispose);
+        return container;
+      }
+
+      final online = open(relay);
+      final store = online.read(savedMessageStoreProvider);
+      final ticket = store.capture(scope, page);
+      await store.save(ticket, [event], relayAuthor: null);
+      final messages = channelMessagesProvider(_channelId);
+      online.listen(messages, (_, _) {});
+      await _pumpEventQueue();
+      expect(online.read(messages).value, [event]);
+
+      relay.closeLive('restricted: authorization denied');
+      await _pumpEventQueue();
+      expect(online.read(messages).value, [event]);
+      expect(store.isCurrent(ticket), isTrue);
+      expect(await store.read(ticket), [event]);
+
+      relay.historyError = Exception('restricted: authorization denied');
+      relay.setConnected(false);
+      await _pumpEventQueue();
+      relay.setConnected(true);
+      await _pumpEventQueue();
+      expect(relay.queryFilters, hasLength(2));
+      expect(online.read(messages).value, [event]);
+      expect(store.isCurrent(ticket), isTrue);
+      expect(await store.read(ticket), [event]);
+
+      relay.setConnected(false);
+      await _pumpEventQueue();
+      relay.setConnected(true);
+      await _pumpEventQueue();
+      relay.closeLive('restricted: channel access revoked');
+      lateHistory.complete([_event(id: 'stale', createdAt: 10), _bounds()]);
+      await _pumpEventQueue();
+      final afterArchive = await store.read(store.capture(scope, page));
+      expect(relay.queryFilters, hasLength(4));
+      expect(online.read(messages).value, [event]);
+      expect(afterArchive, [event]);
+
+      final gate = Completer<Directory>();
+      final pausedRelay = _RecordingRelaySessionNotifier();
+      final paused = open(pausedRelay, blockedRoot: gate.future);
+      paused.read(relaySessionProvider);
+      pausedRelay.setConnected(false);
+      final preview = savedChannelPreviewProvider(_channelId);
+      final projection = channelTimelineProjectionProvider((
+        channelId: _channelId,
+        personal: false,
+        allowPreview: true,
+      ));
+      final listener = paused.listen(projection, (_, _) {});
+      final pendingPreview = paused.read(preview.future);
+      listener.pause();
+      gate.complete(root);
+      final saved = await pendingPreview;
+      listener.resume();
+      expect(saved?.events, [event]);
+      expect(paused.read(projection).messages.value, [event]);
+      expect(pausedRelay.queryFilters, isEmpty);
+      listener.close();
+
+      // The same live CLOSED can signal actual membership loss. The window
+      // returns no bounds and the history request explicitly refuses access.
+      relay.historyError = Exception('restricted: not a channel member');
+      relay.closeLive('restricted: channel access revoked');
+      await _pumpEventQueue();
+      expect(relay.queryFilters, hasLength(5));
+      expect(isRelayAccessDenied(online.read(messages).error!), isTrue);
+      expect(online.read(messages).value, isNull);
+      expect(store.isCurrent(ticket), isFalse);
+      expect(await store.read(store.capture(scope, page)), isNull);
+
+      final offlineRelay = _RecordingRelaySessionNotifier();
+      final offline = open(offlineRelay);
+      offline.read(relaySessionProvider);
+      offlineRelay.setConnected(false);
+      offline.listen(preview, (_, _) {});
+      expect(await offline.read(preview.future), isNull);
+    },
+  );
+
+  for (final mutation in ['delete', 'edit', 'unreact']) {
+    flutter_test.test('offline page after live $mutation', () async {
+      const scope = (
+        communityId: 'cache-test-community',
+        pubkey: 'cache-test-user',
+      );
+      const page = (channelId: _channelId, rootId: '');
+      final root = await Directory.systemTemp.createTemp('buzz-live-cache');
+      addTearDown(() => root.delete(recursive: true));
+      final query = Completer<List<NostrEvent>>();
+      final relay = _RecordingRelaySessionNotifier(
+        queryResults: [query.future],
+      );
+      ProviderContainer makeContainer(_RecordingRelaySessionNotifier session) {
+        final container = ProviderContainer(
+          overrides: [
+            relaySessionProvider.overrideWith(() => session),
+            savedMessageRootProvider.overrideWith((ref) async => root),
+            savedMessageScopeProvider.overrideWithValue(scope),
+          ],
+        );
+        addTearDown(container.dispose);
+        return container;
+      }
+
+      final online = makeContainer(relay);
+      final store = online.read(savedMessageStoreProvider);
+      NostrEvent signed(
+        int kind,
+        String content, {
+        String? target,
+      }) => NostrEvent.fromJson(
+        signNostrEvent(
+          secretKey:
+              '0000000000000000000000000000000000000000000000000000000000000001',
+          kind: kind,
+          content: content,
+          tags: [
+            ['h', _channelId],
+            if (target != null) ['e', target],
+          ],
+        ).toMap(),
+      );
+      final event = signed(EventKind.streamMessage, 'Original message');
+      final untouched = signed(EventKind.streamMessage, 'Another message');
+      final reaction = signed(EventKind.reaction, '+', target: event.id);
+      final unreact = mutation == 'unreact';
+      final oldPage = [event, untouched, if (unreact) reaction];
+      final expected = [untouched, if (unreact) event];
+      final ticket = store.capture(scope, page);
+      await store.save(ticket, oldPage, relayAuthor: null);
+      expect(await store.read(ticket), oldPage);
+      final messages = channelMessagesProvider(_channelId);
+      online.listen(messages, (_, _) {});
+      await relay.subscribed;
+      final preview = savedChannelPreviewProvider(_channelId);
+      online.listen(preview, (_, _) {});
+      expect(
+        (await online.read(preview.future))?.events,
+        unorderedEquals(oldPage),
+      );
+
+      final live = signed(EventKind.streamMessage, 'New live message');
+      relay.emit(live);
+      expect(online.read(messages).value, contains(live));
+      expect(online.read(messages.notifier).hasLoadedHistory, isFalse);
+      expect(online.read(preview).value?.events, unorderedEquals(oldPage));
+      relay.emit(
+        NostrEvent(
+          id: 'live-mutation',
+          pubkey: event.pubkey,
+          kind: mutation == 'edit'
+              ? EventKind.streamMessageEdit
+              : EventKind.deletion,
+          createdAt: event.createdAt + 1,
+          tags: [
+            if (!unreact) ['h', _channelId],
+            ['e', unreact ? reaction.id : event.id],
+          ],
+          content: mutation == 'edit' ? 'Edited message' : '',
+          sig: '',
+        ),
+      );
+      final projection = online.read(
+        channelTimelineProjectionProvider((
+          channelId: _channelId,
+          personal: false,
+          allowPreview: true,
+        )),
+      );
+      expect(projection.relayHistoryReady, isFalse);
+      expect(
+        formatTimeline(
+          projection.messages.requireValue,
+        ).map((row) => row.content),
+        unorderedEquals([
+          untouched.content,
+          live.content,
+          if (mutation == 'edit') 'Edited message',
+          if (unreact) event.content,
+        ]),
+      );
+
+      // An initial relay query already in flight cannot restore the old page.
+      query.complete([...oldPage, _bounds()]);
+      await _pumpEventQueue();
+      expect(store.isCurrent(ticket), isFalse);
+      expect(
+        await store.read(store.capture(scope, page)),
+        unorderedEquals(expected),
+      );
+
+      final offlineRelay = _RecordingRelaySessionNotifier();
+      final offline = makeContainer(offlineRelay);
+      offline.read(relaySessionProvider);
+      offlineRelay.setConnected(false);
+      offline.listen(messages, (_, _) {});
+      offline.listen(preview, (_, _) {});
+      expect(
+        (await offline.read(preview.future))?.events,
+        unorderedEquals(expected),
+      );
+      expect(offlineRelay.queryFilters, isEmpty);
+    });
+  }
+
   test(
     'window access denial cannot be masked by a transient WS fallback',
     () async {
-      final denial = RelayException(403, 'not a member');
+      final denial = RelayException(403, 'restricted: not a channel member');
       final relay = _RecordingRelaySessionNotifier(
         queryResults: [
           [_event(id: 'private-transcript', createdAt: 10), _bounds()],
@@ -1155,6 +1547,12 @@ void main() {
       final state = container.read(channelMessagesProvider(_channelId));
       expect(state.hasError, isFalse);
       expect(state.value?.map((event) => event.id), ['live']);
+      expect(
+        container
+            .read(channelMessagesProvider(_channelId).notifier)
+            .historyRefreshFailed,
+        isTrue,
+      );
     },
   );
 
@@ -1196,6 +1594,68 @@ void main() {
             ?.map((event) => event.id),
         ['z-target', 'm-history', 'a-target'],
       );
+    },
+  );
+
+  test(
+    'keeps a deep-link target whose lookup was held until connect',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier();
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+      container.read(relaySessionProvider);
+      relaySession.setConnected(false);
+      final provider = channelMessagesProvider(_channelId);
+      container.listen(provider, (_, _) {});
+      await _pumpEventQueue();
+
+      // The session holds an ID lookup sent while disconnected and answers it
+      // after authentication, so the reply crosses the connect's re-init.
+      final targetLoad = container.read(provider.notifier).loadEventsById(
+        const ['deep-link'],
+      );
+      relaySession.setConnected(true);
+      await relaySession.subscribed;
+      relaySession.completeHistory([_event(id: 'newer', createdAt: 20)]);
+      await _pumpEventQueue();
+      relaySession.completeTargetHistory([
+        _event(id: 'deep-link', createdAt: 10),
+      ]);
+      await targetLoad;
+      await _pumpEventQueue();
+
+      expect(container.read(provider).value?.map((event) => event.id), [
+        'deep-link',
+        'newer',
+      ]);
+    },
+  );
+
+  test(
+    'drops a deep-link lookup reply that lands after access denial',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier();
+      final container = _buildContainer(relaySession);
+      addTearDown(container.dispose);
+      final provider = channelMessagesProvider(_channelId);
+      container.listen(provider, (_, _) {});
+      await relaySession.subscribed;
+      relaySession.completeHistory([_event(id: 'newer', createdAt: 20)]);
+      await _pumpEventQueue();
+
+      final targetLoad = container.read(provider.notifier).loadEventsById(
+        const ['deep-link'],
+      );
+      relaySession.closeLive('restricted: not a channel member');
+      await _pumpEventQueue();
+      relaySession.completeTargetHistory([
+        _event(id: 'deep-link', createdAt: 10),
+      ]);
+      await targetLoad;
+      await _pumpEventQueue();
+
+      expect(isRelayAccessDenied(container.read(provider).error!), isTrue);
+      expect(container.read(provider).value, isNull);
     },
   );
 
@@ -6689,9 +7149,19 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
       throw Exception('subscribe failed');
     }
     _listeners.add(onEvent);
+    if (onClosed != null) _closeListeners.add(onClosed);
     return () {
       _listeners.remove(onEvent);
+      if (onClosed != null) _closeListeners.remove(onClosed);
     };
+  }
+
+  final _closeListeners = <void Function(String)>[];
+
+  void closeLive(String message) {
+    for (final listener in List.of(_closeListeners)) {
+      listener(message);
+    }
   }
 
   void emit(NostrEvent event) {

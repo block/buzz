@@ -404,7 +404,6 @@ class ChannelDetailsPage extends HookConsumerWidget {
                   BuzzIcons.folderInput,
                   () => _showMoveSectionSheet(
                     context,
-                    ref,
                     channel: resolvedChannel,
                     sectionId: currentSectionId,
                   ),
@@ -687,7 +686,6 @@ class ChannelDetailsPage extends HookConsumerWidget {
                 onTap: () async {
                   await _showMoveSectionSheet(
                     context,
-                    ref,
                     channel: resolvedChannel,
                     sectionId: currentSectionId,
                   );

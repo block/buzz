@@ -2,7 +2,8 @@ part of '../channel_messages_provider.dart';
 
 extension _ChannelHistoryPagination on ChannelMessagesNotifier {
   Future<bool> _fetchOlder() async {
-    if (_reachedOldest || _initInFlight) return false;
+    if (_reachedOldest || _initInFlight || _accessDenial != null) return false;
+    final initVersion = _initVersion;
 
     final session = _summarySession;
     if (_usingChannelWindow) {
@@ -14,6 +15,7 @@ extension _ChannelHistoryPagination on ChannelMessagesNotifier {
       try {
         final pageVersion = ++_threadQuerySerial;
         final page = await _fetchWindowPage(session, cursor);
+        if (!_isCurrentInit(initVersion)) return false;
         _windowStore = appendOlderChannelWindow(_windowStore, page);
         _reconcilePageSummaries(page, pageVersion);
         _reachedOldest = !channelWindowHasMore(_windowStore);
@@ -42,6 +44,7 @@ extension _ChannelHistoryPagination on ChannelMessagesNotifier {
         beforeId: oldest.eventId,
       ),
     );
+    if (!_isCurrentInit(initVersion)) return false;
     if (older.isEmpty) {
       _reachedOldest = true;
       return false;
