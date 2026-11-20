@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:buzz/features/settings/settings_page.dart';
@@ -197,22 +198,28 @@ void main() {
     required bool enabled,
     _Connected? session,
     bool advertisesPush = true,
+    FakePushGateway? gateway,
+    Future<void>? descriptorGate,
+    List<BuzzPushSubscription>? subscriptions,
   }) async {
     debugDefaultTargetPlatformOverride = platform;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     final storage = CommunityStorage(secure: FakeSecureStorage());
-    final gateway = FakePushGateway(
-      nowSeconds: () => DateTime.now().millisecondsSinceEpoch ~/ 1000,
-    );
+    final pushGateway =
+        gateway ??
+        FakePushGateway(
+          nowSeconds: () => DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        );
     debugAndroidPushAuthority = AndroidPushAuthority(
       keystore: FakeAndroidKeystore(),
-      gateway: fakeGatewayClient(gateway),
+      gateway: fakeGatewayClient(pushGateway),
       store: _MemoryStore(),
       sleep: (_) async {},
     );
     addTearDown(() => debugAndroidPushAuthority = null);
+    var descriptorFetches = 0;
     final calls = <String>[];
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
@@ -233,6 +240,9 @@ void main() {
             data: '1' * 64,
           ),
           pushNotificationsEnabled: enabled,
+          pushSubscriptionState: subscriptions == null
+              ? null
+              : BuzzPushLeaseSubscriptionState.desired(desired: subscriptions),
         );
     await storage.save(community);
     await storage.saveActiveId(community.id);
@@ -251,11 +261,13 @@ void main() {
           ),
           relaySessionProvider.overrideWith(() => session ?? _Connected()),
           myPubkeyProvider.overrideWithValue(nostr.Keys('1' * 64).public),
-          buzzPushDescriptorFetcherProvider.overrideWithValue(
-            (_) async => advertisesPush
-                ? _descriptor
-                : throw const BuzzPushNotAdvertised(),
-          ),
+          buzzPushDescriptorFetcherProvider.overrideWithValue((_) async {
+            // Discovery reads the descriptor first, which sets push up; the
+            // fetch that publication makes next is the one held back.
+            if (++descriptorFetches > 1) await descriptorGate;
+            if (!advertisesPush) throw const BuzzPushNotAdvertised();
+            return _descriptor;
+          }),
           appLifecycleProvider.overrideWith(_Lifecycle.new),
         ],
         child: const BuzzPushBootstrap(child: SizedBox()),
@@ -313,6 +325,50 @@ void main() {
       await unmount(tester);
     });
   }
+
+  testWidgets('turning push off while its enrollment waits publishes nothing', (
+    tester,
+  ) async {
+    fcmDeviceToken.value = 'test-fcm-token';
+    addTearDown(() => fcmDeviceToken.value = null);
+    final gateway = FakePushGateway(
+      nowSeconds: () => DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    );
+    final session = _Connected();
+    final descriptorGate = Completer<void>();
+    await pumpBootstrap(
+      tester,
+      platform: TargetPlatform.android,
+      relayUrl: 'https://relay.example',
+      enabled: true,
+      session: session,
+      gateway: gateway,
+      descriptorGate: descriptorGate.future,
+      subscriptions: [
+        BuzzPushSubscription(
+          filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+          notificationClass: 'default',
+        ),
+      ],
+    );
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(BuzzPushBootstrap)),
+    );
+    final notifier = container.read(communityListProvider.notifier);
+    await notifier.setPushNotificationsEnabled(
+      container.read(communityListProvider).value!.single.id,
+      false,
+    );
+
+    // The descriptor arrives after the opt-out: nothing is enrolled, delegated
+    // or published for a community that no longer wants push.
+    descriptorGate.complete();
+    await tester.pumpAndSettle();
+
+    expect(gateway.requests, isEmpty);
+    expect(session.leases.where((lease) => lease['active'] == true), isEmpty);
+    await unmount(tester);
+  });
 
   testWidgets('resuming while the relay reconnects refreshes the FCM token', (
     tester,

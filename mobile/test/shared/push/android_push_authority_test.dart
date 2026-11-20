@@ -52,11 +52,12 @@ void main() {
     String relay = _relayA,
     String? pubkey,
     String token = 'token-1',
-  }) => authority.enroll(
+  }) async => (await authority.enroll(
     relayOrigin: relay,
     relayPubkey: pubkey ?? (relay == _relayA ? _keyA : _keyB),
     endpoint: token,
-  );
+    stillWanted: () => true,
+  ))!;
 
   test('first enrollment, a second relay, reuse and renewal', () async {
     final first = await enroll();
@@ -465,5 +466,51 @@ void main() {
     await store.write('state');
     expect(await store.read(), 'state');
     expect(await secure.read(key: 'buzz_android_push_authority_v2'), 'state');
+  });
+
+  // ---- opt-in fence ----
+
+  test(
+    'an opt-out during the enrollment jitter leaves nothing behind',
+    () async {
+      final release = Completer<void>();
+      authority = AndroidPushAuthority(
+        keystore: keystore,
+        gateway: fakeGatewayClient(gateway),
+        store: store,
+        now: () => DateTime.fromMillisecondsSinceEpoch(now * 1000),
+        sleep: (_) => release.future,
+      );
+      var wanted = true;
+      final enrolling = authority.enroll(
+        relayOrigin: _relayA,
+        relayPubkey: _keyA,
+        endpoint: 'token-1',
+        stillWanted: () => wanted,
+      );
+      await pumpEventQueue();
+      wanted = false;
+      release.complete();
+
+      expect(await enrolling, isNull);
+      expect(gateway.requests, isEmpty);
+      expect(keystore.generated, 0);
+      expect(await authority.grants(), isEmpty);
+    },
+  );
+
+  test('an opt-out after enrollment creates no delegation', () async {
+    final enrolling = authority.enroll(
+      relayOrigin: _relayA,
+      relayPubkey: _keyA,
+      endpoint: 'token-1',
+      // Wanted until the installation exists.
+      stillWanted: () => gateway.installations.isEmpty,
+    );
+
+    expect(await enrolling, isNull);
+    expect(gateway.installations, hasLength(1));
+    expect(gateway.bodiesFor('/v1/delegations'), isEmpty);
+    expect(await authority.grants(), isEmpty);
   });
 }

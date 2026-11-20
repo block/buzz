@@ -551,6 +551,12 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
               memberPubkey!,
               relay,
             );
+            if (grant == null) {
+              // Push was turned off, or the community removed, while this
+              // waited. Nothing was published, and the opt-out already ran.
+              publicationAttempt.complete(attempt);
+              return;
+            }
             final renewInMilliseconds =
                 grant.expiresAt * 1000 -
                 DateTime.now().millisecondsSinceEpoch -
@@ -627,7 +633,9 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
       memberPubkey != null &&
       memberPubkey.isNotEmpty;
 
-  static Future<BuzzPushEndpointGrant> _publish(
+  /// Returns null when the community stopped wanting push before the lease was
+  /// published.
+  static Future<BuzzPushEndpointGrant?> _publish(
     WidgetRef ref,
     RelayConfig config,
     Community community,
@@ -640,6 +648,11 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
       config.baseUrl,
     );
     validateBuzzPushChannelGrammar(descriptor, desired);
+    // The opt-out's revocation may already have run while the descriptor was
+    // fetched or enrollment waited its turn, so enrolling or publishing now
+    // would create authority nothing revokes. Asked again before each step.
+    bool stillWanted() => (ref.read(communityListProvider).value ?? const [])
+        .any((c) => c.id == community.id && c.pushNotificationsEnabled);
     final grant = await enrollBuzzPush(
       config.wsUrl,
       Env.pushGatewayUrl,
@@ -647,6 +660,7 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
           ref.read(communityListProvider).value ?? [community],
       relayOrigin: descriptor.origin,
       relayPubkey: descriptor.executorPubkey,
+      stillWanted: stillWanted,
       // Enrollment can finish after a community switch, when reports already
       // name the next member.
       diagnostics: SignerDiagnosticReporter(
@@ -654,6 +668,7 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
         signer: memberPubkey,
       ),
     );
+    if (grant == null || !stillWanted()) return null;
     // Relay lease replacement and gateway delegation are independent state
     // machines. Subscription changes advance only the kind-30350 generation;
     // the opaque grant remains reusable until its own authority changes.

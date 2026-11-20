@@ -138,32 +138,46 @@ class AndroidPushAuthority {
   /// Makes [endpoint] (the FCM token) the installation's endpoint and returns
   /// a grant from the installation to [relayPubkey] for [relayOrigin],
   /// enrolling, rotating and delegating only as far as the stored state needs.
-  Future<AndroidPushGrant> enroll({
+  ///
+  /// [stillWanted] is read inside the call queue, before each gateway call
+  /// that creates authority, so an opt-out that lands while this waited its
+  /// turn or the enrollment jitter leaves nothing behind. Returns null when it
+  /// said no.
+  Future<AndroidPushGrant?> enroll({
     required String relayOrigin,
     required String relayPubkey,
     required String endpoint,
+    required bool Function() stillWanted,
   }) => _serialized(() async {
     var attemptedReset = false;
-    while (true) {
-      await _ensureInstallation(endpoint);
-      final state = await _load();
-      final delegation = state.delegations[relayPubkey];
-      if (delegation == null || !_reusable(state, delegation)) {
-        try {
-          await _delegate(relayPubkey);
-        } on AndroidPushGatewayRejection catch (rejection) {
-          // The gateway answers every refused installation call with the same
-          // 404. After the one case we can explain (an endpoint rotation whose
-          // response was lost, which _rotate has already accounted for), a
-          // refused delegation means the installation is gone: revoked,
-          // expired, or enrolled under a key this phone no longer has.
-          if (!rejection.isNotAuthorized || attemptedReset) rethrow;
-          attemptedReset = true;
-          await _reset();
-          continue;
+    try {
+      while (true) {
+        _fence(stillWanted);
+        await _ensureInstallation(endpoint, stillWanted);
+        final state = await _load();
+        final delegation = state.delegations[relayPubkey];
+        if (delegation == null || !_reusable(state, delegation)) {
+          _fence(stillWanted);
+          try {
+            await _delegate(relayPubkey);
+          } on AndroidPushGatewayRejection catch (rejection) {
+            // The gateway answers every refused installation call with the
+            // same 404. After the one case we can explain (an endpoint
+            // rotation whose response was lost, which _rotate has already
+            // accounted for), a refused delegation means the installation is
+            // gone: revoked, expired, or enrolled under a key this phone no
+            // longer has.
+            if (!rejection.isNotAuthorized) rethrow;
+            if (attemptedReset) rethrow;
+            attemptedReset = true;
+            await _reset();
+            continue;
+          }
         }
+        return await _pointOrigin(relayOrigin, relayPubkey);
       }
-      return _pointOrigin(relayOrigin, relayPubkey);
+    } on _EnrollmentNoLongerWanted {
+      return null;
     }
   });
 
@@ -198,12 +212,19 @@ class AndroidPushAuthority {
     if (revokeInstallation()) await _revokeInstallation();
   });
 
+  void _fence(bool Function() stillWanted) {
+    if (!stillWanted()) throw const _EnrollmentNoLongerWanted();
+  }
+
   // ---- installation ----
 
-  Future<void> _ensureInstallation(String endpoint) async {
+  Future<void> _ensureInstallation(
+    String endpoint,
+    bool Function() stillWanted,
+  ) async {
     var state = await _load();
     if (state.pendingEnrollment != null) {
-      await _finishEnrollment(state.pendingEnrollment!);
+      await _finishEnrollment(state.pendingEnrollment!, stillWanted);
       state = await _load();
     }
     final installation = state.installation;
@@ -219,7 +240,7 @@ class AndroidPushAuthority {
     }
     state = await _load();
     if (state.installation == null) {
-      await _enrollFresh(endpoint);
+      await _enrollFresh(endpoint, stillWanted);
       return;
     }
     var current = state.installation!;
@@ -231,7 +252,10 @@ class AndroidPushAuthority {
     }
   }
 
-  Future<void> _enrollFresh(String endpoint) async {
+  Future<void> _enrollFresh(
+    String endpoint,
+    bool Function() stillWanted,
+  ) async {
     if ((await _load()).origins.isEmpty &&
         firstEnrollmentJitterMax > Duration.zero) {
       await _sleep(
@@ -242,6 +266,7 @@ class AndroidPushAuthority {
         ),
       );
     }
+    _fence(stillWanted);
     final challenge = await _challenge();
     final expiresAt =
         _nowSeconds - _clockSkewAllowanceSeconds + _lifetimeSeconds;
@@ -276,10 +301,13 @@ class AndroidPushAuthority {
     await _finishEnrollment(pending);
   }
 
-  Future<void> _finishEnrollment(_PendingEnrollment pending) async {
+  Future<void> _finishEnrollment(
+    _PendingEnrollment pending, [
+    bool Function() stillWanted = _always,
+  ]) async {
     if (pending.expiresAt <= _nowSeconds) {
       await _discardPendingEnrollment();
-      return _enrollFresh(pending.body['endpoint']! as String);
+      return _enrollFresh(pending.body['endpoint']! as String, stillWanted);
     }
     final Map<String, Object?> response;
     try {
@@ -675,6 +703,14 @@ class AndroidPushAuthority {
 
   Future<void> _save(_State state) =>
       store.write(state.isEmpty ? null : jsonEncode(state.toJson()));
+}
+
+bool _always() => true;
+
+/// Control flow for [AndroidPushAuthority.enroll]: the caller's `stillWanted`
+/// said no, so nothing more is created.
+class _EnrollmentNoLongerWanted implements Exception {
+  const _EnrollmentNoLongerWanted();
 }
 
 class _Challenge {

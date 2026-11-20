@@ -392,6 +392,8 @@ Future<List<BuzzPushEndpointGrant>> readBuzzPushEndpointGrants() async {
   }
 }
 
+bool _wanted() => true;
+
 /// Enrolls the endpoint and optionally rewrites the NSE snapshot afterward.
 ///
 /// The rewrite propagates NIP-11 `self` rotations even when the opaque grant
@@ -400,12 +402,16 @@ Future<List<BuzzPushEndpointGrant>> readBuzzPushEndpointGrants() async {
 /// On Android the grant comes from the Dart-side [AndroidPushAuthority], which
 /// needs the relay's [relayOrigin] and push key [relayPubkey] from its
 /// descriptor, where iOS native code fetches them itself.
-Future<BuzzPushEndpointGrant> enrollBuzzPush(
+///
+/// [stillWanted] says whether the community still wants push. It is read before
+/// each call that creates authority, and the result is null once it said no.
+Future<BuzzPushEndpointGrant?> enrollBuzzPush(
   String relayUrl,
   String gatewayUrl, {
   List<Community>? communitiesForSnapshotRefresh,
   String? relayOrigin,
   String? relayPubkey,
+  bool Function() stillWanted = _wanted,
   DiagnosticReporter diagnostics = const NoopDiagnosticReporter(),
 }) async {
   final BuzzPushEndpointGrant grant;
@@ -414,20 +420,23 @@ Future<BuzzPushEndpointGrant> enrollBuzzPush(
     if (token == null || relayOrigin == null || relayPubkey == null) {
       throw StateError('Android push enrollment needs a token and a relay.');
     }
+    final AndroidPushGrant? enrolled;
     try {
-      grant = _grantOf(
-        await _androidPushAuthority.enroll(
-          relayOrigin: relayOrigin,
-          relayPubkey: relayPubkey,
-          endpoint: token,
-        ),
+      enrolled = await _androidPushAuthority.enroll(
+        relayOrigin: relayOrigin,
+        relayPubkey: relayPubkey,
+        endpoint: token,
+        stillWanted: stillWanted,
       );
     } on AndroidPushAttestationUnavailable catch (error) {
       pushUnavailableReason.value = error.reason;
       rethrow;
     }
+    if (enrolled == null) return null;
+    grant = _grantOf(enrolled);
     pushUnavailableReason.value = null;
   } else {
+    if (!stillWanted()) return null;
     final Map<dynamic, dynamic>? raw;
     try {
       raw = await _channel.invokeMapMethod<dynamic, dynamic>('enrollPush', {

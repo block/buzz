@@ -85,12 +85,12 @@ void main() {
     fcmDeviceToken.value = 'fcm-token';
     pushUnavailableReason.value = 'stale';
 
-    final grant = await enrollBuzzPush(
+    final grant = (await enrollBuzzPush(
       'wss://relay.example/',
       'https://gateway.example/',
       relayOrigin: 'wss://relay.example',
       relayPubkey: 'a' * 64,
-    );
+    ))!;
 
     expect(grant.relayOrigin, 'wss://relay.example');
     expect(grant.relayPubkey, 'a' * 64);
