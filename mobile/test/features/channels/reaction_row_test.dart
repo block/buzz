@@ -178,6 +178,35 @@ void main() {
   combinedReactionTests();
   shortcodeReactionTests();
 
+  testWidgets('a grouped removal that fails offline reports it once', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        child: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => reportReactionFailure(
+              context,
+              Future.wait([
+                Future<void>.error(RelayNotConnectedError()),
+                Future<void>.error(RelayNotConnectedError()),
+              ]),
+              adding: false,
+            ),
+            child: const Text('Remove'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Remove'));
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    expect(
+      find.text('Couldn’t remove reaction. No connection.'),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('an unexpected local failure still escapes after its notice', (
     tester,
   ) async {

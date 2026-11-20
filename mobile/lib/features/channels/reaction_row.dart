@@ -97,8 +97,13 @@ void reportReactionFailure(
   required bool adding,
 }) {
   final messenger = ScaffoldMessenger.of(context);
-  unawaited(
-    publish.catchError((Object error, StackTrace stackTrace) {
+  // An async catch rather than `catchError`: a grouped removal's
+  // `Future.wait` is a `Future<List<void>>` at runtime, whose `catchError`
+  // handler would have to return a list.
+  unawaited(() async {
+    try {
+      await publish;
+    } catch (error, stackTrace) {
       final message = _reactionFailureMessage(error, adding: adding);
       if (message != null) {
         messenger.showFeedbackSnackBar(
@@ -109,8 +114,8 @@ void reportReactionFailure(
       if (!_isRelayOutcome(error)) {
         Error.throwWithStackTrace(error, stackTrace);
       }
-    }),
-  );
+    }
+  }());
 }
 
 bool _isRelayOutcome(Object error) =>
