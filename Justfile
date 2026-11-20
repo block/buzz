@@ -397,6 +397,8 @@ test-unit:
     #!/usr/bin/env bash
     set -euo pipefail
     ./scripts/test-ensure-local-relay-key.sh
+    python3 scripts/check-community-ban-route-inventory.py
+    python3 scripts/check-community-ban-route-inventory.test.py
     # Shared Huddle transport, codec, and loopback authentication regressions.
     cargo test -p buzz-audio-client
     if command -v cargo-nextest &>/dev/null; then
