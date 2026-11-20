@@ -60,8 +60,13 @@ Future<String?> diagnosticInstallId({
     final dir = await (directory ?? _installIdDirectory)();
     final file = File('${dir.path}/$_installIdFile');
     if (await file.exists()) {
-      final saved = (await file.readAsString()).trim();
-      if (saved.isNotEmpty) return saved;
+      try {
+        final saved = (await file.readAsString()).trim();
+        if (saved.isNotEmpty) return saved;
+      } on FileSystemException {
+        // Unreadable, for instance not text: a damaged file is replaced below,
+        // not a reason to send reports without an install ID.
+      }
     }
     final created = const Uuid().v4();
     await dir.create(recursive: true);
