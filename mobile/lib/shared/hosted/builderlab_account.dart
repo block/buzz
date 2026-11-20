@@ -503,6 +503,11 @@ class BuilderlabAccountClient {
         }
         final pubkey = AccountIdentityStore.publicKeyForNsec(nsec);
         // Never creates a binding: the key must already belong to the account.
+        // Gated on [pubkey], like the assertion request below: this push stop
+        // is for a community that may be removed, so a bad reply must not be
+        // filed under whichever member is current. HostedRelayAuth._acquire
+        // makes the same request without a key, so it has no signer to gate
+        // on; its caller is the active community, whose member reports name.
         final current = await _request(
           '/v1/buzz/nostr-identities/current',
           credential: signedOut.credential,
