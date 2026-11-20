@@ -4866,6 +4866,9 @@ pub(crate) mod postgres_tests {
         crate::migration::run_migrations_through(&db.pool, 89)
             .await
             .expect("migrate with fence objects present");
+        crate::migration::create_tenant_tables_added_after_fence_retirement(&db.pool)
+            .await
+            .expect("tenant tables added since");
         let store = db.deletion_store();
         let community = db
             .ensure_configured_community("optional-fences.example")
@@ -5011,6 +5014,9 @@ DROP FUNCTION community_deletion_lock_key(UUID);
         crate::migration::run_migrations_through(&db.pool, 86)
             .await
             .expect("phase-one schema");
+        crate::migration::create_tenant_tables_added_after_fence_retirement(&db.pool)
+            .await
+            .expect("tenant tables added since");
         let community = db
             .ensure_configured_community("optional-guards.example")
             .await

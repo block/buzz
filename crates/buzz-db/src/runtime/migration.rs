@@ -47,6 +47,26 @@ pub(crate) async fn run_migrations_through(pool: &PgPool, target: i64) -> Result
     .await
 }
 
+/// Migrations that only add a tenant table, applied after the fence
+/// retirement (0090). Append each new one here.
+#[cfg(test)]
+const TENANT_TABLE_MIGRATIONS_AFTER_FENCE_RETIREMENT: [i64; 1] = [106];
+
+/// Create the tenant tables added since the fence retirement, without
+/// recording their migrations. For tests that stop before the retirement but
+/// exercise the whole deletion catalog, and never migrate further.
+#[cfg(test)]
+pub(crate) async fn create_tenant_tables_added_after_fence_retirement(pool: &PgPool) -> Result<()> {
+    for version in TENANT_TABLE_MIGRATIONS_AFTER_FENCE_RETIREMENT {
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == version)
+            .ok_or_else(|| crate::DbError::InvalidData(format!("no migration {version}")))?;
+        sqlx::raw_sql(migration.sql.as_str()).execute(pool).await?;
+    }
+    Ok(())
+}
+
 async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
     reject_legacy_nip_rs_cardinality_ambiguity(conn).await?;
     for (version, doc, indexes) in INLINE_INDEX_BUILDS {
@@ -4562,10 +4582,17 @@ mod postgres_tests {
             .validate_serving_catalog()
             .await
             .expect("new code must boot before the drop");
-        store
+        // Deletion needs every tenant table this binary purges, and tables
+        // added after the retirement are not there yet.
+        let drift = store
             .validate_catalog()
             .await
-            .expect("deletion must accept the catalog before the drop");
+            .expect_err("deletion refuses a catalog missing later tenant tables")
+            .to_string();
+        assert!(
+            drift.contains("(missing=search_outbox, unknown=)"),
+            "deletion must accept the catalog before the drop: {drift}"
+        );
         run_migrations(&pool).await.expect("apply all migrations");
         assert_eq!(present(&pool).await, (false, false));
         store
