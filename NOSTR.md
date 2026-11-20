@@ -388,12 +388,30 @@ that names the workflow that sent it. Channel messages, threaded replies and
 DMs all carry it. `<id>` is the workflow's UUID in hyphenated lowercase form,
 for example `0f8fad5b-d9cb-469f-a165-70867728950e`.
 
-`<id>` is the `d` value of the workflow's kind:30620 definition, with two
-exceptions: a definition whose `d` spells the UUID another way, and a workflow
-whose ID the relay assigned. The list that ends this section describes both,
-and in both the tag matches no definition. Otherwise the `buzz:workflow-owner`
-value and this ID together give the definition's coordinate,
-`30620:<owner>:<id>`. Use both: the ID alone does not name a definition.
+`<id>` is the `d` value of the workflow's kind:30620 definition, with one
+exception: a workflow whose ID the relay assigned. The list that ends this
+section describes it, and there the tag matches no definition. Otherwise the
+`buzz:workflow-owner` value and this ID together give the definition's
+coordinate, `30620:<owner>:<id>`. Use both: the ID alone does not name a
+definition.
+
+A workflow has one live definition, at that coordinate. The relay accepts a
+definition only when its `d` is the workflow's UUID in hyphenated lowercase
+form. It rejects any other spelling of the UUID, such as uppercase,
+unhyphenated, braced or `urn:uuid:`, with
+`invalid: workflow_id must be a lowercase hyphenated UUID`. Earlier relays
+accepted those spellings and stored each as a separate definition of the same
+workflow. The relay treats such stored definitions as follows:
+
+- a save retires every definition the owner stored under another spelling of
+  that UUID, in the same transaction that stores the new one;
+- a delete through any spelling of the coordinate removes the workflow and the
+  definitions under every spelling. Like any deletion, it does nothing when a
+  live definition is newer than the deletion request;
+- until the owner's next save or delete, a definition stored under another
+  spelling stays readable at its own coordinate. If it is the newer one, it
+  holds the YAML the workflow runs, and the coordinate formed from this tag
+  returns the older definition or none.
 
 The tag carries nothing else about the workflow: not its channel, its name or
 the run that sent the message. A definition is scoped to a channel by its `h`
@@ -443,8 +461,8 @@ ordinary event.
 A client finds no definition, and offers nothing, in these cases:
 
 - the message was sent before the relay added the tag, so it has none;
-- the definition's `d` spells the UUID another way, such as uppercase, which
-  the relay accepts but this tag never carries;
+- the only definition is one that an earlier relay stored under another
+  spelling of the UUID, and the owner has not saved the workflow since;
 - the relay assigned the workflow's ID instead of taking it from the
   definition's `d`, as it did for workflows saved before it keyed them by
   that UUID.
