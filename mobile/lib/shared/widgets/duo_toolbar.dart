@@ -39,7 +39,8 @@ class DuoToolbarScope extends InheritedModel<Object> {
   final bool active;
   final EdgeInsets contentInsets;
 
-  /// Space above detail actions for the workspace's persistent rail controls.
+  /// Number of the workspace's persistent rail controls above detail actions.
+  /// They share one glass capsule; see [_railCapsuleExtent].
   final int leadingSlots;
 
   static const Object _stripAspect = #strip;
@@ -117,8 +118,9 @@ class DuoToolbarPortal extends HookConsumerWidget {
         final measuredTop = metrics.windowSize == windowSize
             ? metrics.railTopClearance
             : null;
-        final actionOffset =
-            (DuoToolbarScope.maybeOf(context)?.leadingSlots ?? 0) * 60.0;
+        final actionOffset = _railCapsuleExtent(
+          DuoToolbarScope.maybeOf(context)?.leadingSlots ?? 0,
+        );
         final topClearance =
             (measuredTop != null
                 ? measuredTop + 12
@@ -162,9 +164,7 @@ class DuoToolbarPortal extends HookConsumerWidget {
                           key: ValueKey(
                             'duo-toolbar-${group.map((a) => a.label).join('+')}',
                           ),
-                          // Each extra control extends the capsule by its
-                          // 48-point standalone height.
-                          height: 60 + (group.length - 1) * 48.0,
+                          height: _railCapsuleExtent(group.length),
                           child: IosNavigationBar(
                             title: '',
                             standaloneControl: true,
@@ -184,6 +184,11 @@ class DuoToolbarPortal extends HookConsumerWidget {
     );
   }
 }
+
+/// Rail height of [controls] that share one glass capsule: 48 points for each
+/// control, plus the 12-point margin that every rail capsule has.
+double _railCapsuleExtent(int controls) =>
+    controls > 0 ? 12 + controls * 48.0 : 0;
 
 /// Splits rail actions into controls; adjacent actions that share the rail
 /// background become one control.

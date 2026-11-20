@@ -188,7 +188,8 @@ class AdaptiveConversationPane extends HookConsumerWidget {
 
   final bool persistentSelection;
 
-  /// Rail slots reserved for workspace controls that stay active in wide mode.
+  /// Workspace rail controls that stay active in wide mode, sharing one glass
+  /// capsule above the detail's controls.
   final int listToolbarSlots;
 
   /// Optional list share of the usable width; defaults to the compact sidebar.
@@ -641,7 +642,8 @@ class AdaptiveConversationDestination extends HookConsumerWidget {
   final ConversationPaneController? controller;
   final bool persistentSelection;
 
-  /// Rail slots reserved for workspace controls that stay active in wide mode.
+  /// Workspace rail controls that stay active in wide mode, sharing one glass
+  /// capsule above the detail's controls.
   final int listToolbarSlots;
 
   /// Preferred sidebar width, capped to preserve room for its detail pane.
