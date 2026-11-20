@@ -7,6 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use buzz_core::tenant::CommunityId;
+use uuid::Uuid;
 
 /// Errors from action sink operations.
 #[derive(Debug, thiserror::Error)]
@@ -59,12 +60,15 @@ pub trait ActionSink: Send + Sync {
     /// Send a one-to-one DM from the workflow owner to a hex-encoded pubkey.
     ///
     /// Creates or reuses the participants' private channel in `community_id`.
-    /// `authored_text` is the stored template, as in [`Self::send_message`].
+    /// `workflow_id` identifies the sending workflow and `authored_text` is the
+    /// stored template, both as in [`Self::send_message`].
     /// `may_direct_agents` comes from the same per-run authority gate.
     /// Returns the sent message, including any withheld agent mentions.
+    #[allow(clippy::too_many_arguments)]
     fn send_dm(
         &self,
         community_id: CommunityId,
+        workflow_id: Uuid,
         recipient_pubkey: &str,
         text: &str,
         authored_text: &str,
@@ -79,6 +83,11 @@ pub trait ActionSink: Send + Sync {
     ///   under *this* community, never the deployment/default tenant — the run
     ///   carries its owning community so a workflow in community B posts into B
     ///   even though the side effect has no inbound connection to bind.
+    /// - `workflow_id`: the stored ID of the workflow whose run is sending the
+    ///   message. Consumers publish it on the message as an opaque identifier,
+    ///   so a reader who can already see that workflow can find it. Everyone
+    ///   who can read the message sees it, including people who cannot see
+    ///   the workflow, so it must stay the bare ID: no channel, name or run.
     /// - `channel_id`: UUID string of the target channel
     /// - `text`: rendered message body (must not be empty/whitespace-only)
     /// - `authored_text`: the workflow owner's stored, unrendered step
@@ -98,6 +107,7 @@ pub trait ActionSink: Send + Sync {
     fn send_message(
         &self,
         community_id: CommunityId,
+        workflow_id: Uuid,
         channel_id: &str,
         text: &str,
         authored_text: &str,
