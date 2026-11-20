@@ -15,7 +15,7 @@ fn parse_codex_config(toml_str: &str) -> Option<RuntimeFileConfig> {
     let approval_policy = toml_string(&table, "approval_policy");
     let sandbox_mode = toml_string(&table, "sandbox_mode");
     let reasoning_effort = toml_string(&table, "model_reasoning_effort");
-    let context_window = toml_string(&table, "model_context_window");
+    let context_window = toml_string_or_integer(&table, "model_context_window");
 
     // Two-axis mode: approval_policy × sandbox_mode
     let mode = match (approval_policy.as_deref(), sandbox_mode.as_deref()) {
@@ -122,6 +122,15 @@ fn toml_string(table: &toml::Table, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Like [`toml_string`], but also accepts a TOML integer, which is how Codex
+/// types numeric keys such as `model_context_window`.
+fn toml_string_or_integer(table: &toml::Table, key: &str) -> Option<String> {
+    match table.get(key)? {
+        toml::Value::Integer(value) => Some(value.to_string()),
+        _ => toml_string(table, key),
+    }
+}
+
 pub(crate) fn codex_config_path() -> Option<std::path::PathBuf> {
     if let Ok(home) = std::env::var("CODEX_HOME") {
         return Some(std::path::PathBuf::from(home).join("config.toml"));
@@ -148,6 +157,13 @@ model_reasoning_effort = "high"
         assert_eq!(cfg.provider.as_deref(), Some("openai"));
         assert_eq!(cfg.mode.as_deref(), Some("unless-allow-listed/permissive"));
         assert_eq!(cfg.thinking_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn integer_model_context_window_sets_context_limit() {
+        // Codex types `model_context_window` as an integer.
+        let cfg = parse_codex_config("model_context_window = 200000").unwrap();
+        assert_eq!(cfg.context_limit.as_deref(), Some("200000"));
     }
 
     #[test]
