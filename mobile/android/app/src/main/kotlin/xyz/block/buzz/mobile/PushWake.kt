@@ -200,8 +200,8 @@ internal object PushWake {
             notifier.postGeneric()
         }
 
+        /** Also clears the generic notification an earlier run left behind. */
         private fun removeGeneric() {
-            if (!genericShown) return
             genericShown = false
             notifier.cancelGeneric()
         }
