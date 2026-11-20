@@ -4518,6 +4518,7 @@ mod postgres_tests {
             .run_to(retirement - 1, &pool)
             .await
             .expect("apply pre-retirement migrations");
+        let later = crate::test_support::stand_in_later_expected_tables(&pool).await;
         let store = crate::deletion::DeletionStore::new(pool.clone());
         store
             .validate_serving_catalog()
@@ -4527,6 +4528,7 @@ mod postgres_tests {
             .validate_catalog()
             .await
             .expect("deletion must accept pre-retirement catalog");
+        crate::test_support::drop_stand_in_tables(&pool, &later).await;
         run_migrations(&pool).await.expect("apply all migrations");
         let fence_triggers: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgname LIKE 'community_write_fence_%'",
@@ -4595,6 +4597,7 @@ mod postgres_tests {
             .await
             .expect("apply pre-retirement migrations");
         assert_eq!(present(&pool).await, (true, true));
+        let later = crate::test_support::stand_in_later_expected_tables(&pool).await;
         store
             .validate_serving_catalog()
             .await
@@ -4603,6 +4606,7 @@ mod postgres_tests {
             .validate_catalog()
             .await
             .expect("deletion must accept the catalog before the drop");
+        crate::test_support::drop_stand_in_tables(&pool, &later).await;
         run_migrations(&pool).await.expect("apply all migrations");
         assert_eq!(present(&pool).await, (false, false));
         store

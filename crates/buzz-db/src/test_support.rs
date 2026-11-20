@@ -396,6 +396,50 @@ pub(crate) async fn insert_historical_event_with_thread_metadata(
 /// Move a community fixture into a deletion lifecycle state the way the
 /// executor does. Retain transaction-scoped executor GUCs for older catalogs
 /// with a tombstone guard and fixtures that also write through universal fences.
+/// Stand in for each [`EXPECTED_SCOPED_TABLES`] entry that a later migration
+/// creates, in a database pinned to an older schema, and return their names.
+///
+/// Deletion's catalog check is an exact set, so a pinned schema lacks the
+/// tables a later expand migration adds. In production a release only meets
+/// such a schema after an earlier one listed those tables in
+/// [`PENDING_SCOPED_TABLES`]; a test pinned to an old schema to exercise
+/// something else stands each one up bare instead, as the pending-table tests
+/// do. Drop them with [`drop_stand_in_tables`] before migrating on, or the
+/// migration that creates them fails.
+///
+/// [`EXPECTED_SCOPED_TABLES`]: crate::deletion::EXPECTED_SCOPED_TABLES
+/// [`PENDING_SCOPED_TABLES`]: crate::deletion::PENDING_SCOPED_TABLES
+pub(crate) async fn stand_in_later_expected_tables(pool: &sqlx::PgPool) -> Vec<&'static str> {
+    let mut created = Vec::new();
+    for table in crate::deletion::EXPECTED_SCOPED_TABLES {
+        let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+            .bind(format!("public.{table}"))
+            .fetch_one(pool)
+            .await
+            .expect("look up expected table");
+        if !exists {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "CREATE TABLE public.{table} (community_id UUID NOT NULL)"
+            )))
+            .execute(pool)
+            .await
+            .expect("stand in for a later table");
+            created.push(*table);
+        }
+    }
+    created
+}
+
+/// Drop the tables [`stand_in_later_expected_tables`] created.
+pub(crate) async fn drop_stand_in_tables(pool: &sqlx::PgPool, tables: &[&str]) {
+    for table in tables {
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE public.{table}")))
+            .execute(pool)
+            .await
+            .expect("drop stand-in table");
+    }
+}
+
 pub(crate) async fn set_deletion_state(pool: &sqlx::PgPool, id: uuid::Uuid, state: &str) {
     let mut tx = pool.begin().await.expect("begin lifecycle fixture");
     set_deletion_state_in_transaction(&mut tx, id, state).await;
