@@ -37,8 +37,23 @@ bool shouldNotifyForEvent(
     return false;
   }
 
-  return rootId != null &&
-      (participatedRootIds.contains(rootId) ||
-          followedRootIds.contains(rootId) ||
-          authoredRootIds.contains(rootId));
+  return isInViewerThread(
+    rootId,
+    participatedRootIds: participatedRootIds,
+    followedRootIds: followedRootIds,
+    authoredRootIds: authoredRootIds,
+  );
 }
+
+/// Whether [rootId] is one of the viewer's threads: they replied in it,
+/// follow it, or started it.
+bool isInViewerThread(
+  String? rootId, {
+  required Set<String> participatedRootIds,
+  required Set<String> followedRootIds,
+  required Set<String> authoredRootIds,
+}) =>
+    rootId != null &&
+    (participatedRootIds.contains(rootId) ||
+        followedRootIds.contains(rootId) ||
+        authoredRootIds.contains(rootId));

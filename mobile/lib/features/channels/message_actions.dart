@@ -563,7 +563,14 @@ bool messageActionShowsUnread(
       channel != null &&
       readByChannelCatchUp(
         isDm: channel.isDm,
-        isReply: message.parentId != null,
+        // A message also sent to the channel is read only by its own mark,
+        // with or without a parent.
+        isReply:
+            message.parentId != null ||
+            message.tags.any(
+              (tag) =>
+                  tag.length >= 2 && tag[0] == 'broadcast' && tag[1] == '1',
+            ),
         highPriority: isHighPriorityEvent(message.tags, readerPubkey),
       );
   return isMessageUnread(
