@@ -134,7 +134,10 @@ fn with_archived(
             let Some(archived) = archived else {
                 return Some(profile);
             };
-            let pubkey = profile.get("pubkey")?.as_str()?.to_ascii_lowercase();
+            let Some(pubkey) = profile.get("pubkey").and_then(|v| v.as_str()) else {
+                return Some(profile);
+            };
+            let pubkey = pubkey.to_ascii_lowercase();
             if !archived.contains(&pubkey) {
                 return Some(profile);
             }
@@ -1655,6 +1658,12 @@ mod tests {
         }
         for rows in users_get(&client, &pubkeys, None, false).await {
             assert_eq!(archived_flags(&rows), [Some(true), None], "{rows:?}");
+        }
+        // A non-object kind:0 still comes back with a healthy list.
+        let odd = Keys::generate();
+        seed_profile(&relay, &odd, "null");
+        for rows in users_get(&client, &[odd.public_key().to_hex()], None, false).await {
+            assert_eq!(rows.len(), 1, "{rows:?}");
         }
 
         // Unreadable list: nothing filtered or marked.
