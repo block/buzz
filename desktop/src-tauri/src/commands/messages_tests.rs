@@ -1,4 +1,5 @@
 use super::*;
+use nostr::{EventBuilder, Kind, Tag, Timestamp};
 
 #[test]
 fn search_messages_limit_allows_discussion_discovery_page() {
@@ -275,4 +276,78 @@ fn feed_item_from_event_carries_singular_mention_category() {
 
     assert_eq!(json["category"], "mention");
     assert_eq!(json["id"], event.id.to_hex());
+}
+
+/// Minimal `/query` endpoint ordering events like the relay does
+/// (`created_at DESC, id ASC`) and honouring the `(until, before_id)` cursor.
+async fn marker_relay_query(
+    axum::extract::State(events): axum::extract::State<std::sync::Arc<Vec<Event>>>,
+    axum::Json(filters): axum::Json<Vec<serde_json::Value>>,
+) -> axum::Json<Vec<Event>> {
+    let filter = &filters[0];
+    let mut page: Vec<Event> = events
+        .iter()
+        .filter(|event| match filter["until"].as_u64() {
+            Some(until) => {
+                let created_at = event.created_at.as_secs();
+                created_at < until
+                    || (created_at == until
+                        && filter["before_id"]
+                            .as_str()
+                            .is_none_or(|id| event.id.to_hex().as_str() > id))
+            }
+            None => true,
+        })
+        .cloned()
+        .collect();
+    page.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(a.id.cmp(&b.id)));
+    page.truncate(filter["limit"].as_u64().unwrap() as usize);
+    axum::Json(page)
+}
+
+#[tokio::test]
+async fn marker_lookup_reads_events_sharing_the_page_boundary_second() {
+    let _serial = crate::relay_admission::TEST_SERIAL.lock().await;
+    let keys = Keys::generate();
+    let channel_id = uuid::Uuid::new_v4().to_string();
+    let message = |created_at: u64, content: String, marker: Option<&str>| {
+        let mut tags = vec![Tag::parse(["h", channel_id.as_str()]).unwrap()];
+        if let Some(marker) = marker {
+            tags.push(Tag::parse(["client", marker]).unwrap());
+        }
+        EventBuilder::new(Kind::Custom(9), content)
+            .tags(tags)
+            .custom_created_at(Timestamp::from(created_at))
+            .sign_with_keys(&keys)
+            .unwrap()
+    };
+
+    // 499 newer messages, then two in the oldest second. The first full page
+    // ends on the lower-id one of the pair, so the marker message (the
+    // higher id) is the first event of the second page.
+    let mut events: Vec<Event> = (0..499)
+        .map(|index| message(2_000 + index, format!("newer {index}"), None))
+        .collect();
+    let marked = message(1_000, "kickoff".to_string(), Some("welcome-kickoff"));
+    let plain = (0..)
+        .map(|index| message(1_000, format!("same second {index}"), None))
+        .find(|event| event.id < marked.id)
+        .unwrap();
+    events.extend([plain, marked.clone()]);
+
+    let router = axum::Router::new()
+        .route("/query", axum::routing::post(marker_relay_query))
+        .with_state(std::sync::Arc::new(events));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let state = crate::app_state::build_app_state();
+    *state.keys.lock().unwrap() = keys.clone();
+    *state.relay_url_override.lock().unwrap() = Some(url);
+
+    let found =
+        find_managed_agent_channel_message_by_marker(&state, None, &channel_id, "welcome-kickoff")
+            .await;
+    server.abort();
+    assert_eq!(found.unwrap().map(|event| event.id), Some(marked.id));
 }
