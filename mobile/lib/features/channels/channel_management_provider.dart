@@ -24,8 +24,14 @@ export 'channel_metadata_updates.dart';
 part 'channel_huddle_actions.dart';
 part 'channel_management_actions.dart';
 
-String _relayErrorMessage(Object error) =>
-    error.toString().replaceFirst('Exception: ', '');
+/// The text of [error] without a leading `Exception: `, which a plain
+/// [Exception] adds. Only the prefix goes: `TimeoutException: ...` keeps its
+/// whole name.
+String _relayErrorMessage(Object error) {
+  const prefix = 'Exception: ';
+  final text = error.toString();
+  return text.startsWith(prefix) ? text.substring(prefix.length) : text;
+}
 
 /// Raised when one or more kind:9000 adds were rejected, keyed by pubkey.
 ///

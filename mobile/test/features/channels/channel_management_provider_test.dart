@@ -489,6 +489,44 @@ void main() {
     },
   );
 
+  test('add-members failures keep each error name but drop a bare '
+      'Exception prefix', () async {
+    final keys = nostr.Keys.generate();
+    final timedOut = 'a' * 64;
+    final rejected = 'b' * 64;
+    final session = _RecordingPublishRelaySession()
+      ..publishErrors.addAll({
+        timedOut: RelayAckTimeoutError('Event e not acknowledged'),
+        rejected: Exception('restricted: not allowed'),
+      });
+    final actionsProvider = Provider<ChannelActions>((ref) {
+      return ChannelActions(
+        ref: ref,
+        session: session,
+        signedEventRelay: SignedEventRelay(session: session, nsec: keys.nsec),
+        currentPubkey: keys.public,
+      );
+    });
+    final container = ProviderContainer(retry: (_, _) => null);
+    addTearDown(container.dispose);
+
+    await expectLater(
+      container
+          .read(actionsProvider)
+          .addMembers(
+            channelId: _channelId,
+            pubkeys: [timedOut, rejected],
+            role: 'member',
+          ),
+      throwsA(
+        isA<AddMembersException>().having((e) => e.failures, 'failures', {
+          timedOut: 'TimeoutException: Event e not acknowledged',
+          rejected: 'restricted: not allowed',
+        }),
+      ),
+    );
+  });
+
   test('reactions tag the reacted-to message author', () async {
     final keys = nostr.Keys.generate();
     final session = _RecordingPublishRelaySession();
@@ -945,6 +983,9 @@ const _memberPubkey =
 class _RecordingPublishRelaySession extends RelaySessionNotifier {
   final publishedEvents = <NostrEvent>[];
   final queryFilters = <NostrFilter>[];
+
+  /// Errors to throw instead of publishing, keyed by the event's `p` tag.
+  final publishErrors = <String, Object>{};
   int historyQueryCount = 0;
 
   @override
@@ -956,6 +997,12 @@ class _RecordingPublishRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
     Future<bool> Function()? mayPublish,
   }) async {
+    final target = event.tags
+        .where((tag) => tag.length > 1 && tag[0] == 'p')
+        .map((tag) => tag[1])
+        .firstOrNull;
+    final error = publishErrors[target];
+    if (error != null) throw error;
     publishedEvents.add(event);
     return event;
   }
