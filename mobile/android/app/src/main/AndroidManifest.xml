@@ -2,6 +2,7 @@
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.CAMERA" />
@@ -63,6 +64,14 @@
                 android:name="flutter_deeplinking_enabled"
                 android:value="false" />
         </activity>
+        <!-- Receives the push gateway's wake from FCM. -->
+        <service
+            android:name=".PushWakeService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
         <!-- Diagnostic reporting (docs/mobile-diagnostic-reporting.md). The
              Sentry SDK starts from Dart, and only when the build has a
              destination, so its startup provider never runs. -->

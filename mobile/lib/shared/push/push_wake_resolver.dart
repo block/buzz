@@ -195,7 +195,9 @@ class PushWakeTimeouts {
 /// that carries no content: sign in to each relay, fetch what is newer than
 /// the last shown message, apply the subscription's eligibility rules
 /// (self-authored, muted channels, hellthreads) and build title, body and
-/// target for each message.
+/// target for each message. [relayHeaders] supplies the headers a community's
+/// relay needs beyond the request signature, such as the account assertion an
+/// organization relay requires.
 ///
 /// It runs headless, with no UI and no Riverpod state, so it is safe to run
 /// in a background engine. Callers run it one at a time per process; see
@@ -204,6 +206,7 @@ Future<PushWakeResult> resolvePushWake({
   required ShownMessageStore store,
   Future<List<Community>> Function()? loadCommunities,
   http.Client? httpClient,
+  Future<Map<String, String>> Function(Community community)? relayHeaders,
   PushWakeTimeouts timeouts = const PushWakeTimeouts(),
   DateTime Function()? now,
 }) async {
@@ -225,6 +228,7 @@ Future<PushWakeResult> resolvePushWake({
         run: run,
         store: store,
         client: client,
+        relayHeaders: relayHeaders,
         timeouts: timeouts,
         clock: clock,
       ).catchError((Object _) {
@@ -279,6 +283,8 @@ Future<void> _resolveCommunity(
   required _WakeRun run,
   required ShownMessageStore store,
   required RelayHttpQueryClient client,
+  required Future<Map<String, String>> Function(Community community)?
+  relayHeaders,
   required PushWakeTimeouts timeouts,
   required DateTime Function() clock,
 }) async {
@@ -288,6 +294,9 @@ Future<void> _resolveCommunity(
   final subscriptions = community.pushSubscriptionState.authoritative;
   final config = RelayConfig(baseUrl: community.relayUrl, nsec: nsec);
   final url = Uri.parse(config.baseUrl).resolve('/query');
+  // Organization relays refuse a request without the account's federated
+  // identity header, so it is read once for the wake, under its deadline.
+  final extraHeaders = await relayHeaders?.call(community) ?? const {};
 
   Future<List<NostrEvent>> query(
     List<Map<String, dynamic>> filters, {
@@ -305,6 +314,7 @@ Future<void> _resolveCommunity(
         ),
         'Content-Type': 'application/json',
         'Accept-Encoding': 'gzip',
+        ...extraHeaders,
       })
       ..bodyBytes = body;
     // An untrusted relay can't make the wake buffer or inflate more than the
