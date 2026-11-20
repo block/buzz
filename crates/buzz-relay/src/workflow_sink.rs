@@ -217,8 +217,7 @@ impl ActionSink for RelayActionSink {
         may_direct_agents: bool,
         author_pubkey: &str,
     ) -> Pin<Box<dyn Future<Output = Result<SentMessage, ActionSinkError>> + Send + '_>> {
-        let recipient = nostr::PublicKey::from_hex(recipient_pubkey)
-            .map_err(|e| ActionSinkError::InvalidInput(format!("invalid recipient pubkey: {e}")));
+        let recipient = recipient_pubkey.to_owned();
         let author = nostr::PublicKey::from_hex(author_pubkey)
             .map_err(|e| ActionSinkError::InvalidInput(format!("invalid author pubkey: {e}")));
         let text = text.to_owned();
@@ -228,15 +227,18 @@ impl ActionSink for RelayActionSink {
                 emit_group_discovery_events, emit_membership_notification,
                 publish_dm_visibility_snapshot,
             };
-            let recipient = recipient?.to_bytes();
             let author = author?.to_bytes();
-            if text.trim().is_empty() {
-                return Err(ActionSinkError::EmptyContent);
+            if !buzz_workflow::schema::valid_dm_address(&recipient) {
+                return Err(ActionSinkError::InvalidInput("invalid DM recipient".into()));
             }
-            if recipient == author {
+            let recipient_key = nostr::PublicKey::from_hex(&recipient).ok();
+            if recipient_key.is_some_and(|key| key.to_bytes() == author) {
                 return Err(ActionSinkError::InvalidInput(
                     "DM requires another participant".into(),
                 ));
+            }
+            if text.trim().is_empty() {
+                return Err(ActionSinkError::EmptyContent);
             }
             let state = self
                 .state
@@ -251,6 +253,29 @@ impl ActionSink for RelayActionSink {
                     ActionSinkError::Database("workflow community has no host".into())
                 })?;
             let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+            let recipient = if let Some(key) = recipient_key {
+                key.to_bytes().to_vec()
+            } else {
+                // Resolve only locally; never make caller-selected discovery requests.
+                let handle = crate::api::nip05::canonicalize_nip05(&recipient, tenant.host())
+                    .map_err(ActionSinkError::InvalidInput)?;
+                let (local, domain) = handle.split_once('@').ok_or_else(|| {
+                    ActionSinkError::InvalidInput("invalid NIP-05 recipient".into())
+                })?;
+                state
+                    .db
+                    .get_user_by_nip05(community_id, local, domain)
+                    .await
+                    .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                    .ok_or_else(|| ActionSinkError::InvalidInput("unknown DM recipient".into()))?
+                    .pubkey
+            };
+            if recipient == author {
+                return Err(ActionSinkError::InvalidInput(
+                    "DM requires another participant".into(),
+                ));
+            }
+
             if state
                 .db
                 .get_user(community_id, &recipient)
@@ -267,6 +292,33 @@ impl ActionSink for RelayActionSink {
                 return Err(ActionSinkError::InvalidInput(
                     "DM recipient must be an existing, unbanned community user".into(),
                 ));
+            }
+            if state.config.require_relay_membership {
+                let mut admitted = state
+                    .db
+                    .is_relay_member_writer(community_id, &hex::encode(&recipient))
+                    .await
+                    .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+                if !admitted {
+                    // Agents inherit admission from their recorded owner, as at authentication.
+                    if let Some((_, Some(owner))) = state
+                        .db
+                        .get_agent_channel_policy(community_id, &recipient)
+                        .await
+                        .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                    {
+                        admitted = state
+                            .db
+                            .is_relay_member_writer(community_id, &hex::encode(owner))
+                            .await
+                            .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+                    }
+                }
+                if !admitted {
+                    return Err(ActionSinkError::InvalidInput(
+                        "DM recipient must be a current community member".into(),
+                    ));
+                }
             }
             // Check attachment access before creating a conversation or notices.
             // Use the same relay signature and owner attribution as send_message;

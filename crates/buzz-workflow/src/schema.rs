@@ -108,7 +108,8 @@ pub enum ActionDef {
     },
     /// Send a direct message to a user.
     SendDm {
-        /// Recipient — pubkey hex or `{{trigger.author}}`.
+        /// Recipient: pubkey hex or `{{trigger.author}}`. Webhook workflows may
+        /// use `{{trigger.recipient}}`, resolving to a pubkey or local NIP-05 handle.
         to: String,
         /// Message text (supports template variables).
         text: String,
@@ -210,6 +211,11 @@ impl WorkflowDef {
             }
             if let ActionDef::SendDm { to, .. } = &step.action {
                 validate_dm_recipient(to)?;
+                if to == "{{trigger.recipient}}" && !matches!(self.trigger, TriggerDef::Webhook) {
+                    return Err(WorkflowError::InvalidDefinition(
+                        "send_dm trigger.recipient requires a webhook trigger".into(),
+                    ));
+                }
             }
             if !seen_ids.insert(step.id.as_str()) {
                 return Err(WorkflowError::InvalidDefinition(format!(
@@ -286,13 +292,28 @@ impl WorkflowDef {
 
 /// Enforce the recipient forms before trigger-controlled template resolution.
 pub(crate) fn validate_dm_recipient(to: &str) -> Result<(), WorkflowError> {
-    if to == "{{trigger.author}}" || nostr::PublicKey::from_hex(to).is_ok() {
+    if matches!(to, "{{trigger.author}}" | "{{trigger.recipient}}")
+        || nostr::PublicKey::from_hex(to).is_ok()
+    {
         Ok(())
     } else {
         Err(WorkflowError::InvalidDefinition(
-            "send_dm recipient must be a hex pubkey or {{trigger.author}}".into(),
+            "send_dm recipient must be a hex pubkey, {{trigger.author}}, or webhook {{trigger.recipient}}".into(),
         ))
     }
+}
+
+/// Whether a resolved DM address has a supported, bounded shape. The relay
+/// additionally requires NIP-05 handles to belong to the run's community.
+pub fn valid_dm_address(to: &str) -> bool {
+    nostr::PublicKey::from_hex(to).is_ok()
+        || (to.len() <= 255
+            && !to
+                .chars()
+                .any(|c| c.is_whitespace() || matches!(c, '{' | '}'))
+            && to.split_once('@').is_some_and(|(local, domain)| {
+                !local.is_empty() && !domain.is_empty() && !domain.contains('@')
+            }))
 }
 
 /// Validate a cron expression using the `cron` crate.
@@ -336,6 +357,39 @@ pub fn parse_yaml(yaml: &str) -> Result<(WorkflowDef, String), WorkflowError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dm_recipient_forms_and_trigger_scope() {
+        let key = nostr::Keys::generate().public_key().to_hex();
+        for (to, webhook_only, valid) in [
+            (key.as_str(), false, true),
+            ("alice@chat.example.org", false, false),
+            ("{{trigger.author}}", false, true),
+            ("{{trigger.recipient}}", true, true),
+            ("{{trigger.text}}", false, false),
+            ("{{steps.lookup.output.pubkey}}", false, false),
+            ("prefix{{trigger.recipient}}", false, false),
+            ("{{trigger.recipient}}@chat.example.org", false, false),
+            ("", false, false),
+            ("alice", false, false),
+            ("@chat.example.org", false, false),
+            ("alice@", false, false),
+            ("alice@chat@example.org", false, false),
+        ] {
+            for trigger in ["webhook", "message_posted", "reaction_added", "diff_posted"] {
+                let def: WorkflowDef = serde_json::from_value(serde_json::json!({
+                    "name": "notify", "trigger": {"on": trigger},
+                    "steps": [{"id": "dm", "action": "send_dm", "to": to, "text": "hi"}]
+                }))
+                .unwrap();
+                assert_eq!(
+                    def.validate().is_ok(),
+                    valid && (!webhook_only || trigger == "webhook"),
+                    "to={to}, trigger={trigger}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn parse_simple_message_posted_workflow() {

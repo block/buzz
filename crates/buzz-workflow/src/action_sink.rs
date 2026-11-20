@@ -56,7 +56,7 @@ pub struct SentMessage {
 /// Returns `Pin<Box<dyn Future>>` for dyn-compatibility — required because
 /// `WorkflowEngine` stores `Arc<dyn ActionSink>`.
 pub trait ActionSink: Send + Sync {
-    /// Send a one-to-one DM from the workflow owner to a hex-encoded pubkey.
+    /// Send a one-to-one DM to a hex pubkey or community-local NIP-05 handle.
     ///
     /// Creates or reuses the participants' private channel in `community_id`.
     /// `authored_text` is the stored template, as in [`Self::send_message`].
