@@ -43,6 +43,12 @@ async fn every_acceptance_check_passes_against_a_live_relay() {
 /// Runs the binary with `args`, metrics sent to a local listener. Returns
 /// its output and every datagram that arrived.
 fn probe(args: &[&str]) -> (Output, Vec<String>) {
+    probe_with_env(args, &[])
+}
+
+/// [`probe`] with extra environment variables. The child inherits none of the
+/// probe's own settings from the test's environment.
+fn probe_with_env(args: &[&str], envs: &[(&str, &str)]) -> (Output, Vec<String>) {
     let agent = UdpSocket::bind("127.0.0.1:0").unwrap();
     agent
         .set_read_timeout(Some(Duration::from_millis(500)))
@@ -52,7 +58,11 @@ fn probe(args: &[&str]) -> (Output, Vec<String>) {
         .args(args)
         .args(["--statsd-addr", &addr, "--tag", "env:test"])
         .env_remove("BUZZ_PRIVATE_KEY")
+        .env_remove("BUZZ_PRIVATE_KEY_FILE")
+        .env_remove("BUZZ_ACCEPTANCE_ASSERTION_FILE")
+        .env_remove("BUZZ_ACCEPTANCE_STATSD_ADDR")
         .env_remove("BUZZ_RELAY_URL")
+        .envs(envs.iter().copied())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -195,7 +205,7 @@ fn the_binary_exits_2_when_it_cannot_run() {
 
 #[test]
 #[ignore]
-fn the_binary_passes_with_a_key_from_a_file() {
+fn the_binary_authenticates_with_the_key_from_its_key_file() {
     let dir = std::env::temp_dir().join(format!("acceptance-key-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let key_file = dir.join("key");
@@ -206,14 +216,15 @@ fn the_binary_passes_with_a_key_from_a_file() {
     )
     .unwrap();
 
-    let (output, _) = probe(&[
-        "--relay-url",
-        &relay_url(),
-        "--private-key-file",
-        key_file.to_str().unwrap(),
-    ]);
+    // The chart passes the path through the environment, so this does too.
+    let (output, _) = probe_with_env(
+        &["--relay-url", &relay_url()],
+        &[("BUZZ_PRIVATE_KEY_FILE", key_file.to_str().unwrap())],
+    );
     let report = report(&output);
     assert_eq!(output.status.code(), Some(0), "{report}");
     assert_eq!(report["passed"], true);
+    // A probe that ignored the file would run as a new key.
+    assert_eq!(report["pubkey"], keys.public_key().to_hex(), "{report}");
     std::fs::remove_dir_all(dir).unwrap();
 }

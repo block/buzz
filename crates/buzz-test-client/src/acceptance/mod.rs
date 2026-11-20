@@ -71,6 +71,8 @@ pub struct Config {
 pub struct Report {
     /// The relay the run checked.
     pub relay_url: String,
+    /// The public key (hex) the run authenticated and signed as.
+    pub pubkey: String,
     /// The relay's NIP-11 `version`, when it reported one.
     pub relay_version: Option<String>,
     /// True when no check failed.
@@ -234,6 +236,7 @@ pub async fn run(cfg: &Config) -> Report {
 
     Report {
         relay_url: cfg.relay_url.clone(),
+        pubkey: cfg.keys.public_key().to_hex(),
         relay_version,
         passed: checks.iter().all(|c| c.result != Outcome::Failure),
         seconds: started.elapsed().as_secs_f64(),
