@@ -29,7 +29,7 @@ TextStyle _effectiveTitleStyle(BuildContext context, TextStyle? titleStyle) {
   return baseStyle.copyWith(fontWeight: FontWeight.w600).merge(titleStyle);
 }
 
-double _barContentHeight(
+double _titleHeight(
   BuildContext context,
   TextStyle? titleStyle,
   double titleContentHeight,
@@ -39,12 +39,24 @@ double _barContentHeight(
     context,
   ).scale(style.fontSize ?? 16);
   final scaledTitleHeight = scaledFontSize * (style.height ?? 1);
-  final effectiveTitleHeight = titleContentHeight > scaledTitleHeight
+  return titleContentHeight > scaledTitleHeight
       ? titleContentHeight
       : scaledTitleHeight;
+}
+
+double _barContentHeight(
+  BuildContext context,
+  TextStyle? titleStyle,
+  double titleContentHeight,
+) {
+  final effectiveTitleHeight = _titleHeight(
+    context,
+    titleStyle,
+    titleContentHeight,
+  );
   final duoTop = _duoTopClearance(context);
   if (duoTop > 0) {
-    // Match the native Duo bar: a 44-point row below the top clearance.
+    // Keep the native Duo bar's height, which can exceed its 44-point row.
     final rowHeight = IosNavigationMetrics.of(
       context,
     ).compactHeight.clamp(44.0, double.infinity);
@@ -503,11 +515,20 @@ class FrostedAppBar extends StatelessWidget {
                     )
             : null);
 
+    // On Duo, controls start at the clearance as on the native bar, whose
+    // reported height can exceed the 44-point row they occupy.
+    final duoTop = _duoTopClearance(context);
+    final duoBottom = duoTop > 0
+        ? barContentHeight -
+              duoTop -
+              max(44.0, _titleHeight(context, titleStyle, titleContentHeight))
+        : 0.0;
     final titleRow = SizedBox(
       height: barContentHeight,
       child: Padding(
         padding: EdgeInsets.only(
-          top: _duoTopClearance(context),
+          top: duoTop,
+          bottom: duoBottom,
           left: horizontalInset,
           right:
               horizontalInset +

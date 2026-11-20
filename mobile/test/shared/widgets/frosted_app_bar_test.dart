@@ -653,12 +653,13 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
-  for (final (name, platform, size, viewPadding, actionTop) in [
+  for (final (name, platform, size, viewPadding, nativeHeight, actionTop) in [
     (
       'iOS Duo cover',
       TargetPlatform.iOS,
       const Size(466, 678),
       const FakeViewPadding(right: 84, bottom: 34),
+      null,
       24.0,
     ),
     (
@@ -666,6 +667,15 @@ void main() {
       TargetPlatform.iOS,
       const Size(951, 669),
       const FakeViewPadding(right: 84, bottom: 34),
+      null,
+      24.0,
+    ),
+    (
+      'iOS Duo wide with a taller native bar',
+      TargetPlatform.iOS,
+      const Size(951, 669),
+      const FakeViewPadding(right: 84, bottom: 34),
+      58.0,
       24.0,
     ),
     (
@@ -673,6 +683,7 @@ void main() {
       TargetPlatform.iOS,
       const Size(402, 874),
       const FakeViewPadding(top: 62, bottom: 34),
+      null,
       62.0 + 6,
     ),
     (
@@ -680,6 +691,7 @@ void main() {
       TargetPlatform.android,
       const Size(466, 678),
       const FakeViewPadding(right: 84, bottom: 34),
+      null,
       6.0,
     ),
   ]) {
@@ -698,6 +710,8 @@ void main() {
         ProviderScope(
           child: MaterialApp(
             theme: AppTheme.light(),
+            builder: (context, child) =>
+                IosNavigationMetricsHost(child: child!),
             home: const Stack(
               children: [
                 FrostedAppBar(
@@ -711,6 +725,13 @@ void main() {
           ),
         ),
       );
+      if (nativeHeight != null) {
+        IosNavigationMetrics.update(
+          tester.element(find.byType(FrostedAppBar)),
+          {'compactHeight': nativeHeight},
+        );
+        await tester.pump();
+      }
       final top = tester.getRect(find.byKey(action)).top;
       expect(top, actionTop);
       expect(tester.getRect(find.text('Messages')).center.dy, top + 22);
