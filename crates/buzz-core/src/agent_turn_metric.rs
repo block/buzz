@@ -6,8 +6,11 @@
 //!
 //! See `docs/nips/NIP-AM.md` for the full specification.
 
+use std::collections::BTreeMap;
+
 use nostr::{Event, Keys, PublicKey};
-use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::observer::{decrypt_observer_payload, encrypt_observer_payload, ObserverPayloadError};
 
@@ -41,6 +44,18 @@ pub struct TokenCounts {
     /// Informational: cache-write tokens included in `input_tokens`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_write_tokens: Option<u64>,
+}
+
+impl TokenCounts {
+    /// True when no field carries a value (the harness reported nothing).
+    pub fn is_empty(&self) -> bool {
+        self.input_tokens.is_none()
+            && self.output_tokens.is_none()
+            && self.total_tokens.is_none()
+            && self.cost_usd.is_none()
+            && self.cache_read_tokens.is_none()
+            && self.cache_write_tokens.is_none()
+    }
 }
 
 /// Why a turn ended.
@@ -157,6 +172,57 @@ pub struct AgentTurnMetricPayload {
     /// treat omission as "price unknown".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pricing_identity: Option<PricingIdentity>,
+
+    /// Tool calls made this turn, keyed by tool name. Omitted when no tool
+    /// calls were observed. Publishers bound the map and fold overflow into
+    /// `"_other"`; consumers must not reject the event over it.
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub tools: Option<BTreeMap<String, u32>>,
+
+    /// Skill invocations this turn, keyed by skill name. Same bounds and
+    /// omission rules as `tools`.
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub skills: Option<BTreeMap<String, u32>>,
+
+    /// Context-window occupancy at the last report during this turn. Omitted
+    /// when the harness reports no window size.
+    #[serde(
+        default,
+        deserialize_with = "lenient",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub context: Option<ContextUsage>,
+}
+
+/// Context-window occupancy snapshot. Percent used is
+/// `used_tokens / window_tokens`; publishers send raw values, not a percent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsage {
+    /// Tokens currently occupying the context window.
+    pub used_tokens: u64,
+    /// Total context window size in tokens; publishers send it only when
+    /// greater than zero.
+    pub window_tokens: u64,
+}
+
+/// Decode an optional analytics field, mapping any malformed value to `None`
+/// so it can never fail the whole event (NIP-AM: consumers MUST ignore it).
+fn lenient<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).ok())
 }
 
 fn default_delta_reliable() -> bool {
@@ -256,6 +322,9 @@ mod tests {
             delta_reliable: true,
             stop_reason: Some(StopReason::EndTurn),
             pricing_identity: None,
+            tools: None,
+            skills: None,
+            context: None,
         }
     }
 
@@ -312,6 +381,67 @@ mod tests {
             payload.delta_reliable,
             "deltaReliable should default to true"
         );
+    }
+
+    #[test]
+    fn activity_fields_optional_and_never_fail_closed() {
+        let old: AgentTurnMetricPayload =
+            serde_json::from_str(r#"{"harness":"goose","timestamp":"t"}"#).unwrap();
+        assert!(old.tools.is_none() && old.skills.is_none() && old.context.is_none());
+        let json = serde_json::to_string(&old).unwrap();
+        assert!(!json.contains("tools") && !json.contains("context"));
+
+        let mut p = sample_payload();
+        p.tools = Some(BTreeMap::from([("Read".to_string(), 2)]));
+        p.skills = Some(BTreeMap::from([("git".to_string(), 1)]));
+        p.context = Some(ContextUsage {
+            used_tokens: 50_000,
+            window_tokens: 200_000,
+        });
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains(r#""tools":{"Read":2}"#));
+        assert!(json.contains(r#""context":{"usedTokens":50000,"windowTokens":200000}"#));
+        assert_eq!(
+            serde_json::from_str::<AgentTurnMetricPayload>(&json).unwrap(),
+            p
+        );
+
+        // Out-of-bounds analytics fields must not drop the event's token/cost
+        // data: decrypt runs validate() fail-closed.
+        p.tools = Some((0..200).map(|i| (i.to_string(), 1)).collect());
+        p.skills = Some(BTreeMap::from([(String::new(), 1)]));
+        p.context = Some(ContextUsage {
+            used_tokens: 1,
+            window_tokens: 0,
+        });
+        assert!(p.validate().is_ok());
+    }
+
+    #[test]
+    fn decrypt_ignores_malformed_activity_fields_keeping_tokens() {
+        use crate::observer::encrypt_observer_payload;
+
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let mut value = serde_json::to_value(sample_payload()).unwrap();
+        value["tools"] = serde_json::json!(["Read"]);
+        value["skills"] = serde_json::json!({"x": 5_000_000_000u64});
+        value["context"] = serde_json::json!({"usedTokens": 1});
+        let ciphertext =
+            encrypt_observer_payload(&agent_keys, &owner_keys.public_key(), &value).unwrap();
+        let event = EventBuilder::new(Kind::Custom(44200), ciphertext)
+            .tags([
+                Tag::parse(["p", &owner_keys.public_key().to_hex()]).unwrap(),
+                Tag::parse(["agent", &agent_keys.public_key().to_hex()]).unwrap(),
+            ])
+            .sign_with_keys(&agent_keys)
+            .unwrap();
+
+        let got = decrypt_agent_turn_metric(&owner_keys, &event).expect("must not fail closed");
+        let want = sample_payload();
+        assert_eq!(got.turn, want.turn);
+        assert_eq!(got.cumulative, want.cumulative);
+        assert!(got.tools.is_none() && got.skills.is_none() && got.context.is_none());
     }
 
     #[test]
@@ -402,6 +532,9 @@ mod tests {
             delta_reliable: true,
             stop_reason: None,
             pricing_identity: None,
+            tools: None,
+            skills: None,
+            context: None,
         }
     }
 
@@ -426,6 +559,9 @@ mod tests {
             delta_reliable: true,
             stop_reason: None,
             pricing_identity: None,
+            tools: None,
+            skills: None,
+            context: None,
         }
     }
 
