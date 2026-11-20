@@ -1103,4 +1103,47 @@ void mentionChipTests() {
     expect(UndoManager.client, isNull);
     await tester.pump(const Duration(seconds: 5));
   });
+
+  testWidgets('a # typed after a chip opens channel suggestions', (
+    tester,
+  ) async {
+    List<String>? sent;
+    String? sentText;
+    final controller = await mount(
+      tester,
+      onSend: (text, keys, {mediaTags = const []}) async {
+        sentText = text;
+        sent = keys;
+      },
+    );
+    final channelRow = find.descendant(
+      of: find.byKey(const ValueKey('channel-suggestions-popover')),
+      matching: find.text('current'),
+    );
+
+    for (final (typed, name, chip) in [
+      ('@Helper', 'Helper Bot', agentChip),
+      ('@bo', 'Bob', personChip),
+    ]) {
+      await tester.enterText(find.byType(TextField), typed);
+      await tester.pumpAndSettle();
+      await tester.tap(row(name));
+      await tester.pumpAndSettle();
+      expect(chip, findsOneWidget);
+
+      // The chip's `@` opens no query, so the `#` is a channel trigger.
+      await tester.enterText(find.byType(TextField), '@$name #cur');
+      await tester.pumpAndSettle();
+      expect(channelRow, findsOneWidget, reason: name);
+      await tester.tap(channelRow);
+      await tester.pumpAndSettle();
+      expect(controller.text, '@$name #current ');
+      expect(chip, findsOneWidget);
+    }
+
+    await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+    await tester.pumpAndSettle();
+    expect(sentText?.trim(), '@Bob #current');
+    expect(sent, [bob]);
+  });
 }
