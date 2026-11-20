@@ -26,6 +26,47 @@ void main() {
     'groups': {'channels': 'recent'},
   };
 
+  fakeAsyncTest('a legacy edit survives a failed read in the disposal flush', (
+    clock,
+  ) {
+    final relay = SidebarRelay();
+    relay.stored.add(
+      relay.event('channel-sections', {
+        'version': 1,
+        'sections': [
+          {'id': 'old', 'name': 'Old', 'order': 0},
+        ],
+        'assignments': <String, String>{},
+      }, nowSeconds() - 60),
+    );
+    ChannelSectionsManager manager() => ChannelSectionsManager(
+      pubkey: relay.pubkey,
+      relayUrl: 'https://relay.example',
+      prefs: prefs,
+      crypto: ChannelSectionsCrypto(relay.keys.nsec, relay.pubkey),
+      relaySession: relay.session,
+      signedEventRelay: relay.signer,
+      remoteEnabled: true,
+      onChanged: () {},
+    )..initialize();
+    final m = manager();
+    clock.flushMicrotasks();
+    m.createSection('mine');
+    clock.elapse(const Duration(seconds: 2));
+    // The socket drops mid-debounce: the provider retires this manager and
+    // its flush's first read fails.
+    relay.historyFailures = 1;
+    m.dispose();
+    clock.elapse(const Duration(seconds: 60));
+    expect(relay.published, hasLength(1));
+
+    final replacement = manager();
+    clock.flushMicrotasks();
+    expect(replacement.store.sections.map((s) => s.name), ['Old', 'mine']);
+    replacement.dispose();
+    clock.flushMicrotasks();
+  });
+
   // live: the head arrives on the subscription while an edit waits.
   // failedRead: the publish preflight fails while the relay already holds it.
   for (final (live, failedRead) in [

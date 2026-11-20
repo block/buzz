@@ -531,7 +531,12 @@ class ChannelSectionsManager {
 
     // Read-before-write: only a successful read can rule out a unified head
     // the legacy record must not follow.
-    if (!await _fetchAndMerge(allowDisposed: allowDisposed)) {
+    var read = await _fetchAndMerge(allowDisposed: allowDisposed);
+    // A retired manager cannot schedule a retry, so its flush re-reads here.
+    for (var i = 0; !read && allowDisposed && i < 2; i++) {
+      read = await _fetchAndMerge(allowDisposed: true);
+    }
+    if (!read) {
       _retryPublishLater();
       return;
     }
