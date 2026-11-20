@@ -26,6 +26,7 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/agents/owned_agent_directory.dart';
+import '../../shared/identity_names/identity_name_policy.dart';
 import '../../shared/identity_names/identity_names.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
@@ -70,6 +71,7 @@ import 'package:buzz/shared/crypto/event_signing.dart';
 
 part 'compose_bar/helpers.dart';
 part 'compose_bar/composer_mentions.dart';
+part 'compose_bar/mention_chip_qualifiers.dart';
 part 'compose_bar/agent_mention_prefill.dart';
 part 'compose_bar/markdown_editing_controller.dart';
 part 'compose_bar/composer_chips.dart';

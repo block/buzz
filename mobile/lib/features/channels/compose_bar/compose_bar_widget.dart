@@ -244,13 +244,13 @@ class ComposeBar extends HookConsumerWidget {
     _useMentionChipQualifiers(
       ref: ref,
       controller: controller,
-      members: () => memberMentions().candidates,
-      memberKeys: [
-        membersAsync.asData?.value,
-        cachedMembers,
-        userCache,
-        agentOwners,
-      ],
+      roster: channelMembersForAutocomplete(
+        membersAsync: membersAsync,
+        sessionStatus: sessionStatus,
+        cachedMembers: cachedMembers,
+      ),
+      userCache: userCache,
+      agentOwners: agentOwners,
     );
     // Bindings migrated from a label-keyed draft give way to longer member
     // names as the roster arrives, and are ordinary once it has loaded.

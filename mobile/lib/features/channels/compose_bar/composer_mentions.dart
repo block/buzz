@@ -86,9 +86,8 @@ class _MemberMentions {
 }
 
 /// The channel's members for the send path, read when asked for and kept
-/// until one of [keys], the objects [build] reads, is replaced. A send, a
-/// legacy draft and the chip labels then share one pass over the roster
-/// however often they run.
+/// until one of [keys], the objects [build] reads, is replaced. A send and a
+/// legacy draft then share one pass over the roster however often they run.
 _MemberMentions Function() _useMemberMentions(
   List<MentionCandidate> Function() build,
   List<Object?> keys,
@@ -145,60 +144,6 @@ extension _LegacyMentions on _MarkdownEditingController {
     if (!complete && settled.length == _mentions.length) return;
     replaceDraft(value, mentions: settled, mentionsInvalid: _mentionsInvalid);
   }
-}
-
-/// Display labels for chips whose name another candidate shares, by
-/// lowercase key: the picked name with the chooser's short key suffix
-/// (`Sam · a1b2`), from the same identity-name policy. The comparison
-/// context is the channel's [members] and the picked [mentions] themselves,
-/// so a single picked namesake is qualified, and so is a person picked from
-/// the directory who shares a member's name. The key never enters the text.
-Map<String, String> _mentionChipQualifiers(
-  IdentityNameSources sources,
-  List<MentionCandidate> members,
-  List<_ComposerMention> mentions,
-) {
-  if (mentions.isEmpty) return const {};
-  final names = mentionPickerNames(sources, [
-    ...members,
-    for (final mention in mentions) mention.candidate,
-  ]);
-  return {
-    for (final mention in mentions)
-      if (names.resolve(mention.pubkey)?.qualifier case final suffix?)
-        mention.pubkey: '${mention.candidate.label} · $suffix',
-  };
-}
-
-/// Keeps the editor's namesake chip labels current: a chip whose name
-/// another candidate shares reads `Sam · a1b2`, the chooser's label, while
-/// the draft text stays `@Sam`. [members] is read again whenever one of
-/// [memberKeys] or the set of picked keys changes. The picked keys are
-/// read from the controller as it changes rather than from a rebuild: a
-/// prefill that swaps one namesake agent for another changes them from
-/// inside a build, where a rebuild request is dropped.
-void _useMentionChipQualifiers({
-  required WidgetRef ref,
-  required _MarkdownEditingController controller,
-  required List<MentionCandidate> Function() members,
-  required List<Object?> memberKeys,
-}) {
-  final identityNames = ref.watch(identityNameSourcesProvider);
-  useEffect(() {
-    String? qualifiedFor;
-    void update() {
-      final keys = controller.mentions.map((m) => m.pubkey).join(',');
-      if (keys == qualifiedFor) return;
-      qualifiedFor = keys;
-      controller.setMentionQualifiers(
-        _mentionChipQualifiers(identityNames, members(), controller.mentions),
-      );
-    }
-
-    update();
-    controller.addListener(update);
-    return () => controller.removeListener(update);
-  }, [controller, identityNames, ...memberKeys]);
 }
 
 /// Whether a mention is bound at [start]. Its `@` opens no query, wherever

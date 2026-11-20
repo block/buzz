@@ -29,19 +29,20 @@ void largeRosterTests() {
     );
     String? sentText;
     List<String>? sent;
+    final members = _CountedMembers([
+      for (var i = 0; i < 7000; i++)
+        ChannelMember(
+          pubkey: key(i),
+          displayName: i == 6999 ? 'Alex Smith 0 30' : name(i),
+          role: 'member',
+          joinedAt: DateTime(2025),
+        ),
+    ]);
     final clock = Stopwatch()..start();
     await tester.pumpWidget(
       _buildComposeBar(
         uploadService: _testUploadService(signer.nsec),
-        members: [
-          for (var i = 0; i < 7000; i++)
-            ChannelMember(
-              pubkey: key(i),
-              displayName: i == 6999 ? 'Alex Smith 0 30' : name(i),
-              role: 'member',
-              joinedAt: DateTime(2025),
-            ),
-        ],
+        members: members,
         channels: [_makeCurrentChannel()],
         currentPubkey: signer.public,
         relayConfig: () => _SwitchableRelayConfigNotifier(
@@ -69,6 +70,51 @@ void largeRosterTests() {
     expect(saved.single['mentions'], [
       {'start': 0, 'end': 13, 'pubkey': key(0)},
     ]);
+
+    // Review of #9699: every profile that loaded named the whole roster
+    // again to label the chip. A profile that is nobody's namesake now
+    // names nobody, and a keystroke beside the chip reads no member.
+    Future<void> profile(int i, String name) async {
+      ProviderScope.containerOf(tester.element(find.byType(ComposeBar)))
+          .read(userCacheProvider.notifier)
+          .put(UserProfile(pubkey: key(i), displayName: name));
+      await tester.pumpAndSettle();
+    }
+
+    expect(find.text('@Alex Smith 0'), findsOneWidget);
+    var named = mentionQualifierNamingPasses;
+    var walked = mentionQualifierRosterPasses;
+    await profile(5, 'Someone Else');
+    expect(mentionQualifierNamingPasses, named);
+    expect(mentionQualifierRosterPasses, walked + 1);
+    var read = members.reads;
+    // Typed before the chip, with the caret left in the prose: a caret
+    // after the typed name would open the chooser, which lists members.
+    tester.testTextInput.updateEditingValue(
+      const TextEditingValue(
+        text: 'so @Alex Smith 0 and @Alex Smith 0 30',
+        selection: TextSelection.collapsed(offset: 2),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('@Alex Smith 0'), findsOneWidget);
+    expect(mentionQualifierRosterPasses, walked + 1);
+    expect(members.reads, read);
+    // A member who takes the chip's name is its namesake: the chip gains
+    // its key suffix, and loses it when the name goes.
+    await profile(7, 'Alex Smith 0');
+    expect(mentionQualifierNamingPasses, greaterThan(named));
+    expect(find.text('@Alex Smith 0'), findsNothing);
+    expect(find.textContaining('@Alex Smith 0 \u00b7 '), findsOneWidget);
+    // Beside a namesake, an unrelated profile still names nobody.
+    named = mentionQualifierNamingPasses;
+    await profile(11, 'Yet Another');
+    expect(mentionQualifierNamingPasses, named);
+    expect(find.textContaining('@Alex Smith 0 \u00b7 '), findsOneWidget);
+    await profile(7, 'Zoë Lopez 7');
+    expect(mentionQualifierNamingPasses, greaterThan(named));
+    expect(find.text('@Alex Smith 0'), findsOneWidget);
+
     expect(await send(), lessThan(40));
     expect(sent, [key(0), key(6999)]);
 
@@ -78,6 +124,16 @@ void largeRosterTests() {
     expect(await send(), 0);
     expect(sentText, 'release notes are up');
     expect(sent, isEmpty);
+
+    // No chip: typing and a loading profile read no member at all.
+    named = mentionQualifierNamingPasses;
+    walked = mentionQualifierRosterPasses;
+    read = members.reads;
+    await tester.enterText(find.byType(TextField), 'more notes');
+    await profile(9, 'Another Person');
+    expect(mentionQualifierNamingPasses, named);
+    expect(mentionQualifierRosterPasses, walked);
+    expect(members.reads, read);
 
     // Typed names in any case, after a bracket and inside italics; a name
     // nobody has and an address notify nobody.
@@ -96,4 +152,28 @@ void largeRosterTests() {
     // sends alone took about ten with a pattern per member.
     expect(clock.elapsed, lessThan(const Duration(seconds: 15)));
   });
+}
+
+/// A roster that counts each member read from it.
+class _CountedMembers extends ListBase<ChannelMember> {
+  _CountedMembers(this._members);
+
+  final List<ChannelMember> _members;
+  int reads = 0;
+
+  @override
+  int get length => _members.length;
+
+  @override
+  set length(int _) => throw UnsupportedError('fixed roster');
+
+  @override
+  ChannelMember operator [](int index) {
+    reads++;
+    return _members[index];
+  }
+
+  @override
+  void operator []=(int index, ChannelMember value) =>
+      throw UnsupportedError('fixed roster');
 }

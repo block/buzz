@@ -57,6 +57,31 @@ String? recipientRowDetail(
   return owner == null ? 'agent' : 'agent \u00b7 managed by $owner';
 }
 
+/// One channel member as a mention candidate, as [buildMentionCandidates]
+/// lists it. Readers that need a few members build them from here and leave
+/// the rest of the roster alone.
+MentionCandidate memberMentionCandidate(
+  ChannelMember member, {
+  required Map<String, UserProfile> userCache,
+  required Map<String, String> ownerByAgentPubkey,
+}) {
+  final pk = member.pubkey.toLowerCase();
+  final profile = userCache[pk];
+  final ownerPubkey = ownerByAgentPubkey[pk] ?? profile?.ownerPubkey;
+  return MentionCandidate(
+    pubkey: pk,
+    displayName: profile?.displayName?.trim().isNotEmpty == true
+        ? profile!.displayName!.trim()
+        : member.displayName,
+    secondaryLabel: profile?.nip05Handle,
+    avatarUrl: profile?.avatarUrl,
+    isAgent: member.isBot || ownerPubkey != null,
+    isMember: true,
+    role: member.role,
+    ownerPubkey: ownerPubkey,
+  );
+}
+
 /// Assemble the full mention candidate list: channel members first-class,
 /// then the viewer's own agents where they can be invited, then eligible
 /// non-member relay agents, then global user-search results.
@@ -95,23 +120,12 @@ List<MentionCandidate> buildMentionCandidates({
       !listedOwned.contains(pubkey);
 
   for (final member in members) {
-    final pk = member.pubkey.toLowerCase();
-    if (!seen.add(pk)) continue;
-    final profile = userCache[pk];
-    final ownerPubkey = ownerByAgentPubkey[pk] ?? profile?.ownerPubkey;
-    final isAgent = member.isBot || ownerPubkey != null;
+    if (!seen.add(member.pubkey.toLowerCase())) continue;
     candidates.add(
-      MentionCandidate(
-        pubkey: pk,
-        displayName: profile?.displayName?.trim().isNotEmpty == true
-            ? profile!.displayName!.trim()
-            : member.displayName,
-        secondaryLabel: profile?.nip05Handle,
-        avatarUrl: profile?.avatarUrl,
-        isAgent: isAgent,
-        isMember: true,
-        role: member.role,
-        ownerPubkey: ownerPubkey,
+      memberMentionCandidate(
+        member,
+        userCache: userCache,
+        ownerByAgentPubkey: ownerByAgentPubkey,
       ),
     );
   }

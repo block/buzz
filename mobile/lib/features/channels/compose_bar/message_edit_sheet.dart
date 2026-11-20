@@ -63,13 +63,13 @@ class _MessageEditSheet extends HookConsumerWidget {
     _useMentionChipQualifiers(
       ref: ref,
       controller: controller,
-      members: memberCandidates,
-      memberKeys: [
-        membersAsync.asData?.value,
-        cachedMembers,
-        userCache,
-        agentOwners,
-      ],
+      roster: channelMembersForAutocomplete(
+        membersAsync: membersAsync,
+        sessionStatus: sessionStatus,
+        cachedMembers: cachedMembers,
+      ),
+      userCache: userCache,
+      agentOwners: agentOwners,
     );
 
     // The message's existing mentions, as the bubble names them, open as
