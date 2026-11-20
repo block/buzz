@@ -131,10 +131,11 @@ abstract final class DiagnosticFilter {
 
   /// Whether the text of the error [throwable] may leave the device. Dart's
   /// programmer-error types qualify because developers write their messages,
-  /// for example "Bad state: ref used after dispose". The risk, accepted, is
-  /// a message that interpolates a value. The SDK names a [FlutterError] an
-  /// `AssertionError` because it implements one, so this checks the error
-  /// itself rather than the type name the report carries.
+  /// for example "Bad state: Using "ref" when a widget is about to or has been
+  /// unmounted is unsafe." The risk, accepted, is a message that interpolates
+  /// a value. The SDK names a [FlutterError] an `AssertionError` because it
+  /// implements one, so this checks the error itself rather than the type
+  /// name the report carries.
   static bool _keepsText(Object? throwable) => switch (throwable) {
     FlutterError() => false,
     StateError() ||
@@ -143,6 +144,21 @@ abstract final class DiagnosticFilter {
     UnsupportedError() => true,
     _ => false,
   };
+
+  /// The longest first line of a kept error's text that may leave the device.
+  static const _keptTextLimit = 200;
+
+  /// The first line of a kept error's [text], or [removedText] when that line
+  /// contains a URL or is long. Where a URL ends in free text is ambiguous, so
+  /// none is kept. A long line, or the lines after the first, usually quote
+  /// other text, such as a response body or a wrapped error.
+  static String _keptText(String text) {
+    final newline = text.indexOf('\n');
+    final line = newline < 0 ? text : text.substring(0, newline);
+    return line.length > _keptTextLimit || line.contains('://')
+        ? removedText
+        : line;
+  }
 
   static final _urlTail = RegExp(
     r'''(\b[a-z][a-z0-9+.-]*://[^\s?#'"]*)[?#][^\s'"]*''',
@@ -206,7 +222,7 @@ abstract final class DiagnosticFilter {
       // its text only for the types in [_keepsText].
       if (exception.value case final value?) {
         exception.value = _keepsText(exception.throwable)
-            ? stripUrlTails(value)
+            ? _keptText(value)
             : removedText;
       }
       exception.mechanism?.data = null;

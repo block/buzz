@@ -244,22 +244,62 @@ void main() {
       });
     }
 
-    const link = 'open https://e.org/f?token=private-marker';
     final kept = <(String, Object, String, String)>[
-      ('a bad state', StateError(link), 'StateError', 'Bad state: open'),
-      ('a failed assertion', AssertionError(link), 'AssertionError', 'open'),
-      ('an unsupported call', UnsupportedError(link), 'Unsupported', 'open'),
-      ('an unimplemented call', UnimplementedError(link), 'Unimpl', 'open'),
+      (
+        'a bad state',
+        StateError('ref used after dispose\nprivate-marker'),
+        'StateError',
+        'Bad state: ref used after dispose',
+      ),
+      (
+        'a failed assertion',
+        AssertionError('list is sorted'),
+        'AssertionError',
+        'list is sorted',
+      ),
+      (
+        'an unsupported call',
+        UnsupportedError('no resize'),
+        'Unsupported',
+        'no resize',
+      ),
+      (
+        'an unimplemented call',
+        UnimplementedError('no export'),
+        'Unimpl',
+        'no export',
+      ),
       ('a failed cast', _failedCast(), 'TypeError', 'is not a subtype of'),
     ];
     for (final (name, error, type, text) in kept) {
-      test('keeps the text of $name, without a URL query', () async {
+      test('keeps the first line of the text of $name', () async {
         await hub.captureException(error, stackTrace: StackTrace.current);
         final sent = transport.events.single;
 
         final exception = (sent['exception']['values'] as List).last as Map;
         expect(exception['type'], contains(type));
         expect(exception['value'], contains(text));
+        expect(exception['value'], isNot(contains('\n')));
+        expect(jsonEncode(sent), isNot(contains('private-marker')));
+      });
+    }
+
+    final replaced = <(String, String)>[
+      ('a URL', 'open https://e.org/f?token=private-marker'),
+      ('a URL with a quote', "open https://e.org/O'Brien?private-marker#x"),
+      ('a URL inside a word', 'open id_https://e.org/f?private-marker'),
+      ('a long line', 'state ${'x' * 200} private-marker'),
+    ];
+    for (final (name, text) in replaced) {
+      test('replaces kept text that has $name', () async {
+        await hub.captureException(
+          StateError(text),
+          stackTrace: StackTrace.current,
+        );
+        final sent = transport.events.single;
+
+        final exception = (sent['exception']['values'] as List).last as Map;
+        expect(exception['value'], DiagnosticFilter.removedText);
         expect(jsonEncode(sent), isNot(contains('private-marker')));
       });
     }
