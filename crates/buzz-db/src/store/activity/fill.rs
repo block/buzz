@@ -39,8 +39,9 @@ const WARM_ATTEMPTS: u8 = 4;
 const WARM_WINDOW_HOURS: i64 = 24;
 
 /// A channel row `h` of channel `c` that is missing, behind the log, or names
-/// a deleted message. "Behind" is one index probe, pruned to the partitions
-/// after `seen_at`: is any stored event newer than the row accounts for?
+/// a deleted message or edit. "Behind" is one index probe, pruned to the
+/// partitions after `seen_at`: is any stored event newer than the row accounts
+/// for?
 const CHANNEL_WANTING: &str = "(h.channel_id IS NULL
     OR EXISTS (SELECT 1 FROM events n
         WHERE n.community_id = c.community_id AND n.channel_id = c.id
@@ -48,7 +49,10 @@ const CHANNEL_WANTING: &str = "(h.channel_id IS NULL
             AND n.created_at <= clock_timestamp())
     OR (h.head_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM events e
         WHERE e.community_id = h.community_id AND e.created_at = h.head_created_at
-            AND e.id = h.head_id AND e.deleted_at IS NULL)))";
+            AND e.id = h.head_id AND e.deleted_at IS NULL))
+    OR (h.head_edit_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM events e
+        WHERE e.community_id = h.community_id AND e.created_at = h.head_edit_at
+            AND e.id = h.head_edit_id AND e.deleted_at IS NULL)))";
 
 /// What [`Db::warm_activity`] rebuilt.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -203,16 +207,22 @@ impl Db {
             .bind(batch)
             .execute(tx.conn())
             .await?;
-            // Only while the row still names the deleted head: a message
-            // stored since then, or another reader, already replaced it.
+            // Only while the row still names the deleted head or edit: a
+            // message stored since then, or another reader, already replaced
+            // it. An edit can only be newer, so a deleted one clears the head
+            // and the fill installs it again with its latest live edit, or
+            // with none.
             sqlx::query(
                 "UPDATE channel_heads h SET head_id = NULL, head_created_at = NULL, \
                     head_received_at = NULL, head_pubkey = NULL, head_text = NULL, \
                     head_edit_at = NULL, head_edit_id = NULL, updated_at = clock_timestamp() \
                  WHERE h.community_id = $1 AND h.channel_id = ANY($2) AND h.head_id IS NOT NULL \
-                    AND NOT EXISTS (SELECT 1 FROM events e \
+                    AND (NOT EXISTS (SELECT 1 FROM events e \
                         WHERE e.community_id = $1 AND e.created_at = h.head_created_at \
-                            AND e.id = h.head_id AND e.deleted_at IS NULL)",
+                            AND e.id = h.head_id AND e.deleted_at IS NULL) \
+                    OR (h.head_edit_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM events e \
+                        WHERE e.community_id = $1 AND e.created_at = h.head_edit_at \
+                            AND e.id = h.head_edit_id AND e.deleted_at IS NULL)))",
             )
             .bind(community.as_uuid())
             .bind(batch)

@@ -343,7 +343,8 @@ struct Pending {
 
 struct Writer {
     pending: std::sync::Mutex<Pending>,
-    /// The `submitted` count that has been written or given up on.
+    /// The `submitted` count that has been written or given up on, with
+    /// nothing of it left to retry.
     applied: tokio::sync::watch::Sender<u64>,
 }
 
@@ -446,7 +447,9 @@ async fn drain(draining: Draining) {
         let (communities, submitted) = {
             let mut pending = lock_pending(writer);
             if pending.communities.is_empty() {
-                // Checked under the lock `submit` takes: nothing is stranded.
+                // Checked under the lock `submit` takes: nothing is stranded,
+                // and nothing is in flight, so every hand-off is done.
+                writer.applied.send_replace(pending.submitted);
                 pending.draining = false;
                 std::mem::forget(draining);
                 return;
@@ -454,6 +457,8 @@ async fn drain(draining: Draining) {
             pending.channels = 0;
             (std::mem::take(&mut pending.communities), pending.submitted)
         };
+        // Whether any of this round's work went back on the queue.
+        let mut requeued = false;
         for (community_id, (pool, mut channels)) in communities {
             let community = CommunityId::from_uuid(community_id);
             let write = tokio::time::timeout(WRITE_TIMEOUT, write(&pool, community, &channels));
@@ -498,9 +503,15 @@ async fn drain(draining: Draining) {
             if !given_up.is_empty() {
                 distrust_later(pool.clone(), community, given_up);
             }
+            requeued |= !again.is_empty();
             enqueue(&mut lock_pending(writer), &pool, community_id, again);
         }
-        writer.applied.send_replace(submitted);
+        // Hand-offs are done only once no part of them waits for a retry. A
+        // later round that takes the retry off the queue reports them, after
+        // its own write, so a flush never sees one in flight as finished.
+        if !requeued {
+            writer.applied.send_replace(submitted);
+        }
     }
 }
 
@@ -536,6 +547,33 @@ pub async fn flush_pending(timeout: std::time::Duration) -> bool {
 #[cfg(test)]
 pub(crate) async fn flush() {
     flush_pending(std::time::Duration::from_secs(10)).await;
+}
+
+/// Write one message's channel head as the writer does, on its own, for a
+/// test that orders it after a later edit's upsert.
+#[cfg(test)]
+pub(super) async fn install_head_for_test(
+    pool: &sqlx::PgPool,
+    community: CommunityId,
+    channel: Uuid,
+    event: &Event,
+    received_at: DateTime<Utc>,
+) {
+    let staged = Staged {
+        head: Some(Message {
+            id: *event.id.as_bytes(),
+            created_at: DateTime::from_timestamp(event.created_at.as_secs() as i64, 0)
+                .expect("timestamp"),
+            received_at,
+            pubkey: event.pubkey.to_bytes(),
+            text: preview_text(&event.content),
+        }),
+        ..Staged::default()
+    };
+    let mut conn = pool.acquire().await.expect("acquire connection");
+    apply_one(&mut conn, community, channel, &staged)
+        .await
+        .expect("install head");
 }
 
 /// Returns the channels whose rows were not written, each with whether its
@@ -732,11 +770,25 @@ async fn apply_one(
     staged: &Staged,
 ) -> Result<()> {
     if staged.seen.is_some() || staged.head.is_some() {
+        // A head goes in with its latest stored edit. Another relay may have
+        // written that edit while this head was still on its way, and its
+        // upsert found no head to apply it to. One probe of the edit-target
+        // index.
         let sql = format!(
             "INSERT INTO channel_heads AS h (community_id, channel_id, head_id, \
-                head_created_at, head_received_at, head_pubkey, head_text, seen_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, clock_timestamp()) {merge}",
+                head_created_at, head_received_at, head_pubkey, head_text, head_edit_at, \
+                head_edit_id, seen_at, updated_at) \
+             SELECT $1, $2, $3, $4, $5, $6, COALESCE(left(edit.content, $9), $7), \
+                edit.created_at, edit.id, NULL, clock_timestamp() \
+             FROM (SELECT) one \
+             LEFT JOIN LATERAL ( \
+                SELECT content, created_at, id FROM events \
+                WHERE community_id = $1 AND channel_id = $2 AND kind = 40003 \
+                    AND deleted_at IS NULL AND {target} = $3::bytea \
+                ORDER BY created_at DESC, id DESC LIMIT 1 \
+             ) edit ON $3::bytea IS NOT NULL {merge}",
             merge = channel_merge_sql(&not_future("$8::timestamptz"), "NULL::timestamptz"),
+            target = crate::store::media::MEDIA_EDIT_TARGET_SQL,
         );
         let head = staged.head.as_ref();
         sqlx::query(sqlx::AssertSqlSafe(sql))
@@ -748,6 +800,7 @@ async fn apply_one(
             .bind(head.map(|m| m.pubkey.to_vec()))
             .bind(head.map(|m| m.text.as_str()))
             .bind(staged.seen)
+            .bind(PREVIEW_CHARS as i32)
             .execute(&mut *conn)
             .await?;
     }
