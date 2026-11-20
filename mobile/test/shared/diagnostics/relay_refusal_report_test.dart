@@ -137,7 +137,12 @@ void main() {
   group('a one-shot signed event', () {
     const marker = 'private-marker';
 
-    Future<HttpServer> relayAnswering(String? reason) async {
+    var eventsReceived = 0;
+
+    Future<HttpServer> relayAnswering(
+      String? reason, {
+      bool acknowledgeAuth = true,
+    }) async {
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       addTearDown(() => server.close(force: true));
       server.listen((request) async {
@@ -146,7 +151,10 @@ void main() {
         ws.listen((raw) {
           final frame = jsonDecode(raw as String) as List<dynamic>;
           final id = (frame[1] as Map<String, dynamic>)['id'];
-          if (frame[0] == 'AUTH') ws.add(jsonEncode(['OK', id, true, '']));
+          if (frame[0] == 'AUTH' && acknowledgeAuth) {
+            ws.add(jsonEncode(['OK', id, true, '']));
+          }
+          if (frame[0] == 'EVENT') eventsReceived++;
           if (frame[0] == 'EVENT' && reason != null) {
             ws.add(jsonEncode(['OK', id, false, reason]));
           }
@@ -202,6 +210,27 @@ void main() {
       expect(sent['tags']['relay.call'], 'publish');
       expect(sent['tags']['relay.reason'], 'timeout');
     });
+
+    test('an authentication the relay never acknowledges is a publish '
+        'timeout from the caller, and the event is never sent', () async {
+      eventsReceived = 0;
+      final server = await relayAnswering(
+        'rate-limited: $marker',
+        acknowledgeAuth: false,
+      );
+
+      // The socket's 8 s authentication deadline passes first.
+      final (error, stack) = await failure(submit(server));
+      final sent = await escaped(error, stack);
+
+      expect(error, isA<TimeoutException>());
+      expect(error, isA<RelayTimeoutException>());
+      expect(stack.toString(), contains('_submitFromTheCaller'));
+      expect(sent['tags']['relay.call'], 'publish');
+      expect(sent['tags']['relay.reason'], 'timeout');
+      expect(jsonEncode(sent), isNot(contains(marker)));
+      expect(eventsReceived, 0);
+    }, timeout: const Timeout(Duration(seconds: 30)));
   });
 }
 

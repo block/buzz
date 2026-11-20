@@ -140,9 +140,21 @@ Future<NostrEvent> submitSignedEventOnce({
       if (!result.isCompleted) socket.send(['EVENT', event.toJson()]);
     },
     onDisconnected: (error) {
-      if (!result.isCompleted) {
-        result.completeError(error ?? Exception('Relay disconnected'));
+      if (result.isCompleted) return;
+      // The socket's own authentication deadline is shorter than [timeout],
+      // so its plain timeout is typed here as this call's.
+      if (error is TimeoutException && error is! RelayCallError) {
+        result.completeError(
+          RelayTimeoutException(
+            RelayCall.publish,
+            error.message ?? 'Relay did not answer',
+            error.duration,
+          ),
+          callSite,
+        );
+        return;
       }
+      result.completeError(error ?? Exception('Relay disconnected'), callSite);
     },
   );
   socket.headers = headers;
