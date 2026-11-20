@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use buzz_ws_client::NostrWsConnection;
+use buzz_ws_client::{HeaderMap, NostrWsConnection};
 use nostr::{Event, JsonUtil, Keys, Tag};
 
 use super::identity;
@@ -59,7 +59,8 @@ impl Net {
         let attempt = async {
             let mut conn = match (&self.connect_addr, &community.host) {
                 (Some(addr), Some(_)) => {
-                    NostrWsConnection::connect_to_addr(&community.ws_url, addr).await?
+                    NostrWsConnection::connect_to_addr(&community.ws_url, addr, HeaderMap::new())
+                        .await?
                 }
                 _ => NostrWsConnection::connect(&community.ws_url).await?,
             };

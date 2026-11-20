@@ -227,6 +227,7 @@
         "successfulJobsHistoryLimit": { "type": "integer", "minimum": 0 },
         "failedJobsHistoryLimit": { "type": "integer", "minimum": 0 },
         "relayUrl": { "type": "string" },
+        "connectAddr": { "type": "string" },
         "stageTimeoutSeconds": { "type": "integer", "minimum": 1 },
         "privateKeySecret": {
           "type": "object",
@@ -236,6 +237,7 @@
             "key": { "type": "string", "minLength": 1 }
           }
         },
+        "privateKeyFile": { "type": "string" },
         "assertionFile": { "type": "string" },
         "statsdAddr": { "type": "string" },
         "metricPrefix": { "type": "string", "minLength": 1 },

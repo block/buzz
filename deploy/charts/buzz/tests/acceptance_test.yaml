@@ -72,6 +72,11 @@ tests:
           content:
             name: BUZZ_ACCEPTANCE_STATSD_ADDR
           any: true
+      - notContains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_ACCEPTANCE_CONNECT_ADDR
+          any: true
       - contains:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
@@ -84,6 +89,11 @@ tests:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
             name: BUZZ_ACCEPTANCE_ASSERTION_FILE
+          any: true
+      - notContains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_PRIVATE_KEY_FILE
           any: true
       # The probe needs no Kubernetes or cloud access: no relay service
       # account, no token.
@@ -106,6 +116,7 @@ tests:
       acceptance:
         enabled: true
         relayUrl: wss://probe.example.com
+        connectAddr: relay.internal:80
         schedule: "*/10 * * * *"
         activeDeadlineSeconds: 120
         stageTimeoutSeconds: 5
@@ -161,6 +172,8 @@ tests:
             - example.acceptance
             - --tag
             - probe_revision:sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+            - --connect-addr
+            - relay.internal:80
             - --tag
             - env:staging
             - --tag
@@ -178,6 +191,11 @@ tests:
           content:
             name: BUZZ_RELAY_URL
             value: wss://probe.example.com
+      - notContains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_ACCEPTANCE_CONNECT_ADDR
+          any: true
       - contains:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
@@ -264,6 +282,48 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "acceptance.enabled requires image.tag or image.digest"
+
+  - it: reads a key an init container writes
+    set:
+      image.tag: "1.2.3"
+      acceptance:
+        enabled: true
+        privateKeyFile: /var/run/assertion/key
+        assertionFile: /var/run/assertion/token
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].args
+          value:
+            - --stage-timeout-secs
+            - "10"
+            - --metric-prefix
+            - buzz.acceptance
+            - --tag
+            - probe_revision:1.2.3
+            - --private-key-file
+            - /var/run/assertion/key
+      - notContains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_PRIVATE_KEY_FILE
+          any: true
+      - notContains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: BUZZ_PRIVATE_KEY
+          any: true
+
+  - it: rejects both a key Secret and a key file
+    set:
+      image.tag: "1.2.3"
+      acceptance:
+        enabled: true
+        privateKeySecret:
+          name: buzz-acceptance-key
+        privateKeyFile: /var/run/assertion/key
+    asserts:
+      - failedTemplate:
+          errorPattern: "set privateKeySecret.name or privateKeyFile, not both"
 
   - it: rejects a tag without a key
     set:
