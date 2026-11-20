@@ -1,4 +1,6 @@
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_render.dart';
 import 'package:buzz/shared/emoji/native_emoji_glyph.dart';
 import 'package:http/http.dart' as http;
@@ -30,10 +32,13 @@ import 'package:flutter/foundation.dart';
 import 'package:buzz/shared/widgets/native_message_presentation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart' show Override;
 
 import '../../helpers/widget_helpers.dart';
+import '../../helpers/test_assertion.dart';
 
 part 'reaction_row_test/combined_tests.dart';
+part 'reaction_row_test/shortcode_tests.dart';
 
 const _alice =
     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -139,14 +144,18 @@ class _RecordingReactionActions implements ChannelActions {
   Future<void> removeReaction(String eventId, String emoji) async =>
       removed.add(eventId);
   @override
-  Future<void> addReaction(String eventId, String emoji) async =>
-      added.add(eventId);
+  Future<void> addReaction(
+    String eventId,
+    String emoji, {
+    required String targetAuthor,
+  }) async => added.add(eventId);
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 void main() {
   combinedReactionTests();
+  shortcodeReactionTests();
 
   testWidgets('removing the sole reaction closes the sheet', (tester) async {
     final reactions = ValueNotifier<List<TimelineReaction>>([
@@ -443,7 +452,7 @@ void main() {
               ),
               '/api/goose/v1/buzz/identity/assertions' => http.Response(
                 jsonEncode({
-                  'assertion': 'token-${++issued}',
+                  'assertion': testAssertion('token-${++issued}'),
                   'nostr_pubkey': keys.public,
                   'expires_at': clock.millisecondsSinceEpoch ~/ 1000 + 120,
                 }),
@@ -459,7 +468,7 @@ void main() {
       addTearDown(auth.dispose);
       // The live socket's assertion, issued when the session connected.
       expect(await auth.headers(config), {
-        'Nostr-Federated-Identity': 'Bearer token-1',
+        'Nostr-Federated-Identity': 'Bearer ${testAssertion('token-1')}',
       });
       final payloads = <Map<Object?, Object?>>[];
       final reactionUpdates = <List<Object?>>[];
@@ -553,8 +562,14 @@ void main() {
       issuerGate.complete();
       await tester.pumpAndSettle();
       expect(issued, issuedBeforeSheet + 1);
-      expect(authOf(reactionUpdates.last.single), 'Bearer token-$issued');
-      expect(authOf(profileUpdates.last[_alice]), 'Bearer token-$issued');
+      expect(
+        authOf(reactionUpdates.last.single),
+        'Bearer ${testAssertion('token-$issued')}',
+      );
+      expect(
+        authOf(profileUpdates.last[_alice]),
+        'Bearer ${testAssertion('token-$issued')}',
+      );
       completion.complete(<String, Object?>{});
       await tester.pumpAndSettle();
 
@@ -568,7 +583,7 @@ void main() {
       expect(payloads, hasLength(2));
       expect(
         authOf((payloads.last['reactions'] as List).single),
-        'Bearer token-$issued',
+        'Bearer ${testAssertion('token-$issued')}',
       );
       expect(reactionUpdates, isEmpty);
       completion.complete(<String, Object?>{});
@@ -805,6 +820,91 @@ void main() {
         find.byKey(const ValueKey('reaction-details-sheet')),
         findsNothing,
       );
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  testWidgets(
+    'native sheet reuses custom emoji bytes the pill already downloaded',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      const shortcode = ':partyparrot:';
+      final png = base64Decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+      );
+      var fetches = 0;
+      Map<Object?, Object?>? payload;
+      final completion = Completer<Map<String, Object?>>();
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        NativeMessagePresentation.channel,
+        (call) async {
+          if (call.method == 'reactions') {
+            payload = call.arguments as Map<Object?, Object?>;
+            return completion.future;
+          }
+          return <String, Object?>{};
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          NativeMessagePresentation.channel,
+          null,
+        ),
+      );
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
+            mediaHttpClientProvider.overrideWithValue(
+              MockClient((request) async {
+                fetches++;
+                return http.Response.bytes(png, 200);
+              }),
+            ),
+          ],
+          child: ReactionRow(
+            messageId: _messageId,
+            channelId: 'channel',
+            reactions: const [
+              TimelineReaction(
+                emoji: shortcode,
+                count: 1,
+                reactedByCurrentUser: false,
+                userPubkeys: [_alice],
+                emojiUrl: 'https://relay.example/media/party.png',
+              ),
+            ],
+            onToggle: (_) {},
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final source = tester.widget<Image>(
+        find.descendant(
+          of: find.byType(CustomEmojiImage),
+          matching: find.byType(Image),
+        ),
+      );
+      await tester.runAsync(
+        () => precacheImage(
+          source.image,
+          tester.element(find.byType(CustomEmojiImage)),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(fetches, 1);
+
+      await tester.longPress(
+        find.byKey(const ValueKey('reaction-pill-$shortcode')),
+      );
+      await tester.pumpAndSettle();
+
+      final reaction = (payload!['reactions'] as List).single as Map;
+      expect(reaction['url'], 'https://relay.example/media/party.png');
+      expect(reaction['bytes'], png);
+      completion.complete(<String, Object?>{});
+      await tester.pumpAndSettle();
       debugDefaultTargetPlatformOverride = null;
     },
   );

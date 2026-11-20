@@ -3,9 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../../shared/me/me_assistant_names.dart';
 import '../../../shared/me/me_assistants.dart';
 import '../../../shared/me/me_agent_change.dart';
 import '../../../shared/me/me_sync.dart';
+import '../../../shared/mentions/agent_identity_provider.dart';
 import '../../../shared/profile/user_cache_provider.dart';
 import '../../../shared/relay/relay.dart';
 import '../../../shared/theme/theme.dart';
@@ -16,6 +18,7 @@ import '../../../shared/widgets/modal_presentation.dart';
 import '../channel_management_provider.dart';
 import '../channel_event_order.dart';
 import 'me_assistant_picker_sheet.dart';
+import 'me_settings_sheet.dart';
 
 /// Resolves a remembered choice or the assistant already used in a synced chat.
 /// Ambiguous chats require a choice instead of silently picking another agent.
@@ -51,6 +54,8 @@ String? resolveMeAssistant({
 /// Header avatar and persistent mobile selection for a personal chat.
 ({
   String? selected,
+  String name,
+  Future<void> Function({MeSettingsPresenter? present})? openPicker,
   IosNavigationAction nativeAction,
   Widget action,
   Widget? pendingNotice,
@@ -70,7 +75,9 @@ useMeChatAssistant(
   final prefs = sync?.prefs;
   final selection = useState((key, initial ?? prefs?.getString(key)));
   final busy = useState(false);
-  final agents = enabled ? ref.watch(meAssistantsProvider).value ?? [] : [];
+  final List<AgentDirectoryEntry> agents = enabled
+      ? ref.watch(meAssistantsProvider).value ?? []
+      : [];
   final members = enabled
       ? ref.watch(channelMembersProvider(channelId)).value ?? []
       : [];
@@ -90,30 +97,6 @@ useMeChatAssistant(
       ? ref.watch(userCacheProvider)[selected] ??
             ref.read(userCacheProvider.notifier).get(selected)
       : null;
-  // The owner's inventory name outranks the agent's self-published profile.
-  final name =
-      agents
-          .where((agent) => agent.pubkey == selected)
-          .firstOrNull
-          ?.displayName ??
-      profile?.displayName;
-  final avatarInitial = name?.trim().isNotEmpty == true
-      ? name!.trim()[0].toUpperCase()
-      : profile?.initial ?? '?';
-  String agentName(String pubkey) {
-    final names = [
-      agents.where((a) => a.pubkey == pubkey).firstOrNull?.displayName,
-      ref.read(userCacheProvider)[pubkey]?.displayName,
-    ];
-    return names
-            .whereType<String>()
-            .where((name) => name.trim().isNotEmpty)
-            .firstOrNull ??
-        (pubkey.length > 12
-            ? '${pubkey.substring(0, 8)}…${pubkey.substring(pubkey.length - 4)}'
-            : pubkey);
-  }
-
   MeAgentChange? pending;
   if (sync != null) {
     try {
@@ -122,13 +105,38 @@ useMeChatAssistant(
       // The action surfaces an unreadable journal without crashing the chat.
     }
   }
+  // The owner's inventory name outranks the agent's self-published profile.
+  // Only Solo reads these names; other chats must not watch every profile.
+  final names = enabled
+      ? watchMeAssistantNames(ref, agents, saved: [selected, pending?.agent])
+      : null;
+  // A known agent outside the inventory, such as an archived one, is labeled
+  // against the live agents so it never reads as a live namesake.
+  bool named(String pubkey) =>
+      names != null &&
+      (agents.any((agent) => agent.pubkey == pubkey) ||
+          ref.read(userCacheProvider)[pubkey]?.displayName?.trim().isNotEmpty ==
+              true);
+  final name = selected != null && named(selected)
+      ? names!.labelFor(selected)
+      : profile?.displayName;
+  final avatarInitial = name?.trim().isNotEmpty == true
+      ? name!.trim()[0].toUpperCase()
+      : profile?.initial ?? '?';
+  String agentName(String pubkey) {
+    if (named(pubkey)) return names!.labelFor(pubkey);
+    return pubkey.length > 12
+        ? '${pubkey.substring(0, 8)}…${pubkey.substring(pubkey.length - 4)}'
+        : pubkey;
+  }
+
   final pendingName = pending == null ? null : agentName(pending.agent);
   final label = pendingName != null
       ? 'Pending agent change: $pendingName'
       : selected == null
       ? 'Choose an agent'
       : 'Change agent: ${name ?? 'Agent'}';
-  Future<void> choose() async {
+  Future<void> choose({MeSettingsPresenter? present}) async {
     if (busy.value || sync == null) return;
     busy.value = true;
     try {
@@ -165,13 +173,21 @@ useMeChatAssistant(
         }
         if (resume != 'resume') return;
       } else {
-        final picked = await showBuzzModalBottomSheet<String>(
-          context: context,
-          title: 'Agent',
-          isScrollControlled: true,
-          showDragHandle: true,
-          builder: (_) => MeAssistantPickerSheet(selected: selected),
-        );
+        final picked = present != null
+            ? await present(
+                'Agent',
+                (onSelected) => MeAssistantPickerSheet(
+                  selected: selected,
+                  onSelected: onSelected,
+                ),
+              )
+            : await showBuzzModalBottomSheet<String>(
+                context: context,
+                title: 'Agent',
+                isScrollControlled: true,
+                showDragHandle: true,
+                builder: (_) => MeAssistantPickerSheet(selected: selected),
+              );
         if (picked == null || !context.mounted) return;
         intent = MeAgentChange.create(sync, channelId, picked);
       }
@@ -216,6 +232,8 @@ useMeChatAssistant(
 
   return (
     selected: selected,
+    openPicker: busy.value ? null : choose,
+    name: pendingName ?? name ?? 'Choose an agent',
     pendingNotice: pendingName == null
         ? null
         : Semantics(

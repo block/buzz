@@ -149,7 +149,11 @@ async fn request_headers_reach_the_upgrade() {
         let (stream, _) = listener.accept().await.unwrap();
         let (seen, header) = oneshot::channel();
         let mut socket = accept_hdr_async(stream, |request: &Request, response: Response| {
-            let _ = seen.send(request.headers().get("authorization").cloned());
+            let headers = request.headers();
+            let _ = seen.send((
+                headers.get("authorization").cloned(),
+                headers.get("user-agent").cloned(),
+            ));
             Ok(response)
         })
         .await
@@ -182,8 +186,11 @@ async fn request_headers_reach_the_upgrade() {
     })
     .await
     .unwrap();
-    assert_eq!(
-        server.await.unwrap().unwrap().to_str().unwrap(),
-        "Bearer upgrade-token"
-    );
+    let (authorization, user_agent) = server.await.unwrap();
+    assert_eq!(authorization.unwrap(), "Bearer upgrade-token");
+    let user_agent = user_agent.unwrap();
+    assert!(user_agent
+        .to_str()
+        .unwrap()
+        .starts_with("buzz-audio-client/"));
 }

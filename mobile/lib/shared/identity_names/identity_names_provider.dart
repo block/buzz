@@ -42,15 +42,18 @@ void loadIdentityNameOwners(Ref ref, IdentityNames names) {
 /// [candidates]). Pass [shown] when the context also holds identities that are
 /// only compared, such as a channel roster whose names another owner loads,
 /// so opening the view does not queue a profile read for every one of them.
+/// [sources] replaces the client-wide facts for views that adjust them.
 IdentityNames watchIdentityNames(
   WidgetRef ref,
   Iterable<String> candidates, {
   Set<String> agentPubkeys = const {},
   Map<String, String> fallbackNames = const {},
   Iterable<String>? shown,
+  IdentityNameSources? sources,
 }) {
-  final sources = ref.watch(identityNameSourcesProvider);
-  final names = sources.scope(
+  final IdentityNameSources facts =
+      sources ?? ref.watch<IdentityNameSources>(identityNameSourcesProvider);
+  final names = facts.scope(
     candidates,
     agentPubkeys: agentPubkeys,
     fallbackNames: fallbackNames,
@@ -66,7 +69,7 @@ IdentityNames watchIdentityNames(
         };
   final missing = {
     for (final key in loadFor)
-      if (!sources.profiles.containsKey(key)) key,
+      if (!facts.profiles.containsKey(key)) key,
     ...names.missingOwnerProfiles(loadFor),
   };
   if (missing.isNotEmpty) {

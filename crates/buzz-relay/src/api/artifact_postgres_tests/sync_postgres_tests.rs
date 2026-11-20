@@ -269,6 +269,7 @@ async fn sync_policy_changes_reset_without_hidden_channel_ids() {
             visibility: Some("private".into()),
             ..Default::default()
         },
+        &f.owner.public_key().to_bytes(),
     )
     .await
     .unwrap();

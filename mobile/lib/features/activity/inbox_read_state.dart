@@ -8,8 +8,8 @@ import 'inbox_item.dart';
 /// `thread-activity:<root>`. Returns null for an event with no channel.
 ///
 /// `activity:<channel>` never counts here. Activity rows hold only mentions,
-/// needs-action and agent events addressed to the reader, and DM messages,
-/// and that catch-up mark reads none of those.
+/// needs-action and agent events addressed to the reader, eligible thread
+/// replies, and DM messages. That catch-up mark reads none of those.
 int? inboxEventReadAt(
   FeedItem event, {
   required int? Function(String contextId) markerOf,
@@ -38,19 +38,39 @@ bool isInboxEventRead(
   return readAt != null && event.createdAt <= readAt;
 }
 
-/// Whether the row is read ("done"): a local unread override always wins;
-/// otherwise the row is done when the marks read every grouped event. Each
-/// event is checked on its own, because reading a channel marks mentions
-/// with per-message marks, so reading the newest says nothing about the
-/// rest. Channel-less rows fall back to the local done set.
+/// The newest marker covering any grouped event of [item], or 0.
+int inboxItemReadAt(
+  InboxItem item, {
+  required int? Function(String contextId) markerOf,
+}) =>
+    maxReadAt([
+      for (final event in _groupedEvents(item))
+        inboxEventReadAt(event, markerOf: markerOf),
+    ]) ??
+    0;
+
+/// Whether the row is read ("done"): a local unread override wins until any
+/// device reads past the marker it was set at ([rawMarkerOf], the stored
+/// markers without the moving retention floor, defaulting to [markerOf]);
+/// otherwise the row is done
+/// when the marks read every grouped event. Each event is checked on its
+/// own, because reading a channel marks mentions with per-message marks, so
+/// reading the newest says nothing about the rest. Channel-less rows fall
+/// back to the local done set.
 bool isInboxItemDone(
   InboxItem item, {
   required int? Function(String contextId) markerOf,
-  required Set<String> localUnreadOverrides,
+  int? Function(String contextId)? rawMarkerOf,
+  required Map<String, int> localUnreadOverrides,
   required Set<String> localDoneSet,
 }) {
   final ids = groupedInboxItemIds(item);
-  if (ids.any(localUnreadOverrides.contains)) return false;
+  final baselines = [for (final id in ids) ?localUnreadOverrides[id]];
+  if (baselines.isNotEmpty &&
+      inboxItemReadAt(item, markerOf: rawMarkerOf ?? markerOf) <=
+          baselines.reduce((a, b) => a > b ? a : b)) {
+    return false;
+  }
 
   if (item.item.channelId == null) return localDoneSet.contains(item.id);
   return _groupedEvents(

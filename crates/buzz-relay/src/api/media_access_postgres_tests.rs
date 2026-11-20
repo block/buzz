@@ -173,6 +173,7 @@ async fn post(
     .await
 }
 
+mod cli_edit_postgres_tests;
 mod emoji_reference_postgres_tests;
 mod reference_budget_postgres_tests;
 mod reference_formats_postgres_tests;
@@ -710,6 +711,7 @@ async fn private_media_revocation_http_journey() {
             &open.to_string(),
             &text,
             &text,
+            true,
             &member.public_key().to_hex(),
             None,
         )

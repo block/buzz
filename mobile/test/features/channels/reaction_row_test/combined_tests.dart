@@ -172,7 +172,9 @@ void combinedReactionTests() {
             );
             expect(image.image, isNotNull);
           } else {
-            expect(find.text(':custom:'), findsOneWidget);
+            // A truncated shortcode is illegible in a pill: show sparkles.
+            expect(find.byIcon(BuzzIcons.sparkles), findsOneWidget);
+            expect(find.text(':custom:'), findsNothing);
           }
           final tray = find.byKey(const ValueKey('combined-reaction-tray'));
           final center = tester.getCenter(tray).dy;

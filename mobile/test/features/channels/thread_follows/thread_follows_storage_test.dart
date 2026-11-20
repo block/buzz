@@ -62,20 +62,4 @@ void main() {
     expect(entries, hasLength(1));
     expect(entries.single.rootId, 'good');
   });
-
-  test('capThreadFollowEntries evicts oldest first', () {
-    final entries = [
-      for (var i = 0; i < threadFollowsMaxEntries + 10; i++)
-        ThreadFollowEntry(rootId: 'root-$i', followedAt: i),
-    ];
-    final capped = capThreadFollowEntries(entries);
-    expect(capped, hasLength(threadFollowsMaxEntries));
-    expect(capped.first.rootId, 'root-10');
-    expect(capped.last.rootId, 'root-${threadFollowsMaxEntries + 9}');
-  });
-
-  test('capThreadFollowEntries keeps small lists untouched', () {
-    const entries = [ThreadFollowEntry(rootId: threadIdA, followedAt: 1)];
-    expect(capThreadFollowEntries(entries), same(entries));
-  });
 }

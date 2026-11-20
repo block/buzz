@@ -30,6 +30,14 @@ enum ChannelSortMode {
 
 const ChannelSortMode kDefaultSortMode = ChannelSortMode.alpha;
 
+/// Desktop sorts Solo by recent activity until the user picks otherwise.
+ChannelSortMode defaultSortModeFor(String groupKey) =>
+    groupKey == 'solo' ? ChannelSortMode.recent : kDefaultSortMode;
+
+/// Desktop's unified sort coordinate. When its head exists desktop ignores
+/// `channel-sort`, so mobile reads it and stops writing the legacy one.
+const workspaceSortCoordinate = 'channel-workspace-sort';
+
 String sectionSortGroupKey(String sectionId) => 'section:$sectionId';
 
 class ChannelSortStore {
@@ -57,6 +65,26 @@ class ChannelSortStore {
       }
     }
     return ChannelSortStore(groups: groups);
+  }
+
+  /// Reads a `channel-workspace-sort` payload. Register metadata, when
+  /// present, is authoritative over the plain `groups` map; a null register
+  /// clears that section's choice.
+  factory ChannelSortStore.fromWorkspaceJson(Map<String, dynamic> json) {
+    final meta = json['meta'];
+    if (meta is! Map) return ChannelSortStore.fromJson(json);
+    final registers = meta['g'];
+    if (meta['v'] != 1 || (registers != null && registers is! Map)) {
+      throw const FormatException('Unsupported sort metadata');
+    }
+    return ChannelSortStore(
+      groups: {
+        for (final MapEntry(:key, :value)
+            in (registers as Map? ?? const {}).entries)
+          if (key is String && value is List && value.length == 3)
+            key: ?ChannelSortMode.fromWire(value[2]),
+      },
+    );
   }
 }
 
@@ -90,15 +118,17 @@ List<Channel> sortChannelsForList(
     sorted.sort(compareChannelsByName);
     return sorted;
   }
+  // As desktop: newest activity first, counting at least from creation so a
+  // chat just started leads before its first message lands.
+  int recentMs(Channel channel) {
+    final created = channel.createdAt.millisecondsSinceEpoch;
+    final last = channel.lastMessageAt?.millisecondsSinceEpoch;
+    return last == null || last < created ? created : last;
+  }
+
   sorted.sort((left, right) {
-    final leftMs = left.lastMessageAt?.millisecondsSinceEpoch;
-    final rightMs = right.lastMessageAt?.millisecondsSinceEpoch;
-    if (leftMs != null && rightMs != null && leftMs != rightMs) {
-      return rightMs.compareTo(leftMs);
-    }
-    if (leftMs != null && rightMs == null) return -1;
-    if (leftMs == null && rightMs != null) return 1;
-    return compareChannelsByName(left, right);
+    final recent = recentMs(right).compareTo(recentMs(left));
+    return recent != 0 ? recent : compareChannelsByName(left, right);
   });
   return sorted;
 }
@@ -213,6 +243,51 @@ class ChannelSortStorage {
       jsonEncode(state.toJson()),
     );
   }
+
+  /// The last unified sort head, so a cold start sorts as desktop does.
+  ({ChannelSortStore store, int createdAt, String eventId})? readWorkspace(
+    String pubkey,
+    String relayUrl,
+  ) {
+    final raw = _prefs.getString(_workspaceKey(pubkey, relayUrl));
+    if (raw == null) return null;
+    try {
+      if (jsonDecode(raw) case {
+        'store': final Map<String, dynamic> store,
+        'createdAt': final int createdAt,
+        'eventId': final String eventId,
+      }) {
+        return (
+          store: ChannelSortStore.fromJson(store),
+          createdAt: createdAt,
+          eventId: eventId,
+        );
+      }
+    } on FormatException {
+      // The relay head replaces an unreadable cache.
+    }
+    return null;
+  }
+
+  void writeWorkspace(
+    String pubkey,
+    String relayUrl,
+    ChannelSortStore store,
+    int createdAt,
+    String eventId,
+  ) {
+    _prefs.setString(
+      _workspaceKey(pubkey, relayUrl),
+      jsonEncode({
+        'store': store.toJson(),
+        'createdAt': createdAt,
+        'eventId': eventId,
+      }),
+    );
+  }
+
+  String _workspaceKey(String pubkey, String relayUrl) =>
+      '${channelSortKey(pubkey, relayUrl)}:workspace';
 
   String _syncStateKey(String pubkey, String relayUrl) =>
       '${channelSortKey(pubkey, relayUrl)}:sync';

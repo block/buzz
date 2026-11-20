@@ -59,8 +59,8 @@ class _ComposerDockFrame extends HookWidget {
         ),
         Padding(
           padding: EdgeInsets.only(
-            left: Grid.twelve,
-            right: Grid.twelve,
+            left: composerHorizontalGutter,
+            right: composerHorizontalGutter,
             bottom: MediaQuery.viewPaddingOf(context).bottom + Grid.xxs,
           ),
           child: Align(
@@ -96,7 +96,9 @@ class _ComposerDockFrame extends HookWidget {
                     ),
                     child: FractionallySizedBox(
                       key: const ValueKey('composer-width-transition'),
-                      widthFactor: 0.85 + 0.15 * widthProgress,
+                      widthFactor:
+                          collapsedComposerWidthFactor +
+                          (1 - collapsedComposerWidthFactor) * widthProgress,
                       child: child,
                     ),
                   ),

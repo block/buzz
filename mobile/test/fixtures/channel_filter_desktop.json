@@ -1,0 +1,55 @@
+{
+  "producer": "block/buzz-app browser-host/sidebar-sort.mjs at 475e2afef07519b065fe65c36a63cbb01c3d333a",
+  "testSecretHex": "0000000000000000000000000000000000000000000000000000000000000001",
+  "head": {
+    "kind": 30078,
+    "content": "AiUaHZzIMpxRgskz71o22p/SmQcBDyoc+ZK13jmjZ8fS4iTUQ8UvHpihm/tPLvv8u3MRx/Lg1UVv3Ba6kPfhZrWyUp8QVOAThoaA3OSnqYn6oyiK7o2dacoj7o/mGcjumIgYMBx0bi2DOUU/1CvZd/MPNTcWT/aBx7OWHXDM7hGbP+JWupageYTBMcK3Yh4zam9F/VGGWnVA5xkAcusLHffQckk1eQbTiDj4e1S4THRv/1n9U5RFgS31A4owYf+IQqS6dvK5j+xcs9TCjgiHBmDLN1BGkpF1e+khoJD/hgXUcTbbhjMmsAuhwRr6TKu9mBUPYwJlQHhPI93qpwvyTwCqaQ==",
+    "created_at": 1700000000,
+    "tags": [
+      [
+        "d",
+        "channel-filter"
+      ],
+      [
+        "t",
+        "channel-filter"
+      ]
+    ],
+    "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+    "id": "6e7a80b302ef51ded8d80ddd6fe5306141576cb496450d24def70bc544fd85ed",
+    "sig": "2562bcb9cdfaaa6d78c50dca53ea215b055817bdfd715f7e8bdfd9a24dce88ffed0b753c0f8c91f4f3e1dc561c224da04348db31288abd1f4dbe7c603ee1ead7"
+  },
+  "plaintext": {
+    "version": 1,
+    "groups": {
+      "channels": "active"
+    },
+    "meta": {
+      "v": 1,
+      "g": {
+        "channels": [
+          1700000000000,
+          "2a60ddc6f815f2de",
+          "active"
+        ]
+      }
+    },
+    "activeWindowSeconds": {
+      "channels": 604800
+    }
+  },
+  "mobileHead": {
+    "id": "af147924f0b3376b3bd0bb6dbfab4f403d0f7a24044a6df289b069d15e0b4325",
+    "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+    "created_at": 1792513727,
+    "kind": 30078,
+    "tags": [
+      [
+        "d",
+        "channel-filter"
+      ]
+    ],
+    "content": "Aq9hWkmNY3trUoHFyAnlb5kdFTrAeogOYD8u/CNR4vB8ayOIsf6M7QplHVP9kKMLOms1hcubPzvnMpocYuc+nITZzmNuOOjVnclgm4v850mdyha9riHF5/JLn5u/0N/Z9l6tV0iynyFAy7rkJQPq7ulKazvv5hXjlCs+Nsd6jzN2OFRoVIefatSWcmQcMyHIvzxnVw3uM8tbajQfgL49/JmLfG86js0eBQ+2LbUqxfd0T0tyYqh7CAP+HO9vLOdhDaz0Fbi5xyG756kE5vg37QaWZxU9BsmCD9Zy+NQIT2b7ywUuERCVme+qdICKTeR/Nia5O6G9ZjPMW7hfU1gdDNzxTycQ8fwuCTIXRNA3sIZQCqsxylG2GahAQaP8HwdyOJ4SMZU323JA+oK4bs2epxxs45b+z40mXaAQgvGHSvT8K4g=",
+    "sig": "795bd134835f7d7130409ac1084b7bd0360d119940f0a90c525cd18575a9978c275c28c8cfdc711032987d581e4283bdcf75e98fed5847352ebb30566c177912"
+  }
+}

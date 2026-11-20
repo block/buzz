@@ -1,5 +1,7 @@
 import 'features/activity/activity_provider.dart';
+import 'features/channels/bestie_conversation.dart';
 import 'features/channels/default_agent_launcher.dart';
+import 'features/channels/quick_send_host.dart';
 import 'features/agents/agents_page.dart';
 
 import 'dart:async';
@@ -7,12 +9,14 @@ import 'dart:async';
 import 'hosted_app_gate.dart';
 import 'onboarding_app_entry.dart';
 import 'organization_app_entry.dart';
+import 'shared/share/signed_out_share_notice.dart';
 import 'shared/hosted/organization_environment.dart';
 import 'shared/widgets/ios_navigation_metrics.dart';
 import 'shared/community/paired_community_landing.dart';
 import 'shared/community/community_loading_surface.dart';
 
 import 'package:app_badge_plus/app_badge_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
@@ -34,7 +38,10 @@ import 'features/pairing/pairing_page.dart';
 import 'features/pairing/pairing_provider.dart';
 import 'features/channels/agent_activity/observer_subscription.dart';
 import 'features/channels/channel_detail_page.dart';
+import 'features/channels/notification_reply.dart';
 import 'shared/widgets/app_route_observer.dart';
+import 'shared/widgets/root_page_route.dart';
+import 'features/profile/profile_provider.dart';
 import 'features/profile/user_status_cache_provider.dart';
 import 'features/profile/settings_profile_header.dart';
 import 'features/profile/set_status_sheet.dart';
@@ -49,6 +56,7 @@ import 'shared/emoji/emoji_burst.dart';
 import 'shared/relay/relay.dart';
 import 'shared/theme/theme.dart';
 import 'shared/widgets/buzz_loading_indicator.dart';
+import 'shared/read_state/failed_clear_notice.dart';
 import 'shared/widgets/buzz_toast_host.dart';
 import 'shared/widgets/covered_route_keyboard_insets.dart';
 
@@ -389,6 +397,8 @@ class App extends HookConsumerWidget {
       ref.listen(observerRelayProvider, (_, _) {});
       ref.watch(appLifecycleProvider);
       ref.listen(userStatusCacheProvider, (_, _) {});
+      // Presence heartbeats run only while something holds this provider.
+      ref.listen(presenceProvider, (_, _) {});
       // Activity owns hidden-DM recovery even when Inbox is never opened.
       ref.listen(activityProvider, (_, _) {});
       // Preserve initial read seeding even while Solo is hidden.
@@ -398,6 +408,9 @@ class App extends HookConsumerWidget {
     // Start listening for buzz:// links immediately (even pre-auth) so a
     // cold-start link survives until the authenticated UI can dispatch it.
     ref.watch(pendingDeepLinkProvider);
+    // Unconditional: iOS may launch the app in the background only to send a
+    // notification reply, and no later frame may come to rebuild this.
+    ref.listen(notificationReplySenderProvider, (_, _) {});
 
     void applyBadge(UnreadBadgeState state) {
       if (state.highPriorityCount > 0) {
@@ -422,6 +435,47 @@ class App extends HookConsumerWidget {
         applyBadge(next);
       });
     }
+
+    final home = authState.when(
+      loading: () => const _SplashScreen(),
+      // An internal build never offers pairing, even when auth state is
+      // unreadable: pairing could make another relay the active community.
+      error: (_, _) => OrganizationEnvironment.enabled
+          ? const OrganizationAppEntry()
+          : const PairingPage(),
+      data: (state) => switch (state.status) {
+        AuthStatus.authenticated => HostedAppGate(
+          authenticated: true,
+          child: CoveredRouteKeyboardInsets(
+            child: FailedClearNotice(
+              child: HomePage(
+                onAgents: showAgents,
+                defaultAgentBuilder: (context) => DefaultAgentLauncher(
+                  onChooseAgent: () => showAgents(context, createOnOpen: true),
+                ),
+                openBestieConversation: openBestieConversation,
+                mePageBuilder: (_, chat, workspace) => MePage(
+                  sliver: true,
+                  newChatAction: chat,
+                  newWorkspaceAction: workspace,
+                ),
+                backgroundHost: defaultTargetPlatform == TargetPlatform.iOS
+                    ? const QuickSendHost()
+                    : null,
+                settingsPageBuilder: _buildSettingsPage,
+                communityInvitePageBuilder: (_) => const CommunityInvitePage(),
+                communityAppearancePageBuilder: (_) => const ThemePickerPage(),
+              ),
+            ),
+          ),
+        ),
+        _ => const HostedAppGate(
+          authenticated: false,
+          child: SignedOutShareNotice(child: OnboardingAppEntry()),
+        ),
+      },
+    );
+    final latestHome = useRef<Widget?>(null)..value = home;
 
     return MaterialApp(
       navigatorKey: _mobileRootNavigatorKey,
@@ -466,39 +520,14 @@ class App extends HookConsumerWidget {
           ),
         ),
       },
-      home: authState.when(
-        loading: () => const _SplashScreen(),
-        // An internal build never offers pairing, even when auth state is
-        // unreadable: pairing could make another relay the active community.
-        error: (_, _) => OrganizationEnvironment.enabled
-            ? const OrganizationAppEntry()
-            : const PairingPage(),
-        data: (state) => switch (state.status) {
-          AuthStatus.authenticated => HostedAppGate(
-            authenticated: true,
-            child: CoveredRouteKeyboardInsets(
-              child: HomePage(
-                onAgents: showAgents,
-                defaultAgentBuilder: (context) => DefaultAgentLauncher(
-                  onChooseAgent: () => showAgents(context, createOnOpen: true),
-                ),
-                mePageBuilder: (_, chat, workspace) => MePage(
-                  sliver: true,
-                  newChatAction: chat,
-                  newWorkspaceAction: workspace,
-                ),
-                settingsPageBuilder: _buildSettingsPage,
-                communityInvitePageBuilder: (_) => const CommunityInvitePage(),
-                communityAppearancePageBuilder: (_) => const ThemePickerPage(),
-              ),
-            ),
-          ),
-          _ => const HostedAppGate(
-            authenticated: false,
-            child: OnboardingAppEntry(),
-          ),
-        },
-      ),
+      // A root route that refuses pops, so a stray pop can never leave an
+      // empty navigator. It reads [home] when built, so it follows auth.
+      onGenerateRoute: (settings) => settings.name == Navigator.defaultRouteName
+          ? RootPageRoute<void>(
+              settings: settings,
+              builder: (_) => latestHome.value!,
+            )
+          : null,
     );
   }
 }

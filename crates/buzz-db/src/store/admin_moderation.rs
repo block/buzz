@@ -336,6 +336,7 @@ async fn get_report(
     row.map(|row| {
         let message = row
             .try_get::<Option<Vec<u8>>, _>("message_author_pubkey")?
+            .filter(|key| !key.is_empty())
             .map(|author_pubkey| -> Result<AdminReportedMessage> {
                 Ok(AdminReportedMessage {
                     author_pubkey: hex::encode(author_pubkey),
@@ -398,6 +399,7 @@ fn row_to_report(row: sqlx::postgres::PgRow) -> Result<AdminReport> {
         target: hex::encode(target),
         target_author_pubkey: row
             .try_get::<Option<Vec<u8>>, _>("target_author_pubkey")?
+            .filter(|key| !key.is_empty())
             .map(hex::encode),
         channel_id: row.try_get("channel_id")?,
         report_type: row.try_get("report_type")?,
@@ -552,6 +554,7 @@ pub async fn get_event_preview(
         SELECT id, pubkey, kind, content, created_at, deleted_at, channel_id
         FROM events
         WHERE community_id = $1 AND id = $2 AND kind <> ALL($3)
+          AND pubkey <> ''::bytea
           AND NOT (kind = 5 AND EXISTS (
               SELECT 1 FROM jsonb_array_elements(tags) t
               WHERE t->>0 = 'k' AND t->>1 = ANY($4::text[])))
@@ -784,6 +787,46 @@ mod postgres_tests {
             .execute(pool)
             .await
             .expect("delete community fixture");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn erased_tombstone_is_unavailable_in_moderation() {
+        let pool = setup_pool().await;
+        let community = insert_community(&pool, "erased").await;
+        let id = vec![91_u8; 32];
+        insert_event(&pool, community, &id, &[], "", Some(Utc::now())).await;
+        let report = insert_event_report(&pool, community, &id).await;
+        let detail = get_report(
+            &pool,
+            report,
+            &admin_hidden_kinds(),
+            &private_deletion_k_values(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(detail.message.is_none());
+        assert!(detail.report.target_author_pubkey.is_none());
+        assert!(get_event_preview(&pool, community, &id)
+            .await
+            .unwrap()
+            .is_none());
+        // A normal moderation soft-delete still exposes its original content.
+        let normal = vec![92_u8; 32];
+        insert_event(
+            &pool,
+            community,
+            &normal,
+            &[5_u8; 32],
+            "moderated",
+            Some(Utc::now()),
+        )
+        .await;
+        assert!(get_event_preview(&pool, community, &normal)
+            .await
+            .unwrap()
+            .is_some());
     }
 
     #[tokio::test]

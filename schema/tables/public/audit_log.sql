@@ -4,7 +4,7 @@
 -- (Lane Audit/Dawn builds the chain logic; Lane 0 fixes the scoped schema.)
 
 CREATE TABLE audit_log (
-    community_id    UUID NOT NULL REFERENCES communities(id),
+    community_id    UUID NOT NULL,
     seq             BIGINT NOT NULL,
     hash_version    SMALLINT NOT NULL DEFAULT 1 CHECK (hash_version IN (1, 2)),
     hash            BYTEA NOT NULL,
@@ -18,3 +18,7 @@ CREATE TABLE audit_log (
 );
 
 CREATE UNIQUE INDEX idx_audit_log_hash ON audit_log (community_id, hash);
+
+CREATE INDEX idx_audit_media_actor_hash ON audit_log (actor_pubkey, object_id) WHERE action = 'media_uploaded';
+
+CREATE INDEX idx_audit_media_hash_actor ON audit_log (object_id, actor_pubkey) WHERE action = 'media_uploaded';

@@ -12,7 +12,7 @@ This chart has two operating profiles selected by values:
 ## Quickstart (eval only)
 
 ```sh
-helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.10 \
+helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.12 \
   --create-namespace --namespace buzz \
   --set quickstart=true \
   --set postgresql.enabled=true \
@@ -362,7 +362,7 @@ can give it to a caller.
 | `buzz_db_connection_step_duration_seconds` | histogram | `pool_role`, `step` |
 | `buzz_db_connection_step_attempts_total` | counter | `pool_role`, `step`, `outcome` |
 
-The fixed steps are `writer_pool`, `physical_connect`, `created_at_floor`,
+The fixed steps are `writer_pool`, `physical_connect`,
 `session_timeouts`, `isolation`, and `ready`. Measurable phases emit start,
 duration, and terminal evidence. `physical_connect` and `ready` are success
 milestones: SQLx 0.9 exposes `after_connect` only after DNS, network, TLS, and
@@ -376,8 +376,8 @@ start counter to derive the number of attempts currently in progress. The
 session phases run in order, so a later phase start also proves the earlier
 phases succeeded for that attempt.
 
-Four start counters, four 13-series histograms, and fifteen terminal counters
-create a hard ceiling of 71 raw Prometheus series per pod. Connection ordinals,
+Three start counters, three 13-series histograms, and twelve terminal counters
+create a hard ceiling of 54 raw Prometheus series per pod. Connection ordinals,
 database URLs, hosts, usernames, SQL, and raw errors are forbidden as metric
 labels.
 
@@ -631,9 +631,13 @@ default so long-lived WebSocket connections have time to drain.
 
 ## Upgrades
 
-Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run at startup, gated by `BUZZ_AUTO_MIGRATE` (default `true`). Multiple replicas race-safely behind a Postgres advisory lock. `helm upgrade` is the entire upgrade procedure.
+Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run at startup, gated by `BUZZ_AUTO_MIGRATE` (default `true`). Multiple replicas race-safely behind a Postgres advisory lock. Outside the required stop below, `helm upgrade` is the entire upgrade procedure.
 
-Migration 0032 is a hard compatibility boundary for relay versions that publish repaired channel rosters. Older relays verify its roster-fence trigger before opening listeners and refuse to start if the trigger is missing or inert. Newer relays run the same check in every roster writer and do not require the trigger. A later release drops it, and that release requires every relay to run a version without the startup check first. Apply migrations before rolling the relay; for large installations, prefer a controlled `buzz-admin migrate` job with PostgreSQL lock monitoring before the code rollout.
+**Required stop before migrations 0089–0091, 0095 and 0096.** These migrations drop database triggers whose work the relay now does in application code. Before you upgrade to a build that contains any of them, every relay pod, job and rollback target must run a stop build. An older relay that keeps serving after they run can write data the dropped triggers used to refuse, and some older builds refuse to start without the 0032 roster trigger or the community tombstone trigger. [`docs/trigger-retirement-deployment.md`](../../../docs/trigger-retirement-deployment.md) names the stop build and gives the procedure and rollback.
+
+**Required stop before migration 0100.** Migrations 0098–0100 undo migration 0097, and 0100 drops the columns and indexes that 0097 added. No tagged relay release reads them. Only rolling images built from commit `eebf62b6` (#9650) up to, but not including, `a4061916` (#9689) do. Their channel artifact reads and writes fail once 0100 runs. If any relay pod, job or rollback target runs one of those images, move all of them to `sha-a406191` or later before you upgrade. To roll back after 0100 has run, set `migrate.autoMigrate=false` first, because an older binary with auto-migration on refuses a database that has migrations it does not know. Then roll back to `sha-a406191` or later, never to an image in that range. Migration 0098 refuses a database whose `artifact_heads` primary key is not `(community_id, artifact_id)`. Recover such a database as #9689 describes before upgrading.
+
+Apply migrations before rolling the relay; for large installations, prefer a controlled `buzz-admin migrate` job with PostgreSQL lock monitoring before the code rollout.
 
 If you prefer decoupling migrations from serving, set `migrate.autoMigrate=false`. **In that mode the chart does not run migrations for you** — you own running `buzz-admin migrate` (separate Pod / one-shot Job) against the database before every `helm install` / `helm upgrade`. Readiness probes only verify DB connectivity, not schema freshness, so a pod will appear healthy against an unmigrated schema and fail under load. A pre-upgrade Helm Job for this is on the chart roadmap; the values knob `migrate.preUpgradeJob.enabled` is reserved.
 
@@ -673,11 +677,11 @@ and the relay image via its own `chart-v*` tags. Every PR/`main` push still
 lints, unit-tests, and render-checks the chart; only a `chart-v*` tag publishes,
 so an in-progress `main` can never overwrite a released version.
 
-To cut a release, push a `chart-release/<version>` branch whose `<version>`
-matches `Chart.yaml`'s `version`; merging it auto-tags `chart-v<version>` and
-dispatches the publish job (same lane machinery as the desktop and relay
-releases — see `.github/workflows/auto-tag-on-release-pr-merge.yml`). The publish
-job fails loudly if the tag version and `Chart.yaml` version disagree.
+Merging a PR from a branch in `block/buzz` that bumps `version` in
+`Chart.yaml` creates a `chart-v<version>` tag and triggers the publish job.
+For a dedicated release PR, use a `chart-release/<version>` branch with a
+version matching `Chart.yaml`. The publish job checks that the tag and
+`Chart.yaml` version agree.
 
 ## Development
 

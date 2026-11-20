@@ -98,7 +98,7 @@ class _SystemMessageRow extends HookConsumerWidget {
         ),
       );
       if (reactedMessages.isEmpty) {
-        actions.addReaction(message.id, emoji);
+        actions.addReaction(message.id, emoji, targetAuthor: message.pubkey);
         return;
       }
       for (final source in reactedMessages) {
@@ -292,6 +292,7 @@ class _SystemMessageRow extends HookConsumerWidget {
                     RepaintBoundary(
                       key: spotlightKey,
                       child: _HuddleJoinSurface(
+                        isOwn: ownHuddle,
                         message: message,
                         allMessages: allMessages ?? const [],
                         parentChannelId: channelId,

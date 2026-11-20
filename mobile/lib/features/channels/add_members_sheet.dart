@@ -99,6 +99,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
         query: search,
         historyKey: addMembersMentionHistoryKey,
         unsharedAgents: true,
+        channelId: channelId,
       )),
     );
     final searching = ref.watch(recipientSearchPendingProvider(search));
@@ -124,6 +125,9 @@ class AddChannelMembersSheet extends HookConsumerWidget {
       query: search,
       opening: opening.value,
       pending: searching,
+      // Agents rank ahead of the known people an empty query lists, even
+      // when they load after them. Typed rows keep their places.
+      restartForNewAgents: search.isEmpty,
     );
     final availableUsers = shown.rows;
     final userCache = ref.watch(userCacheProvider);
@@ -161,7 +165,11 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     void toggleUser(MentionCandidate user) {
       if (isSubmitting.value) return;
       final normalized = user.pubkey.toLowerCase();
-      if (selectedPubkeys.contains(normalized)) {
+      // The current selection, not this build's: a second tap can land
+      // before the rebuild that reflects the first.
+      if (selectedUsers.value.any(
+        (selected) => selected.pubkey.toLowerCase() == normalized,
+      )) {
         selectedUsers.value = [
           for (final selected in selectedUsers.value)
             if (selected.pubkey.toLowerCase() != normalized) selected,
@@ -215,6 +223,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     if (nativePresentation) {
       final auth = ref.watch(mediaGetAuthServiceProvider);
       final client = ref.watch(mediaHttpClientProvider);
+      final diskCache = ref.watch(mediaDiskCacheProvider);
       final colors = Theme.of(context).colorScheme;
       String avatarKey(MentionCandidate user) => jsonEncode([
         user.pubkey,
@@ -248,8 +257,12 @@ class AddChannelMembersSheet extends HookConsumerWidget {
             isAgent: user.isAgent,
             background: colors.primaryContainer,
             foreground: colors.onPrimaryContainer,
-            networkImage: (url) =>
-                MediaImageProvider(url: url, auth: auth, client: client),
+            networkImages: (url) => smallMediaImageProviders(
+              url: url,
+              auth: auth,
+              client: client,
+              diskCache: diskCache,
+            ),
           );
         },
         state: {

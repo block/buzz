@@ -1,23 +1,31 @@
 import 'dart:async';
+
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:buzz/shared/channels/channel_list_snapshot.dart';
+import 'package:buzz/shared/channels/open_channel_directory_storage.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
+import 'package:buzz/shared/relay/media_disk_cache.dart';
 import 'package:buzz/shared/relay/relay_provider.dart' show RelayConfig;
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import 'community_storage_test.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  setUp(() => FlutterSecureStorage.setMockInitialValues({}));
   late FakeSecureStorage fakeSecure;
   late CommunityStorage communityStorage;
   late ProviderContainer container;
@@ -516,13 +524,40 @@ void main() {
       ]);
     });
 
-    test('startup and credential replacement discard orphan snapshots', () async {
+    test('startup and credential replacement discard orphan snapshots and '
+        'image caches', () async {
+      final mediaRoot = await Directory.systemTemp.createTemp('media_root');
+      addTearDown(() => mediaRoot.delete(recursive: true));
+      Future<Directory> seedMedia(Directory directory) async {
+        await File('${directory.path}/image').create(recursive: true);
+        return directory;
+      }
+
+      Future<File> seedDirectory(String communityId, String signer) async {
+        final file = OpenChannelDirectoryStorage.fileFor(
+          mediaRoot,
+          communityId,
+          signer,
+        );
+        await file.create(recursive: true);
+        return file;
+      }
+
+      // Media sweeps run in the background.
+      Future<bool> eventuallyExists(FileSystemEntity directory) async {
+        for (var i = 0; i < 50 && await directory.exists(); i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+        return directory.exists();
+      }
+
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
       final cache = ChannelListSnapshotStorage(prefs);
       const snapshot = ChannelListSnapshot(channels: [], hiddenDmIds: {});
       final oldKeys = nostr.Keys.generate();
       final newKeys = nostr.Keys.generate();
+      final midKeys = nostr.Keys.generate();
       final community = Community.create(
         name: 'Stored',
         relayUrl: 'wss://cached.example.com:443',
@@ -534,21 +569,49 @@ void main() {
       await cache.write(oldToken, snapshot);
       await cache.write(restoredToken, snapshot);
       await prefs.setString('unrelated', 'keep');
+      final oldMedia = await seedMedia(
+        MediaDiskCache.directoryFor(mediaRoot, community.id, oldKeys.public),
+      );
+      final orphanMedia = await seedMedia(
+        MediaDiskCache.communityDirectory(mediaRoot, 'restored'),
+      );
       container = createContainer(
-        overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          mediaCacheRootProvider.overrideWith((ref) async => mediaRoot),
+        ],
       );
       await container.read(communityListProvider.future);
       expect(cache.read(oldKeys.public, community.relayUrl), isNotNull);
       expect(cache.read('restored', 'https://orphan.example'), isNull);
       expect(await cache.write(restoredToken, snapshot), isFalse);
+      expect(await eventuallyExists(orphanMedia), isFalse);
+      expect(await oldMedia.exists(), isTrue);
 
       final notifier = container.read(communityListProvider.notifier);
       await notifier.addCommunity(community);
       expect(cache.read(oldKeys.public, community.relayUrl), isNotNull);
       expect(await cache.write(oldToken, snapshot), isTrue);
+      expect(await oldMedia.exists(), isTrue);
+      final midMedia = await seedMedia(
+        MediaDiskCache.directoryFor(mediaRoot, community.id, midKeys.public),
+      );
+      final newMedia = await seedMedia(
+        MediaDiskCache.directoryFor(mediaRoot, community.id, newKeys.public),
+      );
+      final oldDirectory = await seedDirectory(community.id, oldKeys.public);
+      final newDirectory = await seedDirectory(community.id, newKeys.public);
+      // Two quick replacements: the first one's sweep must not delete the
+      // newest account's cache.
+      await notifier.addCommunity(community.copyWith(nsec: midKeys.nsec));
       await notifier.addCommunity(community.copyWith(nsec: newKeys.nsec));
+      expect(await eventuallyExists(midMedia), isFalse);
       expect(cache.read(oldKeys.public, community.relayUrl), isNull);
       expect(await cache.write(oldToken, snapshot), isFalse);
+      expect(await eventuallyExists(oldMedia), isFalse);
+      expect(await newMedia.exists(), isTrue);
+      expect(await eventuallyExists(oldDirectory), isFalse);
+      expect(await newDirectory.exists(), isTrue);
       final newToken = cache.capture(newKeys.public, community.relayUrl);
       await cache.write(newToken, snapshot);
       await communityStorage.saveActiveId(community.id);
@@ -556,6 +619,14 @@ void main() {
       expect(await communityStorage.loadAll(), isEmpty);
       expect(prefs.getKeys(), {'unrelated'});
       expect(await cache.write(newToken, snapshot), isFalse);
+      expect(await eventuallyExists(newMedia), isFalse);
+      expect(
+        await MediaDiskCache.communityDirectory(
+          mediaRoot,
+          community.id,
+        ).exists(),
+        isFalse,
+      );
 
       // A backup restored without secure community records is swept at startup.
       container.dispose();
@@ -836,6 +907,38 @@ void main() {
     });
   });
 
+  test('switching and removing name the new member at once', () async {
+    final reporter = _MemberRecorder();
+    container = createContainer(
+      overrides: [diagnosticReporterProvider.overrideWithValue(reporter)],
+    );
+    await container.read(communityListProvider.future);
+    final one = nostr.Keys.generate();
+    final two = nostr.Keys.generate();
+    final ws1 = Community.create(
+      name: 'One',
+      relayUrl: 'https://one.example.com',
+      nsec: one.nsec,
+    );
+    final ws2 = Community.create(
+      name: 'Two',
+      relayUrl: 'https://two.example.com',
+      nsec: two.nsec,
+    );
+    final notifier = container.read(communityListProvider.notifier);
+    await notifier.addCommunity(ws1);
+    await notifier.addCommunity(ws2);
+
+    await notifier.switchCommunity(ws1.id);
+    expect(reporter.member, one.public);
+    await notifier.switchCommunity(ws2.id);
+    expect(reporter.member, two.public);
+    await notifier.removeCommunity(ws2.id);
+    expect(reporter.member, one.public);
+    await notifier.removeCommunity(ws1.id);
+    expect(reporter.member, isNull);
+  });
+
   group('activeCommunityProvider', () {
     test('returns null when no communities', () async {
       container = createContainer();
@@ -912,4 +1015,11 @@ class _SnapshotStore extends InMemorySharedPreferencesStore {
     await removeGate?.future;
     return removed;
   }
+}
+
+class _MemberRecorder extends NoopDiagnosticReporter {
+  String? member = 'unset';
+
+  @override
+  void setMember(String? pubkey) => member = pubkey;
 }

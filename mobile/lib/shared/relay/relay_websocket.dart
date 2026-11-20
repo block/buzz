@@ -8,6 +8,26 @@ import 'dart:io';
 /// leaves the app reconnecting for as long as the network stays stalled.
 const relayWebSocketConnectTimeout = Duration(seconds: 10);
 
+/// `User-Agent` sent on every relay WebSocket upgrade; [setRelayUserAgent]
+/// adds the app version once it is known.
+String relayUserAgent = 'Buzz-Mobile';
+
+void setRelayUserAgent(String version) =>
+    relayUserAgent = 'Buzz-Mobile/$version';
+
+/// Sets [relayUserAgent] from [lookupVersion] before any socket opens, giving
+/// up after [timeout] so a hung or failed lookup cannot stall launch.
+Future<void> loadRelayUserAgent(
+  Future<String> Function() lookupVersion, {
+  Duration timeout = const Duration(milliseconds: 500),
+}) async {
+  try {
+    setRelayUserAgent(await lookupVersion().timeout(timeout));
+  } catch (_) {
+    // Keep the unversioned fallback.
+  }
+}
+
 /// WebSocket's default HTTP client follows redirects, including custom headers.
 /// Keep key-bound assertions at their original origin and bound upgrade time.
 ///
@@ -20,6 +40,7 @@ Future<WebSocket> openRelayWebSocket(
   Duration connectTimeout = relayWebSocketConnectTimeout,
 }) async {
   final HttpClient client = headers.isEmpty ? HttpClient() : _UpgradeClient();
+  client.userAgent = relayUserAgent;
   try {
     return await WebSocket.connect(
           uri.toString(),
@@ -50,6 +71,12 @@ class _UpgradeClient implements HttpClient {
     request.followRedirects = false;
     return request;
   }
+
+  @override
+  String? get userAgent => _inner.userAgent;
+
+  @override
+  set userAgent(String? value) => _inner.userAgent = value;
 
   @override
   void close({bool force = false}) => _inner.close(force: force);

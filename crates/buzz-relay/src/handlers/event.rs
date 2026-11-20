@@ -8,7 +8,8 @@ use tracing::{debug, error, info, warn};
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
     event_kind_u32, is_ephemeral, is_unshared_gated_event, KIND_AGENT_OBSERVER_FRAME,
-    KIND_AGENT_PRESENCE, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE, KIND_TYPING_INDICATOR,
+    KIND_AGENT_PRESENCE, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE, KIND_SOLO_MEMBER_ROLE,
+    KIND_TYPING_INDICATOR,
 };
 use buzz_core::observer::{
     content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -35,6 +36,7 @@ pub(crate) fn bounded_kind_label(kind: u32) -> String {
     match kind {
         0..=9 | 1059 | 1063 => kind.to_string(),
         8000..=8003 | 9000..=9022 | 9030..=9036 => kind.to_string(),
+        KIND_SOLO_MEMBER_ROLE => kind.to_string(),
         13534..=13535 => kind.to_string(),
         20000..=29999 => kind.to_string(),
         30023 | 30315 | 39000..=39003 => kind.to_string(),
@@ -254,6 +256,9 @@ async fn check_fanout_access(
     match visibility {
         Ok(v) if v != "private" => return verified(matches),
         Ok(_) => {}
+        // A deleted channel grants no one access. That is an answer, not a
+        // failed check, so its recipients are not unverified.
+        Err(buzz_db::DbError::ChannelNotFound(_)) => return verified(Vec::new()),
         Err(e) => {
             // Fail closed: if we cannot determine visibility, do not leak a
             // possibly-private channel's events.
@@ -265,22 +270,32 @@ async fn check_fanout_access(
         }
     }
 
-    let mut allowed = Vec::with_capacity(matches.len());
+    // One membership read for every recipient the cache lacks, not one per
+    // recipient: each read would wait on the pool in turn.
+    let recipients: Vec<_> = matches
+        .into_iter()
+        .filter_map(|(conn_id, sub_id)| {
+            Some((
+                conn_id,
+                sub_id,
+                state.conn_manager.pubkey_for_conn(conn_id)?,
+            ))
+        })
+        .collect();
+    let members = state
+        .members_cached(
+            community_id,
+            channel_id,
+            recipients.iter().map(|(.., pubkey)| pubkey.clone()),
+        )
+        .await;
+    let mut allowed = Vec::with_capacity(recipients.len());
     let mut unverified = Vec::new();
-    for (conn_id, sub_id) in matches {
-        let Some(pubkey) = state.conn_manager.pubkey_for_conn(conn_id) else {
-            continue;
-        };
-        match state
-            .is_member_cached(community_id, channel_id, &pubkey)
-            .await
-        {
-            Ok(true) => allowed.push((conn_id, sub_id)),
-            Ok(false) => {}
-            Err(e) => {
-                warn!(%channel_id, "fan-out access filter: membership lookup failed: {e}");
-                unverified.push((conn_id, sub_id));
-            }
+    for (conn_id, sub_id, pubkey) in recipients {
+        if members.members.contains(&pubkey) {
+            allowed.push((conn_id, sub_id));
+        } else if members.unverified.contains(&pubkey) {
+            unverified.push((conn_id, sub_id));
         }
     }
     FanoutAccess {
@@ -420,7 +435,6 @@ pub(crate) async fn deliver_pubsub_event(
     if matches.is_empty() {
         return;
     }
-
     let event_json = match serde_json::to_string(&stored.event) {
         Ok(json) => json,
         Err(e) => {
@@ -2488,7 +2502,6 @@ mod tests {
                             community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                             topic: EventTopic::Global,
                             event,
-                            received_at: tokio::time::Instant::now(),
                         },
                     )
                     .await;
@@ -2584,7 +2597,6 @@ mod tests {
                     community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                     topic: EventTopic::Global,
                     event,
-                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;
@@ -2608,7 +2620,6 @@ mod tests {
                     community_id: community,
                     topic: EventTopic::Global,
                     event,
-                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;
@@ -2651,7 +2662,6 @@ mod tests {
                     community_id: community_b,
                     topic: EventTopic::Global,
                     event,
-                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;
@@ -2681,7 +2691,6 @@ mod tests {
                     community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
                     topic: EventTopic::Global,
                     event,
-                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;
@@ -3503,7 +3512,6 @@ mod tests {
                     community_id,
                     topic: buzz_pubsub::EventTopic::Channel(channel_id),
                     event: artifact(channel_id).event,
-                    received_at: tokio::time::Instant::now(),
                 },
             )
             .await;

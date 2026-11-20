@@ -15,6 +15,61 @@ class _MeRetry extends StatelessWidget {
   );
 }
 
+/// A Solo chat row. It opens as a personal chat in whichever sidebar
+/// section the chat is filed.
+class SoloChatTile extends ConsumerWidget {
+  const SoloChatTile({super.key, required this.channel});
+  final Channel channel;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final viewer = ref.watch(myPubkeyProvider);
+    final legacyChannels = ref.watch(
+      meGroupsProvider.select((g) => g.value?.channels ?? const <String>[]),
+    );
+    final isUnread = ref.watch(
+      meUnreadChannelIdsProvider.select((ids) => ids.contains(channel.id)),
+    );
+    final pane = ConversationPaneScope.maybeOf(context);
+    final selected = pane?.selectedId == channel.id;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: selected ? context.colors.primaryContainer : null,
+        borderRadius: BorderRadius.circular(Radii.md),
+      ),
+      child: Semantics(
+        selected: selected,
+        child: _MeChatRow(
+          channelId: channel.id,
+          name: channel.name,
+          isUnread: isUnread,
+          onLongPress: () => showChannelDetailsSheet(
+            context: context,
+            channel: channel,
+            currentPubkey: viewer,
+            onMemberTap: (context, pubkey) => showUserProfileSheet(
+              context,
+              pubkey,
+              names: channelIdentityNamesProvider(channel.id),
+              contextualActions: (_) =>
+                  ChannelMemberProfileActions(channel: channel, pubkey: pubkey),
+            ),
+            personalChat: true,
+          ),
+          onTap: () => openConversationPane(
+            context,
+            channel.id,
+            (_) => ChannelDetailPage(
+              channel: channel,
+              personalChat: channel.isPersonalChat(viewer, legacyChannels),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _MeChatRow extends ConsumerWidget {
   const _MeChatRow({
     required this.channelId,

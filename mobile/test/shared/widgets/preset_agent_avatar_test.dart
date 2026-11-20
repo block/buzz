@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/dm_header_portrait.dart';
 import 'package:buzz/shared/widgets/preset_agent_avatar.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:flutter/material.dart';
@@ -56,6 +57,50 @@ class _Player extends VideoPlayerPlatform {
 }
 
 void main() {
+  testWidgets(
+    'DM header plays transparent agent artwork and honors reduced motion',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final original = VideoPlayerPlatform.instance;
+      final player = _Player();
+      VideoPlayerPlatform.instance = player;
+      addTearDown(() => VideoPlayerPlatform.instance = original);
+      Widget surface({bool reduced = false}) => ProviderScope(
+        child: MaterialApp(
+          home: MediaQuery(
+            data: MediaQueryData(disableAnimations: reduced),
+            child: const Center(
+              child: DmHeaderPortrait(
+                imageUrl:
+                    'https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-13.png',
+                isAgent: true,
+                initial: 'A',
+                size: 64,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpWidget(surface());
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('video')), findsOneWidget);
+      expect(player.playing, isTrue);
+      expect(
+        find.descendant(
+          of: find.byType(DmHeaderPortrait),
+          matching: find.byType(DecoratedBox),
+        ),
+        findsNothing,
+      );
+      await tester.pumpWidget(surface(reduced: true));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('video')), findsNothing);
+      expect(find.byType(AvatarImageContent), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
   testWidgets(
     'preset plays silently, pauses when hidden, and respects reduced motion',
     (tester) async {
@@ -146,6 +191,105 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     },
   );
+  testWidgets('iOS keeps the poster over a new player until playback advances', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final original = VideoPlayerPlatform.instance;
+    final player = _Player();
+    VideoPlayerPlatform.instance = player;
+    addTearDown(() => VideoPlayerPlatform.instance = original);
+    double posterOpacity() =>
+        tester.widget<AnimatedOpacity>(find.byType(AnimatedOpacity)).opacity;
+    double videoOpacity() => tester
+        .widget<Opacity>(
+          find.ancestor(
+            of: find.byKey(const Key('video')),
+            matching: find.byType(Opacity),
+          ),
+        )
+        .opacity;
+    await tester.pumpWidget(
+      const ProviderScope(
+        child: MaterialApp(
+          home: PresetAgentAvatar(
+            imageUrl:
+                'https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-13.png',
+            size: 64,
+            fallback: Text('A'),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('video')), findsOneWidget);
+    expect(videoOpacity(), 0);
+    expect(posterOpacity(), 1);
+    player.position = const Duration(milliseconds: 100);
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pumpAndSettle();
+    expect(videoOpacity(), 1);
+    expect(posterOpacity(), 0);
+
+    // Returning to the route mounts a new player, which starts covered.
+    final navigator = tester.state<NavigatorState>(find.byType(Navigator));
+    navigator.push<void>(
+      PageRouteBuilder<void>(
+        opaque: false,
+        pageBuilder: (_, _, _) => const SizedBox.shrink(),
+      ),
+    );
+    await tester.pump();
+    expect(find.byKey(const Key('video')), findsNothing);
+    expect(posterOpacity(), 1);
+    // The player is past the last polled position when it comes back; the
+    // poster waits for playback to advance from where it actually is.
+    player.position = const Duration(milliseconds: 700);
+    await tester.pumpAndSettle();
+    navigator.pop();
+    // Step real frames: the baseline lands before the first poll does.
+    for (var frame = 0; frame < 60; frame++) {
+      await tester.pump(const Duration(milliseconds: 16));
+      if (find.byKey(const Key('video')).evaluate().isNotEmpty) {
+        expect(videoOpacity(), 0);
+        expect(posterOpacity(), 1);
+      }
+    }
+    expect(find.byKey(const Key('video')), findsOneWidget);
+    player.position = const Duration(milliseconds: 800);
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.pumpAndSettle();
+    expect(videoOpacity(), 1);
+    expect(posterOpacity(), 0);
+
+    // A new character covers with its own poster, never the previous one
+    // kept by gapless playback.
+    final previous = tester.state(find.byType(AvatarImageContent));
+    await tester.pumpWidget(
+      const ProviderScope(
+        child: MaterialApp(
+          home: PresetAgentAvatar(
+            imageUrl:
+                'https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/gloopies/gloopies-14.png',
+            size: 64,
+            fallback: Text('A'),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    final posters = tester
+        .widgetList<AvatarImageContent>(find.byType(AvatarImageContent))
+        .map((poster) => poster.imageUrl);
+    expect(posters, [endsWith('gloopies-14.png')]);
+    expect(
+      tester.state(find.byType(AvatarImageContent)),
+      isNot(same(previous)),
+    );
+    await tester.pumpWidget(const SizedBox.shrink());
+    debugDefaultTargetPlatformOverride = null;
+  });
   testWidgets('Android uses transparent renderer and pauses offscreen', (
     tester,
   ) async {

@@ -12,6 +12,8 @@ use crate::error::CliError;
 
 /// NIP-FI assertion header (`docs/nips/NIP-FI.md` §Client-attached transport).
 const FEDERATED_IDENTITY_HEADER: &str = "Nostr-Federated-Identity";
+/// `User-Agent` sent on every WebSocket upgrade.
+const USER_AGENT: &str = concat!("buzz-cli/", env!("CARGO_PKG_VERSION"));
 
 /// Descriptor returned by the relay after a successful upload.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -193,6 +195,19 @@ fn should_retry_legacy_upload(status: reqwest::StatusCode) -> bool {
 /// not be blindly retried on ambiguous outcomes.
 fn is_moderation_kind(kind: u16) -> bool {
     matches!(kind, 9040..=9044)
+}
+
+/// Returns `true` for command kinds the relay executes on receipt, outside
+/// event storage and its event-ID deduplication: moderation (9040–9044),
+/// relay-admin (9030–9033), identity archive and unarchive requests
+/// (9035–9036) and the NIP-43 leave request (28936). A blind re-send can
+/// repeat the mutation, so they get the non-idempotent retry policy.
+fn executes_without_dedup(kind: u16) -> bool {
+    let kind_u32 = u32::from(kind);
+    is_moderation_kind(kind)
+        || buzz_core::kind::is_relay_admin_kind(kind_u32)
+        || buzz_core::kind::is_identity_archive_request_kind(kind_u32)
+        || kind_u32 == buzz_core::kind::KIND_NIP43_LEAVE_REQUEST
 }
 
 /// Returns `true` for HTTP status codes that indicate a successful response
@@ -643,26 +658,27 @@ impl BuzzClient {
     ) -> Result<reqwest::RequestBuilder, CliError> {
         // Evidence first: a refresh may wait out adapter retries, and the
         // proof must be signed after it, just before sending, to stay fresh.
-        // Signing may wait out throttling in turn, so evidence that is due
-        // for refresh by then is fetched again, and the proof re-signed when
-        // the assertion changed or that fetch aged the proof.
-        let mut assertion = self.evidence().await?;
+        // Signing may wait out throttling in turn, so the evidence is fetched
+        // again after it and sent with the proof; the proof is re-signed only
+        // when signing or that fetch aged it. The proof covers the request,
+        // not the assertion, so a provider may hand out a new one each time.
+        self.evidence().await?;
         let mut round = 1;
-        let authorization = loop {
+        let (authorization, assertion) = loop {
             // The proof is dated before signing, which may be held for long.
             let signed_at = crate::cached_assertion::unix_now();
             let authorization = self.proof(&proof).await?;
             let current = self.evidence().await?;
             let age = crate::cached_assertion::unix_now().saturating_sub(signed_at);
-            if current == assertion && age < PROOF_MAX_AGE_SECS {
-                break authorization;
+            if age < PROOF_MAX_AGE_SECS {
+                break (authorization, current);
             }
             if round == AUTHORIZE_ROUNDS {
                 return Err(CliError::Unavailable(
-                    "the NIP-FI assertion kept expiring while the proof was signed".into(),
+                    "the request proof kept going stale while it was signed".into(),
                 ));
             }
-            (assertion, round) = (current, round + 1);
+            round += 1;
         };
         let mut req = req.header(reqwest::header::AUTHORIZATION, sensitive(authorization)?);
         if let Some(tag) = self.credentials.auth_tag() {
@@ -704,10 +720,14 @@ impl BuzzClient {
         })
     }
 
-    /// The NIP-FI assertion as WebSocket upgrade headers (empty without an
-    /// evidence source).
+    /// The WebSocket upgrade headers: the CLI's `User-Agent`, and the NIP-FI
+    /// assertion when there is an evidence source.
     async fn upgrade_headers(&self) -> Result<buzz_ws_client::HeaderMap, CliError> {
         let mut headers = buzz_ws_client::HeaderMap::new();
+        headers.insert(
+            "user-agent",
+            buzz_ws_client::HeaderValue::from_static(USER_AGENT),
+        );
         if let Some(assertion) = self.evidence().await? {
             let mut value =
                 buzz_ws_client::HeaderValue::from_str(&format!("Bearer {assertion}"))
@@ -1140,7 +1160,9 @@ impl BuzzClient {
 
     /// Submit a signed Nostr event via POST /events.
     ///
-    /// For non-idempotent moderation command kinds (9040–9044), an ambiguous
+    /// For command kinds the relay executes without deduplication (moderation
+    /// 9040–9044, relay-admin 9030–9033, identity archive 9035–9036, NIP-43
+    /// leave 28936), an ambiguous
     /// outcome (mid-request error, body loss, non-ingest 429, or 502/503/504)
     /// surfaces as `CliError::DeliveryUnknown` instead of being retried.  These
     /// events execute at the relay *before* any dedup check, so a blind re-send
@@ -1151,14 +1173,15 @@ impl BuzzClient {
     /// All other event kinds retain the standard retry policy.
     pub async fn submit_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let kind = event.kind.as_u16();
-        if is_moderation_kind(kind) {
+        if executes_without_dedup(kind) {
             self.submit_moderation_event(event).await
         } else {
             self.submit_stored_event(event).await
         }
     }
 
-    /// Submit a moderation command (kinds 9040–9044) with non-idempotent retry policy.
+    /// Submit a command kind that executes without deduplication (see
+    /// `executes_without_dedup`) with the non-idempotent retry policy.
     async fn submit_moderation_event(&self, event: nostr::Event) -> Result<String, CliError> {
         let url = format!("{}/events", self.relay_url);
         let body = bytes::Bytes::from(
@@ -1203,7 +1226,7 @@ impl BuzzClient {
                         {
                             // Ambiguous: the relay may have executed this command.
                             return Err(CliError::DeliveryUnknown(format!(
-                                "moderation command (kind {}) outcome unknown: {}",
+                                "command (kind {}) outcome unknown: {}",
                                 event.kind.as_u16(),
                                 net_err
                             )));
@@ -1244,7 +1267,7 @@ impl BuzzClient {
                         }
                         // Non-canonical 429 (proxy-level or unrecognised body): outcome unknown.
                         return Err(CliError::DeliveryUnknown(format!(
-                            "moderation command (kind {}) outcome unknown: HTTP 429",
+                            "command (kind {}) outcome unknown: HTTP 429",
                             event.kind.as_u16()
                         )));
                     }
@@ -1252,7 +1275,7 @@ impl BuzzClient {
                         // Proxy-level error: the relay may have received and executed
                         // the command before the proxy failed.
                         return Err(CliError::DeliveryUnknown(format!(
-                            "moderation command (kind {}) outcome unknown: HTTP {status}",
+                            "command (kind {}) outcome unknown: HTTP {status}",
                             event.kind.as_u16()
                         )));
                     }
@@ -1261,7 +1284,7 @@ impl BuzzClient {
                         // Body loss after relay confirmed receipt is ambiguous for
                         // non-idempotent commands.
                         CliError::DeliveryUnknown(format!(
-                            "moderation command (kind {}) outcome unknown: response body lost: {e}",
+                            "command (kind {}) outcome unknown: response body lost: {e}",
                             event.kind.as_u16()
                         ))
                     })?;
@@ -2091,25 +2114,74 @@ mod retry_policy_tests {
         );
     }
 
-    /// A moderation command (kind 9042) that gets HTTP 502 returns `DeliveryUnknown`
-    /// immediately — proxy errors leave relay execution state ambiguous.
+    /// A command the relay executes without deduplication (moderation 9042,
+    /// relay-admin remove-member 9031, identity archive 9035 and unarchive
+    /// 9036, NIP-43 leave 28936) that gets HTTP 502
+    /// returns `DeliveryUnknown` immediately — proxy errors leave relay
+    /// execution state ambiguous.
     #[tokio::test]
-    async fn moderation_kind_502_returns_delivery_unknown() {
-        let (url, attempts) =
-            test_server(|_n| (StatusCode::BAD_GATEWAY, "bad gateway".to_string())).await;
-        let client = test_client(&url);
-        let event = make_moderation_event(&client_keys(&client), 9042);
-        let err = client.submit_event(event).await.unwrap_err();
-        assert!(
-            matches!(err, CliError::DeliveryUnknown(_)),
-            "expected DeliveryUnknown for 502, got {err:?}"
-        );
-        // 502 must not be retried — exactly 1 attempt.
-        assert_eq!(
-            attempts.load(Ordering::SeqCst),
-            1,
-            "must not retry 502 for moderation kind"
-        );
+    async fn non_dedup_command_502_returns_delivery_unknown() {
+        for kind in [9042u16, 9031, 9035, 9036, 28936] {
+            let (url, attempts) =
+                test_server(|_n| (StatusCode::BAD_GATEWAY, "bad gateway".to_string())).await;
+            let client = test_client(&url);
+            let event = make_moderation_event(&client_keys(&client), kind);
+            let err = client.submit_event(event).await.unwrap_err();
+            assert!(
+                matches!(err, CliError::DeliveryUnknown(_)),
+                "kind {kind}: expected DeliveryUnknown for 502, got {err:?}"
+            );
+            // 502 must not be retried — exactly 1 attempt.
+            assert_eq!(
+                attempts.load(Ordering::SeqCst),
+                1,
+                "kind {kind}: must not retry 502"
+            );
+        }
+    }
+
+    /// A command the relay executes without deduplication whose response body
+    /// is lost after 200 headers returns `DeliveryUnknown` after one
+    /// submission: the relay may already have run it.
+    #[tokio::test]
+    async fn non_dedup_command_body_loss_returns_delivery_unknown() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for kind in [9042u16, 9031, 9035, 9036, 28936] {
+            let attempts = Arc::new(AtomicU32::new(0));
+            let attempts2 = attempts.clone();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    attempts2.fetch_add(1, Ordering::SeqCst);
+                    let mut buf = vec![0u8; 8192];
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(200),
+                        stream.read(&mut buf),
+                    )
+                    .await;
+                    let partial = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\n{\"partial\":";
+                    let _ = stream.write_all(partial).await;
+                }
+            });
+
+            let client = test_client(&format!("http://{addr}"));
+            let event = make_moderation_event(&client_keys(&client), kind);
+            let err = client.submit_event(event).await.unwrap_err();
+            assert!(
+                matches!(err, CliError::DeliveryUnknown(_)),
+                "kind {kind}: expected DeliveryUnknown for body loss, got {err:?}"
+            );
+            assert_eq!(
+                attempts.load(Ordering::SeqCst),
+                1,
+                "kind {kind}: must submit exactly once"
+            );
+        }
     }
 
     /// When all retry attempts are connect-failures (the relay definitively never saw
@@ -3620,26 +3692,28 @@ mod desktop_throttle_tests {
         (BuzzClient::new(relay.into(), credentials).unwrap(), signed)
     }
 
-    /// A desktop allowing one sign-in signature per 300 ms against a relay
-    /// that drops unsigned sockets after 200 ms: the throttle is waited out
-    /// between connections, so only the live challenge is signed, with a
-    /// fresh assertion on the reconnect after the old one expired.
+    /// A desktop that throttles the first sign-in signature: the throttle is
+    /// waited out between connections, so only the live challenge is signed,
+    /// with a fresh assertion on the reconnect after the old one expired.
+    ///
+    /// The throttle is decided by call count, not by time since the test
+    /// started: on a loaded runner the desktop setup alone could outlast a
+    /// wall-clock throttle window, leaving nothing to wait out. The relay's
+    /// sign-in deadline is long for the same reason; the client drops the
+    /// throttled socket itself.
     #[tokio::test]
     async fn a_throttled_sign_in_reconnects_with_fresh_evidence() {
         use super::ws_deadline_tests::deadline_relay;
         let keys = nostr::Keys::generate();
-        let (relay, conns, _, bearers) =
-            deadline_relay(std::time::Duration::from_millis(200)).await;
-        let last = std::sync::Mutex::new(std::time::Instant::now());
+        let (relay, conns, _, bearers) = deadline_relay(std::time::Duration::from_secs(5)).await;
+        let signs = AtomicUsize::new(0);
         let (c, signed) = desktop(&relay, &keys, || dp::assertion(40), move |_| {
-            let mut last = last.lock().unwrap();
-            if last.elapsed() < std::time::Duration::from_millis(300) {
+            if signs.fetch_add(1, Ordering::SeqCst) == 0 {
                 crate::cached_assertion::test_clock::advance(60);
                 return Some(
                     serde_json::json!({"result": "", "error": "rate_limited", "retry_after": 30}),
                 );
             }
-            *last = std::time::Instant::now();
             None
         })
         .await;
@@ -3764,6 +3838,50 @@ mod desktop_throttle_tests {
             "the stale proof is signed again"
         );
         assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    /// A provider handing out a new assertion on every lookup is served:
+    /// the proof is signed once and goes out with the post-sign assertion.
+    #[tokio::test]
+    async fn a_new_assertion_per_lookup_goes_out_after_the_proof() {
+        let (relay, seen) = logging_relay().await;
+        let issued: super::ws_deadline_tests::Log = Default::default();
+        let log = issued.clone();
+        let jti = AtomicUsize::new(0);
+        let signs = Arc::new(AtomicUsize::new(0));
+        let n = signs.clone();
+        let keys = nostr::Keys::generate();
+        let pubkey = keys.public_key().to_hex();
+        let aud = relay.clone();
+        let (c, _) = desktop(
+            &relay,
+            &keys,
+            move || {
+                let now = crate::cached_assertion::unix_now();
+                let token = crate::federated_identity::test_support::jws(serde_json::json!({
+                    "iss": "https://adapter.example",
+                    "sub": "user-1",
+                    "aud": aud,
+                    "iat": now,
+                    "exp": now + 600,
+                    "jti": format!("jti-{}", jti.fetch_add(1, Ordering::SeqCst)),
+                    "nostr_pubkey": pubkey,
+                }));
+                log.lock().unwrap().push(token.clone());
+                token
+            },
+            move |_| {
+                n.fetch_add(1, Ordering::SeqCst);
+                None
+            },
+        )
+        .await;
+        let before = issued.lock().unwrap().len();
+        c.query(&serde_json::json!({})).await.unwrap();
+        assert_eq!(signs.load(Ordering::SeqCst), 1);
+        let issued = issued.lock().unwrap();
+        assert_eq!(issued.len() - before, 2, "one lookup each side of signing");
+        assert_eq!(*seen.lock().unwrap(), [issued.last().unwrap().clone()]);
     }
 
     /// Evidence that keeps expiring while the proof is signed ends retryable
@@ -4094,6 +4212,20 @@ mod ws_deadline_tests {
     }
 
     pub(super) type Log = Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// Every upgrade names the CLI and its version.
+    #[tokio::test]
+    async fn upgrade_headers_carry_the_cli_user_agent() {
+        let keys = Keys::generate();
+        let c = BuzzClient::new(
+            "http://127.0.0.1:1".into(),
+            Credentials::from_signer(Arc::new(keys.clone()), keys.public_key()),
+        )
+        .unwrap();
+        let headers = c.upgrade_headers().await.unwrap();
+        assert_eq!(headers.get("user-agent").unwrap(), super::USER_AGENT);
+        assert!(super::USER_AGENT.starts_with("buzz-cli/"));
+    }
 
     /// A sign-in signature that comes back after the relay's 5 s deadline
     /// reconnects and signs the new challenge, never the old one.

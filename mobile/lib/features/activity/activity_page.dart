@@ -1,4 +1,5 @@
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 
 import 'dart:async';
 import 'dart:math' show max;
@@ -19,6 +20,7 @@ import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/relay/thread_reference.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/sheet_action_section.dart';
@@ -26,6 +28,8 @@ import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/duo_toolbar.dart';
+import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/message_author_meta.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/channel.dart';
@@ -33,20 +37,25 @@ import '../channels/channel_detail_page.dart';
 import '../channels/channel_identity_names_provider.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
+import '../channels/me/me_page.dart';
 import '../channels/dm_channel_labels.dart';
 import '../channels/message_content.dart';
 import '../../shared/read_state/read_state_format.dart';
+import '../../shared/reminders/remind_me_later_sheet.dart';
+import '../../shared/reminders/reminder_service.dart'
+    show ReminderTarget, reminderServiceProvider;
+import '../channels/thread_follows/thread_follows_provider.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'activity_provider.dart';
-import 'compose_drafts_provider.dart';
+import '../../shared/drafts/compose_drafts_provider.dart';
 import 'dm_resurface.dart';
 import 'feed_item.dart';
 import 'inbox_item.dart';
 import 'inbox_local_state_provider.dart';
 import 'inbox_read_state.dart';
-import 'reminders_provider.dart';
+import 'reminders_provider.dart' hide ReminderTarget;
 
 part 'activity_page/header_actions.dart';
 part 'activity_page/inbox_row.dart';
@@ -149,7 +158,8 @@ class ActivityPage extends HookConsumerWidget {
     bool isDone(InboxItem item) => isInboxItemDone(
       item,
       markerOf: markerOf,
-      localUnreadOverrides: localState.unreadIds,
+      rawMarkerOf: (contextId) => readState.contexts[contextId],
+      localUnreadOverrides: localState.unreadBaselines,
       localDoneSet: localState.doneIds,
     );
 
@@ -186,8 +196,6 @@ class ActivityPage extends HookConsumerWidget {
           (channelById[id]?.isDm ?? false) ||
           ref.read(channelsProvider.notifier).hiddenDmIds.contains(id),
     );
-    // A filtered DM row holds only part of its conversation, so the DM
-    // channel marker would also read events this view hides.
     final rowsArePartial =
         filter.value == InboxFilter.thread ||
         filter.value == InboxFilter.mention ||
@@ -215,16 +223,80 @@ class ActivityPage extends HookConsumerWidget {
       return null;
     }, [preloadPubkeysKey]);
 
+    // A filtered row holds only part of its conversation. Its synced thread
+    // or channel marker is one watermark, so advance it through every event
+    // that is now read (shown here, or already read) and stop just before the
+    // first unread event the filter hides. Shown events past that point get
+    // local per-message marks until the hidden one is read too.
+    void markPartialRowRead(
+      InboxItem item,
+      String channelId, {
+      required bool isDmRow,
+    }) {
+      final notifier = ref.read(readStateProvider.notifier);
+      final shown = {
+        for (final e in [item.item, ...item.groupItems]) e.id: e,
+      };
+      final rootId = isDmRow ? null : item.threadRootId;
+      bool inContext(FeedItem e) =>
+          e.channelId == channelId &&
+          (rootId == null ||
+              (isThreadReply(e.tags) &&
+                  threadReferenceOf(e.tags).rootId == rootId));
+      final events = {
+        for (final e in [
+          ...allItems.expand((i) => i.groupItems),
+          ...shown.values,
+        ])
+          if (inContext(e)) e.id: e,
+      }.values.toList()..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      int? cap;
+      for (final e in events) {
+        if (!shown.containsKey(e.id) &&
+            !isInboxEventRead(e, markerOf: markerOf)) {
+          cap = e.createdAt - 1;
+          break;
+        }
+        cap = e.createdAt;
+      }
+      if (cap != null) {
+        notifier.markContextRead(
+          rootId == null ? channelId : threadContextKey(rootId),
+          cap,
+          explicit: true,
+        );
+      }
+      for (final e in shown.values) {
+        if (inContext(e) && cap != null && e.createdAt <= cap) continue;
+        notifier.markContextRead(
+          msgContextKey(e.id),
+          e.createdAt,
+          explicit: true,
+        );
+      }
+    }
+
+    // The catch-up scope covering a row: its thread, or its whole channel
+    // for a DM or top-level row.
+    String? scopeOf(InboxItem item) {
+      final threadRootId = item.conversationId.startsWith('dm:')
+          ? null
+          : item.threadRootId;
+      return threadRootId != null
+          ? threadContextKey(threadRootId)
+          : item.item.channelId;
+    }
+
     void markItemRead(InboxItem item) {
       final notifier = ref.read(readStateProvider.notifier);
-      ref
-          .read(inboxLocalStateProvider.notifier)
-          .clearUnread(groupedInboxItemIds(item));
+      final inbox = ref.read(inboxLocalStateProvider.notifier);
+      // Only this row's own marks. A scope-wide clear belongs to catch-up
+      // and to an explicit channel or thread mark read.
+      inbox.clearUnread(groupedInboxItemIds(item));
       final isDmRow = item.conversationId.startsWith('dm:');
-      if (isDmRow && rowsArePartial) {
-        for (final e in {item.item, ...item.groupItems}) {
-          notifier.markContextRead(msgContextKey(e.id), e.createdAt);
-        }
+      final partialChannelId = rowsArePartial ? item.item.channelId : null;
+      if (partialChannelId != null) {
+        markPartialRowRead(item, partialChannelId, isDmRow: isDmRow);
         return;
       }
       // A DM row can group replies under several thread roots; its channel
@@ -256,9 +328,17 @@ class ActivityPage extends HookConsumerWidget {
     }
 
     void markItemUnread(InboxItem item) {
+      final readState = ref.read(readStateProvider);
       ref
           .read(inboxLocalStateProvider.notifier)
-          .markUnread(groupedInboxItemIds(item));
+          .markUnread(
+            groupedInboxItemIds(item),
+            baseline: inboxItemReadAt(
+              item,
+              markerOf: (contextId) => readState.contexts[contextId],
+            ),
+            scope: scopeOf(item),
+          );
     }
 
     Future<void> openItem(InboxItem item) async {
@@ -331,16 +411,19 @@ class ActivityPage extends HookConsumerWidget {
           : thread.parentId;
 
       if (!context.mounted) return;
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ChannelDetailPage(
-            channel: resolvedChannel,
-            initialMessageId: target.id,
-            initialThreadRootId: threadRootId,
-            initialThreadRouteBehavior:
-                InitialThreadRouteBehavior.replaceCurrentRoute,
-          ),
+      openConversationPane(
+        context,
+        target.id,
+        (_) => ChannelDetailPage(
+          channel: resolvedChannel,
+          initialMessageId: target.id,
+          initialThreadRootId: threadRootId,
+          initialThreadRouteBehavior:
+              ConversationPaneScope.maybeOf(context) == null
+              ? InitialThreadRouteBehavior.replaceCurrentRoute
+              : InitialThreadRouteBehavior.push,
         ),
+        reopen: true,
       );
     }
 
@@ -353,15 +436,18 @@ class ActivityPage extends HookConsumerWidget {
         );
         return;
       }
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ChannelDetailPage(
-            channel: channel,
-            initialThreadRootId: draft.threadHeadId,
-            initialThreadRouteBehavior:
-                InitialThreadRouteBehavior.replaceCurrentRoute,
-          ),
+      openConversationPane(
+        context,
+        'draft:${draft.channelId}:${draft.threadHeadId}',
+        (_) => ChannelDetailPage(
+          channel: channel,
+          initialThreadRootId: draft.threadHeadId,
+          initialThreadRouteBehavior:
+              ConversationPaneScope.maybeOf(context) == null
+              ? InitialThreadRouteBehavior.replaceCurrentRoute
+              : InitialThreadRouteBehavior.push,
         ),
+        reopen: true,
       );
     }
 
@@ -382,12 +468,12 @@ class ActivityPage extends HookConsumerWidget {
         );
         return;
       }
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ChannelDetailPage(
-            channel: channel,
-            initialMessageId: target.eventId,
-          ),
+      openConversationPane(
+        context,
+        target.eventId,
+        (_) => ChannelDetailPage(
+          channel: channel,
+          initialMessageId: target.eventId,
         ),
       );
     }
@@ -471,6 +557,16 @@ class ActivityPage extends HookConsumerWidget {
       );
     }
 
+    final strip = DuoToolbarScope.maybeStripOf(context);
+    final closeInRail =
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        strip != null &&
+        usesConversationPanes(
+          context,
+          strip: strip,
+          windowSize:
+              View.of(context).physicalSize / View.of(context).devicePixelRatio,
+        );
     return IosScrollToTop(
       child: Scaffold(
         backgroundColor: context.colors.surface,
@@ -479,36 +575,62 @@ class ActivityPage extends HookConsumerWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: Grid.gutter,
-                  vertical: Grid.xxs,
-                ),
-                child: Row(
-                  children: [
-                    defaultTargetPlatform == TargetPlatform.iOS
-                        ? Padding(
-                            padding: const EdgeInsets.only(right: Grid.twelve),
-                            child: IosGlassNavigationButton(
-                              icon: IosGlassNavigationIcon.close,
-                              semanticLabel: 'Close activity',
-                              width: 44,
-                              height: 44,
-                              controlSize: 44,
-                              foregroundColor: navigationPrimaryForeground(
-                                context,
-                              ),
-                              onPressed: () => Navigator.of(context).pop(),
-                            ),
-                          )
-                        : IconButton(
-                            tooltip: 'Close activity',
-                            icon: const Icon(BuzzIcons.x),
-                            onPressed: () => Navigator.of(context).pop(),
+              Stack(
+                children: [
+                  if (closeInRail)
+                    FrostedAppBar(
+                      nativeTitle: '',
+                      railOnly: true,
+                      automaticallyImplyLeading: false,
+                      nativeLeading: IosNavigationAction(
+                        label: 'Close activity',
+                        symbol: 'xmark',
+                        onPressed: () => Navigator.of(context).pop(),
+                      ),
+                    ),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(
+                      minHeight: 44 + Grid.xxs * 2,
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: Grid.gutter,
+                        vertical: Grid.xxs,
+                      ),
+                      child: Row(
+                        children: [
+                          if (!closeInRail)
+                            defaultTargetPlatform == TargetPlatform.iOS
+                                ? Padding(
+                                    padding: const EdgeInsets.only(
+                                      right: Grid.twelve,
+                                    ),
+                                    child: IosGlassNavigationButton(
+                                      icon: IosGlassNavigationIcon.close,
+                                      semanticLabel: 'Close activity',
+                                      width: 44,
+                                      height: 44,
+                                      controlSize: 44,
+                                      foregroundColor:
+                                          navigationPrimaryForeground(context),
+                                      onPressed: () =>
+                                          Navigator.of(context).pop(),
+                                    ),
+                                  )
+                                : IconButton(
+                                    tooltip: 'Close activity',
+                                    icon: const Icon(BuzzIcons.x),
+                                    onPressed: () =>
+                                        Navigator.of(context).pop(),
+                                  ),
+                          Expanded(
+                            child: Text('Activity', style: headerTitleStyle),
                           ),
-                    Expanded(child: Text('Activity', style: headerTitleStyle)),
-                  ],
-                ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ),
               SizedBox(
                 height: filterHeight,

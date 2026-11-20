@@ -20,6 +20,7 @@ class _MessageList extends HookConsumerWidget {
   final String? welcomeAgent;
   final ChannelMessagesNotifier notifier;
   final bool isDm;
+  final bool flat;
   final String? currentPubkey;
   final bool isMember;
   final bool isArchived;
@@ -46,6 +47,7 @@ class _MessageList extends HookConsumerWidget {
     this.welcomeAgent,
     required this.notifier,
     required this.isDm,
+    required this.flat,
     required this.currentPubkey,
     required this.isMember,
     required this.isArchived,
@@ -298,7 +300,7 @@ class _MessageList extends HookConsumerWidget {
       }
 
       final stickyTop =
-          frostedAppBarHeight(
+          _conversationHeaderHeight(
             context,
             titleContentHeight: appBarTitleContentHeight,
           ) +
@@ -477,7 +479,7 @@ class _MessageList extends HookConsumerWidget {
       final visiblePageHeight = max(
         0.0,
         viewportHeight -
-            frostedAppBarHeight(
+            _conversationHeaderHeight(
               context,
               titleContentHeight: appBarTitleContentHeight,
             ) -
@@ -605,6 +607,18 @@ class _MessageList extends HookConsumerWidget {
       ],
     );
 
+    // Reading starts once the timeline holds still for the dwell while this
+    // page is in front and the app is in use.
+    final appInUse = isAppInUse(useAppLifecycleState());
+    final readStateReady = ref.watch(
+      readStateProvider.select((state) => state.isReady),
+    );
+    final readingActive =
+        readStateReady &&
+        appInUse &&
+        (ModalRoute.of(context)?.isCurrent ?? true) &&
+        ConversationPaneScope.isActiveOf(context);
+    final clearCovered = useClearsCoveredUnread(ref, active: readingActive);
     void readVisibleRows() {
       final readState = ref.read(readStateProvider);
       final viewportHeight = timelineViewportHeight.value;
@@ -623,7 +637,7 @@ class _MessageList extends HookConsumerWidget {
           (navigationBottomInset / viewportHeight).clamp(0.0, 1.0) - 0.01;
       final topEdge =
           1 -
-          frostedAppBarHeight(
+          _conversationHeaderHeight(
                 context,
                 titleContentHeight: appBarTitleContentHeight,
               ) /
@@ -631,14 +645,16 @@ class _MessageList extends HookConsumerWidget {
           0.01;
       final visible = <TimelineMessage>[];
       for (final position in itemPositionsListener.itemPositions.value) {
-        if (position.index >= displayEntries.length ||
-            position.itemLeadingEdge < bottomEdge ||
-            position.itemTrailingEdge > topEdge) {
-          continue;
+        if (position.index >= displayEntries.length) continue;
+        final group = displayEntries.reversed.elementAt(position.index);
+        if (isReadableRow(
+          position,
+          start: bottomEdge,
+          end: topEdge,
+          linked: group.any((e) => e.message.id == initialMessageId),
+        )) {
+          visible.addAll(group.map((entry) => entry.message));
         }
-        final group =
-            displayEntries[displayEntries.length - 1 - position.index];
-        visible.addAll(group.map((entry) => entry.message));
       }
       final latest = entries.last.message;
       final atBottom =
@@ -647,14 +663,18 @@ class _MessageList extends HookConsumerWidget {
             (position) =>
                 position.index == 0 && position.itemLeadingEdge >= bottomEdge,
           );
+      // Displaying a row ends its device-local unread before it is read.
+      final endCatchUp = clearCovered(visible);
       final marks = readingMarks(
-        readState: readState,
+        readState: ref.read(readStateProvider),
         channelId: channelId,
         isDm: isDm,
         currentPubkey: currentPubkey,
         loaded: allMessages,
         visible: visible,
         bottom: atBottom ? latest : null,
+        flat: flat,
+        onCatchUp: endCatchUp,
       );
       final notifier = ref.read(readStateProvider.notifier);
       // Reading to the bottom ends a manual "mark unread" on the channel.
@@ -666,18 +686,9 @@ class _MessageList extends HookConsumerWidget {
       }
     }
 
-    // Reading starts once the timeline holds still for the dwell while this
-    // page is in front and the app is in use.
-    final appInUse = isAppInUse(useAppLifecycleState());
-    final readStateReady = ref.watch(
-      readStateProvider.select((state) => state.isReady),
-    );
     useReadingDwell(
       positions: itemPositionsListener.itemPositions,
-      active:
-          readStateReady &&
-          appInUse &&
-          (ModalRoute.of(context)?.isCurrent ?? true),
+      active: readingActive,
       onDwell: readVisibleRows,
       keys: [channelId, readingContentKey(allMessages), navigationBottomInset],
     );
@@ -868,29 +879,20 @@ class _MessageList extends HookConsumerWidget {
     }
     if (entries.isEmpty) {
       if (welcomeAgent != null) {
-        return SingleChildScrollView(
-          padding: EdgeInsets.fromLTRB(
-            Grid.gutter,
-            frostedAppBarHeight(
-                  context,
-                  titleContentHeight: appBarTitleContentHeight,
-                ) +
-                Grid.md,
-            Grid.gutter,
-            composerBottomInset + Grid.md,
-          ),
-          child: Column(
-            children: [
-              BestieWelcome(agent: welcomeAgent!),
-              ?hiddenHistory,
-              if (displayedTyping.isNotEmpty)
-                InlineAgentTyping(
-                  channelId: channelId,
-                  entries: displayedTyping,
-                  knownAgents: workingAgents,
-                ),
-            ],
-          ),
+        return _welcomeMessages(
+          context,
+          appBarTitleContentHeight: appBarTitleContentHeight,
+          composerBottomInset: composerBottomInset,
+          children: [
+            BestieWelcome(agent: welcomeAgent!),
+            ?hiddenHistory,
+            if (displayedTyping.isNotEmpty)
+              InlineAgentTyping(
+                channelId: channelId,
+                entries: displayedTyping,
+                knownAgents: workingAgents,
+              ),
+          ],
         );
       }
       return hiddenHistory ?? const _EmptyMessages();
@@ -959,7 +961,7 @@ class _MessageList extends HookConsumerWidget {
               padding: EdgeInsets.only(
                 left: Grid.gutter,
                 right: Grid.gutter,
-                top: frostedAppBarHeight(
+                top: _conversationHeaderHeight(
                   context,
                   titleContentHeight: appBarTitleContentHeight,
                 ),
@@ -1166,7 +1168,7 @@ class _MessageList extends HookConsumerWidget {
             left: 0,
             right: 0,
             top:
-                frostedAppBarHeight(
+                _conversationHeaderHeight(
                   context,
                   titleContentHeight: appBarTitleContentHeight,
                 ) +

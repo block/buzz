@@ -20,6 +20,8 @@ void main() {
       ('buzz://message?channel=source', 'Chat'),
       ('### Heading', 'Heading'),
       ('🐝' * 90, '🐝' * 80),
+      ('> Ship it Friday\n>\n> ok?\n\nSummarize this', 'Summarize this'),
+      ('> Ship it Friday\n> ok?\n\n', 'Ship it Friday ok?'),
     ]) {
       expect(startingMeChatTitle(message), title);
     }
@@ -361,6 +363,7 @@ class _MessageRelay extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
   }) async {
     attempts.add(event.id);
     messages[event.id] = event;

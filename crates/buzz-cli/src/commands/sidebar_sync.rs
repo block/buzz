@@ -12,8 +12,12 @@ use super::sidebar_doc::{self, Codec, Edit, Stamp, Tree};
 use crate::client::BuzzClient;
 use crate::error::CliError;
 
-/// Relay event size ceiling shared with desktop's sidebar blobs.
+/// Existing byte budget for the other sidebar documents.
 const MAX_CIPHERTEXT_BYTES: usize = 65_535;
+/// A 500-entry channel flag record can exceed the old ciphertext budget
+/// after millisecond timestamps, NIP-44 padding, and base64. The relay
+/// accepts the full short-form NIP-44 envelope for these records.
+const FLAG_MAX_CIPHERTEXT_BYTES: usize = 87_472;
 
 /// One synced document: its `d` tag and the name used in messages.
 #[derive(Clone, Copy)]
@@ -46,17 +50,10 @@ pub(crate) fn channel_ids(channels: &[String]) -> Result<Vec<String>, CliError> 
         .collect()
 }
 
-/// The relay's current event for `lane` and this identity, decrypted and
-/// passed to `decode` with the event's `created_at`. An absent head is
-/// `doc: None`; an unreadable one is an error, never an empty document. The
-/// read is pinned to the writer (`consistency: strong`): a write derives a
-/// full snapshot from it, and a lagging replica would drop the caller's own
-/// just-accepted edits.
-pub(crate) async fn fetch_head<T>(
-    client: &BuzzClient,
-    lane: Lane,
-    decode: impl FnOnce(&Value, u64) -> Option<T>,
-) -> Result<Head<T>, CliError> {
+/// The relay's current verified `lane` event for this identity, read from the
+/// writer. `None` when the relay holds none; an error when it returns only
+/// events that are not yours or fail verification.
+async fn head_event(client: &BuzzClient, lane: Lane) -> Result<Option<nostr::Event>, CliError> {
     let me = client.public_key();
     let filter = json!({
         "kinds": [KIND_READ_STATE],
@@ -73,7 +70,8 @@ pub(crate) async fn fetch_head<T>(
         .into_iter()
         .filter_map(|event| serde_json::from_value::<nostr::Event>(event).ok())
         .filter(|event| {
-            event.pubkey == me
+            event.kind.as_u16() == KIND_READ_STATE as u16
+                && event.pubkey == me
                 && event.tags.identifier() == Some(lane.d_tag)
                 && event.verify().is_ok()
         })
@@ -82,19 +80,33 @@ pub(crate) async fn fetch_head<T>(
                 .cmp(&a.created_at)
                 .then_with(|| a.id.to_hex().cmp(&b.id.to_hex()))
         });
-    let Some(event) = head else {
-        if returned > 0 {
-            return Err(CliError::Other(format!(
-                "the relay returned a {} event that is not yours or fails verification; refusing to overwrite it",
-                lane.label
-            )));
-        }
+    if head.is_none() && returned > 0 {
+        return Err(CliError::Other(format!(
+            "the relay returned a {} event that is not yours or fails verification; refusing to overwrite it",
+            lane.label
+        )));
+    }
+    Ok(head)
+}
+
+/// The relay's current event for `lane` and this identity, decrypted and
+/// passed to `decode` with the event's `created_at`. An absent head is
+/// `doc: None`; an unreadable one is an error, never an empty document. The
+/// read is pinned to the writer (`consistency: strong`): a write derives a
+/// full snapshot from it, and a lagging replica would drop the caller's own
+/// just-accepted edits.
+pub(crate) async fn fetch_head<T>(
+    client: &BuzzClient,
+    lane: Lane,
+    decode: impl FnOnce(&Value, u64) -> Option<T>,
+) -> Result<Head<T>, CliError> {
+    let Some(event) = head_event(client, lane).await? else {
         return Ok(Head {
             created_at: 0,
             doc: None,
         });
     };
-
+    let me = client.public_key();
     let unreadable = |detail: String| {
         CliError::Other(format!(
             "your {} event {} is unreadable ({detail}); refusing to read or overwrite it",
@@ -120,7 +132,9 @@ pub(crate) async fn fetch_head<T>(
 
 /// Encrypts `plaintext` to yourself and publishes it as the new head, one
 /// second after `head_created_at` at the earliest. A relay `duplicate:` reply
-/// is a conflict.
+/// is a conflict unless the head is this event: `submit_event` retries an
+/// ambiguous attempt with the same signed event, which the relay then reports
+/// as a duplicate of the copy it already stored.
 pub(crate) async fn publish(
     client: &BuzzClient,
     lane: Lane,
@@ -143,20 +157,32 @@ pub(crate) async fn publish(
         .nip44_encrypt(&me, &plaintext)
         .await
         .map_err(|e| CliError::Other(format!("failed to encrypt {}: {e}", lane.label)))?;
-    if content.len() > MAX_CIPHERTEXT_BYTES {
+    let ciphertext_limit = match lane.d_tag {
+        "channel-stars" | "channel-mutes" => FLAG_MAX_CIPHERTEXT_BYTES,
+        _ => MAX_CIPHERTEXT_BYTES,
+    };
+    if content.len() > ciphertext_limit {
         return Err(too_large());
     }
     let created_at = now().as_secs().max(head_created_at + 1);
     let builder = EventBuilder::new(Kind::Custom(KIND_READ_STATE as u16), content)
         .tags([Tag::identifier(lane.d_tag), Tag::hashtag(lane.d_tag)])
         .custom_created_at(Timestamp::from(created_at));
-    let raw = client
-        .submit_event(client.sign_event(builder).await?)
-        .await?;
-    let normalized = parse_write_response(
+    let event = client.sign_event(builder).await?;
+    let event_id = event.id;
+    let raw = client.submit_event(event).await?;
+    let normalized = match parse_write_response(
         &raw,
         &format!("a newer {} update won; run the command again", lane.label),
-    )?;
+    ) {
+        Err(CliError::Conflict(conflict)) => match head_event(client, lane).await? {
+            Some(head) if head.id == event_id => {
+                json!({"event_id": event_id.to_hex(), "accepted": true, "message": ""}).to_string()
+            }
+            _ => return Err(CliError::Conflict(conflict)),
+        },
+        other => other?,
+    };
     serde_json::from_str(&normalized)
         .map_err(|e| CliError::Other(format!("relay response is not JSON: {e}")))
 }
@@ -223,6 +249,9 @@ pub(crate) mod test_support {
     pub struct Relay {
         pub events: Vec<Value>,
         pub duplicate: bool,
+        /// Store the event but answer `duplicate:`, as the relay answers a
+        /// retry of an attempt it already stored.
+        pub stored_duplicate: bool,
         /// Answer every query with all stored events, whoever authored them.
         pub leaky: bool,
     }
@@ -262,8 +291,8 @@ pub(crate) mod test_support {
                 post(|State(relay): State<Shared>, body: Bytes| async move {
                     let event: Value = serde_json::from_slice(&body).unwrap();
                     let mut relay = relay.lock().unwrap();
-                    let message = if relay.duplicate {
-                        "duplicate: newer head"
+                    let message = if relay.duplicate || relay.stored_duplicate {
+                        "duplicate:"
                     } else {
                         ""
                     };

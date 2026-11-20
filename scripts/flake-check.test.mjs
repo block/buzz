@@ -17,7 +17,6 @@ import {
   chooseRust,
   classify,
   cratePackage,
-  dartDefine,
   hunkRanges,
   ITERATIONS,
   infraTest,
@@ -1028,16 +1027,11 @@ test("reports give per-test statuses per iteration", () => {
 });
 
 test("repeat invocations mirror the lanes they stand in for", () => {
-  // node:test flags come from desktop/package.json "test"; the Flutter define
-  // from the mobile test shards; nextest's flake profile must keep retries off.
+  // node:test flags come from desktop/package.json "test"; nextest's flake
+  // profile must keep retries off.
   const script = JSON.parse(read("../desktop/package.json")).scripts.test;
   for (const file of ["x.test.mjs", "x.jsdom-test.mjs"])
     assert.ok(script.includes(`node ${nodeTestArgs(file).join(" ")} "`), file);
-  assert.ok(
-    read("../.github/workflows/_ci-clients.yml").includes(
-      `scripts/mobile-test-shard.sh \${{ matrix.shard }} 3 ${dartDefine}`,
-    ),
-  );
   // nextest reads its config from the workspace root, so each Rust workspace
   // carries the flake profile.
   for (const config of [

@@ -33,3 +33,22 @@ class _EmptyMessages extends StatelessWidget {
     );
   }
 }
+
+Widget _welcomeMessages(
+  BuildContext context, {
+  required double appBarTitleContentHeight,
+  required double composerBottomInset,
+  required List<Widget> children,
+}) => SingleChildScrollView(
+  padding: EdgeInsets.fromLTRB(
+    Grid.gutter,
+    _conversationHeaderHeight(
+          context,
+          titleContentHeight: appBarTitleContentHeight,
+        ) +
+        Grid.md,
+    Grid.gutter,
+    composerBottomInset + Grid.md,
+  ),
+  child: Column(children: children),
+);

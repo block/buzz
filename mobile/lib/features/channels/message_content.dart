@@ -1,8 +1,13 @@
 import 'message_reply_drag_target.dart';
+
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+
 import 'dart:async';
+import 'dart:convert';
+
 import '../../shared/widgets/ios_media_carousel.dart';
 import '../../shared/widgets/message_attachment_corners.dart';
+
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -10,6 +15,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
@@ -38,11 +44,15 @@ import '../../shared/emoji/emoji_only.dart';
 import 'channel_ids_by_name_provider.dart';
 import 'local_send_bubble_surface.dart';
 import 'media_viewer_page.dart';
+import 'native_photo_zoom_preview.dart';
+import 'native_video_files.dart';
 import 'message_content/link_normalizer.dart';
 import 'message_content/markdown_escapes.dart';
+import 'message_content/markdown_tables.dart';
 import 'message_content/preview_text.dart';
 import 'message_media.dart';
 import 'message_content/bubble_segments.dart';
+import 'message_content/edited_marker.dart';
 import 'message_content/buzz_link_label.dart';
 import 'message_content/channel_token_pattern.dart';
 import 'message_mention_pill.dart';
@@ -54,6 +64,9 @@ import 'message_media_geometry.dart';
 import 'voice_note_attachment.dart';
 
 part 'message_content/media_carousel.dart';
+part 'message_content/mention_markdown.dart';
+part 'message_content/media_stack.dart';
+part 'message_content/media_stack_tuning.dart';
 part 'message_content/message_preview.dart';
 part 'message_content/bubble_shape.dart';
 part 'message_content/inline_components.dart';
@@ -110,6 +123,9 @@ class MessageContent extends HookConsumerWidget {
   /// Paint conversation text bubbles while keeping attachments on the page.
   final bool bubble;
 
+  /// Space reclaimed from an omitted sender avatar and its gutter.
+  final double additionalTextWidth;
+
   /// Distinguishes messages authored by the signed-in identity.
   final bool ownMessage;
 
@@ -158,6 +174,7 @@ class MessageContent extends HookConsumerWidget {
 
   /// Opens message-specific actions for an image in the full-screen viewer.
   final MediaViewerMoreAction? onMediaMore;
+  final NativePhotoActions? nativePhotoActions;
 
   final TextStyle? baseStyle;
 
@@ -172,6 +189,10 @@ class MessageContent extends HookConsumerWidget {
   /// it contains.
   final bool scaleEmojiOnly;
 
+  /// Marks the body as replaced by an edit, after its last line: inline after
+  /// prose, else on its own line after a closing block or trailing media.
+  final bool edited;
+
   /// Allows a multi-image carousel to reclaim leading space reserved by the
   /// surrounding message layout, while keeping its image count aligned with
   /// the message body.
@@ -185,6 +206,7 @@ class MessageContent extends HookConsumerWidget {
     super.key,
     required this.content,
     this.bubble = false,
+    this.additionalTextWidth = 0,
     this.ownMessage = false,
     this.trimTrailingSpacing = false,
     this.bubbleEnd = true,
@@ -199,10 +221,12 @@ class MessageContent extends HookConsumerWidget {
     this.onMentionTap,
     this.onMediaReply,
     this.onMediaMore,
+    this.nativePhotoActions,
     this.baseStyle,
     this.textAlign,
     this.maxLines,
     this.scaleEmojiOnly = false,
+    this.edited = false,
     this.mediaCarouselLeadingOverflow = 0,
     this.mediaCarouselTrailingOverflow = 0,
   });
@@ -210,7 +234,13 @@ class MessageContent extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final markdownTheme = GptMarkdownTheme.of(context);
-    final chatColors = ChatColors.of(context);
+    final resolvedChatColors = ChatColors.of(context);
+    // The fallback palette is newly allocated; keep the nested theme stable so
+    // unchanged messages do not reparse their Markdown on parent rebuilds.
+    final chatColors = useMemoized(() => resolvedChatColors, [
+      resolvedChatColors.outgoing,
+      resolvedChatColors.foreground,
+    ]);
     final ownTextColor = chatColors.foreground;
     // Own-bubble links share the bubble ink; markdown marks them by underline.
     final linkColor = ownMessage ? ownTextColor : context.colors.tertiary;
@@ -301,13 +331,15 @@ class MessageContent extends HookConsumerWidget {
       content,
     ]);
     final trailingGallery = maxLines == null
-        ? extractTrailingImageGallery(normalizedContent, imetaByUrl)
+        ? extractTrailingImageGallery(
+            normalizedContent,
+            imetaByUrl,
+            includeVideos: bubble,
+          )
         : null;
     final galleryText = trailingGallery?.content ?? normalizedContent;
-    // gpt_markdown has no backslash escapes, so hold escaped characters as
-    // stand-ins that _MarkdownEscapeMd and the link builders restore.
     final markdownContent = useMemoized(
-      () => shieldMarkdownProseEscapes(galleryText),
+      () => separateMarkdownTables(escapeMarkdownLiterals(galleryText)),
       [galleryText],
     );
     final customEmoji = _mergeCustomEmoji(
@@ -343,42 +375,36 @@ class MessageContent extends HookConsumerWidget {
         ? kEmojiOnlyCustomEmojiSize
         : kCustomEmojiInlineSize;
 
+    // A new pool per message text, so an edit retires the old links'
+    // recognizers (and any hold under way on them) with the old text.
+    final pressedLink = useValueNotifier<_LinkTextRecognizer?>(null);
+    final linkRecognizers = useMemoized(
+      () => _LinkTextRecognizers(pressedLink),
+      [markdownContent],
+    );
+    useEffect(() => linkRecognizers.dispose, [linkRecognizers]);
+
     final finalContent = useMemoized(() {
       // Replace spaces with non-breaking spaces inside known mention names
-      // so the gpt_markdown combined regex can match multi-word names
-      // even when caseSensitive is not preserved.
-      // Skip content inside backticks to avoid altering inline code.
-      final mentionParts = markdownContent.split('`');
-      final mentionBuf = StringBuffer();
-      for (var i = 0; i < mentionParts.length; i++) {
-        if (i.isOdd) {
-          mentionBuf.write('`${mentionParts[i]}`');
-        } else {
-          var segment = mentionParts[i];
-          for (final range in mentionOccurrences(
-            segment,
-            mentionBindings.keys,
-          ).reversed) {
-            segment = segment.replaceRange(
-              range.start,
-              range.end,
-              '@${_markdownMentionName(range.label)}',
-            );
-          }
-          mentionBuf.write(segment);
+      // so _MentionMd's pattern matches multi-word names as one token, in
+      // the authored case. Code, inline or fenced, is left as written.
+      return mapMarkdownProse(markdownContent, (segment) {
+        for (final range in mentionOccurrences(
+          segment,
+          mentionBindings.keys,
+        ).reversed) {
+          segment = segment.replaceRange(
+            range.start,
+            range.end,
+            '@${_markdownMentionName(segment.substring(range.start + 1, range.end))}',
+          );
         }
-      }
-      var result = mentionBuf.toString();
-
-      // Ensure channel links at the very start of content don't get
-      // swallowed by markdown processing.
-      if (RegExp(r'^#[A-Za-z0-9_]').hasMatch(result)) {
-        result = '\u200B$result';
-      }
-      return result;
+        return segment;
+      });
     }, [markdownContent, mentionPresentationKey]);
 
-    final inlineComponents = _useMessageInlineComponents(
+    final inlinePatterns = _useMessageInlinePatterns(
+      ownBubble: bubble && ownMessage,
       content: content,
       finalContent: finalContent,
       mentionNames: resolvedMentionNames,
@@ -394,67 +420,91 @@ class MessageContent extends HookConsumerWidget {
       onMentionTap: onMentionTap,
       onChannelTap: resolvedChannelTap,
     );
+    final editedStyle = editedMarkerStyle(context, own: bubble && ownMessage);
+    // An authored slot is drawn as written; the marker takes its own line.
+    final markerSlot = edited && !finalContent.contains(editedSlot);
+    final components = useMemoized(
+      () => [
+        if (markerSlot) editedMarkerPattern(editedStyle),
+        ...inlinePatterns,
+        escapedSigilPattern,
+      ],
+      [inlinePatterns, editedStyle, markerSlot],
+    );
 
     Widget renderMarkdown(String text) => KeyedSubtree(
       key: ValueKey(
         '$text\u0000$mentionPresentationKey\u0000$channelPresentationKey',
       ),
-      child: GptMarkdown(
-        text,
-        style: style,
-        styleSheet: bubble
-            ? GptMarkdownStyleSheet(
-                blockQuote: BlockQuoteStyle(barColor: bubbleInk),
-                hr: HrStyle(color: bubbleInk.withValues(alpha: 0.3)),
-                table: TableStyle(
-                  borderColor: bubbleInk.withValues(alpha: 0.3),
-                  headerBackground: Colors.transparent,
-                  headerTextStyle: TextStyle(color: bubbleInk),
-                ),
-              )
-            : null,
-        followLinkColor: false,
-        // normalizeBareLinks() already turns bare URLs into Markdown links;
-        // gpt_markdown 1.2.0 autolinks by default, so both would run.
-        autolink: false,
-        codeBuilder: (context, name, code, closed) => _MessageCodeBlock(
-          name: name,
-          code: code,
-          bubble: bubble,
-          ink: bubble && ownMessage ? ownTextColor : null,
-        ),
-        linkBuilder: (context, linkText, shieldedUrl, linkStyle) {
-          final url = unshieldMarkdownEscapes(shieldedUrl);
-          return _buildLink(
-            context,
+      child: _LinkPressHighlight(
+        pressed: pressedLink,
+        child: GptMarkdown(
+          text,
+          style: style,
+          styleSheet: bubble
+              ? GptMarkdownStyleSheet(
+                  blockQuote: BlockQuoteStyle(barColor: bubbleInk),
+                  hr: HrStyle(color: bubbleInk.withValues(alpha: 0.3)),
+                  table: TableStyle(
+                    borderColor: bubbleInk.withValues(alpha: 0.3),
+                    headerBackground: Colors.transparent,
+                    headerTextStyle: TextStyle(color: bubbleInk),
+                  ),
+                )
+              : null,
+          followLinkColor: false,
+          // normalizeBareLinks() already turns bare URLs into Markdown links;
+          // gpt_markdown autolinks by default, so both would run.
+          autolink: false,
+          // Desktop has no GitHub alerts: a `> [!NOTE]` quote stays a quote.
+          alertBuilder: (_, alert) => alert.asBlockQuote(),
+          codeBuilder: (context, name, code, closed) => _MessageCodeBlock(
+            name: name,
+            code: code,
+            bubble: bubble,
+            ink: bubble && ownMessage ? ownTextColor : null,
+          ),
+          // Chips, media links and taps are handled in _buildLink, so the
+          // package's own tap is not used.
+          inlineLinkBuilder: (link) => _buildLink(
+            link,
             ref,
-            linkText,
-            url,
-            imetaByUrl[url],
-            linkStyle,
+            unmaskInlinePatterns(link.url),
             style,
             resolvedChannelTap,
             resolvedChannelNames,
-          );
-        },
-        imageBuilder: (context, shieldedUrl, _, _) {
-          final imageUrl = unshieldMarkdownEscapes(shieldedUrl);
-          return _buildMedia(
-            context,
-            imageUrl,
-            imetaByUrl[imageUrl],
-            onReply: onMediaReply == null ? null : mediaReply,
-            onMore: onMediaMore == null ? null : mediaMore,
-          );
-        },
-        textAlign: textAlign ?? (bubble ? TextAlign.start : null),
-        maxLines: maxLines,
-        inlineComponents: inlineComponents,
+            linkRecognizers,
+            imetaByUrl,
+          ),
+          imageBuilder: (context, maskedUrl, _, _) {
+            final imageUrl = unmaskInlinePatterns(maskedUrl);
+            return _buildMedia(
+              context,
+              imageUrl,
+              imetaByUrl[imageUrl],
+              onReply: onMediaReply == null ? null : mediaReply,
+              onMore: onMediaMore == null ? null : mediaMore,
+            );
+          },
+          textAlign: textAlign ?? (bubble ? TextAlign.start : null),
+          maxLines: maxLines,
+          inlinePatterns: components,
+        ),
       ),
     );
     final segments = bubble
         ? messageBubbleSegments(finalContent, imetaByUrl)
         : const <({String text, bool attachment})>[];
+    // Media that closes the body takes the marker after it instead.
+    final editedInBody =
+        edited &&
+        trailingGallery == null &&
+        (bubble
+            ? segments.isNotEmpty && !segments.last.attachment
+            : finalContent.trim().isNotEmpty);
+    Widget renderBody(String text, {required bool last}) => editedInBody && last
+        ? markedEditedBody(text, renderMarkdown, editedStyle, slot: markerSlot)
+        : renderMarkdown(text);
     final markdown = bubble
         ? Column(
             crossAxisAlignment: ownMessage
@@ -491,7 +541,8 @@ class MessageContent extends HookConsumerWidget {
                       constraints: BoxConstraints(
                         maxWidth:
                             MediaQuery.sizeOf(context).width *
-                            messageTextMaxWidthFraction,
+                                messageTextMaxWidthFraction +
+                            additionalTextWidth,
                       ),
                       child: MessageReplyDragTarget(
                         child: LocalSendBubbleSurface(
@@ -512,13 +563,20 @@ class MessageContent extends HookConsumerWidget {
                             ),
                             child: Theme(
                               data: Theme.of(context).copyWith(
+                                extensions: [
+                                  ...Theme.of(context).extensions.values,
+                                  chatColors,
+                                ],
                                 colorScheme: context.colors.copyWith(
                                   primary: linkColor,
                                 ),
                               ),
                               child: GptMarkdownTheme(
                                 gptThemeData: bubbleMarkdownTheme,
-                                child: renderMarkdown(segment.text),
+                                child: renderBody(
+                                  segment.text,
+                                  last: index == segments.length - 1,
+                                ),
                               ),
                             ),
                           ),
@@ -528,8 +586,12 @@ class MessageContent extends HookConsumerWidget {
                   ),
             ],
           )
-        : renderMarkdown(finalContent);
-    if (trailingGallery == null) return markdown;
+        : renderBody(finalContent, last: true);
+    if (trailingGallery == null) {
+      return edited && !editedInBody
+          ? withEditedMarkerBelow(markdown, end: ownMessage)
+          : markdown;
+    }
 
     return Column(
       crossAxisAlignment: ownMessage
@@ -537,26 +599,46 @@ class MessageContent extends HookConsumerWidget {
           : CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
+        if (bubble) _MessageImageStackCount(items: trailingGallery.items),
         if (trailingGallery.content.trim().isNotEmpty) markdown,
         MessageReplyDragTarget(
+          // The photo stack is narrower than the row it aligns itself in, so
+          // it marks its own deck for the long press.
+          opensActions: !bubble,
           child: MessageAttachmentCorners(
             borderRadius: _attachmentCorners(
               start: bubbleStart && trailingGallery.content.trim().isEmpty,
               end: bubbleEnd,
             ),
-            child: _MessageImageCarousel(
-              key: ValueKey(
-                trailingGallery.items.map((item) => item.url).join('\u0000'),
-              ),
-              items: trailingGallery.items,
-              mirrored: ownMessage,
-              leadingOverflow: mediaCarouselLeadingOverflow,
-              trailingOverflow: mediaCarouselTrailingOverflow,
-              onReply: onMediaReply,
-              onMore: onMediaMore,
-            ),
+            child: bubble
+                ? _MessageImageStack(
+                    key: ValueKey(
+                      trailingGallery.items
+                          .map((item) => item.url)
+                          .join('\u0000'),
+                    ),
+                    items: trailingGallery.items,
+                    mirrored: ownMessage,
+                    nativeActions: nativePhotoActions,
+                    onReply: onMediaReply,
+                    onMore: onMediaMore,
+                  )
+                : _MessageImageCarousel(
+                    key: ValueKey(
+                      trailingGallery.items
+                          .map((item) => item.url)
+                          .join('\u0000'),
+                    ),
+                    items: trailingGallery.items,
+                    mirrored: ownMessage,
+                    leadingOverflow: mediaCarouselLeadingOverflow,
+                    trailingOverflow: mediaCarouselTrailingOverflow,
+                    onReply: onMediaReply,
+                    onMore: onMediaMore,
+                  ),
           ),
         ),
+        if (edited) const EditedMarkerBelow(),
       ],
     );
   }
@@ -596,17 +678,21 @@ class MessageContent extends HookConsumerWidget {
     );
   }
 
-  Widget _buildLink(
-    BuildContext context,
+  /// A link as text that wraps with the sentence, or as a widget for chips,
+  /// audio and repository links.
+  InlineSpan _buildLink(
+    LinkBuildDetails link,
     WidgetRef ref,
-    InlineSpan linkText,
     String url,
-    ImetaEntry? imeta,
-    TextStyle linkStyle,
     TextStyle? fallbackStyle,
     void Function(String channelId) resolvedChannelTap,
     Map<String, String> resolvedChannelNames,
+    _LinkTextRecognizers recognizers,
+    Map<String, ImetaEntry> imetaByUrl,
   ) {
+    final context = link.context;
+    final linkText = TextSpan(children: link.labelSpans);
+    final imeta = imetaByUrl[url];
     String text = '';
     linkText.visitChildren((span) {
       if (span is TextSpan && span.text != null) {
@@ -615,10 +701,10 @@ class MessageContent extends HookConsumerWidget {
       return true;
     });
 
-    final baseStyle = fallbackStyle ?? linkStyle;
+    final baseStyle = fallbackStyle ?? link.style;
     if (imeta != null &&
         classifyMediaUrl(url, imeta: imeta) == MessageMediaKind.audio) {
-      return _buildMedia(context, url, imeta);
+      return link.asWidgetSpan(_buildMedia(context, url, imeta));
     }
     final uri = Uri.tryParse(url);
     final buzzLink = uri?.scheme == 'buzz'
@@ -669,17 +755,11 @@ class MessageContent extends HookConsumerWidget {
       decoration: TextDecoration.underline,
       decorationColor: context.colors.primary,
     );
-    final linkTextWidget = isCanonicalBuzzLabel
-        ? Text(
-            text,
-            style: baseStyle.copyWith(
-              color: context.colors.primary,
-              fontWeight: FontWeight.w600,
-            ),
-          )
-        : Text.rich(TextSpan(style: authoredLinkStyle, children: [linkText]));
-
-    final renderedLink = isCanonicalBuzzLabel && buzzPresentation != null
+    final canonicalLabelStyle = baseStyle.copyWith(
+      color: context.colors.primary,
+      fontWeight: FontWeight.w600,
+    );
+    final chip = isCanonicalBuzzLabel && buzzPresentation != null
         ? _TokenPill(
             key: ValueKey('buzz-link-chip:$url'),
             icon: buzzPresentation.icon,
@@ -688,19 +768,35 @@ class MessageContent extends HookConsumerWidget {
             text: buzzPresentation.label,
             textStyle: baseStyle.copyWith(fontWeight: FontWeight.w600),
           )
-        : linkTextWidget;
+        : null;
 
     final highlightColor = (baseStyle.color ?? context.colors.primary)
         .withValues(alpha: 0.2);
 
     // Mobile has no repo/PR/issue destination yet, so these chips have no tap
     // and no Open action, but a hold still copies or shares the link.
+    // The container keeps the chip's label its own node; without it, the
+    // non-interactive chip merges into the surrounding paragraph's label.
     if (buzzLink is EntityDeepLink) {
-      return _LinkLongPress(
-        url: url,
-        onOpen: null,
-        highlightColor: highlightColor,
-        child: renderedLink,
+      return link.asWidgetSpan(
+        Semantics(
+          container: true,
+          child: _LinkLongPress(
+            url: url,
+            onOpen: null,
+            highlightColor: highlightColor,
+            child:
+                chip ??
+                Text.rich(
+                  TextSpan(
+                    style: isCanonicalBuzzLabel
+                        ? canonicalLabelStyle
+                        : authoredLinkStyle,
+                    children: [linkText],
+                  ),
+                ),
+          ),
+        ),
       );
     }
 
@@ -747,11 +843,49 @@ class MessageContent extends HookConsumerWidget {
     // openLink handles only these schemes; the sheet hides Open for others.
     final scheme = Uri.tryParse(url)?.scheme;
     final canOpen = scheme == 'buzz' || scheme == 'http' || scheme == 'https';
-    return _LinkLongPress(
+    void showActions() => _showLinkActions(
+      context,
       url: url,
       onOpen: canOpen ? () => unawaited(openLink()) : null,
-      highlightColor: highlightColor,
-      child: GestureDetector(onTap: openLink, child: renderedLink),
+    );
+    if (chip != null) {
+      return link.asWidgetSpan(
+        _LinkLongPress(
+          url: url,
+          onOpen: canOpen ? () => unawaited(openLink()) : null,
+          highlightColor: highlightColor,
+          child: GestureDetector(onTap: openLink, child: chip),
+        ),
+      );
+    }
+
+    // Text, not a widget, so a long label wraps mid-label and the words after
+    // it continue on the same line.
+    // The recognizer outlives this link when an edit removes it, so a tap or
+    // hold already under way checks that the link is still on screen.
+    // A link nothing can open shows its actions on a tap, so it isn't dead
+    // for screen reader users, who can't reach the hold.
+    final recognizer = recognizers.forLink(url, text)
+      ..onTap = (() {
+        if (!context.mounted) return;
+        canOpen ? unawaited(openLink()) : showActions();
+      })
+      ..onHold = () {
+        if (context.mounted) showActions();
+      }
+      ..highlightColor = highlightColor;
+    // A canonical label is drawn as its plain text, as before; an authored
+    // label keeps its parsed spans (bold, code) in the link style.
+    if (isCanonicalBuzzLabel) {
+      return TextSpan(
+        text: text,
+        style: canonicalLabelStyle,
+        recognizer: recognizer,
+      );
+    }
+    return TextSpan(
+      style: authoredLinkStyle,
+      children: _withLinkRecognizer(link.labelSpans, recognizer),
     );
   }
 }
@@ -923,6 +1057,8 @@ class _MediaPreviewFallback extends StatelessWidget {
   }
 }
 
+const _codeCopyButtonSize = 28.0;
+
 class _MessageCodeBlock extends HookWidget {
   final String name;
   final String code;
@@ -971,6 +1107,14 @@ class _MessageCodeBlock extends HookWidget {
           : [TextSpan(text: shownCode)],
       [code, name, isDark, ink],
     );
+    // Opaque, so the copy button can share it and hide code scrolled beneath.
+    // An inked block sits on the outgoing fill, so its tint is blended there.
+    final surface = ink == null
+        ? CodeStyle.background(context.colors)
+        : Color.alphaBlend(
+            chatCodeTint(ink, 0.14),
+            ChatColors.of(context).outgoing,
+          );
     return Container(
       // In a bubble, the vertical margin brings the bubble's 8px vertical
       // padding up to its 16px side padding, so the block is inset evenly and
@@ -979,9 +1123,7 @@ class _MessageCodeBlock extends HookWidget {
           ? const EdgeInsets.symmetric(vertical: Grid.xs - Grid.xxs)
           : const EdgeInsets.only(top: Grid.half),
       decoration: BoxDecoration(
-        color: ink == null
-            ? CodeStyle.background(context.colors)
-            : chatCodeTint(ink, 0.14),
+        color: surface,
         borderRadius: BorderRadius.circular(
           bubble ? Radii.container - Grid.xs : 12,
         ),
@@ -992,50 +1134,55 @@ class _MessageCodeBlock extends HookWidget {
       ),
       child: Stack(
         children: [
-          // Even 12px insets; the right side also reserves the copy button.
-          Padding(
-            padding: const EdgeInsets.fromLTRB(
-              Grid.twelve,
-              Grid.twelve,
-              Grid.twelve + 28,
-              Grid.twelve,
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (name.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: Grid.half),
-                    child: Text(
-                      name,
-                      style: context.textTheme.labelSmall?.copyWith(
-                        color: ink ?? context.colors.onSurfaceVariant,
-                      ),
+          // As on desktop, the code scrolls under the copy button rather than
+          // beside it, and its end padding keeps every line end reachable.
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (name.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    Grid.twelve,
+                    Grid.twelve,
+                    Grid.twelve + _codeCopyButtonSize,
+                    Grid.half,
+                  ),
+                  child: Text(
+                    name,
+                    style: context.textTheme.labelSmall?.copyWith(
+                      color: ink ?? context.colors.onSurfaceVariant,
                     ),
                   ),
-                SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: RichText(
-                    softWrap: false,
-                    text: TextSpan(style: codeBaseStyle, children: codeSpans),
-                  ),
                 ),
-              ],
-            ),
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                padding: EdgeInsets.fromLTRB(
+                  Grid.twelve,
+                  name.isEmpty ? Grid.twelve : 0,
+                  Grid.twelve + _codeCopyButtonSize,
+                  Grid.twelve,
+                ),
+                child: RichText(
+                  softWrap: false,
+                  text: TextSpan(style: codeBaseStyle, children: codeSpans),
+                ),
+              ),
+            ],
           ),
           Positioned(
             top: Grid.half + Grid.quarter,
             right: Grid.half + Grid.quarter,
             child: SizedBox(
-              width: 28,
-              height: 28,
+              width: _codeCopyButtonSize,
+              height: _codeCopyButtonSize,
               child: IconButton(
                 onPressed: handleCopy,
                 padding: EdgeInsets.zero,
                 visualDensity: VisualDensity.compact,
                 style: IconButton.styleFrom(
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  backgroundColor: surface,
                 ),
                 icon: Icon(
                   isCopied.value ? BuzzIcons.check : BuzzIcons.copy,
@@ -1054,82 +1201,3 @@ class _MessageCodeBlock extends HookWidget {
     );
   }
 }
-
-class _MentionMd extends InlineMd {
-  final Map<String, Set<String>> bindings;
-  final Map<String, String> displayLabels;
-  final Map<String, String> mentionNames;
-  final Map<String, String> mentionLabels;
-  final Set<String> agentMentionPubkeys;
-  final void Function(String pubkey)? onMentionTap;
-  late final RegExp _exp = _buildPrefixPattern(
-    prefix: '@',
-    knownNames: bindings.keys.map(_markdownMentionName),
-    genericTokenPattern: r'[A-Za-z0-9_][A-Za-z0-9_\u00A0-]*',
-  );
-
-  _MentionMd({
-    required this.bindings,
-    required this.displayLabels,
-    required this.mentionNames,
-    required this.mentionLabels,
-    required this.agentMentionPubkeys,
-    this.onMentionTap,
-  });
-
-  /// Excluded from link labels: this component renders a [WidgetSpan], and a
-  /// placeholder nested inside the link's own placeholder does not paint on
-  /// iOS — an authored `[@mention](url)` renders as nothing. Link resolution
-  /// wins over token detection inside a label.
-  @override
-  Set<MarkdownScope> get scopes => MarkdownComponent.allScopesExceptLinkLabel;
-
-  @override
-  RegExp get exp => _exp;
-
-  @override
-  InlineSpan span(
-    BuildContext context,
-    String text,
-    final GptMarkdownConfig config,
-  ) {
-    final raw = exp.firstMatch(text.trim())?.group(0);
-    if (raw == null) {
-      return TextSpan(text: text, style: config.style);
-    }
-
-    final name = raw.substring(1).replaceAll('\u00A0', ' ').toLowerCase();
-    final matches = bindings[name] ?? const <String>{};
-    final pubkey = matches.length == 1 ? matches.single : null;
-    if (bindings.containsKey(name) && matches.length != 1) {
-      return TextSpan(text: text, style: config.style);
-    }
-    final displayName = name.contains(RegExp(r'\([0-9a-f]{64}\)'))
-        ? displayLabels[name]
-        : mentionLabels[pubkey] ?? mentionNames[pubkey];
-
-    final isAgent =
-        pubkey != null && agentMentionPubkeys.contains(pubkey.toLowerCase());
-    final fullLabel = displayName ?? raw.substring(1);
-    final visibleLabel = fullLabel.replaceAllMapped(
-      RegExp(r'\(([0-9a-f]{64})\)'),
-      (m) => '(${m[1]!.substring(0, 8)}…${m[1]!.substring(60)})',
-    );
-    final pill = MessageMentionPill(
-      label: visibleLabel,
-      semanticsLabel: fullLabel,
-      isAgent: isAgent,
-      textStyle: config.style,
-    );
-
-    return WidgetSpan(
-      alignment: PlaceholderAlignment.baseline,
-      baseline: TextBaseline.alphabetic,
-      child: pubkey != null && onMentionTap != null
-          ? GestureDetector(onTap: () => onMentionTap!(pubkey), child: pill)
-          : pill,
-    );
-  }
-}
-
-String _markdownMentionName(String name) => name.replaceAll(' ', '\u00A0');

@@ -3,7 +3,7 @@
 -- PK becomes (community_id, pubkey).
 
 CREATE TABLE pubkey_allowlist (
-    community_id UUID NOT NULL REFERENCES communities(id),
+    community_id UUID NOT NULL,
     pubkey      BYTEA NOT NULL,
     added_by    BYTEA,
     added_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),

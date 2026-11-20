@@ -49,6 +49,31 @@ class OrganizationSignIn extends ChangeNotifier {
   /// The last sign-in or session-check failure, cleared by the next attempt.
   Object? failure;
 
+  /// [failure] as a short code shown with the failure message, so a reported
+  /// screenshot names the step that failed.
+  String? get failureCode => switch (failure) {
+    null => null,
+    final BrowserAuthFailure f => 'browser-${f.name}',
+    AccountFailure.unavailable when _unavailableCause != null =>
+      'account-unavailable-$_unavailableCause',
+    final AccountFailure f => 'account-${f.name}',
+    final f => throw StateError('Unexpected sign-in failure: $f'),
+  };
+
+  /// What the user can do about [failure], ending the sign-in page's failure
+  /// message. The banner keeps "Try again." so its capsule stays compact.
+  String get failureAdvice => switch (_unavailableCause) {
+    final cause? when cause.startsWith('http5') =>
+      'The sign-in service is unavailable. Try again later.',
+    final cause? when cause.startsWith('http3') || !cause.startsWith('http') =>
+      'Check your network or VPN connection, then try again.',
+    _ => 'Try again.',
+  };
+
+  // What [BuilderlabAccountClient.lastUnavailableCause] held when the
+  // exchange failed, so later account requests cannot change the code.
+  String? _unavailableCause;
+
   final _subscriptions = <StreamSubscription<Object>>[];
 
   /// Advanced by every start or cancel, so an exchange from an abandoned
@@ -103,6 +128,7 @@ class OrganizationSignIn extends ChangeNotifier {
     // Busy before any await, so a second tap cannot start another attempt.
     final attempt = ++_attempt;
     failure = null;
+    _unavailableCause = null;
     _set(OrganizationSessionStatus.signingIn);
     if (clear) {
       try {
@@ -131,6 +157,7 @@ class OrganizationSignIn extends ChangeNotifier {
     if (_disposed) return;
     final attempt = ++_attempt;
     failure = null;
+    _unavailableCause = null;
     _set(OrganizationSessionStatus.checking);
     try {
       await account.clearLocalSession();
@@ -157,6 +184,7 @@ class OrganizationSignIn extends ChangeNotifier {
 
   Future<void> _exchange(BrowserAuthCode code) async {
     final attempt = _attempt;
+    account.lastUnavailableCause = null;
     try {
       await account.exchange(
         code: code.code,
@@ -167,6 +195,7 @@ class OrganizationSignIn extends ChangeNotifier {
     } on AccountFailure catch (error) {
       if (attempt != _attempt) return;
       failure = error;
+      _unavailableCause = account.lastUnavailableCause;
       _set(_currentStatus());
       return;
     }

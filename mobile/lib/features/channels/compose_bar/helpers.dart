@@ -58,6 +58,41 @@ const _typingThrottleMs = 3000;
 /// milliseconds after `resumed` (flutter/flutter#189051 logs about 0.4 s).
 const _composerKeyboardRestoreGrace = Duration(seconds: 1);
 
+// Keyboard show/hide drives Android IME lift and collapses on hide.
+void _useComposerKeyboardMetrics({
+  required BuildContext context,
+  required FocusNode focusNode,
+  required _ComposerVoiceNote voiceNote,
+  required ObjectRef<Timer?> androidImeFallbackTimer,
+  required ValueNotifier<bool> androidImeTransitionStarted,
+  required VoidCallback collapseComposer,
+}) {
+  final appView = View.of(context);
+  useEffect(() {
+    final observer = _ComposerKeyboardMetricsObserver(
+      view: appView,
+      onKeyboardShown: () {
+        androidImeFallbackTimer.value?.cancel();
+        androidImeTransitionStarted.value = true;
+      },
+      onKeyboardHidden: () {
+        androidImeFallbackTimer.value?.cancel();
+        if (defaultTargetPlatform == TargetPlatform.android) {
+          androidImeTransitionStarted.value = false;
+        }
+        voiceNote.onKeyboardHidden();
+        collapseComposer();
+        focusNode.unfocus();
+      },
+    );
+    WidgetsBinding.instance.addObserver(observer);
+    return () {
+      WidgetsBinding.instance.removeObserver(observer);
+      observer.dispose();
+    };
+  }, [appView, focusNode, voiceNote.isPreparing]);
+}
+
 class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
   final FlutterView view;
   final VoidCallback onKeyboardShown;
@@ -341,6 +376,82 @@ void spliceAndMoveCursor(
   focusNode.requestFocus();
 }
 
+/// Channel members as the send resolves typed names: loaded members, or the
+/// cached roster while they load.
+List<MentionCandidate> _typedMemberCandidates({
+  required AsyncValue<List<ChannelMember>> membersAsync,
+  required SessionStatus sessionStatus,
+  required List<ChannelMember> cachedMembers,
+  required Map<String, UserProfile> userCache,
+  required Map<String, String>? agentOwners,
+}) => buildMentionCandidates(
+  members: channelMembersForAutocomplete(
+    membersAsync: membersAsync,
+    sessionStatus: sessionStatus,
+    cachedMembers: cachedMembers,
+  ),
+  relayAgents: const [],
+  sharedChannelIds: const {},
+  userCache: userCache,
+  ownerByAgentPubkey: agentOwners ?? const {},
+);
+
+/// Qualify earlier namesake mentions outside code, keeping the cursor in
+/// place, and rebind [mentions] before the text changes. A key with any
+/// plain occurrence left, by the presence rule draft persistence uses (code
+/// formatting ignored), stays bound beside its qualified label. Returns
+/// [start] shifted by the edits before it. Call it before tracking the new
+/// selection: persistence prunes keys absent from the text. [competitors] are
+/// the typed member labels the send resolves: a longer one keeps its
+/// occurrence instead of losing its prefix to a rename.
+int _requalifyNamesakes(
+  _MarkdownEditingController controller,
+  Map<String, MentionCandidate> mentions,
+  MentionCandidate candidate,
+  int start,
+  Iterable<String> competitors,
+) {
+  final renames = namesakeRequalifications(candidate.label, candidate.pubkey, {
+    for (final entry in mentions.entries) entry.key: entry.value.pubkey,
+  });
+  if (renames.isEmpty) return start;
+  final text = controller.text;
+  final cursor = controller.selection.isValid
+      ? controller.selection.baseOffset
+      : text.length;
+  final code = controller._styledCodeRanges(text);
+  // Selected keys first, so an equal-length duplicate stays the selection's.
+  final selected = {for (final key in mentions.keys) key.toLowerCase()};
+  final labels = [
+    ...mentions.keys,
+    ...competitors.where((label) => !selected.contains(label.toLowerCase())),
+  ];
+  final result = renameMentions(
+    text,
+    labels,
+    renames,
+    start,
+    // Exactly what the editor draws as code stays as typed.
+    excluded: (from, to) => code.any((c) => c.start < from && to < c.end),
+  );
+  // Backtick-adjacent code is no occurrence, but persistence still keeps it.
+  final remaining = mentionOccurrences(
+    result.text.replaceAll('`', ' '),
+    labels,
+  ).map((range) => range.label).toSet().intersection(result.renamed);
+  for (final key in result.renamed) {
+    mentions[renames[key]!] =
+        result.kept.contains(key) || remaining.contains(key)
+        ? mentions[key]!
+        : mentions.remove(key)!;
+  }
+  controller.value = TextEditingValue(
+    text: result.text,
+    selection: TextSelection.collapsed(offset: cursor + result.offset - start),
+  );
+  return result.offset;
+}
+
 /// Insert [trigger] (e.g. `@` or `#`) at the cursor position, prefixed with
 /// a space if needed for word separation. Used by `triggerMention` and
 /// `triggerChannel`.
@@ -374,6 +485,18 @@ String _composeSendErrorMessage(Object error) {
   if (error is AddMembersException) return error.message;
   return error.toString().replaceFirst('Exception: ', '');
 }
+
+/// Describes why a text send failed. A community switch is reported
+/// separately by [_reportSendCancelledByCommunitySwitch]. Failures after the
+/// EVENT went out say "Not confirmed": the relay may have accepted it.
+String _sendFailureMessage(Object error) => switch (error) {
+  RelayNotConnectedError() => 'Not sent. No connection.',
+  RelayAckTimeoutError() => "Not confirmed. The relay didn't respond.",
+  RelayAckLostError() => 'Not confirmed. Connection lost.',
+  TimeoutException() => "Not sent. The relay didn't respond.",
+  StateError(:final message) => 'Not sent: $message',
+  _ => 'Not sent: ${_composeSendErrorMessage(error)}',
+};
 
 /// Ask whether to invite mentioned humans who aren't channel members, or
 /// send without inviting them. Mirrors desktop's `NonMemberMentionDialog`.
@@ -697,4 +820,60 @@ class _OutgoingMentions {
       );
     }
   }
+}
+
+/// Insert an emoji at the cursor without replacing the draft.
+void _insertComposerEmoji(
+  TextEditingController controller,
+  FocusNode focusNode,
+  String emoji,
+) {
+  final text = controller.text;
+  final selection = controller.selection;
+  final cursor = selection.isValid
+      ? selection.baseOffset.clamp(0, text.length)
+      : text.length;
+  controller.value = TextEditingValue(
+    text: text.replaceRange(cursor, cursor, emoji),
+    selection: TextSelection.collapsed(offset: cursor + emoji.length),
+  );
+  focusNode.requestFocus();
+}
+
+// Wrap or insert markdown formatting around the current selection.
+void _applyComposerFormat(
+  TextEditingController controller,
+  FocusNode focusNode,
+  ObjectRef<bool> isModifyingText,
+  String prefix,
+  String? suffix,
+) {
+  suffix ??= prefix;
+  final text = controller.text;
+  final sel = controller.selection;
+  if (!sel.isValid) return;
+
+  isModifyingText.value = true;
+  try {
+    if (sel.isCollapsed) {
+      final offset = sel.baseOffset;
+      final updated =
+          '${text.substring(0, offset)}$prefix$suffix${text.substring(offset)}';
+      controller.text = updated;
+      controller.selection = TextSelection.collapsed(
+        offset: offset + prefix.length,
+      );
+    } else {
+      final selected = text.substring(sel.start, sel.end);
+      final updated =
+          '${text.substring(0, sel.start)}$prefix$selected$suffix${text.substring(sel.end)}';
+      controller.text = updated;
+      controller.selection = TextSelection.collapsed(
+        offset: sel.start + prefix.length + selected.length + suffix.length,
+      );
+    }
+  } finally {
+    isModifyingText.value = false;
+  }
+  focusNode.requestFocus();
 }
