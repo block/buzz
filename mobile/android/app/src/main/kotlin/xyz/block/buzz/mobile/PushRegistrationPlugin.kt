@@ -32,12 +32,16 @@ internal class PushRegistrationPlugin(
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "startRegistration" -> {
-                requestNotificationPermission()
-                fetchToken()
+                // A build without Firebase has no token to wait for, and must
+                // not ask the user for a permission that only push needs.
+                if (firebaseConfigured()) {
+                    requestNotificationPermission()
+                    fetchToken()
+                }
                 result.success(null)
             }
             "refreshToken" -> {
-                fetchToken()
+                if (firebaseConfigured()) fetchToken()
                 result.success(null)
             }
             else -> result.notImplemented()
@@ -56,14 +60,17 @@ internal class PushRegistrationPlugin(
         ActivityCompat.requestPermissions(activity, arrayOf(permission), REQUEST_CODE)
     }
 
+    /** Whether Firebase is set up; when not, tells Dart registration failed. */
+    private fun firebaseConfigured(): Boolean {
+        if (FirebaseApp.getApps(activity).isNotEmpty()) return true
+        channel.invokeMethod(
+            "fcmRegistrationFailed",
+            mapOf("message" to "Firebase is not configured in this build."),
+        )
+        return false
+    }
+
     private fun fetchToken() {
-        if (FirebaseApp.getApps(activity).isEmpty()) {
-            channel.invokeMethod(
-                "fcmRegistrationFailed",
-                mapOf("message" to "Firebase is not configured in this build."),
-            )
-            return
-        }
         FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
             // `result` throws for a failed task, so read it only after success.
             val token = if (task.isSuccessful) task.result else null
