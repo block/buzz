@@ -615,34 +615,42 @@ class ChannelsPage extends HookConsumerWidget {
       return () => active = false;
     }, [newChannelAction, newDmAction, currentPubkey]);
 
+    final body = _ChannelsBody(
+      soloSliver: soloSliver,
+      onInbox: onInbox,
+      onReadyChanged: (ready) => bodyReady.value = ready,
+      channels: channels,
+      channelsAsync: channelsAsync,
+      showError: showError.value,
+      sessionStatus: sessionState.status,
+      currentPubkey: currentPubkey,
+      topSectionHeight: topSectionHeight,
+      usesPinnedGradient: usesPinnedGradient,
+      scrollController: channelsScrollController,
+      onRefresh: () async {
+        // Restart the reader for Solo chat and project placement.
+        if (soloSliver != null) ref.invalidate(meGroupsProvider);
+        ref.invalidate(channelFilterActivityProvider);
+        await Future.wait([
+          ref.read(channelsProvider.notifier).refresh(),
+          if (ref.read(channelFilterProvider) case final manager?)
+            manager.refresh(),
+        ]);
+      },
+      onSelectChannel: openChannel,
+    );
     final page = ValueListenableBuilder(
       valueListenable: headerFrost,
       // Retain the inventory during header animation. Provider and parent
       // updates still construct a fresh body with current channel data.
-      child: _ChannelsBody(
-        soloSliver: soloSliver,
-        onInbox: onInbox,
-        onReadyChanged: (ready) => bodyReady.value = ready,
-        channels: channels,
-        channelsAsync: channelsAsync,
-        showError: showError.value,
-        sessionStatus: sessionState.status,
-        currentPubkey: currentPubkey,
-        topSectionHeight: topSectionHeight,
-        usesPinnedGradient: usesPinnedGradient,
-        scrollController: channelsScrollController,
-        onRefresh: () async {
-          // Restart the reader for Solo chat and project placement.
-          if (soloSliver != null) ref.invalidate(meGroupsProvider);
-          ref.invalidate(channelFilterActivityProvider);
-          await Future.wait([
-            ref.read(channelsProvider.notifier).refresh(),
-            if (ref.read(channelFilterProvider) case final manager?)
-              manager.refresh(),
-          ]);
-        },
-        onSelectChannel: openChannel,
-      ),
+      child: messages
+          ? _DuoRailActions(
+              actions: duoRailActions
+                  ? messagesNativeActionsBuilder!(openCommunityGrid)
+                  : const [],
+              child: body,
+            )
+          : body,
       builder: (context, frostProgress, child) => FrostedScaffold(
         backgroundColor: usesPinnedGradient
             ? Colors.transparent
@@ -750,14 +758,7 @@ class ChannelsPage extends HookConsumerWidget {
           bottomHeight: _kTopSectionBottomPadding,
           bottom: const SizedBox.expand(),
         ),
-        body: messages
-            ? _DuoRailActions(
-                actions: duoRailActions
-                    ? messagesNativeActionsBuilder!(openCommunityGrid)
-                    : const [],
-                child: child!,
-              )
-            : child!,
+        body: child!,
       ),
     );
     return _RouteCurrencySync(

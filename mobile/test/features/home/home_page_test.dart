@@ -27,6 +27,9 @@ import 'package:buzz/shared/widgets/ios_message_create_button.dart';
 import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/community/community.dart';
+import 'package:buzz/shared/community/community_icon_provider.dart';
+import 'package:buzz/shared/community/community_provider.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -49,6 +52,7 @@ void main() {
     );
   });
   Future<Widget> buildHome({
+    String? communityIcon,
     bool longSolo = false,
     bool inboxUnread = false,
     bool disableAnimations = false,
@@ -63,6 +67,19 @@ void main() {
     return ProviderScope(
       overrides: [
         savedPrefsProvider.overrideWithValue(prefs),
+        if (communityIcon != null) ...[
+          activeCommunityProvider.overrideWith(
+            (_) => Community(
+              id: 'example',
+              name: 'Example',
+              relayUrl: 'wss://example.org',
+              addedAt: DateTime.utc(2026),
+            ),
+          ),
+          communityIconPresentationProvider(
+            'wss://example.org',
+          ).overrideWithValue(communityIcon),
+        ],
         inboxHasUnreadProvider.overrideWithValue(inboxUnread),
         defaultAgentProvider.overrideWith(
           (ref) => bestieUpdates ?? Stream.value(bestie),
@@ -251,7 +268,13 @@ void main() {
       tester.view.viewPadding = const FakeViewPadding(right: 76);
       tester.view.padding = const FakeViewPadding(right: 76);
       addTearDown(tester.view.reset);
-      await tester.pumpWidget(await buildHome(longSolo: true));
+      // Community artwork arrives as an inline `data:` URI.
+      const icon =
+          'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC'
+          'AAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+      await tester.pumpWidget(
+        await buildHome(longSolo: true, communityIcon: icon),
+      );
       await tester.pumpAndSettle();
       final bar = find.byWidgetPredicate(
         (widget) => widget is FrostedAppBar && widget.nativeTitle == 'Messages',
@@ -283,10 +306,58 @@ void main() {
 
       const wideTitle = Rect.fromLTRB(20, 19.5, 196, 48.5);
       expectLeadingTitle(wideTitle, 76);
+      // The rail's native controls get only the rendered avatar, never the
+      // source artwork, and Home's scrolling never reaches them: no rebuilds
+      // and no `scroll` calls, which UIKit ignores for standalone controls.
+      final railCalls = <String>[];
+      var railRebuilds = 0;
+      for (final (name, id) in [('Activity', 9801), ('Community menu', 9802)]) {
+        final view = tester.widget<UiKitView>(
+          find.descendant(
+            of: find.byKey(ValueKey('duo-toolbar-$name')),
+            matching: find.byType(UiKitView),
+          ),
+        );
+        if (name == 'Community menu') {
+          final params = view.creationParams! as Map;
+          expect((params['leading'] as Map).containsKey('imageUrl'), isFalse);
+        }
+        final channel = MethodChannel('${IosNavigationBar.viewType}/$id');
+        binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+          call,
+        ) async {
+          railCalls.add(call.method);
+          return null;
+        });
+        addTearDown(
+          () => binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            channel,
+            null,
+          ),
+        );
+        view.onPlatformViewCreated!(id);
+      }
+      await tester.pumpAndSettle();
+      railCalls.clear();
+      final previousOnRebuild = debugOnRebuildDirtyWidget;
+      debugOnRebuildDirtyWidget = (element, _) {
+        final widget = element.widget;
+        if (widget is IosNavigationBar && widget.standaloneControl) {
+          railRebuilds++;
+        }
+      };
+      addTearDown(() => debugOnRebuildDirtyWidget = previousOnRebuild);
       final originalHeaderRect = tester.getRect(bar);
       final scrollable = find.byType(Scrollable).first;
-      await tester.drag(scrollable, const Offset(0, -250));
+      await tester.timedDrag(
+        scrollable,
+        const Offset(0, -250),
+        const Duration(milliseconds: 500),
+      );
       await tester.pumpAndSettle();
+      debugOnRebuildDirtyWidget = previousOnRebuild;
+      expect(railCalls, isEmpty);
+      expect(railRebuilds, 0);
       expect(tester.getRect(bar), originalHeaderRect);
       expectLeadingTitle(wideTitle, 76);
       tester.view.physicalSize = const Size(466, 678);
