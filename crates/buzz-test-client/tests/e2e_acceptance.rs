@@ -7,6 +7,7 @@
 //! RELAY_URL=ws://localhost:3000 cargo test -p buzz-test-client --test e2e_acceptance -- --ignored
 //! ```
 
+use std::io::Read;
 use std::net::UdpSocket;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -56,21 +57,44 @@ fn probe(args: &[&str]) -> (Output, Vec<String>) {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    // Drain both pipes while the child runs, so a chatty child cannot fill a
+    // pipe and stall before the deadline.
+    let stdout = drain(child.stdout.take().unwrap());
+    let stderr = drain(child.stderr.take().unwrap());
     let deadline = Instant::now() + Duration::from_secs(120);
-    while child.try_wait().unwrap().is_none() {
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
         if Instant::now() > deadline {
             let _ = child.kill();
+            let _ = child.wait();
             panic!("buzz-acceptance did not exit within 120 s");
         }
         std::thread::sleep(Duration::from_millis(50));
-    }
-    let output = child.wait_with_output().unwrap();
+    };
+    let output = Output {
+        status,
+        stdout: stdout.join().unwrap(),
+        stderr: stderr.join().unwrap(),
+    };
     let mut lines = Vec::new();
     let mut buf = [0u8; 2048];
     while let Ok(n) = agent.recv(&mut buf) {
         lines.push(String::from_utf8_lossy(&buf[..n]).into_owned());
     }
     (output, lines)
+}
+
+/// Reads `pipe` to its end on a thread, keeping at most 4 MiB.
+fn drain(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut pipe = pipe;
+        let mut kept = Vec::new();
+        let _ = (&mut pipe).take(4 << 20).read_to_end(&mut kept);
+        let _ = std::io::copy(&mut pipe, &mut std::io::sink());
+        kept
+    })
 }
 
 fn report(output: &Output) -> serde_json::Value {

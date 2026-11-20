@@ -786,19 +786,23 @@ mod tests {
         assert!(upgrade_headers(&cfg).is_err(), "a directory must fail");
 
         // A FIFO with no writer must fail at once, not block the open.
-        let fifo = dir.join("fifo");
-        let made = std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .unwrap();
-        assert!(made.success());
-        cfg.assertion_file = Some(fifo);
-        let (done, result) = std::sync::mpsc::channel();
-        std::thread::spawn(move || done.send(upgrade_headers(&cfg).is_err()).unwrap());
-        assert!(
-            result.recv_timeout(Duration::from_secs(5)).unwrap(),
-            "a FIFO must fail"
-        );
+        #[cfg(unix)]
+        {
+            let fifo = dir.join("fifo");
+            let made = std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap();
+            assert!(made.success());
+            let mut cfg = config("wss://relay.example".into());
+            cfg.assertion_file = Some(fifo);
+            let (done, result) = std::sync::mpsc::channel();
+            std::thread::spawn(move || done.send(upgrade_headers(&cfg).is_err()).unwrap());
+            assert!(
+                result.recv_timeout(Duration::from_secs(5)).unwrap(),
+                "a FIFO must fail"
+            );
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 
