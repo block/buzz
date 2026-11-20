@@ -2330,6 +2330,12 @@ mod postgres_tests {
         locker
     }
 
+    /// Whether a read gave up on a lock that [`lock`] holds.
+    fn lock_timed_out<T>(result: &Result<T>) -> bool {
+        matches!(result, Err(crate::error::DbError::Sqlx(sqlx::Error::Database(db)))
+            if db.code().as_deref() == Some("55P03"))
+    }
+
     async fn unlock(
         locker: sqlx::Transaction<'static, sqlx::Postgres>,
         conn: &mut sqlx::PgConnection,
@@ -2826,7 +2832,7 @@ mod postgres_tests {
         assert!(window.has_more);
         let failed = newer_page(&mut conn, community, channel, 2, after_march()).await;
         assert!(
-            failed.is_err(),
+            lock_timed_out(&failed),
             "a failed later pass must fail the window, got {:?}",
             failed.map(|w| (w.rows.len(), w.has_more))
         );
@@ -2917,7 +2923,7 @@ mod postgres_tests {
         }
         let failed = newer_page(&mut conn, community, channel, 4, None).await;
         assert!(
-            failed.is_err(),
+            lock_timed_out(&failed),
             "a page that needs the June window must fail on its lock, got {:?}",
             failed.map(|w| (w.rows.len(), w.has_more))
         );

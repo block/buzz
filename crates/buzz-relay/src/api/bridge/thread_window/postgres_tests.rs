@@ -358,7 +358,12 @@ async fn thread_window_newer_pages_forward() {
     filter["direction"] = json!("newer");
     let page = f.query(&filter).await;
     assert_eq!(ids(&page, Some(9)), hex(&replies[..50]));
-    assert!(ids(&page, None).contains(&root_edit.id.to_hex().as_str()));
+    let first = ids(&page, None);
+    assert!(first.contains(&root_edit.id.to_hex().as_str()), "{page}");
+    assert!(
+        !first.contains(&reply_reaction.id.to_hex().as_str()),
+        "{page}"
+    );
     let bounds = f.bounds(&page, &filter);
     assert_eq!(bounds["direction"], "newer");
     assert_eq!(bounds["has_more"], true);
