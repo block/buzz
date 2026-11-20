@@ -52,6 +52,9 @@ void largeRosterTests() {
           sentText = text;
           sent = keys;
         },
+        overrides: [
+          verifiedProfilesProvider.overrideWith(_SettableVerified.new),
+        ],
       ),
     );
     await tester.tap(find.textContaining('@Alex Smith 0'));
@@ -72,22 +75,54 @@ void largeRosterTests() {
     ]);
 
     // Review of #9699: every profile that loaded named the whole roster
-    // again to label the chip. A profile that is nobody's namesake now
-    // names nobody, and a keystroke beside the chip reads no member.
-    Future<void> profile(int i, String name) async {
-      ProviderScope.containerOf(tester.element(find.byType(ComposeBar)))
+    // again to label the chip, and later still walked it once. A change to
+    // the naming facts that cannot touch the chip's label now reads no
+    // member, and a keystroke beside the chip reads none either.
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(ComposeBar)),
+    );
+    Future<void> profile(int i, String name, {int? owner}) async {
+      container
           .read(userCacheProvider.notifier)
-          .put(UserProfile(pubkey: key(i), displayName: name));
+          .put(
+            UserProfile(
+              pubkey: key(i),
+              displayName: name,
+              ownerPubkey: owner == null ? null : key(owner),
+            ),
+          );
       await tester.pumpAndSettle();
     }
 
-    expect(find.text('@Alex Smith 0'), findsOneWidget);
+    Future<void> verify(int i, String? name) async {
+      final verified =
+          container.read(verifiedProfilesProvider.notifier)
+              as _SettableVerified;
+      verified.set(key(i), name);
+      await tester.pumpAndSettle();
+    }
+
+    final plain = find.text('@Alex Smith 0');
+    final suffixed = find.textContaining('@Alex Smith 0 · ');
     var named = mentionQualifierNamingPasses;
     var walked = mentionQualifierRosterPasses;
-    await profile(5, 'Someone Else');
-    expect(mentionQualifierNamingPasses, named);
-    expect(mentionQualifierRosterPasses, walked + 1);
     var read = members.reads;
+    void expectUntouched() {
+      expect(mentionQualifierNamingPasses, named);
+      expect(mentionQualifierRosterPasses, walked);
+      expect(members.reads, read);
+    }
+
+    void expectRelabelled({required bool suffix}) {
+      expect(mentionQualifierNamingPasses, greaterThan(named));
+      expect(plain, suffix ? findsNothing : findsOneWidget);
+      expect(suffixed, suffix ? findsOneWidget : findsNothing);
+      named = mentionQualifierNamingPasses;
+      walked = mentionQualifierRosterPasses;
+      read = members.reads;
+    }
+
+    expect(plain, findsOneWidget);
     // Typed before the chip, with the caret left in the prose: a caret
     // after the typed name would open the chooser, which lists members.
     tester.testTextInput.updateEditingValue(
@@ -97,23 +132,49 @@ void largeRosterTests() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('@Alex Smith 0'), findsOneWidget);
-    expect(mentionQualifierRosterPasses, walked + 1);
-    expect(members.reads, read);
+    expect(plain, findsOneWidget);
+    expectUntouched();
+    await profile(5, 'Someone Else');
+    expectUntouched();
     // A member who takes the chip's name is its namesake: the chip gains
     // its key suffix, and loses it when the name goes.
     await profile(7, 'Alex Smith 0');
-    expect(mentionQualifierNamingPasses, greaterThan(named));
-    expect(find.text('@Alex Smith 0'), findsNothing);
-    expect(find.textContaining('@Alex Smith 0 \u00b7 '), findsOneWidget);
-    // Beside a namesake, an unrelated profile still names nobody.
-    named = mentionQualifierNamingPasses;
+    expectRelabelled(suffix: true);
+    // Beside a namesake, an unrelated profile still reads no member.
     await profile(11, 'Yet Another');
-    expect(mentionQualifierNamingPasses, named);
-    expect(find.textContaining('@Alex Smith 0 \u00b7 '), findsOneWidget);
+    expectUntouched();
+    expect(suffixed, findsOneWidget);
     await profile(7, 'Zoë Lopez 7');
-    expect(mentionQualifierNamingPasses, greaterThan(named));
-    expect(find.text('@Alex Smith 0'), findsOneWidget);
+    expectRelabelled(suffix: false);
+    // A verified name outranks the profile's: one that is nobody's
+    // namesake reads no member, and the chip's name verified for another
+    // member is found and given up like a profile name.
+    await verify(13, 'Someone Verified');
+    expectUntouched();
+    await verify(13, 'Alex Smith 0');
+    expectRelabelled(suffix: true);
+    await verify(5, 'Someone Else Verified');
+    expectUntouched();
+    await verify(13, null);
+    expectRelabelled(suffix: false);
+    // Two agents of one name are told apart by their owners' names, and
+    // by key once the owners share a name: renaming the owner of an agent
+    // relabels the chip, though the owner's own name meets nobody's.
+    await profile(0, 'Alex Smith 0', owner: 20);
+    await profile(7, 'Alex Smith 0', owner: 21);
+    expect(plain, findsOneWidget);
+    named = mentionQualifierNamingPasses;
+    walked = mentionQualifierRosterPasses;
+    read = members.reads;
+    await profile(11, 'Still Another');
+    expectUntouched();
+    await profile(21, name(20));
+    expectRelabelled(suffix: true);
+    await profile(21, name(21));
+    expectRelabelled(suffix: false);
+    await profile(7, 'Zoë Lopez 7');
+    await profile(0, 'Alex Smith 0');
+    expect(plain, findsOneWidget);
 
     expect(await send(), lessThan(40));
     expect(sent, [key(0), key(6999)]);
@@ -152,6 +213,26 @@ void largeRosterTests() {
     // sends alone took about ten with a pattern per member.
     expect(clock.elapsed, lessThan(const Duration(seconds: 15)));
   });
+}
+
+/// Verified names a test sets one at a time.
+class _SettableVerified extends VerifiedProfilesNotifier {
+  @override
+  Map<String, VerifiedProfile> build() => const {};
+
+  void set(String pubkey, String? name) => state = {
+    for (final entry in state.entries)
+      if (entry.key != pubkey) entry.key: entry.value,
+    if (name != null)
+      pubkey: VerifiedProfile(
+        displayName: name,
+        username: name,
+        issuerLabel: 'Example Corp',
+        verifiedAt: 1000,
+        checked: true,
+        multipleIssuers: false,
+      ),
+  };
 }
 
 /// A roster that counts each member read from it.

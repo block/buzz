@@ -23,6 +23,8 @@ import 'package:buzz/features/channels/deep_link_dispatcher.dart';
 import 'package:buzz/features/channels/open_channel_routes.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
+import 'package:buzz/shared/verified_profiles/verified_profile.dart';
+import 'package:buzz/shared/verified_profiles/verified_profile_directory.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 import '../../shared/community/community_storage_test.dart';
