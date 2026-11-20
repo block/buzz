@@ -54,17 +54,38 @@ typedef _SectionEdits = ({VoidCallback onRename, VoidCallback onDelete});
 /// A workspace's decorative icon: a Unicode emoji, or a community custom
 /// emoji. As on desktop, a shortcode the catalog lacks draws nothing.
 class _WorkspaceIcon extends ConsumerWidget {
-  const _WorkspaceIcon(this.icon);
+  const _WorkspaceIcon(this.icon, {this.inHeader = false});
+  final bool inHeader;
   final String icon;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    Widget spaced(Widget child) => Padding(
-      padding: const EdgeInsets.only(right: Grid.quarter),
-      child: ExcludeSemantics(child: child),
-    );
+    Widget display(Widget child) {
+      if (!inHeader) return ExcludeSemantics(child: child);
+      const sideInset = (_kChannelIconSize - _kWorkspaceIconSize) / 2;
+      return Padding(
+        padding: const EdgeInsets.only(right: Grid.xxs - sideInset),
+        child: SizedBox.square(
+          dimension: _kChannelIconSize,
+          child: Center(
+            child: SizedBox.square(
+              dimension: _kWorkspaceIconSize,
+              child: ExcludeSemantics(child: child),
+            ),
+          ),
+        ),
+      );
+    }
+
     if (!(icon.length > 2 && icon.startsWith(':') && icon.endsWith(':'))) {
-      return spaced(Text(icon, style: navigationSectionTextStyle));
+      return display(
+        FittedBox(
+          child: Text(
+            icon,
+            style: const TextStyle(fontSize: _kWorkspaceIconSize, height: 1),
+          ),
+        ),
+      );
     }
     final shortcode = normalizeShortcode(icon);
     final url = shortcode == null
@@ -78,7 +99,7 @@ class _WorkspaceIcon extends ConsumerWidget {
             ),
           );
     if (url == null) return const SizedBox.shrink();
-    return spaced(
+    return display(
       CustomEmojiImage(
         shortcode: shortcode!,
         url: url,
@@ -176,7 +197,7 @@ class _CustomSectionHeader extends StatelessWidget {
                 child: _SectionLabel(
                   label: label,
                   icon: switch (section.icon) {
-                    final icon? => _WorkspaceIcon(icon),
+                    final icon? => _WorkspaceIcon(icon, inHeader: true),
                     null => null,
                   },
                   expanded: expanded,
@@ -582,7 +603,7 @@ class _SectionLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(top: Grid.xxs),
+    padding: EdgeInsets.only(top: icon == null ? Grid.xxs : 0),
     child: Row(
       children: [
         ?icon,

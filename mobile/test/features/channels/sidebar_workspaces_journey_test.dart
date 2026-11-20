@@ -217,7 +217,19 @@ void main() {
       tester.getTopLeft(find.byIcon(BuzzIcons.messageCircle).first).dx,
       tester.getTopLeft(find.byKey(const ValueKey('channel-icon-general'))).dx,
     );
-    expect(inList('🚀'), findsOneWidget);
+    final emoji = tester.getRect(
+      find.ancestor(of: inList('🚀'), matching: find.byType(FittedBox)).first,
+    );
+    final channelIcon = tester.getRect(
+      find.byKey(const ValueKey('channel-icon-general')),
+    );
+    expect(emoji.center.dx, channelIcon.center.dx);
+    expect(emoji.center.dy, tester.getCenter(inList('Launch')).dy);
+    expect(
+      emoji.center.dy,
+      tester.getCenter(find.byTooltip('Launch options')).dy,
+    );
+    expect(tester.getTopLeft(inList('Launch')).dx - emoji.right, 8);
     // A workspace holds team and Solo rows alike, in desktop's sort.
     for (final filed in ['design-crit', 'solo-plan']) {
       expect(top(filed), greaterThan(top('Launch')));
