@@ -386,7 +386,11 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     }
 
     if arguments?["mergingNavigation"] as? Bool == true {
-      let glass = MergingNavigationGlass(frame: containerView.bounds)
+      let glass = MergingNavigationGlass(
+        frame: containerView.bounds,
+        controlSize: controlSize,
+        mergeSpacing: (arguments?["mergeSpacing"] as? NSNumber)?.doubleValue ?? 12
+      )
       glass.vertical = arguments?["verticalNavigation"] as? Bool ?? false
       glass.autoresizingMask = [.flexibleWidth, .flexibleHeight]
       containerView.addSubview(glass)
@@ -849,16 +853,19 @@ final class NativeSegmentedControlPlatformView: NSObject, FlutterPlatformView {
 /// Three native glass elements share a compositor so their surfaces merge.
 final class MergingNavigationGlass: UIView {
   var vertical = false
+  /// Side of each surface; the horizontal center surface is twice as wide.
+  let controlSize: CGFloat
   let leftSurface: UIVisualEffectView
   let centerSurface: UIVisualEffectView
   let rightSurface: UIVisualEffectView
   private let group: UIVisualEffectView
   private var movementAnimator: UIViewPropertyAnimator?
 
-  override init(frame: CGRect) {
+  init(frame: CGRect, controlSize: CGFloat = 56, mergeSpacing: CGFloat = 12) {
+    self.controlSize = controlSize
     if #available(iOS 26.0, *) {
       let container = UIGlassContainerEffect()
-      container.spacing = 12
+      container.spacing = mergeSpacing
       group = UIVisualEffectView(effect: container)
       leftSurface = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
       centerSurface = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
@@ -877,7 +884,7 @@ final class MergingNavigationGlass: UIView {
       if #available(iOS 26.0, *) {
         surface.cornerConfiguration = .capsule()
       } else {
-        surface.layer.cornerRadius = 28
+        surface.layer.cornerRadius = controlSize / 2
         surface.clipsToBounds = true
       }
       group.contentView.addSubview(surface)
@@ -891,17 +898,19 @@ final class MergingNavigationGlass: UIView {
   override func layoutSubviews() {
     super.layoutSubviews()
     // Use bounds/center rather than frame: side views may be transformed.
-    leftSurface.bounds = CGRect(x: 0, y: 0, width: 56, height: 56)
+    let size = controlSize
+    let half = size / 2
+    leftSurface.bounds = CGRect(x: 0, y: 0, width: size, height: size)
     rightSurface.bounds = leftSurface.bounds
-    centerSurface.bounds = CGRect(x: 0, y: 0, width: vertical ? 56 : 112, height: 56)
-    leftSurface.center = vertical ? CGPoint(x: bounds.midX, y: 28) : CGPoint(x: 28, y: bounds.midY)
-    rightSurface.center = vertical ? CGPoint(x: bounds.midX, y: bounds.height - 28) : CGPoint(x: bounds.width - 28, y: bounds.midY)
+    centerSurface.bounds = CGRect(x: 0, y: 0, width: vertical ? size : size * 2, height: size)
+    leftSurface.center = vertical ? CGPoint(x: bounds.midX, y: half) : CGPoint(x: half, y: bounds.midY)
+    rightSurface.center = vertical ? CGPoint(x: bounds.midX, y: bounds.height - half) : CGPoint(x: bounds.width - half, y: bounds.midY)
     centerSurface.center = CGPoint(x: bounds.midX, y: bounds.midY)
   }
 
   func setMenuOpen(_ open: Bool, animator: UIContextMenuInteractionAnimating?) {
     layoutIfNeeded()
-    let movement = (vertical ? bounds.midY : bounds.midX) - 28
+    let movement = (vertical ? bounds.midY : bounds.midX) - controlSize / 2
     let dx = vertical ? 0 : movement
     let dy = vertical ? movement : 0
     let changes = { [weak self] in

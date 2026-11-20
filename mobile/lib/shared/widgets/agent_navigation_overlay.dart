@@ -7,11 +7,23 @@ class AgentNavigationOverlay extends InheritedWidget {
     required this.active,
     this.onRecordingChanged,
     this.menuOpen = false,
+    this.controlSize = defaultControlSize,
     required super.child,
   });
   final ValueNotifier<bool> active;
   final ValueChanged<bool>? onRecordingChanged;
   final bool menuOpen;
+
+  /// Side of the agent control and the height of its recording pill.
+  final double controlSize;
+
+  static const double defaultControlSize = 56;
+
+  static double controlSizeOf(BuildContext context) =>
+      context
+          .dependOnInheritedWidgetOfExactType<AgentNavigationOverlay>()
+          ?.controlSize ??
+      defaultControlSize;
 
   static bool menuOpenOf(BuildContext context) =>
       context
@@ -32,5 +44,6 @@ class AgentNavigationOverlay extends InheritedWidget {
   bool updateShouldNotify(AgentNavigationOverlay oldWidget) =>
       active != oldWidget.active ||
       menuOpen != oldWidget.menuOpen ||
+      controlSize != oldWidget.controlSize ||
       onRecordingChanged != oldWidget.onRecordingChanged;
 }

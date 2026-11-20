@@ -74,6 +74,7 @@ class BestieTranscriptionSurface extends HookWidget {
     final recordingCallback = AgentNavigationOverlay.recordingCallbackOf(
       context,
     );
+    final controlSize = AgentNavigationOverlay.controlSizeOf(context);
     useEffect(() {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (alive.value && context.mounted) {
@@ -188,8 +189,8 @@ class BestieTranscriptionSurface extends HookWidget {
                 ? Duration.zero
                 : const Duration(milliseconds: 220),
             curve: Curves.easeInOutCubic,
-            width: active ? 224 + Grid.xs * 2 : 56,
-            height: 56,
+            width: active ? 224 + Grid.xs * 2 : controlSize,
+            height: controlSize,
             // Keep one native glass view mounted while the finger is down.
             // Replacing its UIKit subtree cancels the active iOS touch.
             child: Stack(
@@ -308,8 +309,8 @@ class BestieTranscriptionSurface extends HookWidget {
                         Positioned(
                           right: 0,
                           top: 0,
-                          width: 56,
-                          height: 56,
+                          width: controlSize,
+                          height: controlSize,
                           child: ExcludeSemantics(
                             excluding: active,
                             child: IgnorePointer(
@@ -340,12 +341,12 @@ class BestieTranscriptionSurface extends HookWidget {
                           Positioned(
                             right: 0,
                             top: 0,
-                            width: 56,
-                            height: 56,
+                            width: controlSize,
+                            height: controlSize,
                             child: IconButton(
                               tooltip: 'Send transcript',
                               onPressed: () => unawaited(finish()),
-                              icon: const SizedBox.square(dimension: 48),
+                              icon: SizedBox.square(dimension: controlSize - 8),
                             ),
                           ),
                       ],
@@ -354,7 +355,7 @@ class BestieTranscriptionSurface extends HookWidget {
                 ),
                 if (recording)
                   Positioned(
-                    bottom: 56 + Grid.xs,
+                    bottom: controlSize + Grid.xs,
                     width: 224 + Grid.xs * 2,
                     right: 0,
                     child: Center(
@@ -425,7 +426,7 @@ class BestieTranscriptionSurface extends HookWidget {
         final box =
             recoveryAnchor.currentContext?.findRenderObject() as RenderBox?;
         final origin = box?.localToGlobal(Offset.zero) ?? Offset.zero;
-        final right = origin.dx + (box?.size.width ?? 56);
+        final right = origin.dx + (box?.size.width ?? controlSize);
         final screen = MediaQuery.sizeOf(overlayContext);
         final left = (right - 256).clamp(8.0, screen.width - 264);
         final below = origin.dy < 72;
@@ -440,7 +441,7 @@ class BestieTranscriptionSurface extends HookWidget {
                   ? Alignment.topRight
                   : Alignment.bottomRight,
               offset: Offset(left - (right - 256), below ? 8 : -8),
-              child: SizedBox(width: 256, height: 56, child: pill),
+              child: SizedBox(width: 256, height: controlSize, child: pill),
             ),
           ),
         );
