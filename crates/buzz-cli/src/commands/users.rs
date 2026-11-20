@@ -951,6 +951,10 @@ pub async fn dispatch(
             about,
             nip05,
         } => {
+            // `--about -` matches messages/notes: substitute stdin for the
+            // sentinel. Without this, clap stores the literal "-" and the
+            // published kind:0 about field collapses to a single dash.
+            let about = resolve_about_arg(about, || crate::validate::read_or_stdin("-"))?;
             cmd_set_profile(
                 client,
                 name.as_deref(),
@@ -981,13 +985,24 @@ pub async fn dispatch(
     }
 }
 
+/// Resolve `--about`, treating `-` as "read stdin" the way messages/notes do.
+fn resolve_about_arg(
+    about: Option<String>,
+    read_stdin: impl FnOnce() -> Result<String, CliError>,
+) -> Result<Option<String>, CliError> {
+    match about {
+        Some(value) if value == "-" => read_stdin().map(|raw| Some(raw.trim_end().to_string())),
+        other => Ok(other),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         compact_profile, find_profiles, get_profiles, lookup_profiles,
         owned_agent_pubkeys_from_events, owner_scoped_profiles, owner_verification,
         parse_expiration_tag, parse_expiry, presence_subject, publish_status, read_statuses,
-        search_profiles,
+        resolve_about_arg, search_profiles,
     };
     use crate::client::BuzzClient;
     use crate::error::CliError;
@@ -1763,6 +1778,31 @@ mod tests {
         let event = json!({"pubkey": "aa", "content": FORGED, "tags": []});
         let owned = owner_scoped_profiles(&[event], &["aa".to_string()], "bb", "bb");
         assert!(owned[0].get("verified").is_none());
+    }
+
+    #[test]
+    fn resolve_about_arg_passes_through_literal_bios() {
+        assert_eq!(
+            resolve_about_arg(Some("Scout Bee".into()), || unreachable!()).unwrap(),
+            Some("Scout Bee".into())
+        );
+        assert_eq!(resolve_about_arg(None, || unreachable!()).unwrap(), None);
+    }
+
+    #[test]
+    fn resolve_about_arg_reads_stdin_for_dash_sentinel() {
+        let about =
+            resolve_about_arg(Some("-".into()), || Ok("line one\nline two\n".into())).unwrap();
+        assert_eq!(about.as_deref(), Some("line one\nline two"));
+    }
+
+    #[test]
+    fn resolve_about_arg_propagates_stdin_errors() {
+        let err = resolve_about_arg(Some("-".into()), || {
+            Err(CliError::Other("failed to read stdin".into()))
+        })
+        .unwrap_err();
+        assert!(matches!(err, CliError::Other(_)));
     }
 
     #[test]
