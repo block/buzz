@@ -23,6 +23,7 @@ mod runtime;
 use runtime::{AgentRuntime, PoolStartup, SessionMode};
 mod scope;
 mod setup_mode;
+mod sibling_retry;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -174,10 +175,8 @@ fn resolve_agent_owner(config: &Config) -> Option<String> {
 /// sibling lookup was [`SiblingVerdict::Indeterminate`]. Doubles per
 /// consecutive indeterminate result up to [`SIBLING_RETRY_MAX`].
 ///
-/// The lookup awaits inline in the sole inbound-event loop (2s timeout), so an
-/// unthrottled retry-per-event under a persistent `/query` outage would let a
-/// chatty sibling stall ingress for the owner too. With this backoff a dead
-/// relay costs at most one inline lookup per author per minute.
+/// Back off per sender so more messages during a relay outage do not trigger
+/// more profile lookups.
 const SIBLING_RETRY_BASE: Duration = Duration::from_secs(5);
 /// Ceiling for the indeterminate-lookup retry backoff.
 const SIBLING_RETRY_MAX: Duration = Duration::from_secs(60);
@@ -187,8 +186,8 @@ const SIBLING_RETRY_MAX: Duration = Duration::from_secs(60);
 enum SiblingEntry {
     /// Relay-proven verdict; immutable for the process lifetime.
     Proven(bool),
-    /// Last lookup was indeterminate: denied without a relay call until
-    /// `retry_at`. `failures` counts consecutive indeterminate results and
+    /// Last lookup was indeterminate: wait until `retry_at` before retrying
+    /// the profile request. `failures` counts consecutive indeterminate results and
     /// drives the exponential backoff.
     Indeterminate {
         retry_at: std::time::Instant,
@@ -201,8 +200,7 @@ enum SiblingEntry {
 enum SiblingCacheState {
     /// Relay-proven verdict.
     Proven(bool),
-    /// An indeterminate verdict is still inside its retry deadline: deny
-    /// this event without consulting the relay.
+    /// An indeterminate verdict is still inside its retry deadline.
     Throttled,
     /// Never seen, or the retry deadline has passed: consult the relay.
     Unknown,
@@ -220,7 +218,7 @@ enum SiblingCacheState {
 /// deadline ([`SiblingEntry::Indeterminate`]) — never as a verdict — so one
 /// relay blip cannot make this agent ignore a same-owner sibling until
 /// restart, and a persistent outage cannot turn every sibling event into an
-/// inline relay round-trip.
+/// relay round-trip.
 struct OwnerCache {
     pubkey: Option<String>,
     siblings: std::sync::Mutex<HashMap<String, SiblingEntry>>,
@@ -266,6 +264,29 @@ impl OwnerCache {
                 } else {
                     SiblingCacheState::Unknown
                 }
+            }
+        }
+    }
+
+    fn sibling_retry_at(&self, author: &str) -> Option<std::time::Instant> {
+        let map = self.siblings.lock().ok()?;
+        match map.get(author)? {
+            SiblingEntry::Indeterminate { retry_at, .. } => Some(*retry_at),
+            SiblingEntry::Proven(_) => None,
+        }
+    }
+
+    fn record_sibling_verdict(&self, author: &str, verdict: SiblingVerdict) {
+        match verdict {
+            SiblingVerdict::Sibling => self.cache_sibling(author.to_owned(), true),
+            SiblingVerdict::NotSibling => self.cache_sibling(author.to_owned(), false),
+            SiblingVerdict::Indeterminate => {
+                let backoff = self.note_indeterminate(author);
+                tracing::debug!(
+                    author,
+                    retry_after_secs = backoff.as_secs(),
+                    "sibling verification inconclusive"
+                );
             }
         }
     }
@@ -372,14 +393,8 @@ enum SiblingVerdict {
     Indeterminate,
 }
 
-/// Check if `author` is the owner OR a sibling (same owner via NIP-OA).
-///
-/// For unknown authors, queries their kind:0 profile to extract the NIP-OA
-/// auth tag and verify the owner matches. Only proven verdicts are cached as
-/// verdicts; an [`SiblingVerdict::Indeterminate`] lookup fails closed for the
-/// current event and arms a bounded retry deadline, so a transient relay
-/// outage cannot poison a sibling for the process lifetime and a persistent
-/// one cannot turn every sibling event into an inline relay round-trip.
+/// Drive one verification attempt directly in the backoff tests.
+#[cfg(test)]
 async fn is_owner_or_sibling(
     author: &str,
     owner_cache: &OwnerCache,
@@ -408,27 +423,9 @@ async fn is_owner_or_sibling(
         SiblingCacheState::Unknown => {}
     }
 
-    // Query the author's kind:0 profile to check for NIP-OA auth tag.
-    match check_sibling_via_profile(author, my_owner, rest_client).await {
-        SiblingVerdict::Sibling => {
-            owner_cache.cache_sibling(author.to_string(), true);
-            true
-        }
-        SiblingVerdict::NotSibling => {
-            owner_cache.cache_sibling(author.to_string(), false);
-            false
-        }
-        SiblingVerdict::Indeterminate => {
-            let backoff = owner_cache.note_indeterminate(author);
-            tracing::warn!(
-                author,
-                retry_after_secs = backoff.as_secs(),
-                "sibling check indeterminate — relay profile query failed; \
-                 dropping this event without a proven verdict, retrying after backoff"
-            );
-            false
-        }
-    }
+    let verdict = check_sibling_via_profile(author, my_owner, rest_client).await;
+    owner_cache.record_sibling_verdict(author, verdict);
+    verdict == SiblingVerdict::Sibling
 }
 
 /// Return the workflow owner attributed by a relay-signed workflow message.
@@ -533,15 +530,30 @@ fn effective_prompt_author(
 /// dropping the load inside it fails the construction regressions.
 mod inbound_author_gate {
     use super::{
-        effective_prompt_author, is_dm_channel, is_owner_or_sibling, pool, refresh_relay_self,
-        relay, OwnerCache, RespondTo,
+        effective_prompt_author, is_dm_channel, pool, refresh_relay_self, relay,
+        sibling_retry::SiblingRetries, OwnerCache, RespondTo, SiblingCacheState,
     };
     use std::collections::HashSet;
+    use std::future::Future;
 
     pub(crate) struct InboundAuthorGateDecision {
         pub(crate) effective_author: String,
-        pub(crate) allowed: bool,
+        verdict: AuthorVerdict,
         pub(crate) is_dm: bool,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum AuthorVerdict {
+        Allow,
+        Deny,
+        VerifySibling,
+    }
+
+    #[cfg(test)]
+    impl InboundAuthorGateDecision {
+        pub(crate) fn allowed(&self) -> bool {
+            self.verdict == AuthorVerdict::Allow
+        }
     }
 
     /// An event that passed the complete listener author boundary.
@@ -566,49 +578,41 @@ mod inbound_author_gate {
     ///
     /// This stays private to the gate module so neither listener can bypass
     /// workflow attribution by calling the raw-signer policy directly.
-    async fn author_allowed(
+    fn author_verdict(
         respond_to: &RespondTo,
         allowlist: &HashSet<String>,
         author: &str,
         is_dm: bool,
         owner_cache: &OwnerCache,
-        rest_client: &relay::RestClient,
-    ) -> bool {
-        if is_dm {
-            return match respond_to {
-                RespondTo::Nobody => false,
-                _ => is_owner_or_sibling(author, owner_cache, rest_client).await,
-            };
-        }
+    ) -> AuthorVerdict {
         match respond_to {
-            RespondTo::Anyone => true,
-            RespondTo::Nobody => false,
-            RespondTo::OwnerOnly => is_owner_or_sibling(author, owner_cache, rest_client).await,
-            RespondTo::Allowlist => {
-                allowlist.contains(author)
-                    || is_owner_or_sibling(author, owner_cache, rest_client).await
+            RespondTo::Nobody => return AuthorVerdict::Deny,
+            RespondTo::Anyone if !is_dm => return AuthorVerdict::Allow,
+            RespondTo::Allowlist if !is_dm && allowlist.contains(author) => {
+                return AuthorVerdict::Allow;
             }
+            _ => {}
+        }
+        match owner_cache.get() {
+            None => AuthorVerdict::Deny,
+            Some(owner) if owner == author => AuthorVerdict::Allow,
+            Some(_) => match owner_cache.sibling_state(author) {
+                SiblingCacheState::Proven(true) => AuthorVerdict::Allow,
+                SiblingCacheState::Proven(false) => AuthorVerdict::Deny,
+                _ => AuthorVerdict::VerifySibling,
+            },
         }
     }
 
     #[cfg(test)]
-    pub(super) async fn test_author_allowed(
+    pub(super) fn test_author_allowed(
         respond_to: &RespondTo,
         allowlist: &HashSet<String>,
         author: &str,
         is_dm: bool,
         owner_cache: &OwnerCache,
-        rest_client: &relay::RestClient,
     ) -> bool {
-        author_allowed(
-            respond_to,
-            allowlist,
-            author,
-            is_dm,
-            owner_cache,
-            rest_client,
-        )
-        .await
+        author_verdict(respond_to, allowlist, author, is_dm, owner_cache) == AuthorVerdict::Allow
     }
 
     pub(crate) struct InboundAuthorGate {
@@ -616,6 +620,7 @@ mod inbound_author_gate {
         relay_self: Option<String>,
         // None means no authoritative NIP-11 result yet, including at startup.
         refreshed_generation: Option<u64>,
+        sibling_retries: SiblingRetries,
     }
 
     pub(crate) fn refresh_needed(refreshed_generation: Option<u64>, event_generation: u64) -> bool {
@@ -634,7 +639,24 @@ mod inbound_author_gate {
                 agent_pubkey_hex: agent_pubkey_hex.to_string(),
                 relay_self,
                 refreshed_generation: completed.then_some(0),
+                sibling_retries: SiblingRetries::default(),
             }
+        }
+
+        pub(crate) async fn next_listener_event(
+            &mut self,
+            incoming: impl Future<Output = Option<relay::BuzzEvent>>,
+            owner_cache: &OwnerCache,
+            rest_client: &relay::RestClient,
+        ) -> Option<relay::BuzzEvent> {
+            tokio::select! {
+                event = self.sibling_retries.next_event(owner_cache, rest_client) => Some(event),
+                event = incoming => event,
+            }
+        }
+
+        pub(crate) fn discard_channel(&mut self, channel_id: uuid::Uuid) {
+            self.sibling_retries.discard_channel(channel_id);
         }
 
         /// Whether delegated workflow attribution is currently available.
@@ -686,34 +708,24 @@ mod inbound_author_gate {
                 allowlist,
                 is_dm,
                 owner_cache,
-                rest_client,
             )
-            .await
         }
 
-        async fn evaluate_with_channel_trust(
+        fn evaluate_with_channel_trust(
             &self,
             event: &nostr::Event,
             respond_to: &RespondTo,
             allowlist: &HashSet<String>,
             is_dm: bool,
             owner_cache: &OwnerCache,
-            rest_client: &relay::RestClient,
         ) -> InboundAuthorGateDecision {
             let effective_author =
                 effective_prompt_author(event, self.relay_self.as_deref(), &self.agent_pubkey_hex);
-            let allowed = author_allowed(
-                respond_to,
-                allowlist,
-                &effective_author,
-                is_dm,
-                owner_cache,
-                rest_client,
-            )
-            .await;
+            let verdict =
+                author_verdict(respond_to, allowlist, &effective_author, is_dm, owner_cache);
             InboundAuthorGateDecision {
                 effective_author,
-                allowed,
+                verdict,
                 is_dm,
             }
         }
@@ -737,45 +749,56 @@ mod inbound_author_gate {
                     rest_client,
                 )
                 .await;
-            if !decision.allowed {
-                // INFO, not debug: under owner-only fleets a dropped event is
-                // the whole story of "the agent never answered", and the
-                // default log filter hides debug.
-                tracing::info!(
-                    channel_id = %buzz_event.channel_id,
-                    raw_author = %buzz_event.event.pubkey.to_hex(),
-                    effective_author = %decision.effective_author,
-                    mode = %respond_to,
-                    is_dm = decision.is_dm,
-                    "inbound author gate — dropping event"
-                );
-                return None;
+            match decision.verdict {
+                AuthorVerdict::Allow => {
+                    if !self.sibling_retries.admit_once(buzz_event.event.id) {
+                        tracing::debug!(event_id = %buzz_event.event.id, "dropping replay of an admitted recovered event");
+                        return None;
+                    }
+                    Some(AuthorizedListenerEvent {
+                        buzz_event,
+                        effective_author: decision.effective_author,
+                    })
+                }
+                AuthorVerdict::VerifySibling => {
+                    if let Some(owner) = owner_cache.get() {
+                        let retry_at = owner_cache.sibling_retry_at(&decision.effective_author);
+                        self.sibling_retries.hold(
+                            buzz_event,
+                            decision.effective_author,
+                            owner,
+                            retry_at,
+                            rest_client,
+                        );
+                    }
+                    None
+                }
+                AuthorVerdict::Deny => {
+                    tracing::info!(
+                        event_id = %buzz_event.event.id,
+                        kind = %buzz_event.event.kind,
+                        channel_id = %buzz_event.channel_id,
+                        raw_author = %buzz_event.event.pubkey.to_hex(),
+                        effective_author = %decision.effective_author,
+                        mode = %respond_to,
+                        is_dm = decision.is_dm,
+                        "inbound author gate — dropping event"
+                    );
+                    None
+                }
             }
-            Some(AuthorizedListenerEvent {
-                buzz_event,
-                effective_author: decision.effective_author,
-            })
         }
 
         #[cfg(test)]
-        pub(crate) async fn evaluate_for_test(
+        pub(crate) fn evaluate_for_test(
             &self,
             event: &nostr::Event,
             respond_to: &RespondTo,
             allowlist: &HashSet<String>,
             is_dm: bool,
             owner_cache: &OwnerCache,
-            rest_client: &relay::RestClient,
         ) -> InboundAuthorGateDecision {
-            self.evaluate_with_channel_trust(
-                event,
-                respond_to,
-                allowlist,
-                is_dm,
-                owner_cache,
-                rest_client,
-            )
-            .await
+            self.evaluate_with_channel_trust(event, respond_to, allowlist, is_dm, owner_cache)
         }
     }
 }
@@ -3475,7 +3498,7 @@ async fn run_harness(
                     None
                 }
                 // Remaining branches don't touch pool — evaluated when pool is idle.
-                buzz_event = relay.next_event() => {
+                buzz_event = author_gate_ctx.next_listener_event(relay.next_event(), &owner_cache, &ctx.rest_client) => {
                     let _ = result_rx; // end split borrow before relay handling
                     match buzz_event {
                         Some(buzz_event) => {
@@ -3552,6 +3575,7 @@ async fn run_harness(
                                     }
                                 } else {
                                     subscribed_channel_ids.remove(&ch);
+                                    author_gate_ctx.discard_channel(ch);
                                     tracing::info!(channel_id = %ch, "membership notification: unsubscribing from channel");
                                     if let Err(e) = relay.unsubscribe_channel(ch).await {
                                         tracing::warn!("failed to unsubscribe from channel {ch}: {e}");
@@ -7898,7 +7922,7 @@ mod author_gate_tests {
             "a connected gate must attribute a relay-signed workflow dispatch to its owner, not the relay signer"
         );
         assert!(
-            decision.allowed,
+            decision.allowed(),
             "an owner-only agent must wake for its own workflow's explicit mention"
         );
         server.abort();
@@ -7927,23 +7951,20 @@ mod author_gate_tests {
         cache.cache_sibling(workflow_owner, true);
         cache.cache_sibling(relay_hex.clone(), false);
 
-        let decision = gate
-            .evaluate_for_test(
-                &event,
-                &RespondTo::OwnerOnly,
-                &HashSet::new(),
-                false,
-                &cache,
-                &rest_client,
-            )
-            .await;
+        let decision = gate.evaluate_for_test(
+            &event,
+            &RespondTo::OwnerOnly,
+            &HashSet::new(),
+            false,
+            &cache,
+        );
 
         assert_eq!(
             decision.effective_author, relay_hex,
             "without a verified relay identity the gate must fall back to the raw signer"
         );
         assert!(
-            !decision.allowed,
+            !decision.allowed(),
             "unattributed relay-signed output must not wake an owner-only agent"
         );
         server.abort();
@@ -8006,7 +8027,7 @@ mod author_gate_tests {
             decision.effective_author, workflow_owner,
             "a reconnect refresh must restore delegated workflow attribution"
         );
-        assert!(decision.allowed);
+        assert!(decision.allowed());
         server.abort();
     }
 
@@ -8068,7 +8089,7 @@ mod author_gate_tests {
             .await;
         server.abort();
         assert!(
-            decision.allowed,
+            decision.allowed(),
             "a generation-0 workflow wake must recover after the startup NIP-11 failure"
         );
         assert_eq!(decision.effective_author, workflow_owner);
@@ -8127,7 +8148,7 @@ mod author_gate_tests {
                         &rest_client,
                     )
                     .await;
-                assert_eq!(decision.allowed, identity.is_some());
+                assert_eq!(decision.allowed(), identity.is_some());
                 assert_eq!(
                     gate.relay_identity_for_test(),
                     identity.as_deref(),
@@ -8146,7 +8167,7 @@ mod author_gate_tests {
                     &rest_client,
                 )
                 .await;
-            assert!(decision.allowed);
+            assert!(decision.allowed());
             assert_eq!(decision.effective_author, workflow_owner);
             assert_eq!(
                 gate.relay_identity_for_test(),
@@ -8208,7 +8229,7 @@ mod author_gate_tests {
             .await;
         assert_eq!(gate.relay_identity_for_test(), Some(old_relay_hex.as_str()));
         assert!(
-            !first_new.allowed,
+            !first_new.allowed(),
             "the new signer must remain fail-closed while NIP-11 is unavailable"
         );
 
@@ -8225,7 +8246,7 @@ mod author_gate_tests {
         assert_eq!(gate.relay_identity_for_test(), Some(new_relay_hex.as_str()));
         assert_eq!(recovered.effective_author, workflow_owner);
         assert!(
-            recovered.allowed,
+            recovered.allowed(),
             "a later event on the same connection must use the refreshed relay key"
         );
 
@@ -8244,7 +8265,10 @@ mod author_gate_tests {
                 &rest_client,
             )
             .await;
-        assert!(!stale.allowed, "the rotated-away relay key must be evicted");
+        assert!(
+            !stale.allowed(),
+            "the rotated-away relay key must be evicted"
+        );
 
         server.abort();
     }
@@ -8269,21 +8293,17 @@ mod author_gate_tests {
         let cache = cache_with_sibling();
         cache.cache_sibling(workflow_owner.clone(), true);
 
-        let (gate, rest_client, server) =
-            connected_gate(&relay.public_key().to_hex(), &agent).await;
-        let decision = gate
-            .evaluate_for_test(
-                &event,
-                &RespondTo::OwnerOnly,
-                &HashSet::new(),
-                false,
-                &cache,
-                &rest_client,
-            )
-            .await;
+        let (gate, _, server) = connected_gate(&relay.public_key().to_hex(), &agent).await;
+        let decision = gate.evaluate_for_test(
+            &event,
+            &RespondTo::OwnerOnly,
+            &HashSet::new(),
+            false,
+            &cache,
+        );
         assert_eq!(decision.effective_author, workflow_owner);
         assert!(
-            decision.allowed,
+            decision.allowed(),
             "a verified workflow owner for an explicitly targeted agent must flow through the existing sibling policy"
         );
         server.abort();
@@ -8308,22 +8328,18 @@ mod author_gate_tests {
         cache.cache_sibling(workflow_owner, true);
         cache.cache_sibling(relay.public_key().to_hex(), false);
 
-        let (gate, rest_client, server) =
-            connected_gate(&relay.public_key().to_hex(), &agent).await;
-        let decision = gate
-            .evaluate_for_test(
-                &event,
-                &RespondTo::OwnerOnly,
-                &HashSet::new(),
-                false,
-                &cache,
-                &rest_client,
-            )
-            .await;
+        let (gate, _, server) = connected_gate(&relay.public_key().to_hex(), &agent).await;
+        let decision = gate.evaluate_for_test(
+            &event,
+            &RespondTo::OwnerOnly,
+            &HashSet::new(),
+            false,
+            &cache,
+        );
         server.abort();
         assert_eq!(decision.effective_author, relay.public_key().to_hex());
         assert!(
-            !decision.allowed,
+            !decision.allowed(),
             "the legacy owner p tag alone must not wake an agent-owned workflow"
         );
     }
@@ -8350,22 +8366,18 @@ mod author_gate_tests {
         cache.cache_sibling(workflow_owner, true);
         cache.cache_sibling(attacker.public_key().to_hex(), false);
 
-        let (gate, rest_client, server) =
-            connected_gate(&relay.public_key().to_hex(), &agent).await;
-        let decision = gate
-            .evaluate_for_test(
-                &event,
-                &RespondTo::OwnerOnly,
-                &HashSet::new(),
-                false,
-                &cache,
-                &rest_client,
-            )
-            .await;
+        let (gate, _, server) = connected_gate(&relay.public_key().to_hex(), &agent).await;
+        let decision = gate.evaluate_for_test(
+            &event,
+            &RespondTo::OwnerOnly,
+            &HashSet::new(),
+            false,
+            &cache,
+        );
         server.abort();
         assert_eq!(decision.effective_author, attacker.public_key().to_hex());
         assert!(
-            !decision.allowed,
+            !decision.allowed(),
             "an attacker-signed workflow event must not borrow trusted owner authority"
         );
     }
@@ -8381,9 +8393,7 @@ mod author_gate_tests {
                 SIBLING,
                 false,
                 &cache,
-                &dummy_rest_client()
-            )
-            .await,
+            ),
             "a same-owner sibling must fire a turn under Allowlist even when not listed"
         );
     }
@@ -8399,9 +8409,7 @@ mod author_gate_tests {
                 EXTERNAL,
                 false,
                 &cache,
-                &dummy_rest_client()
-            )
-            .await,
+            ),
             "an explicitly allowlisted external pubkey must still be accepted"
         );
     }
@@ -8417,9 +8425,7 @@ mod author_gate_tests {
                 STRANGER,
                 false,
                 &cache,
-                &dummy_rest_client()
-            )
-            .await,
+            ),
             "a non-sibling absent from the allowlist must be dropped"
         );
     }
@@ -8435,9 +8441,7 @@ mod author_gate_tests {
                 OWNER,
                 false,
                 &cache,
-                &dummy_rest_client()
-            )
-            .await,
+            ),
             "the owner must always be accepted under Allowlist"
         );
     }
@@ -8456,9 +8460,7 @@ mod author_gate_tests {
                 STRANGER,
                 false,
                 &cache,
-                &dummy_rest_client()
-            )
-            .await,
+            ),
             "under the default OwnerOnly, a stranger must be dropped — so it can never reach the mode gate to steer"
         );
     }
@@ -8474,9 +8476,7 @@ mod author_gate_tests {
                     who,
                     false,
                     &cache,
-                    &dummy_rest_client()
-                )
-                .await,
+                ),
                 "under default OwnerOnly, the {label} must be admitted so steering can fire"
             );
         }
@@ -8500,9 +8500,7 @@ mod author_gate_tests {
                 EXTERNAL,
                 true,
                 &cache,
-                &dummy_rest_client()
-            )
-            .await,
+            ),
             "an allowlisted external pubkey must NOT fire a turn inside a DM"
         );
     }
@@ -8517,9 +8515,7 @@ mod author_gate_tests {
                 STRANGER,
                 true,
                 &cache,
-                &dummy_rest_client()
-            )
-            .await,
+            ),
             "respond_to=anyone must still drop non-owner authors inside a DM"
         );
     }
@@ -8540,9 +8536,7 @@ mod author_gate_tests {
                         who,
                         true,
                         &cache,
-                        &dummy_rest_client()
-                    )
-                    .await,
+                    ),
                     "in a DM under {mode}, the {label} must still be admitted"
                 );
             }
@@ -8559,9 +8553,7 @@ mod author_gate_tests {
                 OWNER,
                 true,
                 &cache,
-                &dummy_rest_client()
-            )
-            .await,
+            ),
             "respond_to=nobody must drop everything, DMs included"
         );
     }
@@ -8682,10 +8674,11 @@ mod author_gate_tests {
 
     /// A `/query` stand-in that counts requests and answers HTTP 500 (a
     /// non-retriable status, so the harness sees an immediate error rather
-    /// than the 2s timeout) until `healthy` is flipped, after which it answers
-    /// `200 [{"tags":[]}]` — a fetched profile with no owner attestation, i.e.
-    /// a definitive `NotSibling`.
-    async fn flaky_sibling_query_server() -> (
+    /// than the 2s timeout) until `healthy` is flipped, after which it returns
+    /// the supplied profile response.
+    async fn flaky_sibling_query_server(
+        profile: serde_json::Value,
+    ) -> (
         relay::RestClient,
         std::sync::Arc<std::sync::atomic::AtomicUsize>,
         std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -8701,6 +8694,7 @@ mod author_gate_tests {
         let requests = std::sync::Arc::new(AtomicUsize::new(0));
         let healthy = std::sync::Arc::new(AtomicBool::new(false));
         let (server_requests, server_healthy) = (requests.clone(), healthy.clone());
+        let body = profile.to_string();
         let server = tokio::spawn(async move {
             loop {
                 let Ok((mut socket, _)) = listener.accept().await else {
@@ -8708,11 +8702,18 @@ mod author_gate_tests {
                 };
                 let mut request = vec![0; 8192];
                 let _ = socket.read(&mut request).await;
-                server_requests.fetch_add(1, Ordering::SeqCst);
-                let response = if server_healthy.load(Ordering::SeqCst) {
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\nConnection: close\r\n\r\n[{\"tags\":[]}]".to_string()
+                let response = if request.starts_with(b"GET ") {
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_owned()
                 } else {
-                    "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                    server_requests.fetch_add(1, Ordering::SeqCst);
+                    if server_healthy.load(Ordering::SeqCst) {
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                    } else {
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned()
+                    }
                 };
                 let _ = socket.write_all(response.as_bytes()).await;
             }
@@ -8727,6 +8728,250 @@ mod author_gate_tests {
     }
 
     #[tokio::test]
+    async fn original_sibling_message_survives_a_failed_profile_lookup() {
+        use std::sync::atomic::Ordering;
+
+        let owner = nostr::Keys::generate();
+        let sender = nostr::Keys::generate();
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        let attestation = buzz_sdk::nip_oa::compute_auth_tag(&owner, &sender.public_key(), "")
+            .expect("sign ownership attestation");
+        let tag: serde_json::Value = serde_json::from_str(&attestation).unwrap();
+        let (rest, requests, healthy, server) =
+            flaky_sibling_query_server(serde_json::json!([{ "tags": [tag] }])).await;
+        let mut gate = InboundAuthorGate::connect(&rest, &agent, "test").await;
+        let cache = OwnerCache::with_retry_backoff(
+            Some(owner.public_key().to_hex()),
+            Duration::from_millis(150),
+            Duration::from_millis(400),
+        );
+        let channel_id = Uuid::new_v4();
+        let queued_channel_id = Uuid::new_v4();
+        let removed_channel_id = Uuid::new_v4();
+        let channel_info = pool::ChannelInfoResolver::new(
+            [channel_id, queued_channel_id, removed_channel_id]
+                .into_iter()
+                .map(|id| {
+                    (
+                        id,
+                        relay::ChannelInfo {
+                            name: "review".into(),
+                            channel_type: "stream".into(),
+                            description: None,
+                        },
+                    )
+                })
+                .collect(),
+            rest.clone(),
+        );
+        let message = sibling_mention(&sender, &agent, channel_id);
+        let event_id = message.event.id;
+        let queued_message = sibling_mention(&sender, &agent, queued_channel_id);
+        let removed_message = sibling_mention(&sender, &agent, removed_channel_id);
+        for event in [
+            message.clone(),
+            message.clone(),
+            queued_message.clone(),
+            removed_message,
+        ] {
+            let admitted = authorize_normal_listener_event(
+                &mut gate,
+                event,
+                &RespondTo::OwnerOnly,
+                &HashSet::new(),
+                &cache,
+                &channel_info,
+                &rest,
+            )
+            .await;
+            assert!(admitted.is_none(), "an unknown author cannot be admitted");
+        }
+        let sender_hex = sender.public_key().to_hex();
+        tokio::select! {
+            _ = gate.next_listener_event(std::future::pending(), &cache, &rest) => {
+                panic!("an unsuccessful profile lookup must not release the message");
+            }
+            result = tokio::time::timeout(Duration::from_secs(2), async {
+                while cache.sibling_retry_at(&sender_hex).is_none() {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            }) => result.expect("the first lookup should fail and arm a retry"),
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        gate.discard_channel(removed_channel_id);
+
+        let owner_message = relay::BuzzEvent {
+            event: nostr::EventBuilder::new(nostr::Kind::Custom(9), "Check in")
+                .sign_with_keys(&owner)
+                .unwrap(),
+            ..message
+        };
+        let owner_message = gate
+            .next_listener_event(std::future::ready(Some(owner_message)), &cache, &rest)
+            .await
+            .unwrap();
+        assert!(
+            authorize_normal_listener_event(
+                &mut gate,
+                owner_message,
+                &RespondTo::OwnerOnly,
+                &HashSet::new(),
+                &cache,
+                &channel_info,
+                &rest,
+            )
+            .await
+            .is_some(),
+            "the owner's own messages must still be admitted during backoff"
+        );
+
+        healthy.store(true, Ordering::SeqCst);
+        let recovered = tokio::time::timeout(
+            Duration::from_secs(2),
+            gate.next_listener_event(std::future::pending(), &cache, &rest),
+        )
+        .await
+        .expect("the original message should return without another relay event")
+        .unwrap();
+        let (admitted, effective_author) = authorize_normal_listener_event(
+            &mut gate,
+            recovered,
+            &RespondTo::OwnerOnly,
+            &HashSet::new(),
+            &cache,
+            &channel_info,
+            &rest,
+        )
+        .await
+        .expect("the retried message should pass the normal gate")
+        .into_parts();
+        assert_eq!(admitted.event.id, event_id);
+        assert_eq!(admitted.channel_id, channel_id);
+        assert_eq!(effective_author, sender_hex);
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            2,
+            "Buzz should retry the original message without a new event from the sibling"
+        );
+        let authorize = async |gate: &mut InboundAuthorGate, event| {
+            authorize_normal_listener_event(
+                gate,
+                event,
+                &RespondTo::OwnerOnly,
+                &HashSet::new(),
+                &cache,
+                &channel_info,
+                &rest,
+            )
+            .await
+        };
+        // Simulate relay replays that escape the relay's bounded event-ID cache.
+        // One races an event still in `ready`; the other follows an admission.
+        for (message, first_admission) in [(queued_message.clone(), true), (admitted, false)] {
+            let replay = relay::BuzzEvent {
+                connection_generation: 1,
+                ..message
+            };
+            assert_eq!(
+                authorize(&mut gate, replay).await.is_some(),
+                first_admission,
+                "a recovered event may be authorized once whichever copy reaches the gate first"
+            );
+        }
+        let queued_original = gate
+            .next_listener_event(std::future::pending(), &cache, &rest)
+            .now_or_never()
+            .flatten()
+            .expect("the other recovered event should already be ready");
+        assert_eq!(queued_original.event.id, queued_message.event.id);
+        assert!(
+            authorize(&mut gate, queued_original).await.is_none(),
+            "the queued original cannot be authorized after its live replay"
+        );
+        assert!(
+            gate.next_listener_event(std::future::pending(), &cache, &rest)
+                .now_or_never()
+                .is_none(),
+            "duplicate events and events from removed channels must not be returned"
+        );
+        server.abort();
+    }
+
+    fn sibling_mention(sender: &nostr::Keys, agent: &str, channel_id: Uuid) -> relay::BuzzEvent {
+        relay::BuzzEvent {
+            connection_generation: 0,
+            channel_id,
+            event: nostr::EventBuilder::new(
+                nostr::Kind::Custom(KIND_STREAM_MESSAGE as u16),
+                "Review complete",
+            )
+            .tags([
+                nostr::Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+                nostr::Tag::parse(["p", agent]).unwrap(),
+            ])
+            .sign_with_keys(sender)
+            .unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn held_messages_are_dropped_after_denial_or_retry_limit() {
+        use std::sync::atomic::Ordering;
+
+        for (profile_available, expected_verdict, expected_requests) in
+            [(true, Some(false), 1), (false, None, 4)]
+        {
+            let owner = nostr::Keys::generate().public_key().to_hex();
+            let sender = nostr::Keys::generate();
+            let agent = nostr::Keys::generate().public_key().to_hex();
+            let (rest, requests, healthy, server) =
+                flaky_sibling_query_server(serde_json::json!([{ "tags": [] }])).await;
+            healthy.store(profile_available, Ordering::SeqCst);
+            let mut gate = InboundAuthorGate::connect(&rest, &agent, "test").await;
+            let cache = OwnerCache::with_retry_backoff(
+                Some(owner),
+                Duration::from_millis(5),
+                Duration::from_millis(20),
+            );
+            let channel_id = Uuid::new_v4();
+            let channel_info = resolver(HashMap::from([(
+                channel_id,
+                relay::ChannelInfo {
+                    name: "review".into(),
+                    channel_type: "stream".into(),
+                    description: None,
+                },
+            )]));
+            let admitted = authorize_normal_listener_event(
+                &mut gate,
+                sibling_mention(&sender, &agent, channel_id),
+                &RespondTo::OwnerOnly,
+                &HashSet::new(),
+                &cache,
+                &channel_info,
+                &rest,
+            )
+            .await;
+            assert!(admitted.is_none());
+            assert!(
+                tokio::time::timeout(
+                    Duration::from_secs(1),
+                    gate.next_listener_event(std::future::pending(), &cache, &rest),
+                )
+                .await
+                .is_err(),
+                "an unverified sender must never be released to the listener"
+            );
+            assert_eq!(requests.load(Ordering::SeqCst), expected_requests);
+            assert_eq!(
+                cache.proven_verdict(&sender.public_key().to_hex()),
+                expected_verdict
+            );
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
     async fn test_sibling_indeterminate_retry_is_throttled_then_recovers() {
         use std::sync::atomic::Ordering;
 
@@ -8737,7 +8982,8 @@ mod author_gate_tests {
             Duration::from_millis(80),
             Duration::from_millis(400),
         );
-        let (rest, requests, healthy, server) = flaky_sibling_query_server().await;
+        let (rest, requests, healthy, server) =
+            flaky_sibling_query_server(serde_json::json!([{ "tags": [] }])).await;
 
         // First contact during the outage: one relay call, denied, not proven.
         assert!(!is_owner_or_sibling(&author, &cache, &rest).await);
@@ -9077,9 +9323,7 @@ mod author_gate_tests {
                 EXTERNAL,
                 is_dm,
                 &owner_cache,
-                &dummy_rest_client(),
-            )
-            .await,
+            ),
             "an external author must not pass when startup discovery omitted metadata"
         );
     }
