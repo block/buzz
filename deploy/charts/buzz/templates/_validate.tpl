@@ -26,12 +26,17 @@ surface at template time regardless of which manifest helm renders first.
 {{- end -}}
 
 {{/* The acceptance probe ships only in relay images that include it, so the
-     chart's default appVersion image can't run it. acceptance.tags can't
+     chart's default appVersion image can't run it. The probe needs a key the
+     relay admits, so the chart never lets it fall back to a new key per run.
+     acceptance.tags keys are canonical (see values.schema.json) and can't
      override probe-owned metric tag keys or repeat a key, so one run never
      lands in two populations of the same tag. */}}
 {{- if .Values.acceptance.enabled -}}
   {{- if not (or .Values.image.tag .Values.image.digest) -}}
     {{- fail "acceptance.enabled requires image.tag or image.digest: the probe binary is not in the chart's default appVersion image." -}}
+  {{- end -}}
+  {{- if not .Values.acceptance.privateKeySecret.name -}}
+    {{- fail "acceptance.enabled requires acceptance.privateKeySecret.name: without a key the probe signs with a new key each run, which a members-only relay refuses and an open relay joins to every auto-join channel." -}}
   {{- end -}}
   {{- $seen := dict -}}
   {{- range .Values.acceptance.tags -}}

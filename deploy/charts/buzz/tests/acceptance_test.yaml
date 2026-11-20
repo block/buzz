@@ -15,10 +15,11 @@ tests:
       - hasDocuments:
           count: 0
 
-  - it: runs the probe from the relay image against relayUrl without a key or metrics
+  - it: runs the probe from the relay image against relayUrl with a key and no metrics
     set:
       image.tag: "1.2.3"
       acceptance.enabled: true
+      acceptance.privateKeySecret.name: buzz-acceptance-key
     asserts:
       - hasDocuments:
           count: 1
@@ -71,11 +72,14 @@ tests:
           content:
             name: BUZZ_ACCEPTANCE_STATSD_ADDR
           any: true
-      - notContains:
+      - contains:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
             name: BUZZ_PRIVATE_KEY
-          any: true
+            valueFrom:
+              secretKeyRef:
+                name: buzz-acceptance-key
+                key: BUZZ_PRIVATE_KEY
       - notContains:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
@@ -193,20 +197,32 @@ tests:
                 name: buzz-acceptance-key
                 key: nsec
       - equal:
-          path: spec.jobTemplate.spec.template.spec.initContainers[0].name
-          value: mint-assertion
+          path: spec.jobTemplate.spec.template.spec.initContainers
+          value:
+            - name: mint-assertion
+              image: example.com/minter:v1
+              volumeMounts:
+                - name: assertion
+                  mountPath: /var/run/assertion
       - equal:
-          path: spec.jobTemplate.spec.template.spec.volumes[0].name
-          value: assertion
+          path: spec.jobTemplate.spec.template.spec.volumes
+          value:
+            - name: assertion
+              emptyDir: {}
       - equal:
-          path: spec.jobTemplate.spec.template.spec.containers[0].volumeMounts[0].mountPath
-          value: /var/run/assertion
+          path: spec.jobTemplate.spec.template.spec.containers[0].volumeMounts
+          value:
+            - name: assertion
+              mountPath: /var/run/assertion
+              readOnly: true
 
   - it: owns the Datadog version label over a stale pin
     set:
       image.tag: sha-abcdef1
       acceptance:
         enabled: true
+        privateKeySecret:
+          name: buzz-acceptance-key
         podLabels:
           tags.datadoghq.com/service: buzz-acceptance
           tags.datadoghq.com/version: sha-stale00
@@ -228,6 +244,8 @@ tests:
       image.tag: sha-abcdef1
       acceptance:
         enabled: true
+        privateKeySecret:
+          name: buzz-acceptance-key
         relayUrl: wss://other.example.com
     asserts:
       - contains:
@@ -252,6 +270,8 @@ tests:
       image.tag: "1.2.3"
       acceptance:
         enabled: true
+        privateKeySecret:
+          name: buzz-acceptance-key
         tags: ["staging"]
     asserts:
       - failedTemplate: {}
@@ -261,6 +281,8 @@ tests:
       image.tag: "1.2.3"
       acceptance:
         enabled: true
+        privateKeySecret:
+          name: buzz-acceptance-key
         tags: ["env:staging", "relay_version:9.9.9"]
     asserts:
       - failedTemplate:
@@ -271,6 +293,8 @@ tests:
       image.tag: "1.2.3"
       acceptance:
         enabled: true
+        privateKeySecret:
+          name: buzz-acceptance-key
         tags: ["target:stable", "env:staging", "target:canary"]
     asserts:
       - failedTemplate:
@@ -281,8 +305,65 @@ tests:
       image.tag: "1.2.3"
       acceptance:
         enabled: true
+        privateKeySecret:
+          name: buzz-acceptance-key
         podLabels:
           app.kubernetes.io/component: other
     asserts:
       - failedTemplate:
           errorPattern: 'acceptance.podLabels may not set chart-owned label "app.kubernetes.io/component"'
+
+  # A new key per run is refused by a members-only relay and joined to every
+  # auto-join channel on an open one, so the chart requires a key.
+  - it: requires a probe key
+    set:
+      image.tag: "1.2.3"
+      acceptance.enabled: true
+    asserts:
+      - failedTemplate:
+          errorPattern: "acceptance.enabled requires acceptance.privateKeySecret.name"
+
+  - it: requires a probe key with an assertion file
+    set:
+      image.tag: "1.2.3"
+      acceptance:
+        enabled: true
+        assertionFile: /var/run/assertion/token
+    asserts:
+      - failedTemplate:
+          errorPattern: "acceptance.enabled requires acceptance.privateKeySecret.name"
+
+  # The probe rewrites spaces to "_" and Datadog lowercases keys and trims
+  # "_", so only canonical keys pass the reserved and duplicate checks.
+  - it: rejects an uppercase tag key
+    set:
+      image.tag: "1.2.3"
+      acceptance:
+        enabled: true
+        privateKeySecret:
+          name: buzz-acceptance-key
+        tags: ["Env:staging"]
+    asserts:
+      - failedTemplate: {}
+
+  - it: rejects a tag key with a space
+    set:
+      image.tag: "1.2.3"
+      acceptance:
+        enabled: true
+        privateKeySecret:
+          name: buzz-acceptance-key
+        tags: ["relay version:9.9.9"]
+    asserts:
+      - failedTemplate: {}
+
+  - it: rejects a tag key with a trailing underscore
+    set:
+      image.tag: "1.2.3"
+      acceptance:
+        enabled: true
+        privateKeySecret:
+          name: buzz-acceptance-key
+        tags: ["env_:staging"]
+    asserts:
+      - failedTemplate: {}

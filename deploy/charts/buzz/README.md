@@ -527,9 +527,11 @@ image predates the probe.
 
 - The probe connects to `acceptance.relayUrl`, or to `relayUrl` when that is
   empty. Each run creates one private channel with a 1 h TTL and deletes it.
-- `acceptance.privateKeySecret.name` names a Secret with the probe's key. Left
-  empty, every run uses a new key, which works only on a relay that admits
-  any key.
+- `acceptance.privateKeySecret.name` names a Secret with the probe's key
+  (hex or nsec). It is required: the chart fails to render without it. A new
+  key per run would fail on a members-only relay, and an open relay would
+  join each new key to every auto-join channel. On a members-only relay, make
+  the key a relay member first.
 - `acceptance.statsdAddr` sends DogStatsD metrics under
   `acceptance.metricPrefix` (`<prefix>.runs`, `<prefix>.run.seconds`,
   `<prefix>.check.runs`, `<prefix>.check.seconds`, `<prefix>.stage.seconds`).
@@ -538,7 +540,9 @@ image predates the probe.
   `relay_version`, and each `acceptance.tags` entry. `probe_revision` names the
   probe's own image (`image.digest`, else `image.tag`), not the relay build the
   run reached: during a rollout, or with `acceptance.relayUrl` set, the probe
-  can reach pods of another build. `acceptance.tags` can't reuse the
+  can reach pods of another build. `acceptance.tags` keys must be lowercase
+  (`a-z`, `0-9`, `_`, `.`, `/`, `-`, starting with a letter and not ending in
+  `_`), because Datadog lowercases keys and trims `_`. They can't reuse the
   probe-owned keys `probe_revision`, `relay_version`, `check`, `stage` or
   `result`, and each key may appear once.
 - The Pod runs with `acceptance.serviceAccountName`, or the namespace default
@@ -546,12 +550,19 @@ image predates the probe.
   account and never mounts its token.
 - `concurrencyPolicy` is `Forbid` and `backoffLimit` is 0: a retry would
   hide a failed run. `acceptance.activeDeadlineSeconds` bounds the whole run,
-  including init containers.
+  including image pull and init containers. The probe sends metrics only when
+  the run ends, so a run killed at the deadline sends none. A run has 13
+  stages, each capped at `acceptance.stageTimeoutSeconds`, plus about 30 s to
+  close and send metrics. Keep the deadline above 13 ×
+  `stageTimeoutSeconds` + 30 s plus pull and init time.
 
 On a relay that enforces NIP-FI, the probe needs a fresh assertion for its
 key. Minting one is deployment-specific, so the chart takes it as a file: an
 init container writes it to a shared volume and `acceptance.assertionFile`
 points the probe at it. The probe re-reads the file before every connection.
+The assertion must name the probe's key, so the init container needs the same
+key Secret. Keep the Pod's `runAsUser` in the init container, so the probe can
+read files the minter writes with mode 0600.
 
 ```yaml
 image:
@@ -567,6 +578,12 @@ acceptance:
     - name: mint-assertion
       image: example.com/assertion-minter:v1
       args: [--out, /var/run/assertion/token]
+      env:
+        - name: BUZZ_PRIVATE_KEY   # the assertion must name the probe's key
+          valueFrom:
+            secretKeyRef:
+              name: buzz-acceptance-key
+              key: BUZZ_PRIVATE_KEY
       securityContext:
         runAsNonRoot: true
         allowPrivilegeEscalation: false
@@ -582,7 +599,8 @@ acceptance:
           mountPath: /var/run/assertion
   extraVolumes:
     - name: assertion
-      emptyDir: {}
+      emptyDir:
+        medium: Memory             # holds a credential
   extraVolumeMounts:
     - name: assertion
       mountPath: /var/run/assertion
