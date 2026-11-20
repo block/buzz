@@ -25,8 +25,8 @@ fn parse_goose_config(yaml_str: &str) -> Option<RuntimeFileConfig> {
     let goose_provider = yaml_string(&map, "GOOSE_PROVIDER");
     let goose_model = yaml_string(&map, "GOOSE_MODEL");
     let goose_mode = yaml_string(&map, "GOOSE_MODE");
-    let goose_max_tokens = yaml_string(&map, "GOOSE_MAX_TOKENS");
-    let goose_context_limit = yaml_string(&map, "GOOSE_CONTEXT_LIMIT");
+    let goose_max_tokens = yaml_string_or_integer(&map, "GOOSE_MAX_TOKENS");
+    let goose_context_limit = yaml_string_or_integer(&map, "GOOSE_CONTEXT_LIMIT");
 
     // Nested provider format: active_provider → providers.<name>.{model,host,...}
     let nested = active_provider
@@ -146,6 +146,20 @@ fn yaml_string(
         .map(str::to_string)
 }
 
+/// Like [`yaml_string`], but also accepts an integer, which is how an
+/// unquoted numeric value such as `GOOSE_CONTEXT_LIMIT: 200000` parses.
+fn yaml_string_or_integer(
+    map: &std::collections::HashMap<String, serde_yaml::Value>,
+    key: &str,
+) -> Option<String> {
+    match map.get(key)? {
+        serde_yaml::Value::Number(value) if value.is_i64() || value.is_u64() => {
+            Some(value.to_string())
+        }
+        _ => yaml_string(map, key),
+    }
+}
+
 fn mapping_string(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
     map.get(serde_yaml::Value::String(key.to_owned()))
         .and_then(|v| v.as_str())
@@ -179,6 +193,18 @@ GOOSE_MAX_TOKENS: "8192"
         assert_eq!(cfg.model.as_deref(), Some("claude-sonnet-4-20250514"));
         assert_eq!(cfg.mode.as_deref(), Some("auto"));
         assert_eq!(cfg.max_output_tokens.as_deref(), Some("8192"));
+    }
+
+    #[test]
+    fn integer_token_limits_are_read() {
+        // Unquoted YAML numbers are how goose itself stores these keys.
+        let yaml = r#"
+GOOSE_MAX_TOKENS: 8192
+GOOSE_CONTEXT_LIMIT: 200000
+"#;
+        let cfg = parse_goose_config(yaml).unwrap();
+        assert_eq!(cfg.max_output_tokens.as_deref(), Some("8192"));
+        assert_eq!(cfg.context_limit.as_deref(), Some("200000"));
     }
 
     #[test]
