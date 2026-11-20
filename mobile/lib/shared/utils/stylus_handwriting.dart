@@ -30,9 +30,11 @@ bool stylusHandwritingEnabledFor(String text) =>
 /// them. iOS holds rectangles only for the focused field, so a field crossing
 /// the cutoff without focus has none to clear.
 ///
-/// For the same reason, it closes any open iPad Scribble writing gap first.
-/// Flutter ignores iOS's request to close the gap once handwriting is off, so
-/// the gap would otherwise stay in the text until the field is rebuilt.
+/// On any crossing, focused or not, it first closes an open iPad Scribble
+/// writing gap. Flutter ignores iOS's request to close the gap once
+/// handwriting is off, so the gap would otherwise stay in the text until the
+/// field is rebuilt. A gap can outlive focus when iOS closes the input
+/// connection itself.
 class StylusHandwritingCutoff extends ValueNotifier<bool> {
   StylusHandwritingCutoff(this._controller, this._focusNode)
     : super(stylusHandwritingEnabledFor(_controller.text)) {
@@ -44,12 +46,17 @@ class StylusHandwritingCutoff extends ValueNotifier<bool> {
 
   void _update() {
     final enabled = stylusHandwritingEnabledFor(_controller.text);
-    if (value && !enabled && _focusNode.hasPrimaryFocus) {
+    // The node keeps the context of a field that has since been removed, which
+    // took its gap with it.
+    final fieldContext = _focusNode.context;
+    if (value && !enabled && fieldContext != null && fieldContext.mounted) {
       // The field still has handwriting on until it rebuilds, so it accepts
       // the close.
-      _focusNode.context
-          ?.findAncestorStateOfType<EditableTextState>()
+      fieldContext
+          .findAncestorStateOfType<EditableTextState>()
           ?.removeTextPlaceholder();
+    }
+    if (value && !enabled && _focusNode.hasPrimaryFocus) {
       SystemChannels.textInput.invokeMethod<void>(
         'TextInput.setSelectionRects',
         const <Object>[],

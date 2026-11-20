@@ -14,6 +14,7 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/shared/utils/stylus_handwriting.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -654,6 +655,46 @@ void main() {
     await tester.enterText(field, 'short');
     await tester.pump();
     expect(handwriting(), isTrue);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+  testWidgets('iOS closes a Scribble writing gap left after losing focus', (
+    tester,
+  ) async {
+    Future<void> sendScribble(String method, [List<Object> size = const []]) =>
+        tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+          SystemChannels.textInput.name,
+          SystemChannels.textInput.codec.encodeMethodCall(
+            MethodCall('TextInputClient.$method', <Object>[-1, ...size]),
+          ),
+          (_) {},
+        );
+    bool hasWritingGap() {
+      var found = false;
+      tester
+          .state<EditableTextState>(find.byType(EditableText))
+          .renderEditable
+          .text
+          ?.visitChildren((span) {
+            found = found || span is WidgetSpan;
+            return !found;
+          });
+      return found;
+    }
+
+    await _openEditSheet(tester, message: _message('abc'));
+    await sendScribble('insertTextPlaceholder', [300, 0]);
+    await tester.pump();
+    expect(hasWritingGap(), isTrue);
+    // When iOS closes the input connection itself, Flutter keeps the gap
+    // after the field loses focus, and ignores closing it once handwriting is
+    // off. So the edit crossing the cutoff without focus must close it.
+    await sendScribble('onConnectionClosed');
+    await tester.pump();
+    expect(tester.widget<TextField>(field).focusNode!.hasPrimaryFocus, isFalse);
+    expect(hasWritingGap(), isTrue);
+    controllerOf(tester).text = 'a' * (stylusHandwritingMaxLength + 1);
+    await tester.pump();
+    expect(hasWritingGap(), isFalse);
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets('an unchanged or emptied edit saves nothing', (tester) async {
