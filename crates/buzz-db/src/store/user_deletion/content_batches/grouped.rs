@@ -203,13 +203,16 @@ async fn erase_events(tx: &mut AdmittedTx, number: i64) -> Result<()> {
     sqlx::query("UPDATE events e SET pubkey=''::bytea,content='',sig=''::bytea,
         tags=COALESCE((SELECT jsonb_agg(jsonb_build_array('e',lower(tag->>1),'',tag->>3))
             FROM jsonb_array_elements(e.tags) tag WHERE tag->>0='e'
-              AND tag->>3 IN ('root','reply') AND tag->>1 ~ '^[0-9a-fA-F]{64}$'),'[]'::jsonb),
+              AND tag->>3 IN ('root','reply') AND tag->>1 ~ '^[0-9a-fA-F]{64}$'
+              AND NOT(e.kind=ANY($3))),'[]'::jsonb),
         d_tag=NULL,not_before=NULL,delivered_at=NULL,
         deleted_at=COALESCE(deleted_at,clock_timestamp())
         FROM content_batch_work w WHERE w.table_name='events' AND w.batch=$2
         AND w.action='would_scrub' AND e.community_id=$1
         AND e.id=decode(w.row_key->>'id','hex') AND e.created_at=(w.row_key->>'created_at')::timestamptz")
-        .bind(community).bind(number).execute(tx.conn()).await?;
+        // A pin command's `e` tag names its target, not an ancestor to keep.
+        .bind(community).bind(number).bind(crate::pins::COMMAND_KINDS.as_slice())
+        .execute(tx.conn()).await?;
     sqlx::query(
         "DELETE FROM thread_metadata tm USING content_batch_work w
         WHERE w.table_name='events' AND w.batch=$2 AND w.action='would_delete'
