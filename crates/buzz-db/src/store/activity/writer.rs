@@ -576,6 +576,42 @@ pub(super) async fn install_head_for_test(
         .expect("install head");
 }
 
+/// The writer's two transactions for one channel, a batch with a head and a
+/// thread reply and then the distrust that follows a failed batch, for the
+/// admission test. Returns each one's result.
+#[cfg(test)]
+pub(super) async fn admitted_writes_for_test(
+    pool: &sqlx::PgPool,
+    community: CommunityId,
+    channel: Uuid,
+    head: &nostr::Event,
+    reply: &nostr::Event,
+    root: Id,
+) -> (Result<Vec<(Uuid, bool)>>, Result<()>) {
+    let message = |event: &nostr::Event| Message {
+        id: *event.id.as_bytes(),
+        created_at: DateTime::from_timestamp(event.created_at.as_secs() as i64, 0)
+            .expect("timestamp"),
+        received_at: Utc::now(),
+        pubkey: event.pubkey.to_bytes(),
+        text: preview_text(&event.content),
+    };
+    let staged = Staged {
+        head: Some(message(head)),
+        threads: BTreeMap::from([(
+            root,
+            StagedThread {
+                seen: None,
+                newest: Some(message(reply)),
+            },
+        )]),
+        ..Staged::default()
+    };
+    let written = write(pool, community, &BTreeMap::from([(channel, staged)])).await;
+    let distrusted = distrust(pool.clone(), community, vec![channel]).await;
+    (written, distrusted)
+}
+
 /// Returns the channels whose rows were not written, each with whether its
 /// people's rows are among them.
 async fn write(

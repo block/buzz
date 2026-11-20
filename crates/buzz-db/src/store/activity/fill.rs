@@ -407,6 +407,13 @@ impl Db {
         Ok(skipped)
     }
 
+    /// Opens and drops the transaction every repair write runs in, for the
+    /// admission test.
+    #[cfg(test)]
+    pub(super) async fn begin_repair_for_test(&self, community: CommunityId) -> Result<()> {
+        self.begin_repair(community).await.map(drop)
+    }
+
     async fn begin_repair(&self, community: CommunityId) -> Result<crate::AdmittedTx> {
         let mut tx = crate::begin_community_write_transaction(
             &self.pool,

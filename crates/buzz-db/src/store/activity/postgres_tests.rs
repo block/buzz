@@ -1056,6 +1056,74 @@ async fn activity_flush_waits_for_retried_writes() {
     assert_eq!(head.as_deref(), Some(held.id.as_bytes().as_slice()));
 }
 
+/// Every writer of the activity tables goes through community admission: once
+/// a community's deletion has started (quiescing) or fenced it, the
+/// background writer, its distrust pass and the on-read repair are all
+/// refused and leave no row. An active community's writes land in both
+/// tables.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn activity_writers_are_refused_once_deletion_starts() {
+    let (db, communities) = crate::test_support::admission_fixture().await;
+    let keys = Keys::generate();
+    let head = EventBuilder::new(Kind::Custom(9), "head")
+        .sign_with_keys(&keys)
+        .expect("sign head");
+    let reply = EventBuilder::new(Kind::Custom(9), "reply")
+        .sign_with_keys(&keys)
+        .expect("sign reply");
+    let root = *head.id.as_bytes();
+    let rows = |community: CommunityId| {
+        let pool = db.pool.clone();
+        async move {
+            let mut counts = Vec::new();
+            for table in ["channel_heads", "thread_heads"] {
+                let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "SELECT count(*) FROM {table} WHERE community_id = $1"
+                )))
+                .bind(community.as_uuid())
+                .fetch_one(&pool)
+                .await
+                .expect("count rows");
+                counts.push(count);
+            }
+            counts
+        }
+    };
+    let assert_fenced = |error: crate::DbError| {
+        assert!(
+            matches!(&error, crate::DbError::AccessDenied(message) if message.contains("write-fenced")),
+            "expected application admission rejection, got {error:?}"
+        );
+    };
+
+    for community in &communities[1..] {
+        let channel = Uuid::new_v4();
+        let (written, distrusted) =
+            writer::admitted_writes_for_test(&db.pool, *community, channel, &head, &reply, root)
+                .await;
+        assert_fenced(written.expect_err("the writer's batch must be refused"));
+        assert_fenced(distrusted.expect_err("the distrust pass must be refused"));
+        assert_fenced(
+            db.begin_repair_for_test(*community)
+                .await
+                .expect_err("the on-read repair must be refused"),
+        );
+        assert_eq!(rows(*community).await, [0, 0]);
+    }
+
+    let active = communities[0];
+    let (written, distrusted) =
+        writer::admitted_writes_for_test(&db.pool, active, Uuid::new_v4(), &head, &reply, root)
+            .await;
+    assert!(written.expect("active batch").is_empty(), "nothing failed");
+    distrusted.expect("active distrust");
+    db.begin_repair_for_test(active)
+        .await
+        .expect("active repair");
+    assert_eq!(rows(active).await, [1, 1]);
+}
+
 /// Rows never cross communities or outlive membership.
 #[tokio::test]
 #[ignore = "requires Postgres"]
