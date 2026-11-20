@@ -149,16 +149,23 @@ abstract final class DiagnosticFilter {
   static const _keptTextLimit = 200;
 
   /// The first line of a kept error's [text], or [removedText] when that line
-  /// contains a URL or is long. Where a URL ends in free text is ambiguous, so
-  /// none is kept. A long line, or the lines after the first, usually quote
-  /// other text, such as a response body or a wrapped error.
+  /// may hold a URL or is long. Where a URL ends in free text is ambiguous, so
+  /// none is kept: a `://`, or a `?` or `#` that could start a query or
+  /// fragment (a `mailto:` link has no `//`), replaces the line. A `?` or `#`
+  /// followed by a space, quote, closing bracket or the end stays, so nullable
+  /// types such as `List<String?>` keep a type error readable. A long line,
+  /// or the lines after the first, usually quote other text, such as a
+  /// response body or a wrapped error.
   static String _keptText(String text) {
-    final newline = text.indexOf('\n');
-    final line = newline < 0 ? text : text.substring(0, newline);
-    return line.length > _keptTextLimit || line.contains('://')
+    final lineEnd = text.indexOf(_lineBreak);
+    final line = lineEnd < 0 ? text : text.substring(0, lineEnd);
+    return line.length > _keptTextLimit || line.contains(_mayHoldUrl)
         ? removedText
         : line;
   }
+
+  static final _lineBreak = RegExp('[\r\n]');
+  static final _mayHoldUrl = RegExp(r'''://|[?#](?![\s'">,)\]}]|$)''');
 
   static final _urlTail = RegExp(
     r'''(\b[a-z][a-z0-9+.-]*://[^\s?#'"]*)[?#][^\s'"]*''',
