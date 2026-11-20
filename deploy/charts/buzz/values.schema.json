@@ -236,6 +236,7 @@
             "key": { "type": "string", "minLength": 1 }
           }
         },
+        "privateKeyFile": { "type": "string" },
         "assertionFile": { "type": "string" },
         "statsdAddr": { "type": "string" },
         "metricPrefix": { "type": "string", "minLength": 1 },

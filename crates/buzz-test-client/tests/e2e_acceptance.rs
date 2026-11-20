@@ -152,8 +152,68 @@ fn the_binary_exits_1_and_reports_when_a_check_fails() {
 #[test]
 #[ignore]
 fn the_binary_exits_2_when_it_cannot_run() {
-    let (output, lines) = probe(&["--relay-url", &relay_url(), "--private-key", "not-a-key"]);
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    assert!(lines.is_empty(), "{lines:?}");
+    let dir = std::env::temp_dir().join(format!("acceptance-key-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bad_key_file = dir.join("bad-key");
+    std::fs::write(&bad_key_file, "not-a-key\n").unwrap();
+    let bad_key_file = bad_key_file.to_str().unwrap();
+    let missing_key_file = dir.join("missing");
+    let missing_key_file = missing_key_file.to_str().unwrap();
+    let relay = relay_url();
+
+    // Each case must stop before the run: no report, no metrics.
+    let cases: [(&[&str], &str); 4] = [
+        (&["--private-key", "not-a-key"], "private key:"),
+        // The key file is read and parsed, not ignored for a new key.
+        (&["--private-key-file", bad_key_file], "private key:"),
+        (
+            &["--private-key-file", missing_key_file],
+            "read private key file",
+        ),
+        (
+            &[
+                "--private-key",
+                "not-a-key",
+                "--private-key-file",
+                bad_key_file,
+            ],
+            "cannot be used with",
+        ),
+    ];
+    for (extra, error) in cases {
+        let mut args = vec!["--relay-url", relay.as_str()];
+        args.extend_from_slice(extra);
+        let (output, lines) = probe(&args);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{extra:?}: {stderr}");
+        assert!(stderr.contains(error), "{extra:?}: {stderr}");
+        assert!(output.stdout.is_empty(), "{extra:?}");
+        assert!(lines.is_empty(), "{extra:?}: {lines:?}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[ignore]
+fn the_binary_passes_with_a_key_from_a_file() {
+    let dir = std::env::temp_dir().join(format!("acceptance-key-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let key_file = dir.join("key");
+    let keys = Keys::generate();
+    std::fs::write(
+        &key_file,
+        format!("{}\n", keys.secret_key().to_secret_hex()),
+    )
+    .unwrap();
+
+    let (output, _) = probe(&[
+        "--relay-url",
+        &relay_url(),
+        "--private-key-file",
+        key_file.to_str().unwrap(),
+    ]);
+    let report = report(&output);
+    assert_eq!(output.status.code(), Some(0), "{report}");
+    assert_eq!(report["passed"], true);
+    std::fs::remove_dir_all(dir).unwrap();
 }

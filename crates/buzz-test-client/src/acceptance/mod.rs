@@ -16,7 +16,7 @@ pub mod metrics;
 
 use std::future::Future;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
@@ -633,41 +633,49 @@ async fn wait_for_eose(
 fn upgrade_headers(cfg: &Config) -> anyhow::Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     if let Some(path) = &cfg.assertion_file {
-        let invalid = || {
-            anyhow!(
-                "assertion file {} must be a regular file of at most {MAX_ASSERTION_BYTES} bytes",
-                path.display()
-            )
-        };
-        let read = || -> std::io::Result<Option<String>> {
-            // Check before opening: opening a FIFO blocks until a writer
-            // appears, and no async timeout can interrupt that.
-            if !std::fs::metadata(path)?.is_file() {
-                return Ok(None);
-            }
-            let file = std::fs::File::open(path)?;
-            if !file.metadata()?.is_file() {
-                return Ok(None);
-            }
-            // Cap the read on the open file: it may grow after the check.
-            let mut assertion = String::new();
-            file.take(MAX_ASSERTION_BYTES + 1)
-                .read_to_string(&mut assertion)?;
-            Ok((assertion.len() as u64 <= MAX_ASSERTION_BYTES).then_some(assertion))
-        };
-        let assertion = read()
-            .with_context(|| format!("read assertion file {}", path.display()))?
-            .ok_or_else(invalid)?;
-        let assertion = assertion.trim();
-        if assertion.is_empty() {
-            bail!("assertion file {} is empty", path.display());
-        }
+        let assertion = read_secret_file(path, "assertion file", MAX_ASSERTION_BYTES)?;
         let mut value = HeaderValue::from_str(&format!("Bearer {assertion}"))
             .map_err(|_| anyhow!("assertion file {} is not a header value", path.display()))?;
         value.set_sensitive(true);
         headers.insert(FEDERATED_IDENTITY_HEADER, value);
     }
     Ok(headers)
+}
+
+/// Reads a small secret another process writes, such as a key or an
+/// assertion, and returns it without surrounding whitespace.
+///
+/// The file must be a regular, non-empty file of at most `max_bytes`.
+/// A FIFO or directory fails at once rather than blocking the run.
+pub fn read_secret_file(path: &Path, what: &str, max_bytes: u64) -> anyhow::Result<String> {
+    let read = || -> std::io::Result<Option<String>> {
+        // Check before opening: opening a FIFO blocks until a writer
+        // appears, and no async timeout can interrupt that.
+        if !std::fs::metadata(path)?.is_file() {
+            return Ok(None);
+        }
+        let file = std::fs::File::open(path)?;
+        if !file.metadata()?.is_file() {
+            return Ok(None);
+        }
+        // Cap the read on the open file: it may grow after the check.
+        let mut text = String::new();
+        file.take(max_bytes + 1).read_to_string(&mut text)?;
+        Ok((text.len() as u64 <= max_bytes).then_some(text))
+    };
+    let text = read()
+        .with_context(|| format!("read {what} {}", path.display()))?
+        .ok_or_else(|| {
+            anyhow!(
+                "{what} {} must be a regular file of at most {max_bytes} bytes",
+                path.display()
+            )
+        })?;
+    let text = text.trim();
+    if text.is_empty() {
+        bail!("{what} {} is empty", path.display());
+    }
+    Ok(text.to_owned())
 }
 
 /// The relay's HTTP base for `ws_url`: `wss` becomes `https`, `ws` `http`.

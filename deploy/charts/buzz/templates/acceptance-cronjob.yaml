@@ -80,6 +80,9 @@ spec:
                 {{- with $a.statsdAddr }}
                 - { name: BUZZ_ACCEPTANCE_STATSD_ADDR, value: {{ . | quote }} }
                 {{- end }}
+                {{- with $a.privateKeyFile }}
+                - { name: BUZZ_PRIVATE_KEY_FILE, value: {{ . | quote }} }
+                {{- end }}
                 {{- with $a.assertionFile }}
                 - { name: BUZZ_ACCEPTANCE_ASSERTION_FILE, value: {{ . | quote }} }
                 {{- end }}

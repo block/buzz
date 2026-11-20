@@ -4,7 +4,8 @@
 //! check failed, and 2 when the probe itself could not run or report.
 //!
 //! Usage:
-//!   buzz-acceptance --relay-url wss://relay.example [--assertion-file <path>]
+//!   buzz-acceptance --relay-url wss://relay.example
+//!       [--private-key <key> | --private-key-file <path>] [--assertion-file <path>]
 //!       [--statsd-addr 127.0.0.1:8125] [--tag env:staging]...
 
 use std::net::SocketAddr;
@@ -15,6 +16,9 @@ use std::time::Duration;
 use buzz_test_client::acceptance::{self, metrics, Config};
 use clap::Parser;
 use nostr::Keys;
+
+/// The largest key file the probe reads. An nsec is 63 bytes.
+const MAX_KEY_FILE_BYTES: u64 = 1024;
 
 /// The longest resolving the metrics address or sending the metrics may take.
 const METRICS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -32,6 +36,10 @@ struct Cli {
     /// probe uses a new key, which works only on a relay that admits any key.
     #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     private_key: Option<String>,
+    /// File holding the secret key (hex or nsec), for a key another process
+    /// writes, such as one minted with its NIP-FI assertion before the run.
+    #[arg(long, env = "BUZZ_PRIVATE_KEY_FILE", conflicts_with = "private_key")]
+    private_key_file: Option<PathBuf>,
     /// File holding a NIP-FI assertion for the key, read before every
     /// connection. Keep it fresh from another process.
     #[arg(long, env = "BUZZ_ACCEPTANCE_ASSERTION_FILE")]
@@ -84,8 +92,17 @@ fn main() -> ExitCode {
 /// Runs the probe, prints its report and sends its metrics. Returns whether
 /// every check passed.
 async fn probe(cli: Cli) -> anyhow::Result<bool> {
-    let keys = match &cli.private_key {
-        Some(key) => Keys::parse(key).map_err(|e| anyhow::anyhow!("private key: {e}"))?,
+    let key = match (&cli.private_key, &cli.private_key_file) {
+        (Some(key), _) => Some(key.clone()),
+        (None, Some(path)) => Some(acceptance::read_secret_file(
+            path,
+            "private key file",
+            MAX_KEY_FILE_BYTES,
+        )?),
+        (None, None) => None,
+    };
+    let keys = match key {
+        Some(key) => Keys::parse(&key).map_err(|e| anyhow::anyhow!("private key: {e}"))?,
         None => Keys::generate(),
     };
     let statsd = match &cli.statsd_addr {

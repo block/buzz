@@ -35,8 +35,11 @@ surface at template time regardless of which manifest helm renders first.
   {{- if not (or .Values.image.tag .Values.image.digest) -}}
     {{- fail "acceptance.enabled requires image.tag or image.digest: the probe binary is not in the chart's default appVersion image." -}}
   {{- end -}}
-  {{- if not .Values.acceptance.privateKeySecret.name -}}
-    {{- fail "acceptance.enabled requires acceptance.privateKeySecret.name: without a key the probe signs with a new key each run, which a members-only relay refuses and an open relay joins to every auto-join channel." -}}
+  {{- if and .Values.acceptance.privateKeySecret.name .Values.acceptance.privateKeyFile -}}
+    {{- fail "acceptance: set privateKeySecret.name or privateKeyFile, not both." -}}
+  {{- end -}}
+  {{- if not (or .Values.acceptance.privateKeySecret.name .Values.acceptance.privateKeyFile) -}}
+    {{- fail "acceptance.enabled requires acceptance.privateKeySecret.name or acceptance.privateKeyFile: without a key the probe signs with a new key each run, which a members-only relay refuses and an open relay joins to every auto-join channel." -}}
   {{- end -}}
   {{- $seen := dict -}}
   {{- range .Values.acceptance.tags -}}

@@ -528,10 +528,11 @@ image predates the probe.
 - The probe connects to `acceptance.relayUrl`, or to `relayUrl` when that is
   empty. Each run creates one private channel with a 1 h TTL and deletes it.
 - `acceptance.privateKeySecret.name` names a Secret with the probe's key
-  (hex or nsec). It is required: the chart fails to render without it. A new
-  key per run would fail on a members-only relay, and an open relay would
-  join each new key to every auto-join channel. On a members-only relay, make
-  the key a relay member first.
+  (hex or nsec), or `acceptance.privateKeyFile` names a file an init
+  container writes. Set exactly one: the chart fails to render with neither.
+  Without a key the probe would sign with a new key each run, which a
+  members-only relay refuses and an open relay joins to every auto-join
+  channel. On a members-only relay, make the key a relay member first.
 - `acceptance.statsdAddr` sends DogStatsD metrics under
   `acceptance.metricPrefix` (`<prefix>.runs`, `<prefix>.run.seconds`,
   `<prefix>.check.runs`, `<prefix>.check.seconds`, `<prefix>.stage.seconds`).
@@ -562,8 +563,13 @@ key. Minting one is deployment-specific, so the chart takes it as a file: an
 init container writes it to a shared volume and `acceptance.assertionFile`
 points the probe at it. The probe re-reads the file before every connection.
 The assertion must name the probe's key, so the init container needs the same
-key Secret. Keep the Pod's `runAsUser` in the init container, so the probe can
-read files the minter writes with mode 0600.
+key. Keep the Pod's `runAsUser` in the init container, so the probe can read
+files the minter writes with mode 0600. When the issuer binds each key to one
+identity, the init container can also write a new key for each run to
+`acceptance.privateKeyFile`. A new key per run needs an agent assertion
+(`nip-fi-agent+jwt` whose `nostr_owner_pubkey` is a relay member): a
+members-only relay refuses a new person key, and an open relay joins it to
+every auto-join channel.
 
 ```yaml
 image:

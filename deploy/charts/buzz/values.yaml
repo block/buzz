@@ -420,6 +420,10 @@ acceptance:
   privateKeySecret:
     name: ""
     key: BUZZ_PRIVATE_KEY
+  # Key file path in the probe container, for a key an init container writes
+  # with its assertion (for example one new identity per run). Use this or
+  # privateKeySecret, not both.
+  privateKeyFile: ""
   # NIP-FI assertion path in the probe container. Pair with extraInitContainers,
   # extraVolumes and extraVolumeMounts to mint it before the run.
   assertionFile: ""
