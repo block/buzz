@@ -66,6 +66,16 @@ spec:
                 - {{ $a.metricPrefix | quote }}
                 - --tag
                 - {{ printf "probe_revision:%s" (include "buzz.imageRevision" .) | quote }}
+                # Newer options are flags, not env vars: a probe older than an
+                # option rejects the unknown flag instead of ignoring it.
+                {{- with $a.connectAddr }}
+                - --connect-addr
+                - {{ . | quote }}
+                {{- end }}
+                {{- with $a.privateKeyFile }}
+                - --private-key-file
+                - {{ . | quote }}
+                {{- end }}
                 {{- range $a.tags }}
                 - --tag
                 - {{ . | quote }}

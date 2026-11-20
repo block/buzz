@@ -24,6 +24,7 @@ fn relay_url() -> String {
 async fn every_acceptance_check_passes_against_a_live_relay() {
     let report = acceptance::run(&Config {
         relay_url: relay_url(),
+        connect_addr: None,
         keys: Keys::generate(),
         assertion_file: None,
         stage_timeout: Duration::from_secs(10),
@@ -43,6 +44,12 @@ async fn every_acceptance_check_passes_against_a_live_relay() {
 /// Runs the binary with `args`, metrics sent to a local listener. Returns
 /// its output and every datagram that arrived.
 fn probe(args: &[&str]) -> (Output, Vec<String>) {
+    probe_with_env(args, &[])
+}
+
+/// [`probe`] with extra environment variables. The child inherits none of the
+/// probe's own settings from the test's environment.
+fn probe_with_env(args: &[&str], envs: &[(&str, &str)]) -> (Output, Vec<String>) {
     let agent = UdpSocket::bind("127.0.0.1:0").unwrap();
     agent
         .set_read_timeout(Some(Duration::from_millis(500)))
@@ -52,7 +59,12 @@ fn probe(args: &[&str]) -> (Output, Vec<String>) {
         .args(args)
         .args(["--statsd-addr", &addr, "--tag", "env:test"])
         .env_remove("BUZZ_PRIVATE_KEY")
+        .env_remove("BUZZ_PRIVATE_KEY_FILE")
+        .env_remove("BUZZ_ACCEPTANCE_ASSERTION_FILE")
+        .env_remove("BUZZ_ACCEPTANCE_STATSD_ADDR")
+        .env_remove("BUZZ_ACCEPTANCE_CONNECT_ADDR")
         .env_remove("BUZZ_RELAY_URL")
+        .envs(envs.iter().copied())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -152,8 +164,69 @@ fn the_binary_exits_1_and_reports_when_a_check_fails() {
 #[test]
 #[ignore]
 fn the_binary_exits_2_when_it_cannot_run() {
-    let (output, lines) = probe(&["--relay-url", &relay_url(), "--private-key", "not-a-key"]);
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    assert!(lines.is_empty(), "{lines:?}");
+    let dir = std::env::temp_dir().join(format!("acceptance-key-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bad_key_file = dir.join("bad-key");
+    std::fs::write(&bad_key_file, "not-a-key\n").unwrap();
+    let bad_key_file = bad_key_file.to_str().unwrap();
+    let missing_key_file = dir.join("missing");
+    let missing_key_file = missing_key_file.to_str().unwrap();
+    let relay = relay_url();
+
+    // Each case must stop before the run: no report, no metrics.
+    let cases: [(&[&str], &str); 4] = [
+        (&["--private-key", "not-a-key"], "private key:"),
+        // The key file is read and parsed, not ignored for a new key.
+        (&["--private-key-file", bad_key_file], "private key:"),
+        (
+            &["--private-key-file", missing_key_file],
+            "read private key file",
+        ),
+        (
+            &[
+                "--private-key",
+                "not-a-key",
+                "--private-key-file",
+                bad_key_file,
+            ],
+            "cannot be used with",
+        ),
+    ];
+    for (extra, error) in cases {
+        let mut args = vec!["--relay-url", relay.as_str()];
+        args.extend_from_slice(extra);
+        let (output, lines) = probe(&args);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{extra:?}: {stderr}");
+        assert!(stderr.contains(error), "{extra:?}: {stderr}");
+        assert!(output.stdout.is_empty(), "{extra:?}");
+        assert!(lines.is_empty(), "{extra:?}: {lines:?}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[ignore]
+fn the_binary_authenticates_with_the_key_from_its_key_file() {
+    let dir = std::env::temp_dir().join(format!("acceptance-key-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let key_file = dir.join("key");
+    let keys = Keys::generate();
+    std::fs::write(
+        &key_file,
+        format!("{}\n", keys.secret_key().to_secret_hex()),
+    )
+    .unwrap();
+
+    // The chart passes the path through the environment, so this does too.
+    let (output, _) = probe_with_env(
+        &["--relay-url", &relay_url()],
+        &[("BUZZ_PRIVATE_KEY_FILE", key_file.to_str().unwrap())],
+    );
+    let report = report(&output);
+    assert_eq!(output.status.code(), Some(0), "{report}");
+    assert_eq!(report["passed"], true);
+    // A probe that ignored the file would run as a new key.
+    assert_eq!(report["pubkey"], keys.public_key().to_hex(), "{report}");
+    std::fs::remove_dir_all(dir).unwrap();
 }
