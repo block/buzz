@@ -189,12 +189,15 @@ final class NotificationService: UNNotificationServiceExtension {
         if let navigationTarget = resolution.navigationTarget {
           var userInfo = content.userInfo
           userInfo[BuzzPushNavigationTarget.userInfoKey] = navigationTarget.userInfoValue
-          if let replyContext = resolution.replyContext,
-            navigationTarget.communityID
-              == BuzzSelectedCommunity.id(in: self.appGroupIdentifier.flatMap(UserDefaults.init(suiteName:)))
-          {
+          if let replyContext = resolution.replyContext {
+            // The app also reads it to clear the notification once its
+            // message is read; only the selected community's offer Reply.
             userInfo[BuzzNotificationReplyContext.userInfoKey] = replyContext.userInfoValue
-            content.categoryIdentifier = BuzzNotificationReplyContext.categoryIdentifier
+            if navigationTarget.communityID
+              == BuzzSelectedCommunity.id(in: self.appGroupIdentifier.flatMap(UserDefaults.init(suiteName:)))
+            {
+              content.categoryIdentifier = BuzzNotificationReplyContext.categoryIdentifier
+            }
           }
           content.userInfo = userInfo
         }

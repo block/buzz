@@ -163,8 +163,8 @@ public struct BuzzNotificationReplyRequest: Equatable, Sendable {
   /// Whether a sent reply clears a delivered notification, matching the
   /// read marker the app writes: a reply in a thread reads that thread up to
   /// the notified message, and a top-level reply reads the whole conversation
-  /// up to it, its threads included. Only notifications that offer Reply
-  /// know where and when their message was.
+  /// up to it, its threads included. Only notifications that show a resolved
+  /// channel or DM message know where and when their message was.
   public func clears(threadIdentifier other: String, userInfo: [AnyHashable: Any]) -> Bool {
     guard !threadIdentifier.isEmpty, other == threadIdentifier,
       let notified = BuzzNotificationReplyContext.decodeIfPresent(from: userInfo),
