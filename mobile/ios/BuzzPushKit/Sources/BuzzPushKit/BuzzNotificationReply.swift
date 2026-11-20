@@ -248,6 +248,13 @@ public final class BuzzNotificationReplyBuffer: @unchecked Sendable {
     return taken
   }
 
+  /// Whether a request is still waiting for its outcome.
+  public func holds(id: String) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return entries.contains { $0.request.id == id }
+  }
+
   /// Finishes a request, returning false when the id is unknown or already
   /// finished.
   @discardableResult
@@ -338,7 +345,8 @@ public final class BuzzNotificationReplyJournal: @unchecked Sendable {
     recorded(id: id)?["publishing"] == "true"
   }
 
-  /// Forgets a reply once the app has reported it sent, or kept its draft.
+  /// Forgets a reply once the app has reported it sent, kept its draft, or
+  /// found its community gone (after its "Reply not sent" notice is posted).
   public func settle(id: String) {
     lock.lock()
     defer { lock.unlock() }
