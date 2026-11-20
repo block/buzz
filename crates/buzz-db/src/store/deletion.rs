@@ -8915,6 +8915,16 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             .await
             .expect("store channel message");
         crate::store::activity::flush().await;
+        sqlx::query(
+            "INSERT INTO thread_heads (community_id, root_id, channel_id, updated_at) \
+             VALUES ($1, $2, $3, clock_timestamp())",
+        )
+        .bind(request.community_id.as_uuid())
+        .bind(vec![4_u8; 32])
+        .bind(head_channel)
+        .execute(&db.pool)
+        .await
+        .expect("insert thread activity row");
         store
             .approve(request.id, "approver", None)
             .await
@@ -8975,6 +8985,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         assert_eq!(first["media_uploaders"], 1);
         assert_eq!(first["media_publications"], 1);
         assert_eq!(first["channel_heads"], 1);
+        assert_eq!(first["thread_heads"], 1);
         let optional = {
             let mut conn = db.pool.acquire().await.expect("acquire connection");
             live_optional_tables_on(&mut conn)
