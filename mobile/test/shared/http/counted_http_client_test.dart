@@ -287,6 +287,32 @@ void main() {
     expect(diagnostics.breadcrumbs, hasLength(1));
   });
 
+  test('headers that arrive after the deadline count one timeout, whatever '
+      'their status', () async {
+    for (final code in [503, 200]) {
+      final before = diagnostics.events.length;
+      final answer = Completer<http.Response>();
+      final client = http.runWithClient(
+        newAppHttpClient,
+        () => MockClient((_) => answer.future),
+      );
+      addTearDown(client.close);
+      final request = http.Request(
+        'POST',
+        Uri.parse('https://relay.example.org/query'),
+      );
+      final sent = client.send(request);
+      await pumpEventQueue();
+      noteHttpDeadline(request);
+      answer.complete(http.Response('', code));
+      await (await sent).stream.drain<void>();
+
+      expect(diagnostics.events.skip(before).map((event) => event.failure), [
+        NetworkFailure.timeout,
+      ], reason: 'status $code');
+    }
+  });
+
   test('a request that finishes after another member signs in is not '
       'counted for them', () async {
     diagnostics.setMember('a' * 64);

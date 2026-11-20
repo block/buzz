@@ -80,6 +80,11 @@ class _CountedClient extends http.BaseClient {
       rethrow;
     }
     final headers = stopwatch.elapsed;
+    if (_deadlinePassed[request] ?? false) {
+      // The caller gave up before the headers arrived, whatever they say.
+      count(NetworkFailure.timeout, headers);
+      return response;
+    }
     if (httpStatusFailure(response.statusCode) case final failure?) {
       count(failure, headers);
       return response;
