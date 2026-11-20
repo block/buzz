@@ -390,8 +390,8 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       ref.read(knownCommunitySyncProvider)?.trigger();
 
       final updatedList = current.where((w) => w.id != id).toList();
-      await _removeOrphanChannelListSnapshots(updatedList);
       state = AsyncData(updatedList);
+      await _removeOrphanChannelListSnapshots(updatedList);
       await syncCommunitySnapshot(ref, updatedList);
 
       // If we removed the active community, switch to another or sign out.

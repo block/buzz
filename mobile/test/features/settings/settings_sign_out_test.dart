@@ -127,6 +127,8 @@ void main() {
       // show it or be interrupted by its end.
       final sessionAtRemoval = <bool>[];
       final removed = <String>[];
+      late SavedMessageStore cache;
+      late SavedMessageTicket signOutInFlight;
       // Revocations stay in flight until the landing has been checked.
       final revocations = Completer<void>();
       addTearDown(() {
@@ -144,6 +146,12 @@ void main() {
             ) async {
               removed.add(community.id);
               sessionAtRemoval.add(hosted?.account.account != null);
+              if (community.id == active.id) {
+                signOutInFlight = cache.capture((
+                  communityId: active.id,
+                  pubkey: activeKeys.public,
+                ), _savedPage);
+              }
               return true;
             }),
             communityPushLeaseRevocationTriggerProvider.overrideWithValue(
@@ -162,6 +170,9 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      cache = ProviderScope.containerOf(
+        tester.element(find.byType(_Root)),
+      ).read(savedMessageStoreProvider);
       await tester.tap(find.text('Open Settings'));
       await tester.pumpAndSettle();
 
@@ -252,7 +263,12 @@ void main() {
       expect(find.textContaining('Signed in as'), findsNothing);
       // The active community goes last, so nothing switches to the other.
       expect(removed, [other.id, active.id]);
-      // No account's saved messages survive: no database, WAL or shared memory.
+      await tester.runAsync(
+        () => cache.save(signOutInFlight, [
+          _savedMessage(activeKeys.secret),
+        ], relayAuthor: null),
+      );
+      // Even a refresh started during sign-out cannot recreate the database.
       expect(savedMessages.listSync(), isEmpty);
       final saved = await AccountIdentityStore().identities();
       expect(

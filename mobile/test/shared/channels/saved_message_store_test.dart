@@ -237,6 +237,13 @@ void main() {
     final second = _message(_channel, 'second removed row');
     final retained = _message(_channel, 'unchanged');
     await cache.save(original, [first, second, retained], relayAuthor: null);
+    final file = Directory(
+      '${temp.path}/saved_messages',
+    ).listSync().whereType<File>().single;
+    expect(
+      latin1.decode(file.readAsBytesSync()).contains(first.content),
+      isTrue,
+    );
     rootReads = 0;
 
     cache.removeChannelEvents(_identity, _channel.channelId, {first.id});
@@ -244,6 +251,12 @@ void main() {
 
     expect(cache.isCurrent(original), isFalse);
     expect(await cache.read(cache.capture(_identity, _channel)), [retained]);
+    expect(
+      latin1.decode(file.readAsBytesSync()).contains(first.content),
+      isFalse,
+      reason: 'Deleted content must not survive in the database file.',
+    );
+    expect(File('${file.path}-journal').existsSync(), isFalse);
     expect(rootReads, 2); // One removal batch and one read.
     expect(diagnostics.operations, isEmpty);
   });
@@ -274,6 +287,35 @@ void main() {
       '${temp.path}/saved_messages',
     ).listSync().whereType<File>().single;
     expect(file.lengthSync(), lessThanOrEqualTo(pageLimit * 4096));
+    final db = sqlite3.open(file.path, mode: OpenMode.readOnly);
+    try {
+      expect(db.select('PRAGMA journal_mode').single.values.single, 'delete');
+    } finally {
+      db.close();
+    }
+  });
+
+  test('returns a readable page when its recency update fails', () async {
+    final ticket = store.capture(_identity, _channel);
+    final message = _message(_channel, 'still available offline');
+    await store.save(ticket, [message], relayAuthor: null);
+    final file = Directory(
+      '${temp.path}/saved_messages',
+    ).listSync().whereType<File>().single;
+    final db = sqlite3.open(file.path);
+    try {
+      db.execute('''
+        CREATE TRIGGER fail_recency_update BEFORE UPDATE OF opened_at ON pages
+        BEGIN
+          SELECT RAISE(ABORT, 'recency update failed');
+        END;
+      ''');
+    } finally {
+      db.close();
+    }
+
+    expect(await store.read(ticket), [message]);
+    expect(diagnostics.operations, [DiagnosticOperation.storedData]);
   });
 
   test('discards the cache when a targeted SQL removal fails', () async {
@@ -311,7 +353,7 @@ void main() {
         '${temp.path}/saved_messages',
       ).listSync().whereType<File>().single;
       final database = sqlite3.open(file.path);
-      database.execute('PRAGMA user_version = 2');
+      database.execute('PRAGMA user_version = 1');
       database.close();
       expect(await store.read(ticket), isNull);
       expect(file.existsSync(), isFalse);

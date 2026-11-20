@@ -78,6 +78,7 @@ import 'android_ime_lift.dart';
 import 'channel.dart';
 import 'channel_actions_sheet.dart';
 import 'channel_identity_names_provider.dart';
+import 'channel_event_order.dart';
 import 'channel_member_profile_actions.dart';
 import 'channel_link_navigation.dart';
 import 'channel_management_provider.dart';
@@ -501,9 +502,20 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
               .unwrapPrevious()
               .value
         : null;
-    final messagesState = preview == null
+    final savedEvents = preview?.events;
+    final currentEvents = relayMessagesState.value ?? const <NostrEvent>[];
+    final previewEvents = useMemoized(() {
+      if (savedEvents == null || currentEvents.isEmpty) return savedEvents;
+      final byId = {
+        for (final event in savedEvents) event.id: event,
+        for (final event in currentEvents) event.id: event,
+      };
+      return byId.values.toList()
+        ..sort(compareChannelTimelineEventsChronologically);
+    }, [savedEvents, currentEvents]);
+    final messagesState = previewEvents == null
         ? relayMessagesState
-        : AsyncData(preview.events);
+        : AsyncData(previewEvents);
     final isConnectionInProgress =
         sessionStatus == SessionStatus.connecting ||
         sessionStatus == SessionStatus.reconnecting;

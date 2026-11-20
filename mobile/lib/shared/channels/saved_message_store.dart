@@ -27,7 +27,7 @@ typedef SavedMessagePage = ({String channelId, String rootId});
 final savedMessageScopeProvider = Provider<SavedMessageScope?>((ref) {
   return ref.watch(
     activeCommunityProvider.select((result) {
-      final community = result.value;
+      final community = result.unwrapPrevious().value;
       if (community == null) return null;
       final pubkey = pubkeyFromNsec(community.nsec?.trim()) ?? community.pubkey;
       return pubkey == null
@@ -54,8 +54,9 @@ final class SavedMessageTicket {
 
 /// The app's private cache directory on iOS and Android.
 final savedMessageRootProvider = FutureProvider<Directory?>(
-  (ref) async =>
-      Platform.isIOS || Platform.isAndroid ? getTemporaryDirectory() : null,
+  (ref) async => Platform.isIOS || Platform.isAndroid
+      ? getApplicationCacheDirectory()
+      : null,
 );
 
 /// A single serial queue orders cache operations and privacy deletions.
@@ -90,7 +91,7 @@ final class SavedMessageStore {
     return SavedMessageTicket._(
       key,
       page,
-      _scopeEpochs[key] ?? 0,
+      _scopeEpochs.putIfAbsent(key, () => 0),
       _channelEpochs[(key, page.channelId)] ?? 0,
     );
   }
@@ -209,9 +210,15 @@ final class SavedMessageStore {
 
   /// Removes retired identity databases from interrupted account cleanup and
   /// incompatible cache formats left by an app update.
-  Future<void> removeOrphans(Set<SavedMessageScope> retained) => _enqueue(
-    (directory) => _sweep(directory, retained: retained.map(_scopeKey).toSet()),
-  );
+  Future<void> removeOrphans(Set<SavedMessageScope> retained) {
+    final keys = retained.map(_scopeKey).toSet();
+    // A channel may have started a new load while account removal awaited
+    // storage. Fence those tickets as well as deleting the files.
+    _scopeEpochs.updateAll(
+      (key, epoch) => keys.contains(key) ? epoch : epoch + 1,
+    );
+    return _enqueue((directory) => _sweep(directory, retained: keys));
+  }
 
   Future<_DiskResult?> _forPage(
     SavedMessageTicket ticket,
@@ -232,6 +239,13 @@ final class SavedMessageStore {
       ),
     );
     if (result.reset) _reportReset();
+    if (result.recencyFailure case final stackTrace?) {
+      _diagnostics.reportError(
+        const FormatException('Saved message recency update failed'),
+        stackTrace,
+        operation: DiagnosticOperation.storedData,
+      );
+    }
     return result;
   });
 

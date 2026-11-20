@@ -10,6 +10,13 @@ void _savedChannelPreviewTests() {
     id: 'fresh-relay-page',
     pubkey: 'viewer',
     content: 'Fresh history after reconnect',
+    createdAt: 1001,
+  );
+  final outgoing = _textMsg(
+    id: 'outgoing-message',
+    pubkey: 'viewer',
+    content: 'Message sent while history is pending',
+    createdAt: 1002,
   );
   final preview = (
     events: [cached],
@@ -17,7 +24,7 @@ void _savedChannelPreviewTests() {
   );
 
   testWidgets(
-    'a saved channel stays readable until relay history replaces it',
+    'a saved channel shows live updates and sends until relay history arrives',
     (tester) async {
       final relayMessages = _FakeMessagesNotifier([], hasLoadedMessages: false);
       await tester.pumpWidget(
@@ -30,14 +37,21 @@ void _savedChannelPreviewTests() {
       await tester.pumpAndSettle();
       expect(find.text(cached.content), findsOneWidget);
 
-      relayMessages.setMessages([fresh], historyCompleted: false);
+      relayMessages.setMessages([cached, fresh], historyCompleted: false);
+      relayMessages.addLocalMessage(outgoing);
       await tester.pumpAndSettle();
       expect(find.text(cached.content), findsOneWidget);
-      expect(find.text(fresh.content), findsNothing);
+      expect(find.text(fresh.content), findsOneWidget);
+      expect(find.text(outgoing.content), findsOneWidget);
+      expect(
+        tester.getCenter(find.text(outgoing.content)).dy,
+        greaterThan(tester.getCenter(find.text(cached.content)).dy),
+      );
 
-      relayMessages.setMessages([fresh]);
+      relayMessages.setMessages([fresh, outgoing]);
       await tester.pumpAndSettle();
       expect(find.text(fresh.content), findsOneWidget);
+      expect(find.text(outgoing.content), findsOneWidget);
       expect(find.text(cached.content), findsNothing);
     },
   );

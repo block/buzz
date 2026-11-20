@@ -1,7 +1,9 @@
 part of 'saved_message_store.dart';
 
-const _version = 1;
-const _maxDatabasePages = 22528; // 88 MiB at 4 KiB per page.
+const _version = 2;
+// Leave space for a rollback journal containing one copy of each original
+// page plus its record headers, even if the process exits during a write.
+const _maxDatabasePages = 11520; // 45 MiB at 4 KiB per page.
 const _maxWindowBytes = 2 * 1024 * 1024;
 const _maxWindowEvents = 2101; // 50 rows, their summaries and two aux hops.
 
@@ -30,10 +32,11 @@ final class _DiskRequest {
 }
 
 final class _DiskResult {
-  const _DiskResult({this.events, this.reset = false});
+  const _DiskResult({this.events, this.reset = false, this.recencyFailure});
 
   final List<NostrEvent>? events;
   final bool reset;
+  final StackTrace? recencyFailure;
 }
 
 String _path(String directory, String scope) =>
@@ -56,7 +59,8 @@ _DiskResult _accessDatabase(_DiskRequest request) {
         : const <NostrEvent>[];
     var knownWires = const <String, String>{};
     if (existed && candidates.isNotEmpty) {
-      db = sqlite3.open(request.path, mode: OpenMode.readOnly);
+      // Recover any hot rollback journal before reading verified copies.
+      db = sqlite3.open(request.path, mode: OpenMode.readWrite);
       _checkSchema(db);
       knownWires = _knownWires(db, candidates);
       db.close();
@@ -68,10 +72,12 @@ _DiskResult _accessDatabase(_DiskRequest request) {
     if (!existed) file.parent.createSync(recursive: true);
     db = sqlite3.open(request.path);
     db.execute('PRAGMA foreign_keys = ON');
+    db.execute('PRAGMA secure_delete = ON');
     if (!existed) _initializeSchema(db);
     _checkSchema(db);
     db.execute('PRAGMA max_page_count = ${request.databasePageLimit}');
-    db.execute('PRAGMA journal_size_limit = 0');
+    // Avoid multiple journal segments with sector padding during a write.
+    db.execute('PRAGMA cache_spill = OFF');
     return switch (request.action) {
       _DiskAction.read => _readPage(db, request.page),
       _DiskAction.touch => _touchPage(db, request.page),
@@ -83,7 +89,7 @@ _DiskResult _accessDatabase(_DiskRequest request) {
       ),
     };
   } on SqliteException catch (error) {
-    if (error.resultCode != 11 && error.resultCode != 26) rethrow;
+    if (!_isInvalidDatabase(error)) rethrow;
     db?.close();
     db = null;
     _deleteDatabase(request.path);
@@ -98,9 +104,13 @@ _DiskResult _accessDatabase(_DiskRequest request) {
   }
 }
 
+bool _isInvalidDatabase(SqliteException error) =>
+    error.resultCode == SqlError.SQLITE_CORRUPT ||
+    error.resultCode == SqlError.SQLITE_NOTADB;
+
 void _initializeSchema(Database db) {
   db.execute('PRAGMA page_size = 4096');
-  db.execute('PRAGMA journal_mode = WAL');
+  db.execute('PRAGMA journal_mode = DELETE');
   db.execute('''
     BEGIN;
     CREATE TABLE relay_author (pubkey TEXT NOT NULL);
@@ -139,7 +149,6 @@ _DiskResult _readPage(Database db, SavedMessagePage page) {
     WHERE channel_id = ? AND root_id = ? ORDER BY position
   ''', key);
   if (rows.isEmpty) return const _DiskResult();
-  _touchPage(db, page);
   final events = <NostrEvent>[];
   try {
     for (final row in rows) {
@@ -151,6 +160,12 @@ _DiskResult _readPage(Database db, SavedMessagePage page) {
     }
   } on TypeError {
     throw const FormatException('cached event shape');
+  }
+  try {
+    _touchPage(db, page);
+  } on SqliteException catch (error, stackTrace) {
+    if (_isInvalidDatabase(error)) rethrow;
+    return _DiskResult(events: events, recencyFailure: stackTrace);
   }
   return _DiskResult(events: events);
 }

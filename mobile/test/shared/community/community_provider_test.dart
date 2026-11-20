@@ -669,6 +669,8 @@ void main() {
         'from disk', () async {
       final root = await Directory.systemTemp.createTemp('saved_root');
       addTearDown(() => root.delete(recursive: true));
+      final storage = _ObservedSaveStorage(fakeSecure);
+      communityStorage = storage;
       final oldKeys = nostr.Keys.generate();
       final midKeys = nostr.Keys.generate();
       final newKeys = nostr.Keys.generate();
@@ -690,8 +692,16 @@ void main() {
       );
       await _saveMessage(launch, oldSaved, oldKeys.secret);
       await _saveMessage(launch, orphanSaved, oldKeys.secret);
+      late SavedMessageTicket removalInFlight;
       container = createContainer(
         overrides: [savedMessageRootProvider.overrideWith((ref) async => root)],
+        enqueueRevocation: (_) async {
+          // The active account is still published during revocation journaling.
+          removalInFlight = container
+              .read(savedMessageStoreProvider)
+              .capture(newSaved, _savedPage);
+          return true;
+        },
       );
       await container.read(communityListProvider.future);
       final saved = container.read(savedMessageStoreProvider);
@@ -703,9 +713,19 @@ void main() {
       // Re-adding the same account keeps its messages.
       await notifier.addCommunity(community);
       expect(await _readSaved(saved, oldSaved), hasLength(1));
-      // A refresh captured before the replacement saves after it.
+      // Retire refreshes from before cleanup and while the replacement is
+      // being persisted but the previous identity is still published.
       final oldInFlight = saved.capture(oldSaved, _savedPage);
+      late SavedMessageTicket replacementInFlight;
+      storage.onSave = () {
+        replacementInFlight = saved.capture(oldSaved, _savedPage);
+      };
       await notifier.addCommunity(community.copyWith(nsec: midKeys.nsec));
+      storage.onSave = null;
+      await saved.save(replacementInFlight, [
+        _savedMessage(oldKeys.secret),
+      ], relayAuthor: null);
+      expect(await _readSaved(saved, oldSaved), isNull);
       await _saveMessage(saved, midSaved, midKeys.secret);
       // The next replacement keeps the database the new account wrote first.
       await _saveMessage(saved, newSaved, newKeys.secret);
@@ -718,8 +738,11 @@ void main() {
       expect(await _readSaved(saved, newSaved), hasLength(1));
 
       await notifier.removeCommunity(community.id);
+      await saved.save(removalInFlight, [
+        _savedMessage(newKeys.secret),
+      ], relayAuthor: null);
       expect(await _readSaved(saved, newSaved), isNull);
-      // No database, WAL or shared-memory file survives.
+      // No database or journal survives.
       expect(Directory('${root.path}/saved_messages').listSync(), isEmpty);
     });
 
@@ -1199,5 +1222,17 @@ class _FailingLoadStorage extends CommunityStorage {
       throw StateError('keychain read failed');
     }
     return super.loadAll();
+  }
+}
+
+class _ObservedSaveStorage extends CommunityStorage {
+  _ObservedSaveStorage(FlutterSecureStorage secure) : super(secure: secure);
+
+  void Function()? onSave;
+
+  @override
+  Future<void> save(Community community) {
+    onSave?.call();
+    return super.save(community);
   }
 }
