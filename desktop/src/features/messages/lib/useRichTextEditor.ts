@@ -47,6 +47,7 @@ import {
   insertNewlineInCodeBlock,
 } from "./codeBlockExtensions";
 import { SpoilerMark } from "./spoilerMark";
+import { ComposerPastedLines } from "./composerPastedLines";
 import { createComposerLinkPasteHandler } from "./composerMessageLinkNode";
 import type { ComposerMessageLinkChannel } from "./useComposerMessageLinks";
 import { useComposerMessageLinks } from "./useComposerMessageLinks";
@@ -371,6 +372,7 @@ export function useRichTextEditor({
           transformCopiedText: true,
           breaks: true,
         }),
+        ComposerPastedLines,
       ],
       editorProps: {
         handleDOMEvents: {
