@@ -77,7 +77,16 @@ void _filterFeedbackTests(
     tester,
   ) async {
     final channels = [
-      for (final id in ['history', 'forced'])
+      for (final id in [
+        'history',
+        'forced',
+        'forced1',
+        'forced2',
+        'forced3',
+        'forced4',
+        'forced5',
+        'forced6',
+      ])
         Channel(
           id: id,
           name: id,
@@ -100,7 +109,15 @@ void _filterFeedbackTests(
         pubkey: 'pk',
         contexts: {},
         version: 0,
-        forcedUnreadContexts: {'forced': 'forced'},
+        forcedUnreadContexts: {
+          'forced': 'forced',
+          'forced1': 'forced1',
+          'forced2': 'forced2',
+          'forced3': 'forced3',
+          'forced4': 'forced4',
+          'forced5': 'forced5',
+          'forced6': 'forced6',
+        },
       ),
     );
     final manager = _filterTestManager(
@@ -128,7 +145,8 @@ void _filterFeedbackTests(
     // The channel future resolves before this frame. Seeding runs at its end,
     // but the rendered frame still reflects timestamp-less read state.
     await tester.pump();
-    expect(readState.seededContexts, {'history': 20, 'forced': 20});
+    expect(readState.seededContexts['history'], 20);
+    expect(readState.seededContexts['forced'], 20);
     expect(find.text('history'), findsNothing);
     expect(find.text('forced'), findsOneWidget);
     expect(
@@ -137,8 +155,11 @@ void _filterFeedbackTests(
     );
     await tester.pumpAndSettle();
     expect(find.text('history'), findsNothing);
+    await tester.ensureVisible(find.text('Show hidden channels · 1'));
     await tester.tap(find.text('Show hidden channels · 1'));
     await tester.pumpAndSettle();
+    expect(find.text('Show more'), findsNothing);
+    await tester.ensureVisible(find.text('history'));
     expect(
       tester.widget<Text>(find.text('history')).style?.fontWeight,
       FontWeight.w400,

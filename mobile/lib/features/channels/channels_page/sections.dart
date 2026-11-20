@@ -46,6 +46,8 @@ class _CustomChannelSection extends StatelessWidget {
         ),
       ),
       _SectionChannelsBody(
+        unreadChannelIds: unreadChannelIds,
+        attentionChannelIds: attentionChannelIds,
         expanded: expanded,
         channels: channels,
         isVisible: isVisible,
@@ -331,6 +333,8 @@ class _ChannelSection extends StatelessWidget {
         ),
       ),
       _SectionChannelsBody(
+        unreadChannelIds: unreadChannelIds,
+        attentionChannelIds: attentionChannelIds,
         expanded: expanded,
         channels: channels,
         isVisible: isVisible,
@@ -367,6 +371,8 @@ class _SectionChannelsBody extends HookWidget {
     required this.channels,
     required this.isVisible,
     required this.buildRow,
+    required this.unreadChannelIds,
+    required this.attentionChannelIds,
     this.emptySliver,
   });
 
@@ -374,6 +380,8 @@ class _SectionChannelsBody extends HookWidget {
   final List<Channel> channels;
   final bool Function(Channel) isVisible;
   final Widget Function(Channel) buildRow;
+  final Set<String> unreadChannelIds;
+  final Set<String> attentionChannelIds;
   final Widget? emptySliver;
 
   @override
@@ -395,32 +403,47 @@ class _SectionChannelsBody extends HookWidget {
     }, [hiddenIds.join(',')]);
     final displayed = reveal.value ? channels : visibleChannels;
 
+    final overflow = displayed.skip(LimitedSectionSliver.visibleLimit);
+    final activity =
+        overflow.any((channel) => attentionChannelIds.contains(channel.id))
+        ? 'Needs attention'
+        : overflow.any((channel) => unreadChannelIds.contains(channel.id))
+        ? 'Unread'
+        : null;
+
     return CollapsibleSliverBody(
       expanded: expanded,
       sliver: channels.isEmpty && emptySliver != null
           ? emptySliver!
-          : SliverList.builder(
-              itemCount: displayed.length + (hiddenCount == 0 ? 0 : 1),
-              findChildIndexCallback: (key) {
-                final index = displayed.indexWhere(
-                  (c) => ValueKey(c.id) == key,
-                );
-                return index < 0 ? null : index;
-              },
-              itemBuilder: (context, index) {
-                if (index < displayed.length) return buildRow(displayed[index]);
-                return Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton(
-                    onPressed: () => reveal.value = !reveal.value,
-                    child: Text(
-                      reveal.value
-                          ? 'Hide filtered channels'
-                          : 'Show hidden channels · $hiddenCount',
+          : SliverMainAxisGroup(
+              slivers: [
+                LimitedSectionSliver(
+                  itemCount: displayed.length,
+                  revealAll: reveal.value,
+                  overflowActivity: activity,
+                  findChildIndexCallback: (key) {
+                    final index = displayed.indexWhere(
+                      (channel) => ValueKey(channel.id) == key,
+                    );
+                    return index < 0 ? null : index;
+                  },
+                  itemBuilder: (context, index) => buildRow(displayed[index]),
+                ),
+                if (hiddenCount > 0)
+                  SliverToBoxAdapter(
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton(
+                        onPressed: () => reveal.value = !reveal.value,
+                        child: Text(
+                          reveal.value
+                              ? 'Hide filtered channels'
+                              : 'Show hidden channels · $hiddenCount',
+                        ),
+                      ),
                     ),
                   ),
-                );
-              },
+              ],
             ),
     );
   }

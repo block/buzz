@@ -86,6 +86,7 @@ import '../../helpers/recipient_directory_session.dart';
 import '../../helpers/thread_ids.dart';
 
 part 'channels_page_test/presence_tests.dart';
+part 'channels_page_test/section_limit_tests.dart';
 part 'channels_page_test/native_creation_tests.dart';
 part 'channels_page_test/dm_recipient_layout_tests.dart';
 part 'channels_page_test/unread_readiness_tests.dart';
@@ -178,6 +179,7 @@ void main() {
     );
   }
 
+  _sectionLimitTests(buildTestable);
   _homeCommunityFlightTests(buildTestable);
   _communityUnreadLandingTests(buildTestable);
   _filterFeedbackTests(buildTestable);
@@ -1021,11 +1023,16 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Show more'));
+    await tester.tap(find.text('Show more'));
+    await tester.pumpAndSettle();
 
     final scrollView = find.byType(CustomScrollView);
     final scrollable = tester.state<ScrollableState>(
       find.descendant(of: scrollView, matching: find.byType(Scrollable)).first,
     );
+    scrollable.position.jumpTo(0);
+    await tester.pumpAndSettle();
     await tester.fling(scrollView, const Offset(0, -300), 2400);
     await tester.pump(const Duration(milliseconds: 32));
     final ballisticOffset = scrollable.position.pixels;
@@ -1264,6 +1271,9 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
+        await tester.ensureVisible(find.text('Show more'));
+        await tester.tap(find.text('Show more'));
+        await tester.pumpAndSettle();
         final homeCalls = calls.values.single;
         final position = tester
             .state<ScrollableState>(
@@ -1497,6 +1507,7 @@ void main() {
             realHome: true,
             overrides: [
               savedPrefsProvider.overrideWithValue(duoPrefs),
+              channelSortProvider.overrideWith(_EditableTestSort.new),
               channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
               channelSectionsProvider.overrideWith(
                 () => _FakeChannelSectionsNotifier(
