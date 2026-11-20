@@ -2649,10 +2649,11 @@ void main() {
           // The avatar leaves with its loading indicator. A departure toward
           // the missing header avatar would hold it still at the center.
           final loading = find.byKey(const Key('community-switch-loading'));
-          while (avatar.evaluate().isNotEmpty) {
+          for (var i = 0; i < 200 && avatar.evaluate().isNotEmpty; i++) {
             expect(loading, findsOneWidget);
             await tester.pump(const Duration(milliseconds: 10));
           }
+          expect(avatar, findsNothing);
         } else {
           await tester.pump(const Duration(milliseconds: 450));
           for (var i = 0; i < 6; i++) {

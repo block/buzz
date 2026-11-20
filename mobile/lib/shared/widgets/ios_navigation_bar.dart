@@ -107,7 +107,6 @@ class IosNavigationAction {
   }
 }
 
-/// Scroll position of the route whose UIKit navigation bar is visible.
 /// Identifies the inputs of an action's rendered native avatar.
 typedef _AvatarImageKey = (
   String? identity,
@@ -116,6 +115,7 @@ typedef _AvatarImageKey = (
   bool isAgent,
 );
 
+/// Scroll position of the route whose UIKit navigation bar is visible.
 class IosNavigationScrollScope extends InheritedWidget {
   const IosNavigationScrollScope({
     super.key,
