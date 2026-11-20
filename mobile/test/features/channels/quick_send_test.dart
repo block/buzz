@@ -278,9 +278,9 @@ void main() {
     await tester.pump();
     final (named, _) = await siri('bestie');
     final scope = (named! as Map)['scope'];
-    expect(named, {'pubkey': bestie.public, 'name': 'Bestie', 'scope': scope});
+    expect(named, {'pubkey': bestie.public, 'scope': scope});
 
-    // A confirmation from before a community switch can't send here.
+    // A Bestie looked up before a community switch can't send here.
     final (_, switched) = await siri('send', {
       'text': 'Remind me to call Sam',
       'bestie': bestie.public,
