@@ -119,61 +119,6 @@ bool recordObservedUnreadEvent(
   return true;
 }
 
-int countUnreadObservedEvents(
-  Map<String, ObservedUnreadEvent>? eventsById,
-  int? Function(ObservedUnreadEvent event) getReadAt,
-) {
-  if (eventsById == null) return 0;
-  var count = 0;
-  for (final event in eventsById.values) {
-    final readAt = getReadAt(event);
-    if (readAt == null || event.createdAt > readAt) count++;
-  }
-  return count;
-}
-
-int countUnreadBadgeObservedEvents(
-  Map<String, ObservedUnreadEvent>? eventsById,
-  int? Function(ObservedUnreadEvent event) getReadAt,
-) {
-  if (eventsById == null) return 0;
-  var count = 0;
-  for (final event in eventsById.values) {
-    if (!event.countsTowardBadge) continue;
-    final readAt = getReadAt(event);
-    if (readAt == null || event.createdAt > readAt) count++;
-  }
-  return count;
-}
-
-int countUnreadAppBadgeObservedEvents(
-  Map<String, ObservedUnreadEvent>? eventsById,
-  int? Function(ObservedUnreadEvent event) getReadAt,
-) {
-  if (eventsById == null) return 0;
-  var count = 0;
-  for (final event in eventsById.values) {
-    if (!event.countsTowardAppBadge) continue;
-    final readAt = getReadAt(event);
-    if (readAt == null || event.createdAt > readAt) count++;
-  }
-  return count;
-}
-
-int countUnreadHighPriorityObservedEvents(
-  Map<String, ObservedUnreadEvent>? eventsById,
-  int? Function(ObservedUnreadEvent event) getReadAt,
-) {
-  if (eventsById == null) return 0;
-  var count = 0;
-  for (final event in eventsById.values) {
-    if (!event.highPriority) continue;
-    final readAt = getReadAt(event);
-    if (readAt == null || event.createdAt > readAt) count++;
-  }
-  return count;
-}
-
 /// The newest marker that reads `event` in `channelId`. `markerOf` looks up
 /// a read-state context by key.
 int? observedUnreadEventReadAt(

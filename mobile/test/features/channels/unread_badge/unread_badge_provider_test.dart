@@ -1,581 +1,551 @@
 import 'dart:async';
 
-import 'package:flutter_test/flutter_test.dart';
-import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:buzz/features/activity/activity_provider.dart';
+import 'package:buzz/features/activity/feed_item.dart';
+import 'package:buzz/features/activity/inbox_local_state_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
-import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
+import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/theme/theme_provider.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../helpers/thread_ids.dart';
 
-/// Unit tests for [unreadBadgeProvider].
-///
-/// Strategy: override [channelsProvider] with a [_StubbedChannelsNotifier] that
-/// returns a pre-built channel list and allows seeding [latestHighPriorityByChannel],
-/// and override [readStateProvider] with a [_ReadStateNotifier] that holds a
-/// fixed [ReadStateState]. This avoids standing up any relay connection and
-/// exercises only the badge-computation logic.
-///
-/// Because [channelsProvider] is an [AsyncNotifierProvider], the provider starts
-/// in [AsyncLoading] — tests that check computed badge values must await
-/// [channelsProvider.future] to let the notifier resolve before reading the badge.
-void main() {
-  // Fixed epoch timestamps (Unix seconds).
-  const t10 = 10; // older
-  const t20 = 20; // newer — any channel with lastMessageAt == t20 has a message
-  const t30 = 30; // even newer — used for high-priority events
+const _relayA = 'https://a.example.org';
+const _relayB = 'https://b.example.org';
 
-  Channel makeChannel({
-    required String id,
-    String channelType = 'stream',
-    bool isMember = true,
-    bool isArchived = false,
-    int? lastMessageAtSeconds,
+Channel _channel({
+  String id = 'ch-a',
+  String type = 'stream',
+  bool member = true,
+  bool archived = false,
+}) => Channel(
+  id: id,
+  name: id,
+  channelType: type,
+  visibility: 'open',
+  description: '',
+  createdBy: 'creator',
+  createdAt: DateTime.utc(2024),
+  memberCount: 1,
+  isMember: member,
+  archivedAt: archived ? DateTime.utc(2024) : null,
+);
+
+FeedItem _item({
+  String id = 'mention',
+  String? channelId = 'ch-a',
+  int kind = 9,
+  String category = 'mention',
+  List<List<String>> tags = const [],
+}) => FeedItem(
+  id: id,
+  kind: kind,
+  pubkey: 'sender',
+  content: 'An update',
+  createdAt: 100,
+  channelId: channelId,
+  channelName: channelId ?? '',
+  tags: tags,
+  category: category,
+);
+
+HomeFeedResponse _feed(List<FeedItem> items) => HomeFeedResponse(
+  mentions: items.where((item) => item.category == 'mention').toList(),
+  needsAction: items.where((item) => item.category == 'needs_action').toList(),
+  activity: items.where((item) => item.category == 'activity').toList(),
+  agentActivity: items
+      .where((item) => item.category == 'agent_activity')
+      .toList(),
+);
+
+class _Fixture {
+  _Fixture({
+    List<Channel>? channels,
+    List<FeedItem> items = const [],
+    Map<String, int> contexts = const {},
+    Map<String, String> forced = const {},
+    bool readReady = true,
+    ChannelsNotifier? channelNotifier,
+    _ActivityNotifier? activity,
+    _AuthNotifier? auth,
   }) {
-    return Channel(
-      id: id,
-      name: id,
-      channelType: channelType,
-      visibility: 'open',
-      description: '',
-      createdBy: 'creator',
-      createdAt: DateTime.utc(2024),
-      memberCount: 1,
-      isMember: isMember,
-      archivedAt: isArchived ? DateTime.utc(2024) : null,
-      lastMessageAt: lastMessageAtSeconds != null
-          ? DateTime.fromMillisecondsSinceEpoch(
-              lastMessageAtSeconds * 1000,
-              isUtc: true,
-            )
-          : null,
-    );
-  }
-
-  ProviderContainer buildContainer({
-    required List<Channel> channels,
-    Map<String, int> readContexts = const {},
-    Map<String, String> forcedUnreadContexts = const {},
-    bool readStateReady = true,
-    Map<String, int> highPriorityMap = const {},
-    Map<String, List<ObservedUnreadEvent>>? observedEventsByChannel,
-  }) {
-    final notifier = _StubbedChannelsNotifier(
-      channels: channels,
-      observedEventsByChannel:
-          observedEventsByChannel ??
-          _defaultObservedEvents(channels, highPriorityMap),
-    );
-
-    return ProviderContainer(
+    container = ProviderContainer(
+      retry: (_, _) => null,
       overrides: [
-        channelsProvider.overrideWith(() => notifier),
+        savedPrefsProvider.overrideWithValue(prefs),
+        relayConfigProvider.overrideWith(_RelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue('reader'),
+        authProvider.overrideWith(() => auth ?? _AuthNotifier()),
+        channelsProvider.overrideWith(
+          () =>
+              channelNotifier ??
+              _StubbedChannelsNotifier(channels ?? [_channel()]),
+        ),
+        activityProvider.overrideWith(
+          () => activity ?? _ActivityNotifier((_) async => _feed(items)),
+        ),
         readStateProvider.overrideWith(
           () => _ReadStateNotifier(
             ReadStateState(
-              isReady: readStateReady,
-              pubkey: 'me',
-              contexts: readContexts,
+              isReady: readReady,
+              pubkey: 'reader',
+              contexts: contexts,
               version: 1,
-              forcedUnreadContexts: forcedUnreadContexts,
+              forcedUnreadContexts: forced,
             ),
           ),
         ),
+        channelMutesProvider.overrideWith(_MutedChannels.new),
       ],
+    );
+    addTearDown(container.dispose);
+  }
+
+  static late SharedPreferences prefs;
+  late final ProviderContainer container;
+
+  Future<void> load() async {
+    await container.read(authProvider.future);
+    await container.read(channelsProvider.future);
+    await container.read(activityProvider.future);
+  }
+
+  UnreadBadge get badge => container.read(unreadBadgeProvider);
+  InboxLocalStateNotifier get local =>
+      container.read(inboxLocalStateProvider.notifier);
+}
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    _Fixture.prefs = await SharedPreferences.getInstance();
+  });
+
+  test('everything in Activity read and no reminders gives clear', () async {
+    final fixture = _Fixture(items: [_item()], contexts: {'ch-a': 100});
+    await fixture.load();
+    expect(fixture.badge, UnreadBadge.clear);
+  });
+
+  test('empty Activity and no reminders gives clear', () async {
+    final fixture = _Fixture();
+    await fixture.load();
+    expect(fixture.badge, UnreadBadge.clear);
+  });
+
+  for (final (name, item, channel) in [
+    ('DM', _item(category: 'activity'), _channel(type: 'dm')),
+    ('mention', _item(), _channel()),
+    ('agent event', _item(kind: 43004, category: 'agent_activity'), _channel()),
+    (
+      'followed thread reply',
+      _item(
+        category: 'activity',
+        tags: [
+          ['e', threadIdRoot, '', 'root'],
+        ],
+      ),
+      _channel(),
+    ),
+  ]) {
+    test('one unread $name gives unread', () async {
+      final fixture = _Fixture(channels: [channel], items: [item]);
+      await fixture.load();
+      expect(fixture.badge, UnreadBadge.unread);
+      (fixture.container.read(readStateProvider.notifier) as _ReadStateNotifier)
+          .setState(
+            const ReadStateState(
+              isReady: true,
+              pubkey: 'reader',
+              contexts: {'ch-a': 100},
+              version: 2,
+            ),
+          );
+      expect(fixture.badge, UnreadBadge.clear);
+    });
+  }
+
+  test(
+    'an unread approval with no channel gives unread, and clears when done',
+    () async {
+      final fixture = _Fixture(
+        items: [
+          _item(
+            id: 'approval',
+            channelId: null,
+            kind: 46010,
+            category: 'needs_action',
+          ),
+        ],
+      );
+      await fixture.load();
+      expect(fixture.badge, UnreadBadge.unread);
+      fixture.local.markDone('approval');
+      expect(fixture.badge, UnreadBadge.clear);
+    },
+  );
+
+  for (final (name, context) in [('channel', 'ch-a'), ('message', 'msg:abc')]) {
+    test('a $name marked unread alone gives unread', () async {
+      final fixture = _Fixture(forced: {context: 'ch-a'});
+      await fixture.load();
+      // The channel is muted, but an explicit mark-unread still counts.
+      expect(
+        fixture.container.read(channelMutesProvider).confirmedMutedChannelIds,
+        contains('ch-a'),
+      );
+      expect(fixture.badge, UnreadBadge.unread);
+    });
+  }
+
+  test('an Activity row marked unread after reading gives unread', () async {
+    final fixture = _Fixture(items: [_item()], contexts: {'ch-a': 100});
+    await fixture.load();
+    expect(fixture.badge, UnreadBadge.clear);
+    fixture.local.markUnread(['mention'], baseline: 100);
+    expect(fixture.badge, UnreadBadge.unread);
+    fixture.local.clearUnread(['mention']);
+    expect(fixture.badge, UnreadBadge.clear);
+  });
+
+  for (final broadcast in [false, true]) {
+    test(
+      broadcast
+          ? 'a broadcast with no mention alone gives clear'
+          : 'a plain channel message alone gives clear',
+      () async {
+        final event = makeObservedUnreadEvent(
+          id: 'ordinary',
+          createdAt: 100,
+          rootId: broadcast ? threadIdRoot : null,
+          highPriority: false,
+          channelType: 'stream',
+          isThreadedReply: broadcast,
+          isBroadcast: broadcast,
+        );
+        final fixture = _Fixture(
+          channelNotifier: _StubbedChannelsNotifier(
+            [_channel()],
+            observed: {
+              'ch-a': {'ordinary': event},
+            },
+          ),
+        );
+        await fixture.load();
+        expect(fixture.badge, UnreadBadge.clear);
+      },
     );
   }
 
-  test('all channels read returns (0, 0)', () async {
-    final container = buildContainer(
-      channels: [
-        makeChannel(id: 'ch-a', lastMessageAtSeconds: t20),
-        makeChannel(id: 'ch-b', lastMessageAtSeconds: t20),
-      ],
-      // Read at t30, which is after every message.
-      readContexts: {'ch-a': t30, 'ch-b': t30},
-    );
-    addTearDown(container.dispose);
-
-    await container.read(channelsProvider.future);
-    final badge = container.read(unreadBadgeProvider);
-    expect(badge.highPriorityCount, 0);
-    expect(badge.generalUnreadCount, 0);
-  });
-
   test(
-    'one unread non-DM channel with no high-priority event → (0, 1) general only',
+    'a mention in Activity gives unread even if the channel is muted',
     () async {
-      final container = buildContainer(
-        channels: [makeChannel(id: 'ch-a', lastMessageAtSeconds: t20)],
-        readContexts: {},
-        highPriorityMap: {},
+      final fixture = _Fixture(items: [_item()]);
+      await fixture.load();
+      expect(
+        fixture.container.read(channelMutesProvider).confirmedMutedChannelIds,
+        contains('ch-a'),
       );
-      addTearDown(container.dispose);
-
-      await container.read(channelsProvider.future);
-      final badge = container.read(unreadBadgeProvider);
-      expect(badge.highPriorityCount, 0);
-      expect(badge.generalUnreadCount, 1);
+      expect(fixture.badge, UnreadBadge.unread);
     },
   );
 
-  group('catch-up marks from the web and desktop app', () {
-    ObservedUnreadEvent event(
-      String id, {
-      String? rootId,
-      bool highPriority = false,
-      String channelType = 'stream',
-    }) => makeObservedUnreadEvent(
-      id: id,
-      createdAt: t20,
-      rootId: rootId,
-      highPriority: highPriority,
-      channelType: channelType,
-      isThreadedReply: rootId != null,
+  test(
+    'a mark-unread flag on an archived or non-member channel is ignored',
+    () async {
+      for (final member in [false, true]) {
+        for (final archived in [false, true]) {
+          for (final forced in [false, true]) {
+            final fixture = _Fixture(
+              channels: [_channel(member: member, archived: archived)],
+              forced: forced ? {'ch-a': 'ch-a'} : {},
+            );
+            await fixture.load();
+            expect(
+              fixture.badge,
+              member && !archived && forced
+                  ? UnreadBadge.unread
+                  : UnreadBadge.clear,
+              reason: 'member=$member, archived=$archived, forced=$forced',
+            );
+          }
+        }
+      }
+    },
+  );
+
+  test('an unread item in another community gives clear', () async {
+    final nextFeed = Completer<HomeFeedResponse>();
+    final fixture = _Fixture(
+      activity: _ActivityNotifier(
+        (url) async => url == _relayA ? _feed([_item()]) : nextFeed.future,
+      ),
     );
+    final values = <UnreadBadge>[];
+    fixture.container.listen(
+      unreadBadgeProvider,
+      (_, next) => values.add(next),
+      fireImmediately: true,
+    );
+    await fixture.load();
+    expect(fixture.badge, UnreadBadge.unread);
+    fixture.container
+        .read(relayConfigProvider.notifier)
+        .update(baseUrl: _relayB);
+    expect(fixture.badge, UnreadBadge.pending);
+    // Riverpod retains the old feed's value during this dependency reload.
+    expect(fixture.container.read(activityProvider).value!.all, isNotEmpty);
+    nextFeed.complete(_feed([]));
+    await fixture.container.read(activityProvider.future);
+    expect(fixture.badge, UnreadBadge.clear);
+    expect(values, [
+      UnreadBadge.pending,
+      UnreadBadge.unread,
+      UnreadBadge.pending,
+      UnreadBadge.clear,
+    ]);
+  });
 
-    Future<UnreadBadgeState> badge(
-      Channel channel,
-      ObservedUnreadEvent observed,
-      Map<String, int> readContexts,
-    ) async {
-      final container = buildContainer(
-        channels: [channel],
-        readContexts: readContexts,
-        observedEventsByChannel: {
-          channel.id: [observed],
-        },
+  test('a local mark unread from another community does not count', () async {
+    final fixture = _Fixture(items: [_item()], contexts: {'ch-a': 100});
+    await fixture.load();
+    fixture.local.markUnread(['mention'], baseline: 100);
+    expect(fixture.badge, UnreadBadge.unread);
+    fixture.container
+        .read(relayConfigProvider.notifier)
+        .update(baseUrl: _relayB);
+    await fixture.container.read(activityProvider.future);
+    expect(
+      fixture.container.read(inboxLocalStateProvider).unreadBaselines,
+      isEmpty,
+    );
+    expect(fixture.badge, UnreadBadge.clear);
+    fixture.container
+        .read(relayConfigProvider.notifier)
+        .update(baseUrl: _relayA);
+    await fixture.container.read(activityProvider.future);
+    expect(fixture.badge, UnreadBadge.unread);
+  });
+
+  test('pending while read state is not ready', () async {
+    final fixture = _Fixture(items: [_item()], readReady: false);
+    await fixture.load();
+    expect(fixture.badge, UnreadBadge.pending);
+  });
+
+  test('pending while Activity has not loaded', () async {
+    final fixture = _Fixture(
+      activity: _ActivityNotifier((_) => Completer<HomeFeedResponse>().future),
+    );
+    await fixture.container.read(authProvider.future);
+    await fixture.container.read(channelsProvider.future);
+    expect(fixture.badge, UnreadBadge.pending);
+  });
+
+  test('pending while channels are loading', () async {
+    final fixture = _Fixture(channelNotifier: _LoadingChannelsNotifier());
+    await fixture.container.read(authProvider.future);
+    await fixture.container.read(activityProvider.future);
+    expect(fixture.badge, UnreadBadge.pending);
+  });
+
+  test('pending while auth is unknown or loading', () async {
+    final fixture = _Fixture(auth: _AuthNotifier(status: AuthStatus.unknown));
+    expect(fixture.badge, UnreadBadge.pending);
+    await fixture.container.read(authProvider.future);
+    expect(fixture.badge, UnreadBadge.pending);
+  });
+
+  test('signed out gives clear', () async {
+    final fixture = _Fixture(
+      auth: _AuthNotifier(status: AuthStatus.unauthenticated),
+      activity: _ActivityNotifier(
+        (_) => throw StateError('Activity must not start'),
+      ),
+      channelNotifier: _UnrequestedChannelsNotifier(),
+    );
+    await fixture.container.read(authProvider.future);
+    expect(fixture.badge, UnreadBadge.clear);
+    expect(fixture.container.exists(activityProvider), isFalse);
+    expect(fixture.container.exists(channelsProvider), isFalse);
+  });
+
+  test('pending then data does not pass through clear', () async {
+    final feed = Completer<HomeFeedResponse>();
+    final fixture = _Fixture(activity: _ActivityNotifier((_) => feed.future));
+    final values = <UnreadBadge>[];
+    fixture.container.listen(
+      unreadBadgeProvider,
+      (_, next) => values.add(next),
+      fireImmediately: true,
+    );
+    await fixture.container.read(authProvider.future);
+    await fixture.container.read(channelsProvider.future);
+    expect(fixture.badge, UnreadBadge.pending);
+    expect(values, [UnreadBadge.pending]);
+    feed.complete(_feed([_item()]));
+    await fixture.container.read(activityProvider.future);
+    expect(fixture.badge, UnreadBadge.unread);
+    expect(values, [UnreadBadge.pending, UnreadBadge.unread]);
+  });
+
+  for (final source in ['auth', 'Activity', 'channels']) {
+    test('pending during a $source refresh even with retained data', () async {
+      final refreshed = Completer<void>();
+      var loaded = false;
+      Future<void> gateReload() async {
+        if (loaded) await refreshed.future;
+        loaded = true;
+      }
+
+      final fixture = _Fixture(
+        auth: _AuthNotifier(beforeLoad: source == 'auth' ? gateReload : null),
+        channelNotifier: _StubbedChannelsNotifier([
+          _channel(),
+        ], beforeLoad: source == 'channels' ? gateReload : null),
+        activity: _ActivityNotifier((_) async {
+          if (source == 'Activity') await gateReload();
+          return _feed([_item()]);
+        }),
       );
-      addTearDown(container.dispose);
-      await container.read(channelsProvider.future);
-      return container.read(unreadBadgeProvider);
-    }
-
-    final stream = makeChannel(id: 'ch-a', lastMessageAtSeconds: t20);
-
-    test('activity: reads an ordinary top-level message', () async {
-      final result = await badge(stream, event('m'), {'activity:ch-a': t20});
-      expect(result.generalUnreadCount, 0);
-      expect(result.highPriorityCount, 0);
+      await fixture.load();
+      expect(fixture.badge, UnreadBadge.unread);
+      switch (source) {
+        case 'auth':
+          fixture.container.invalidate(authProvider);
+          expect(fixture.container.read(authProvider).asData, isNotNull);
+        case 'Activity':
+          fixture.container.invalidate(activityProvider);
+          expect(fixture.container.read(activityProvider).asData, isNotNull);
+        case 'channels':
+          fixture.container.invalidate(channelsProvider);
+          expect(fixture.container.read(channelsProvider).asData, isNotNull);
+      }
+      expect(fixture.badge, UnreadBadge.pending);
+      refreshed.complete();
+      await fixture.load();
+      expect(fixture.badge, UnreadBadge.unread);
     });
+  }
 
-    test('activity: does not read a mention', () async {
-      final result = await badge(stream, event('m', highPriority: true), {
-        'activity:ch-a': t30,
-      });
-      expect(result.highPriorityCount, 1);
+  for (final source in ['auth', 'Activity', 'channels']) {
+    test('pending when $source fails to load', () async {
+      final fixture = _Fixture();
+      await fixture.load();
+      expect(fixture.badge, UnreadBadge.clear);
+      final error = StateError('injected load failure');
+      switch (source) {
+        case 'auth':
+          (fixture.container.read(authProvider.notifier) as _AuthNotifier).fail(
+            error,
+          );
+        case 'Activity':
+          (fixture.container.read(activityProvider.notifier)
+                  as _ActivityNotifier)
+              .fail(error);
+        case 'channels':
+          (fixture.container.read(channelsProvider.notifier)
+                  as _StubbedChannelsNotifier)
+              .fail(error);
+      }
+      expect(fixture.badge, UnreadBadge.pending);
     });
+  }
 
-    test('activity: does not read a thread reply', () async {
-      final result = await badge(stream, event('m', rootId: threadIdRoot), {
-        'activity:ch-a': t30,
-      });
-      expect(result.generalUnreadCount, 1);
-    });
-
-    test('activity: does not read a DM', () async {
-      final dm = makeChannel(
-        id: 'dm-a',
-        channelType: 'dm',
-        lastMessageAtSeconds: t20,
-      );
-      final result = await badge(
-        dm,
-        event('m', channelType: 'dm', highPriority: true),
-        {'activity:dm-a': t30},
-      );
-      expect(result.highPriorityCount, 1);
-    });
-
-    test(
-      'seen: quiets ordinary backlog at the cut, not newer or attention',
-      () async {
-        final quiet = await badge(stream, event('m'), {'seen:ch-a': t20});
-        expect(quiet.generalUnreadCount, 0);
-        expect(quiet.highPriorityCount, 0);
-        final newer = await badge(stream, event('m'), {'seen:ch-a': t10});
-        expect(newer.generalUnreadCount, 1);
-        final mention = await badge(stream, event('m', highPriority: true), {
-          'seen:ch-a': t30,
-        });
-        expect(mention.highPriorityCount, 1);
-        final reply = await badge(stream, event('m', rootId: threadIdRoot), {
-          'seen:ch-a': t30,
-        });
-        expect(reply.generalUnreadCount, 1);
-      },
-    );
-
-    test('thread-activity: reads replies in its thread only', () async {
-      final read = await badge(stream, event('m', rootId: threadIdRoot), {
-        'thread-activity:$threadIdRoot': t20,
-      });
-      expect(read.generalUnreadCount, 0);
-      final other = await badge(stream, event('m', rootId: threadIdRoot), {
-        'thread-activity:other': t30,
-      });
-      expect(other.generalUnreadCount, 1);
-    });
+  test('platformCount maps pending to null, clear to 0, unread to 1', () {
+    expect(UnreadBadge.pending.platformCount, isNull);
+    expect(UnreadBadge.clear.platformCount, 0);
+    expect(UnreadBadge.unread.platformCount, 1);
   });
-
-  test('one unread DM channel → (1, 0) high priority', () async {
-    final container = buildContainer(
-      channels: [
-        makeChannel(id: 'dm-a', channelType: 'dm', lastMessageAtSeconds: t20),
-      ],
-      readContexts: {},
-    );
-    addTearDown(container.dispose);
-
-    await container.read(channelsProvider.future);
-    final badge = container.read(unreadBadgeProvider);
-    expect(badge.highPriorityCount, 1);
-    expect(badge.generalUnreadCount, 0);
-  });
-
-  test(
-    'one unread non-DM with unread high-priority @mention → (1, 0) high priority',
-    () async {
-      const channelId = 'ch-a';
-      final container = buildContainer(
-        channels: [makeChannel(id: channelId, lastMessageAtSeconds: t20)],
-        // Read up through t10; both the message (t20) and @mention (t30) are
-        // newer than the read marker.
-        readContexts: {channelId: t10},
-        highPriorityMap: {channelId: t30},
-      );
-      addTearDown(container.dispose);
-
-      await container.read(channelsProvider.future);
-      final badge = container.read(unreadBadgeProvider);
-      expect(badge.highPriorityCount, 1);
-      expect(badge.generalUnreadCount, 0);
-    },
-  );
-
-  test(
-    'mixed: 1 unread DM + 2 unread non-DMs (no high-priority) → (1, 2)',
-    () async {
-      final container = buildContainer(
-        channels: [
-          makeChannel(id: 'dm-a', channelType: 'dm', lastMessageAtSeconds: t20),
-          makeChannel(id: 'ch-b', lastMessageAtSeconds: t20),
-          makeChannel(id: 'ch-c', lastMessageAtSeconds: t20),
-        ],
-        readContexts: {},
-        highPriorityMap: {},
-      );
-      addTearDown(container.dispose);
-
-      await container.read(channelsProvider.future);
-      final badge = container.read(unreadBadgeProvider);
-      expect(badge.highPriorityCount, 1);
-      expect(badge.generalUnreadCount, 2);
-    },
-  );
-
-  test('archived channel is excluded even if unread', () async {
-    final container = buildContainer(
-      channels: [
-        makeChannel(
-          id: 'ch-archived',
-          isArchived: true,
-          lastMessageAtSeconds: t20,
-        ),
-        makeChannel(id: 'ch-active', lastMessageAtSeconds: t20),
-      ],
-      readContexts: {},
-    );
-    addTearDown(container.dispose);
-
-    await container.read(channelsProvider.future);
-    final badge = container.read(unreadBadgeProvider);
-    // Archived channel must not count; active one does.
-    expect(badge.highPriorityCount, 0);
-    expect(badge.generalUnreadCount, 1);
-  });
-
-  test('non-member channel is excluded even if unread', () async {
-    final container = buildContainer(
-      channels: [
-        makeChannel(
-          id: 'ch-nonmember',
-          isMember: false,
-          lastMessageAtSeconds: t20,
-        ),
-        makeChannel(id: 'ch-member', lastMessageAtSeconds: t20),
-      ],
-      readContexts: {},
-    );
-    addTearDown(container.dispose);
-
-    await container.read(channelsProvider.future);
-    final badge = container.read(unreadBadgeProvider);
-    expect(badge.highPriorityCount, 0);
-    expect(badge.generalUnreadCount, 1);
-  });
-
-  test('channel with lastMessageAt == null is excluded', () async {
-    final container = buildContainer(
-      channels: [
-        // No lastMessageAt — provider treats this as having no messages.
-        makeChannel(id: 'ch-nomsg'),
-        makeChannel(id: 'ch-withmsg', lastMessageAtSeconds: t20),
-      ],
-      readContexts: {},
-    );
-    addTearDown(container.dispose);
-
-    await container.read(channelsProvider.future);
-    final badge = container.read(unreadBadgeProvider);
-    expect(badge.highPriorityCount, 0);
-    expect(badge.generalUnreadCount, 1);
-  });
-
-  test(
-    'read state not ready (isReady: false) does not suppress unread counts',
-    () async {
-      // The provider does not gate on isReady — it computes from whatever
-      // timestamps are in contexts. With an empty context map and readStateReady=false,
-      // readAt is null → channel is unread → (0, 1).
-      final container = buildContainer(
-        channels: [makeChannel(id: 'ch-a', lastMessageAtSeconds: t20)],
-        readContexts: {},
-        readStateReady: false,
-      );
-      addTearDown(container.dispose);
-
-      await container.read(channelsProvider.future);
-      final badge = container.read(unreadBadgeProvider);
-      expect(badge.highPriorityCount, 0);
-      expect(badge.generalUnreadCount, 1);
-    },
-  );
-
-  test(
-    'locally forced channel counts unread without publishing rollback',
-    () async {
-      final container = buildContainer(
-        channels: [makeChannel(id: 'ch-a', lastMessageAtSeconds: t20)],
-        readContexts: {'ch-a': t30},
-        forcedUnreadContexts: {'ch-a': 'ch-a'},
-      );
-      addTearDown(container.dispose);
-
-      await container.read(channelsProvider.future);
-      final badge = container.read(unreadBadgeProvider);
-      expect(badge.highPriorityCount, 0);
-      expect(badge.generalUnreadCount, 1);
-    },
-  );
-
-  test('thread marker clears only replies in that thread context', () async {
-    const channelId = 'ch-a';
-    final container = buildContainer(
-      channels: [makeChannel(id: channelId, lastMessageAtSeconds: t30)],
-      readContexts: {'thread:$threadIdRootDash1': t30},
-      observedEventsByChannel: {
-        channelId: [
-          _observed(
-            id: 'reply-1',
-            createdAt: t20,
-            rootId: threadIdRootDash1,
-            isThreadedReply: true,
-          ),
-          _observed(
-            id: 'reply-2',
-            createdAt: t20,
-            rootId: threadIdRootDash2,
-            isThreadedReply: true,
-          ),
-        ],
-      },
-    );
-    addTearDown(container.dispose);
-
-    await container.read(channelsProvider.future);
-    final badge = container.read(unreadBadgeProvider);
-    expect(badge.highPriorityCount, 0);
-    expect(badge.generalUnreadCount, 1);
-  });
-
-  test('message marker clears only that observed message', () async {
-    const channelId = 'ch-a';
-    final container = buildContainer(
-      channels: [makeChannel(id: channelId, lastMessageAtSeconds: t30)],
-      readContexts: {'msg:reply-1': t30},
-      observedEventsByChannel: {
-        channelId: [
-          _observed(
-            id: 'reply-1',
-            createdAt: t20,
-            rootId: threadIdRootDash1,
-            isThreadedReply: true,
-          ),
-          _observed(
-            id: 'reply-2',
-            createdAt: t20,
-            rootId: threadIdRootDash1,
-            isThreadedReply: true,
-          ),
-        ],
-      },
-    );
-    addTearDown(container.dispose);
-
-    await container.read(channelsProvider.future);
-    final badge = container.read(unreadBadgeProvider);
-    expect(badge.highPriorityCount, 0);
-    expect(badge.generalUnreadCount, 1);
-  });
-
-  test('channelsProvider in loading state returns (0, 0)', () {
-    // The provider returns const UnreadBadgeState() while channels are loading.
-    // We intentionally do NOT await the future here — the channels notifier
-    // never resolves (Completer never completes) so the state stays AsyncLoading.
-    final container = ProviderContainer(
-      overrides: [
-        channelsProvider.overrideWith(() => _LoadingChannelsNotifier()),
-        readStateProvider.overrideWith(
-          () => _ReadStateNotifier(
-            const ReadStateState(
-              isReady: true,
-              pubkey: 'me',
-              contexts: {},
-              version: 1,
-            ),
-          ),
-        ),
-      ],
-    );
-    addTearDown(container.dispose);
-
-    final badge = container.read(unreadBadgeProvider);
-    expect(badge.highPriorityCount, 0);
-    expect(badge.generalUnreadCount, 0);
-  });
-
-  test(
-    'high-priority event older than read marker falls through to general bucket',
-    () async {
-      // @mention arrived at t10, user read at t20 (after the mention),
-      // then a new general message arrived at t30. Channel is unread but
-      // the mention is already read → falls through to general.
-      const channelId = 'ch-a';
-      final container = buildContainer(
-        channels: [makeChannel(id: channelId, lastMessageAtSeconds: t30)],
-        readContexts: {channelId: t20},
-        observedEventsByChannel: {
-          channelId: [
-            _observed(id: 'mention', createdAt: t10, highPriority: true),
-            _observed(id: 'general', createdAt: t30),
-          ],
-        },
-      );
-      addTearDown(container.dispose);
-
-      await container.read(channelsProvider.future);
-      final badge = container.read(unreadBadgeProvider);
-      expect(badge.highPriorityCount, 0);
-      expect(badge.generalUnreadCount, 1);
-    },
-  );
 }
 
-ObservedUnreadEvent _observed({
-  required String id,
-  required int createdAt,
-  String? rootId,
-  bool highPriority = false,
-  bool isThreadedReply = false,
-  String channelType = 'stream',
-}) => makeObservedUnreadEvent(
-  id: id,
-  createdAt: createdAt,
-  rootId: rootId,
-  highPriority: highPriority,
-  channelType: channelType,
-  isThreadedReply: isThreadedReply,
-);
-
-Map<String, List<ObservedUnreadEvent>> _defaultObservedEvents(
-  List<Channel> channels,
-  Map<String, int> highPriorityMap,
-) {
-  return {
-    for (final channel in channels)
-      if (channel.lastMessageAt != null)
-        channel.id: [
-          _observed(
-            id: '${channel.id}-latest',
-            createdAt: channel.lastMessageAt!.millisecondsSinceEpoch ~/ 1000,
-            highPriority:
-                channel.isDm || highPriorityMap.containsKey(channel.id),
-            channelType: channel.channelType,
-          ),
-        ],
-  };
-}
-
-/// A [ChannelsNotifier] that immediately resolves to a canned [channels] list
-/// and exposes pre-seeded observed unread events.
-///
-/// Extends [ChannelsNotifier] so [ref.read(channelsProvider.notifier)] returns
-/// an instance whose observed-event getters work correctly.
 class _StubbedChannelsNotifier extends ChannelsNotifier {
-  _StubbedChannelsNotifier({
-    required List<Channel> channels,
-    Map<String, List<ObservedUnreadEvent>> observedEventsByChannel = const {},
-  }) : _channels = channels,
-       _observedEventsByChannel =
-           Map<String, Map<String, ObservedUnreadEvent>>.unmodifiable({
-             for (final entry in observedEventsByChannel.entries)
-               entry.key: Map<String, ObservedUnreadEvent>.unmodifiable({
-                 for (final event in entry.value) event.id: event,
-               }),
-           });
-
-  final List<Channel> _channels;
-  final Map<String, Map<String, ObservedUnreadEvent>> _observedEventsByChannel;
+  _StubbedChannelsNotifier(
+    this.channels, {
+    this.observed = const {},
+    this.beforeLoad,
+  });
+  final Future<void> Function()? beforeLoad;
+  final List<Channel> channels;
+  final Map<String, Map<String, ObservedUnreadEvent>> observed;
 
   @override
-  Future<List<Channel>> build() async => _channels;
+  Future<List<Channel>> build() async {
+    await beforeLoad?.call();
+    return channels;
+  }
+
+  void fail(Object error) => state = AsyncError(error, StackTrace.current);
 
   @override
   Map<String, int> get latestObservedByChannel => {
-    for (final entry in _observedEventsByChannel.entries)
-      if (entry.value.isNotEmpty)
-        entry.key: entry.value.values
-            .map((event) => event.createdAt)
-            .reduce((left, right) => left > right ? left : right),
+    for (final id in observed.keys) id: 100,
   };
 
   @override
   Map<String, Map<String, ObservedUnreadEvent>>
-  get observedUnreadEventsByChannel => _observedEventsByChannel;
+  get observedUnreadEventsByChannel => observed;
 }
 
-/// A [ChannelsNotifier] that stays in the loading state indefinitely.
 class _LoadingChannelsNotifier extends ChannelsNotifier {
   @override
   Future<List<Channel>> build() => Completer<List<Channel>>().future;
-
-  @override
-  Map<String, int> get latestObservedByChannel => const {};
-
-  @override
-  Map<String, Map<String, ObservedUnreadEvent>>
-  get observedUnreadEventsByChannel => const {};
 }
 
-/// A [ReadStateNotifier] that returns a fixed [ReadStateState].
-class _ReadStateNotifier extends ReadStateNotifier {
-  _ReadStateNotifier(this._fixedState);
-
-  final ReadStateState _fixedState;
-
+class _UnrequestedChannelsNotifier extends ChannelsNotifier {
   @override
-  ReadStateState build() => _fixedState;
+  Future<List<Channel>> build() => throw StateError('Channels must not start');
+}
+
+class _ReadStateNotifier extends ReadStateNotifier {
+  _ReadStateNotifier(this.initial);
+  final ReadStateState initial;
+  @override
+  ReadStateState build() => initial;
+  void setState(ReadStateState next) => state = next;
+}
+
+class _ActivityNotifier extends ActivityNotifier {
+  _ActivityNotifier(this.load);
+  final Future<HomeFeedResponse> Function(String relayUrl) load;
+  @override
+  Future<HomeFeedResponse> build() =>
+      load(ref.watch(relayConfigProvider).baseUrl);
+
+  void fail(Object error) => state = AsyncError(error, StackTrace.current);
+}
+
+class _AuthNotifier extends AuthNotifier {
+  _AuthNotifier({this.status = AuthStatus.authenticated, this.beforeLoad});
+  final AuthStatus status;
+  final Future<void> Function()? beforeLoad;
+  @override
+  Future<AuthState> build() async {
+    await beforeLoad?.call();
+    return AuthState(status: status);
+  }
+
+  void fail(Object error) => state = AsyncError(error, StackTrace.current);
+}
+
+class _RelayConfigNotifier extends RelayConfigNotifier {
+  @override
+  RelayConfig build() => const RelayConfig(baseUrl: _relayA);
+}
+
+class _MutedChannels extends ChannelMutesNotifier {
+  @override
+  ChannelMutesState build() => const ChannelMutesState(
+    isReady: true,
+    confirmedMutedChannelIds: {'ch-a'},
+  );
 }
