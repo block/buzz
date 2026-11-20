@@ -2380,6 +2380,139 @@ void main() {
       (RelayInvalidRequest, DiagnosticOperation.relayRejection),
     ]);
   });
+
+  group('errors from relay calls say which call and why', () {
+    test('a rejected publish carries the call and reason class', () async {
+      final session = RelaySessionNotifier();
+      session.debugAttachSocketForTest(_RecordingRelaySocket());
+
+      final publish = session.publish(_event());
+      session.debugHandleMessage([
+        'OK',
+        'event-1',
+        false,
+        'rate-limited: slow down',
+      ]);
+
+      await expectLater(
+        publish,
+        throwsA(
+          isA<RelayEventRejectedException>()
+              .having((error) => error.call, 'call', RelayCall.publish)
+              .having(
+                (error) => error.reason,
+                'reason',
+                RelayReason.rateLimited,
+              ),
+        ),
+      );
+    });
+
+    test('an escaped error keeps the stack of the call', () async {
+      final session = RelaySessionNotifier();
+      session.debugAttachSocketForTest(_RecordingRelaySocket());
+
+      final publish = _publishFromTheCaller(session);
+      session.debugHandleMessage(['OK', 'event-1', false, 'invalid: bad']);
+
+      StackTrace? stack;
+      try {
+        await publish;
+      } on RelayEventRejectedException catch (_, trace) {
+        stack = trace;
+      }
+      expect(stack.toString(), contains('_publishFromTheCaller'));
+    });
+
+    test('an unacknowledged publish is a timeout of the publish', () async {
+      final session = RelaySessionNotifier();
+      session.debugAttachSocketForTest(_RecordingRelaySocket());
+
+      await expectLater(
+        session.publish(_event(), timeout: Duration.zero),
+        throwsA(
+          isA<RelayAckTimeoutError>()
+              .having((error) => error.call, 'call', RelayCall.publish)
+              .having((error) => error.duration, 'duration', Duration.zero),
+        ),
+      );
+    });
+
+    test('a history timeout is a timeout of the history call', () async {
+      final session = RelaySessionNotifier();
+
+      await expectLater(
+        session.fetchHistory(
+          const NostrFilter(kinds: [39002]),
+          timeout: const Duration(milliseconds: 1),
+        ),
+        throwsA(
+          isA<RelayTimeoutException>()
+              .having((error) => error.call, 'call', RelayCall.history)
+              .having((error) => error.reason, 'reason', RelayReason.timeout),
+        ),
+      );
+    });
+
+    test('a query timeout is a timeout of the query', () async {
+      final harness = _queryHarness(client: _ControlledHttpClient());
+      addTearDown(harness.container.dispose);
+
+      await expectLater(
+        harness.session.queryRelay(const [], timeout: Duration.zero),
+        throwsA(
+          isA<RelayTimeoutException>().having(
+            (error) => error.call,
+            'call',
+            RelayCall.query,
+          ),
+        ),
+      );
+    });
+
+    test('a history CLOSED carries the call and the relay prefix', () async {
+      final socket = _RecordingRelaySocket();
+      final session = RelaySessionNotifier();
+      session.debugAttachSocketForTest(socket);
+
+      final history = session.fetchHistory(_channelFilter);
+      session.debugHandleMessage([
+        'CLOSED',
+        _reqs(socket).last[1] as String,
+        'restricted: not a member',
+      ]);
+
+      await expectLater(
+        history,
+        throwsA(
+          isA<RelayClosedException>()
+              .having((error) => error.call, 'call', RelayCall.history)
+              .having((error) => error.reason, 'reason', RelayReason.restricted)
+              .having(
+                (error) => error.toString(),
+                'text',
+                'Exception: restricted: not a member',
+              ),
+        ),
+      );
+    });
+
+    test('a live subscribe CLOSED carries the call', () async {
+      final session = RelaySessionNotifier();
+
+      final subscribe = session.subscribe(_channelFilter, (_) {});
+      session.debugHandleMessage(['CLOSED', 'l-1', 'blocked: no']);
+
+      await expectLater(
+        subscribe,
+        throwsA(
+          isA<RelayClosedException>()
+              .having((error) => error.call, 'call', RelayCall.subscribe)
+              .having((error) => error.reason, 'reason', RelayReason.blocked),
+        ),
+      );
+    });
+  });
 }
 
 class _ControlledHttpClient extends http.BaseClient {
@@ -2561,6 +2694,9 @@ class _FakeRelayConfigNotifier extends RelayConfigNotifier {
   @override
   RelayConfig build() => RelayConfig(baseUrl: _baseUrl, nsec: _nsec);
 }
+
+Future<NostrEvent> _publishFromTheCaller(RelaySessionNotifier session) =>
+    session.publish(_event());
 
 NostrEvent _event({int createdAt = 20, String id = 'event-1'}) {
   return NostrEvent(

@@ -1,7 +1,6 @@
-import 'dart:async';
-
 import 'package:flutter/foundation.dart';
 
+import 'relay_call_error.dart';
 import 'relay_socket.dart';
 
 enum SessionStatus { disconnected, connecting, connected, reconnecting }
@@ -40,9 +39,10 @@ class RelayNotConnectedError extends StateError {
 
 /// The relay did not acknowledge a published EVENT in time, so it may or may
 /// not have accepted it. Other relay timeouts (history, queries) happen before
-/// anything is published and stay plain [TimeoutException]s.
-class RelayAckTimeoutError extends TimeoutException {
-  RelayAckTimeoutError(super.message, [super.duration]);
+/// anything is published and are plain [RelayTimeoutException]s.
+class RelayAckTimeoutError extends RelayTimeoutException {
+  RelayAckTimeoutError(String message, [Duration? duration])
+    : super(RelayCall.publish, message, duration);
 }
 
 /// The connection ended after an EVENT was sent but before the relay
