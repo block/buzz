@@ -273,7 +273,7 @@ fn classify_batch(
                 } else if authored.insert(event.id.clone()) {
                     discovered.authored.push(event.id.clone());
                 }
-            } else if has_tag_value(&event.tags, "p", &self_pubkey) {
+            } else if mentions_self(&event.tags, &self_pubkey) {
                 if let Some(root_id) = thread_reference(&event.tags).root_id {
                     if mentioned.insert(root_id.clone()) {
                         discovered.mentioned.push(root_id);
@@ -313,7 +313,7 @@ fn classify_batch(
             let high_priority = item.channel.channel_type == "dm"
                 || threaded
                 || broadcast
-                || has_tag_value(&event.tags, "p", &self_pubkey);
+                || mentions_self(&event.tags, &self_pubkey);
             max_trigger = max_trigger.max(event.created_at);
             observed_events.push(ObservedUnreadEvent {
                 id: event.id.clone(),
@@ -416,8 +416,7 @@ fn should_notify(
     participated: &HashSet<String>,
     authored: &HashSet<String>,
 ) -> bool {
-    if has_exact_tag(&event.tags, "broadcast", "1") || has_tag_value(&event.tags, "p", self_pubkey)
-    {
+    if has_exact_tag(&event.tags, "broadcast", "1") || mentions_self(&event.tags, self_pubkey) {
         return true;
     }
     let event_channel_id = event
@@ -454,12 +453,19 @@ fn has_exact_tag(tags: &[Vec<String>], name: &str, value: &str) -> bool {
     })
 }
 
-fn has_tag_value(tags: &[Vec<String>], name: &str, value: &str) -> bool {
+/// Whether the event's `p` tags address `self_pubkey`. A workflow message
+/// names its owner in `["p", owner, "", "owner"]` for attribution only; that
+/// tag is not a mention. A workflow that mentions its owner adds a plain `p`.
+/// Mirrors `hasMentionForEvent` in `shouldNotify.ts` and
+/// `buzz_core::filter::is_workflow_owner_attribution`.
+fn mentions_self(tags: &[Vec<String>], self_pubkey: &str) -> bool {
+    let workflow = has_exact_tag(tags, "buzz:workflow", "true");
     tags.iter().any(|tag| {
-        tag.first().is_some_and(|part| part == name)
+        tag.first().is_some_and(|part| part == "p")
             && tag
                 .get(1)
-                .is_some_and(|part| part.eq_ignore_ascii_case(value))
+                .is_some_and(|part| part.eq_ignore_ascii_case(self_pubkey))
+            && !(workflow && tag.get(3).is_some_and(|part| part == "owner"))
     })
 }
 
@@ -584,6 +590,120 @@ mod tests {
             ["broadcast"]
         );
         assert_eq!(*max_trigger, 12);
+    }
+
+    const WORKFLOW_OWNER: &[&str] = &["p", "self", "", "owner"];
+    const WORKFLOW_MARKER: &[&str] = &["buzz:workflow", "true"];
+
+    fn stream_channel() -> CatchUpChannel {
+        CatchUpChannel {
+            id: "ch".into(),
+            channel_type: "stream".into(),
+            name: "Ch".into(),
+            read_at: Some(9),
+        }
+    }
+
+    /// The relay names a workflow's owner in `["p", owner, "", "owner"]` for
+    /// attribution only. Like `hasMentionForEvent` in `shouldNotify.ts`, that
+    /// tag must not make the owner's catch-up treat the message as a mention.
+    #[test]
+    fn workflow_owner_attribution_is_not_a_mention() {
+        let fetched = vec![FetchedChannel {
+            order: 0,
+            channel: stream_channel(),
+            events: vec![event(
+                "workflow-post",
+                "relay",
+                10,
+                &[WORKFLOW_OWNER, WORKFLOW_MARKER, &["h", "ch"]],
+            )],
+        }];
+        let result = classify_batch(&request(), fetched, &HashMap::new());
+        let ChannelResult::Success {
+            observed_events, ..
+        } = &result[0]
+        else {
+            panic!("expected success")
+        };
+        assert_eq!(observed_events.len(), 1);
+        let observed = &observed_events[0];
+        assert!(!observed.high_priority, "attribution is not a mention");
+        assert!(!observed.counts_toward_badge);
+        assert!(!observed.counts_toward_app_badge);
+
+        let mut muted = request();
+        muted.muted_channel_ids.insert("ch".into());
+        let fetched = vec![FetchedChannel {
+            order: 0,
+            channel: stream_channel(),
+            events: vec![
+                event(
+                    "workflow-post",
+                    "relay",
+                    10,
+                    &[WORKFLOW_OWNER, WORKFLOW_MARKER, &["h", "ch"]],
+                ),
+                event(
+                    "workflow-reply",
+                    "relay",
+                    11,
+                    &[
+                        WORKFLOW_OWNER,
+                        WORKFLOW_MARKER,
+                        &["h", "ch"],
+                        &["e", "root", "", "reply"],
+                    ],
+                ),
+            ],
+        }];
+        let result = classify_batch(&muted, fetched, &HashMap::new());
+        let ChannelResult::Success {
+            observed_events,
+            discovered,
+            ..
+        } = &result[0]
+        else {
+            panic!("expected success")
+        };
+        assert_eq!(
+            observed_events
+                .iter()
+                .map(|event| event.id.as_str())
+                .collect::<Vec<_>>(),
+            Vec::<&str>::new(),
+            "a muted channel and an unjoined thread stay quiet"
+        );
+        assert!(discovered.mentioned.is_empty());
+    }
+
+    #[test]
+    fn workflow_that_mentions_its_owner_is_still_a_mention() {
+        let fetched = vec![FetchedChannel {
+            order: 0,
+            channel: stream_channel(),
+            events: vec![event(
+                "workflow-mention",
+                "relay",
+                10,
+                &[
+                    WORKFLOW_OWNER,
+                    WORKFLOW_MARKER,
+                    &["h", "ch"],
+                    &["p", "self"],
+                ],
+            )],
+        }];
+        let result = classify_batch(&request(), fetched, &HashMap::new());
+        let ChannelResult::Success {
+            observed_events, ..
+        } = &result[0]
+        else {
+            panic!("expected success")
+        };
+        assert_eq!(observed_events.len(), 1);
+        assert!(observed_events[0].high_priority);
+        assert!(observed_events[0].counts_toward_app_badge);
     }
 
     /// Pins the SERIALIZED wire contract against `tauriUnreadCatchUp.ts`.
