@@ -1,6 +1,16 @@
+import 'package:buzz/features/channels/voice_note_composer_recorder.dart';
+import 'package:clock/clock.dart';
+import 'package:buzz/features/channels/composer_transcription.dart';
+import 'package:buzz/shared/transcription/device_transcription.dart';
+import 'package:buzz/shared/emoji/emoji_picker.dart';
+import 'package:buzz/shared/widgets/concentric_sheet_surface.dart';
 import 'package:flutter/scheduler.dart';
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
+
 import 'dart:async';
+
 import 'package:buzz/features/channels/composer_send_origin.dart';
+
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
@@ -25,7 +35,9 @@ import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
+
 import '../../shared/community/community_storage_test.dart';
+
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
@@ -53,6 +65,7 @@ import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 part 'compose_bar_test/exact_mention_tests.dart';
+part 'compose_bar_test/ios_controls_tests.dart';
 part 'compose_bar_test/mixed_gallery_tests.dart';
 part 'compose_bar_test/solo_draft_tests.dart';
 part 'compose_bar_test/durable_mention_tests.dart';
@@ -199,6 +212,7 @@ Future<void> _sendNativeAttachmentPopoverCall(
 late SharedPreferences _testPrefs;
 
 Widget _buildComposeBar({
+  String? hintText,
   required MediaUploadService uploadService,
   required ComposeBarOnSend onSend,
   List<ChannelMember>? draftMembers,
@@ -241,6 +255,7 @@ Widget _buildComposeBar({
         child: Builder(
           builder: (context) {
             final composeBar = ComposeBar(
+              hintText: hintText,
               key: ValueKey(composeBarKey),
               channelId: 'channel-1',
               draftMembers: draftMembers,
@@ -335,54 +350,6 @@ Widget _buildComposeBar({
               child: child!,
             ),
       home: wrapPage?.call(page) ?? page,
-    ),
-  );
-}
-
-Widget _buildNativePopoverOwnershipHarness({
-  required MediaUploadService uploadService,
-  required bool includeFirstComposer,
-}) {
-  return ProviderScope(
-    overrides: [
-      customEmojiListProvider.overrideWithValue(const []),
-      mediaUploadServiceProvider.overrideWithValue(uploadService),
-      photoLibraryProvider.overrideWithValue(const _EmptyPhotoLibrary()),
-      currentPubkeyProvider.overrideWith((ref) => null),
-      channelMembersProvider(
-        'channel-1',
-      ).overrideWith((ref) => Future.value(const <ChannelMember>[])),
-      agentDirectoryProvider.overrideWith(
-        (ref) async => const <AgentDirectoryEntry>[],
-      ),
-      agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
-      relayClientProvider.overrideWithValue(
-        RelayClient(baseUrl: 'http://localhost:3000'),
-      ),
-      relayConfigProvider.overrideWith(_FakeRelayConfigNotifier.new),
-      savedPrefsProvider.overrideWithValue(_testPrefs),
-      channelsProvider.overrideWith(() => _FakeChannelsNotifier(const [])),
-    ],
-    child: MaterialApp(
-      theme: AppTheme.light(),
-      home: Scaffold(
-        body: Column(
-          mainAxisAlignment: MainAxisAlignment.end,
-          children: [
-            if (includeFirstComposer)
-              ComposeBar(
-                key: const ValueKey('first-composer'),
-                channelId: 'channel-1',
-                onSend: (_, _, {mediaTags = const []}) async {},
-              ),
-            ComposeBar(
-              key: const ValueKey('second-composer'),
-              channelId: 'channel-1',
-              onSend: (_, _, {mediaTags = const []}) async {},
-            ),
-          ],
-        ),
-      ),
     ),
   );
 }
@@ -751,7 +718,111 @@ class _IterationCountingChannels extends ListBase<Channel> {
       throw UnsupportedError('read-only');
 }
 
+Widget _buildNativePopoverOwnershipHarness({
+  required MediaUploadService uploadService,
+  required bool includeFirstComposer,
+}) {
+  return ProviderScope(
+    overrides: [
+      customEmojiListProvider.overrideWithValue(const []),
+      mediaUploadServiceProvider.overrideWithValue(uploadService),
+      photoLibraryProvider.overrideWithValue(const _EmptyPhotoLibrary()),
+      currentPubkeyProvider.overrideWith((ref) => null),
+      channelMembersProvider(
+        'channel-1',
+      ).overrideWith((ref) => Future.value(const <ChannelMember>[])),
+      agentDirectoryProvider.overrideWith(
+        (ref) async => const <AgentDirectoryEntry>[],
+      ),
+      agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
+      relayClientProvider.overrideWithValue(
+        RelayClient(baseUrl: 'http://localhost:3000'),
+      ),
+      relayConfigProvider.overrideWith(_FakeRelayConfigNotifier.new),
+      savedPrefsProvider.overrideWithValue(_testPrefs),
+      channelsProvider.overrideWith(() => _FakeChannelsNotifier(const [])),
+    ],
+    child: MaterialApp(
+      theme: AppTheme.light(),
+      home: Scaffold(
+        body: Column(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            if (includeFirstComposer)
+              ComposeBar(
+                key: const ValueKey('first-composer'),
+                channelId: 'channel-1',
+                onSend: (_, _, {mediaTags = const []}) async {},
+              ),
+            ComposeBar(
+              key: const ValueKey('second-composer'),
+              channelId: 'channel-1',
+              onSend: (_, _, {mediaTags = const []}) async {},
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
 void main() {
+  for (final isDictation in [false, true]) {
+    testWidgets('recording duration limit: dictation=$isDictation', (
+      tester,
+    ) async {
+      var now = DateTime(2026);
+      await withClock(Clock(() => now), () async {
+        final recorder = _FakeVoiceNoteRecorder();
+        var completed = 0;
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              voiceNoteRecorderFactoryProvider.overrideWithValue(
+                () => recorder,
+              ),
+            ],
+            child: MaterialApp(
+              home: Scaffold(
+                body: VoiceNoteComposerRecorder(
+                  isDictation: isDictation,
+                  onCancel: () {},
+                  onRecorded: (_) => completed++,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        now = now.add(const Duration(minutes: 5));
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(completed, isDictation ? 0 : 1);
+        expect(
+          find.byKey(const ValueKey('voice-note-recorder-duration')),
+          isDictation ? findsNothing : findsOneWidget,
+        );
+        if (!isDictation) expect(find.text('5:00 / 5:00'), findsOneWidget);
+        if (isDictation) {
+          now = now.add(const Duration(minutes: 5));
+          await tester.pump(const Duration(milliseconds: 200));
+          expect(completed, 0);
+          expect(
+            find.byKey(const ValueKey('voice-note-recorder-duration')),
+            findsNothing,
+          );
+          await tester.tap(
+            find.byKey(const ValueKey('voice-note-recorder-stop')),
+          );
+          await tester.pump();
+          expect(completed, 1);
+        }
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      });
+    });
+  }
+
+  iosControlsTests();
   _mixedGalleryTests();
   soloDraftTests();
   exactMentionTests();
@@ -810,10 +881,7 @@ void main() {
         matching: find.byType(MobileTabFooterBackdrop),
       );
       expect(composerBackdrop, findsOneWidget);
-      expect(
-        tester.getSize(composerBackdrop).height,
-        mobileTabFooterBackdropHeight(tester.element(composerBackdrop)),
-      );
+      expect(tester.getSize(composerBackdrop).height, 180);
       final compactDecoration =
           tester
                   .widget<Container>(
@@ -881,7 +949,7 @@ void main() {
         ),
       );
 
-      await tester.tap(find.text('Message\u2026'));
+      await tester.tap(find.text('Message'));
       expect(focusRequested, isTrue);
       await tester.pump();
       await tester.pump();
@@ -909,7 +977,7 @@ void main() {
         ),
       );
 
-      await tester.tap(find.text('Message\u2026'));
+      await tester.tap(find.text('Message'));
       await tester.pump();
       await tester.pump();
 
@@ -940,7 +1008,7 @@ void main() {
         ),
       );
 
-      await tester.tap(find.text('Message\u2026'));
+      await tester.tap(find.text('Message'));
       await tester.pump();
       await tester.pump();
       focusNode.unfocus();
@@ -1093,7 +1161,7 @@ void main() {
         );
         final compactWidth = tester.getSize(widthFinder).width;
 
-        await tester.tap(find.text('Message\u2026'));
+        await tester.tap(find.text('Message'));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 80));
 
@@ -1137,7 +1205,7 @@ void main() {
         );
         final compactWidth = tester.getSize(widthFinder).width;
 
-        await tester.tap(find.text('Message\u2026'));
+        await tester.tap(find.text('Message'));
         await tester.pumpAndSettle();
 
         expect(tester.getSize(widthFinder).width, greaterThan(compactWidth));
@@ -1165,9 +1233,34 @@ void main() {
           .widget<TextField>(find.byType(TextField))
           .focusNode!;
       expect(focusNode.hasFocus, isTrue);
-      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
       addTearDown(tester.view.reset);
-      await tester.pump();
+
+      final backdrop = find.descendant(
+        of: find.byKey(const ValueKey('composer-footer-gradient')),
+        matching: find.byType(MobileTabFooterBackdrop),
+      );
+      // The fade gives up one point per point of keyboard inset (logical)
+      // until it reaches 100, in both directions and at any keyboard height.
+      for (final (inset, height) in [
+        (0.0, 180.0),
+        (1.0, 179.0),
+        (30.0, 150.0),
+        (150.0, 100.0),
+        (336.0, 100.0),
+        (300.0, 100.0),
+        (40.0, 140.0),
+        (300.0, 100.0),
+      ]) {
+        tester.view.viewInsets = FakeViewPadding(
+          bottom: inset * tester.view.devicePixelRatio,
+        );
+        await tester.pump();
+        expect(
+          tester.getSize(backdrop).height,
+          height,
+          reason: 'keyboard inset $inset',
+        );
+      }
 
       // iOS drops the inset while Control Center or the app switcher covers
       // the app, reports `resumed` with it still at zero, and restores the
@@ -1197,8 +1290,9 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(TextField), findsNothing);
       expect(focusNode.hasFocus, isFalse);
+      expect(tester.getSize(backdrop).height, 180);
 
-      await tester.tap(find.text('Message…'));
+      await tester.tap(find.text('Message'));
       await tester.pumpAndSettle();
       tester.view.viewInsets = const FakeViewPadding(bottom: 300);
       await tester.pump();
@@ -1220,7 +1314,7 @@ void main() {
         BorderRadius.circular(Radii.dialog + Grid.quarter),
       );
 
-      await tester.tap(find.text('Message\u2026'));
+      await tester.tap(find.text('Message'));
       await tester.pumpAndSettle();
       expect(find.byType(TextField), findsOneWidget);
       expect(
@@ -1620,7 +1714,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.text('Message\u2026'));
+        await tester.tap(find.text('Message'));
         await tester.pump();
         tester.view.viewInsets = const FakeViewPadding(bottom: 300);
         addTearDown(tester.view.reset);
@@ -2723,16 +2817,29 @@ void main() {
             await tester.enterText(find.byType(TextField), 'hi @a');
             await tester.pumpAndSettle();
             expect(popover(), findsOneWidget);
-            await tester.tap(find.byTooltip('Add attachment').hitTestable());
+            await _tapComposerControl(tester, 'Attachments');
             await tester.pumpAndSettle();
             expect(presentCalls, 1);
+            // Native presentation hides the software keyboard. Exercise keys
+            // reaching Flutter while the popover still owns input.
+            tester
+                .widget<TextField>(find.byType(TextField))
+                .focusNode!
+                .requestFocus();
+            // Opening attachments intentionally dismisses the old suggestions.
+            // Recreate a query to test ownership of a fresh keyboard event.
+            controller.value = const TextEditingValue(
+              text: 'hi @al',
+              selection: TextSelection.collapsed(offset: 6),
+            );
+            await tester.pumpAndSettle();
             for (final key in [
               LogicalKeyboardKey.tab,
               LogicalKeyboardKey.enter,
             ]) {
               await tester.sendKeyEvent(key);
               await tester.pump();
-              expect(controller.text, 'hi @a', reason: '$key');
+              expect(controller.text, 'hi @al', reason: '$key');
               expect(sent, isEmpty);
             }
             await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
@@ -2895,12 +3002,13 @@ void main() {
           final controller = field.controller!;
           expect(popover(), findsOneWidget);
 
-          final menu =
-              field.contextMenuBuilder!(
-                    tester.element(find.byType(TextField)),
-                    tester.state<EditableTextState>(find.byType(EditableText)),
-                  )
-                  as AdaptiveTextSelectionToolbar;
+          tester
+              .state<EditableTextState>(find.byType(EditableText))
+              .showToolbar();
+          await tester.pumpAndSettle();
+          final menu = tester.widget<AdaptiveTextSelectionToolbar>(
+            find.byType(AdaptiveTextSelectionToolbar),
+          );
           menu.buttonItems!
               .singleWhere((item) => item.label == 'Paste Image')
               .onPressed!();
@@ -3141,7 +3249,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await _tapComposerControl(tester, 'Attachments', index: 0);
         await tester.pumpAndSettle();
         await _sendNativeAttachmentPopoverCall(tester, 'pickAllPhotos');
         await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
@@ -3195,7 +3303,7 @@ void main() {
         final textField = tester.widget<TextField>(find.byType(TextField));
         expect(textField.focusNode?.hasFocus, isTrue);
 
-        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await _tapComposerControl(tester, 'Attachments', index: 0);
         await tester.pumpAndSettle();
 
         expect(presentCalls, 1);
@@ -3238,7 +3346,7 @@ void main() {
           );
 
           await _expandComposer(tester);
-          await tester.tap(find.byTooltip('Add attachment').hitTestable());
+          await _tapComposerControl(tester, 'Attachments', index: 0);
           await tester.pumpAndSettle();
           await _sendNativeAttachmentPopoverCall(tester, 'recordVoiceNote');
           await tester.pump();
@@ -3323,7 +3431,7 @@ void main() {
             .focusNode!;
         expect(focusNode.hasFocus, isTrue);
 
-        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await _tapComposerControl(tester, 'Attachments', index: 0);
         await tester.pumpAndSettle();
         expect(focusNode.hasFocus, isTrue);
 
@@ -3373,7 +3481,7 @@ void main() {
           final textField = tester.widget<TextField>(find.byType(TextField));
           expect(textField.focusNode?.hasFocus, isTrue);
 
-          await tester.tap(find.byTooltip('Add attachment').hitTestable());
+          await _tapComposerControl(tester, 'Attachments', index: 0);
           await tester.pumpAndSettle();
 
           expect(textField.focusNode?.hasFocus, isFalse);
@@ -3426,7 +3534,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.byTooltip('Add attachment').hitTestable().at(1));
+        await _tapComposerControl(tester, 'Attachments', index: 1);
         await tester.pumpAndSettle();
         expect(presentCalls, 1);
 
@@ -3489,13 +3597,9 @@ void main() {
             ),
           );
 
-          await tester.tap(
-            find.byTooltip('Add attachment').hitTestable().at(0),
-          );
+          await _tapComposerControl(tester, 'Attachments', index: 0);
           await tester.pump();
-          await tester.tap(
-            find.byTooltip('Add attachment').hitTestable().at(1),
-          );
+          await _tapComposerControl(tester, 'Attachments', index: 1);
           await tester.pumpAndSettle();
 
           expect(supportCalls, 1);
@@ -3572,9 +3676,9 @@ void main() {
           ),
         );
 
-        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await _tapComposerControl(tester, 'Attachments', index: 0);
         await tester.pump();
-        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await _tapComposerControl(tester, 'Attachments', index: 0);
         await tester.pumpAndSettle();
 
         expect(supportCalls, 1);
@@ -3630,7 +3734,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.byTooltip('Add attachment').hitTestable().at(0));
+        await _tapComposerControl(tester, 'Attachments', index: 0);
         await tester.pumpAndSettle();
         expect(presentCalls, 1);
 
@@ -3643,7 +3747,7 @@ void main() {
         await tester.pumpAndSettle();
         expect(dismissCalls, 1);
 
-        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await _tapComposerControl(tester, 'Attachments', index: 0);
         await tester.pumpAndSettle();
         expect(presentCalls, 2);
       } finally {
@@ -3688,7 +3792,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.byTooltip('Add attachment').hitTestable().at(0));
+        await _tapComposerControl(tester, 'Attachments', index: 0);
         await tester.pumpAndSettle();
         expect(presentCalls, 1);
 
@@ -3700,7 +3804,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await _tapComposerControl(tester, 'Attachments', index: 0);
         await tester.pumpAndSettle();
         expect(presentCalls, 2);
       } finally {
@@ -5366,6 +5470,7 @@ void main() {
     testWidgets('iOS native context menu preserves defaults and pastes image', (
       tester,
     ) async {
+      final menus = _captureNativeComposerMenus();
       final previousPlatform = debugDefaultTargetPlatformOverride;
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       try {
@@ -5403,33 +5508,26 @@ void main() {
         );
 
         await _expandComposer(tester);
-        final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
         );
-        final defaultItems = SystemContextMenu.getDefaultItems(
-          editableTextState,
+        editableTextState.widget.controller.value = const TextEditingValue(
+          text: 'Draft',
+          selection: TextSelection(baseOffset: 0, extentOffset: 5),
         );
-        final menu =
-            textField.contextMenuBuilder!(
-                  tester.element(find.byType(TextField)),
-                  editableTextState,
-                )
-                as SystemContextMenu;
-        final pasteImage = menu.items.first as IOSSystemContextMenuItemCustom;
-        final rebuiltMenu =
-            textField.contextMenuBuilder!(
-                  tester.element(find.byType(TextField)),
-                  editableTextState,
-                )
-                as SystemContextMenu;
-        final rebuiltPasteImage =
-            rebuiltMenu.items.first as IOSSystemContextMenuItemCustom;
-
-        expect(pasteImage.title, 'Paste Image');
-        expect(rebuiltPasteImage.onPressed, same(pasteImage.onPressed));
-        expect(menu.items.skip(1), orderedEquals(defaultItems));
-        pasteImage.onPressed();
+        await tester.pump();
+        editableTextState.showToolbar();
+        await tester.pumpAndSettle();
+        final items = menus.last;
+        final pasteImage = items.singleWhere(
+          (item) => item['title'] == 'Paste Image',
+        );
+        expect(pasteImage['title'], 'Paste Image');
+        expect(items.skip(1).any((item) => item['type'] != 'custom'), isTrue);
+        await _nativeComposerMenuEvent('ContextMenu.onPerformCustomAction', [
+          null,
+          pasteImage['id'] as String,
+        ]);
         await tester.pumpAndSettle();
 
         expect(find.byTooltip('Remove attachment'), findsOneWidget);
@@ -5441,6 +5539,7 @@ void main() {
     testWidgets('iOS hides Paste Image when clipboard has no image', (
       tester,
     ) async {
+      final menus = _captureNativeComposerMenus();
       final previousPlatform = debugDefaultTargetPlatformOverride;
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       _setMockMediaUploadPlatformHandler((call) async {
@@ -5469,18 +5568,17 @@ void main() {
         await tester.pump();
 
         await _expandComposer(tester);
-        final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
         );
-        final menu =
-            textField.contextMenuBuilder!(
-                  tester.element(find.byType(TextField)),
-                  editableTextState,
-                )
-                as SystemContextMenu;
-
-        expect(menu.items.whereType<IOSSystemContextMenuItemCustom>(), isEmpty);
+        editableTextState.showToolbar();
+        await tester.pumpAndSettle();
+        expect(
+          menus
+              .expand((items) => items)
+              .where((item) => item['title'] == 'Paste Image'),
+          isEmpty,
+        );
       } finally {
         _setMockMediaUploadPlatformHandler((call) async {
           switch (call.method) {
@@ -5538,16 +5636,14 @@ void main() {
         );
 
         await _expandComposer(tester);
-        final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
         );
-        final menu =
-            textField.contextMenuBuilder!(
-                  tester.element(find.byType(TextField)),
-                  editableTextState,
-                )
-                as AdaptiveTextSelectionToolbar;
+        editableTextState.showToolbar();
+        await tester.pumpAndSettle();
+        final menu = tester.widget<AdaptiveTextSelectionToolbar>(
+          find.byType(AdaptiveTextSelectionToolbar),
+        );
         final pasteImage = menu.buttonItems!.singleWhere(
           (item) => item.label == 'Paste Image',
         );
@@ -5624,16 +5720,14 @@ void main() {
         );
 
         await _expandComposer(tester);
-        final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
         );
-        final menu =
-            textField.contextMenuBuilder!(
-                  tester.element(find.byType(TextField)),
-                  editableTextState,
-                )
-                as AdaptiveTextSelectionToolbar;
+        editableTextState.showToolbar();
+        await tester.pumpAndSettle();
+        final menu = tester.widget<AdaptiveTextSelectionToolbar>(
+          find.byType(AdaptiveTextSelectionToolbar),
+        );
         menu.buttonItems!
             .singleWhere((item) => item.label == 'Paste Image')
             .onPressed!();
@@ -5669,16 +5763,14 @@ void main() {
       );
 
       await _expandComposer(tester);
-      final textField = tester.widget<TextField>(find.byType(TextField));
       final editableTextState = tester.state<EditableTextState>(
         find.byType(EditableText),
       );
-      final menu =
-          textField.contextMenuBuilder!(
-                tester.element(find.byType(TextField)),
-                editableTextState,
-              )
-              as AdaptiveTextSelectionToolbar;
+      editableTextState.showToolbar();
+      await tester.pumpAndSettle();
+      final menu = tester.widget<AdaptiveTextSelectionToolbar>(
+        find.byType(AdaptiveTextSelectionToolbar),
+      );
 
       expect(
         menu.buttonItems!.where((item) => item.label == 'Paste Image'),
@@ -7563,7 +7655,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Message\u2026'));
+      await tester.tap(find.text('Message'));
       await tester.pump();
       await tester.pump();
 
@@ -7811,7 +7903,7 @@ AgentDirectoryEntry _testAgent(String pubkey) {
 
 Future<void> _expandComposer(WidgetTester tester) async {
   if (find.byType(TextField).evaluate().isNotEmpty) return;
-  await tester.tap(find.text('Message\u2026'));
+  await tester.tap(find.text('Message'));
   await tester.pumpAndSettle();
 }
 
@@ -7937,4 +8029,66 @@ Channel _makeChannel({required String name, required String channelType}) {
 Future<void> _inviteOutside(WidgetTester tester) async {
   await tester.pumpAndSettle();
   await tester.tap(find.widgetWithText(TextButton, 'Invite'));
+}
+
+List<List<Map<dynamic, dynamic>>> _captureNativeComposerMenus() {
+  final menus = <List<Map<dynamic, dynamic>>>[];
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'ContextMenu.showSystemContextMenu') {
+          menus.add(((call.arguments as Map)['items'] as List).cast<Map>());
+        }
+        return null;
+      });
+  addTearDown(
+    () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, null),
+  );
+  return menus;
+}
+
+Future<void> _nativeComposerMenuEvent(
+  String method, [
+  Object? arguments,
+]) async {
+  await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .handlePlatformMessage(
+        SystemChannels.platform.name,
+        SystemChannels.platform.codec.encodeMethodCall(
+          MethodCall(method, arguments),
+        ),
+        (_) {},
+      );
+}
+
+Future<void> _tapComposerControl(
+  WidgetTester tester,
+  String label, {
+  int index = 0,
+}) async {
+  final semanticLabel = label == 'Attachments' ? 'Add attachment' : label;
+  final native = find.byWidgetPredicate(
+    (widget) =>
+        widget is IosGlassNavigationButton &&
+        widget.semanticLabel == semanticLabel,
+  );
+  if (native.evaluate().isNotEmpty) {
+    tester.widget<IosGlassNavigationButton>(native.at(index)).onPressed?.call();
+  } else {
+    await tester.tap(find.byTooltip(semanticLabel));
+  }
+}
+
+Future<void> _selectComposerAttachment(
+  WidgetTester tester,
+  String label,
+) async {
+  if (find.byKey(const ValueKey('attachment-menu')).evaluate().isEmpty) {
+    await _tapComposerControl(tester, 'Attachments');
+    await tester.pumpAndSettle();
+  }
+  await tester.tap(
+    find.byKey(ValueKey('attachment-menu-item-${label.toLowerCase()}')),
+  );
+  await tester.pumpAndSettle();
 }

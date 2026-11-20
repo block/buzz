@@ -155,6 +155,16 @@ class PresetAgentAvatar extends HookWidget {
       return null;
     }, [controller, ready.value, playing]);
 
+    final nativeVideoVisible =
+        isIos &&
+        showNativeVideo &&
+        controller != null &&
+        ready.value == controller;
+    // HEVC artwork carries its own alpha silhouette. A Flutter path clip around
+    // its platform view can also clip selection overlays above other native views.
+    Widget clipArtwork(Widget child) =>
+        nativeVideoVisible ? child : AvatarClip(isAgent: true, child: child);
+
     // Keyed by URL so a new character never shows the previous one's poster
     // while its own loads.
     final posterImage = KeyedSubtree(
@@ -169,9 +179,8 @@ class PresetAgentAvatar extends HookWidget {
     );
     return SizedBox.square(
       dimension: size,
-      child: AvatarClip(
-        isAgent: true,
-        child: Transform.scale(
+      child: clipArtwork(
+        Transform.scale(
           scale: animatedAvatarArtworkScale,
           child: isAndroid && videoUrl != null
               ? AndroidTransparentAvatar(

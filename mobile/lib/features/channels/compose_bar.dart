@@ -1,17 +1,20 @@
 import 'composer_geometry.dart';
+import 'composer_transcription.dart';
+
 import 'package:buzz/shared/widgets/buzz_toast.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+
 import 'composer_send_origin.dart';
+
 import 'dart:async';
 import 'dart:collection';
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:ui' show FlutterView;
 
 import 'package:camera/camera.dart' as camera;
-import 'package:duo_kit/duo_kit.dart';
-import '../../shared/widgets/duo_toolbar.dart';
+
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
 import 'package:flutter/rendering.dart';
@@ -61,6 +64,7 @@ import 'photo_library.dart';
 import 'voice_note_attachment.dart';
 import 'voice_note_composer_recorder.dart';
 import 'voice_note_recording.dart';
+
 import 'package:buzz/shared/crypto/event_signing.dart';
 
 part 'compose_bar/helpers.dart';
@@ -80,7 +84,10 @@ part 'compose_bar/ios_attachment_popover.dart';
 part 'compose_bar/camera_preview.dart';
 part 'compose_bar/send_button.dart';
 part 'compose_bar/voice_note.dart';
+part 'compose_bar/input_tray.dart';
 part 'compose_bar/layout.dart';
+part 'compose_bar/ios_controls.dart';
+part 'compose_bar/selection_menu.dart';
 part 'compose_bar/hardware_keyboard.dart';
 part 'compose_bar/dock.dart';
 part 'compose_bar/share_delivery.dart';
