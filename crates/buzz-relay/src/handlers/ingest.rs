@@ -28,13 +28,14 @@ use buzz_core::kind::{
     KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
     KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
     KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
-    KIND_PRESENCE_UPDATE, KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE,
-    KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_SOLO_MEMBER_ROLE,
+    KIND_PIN_MESSAGE, KIND_PRESENCE_UPDATE, KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK,
+    KIND_PROFILE, KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_SOLO_MEMBER_ROLE,
     KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
     KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
     KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE,
-    KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
-    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_UNPIN_MESSAGE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
+    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -641,6 +642,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_STREAM_MESSAGE_SCHEDULED
         | KIND_STREAM_REMINDER
         | KIND_STREAM_MESSAGE_DIFF
+        | KIND_PIN_MESSAGE
+        | KIND_UNPIN_MESSAGE
         | KIND_FORUM_POST
         | KIND_FORUM_VOTE
         | KIND_FORUM_COMMENT => Ok(Scope::MessagesWrite),
@@ -892,6 +895,8 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_STREAM_MESSAGE_SCHEDULED
             | KIND_STREAM_REMINDER
             | KIND_STREAM_MESSAGE_DIFF
+            | KIND_PIN_MESSAGE
+            | KIND_UNPIN_MESSAGE
             | KIND_CANVAS
             | KIND_FORUM_POST
             | KIND_FORUM_VOTE
@@ -1123,12 +1128,19 @@ impl ThreadMetadataOwned {
 /// Whether `target` is in `channel_id` and readable by `reader`. Write paths
 /// that reference an event reject a target failing this exactly as a missing
 /// one, so the rejection never reveals whether, or where, the target exists.
+///
+/// A NIP-PM pin or unpin command is never such a target. Account erasure
+/// removes a command without keeping it as a thread ancestor.
 fn target_readable_in_channel(
     target: &buzz_core::StoredEvent,
     channel_id: Uuid,
     reader: &[u8],
 ) -> bool {
     target.channel_id == Some(channel_id)
+        && !matches!(
+            event_kind_u32(&target.event),
+            KIND_PIN_MESSAGE | KIND_UNPIN_MESSAGE
+        )
         && super::req::event_visible_to_reader(&target.event, reader)
 }
 
@@ -2703,6 +2715,7 @@ async fn ingest_event_inner(
         ));
     }
 
+    let pin_command = matches!(kind_u32, KIND_PIN_MESSAGE | KIND_UNPIN_MESSAGE);
     let required = match required_scope_for_kind(kind_u32, &event) {
         Ok(scope) => scope,
         Err(msg) => return Err(IngestError::Rejected(msg.into())),
@@ -3449,7 +3462,11 @@ async fn ingest_event_inner(
 
     validate_event_imeta(tenant, state, &event, &tenant_media_base).await?;
 
-    let thread_meta = if kind_u32 != KIND_SOLO_MEMBER_ROLE && requires_h_channel_scope(kind_u32) {
+    // A pin command's `e` tag names its target, not a thread parent.
+    let thread_meta = if kind_u32 != KIND_SOLO_MEMBER_ROLE
+        && !pin_command
+        && requires_h_channel_scope(kind_u32)
+    {
         if let Some(ch_id) = channel_id {
             resolve_nip10_thread_meta(tenant.community(), &event, ch_id, state)
                 .await
@@ -3715,6 +3732,8 @@ async fn ingest_event_inner(
         (stored, inserted)
     } else if kind_u32 == KIND_SOLO_MEMBER_ROLE {
         super::solo_member_role::persist(tenant, state, &event).await?
+    } else if pin_command {
+        super::pins::persist(tenant, state, &event).await?
     } else if kind_u32 == KIND_NIP29_REMOVE_USER {
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
         crate::handlers::side_effects::persist_remove_user(tenant, &event, state, thread_params)

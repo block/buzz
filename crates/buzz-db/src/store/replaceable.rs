@@ -347,8 +347,9 @@ async fn replace_parameterized_event_in_transaction_impl(
 ///
 /// These are the lists the relay signs and republishes in full on every
 /// change: the NIP-43 membership list (13534), the NIP-IA archived list
-/// (13535) and NIP-29 group state (39000–39002), written by the addressable
-/// path, the kind:39002 member snapshot and the kind:13534 writer, which all
+/// (13535), the NIP-PM pin list (30623) and NIP-29 group state
+/// (39000–39002), written by the addressable path, the kind:39002 member
+/// snapshot and the kind:13534 writer, which all
 /// build their supersede with [`replacement_sql`] from this predicate. A
 /// retired head is a full copy that no relay reader returns.
 ///
@@ -357,8 +358,8 @@ async fn replace_parameterized_event_in_transaction_impl(
 /// deleted channel's soft-deleted state, say), the deleted row no longer
 /// makes the replay a duplicate, and kinds without a channel have no
 /// created-at floor. Only the relay can submit these events: ingest requires
-/// the signer to be the authenticated pubkey, kinds 13534 and 13535 are
-/// relay-only, and the relay's writers sign a new event on every attempt.
+/// the signer to be the authenticated pubkey, kinds 13534, 13535 and 30623
+/// are relay-only, and the relay's writers sign a new event on every attempt.
 ///
 /// The check is by kind, not signer, and every supersede is scoped to the
 /// event's own pubkey. A client's kind:39000–39002 goes through the NIP-33
@@ -367,11 +368,12 @@ async fn replace_parameterized_event_in_transaction_impl(
 /// soft-deletes it.
 pub(crate) const fn hard_deletes_superseded(kind: i32) -> bool {
     use buzz_core::kind::{
-        KIND_IA_ARCHIVED_LIST, KIND_NIP29_GROUP_ADMINS, KIND_NIP29_GROUP_MEMBERS,
-        KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST,
+        KIND_CHANNEL_PINS, KIND_IA_ARCHIVED_LIST, KIND_NIP29_GROUP_ADMINS,
+        KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST,
     };
     kind == KIND_NIP43_MEMBERSHIP_LIST as i32
         || kind == KIND_IA_ARCHIVED_LIST as i32
+        || kind == KIND_CHANNEL_PINS as i32
         || kind == KIND_NIP29_GROUP_METADATA as i32
         || kind == KIND_NIP29_GROUP_ADMINS as i32
         || kind == KIND_NIP29_GROUP_MEMBERS as i32

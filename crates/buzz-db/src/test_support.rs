@@ -529,6 +529,20 @@ pub(crate) async fn wait_for_lock_wait(pool: &sqlx::PgPool, application_name: &s
     .expect("session reached a lock wait");
 }
 
+/// Monthly `events` partitions (not their indexes) this backend holds a
+/// relation lock on right now.
+pub(crate) async fn locked_event_partitions(tx: &mut crate::AdmittedTx) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT c.relname::text FROM pg_locks l \
+         JOIN pg_class c ON c.oid = l.relation \
+         WHERE l.locktype = 'relation' AND l.pid = pg_backend_pid() \
+         AND c.relkind = 'r' AND c.relname LIKE 'events\\_p%' ORDER BY 1",
+    )
+    .fetch_all(tx.conn())
+    .await
+    .expect("observe partition locks")
+}
+
 /// Loopback TCP proxy that can pause the upstream database, like
 /// `docker pause` on a replica. While paused, every session (established or
 /// new) holds the bytes it receives with both sockets open; on resume the

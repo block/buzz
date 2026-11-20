@@ -79,7 +79,8 @@ double _nativeCompactHeight(BuildContext context, [double titleHeight = 0]) {
   final height = IosNavigationMetrics.of(context).compactHeight;
   return strip == null
       ? max(height, titleHeight)
-      : max(height.clamp(44.0, double.infinity), titleHeight) + 24;
+      : max(height.clamp(44.0, double.infinity), titleHeight) +
+            duoHeaderTopClearance;
 }
 
 /// Returns the total height of the [FrostedAppBar] including safe area padding.

@@ -489,6 +489,23 @@ impl AuthorityStore for PostgresAuthorityStore {
         if request_expires_at < now || request_expires_at > authority.expires_at {
             return Err(AuthorityError::Rejected);
         }
+        // The installation row lock above serializes every admission for this
+        // delegation, so this read cannot race another attempt of the same
+        // request id. Answer an in-flight replay before reserving quota.
+        let replay: Option<bool> = sqlx::query_scalar(
+            "SELECT finished FROM push_gateway_delivery_request_replays
+             WHERE relay_pubkey=$1 AND request_id=$2",
+        )
+        .bind(&relay_bytes)
+        .bind(request_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db)?;
+        match replay {
+            Some(false) => return Err(AuthorityError::InFlight),
+            Some(true) => return Err(AuthorityError::Rejected),
+            None => {}
+        }
         if quota_window_seconds < 1 || quota_max_deliveries < 1 {
             return Err(AuthorityError::Unavailable);
         }
@@ -500,7 +517,7 @@ impl AuthorityStore for PostgresAuthorityStore {
         }
         let auth_inserted = sqlx::query("INSERT INTO push_gateway_delivery_auth_replays(relay_pubkey,auth_event_id,expires_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
             .bind(&relay_bytes).bind(event_bytes).bind(at(request_expires_at)?).execute(&mut *tx).await.map_err(db)?;
-        let request_inserted = sqlx::query("INSERT INTO push_gateway_delivery_request_replays(relay_pubkey,request_id,expires_at) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
+        let request_inserted = sqlx::query("INSERT INTO push_gateway_delivery_request_replays(relay_pubkey,request_id,expires_at,finished) VALUES($1,$2,$3,false) ON CONFLICT DO NOTHING")
             .bind(&relay_bytes).bind(request_id).bind(at(request_expires_at)?).execute(&mut *tx).await.map_err(db)?;
         if auth_inserted.rows_affected() != 1 || request_inserted.rows_affected() != 1 {
             return Err(AuthorityError::Rejected);
@@ -514,14 +531,16 @@ impl AuthorityStore for PostgresAuthorityStore {
         permit: DeliveryPermit,
         disposition: DeliveryDisposition,
     ) -> Result<(), AuthorityError> {
-        if disposition == DeliveryDisposition::Retryable {
-            sqlx::query("DELETE FROM push_gateway_delivery_request_replays WHERE relay_pubkey=$1 AND request_id=$2")
-                .bind(hex::decode(permit.relay_pubkey).map_err(|_| AuthorityError::Unavailable)?)
-                .bind(permit.request_id)
-                .execute(&self.pool)
-                .await
-                .map_err(db)?;
-        }
+        let statement = match disposition {
+            DeliveryDisposition::Retryable => "DELETE FROM push_gateway_delivery_request_replays WHERE relay_pubkey=$1 AND request_id=$2",
+            DeliveryDisposition::Terminal => "UPDATE push_gateway_delivery_request_replays SET finished=true WHERE relay_pubkey=$1 AND request_id=$2",
+        };
+        sqlx::query(statement)
+            .bind(hex::decode(permit.relay_pubkey).map_err(|_| AuthorityError::Unavailable)?)
+            .bind(permit.request_id)
+            .execute(&self.pool)
+            .await
+            .map_err(db)?;
         Ok(())
     }
 
@@ -1434,6 +1453,41 @@ mod postgres_tests {
         assert!(
             admit(&store, &"44".repeat(32), request_id).await.is_err(),
             "terminal outcome keeps the request-id fence burned"
+        );
+
+        pool.close().await;
+        drop_schema(&schema).await;
+    }
+
+    // A replay of an admitted request id that has not finished is InFlight, and
+    // charges no quota; once the attempt finishes terminally it is Rejected.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn unfinished_request_replay_is_in_flight_on_real_postgres() {
+        let (pool, schema) = full_schema(2).await;
+        install_authority(&pool).await;
+        let store = PostgresAuthorityStore::new(pool.clone());
+        let request_id = Uuid::new_v4();
+
+        let permit = admit(&store, &"22".repeat(32), request_id)
+            .await
+            .expect("first admission");
+        assert_eq!(
+            admit(&store, &"33".repeat(32), request_id).await.err(),
+            Some(AuthorityError::InFlight)
+        );
+        let admitted: i64 = sqlx::query_scalar("SELECT admitted FROM push_gateway_endpoint_quotas")
+            .fetch_one(&pool)
+            .await
+            .expect("read quota");
+        assert_eq!(admitted, 1, "the in-flight replay charged no quota");
+        store
+            .finish_delivery(permit, DeliveryDisposition::Terminal)
+            .await
+            .expect("terminal finish");
+        assert_eq!(
+            admit(&store, &"44".repeat(32), request_id).await.err(),
+            Some(AuthorityError::Rejected)
         );
 
         pool.close().await;

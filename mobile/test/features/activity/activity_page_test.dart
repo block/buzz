@@ -276,6 +276,72 @@ void main() {
     );
   }
 
+  for (final (name, platform, size, safeTop, viewPadding, headerTop) in [
+    (
+      'iOS Duo cover',
+      TargetPlatform.iOS,
+      const Size(466, 678),
+      0.0,
+      const FakeViewPadding(right: 84, bottom: 34),
+      24.0,
+    ),
+    (
+      'iOS Duo wide',
+      TargetPlatform.iOS,
+      const Size(951, 669),
+      0.0,
+      const FakeViewPadding(right: 84, bottom: 34),
+      24.0,
+    ),
+    (
+      'iOS phone',
+      TargetPlatform.iOS,
+      const Size(402, 874),
+      62.0,
+      const FakeViewPadding(top: 62, bottom: 34),
+      8.0,
+    ),
+    (
+      'Android with a side inset',
+      TargetPlatform.android,
+      const Size(466, 678),
+      0.0,
+      const FakeViewPadding(right: 84, bottom: 34),
+      8.0,
+    ),
+  ]) {
+    testWidgets('Activity header clears the top edge on $name', (tester) async {
+      debugDefaultTargetPlatformOverride = platform;
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = size;
+      tester.view.viewPadding = viewPadding;
+      addTearDown(tester.view.reset);
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      await tester.pumpWidget(
+        await buildTestable(
+          withPane: true,
+          mediaPadding: EdgeInsets.only(top: safeTop),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final title = find.text('Activity');
+      final row = tester.getRect(
+        find.ancestor(of: title, matching: find.byType(Row)).first,
+      );
+      expect(row.top, safeTop + headerTop);
+      expect(tester.getRect(title).center.dy, row.center.dy);
+      final inlineClose = find.byTooltip('Close activity');
+      if (size.width < 600) {
+        expect(tester.getRect(inlineClose).center.dy, row.center.dy);
+      } else {
+        // Close moves to the rail in the wide layout.
+        expect(inlineClose, findsNothing);
+      }
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
+
   _activityTabJourneys(
     ({Set<String> knownAgentPubkeys = const {}, TextScaler? textScaler}) =>
         buildTestable(
