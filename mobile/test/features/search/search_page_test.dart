@@ -1299,6 +1299,7 @@ class _FakeDmActions implements ChannelActions {
   Future<Channel> openDm({
     required List<String> pubkeys,
     bool waitForChannelList = true,
+    bool includeHistory = false,
   }) async {
     opened.add(pubkeys);
     waits.add(waitForChannelList);

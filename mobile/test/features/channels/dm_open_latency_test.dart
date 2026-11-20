@@ -66,6 +66,22 @@ void main() {
       expect(session.listLoads, 2);
       session.stalledList = Completer();
 
+      // New Message asks the relay for the DM these people share, which
+      // named agents join with its history, and opens the DM it returns.
+      expect(
+        (await actions.openDm(
+          pubkeys: [_peer],
+          waitForChannelList: false,
+          includeHistory: true,
+        )).id,
+        _dmId,
+      );
+      expect(session.published.last.kind, 41010);
+      expect(session.published.last.tags, [
+        ['p', _peer],
+        ['history', 'include'],
+      ]);
+
       // A DM the relay confirms but the caller cannot read fails visibly.
       session.member = false;
       await expectLater(
