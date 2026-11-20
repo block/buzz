@@ -360,6 +360,91 @@ async fn restriction_that_wins_admission_refuses_the_revoke() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn unknown_invite_is_answered_without_waiting_for_admission() {
+    let (pool, community, admin, _) = fixture().await;
+    let (_, other, other_admin, _) = fixture().await;
+    add_member(&pool, community, &admin, "admin").await;
+    add_member(&pool, other, &other_admin, "admin").await;
+    let known = mint_relay_invite(&pool, community, &admin, InviteExpiry::After(3600), None)
+        .await
+        .unwrap();
+    let foreign = mint_relay_invite(&pool, other, &other_admin, InviteExpiry::After(3600), None)
+        .await
+        .unwrap();
+    let unknown_hash = [7u8; 32];
+    let foreign_hash = hash_v2_code(&foreign.code);
+
+    // A claim-like holder of the admission lock.
+    let mut holder = pool.begin().await.unwrap();
+    lock_admission(&mut holder, community).await.unwrap();
+    for selector in [
+        InviteSelector::Id(Uuid::new_v4()),
+        InviteSelector::TokenHash(&unknown_hash),
+        InviteSelector::Id(foreign.invite_id),
+        InviteSelector::TokenHash(&foreign_hash),
+    ] {
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            revoke(&pool, community, &admin, selector),
+        )
+        .await
+        .expect("an unknown invite does not wait for admission");
+        assert_eq!(answer.unwrap(), None);
+    }
+
+    // A known invite still queues behind the holder.
+    let (revoking, name) = queued_revoke(community, &admin, known.invite_id).await;
+    wait_for_lock(&pool, &name, "advisory", &revoking).await;
+    holder.commit().await.unwrap();
+    assert!(revoking.await.unwrap().unwrap().is_some());
+    assert_eq!(revoked_at(&pool, other, foreign.invite_id).await, None);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn unknown_invite_keeps_the_refusals_for_nonmembers_and_restricted_actors() {
+    let (pool, community, admin, outsider) = fixture().await;
+    add_member(&pool, community, &admin, "admin").await;
+    let unknown = InviteSelector::Id(Uuid::new_v4());
+    assert!(matches!(
+        revoke(&pool, community, &outsider, unknown).await,
+        Err(crate::DbError::InviteRevokeForbidden)
+    ));
+    ban_member(&pool, community, &[1; 32], &[3; 32], None, None)
+        .await
+        .unwrap();
+    assert!(matches!(
+        revoke(&pool, community, &admin, unknown).await,
+        Err(crate::DbError::InviteRestricted)
+    ));
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn invite_deleted_after_the_existence_check_is_not_found() {
+    let (pool, community, admin, _) = fixture().await;
+    add_member(&pool, community, &admin, "admin").await;
+    let invite = mint_relay_invite(&pool, community, &admin, InviteExpiry::After(3600), None)
+        .await
+        .unwrap();
+
+    // The revoke sees the invite, then waits for admission while it is deleted.
+    let mut holder = pool.begin().await.unwrap();
+    lock_admission(&mut holder, community).await.unwrap();
+    let (revoking, name) = queued_revoke(community, &admin, invite.invite_id).await;
+    wait_for_lock(&pool, &name, "advisory", &revoking).await;
+    sqlx::query("DELETE FROM relay_invites WHERE community_id = $1 AND id = $2")
+        .bind(community.as_uuid())
+        .bind(invite.invite_id)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+    assert_eq!(revoking.await.unwrap().unwrap(), None);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn claim_and_revoke_serialize_and_the_claim_keeps_its_member() {
     let (pool, community, admin, claimant) = fixture().await;
     add_member(&pool, community, &admin, "admin").await;
@@ -433,6 +518,11 @@ async fn revoke_is_refused_while_the_community_is_quiescing() {
             InviteSelector::Id(invite.invite_id)
         )
         .await,
+        Err(crate::DbError::AccessDenied(_))
+    ));
+    // The lifecycle fence also wins over the unknown-invite answer.
+    assert!(matches!(
+        revoke(&pool, community, &admin, InviteSelector::Id(Uuid::new_v4())).await,
         Err(crate::DbError::AccessDenied(_))
     ));
     assert_eq!(revoked_at(&pool, community, invite.invite_id).await, None);
