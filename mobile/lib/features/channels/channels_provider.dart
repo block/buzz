@@ -239,6 +239,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _hasLoaded = false;
       _hasCachedSnapshot = false;
       _needsSnapshotRevalidation = false;
+      _activity.clear();
       _memberSnapshotRelayBaseUrl = relayBaseUrl;
       _memberSnapshotPubkey = pubkey;
       _memberSnapshotsByChannelId = const {};
@@ -331,7 +332,6 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _refreshCoordinator.retireInFlight();
       _clearLiveSubscriptions();
       _latestObservedByChannel.clear();
-      _activity.clear();
       _observedUnreadEventsByChannel.clear();
       _observedUnreadRevisions.touchAll();
       _unreadCaughtUpByChannel.clear();
@@ -522,6 +522,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
           entry.value,
     ];
     final latestFailedIds = <String>{};
+    final latestRead = _activity.beginRead();
     final latestEventsRequest = _fetchLastMessageEvents(
       session,
       latestRequested,
@@ -592,7 +593,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         }
       }
     }
-    _activity.noteRead(latestRequested, latestFailedIds, events);
+    _activity.noteRead(latestRead, latestRequested, latestFailedIds, events);
     final mutedChannelIds = _mutedChannelIds();
     for (final event in events ?? const <NostrEvent>[]) {
       final channelId = event.channelId;
