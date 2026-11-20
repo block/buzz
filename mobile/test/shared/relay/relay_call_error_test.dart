@@ -51,7 +51,37 @@ void main() {
     });
   });
 
+  group('the reason class of a /query status', () {
+    const cases = {
+      429: RelayReason.rateLimited,
+      401: RelayReason.authRequired,
+      403: RelayReason.restricted,
+      500: RelayReason.error,
+      503: RelayReason.error,
+      599: RelayReason.error,
+      400: RelayReason.other,
+      404: RelayReason.other,
+      302: RelayReason.other,
+      600: RelayReason.other,
+    };
+    for (final entry in cases.entries) {
+      test('${entry.key} is ${entry.value.name}', () {
+        expect(RelayReason.fromHttpStatus(entry.key), entry.value);
+      });
+    }
+  });
+
   group('what a relay error says about itself', () {
+    test('a refused query is a relay exception that names the query', () {
+      final error = RelayQueryException(429, '{"error":"slow down"}');
+
+      expect(error, isA<RelayException>());
+      expect(error.call, RelayCall.query);
+      expect(error.reason, RelayReason.rateLimited);
+      expect(error.statusCode, 429);
+      expect(error.toString(), 'RelayException(429): {"error":"slow down"}');
+    });
+
     test('a rejected publish names the publish and the relay prefix', () {
       const error = RelayEventRejectedException('blocked: secret reason');
 

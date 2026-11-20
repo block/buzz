@@ -97,6 +97,9 @@ Future<NostrEvent> submitSignedEventOnce({
   // push tombstone; its reports must not name the active member.
   final reporter = SignerDiagnosticReporter(diagnostics, signer: event.pubkey);
   final result = Completer<NostrEvent>();
+  // Errors completed later, from a socket callback or timer, carry the stack
+  // of the caller, so an escaped error's report reaches app code.
+  final callSite = StackTrace.current;
   late final RelaySocket socket;
   socket = RelaySocket(
     wsUrl: wsUrl,
@@ -129,7 +132,7 @@ Future<NostrEvent> submitSignedEventOnce({
               operation: DiagnosticOperation.relayRejection,
             );
           }
-          result.completeError(Exception('Relay rejected event: $detail'));
+          result.completeError(_SignedEventRejection(detail), callSite);
         }
       }
     },
@@ -144,10 +147,13 @@ Future<NostrEvent> submitSignedEventOnce({
   socket.diagnostics = reporter;
   final resultFuture = result.future.timeout(
     timeout,
-    onTimeout: () => throw RelayTimeoutException(
-      RelayCall.publish,
-      'Relay did not answer within $timeout',
-      timeout,
+    onTimeout: () => Error.throwWithStackTrace(
+      RelayTimeoutException(
+        RelayCall.publish,
+        'Relay did not answer within $timeout',
+        timeout,
+      ),
+      callSite,
     ),
   );
   try {
@@ -156,4 +162,17 @@ Future<NostrEvent> submitSignedEventOnce({
   } finally {
     await socket.disconnect();
   }
+}
+
+/// The relay answered a one-shot EVENT with OK false and [detail]. Its text
+/// names the refusal for callers; its reason class is the prefix of [detail].
+class _SignedEventRejection extends RelayEventRejectedException {
+  _SignedEventRejection(String detail)
+    : _reason = RelayReason.fromMessage(detail),
+      super('Relay rejected event: $detail');
+
+  final RelayReason _reason;
+
+  @override
+  RelayReason get reason => _reason;
 }
