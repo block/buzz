@@ -154,6 +154,7 @@ class AndroidPushAuthority {
     required bool Function() stillWanted,
   }) => _serialized(() async {
     await _dropForeignGateway();
+    var retriedDelegation = false;
     var attemptedReset = false;
     try {
       while (true) {
@@ -167,12 +168,17 @@ class AndroidPushAuthority {
             await _delegate(relayPubkey);
           } on AndroidPushGatewayRejection catch (rejection) {
             // The gateway answers every refused installation call with the
-            // same 404. After the one case we can explain (an endpoint
-            // rotation whose response was lost, which _rotate has already
-            // accounted for), a refused delegation means the installation is
-            // gone: revoked, expired, or enrolled under a key this phone no
-            // longer has.
+            // same 404. A challenge that expired while the app stalled is the
+            // mild case, so try once more with a fresh one. After that, and
+            // after the one case we can explain (an endpoint rotation whose
+            // response was lost, which _rotate has already accounted for), a
+            // refused delegation means the installation is gone: revoked,
+            // expired, or enrolled under a key this phone no longer has.
             if (!rejection.isNotAuthorized) rethrow;
+            if (!retriedDelegation) {
+              retriedDelegation = true;
+              continue;
+            }
             if (attemptedReset) rethrow;
             attemptedReset = true;
             await _reset();

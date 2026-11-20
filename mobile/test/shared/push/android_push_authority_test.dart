@@ -540,4 +540,23 @@ void main() {
     expect(gateway.installations.values.single.revoked, isFalse);
     expect(store.value, contains('https://push-b.example'));
   });
+
+  // ---- a refused delegation ----
+
+  test('a delegation refused once is retried with a fresh challenge', () async {
+    final first = await enroll();
+    now = first.expiresAt - 200;
+    gateway.refuseOnce.add('/v1/delegations');
+
+    final renewed = await enroll();
+
+    // A challenge that expired while the app stalled is not a lost
+    // installation: the key stays and the same installation is used.
+    final bodies = gateway.bodiesFor('/v1/delegations');
+    expect(bodies, hasLength(3));
+    expect(bodies[2]['challenge_id'], isNot(bodies[1]['challenge_id']));
+    expect(renewed.generation, 3);
+    expect(keystore.deleted, 0);
+    expect(gateway.installations, hasLength(1));
+  });
 }

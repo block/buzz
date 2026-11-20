@@ -89,6 +89,10 @@ class FakePushGateway {
   /// Routes that answer with this status instead of acting.
   final failWith = <String, int>{};
 
+  /// Routes whose next call is refused like an expired challenge: answered
+  /// `not_authorized` without acting.
+  final refuseOnce = <String>{};
+
   /// Refuse attestations like a gateway that does not trust this phone.
   bool refuseAttestation = false;
 
@@ -103,6 +107,7 @@ class FakePushGateway {
     requests.add((route: route, body: body));
     final status = failWith[route];
     if (status != null) return _json(status, {'error': 'unavailable'});
+    if (refuseOnce.remove(route)) return _notAuthorized();
     final response = _handle(route, body);
     if (loseResponseFor.remove(route)) {
       throw http.ClientException('connection lost');
