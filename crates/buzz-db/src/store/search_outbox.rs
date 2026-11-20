@@ -28,8 +28,9 @@ use crate::{AdmittedTx, Result};
 /// messages (45001, 45003).
 pub const SEARCHABLE_KINDS: [i32; 5] = [9, 40002, 40008, 45001, 45003];
 
-/// Communities a claim may skip because their deletion fenced them between
-/// candidate selection and admission.
+/// Communities a claim may pass over because their deletion fenced them
+/// between candidate selection and admission, or another worker holds all
+/// their rows.
 const CLAIM_COMMUNITY_CANDIDATES: usize = 8;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -38,8 +39,20 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 ///
 /// Process-wide because the outbox follows every event insert path. Call it
 /// once at startup, before serving writes, when a search index is configured.
-pub fn enable() {
+/// Fails, leaving the outbox off, if migrations have not created the table:
+/// enabled without it, every searchable insert would fail.
+pub async fn enable(pool: &PgPool) -> Result<()> {
+    let exists: bool = sqlx::query_scalar("SELECT to_regclass('public.search_outbox') IS NOT NULL")
+        .fetch_one(pool)
+        .await?;
+    if !exists {
+        return Err(crate::DbError::InvalidData(
+            "the search_outbox table is missing; run migrations before enabling search indexing"
+                .into(),
+        ));
+    }
     ENABLED.store(true, Ordering::Relaxed);
+    Ok(())
 }
 
 /// Queue `event_id` for indexing in the admitted transaction that inserted it.
@@ -124,12 +137,17 @@ impl SearchOutboxBatch {
     }
 }
 
-/// Claim up to `limit` of the oldest queued rows of one community, skipping
-/// rows another worker holds, and read their events' current state.
+/// Claim up to `limit` of the oldest queued rows of one community not in
+/// `skip`, skipping rows another worker holds, and read their events' current
+/// state.
 ///
-/// Returns `None` when no active community has unclaimed rows.
-pub async fn claim_batch(pool: &PgPool, limit: i64) -> Result<Option<SearchOutboxBatch>> {
-    let mut refused = Vec::<Uuid>::new();
+/// Returns `None` when no other active community has unclaimed rows.
+pub async fn claim_batch(
+    pool: &PgPool,
+    limit: i64,
+    skip: &[CommunityId],
+) -> Result<Option<SearchOutboxBatch>> {
+    let mut refused: Vec<Uuid> = skip.iter().map(|community| *community.as_uuid()).collect();
     for _ in 0..CLAIM_COMMUNITY_CANDIDATES {
         // Exclude fenced communities so they cannot occupy the queue head.
         let candidate: Option<Uuid> = sqlx::query_scalar(
@@ -169,7 +187,8 @@ pub async fn claim_batch(pool: &PgPool, limit: i64) -> Result<Option<SearchOutbo
         .await?;
         if rows.is_empty() {
             // Another worker holds every row of this community.
-            return Ok(None);
+            refused.push(id);
+            continue;
         }
         let mut row_ids = Vec::with_capacity(rows.len());
         let mut queued = std::collections::BTreeMap::<[u8; 32], DateTime<Utc>>::new();

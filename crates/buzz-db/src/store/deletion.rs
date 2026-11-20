@@ -9721,8 +9721,10 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn search_outbox_is_fenced_and_purged() {
-        crate::search_outbox::enable();
         let (db, store) = store().await;
+        crate::search_outbox::enable(&db.pool)
+            .await
+            .expect("enable outbox");
         let (request, inventory) = inventoried_request(&db, &store).await;
         let community = request.community_id;
         let bystander = db
@@ -9759,7 +9761,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             .await
             .expect_err("a fenced community admits no writes");
         assert_eq!(queued(community).await, 1);
-        let batch = crate::search_outbox::claim_batch(&db.pool, 10)
+        let batch = crate::search_outbox::claim_batch(&db.pool, 10, &[])
             .await
             .expect("claim")
             .expect("the bystander's batch");

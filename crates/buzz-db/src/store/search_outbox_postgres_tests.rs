@@ -69,9 +69,9 @@ async fn queued(pool: &PgPool, community: CommunityId) -> i64 {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn claim_reads_the_current_state_of_queued_events() {
-    search_outbox::enable();
     let db = connect().await;
     let pool = db.pool();
+    search_outbox::enable(pool).await.expect("enable outbox");
     let community = create_community(pool).await;
     let agent = Keys::generate();
     let owner = Keys::generate();
@@ -117,7 +117,7 @@ async fn claim_reads_the_current_state_of_queued_events() {
     .expect("insert reply");
     assert_eq!(queued(pool, community).await, 2);
 
-    let batch = search_outbox::claim_batch(pool, 10)
+    let batch = search_outbox::claim_batch(pool, 10, &[])
         .await
         .expect("claim")
         .expect("a batch");
@@ -139,7 +139,7 @@ async fn claim_reads_the_current_state_of_queued_events() {
     assert_eq!(doc.mentions, vec![mentioned.public_key().to_hex()]);
     batch.complete().await.expect("complete");
     assert_eq!(queued(pool, community).await, 0);
-    assert!(search_outbox::claim_batch(pool, 10)
+    assert!(search_outbox::claim_batch(pool, 10, &[])
         .await
         .expect("claim")
         .is_none());
@@ -150,9 +150,9 @@ async fn claim_reads_the_current_state_of_queued_events() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn claim_reports_deleted_events_as_removed() {
-    search_outbox::enable();
     let db = connect().await;
     let pool = db.pool();
+    search_outbox::enable(pool).await.expect("enable outbox");
     let community = create_community(pool).await;
     let message = signed(&Keys::generate(), 9, "soon deleted", vec![]);
     db.insert_event(community, &message, None)
@@ -165,7 +165,7 @@ async fn claim_reports_deleted_events_as_removed() {
         .await
         .expect("delete");
 
-    let batch = search_outbox::claim_batch(pool, 10)
+    let batch = search_outbox::claim_batch(pool, 10, &[])
         .await
         .expect("claim")
         .expect("a batch");
@@ -179,9 +179,9 @@ async fn claim_reports_deleted_events_as_removed() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn only_committed_searchable_events_queue() {
-    search_outbox::enable();
     let db = connect().await;
     let pool = db.pool();
+    search_outbox::enable(pool).await.expect("enable outbox");
     let community = create_community(pool).await;
     let keys = Keys::generate();
     db.insert_event(community, &signed(&keys, 7, "+", vec![]), None)
@@ -206,7 +206,7 @@ async fn only_committed_searchable_events_queue() {
     db.insert_event(community, &signed(&keys, 9, "kept", vec![]), None)
         .await
         .expect("insert message");
-    let batch = search_outbox::claim_batch(pool, 10)
+    let batch = search_outbox::claim_batch(pool, 10, &[])
         .await
         .expect("claim")
         .expect("a batch");
@@ -233,4 +233,69 @@ async fn disabled_outbox_queues_nothing() {
     .await
     .expect("insert");
     assert_eq!(queued(pool, community).await, 0);
+}
+
+/// Enabling fails, and leaves admission unchanged, while the table is missing.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn enable_requires_the_table() {
+    let db = connect().await;
+    let pool = db.pool();
+    sqlx::query("DROP TABLE search_outbox")
+        .execute(pool)
+        .await
+        .expect("drop table");
+    search_outbox::enable(pool)
+        .await
+        .expect_err("enable refuses a database without the table");
+    let community = create_community(pool).await;
+    db.insert_event(
+        community,
+        &signed(&Keys::generate(), 9, "still stored", vec![]),
+        None,
+    )
+    .await
+    .expect("admission works with the outbox off");
+}
+
+/// A claim passes over communities it is told to skip and communities whose
+/// rows another worker holds.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn claim_passes_over_skipped_and_held_communities() {
+    let db = connect().await;
+    let pool = db.pool();
+    search_outbox::enable(pool).await.expect("enable outbox");
+    let first = create_community(pool).await;
+    let second = create_community(pool).await;
+    let keys = Keys::generate();
+    for community in [first, second] {
+        db.insert_event(community, &signed(&keys, 9, "queued", vec![]), None)
+            .await
+            .expect("insert");
+    }
+
+    let held = search_outbox::claim_batch(pool, 10, &[])
+        .await
+        .expect("claim")
+        .expect("a batch");
+    assert_eq!(held.community(), first, "the oldest row's community");
+    let other = search_outbox::claim_batch(pool, 10, &[])
+        .await
+        .expect("claim")
+        .expect("another worker's batch");
+    assert_eq!(other.community(), second);
+    drop(other);
+    drop(held);
+
+    let skipping = search_outbox::claim_batch(pool, 10, &[first])
+        .await
+        .expect("claim")
+        .expect("a batch");
+    assert_eq!(skipping.community(), second);
+    drop(skipping);
+    assert!(search_outbox::claim_batch(pool, 10, &[first, second])
+        .await
+        .expect("claim")
+        .is_none());
 }

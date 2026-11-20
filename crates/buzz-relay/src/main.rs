@@ -658,7 +658,9 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         Some(opensearch) => {
             let index = buzz_search::opensearch::SearchIndex::new(opensearch)
                 .map_err(|e| anyhow::anyhow!("OpenSearch client: {}", e.kind()))?;
-            buzz_db::search_outbox::enable();
+            buzz_db::search_outbox::enable(db.pool())
+                .await
+                .map_err(|e| anyhow::anyhow!("search outbox: {e}"))?;
             info!(url = %opensearch.url, "search outbox enabled");
             Some(buzz_search::indexer::Indexer::new(db.pool().clone(), index))
         }

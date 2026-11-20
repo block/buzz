@@ -10,6 +10,10 @@ pub enum SearchError {
     /// result. The text is a fixed description, never the search text.
     #[error("search engine error: {0}")]
     Engine(String),
+    /// OpenSearch refused this request itself (HTTP 400 or 413), so sending
+    /// it again fails the same way. The text is a fixed description.
+    #[error("search engine rejected the request: {0}")]
+    Rejected(String),
 }
 
 impl SearchError {
@@ -32,6 +36,7 @@ impl SearchError {
         match self {
             SearchError::Db(e) => buzz_db::error::sqlx_error_kind(e),
             SearchError::Engine(description) => format!("opensearch: {description}"),
+            SearchError::Rejected(description) => format!("opensearch rejected: {description}"),
         }
     }
 }

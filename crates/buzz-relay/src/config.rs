@@ -1661,13 +1661,16 @@ fn optional_utf8_env(name: &str) -> Result<Option<String>, ConfigError> {
 }
 
 /// Parse the OpenSearch settings: an HTTP(S) URL without credentials, query,
-/// or fragment, and basic credentials given both or neither.
+/// or fragment, and basic credentials given both or neither. Empty values
+/// count as unset.
 fn parse_opensearch_config(
     url: Option<String>,
     username: Option<String>,
     password: Option<String>,
 ) -> Result<Option<buzz_search::opensearch::OpenSearchConfig>, String> {
-    let Some(raw) = url.filter(|raw| !raw.trim().is_empty()) else {
+    let set = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
+    let (username, password) = (set(username), set(password));
+    let Some(raw) = set(url) else {
         if username.is_some() || password.is_some() {
             return Err(
                 "BUZZ_OPENSEARCH_USERNAME and BUZZ_OPENSEARCH_PASSWORD need BUZZ_OPENSEARCH_URL"
@@ -1714,6 +1717,13 @@ mod tests {
         assert!(parse_opensearch_config(some(" "), None, None)
             .unwrap()
             .is_none());
+        assert!(parse_opensearch_config(None, some(""), some(""))
+            .unwrap()
+            .is_none());
+        let config = parse_opensearch_config(some("http://localhost:9200"), some(""), some(" "))
+            .unwrap()
+            .unwrap();
+        assert!(config.basic_auth.is_none());
 
         let config = parse_opensearch_config(some("http://localhost:9200"), None, None)
             .unwrap()

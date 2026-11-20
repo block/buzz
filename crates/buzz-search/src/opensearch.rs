@@ -105,16 +105,9 @@ impl SearchIndex {
         })
     }
 
-    /// Create the versioned index behind the alias if it does not exist.
+    /// Create the versioned index behind the alias unless the alias exists.
     pub async fn ensure(&self) -> Result<(), SearchError> {
-        let exists = self
-            .client
-            .indices()
-            .exists(IndicesExistsParts::Index(&[&self.index]))
-            .send()
-            .await
-            .map_err(transport_error)?;
-        if exists.status_code().is_success() {
+        if self.alias_exists().await? {
             return Ok(());
         }
         let response = self
@@ -125,15 +118,29 @@ impl SearchIndex {
             .send()
             .await
             .map_err(transport_error)?;
-        // Another relay may have created it first.
+        // Another relay may have created it, with its alias, first.
         if response.status_code().as_u16() == 400 {
             let body: Value = response.json().await.map_err(transport_error)?;
             if body["error"]["type"] == "resource_already_exists_exception" {
-                return Ok(());
+                if self.alias_exists().await? {
+                    return Ok(());
+                }
+                return Err(SearchError::Engine("index exists without its alias".into()));
             }
             return Err(SearchError::Engine("index creation rejected".into()));
         }
         checked(response).await.map(drop)
+    }
+
+    async fn alias_exists(&self) -> Result<bool, SearchError> {
+        let response = self
+            .client
+            .indices()
+            .exists(IndicesExistsParts::Index(&[&self.alias]))
+            .send()
+            .await
+            .map_err(transport_error)?;
+        Ok(response.status_code().is_success())
     }
 
     /// Delete the versioned index. For tests and tools.
@@ -164,10 +171,12 @@ impl SearchIndex {
         checked(response).await.map(drop)
     }
 
-    /// The index a community's documents are written to. The one place that
-    /// decides it, so a community can later move to an index of its own.
-    fn write_index(&self, _community: CommunityId) -> &str {
-        &self.index
+    /// The alias a community's documents are written through. The one place
+    /// that decides it, so a community can later move to an index of its own.
+    /// Writes require an alias, so a missing index fails the write instead of
+    /// being created with a dynamic mapping.
+    fn write_alias(&self, _community: CommunityId) -> &str {
+        &self.alias
     }
 
     /// Upsert `documents` and delete `removed` for one community, in one
@@ -182,7 +191,7 @@ impl SearchIndex {
         if documents.is_empty() && removed.is_empty() {
             return Ok(());
         }
-        let index = self.write_index(community);
+        let index = self.write_alias(community);
         let mut operations: Vec<BulkOperation<Value>> =
             Vec::with_capacity(documents.len() + removed.len());
         for document in documents {
@@ -203,6 +212,7 @@ impl SearchIndex {
         let response = self
             .client
             .bulk(BulkParts::None)
+            .require_alias(true)
             .body(operations)
             .send()
             .await
@@ -215,16 +225,25 @@ impl SearchIndex {
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|item| item.as_object()?.values().next()?.get("error"))
+            .filter_map(|item| item.as_object()?.values().next())
+            .filter(|result| result.get("error").is_some())
             .collect::<Vec<_>>();
         let reason = failed
             .first()
-            .and_then(|error| error["type"].as_str())
+            .and_then(|result| result["error"]["type"].as_str())
             .unwrap_or("unknown");
-        Err(SearchError::Engine(format!(
-            "{} bulk items failed ({reason})",
-            failed.len()
-        )))
+        let description = format!("{} bulk items failed ({reason})", failed.len());
+        // Only a batch whose every failure is the documents' own fault is
+        // rejected; anything else may succeed on a retry.
+        let rejected = !failed.is_empty()
+            && failed
+                .iter()
+                .all(|result| result["status"].as_u64().is_some_and(rejects));
+        Err(if rejected {
+            SearchError::Rejected(description)
+        } else {
+            SearchError::Engine(description)
+        })
     }
 
     /// Run a message search against the alias.
@@ -399,11 +418,24 @@ fn parse_hit(hit: &Value) -> Result<SearchHit, SearchError> {
     })
 }
 
+/// Whether an HTTP status means OpenSearch refused the request itself: a
+/// malformed or too large request. Auth failures, a missing index (404),
+/// throttling (429) and server errors are the cluster's state, not the
+/// request's.
+fn rejects(status: u64) -> bool {
+    matches!(status, 400 | 413)
+}
+
 /// The response body, or an error naming the status.
 async fn checked(response: Response) -> Result<Value, SearchError> {
     let status = response.status_code();
     if !status.is_success() {
-        return Err(SearchError::Engine(format!("HTTP {}", status.as_u16())));
+        let description = format!("HTTP {}", status.as_u16());
+        return Err(if rejects(u64::from(status.as_u16())) {
+            SearchError::Rejected(description)
+        } else {
+            SearchError::Engine(description)
+        });
     }
     response.json().await.map_err(transport_error)
 }

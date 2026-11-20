@@ -44,6 +44,7 @@ use buzz_search::opensearch::{OpenSearchConfig, SearchIndex};
 use buzz_search::{ChannelScope, SearchMode, SearchQuery, SearchService, SearchSort};
 use nostr::{Event, EventBuilder, Keys, Kind};
 use opensearch::http::transport::Transport;
+use opensearch::indices::{IndicesCreateParts, IndicesExistsParts};
 use opensearch::{GetParts, OpenSearch};
 use uuid::Uuid;
 
@@ -56,8 +57,8 @@ fn opensearch_url() -> String {
 /// A database layer with the search outbox on, as the relay runs it when
 /// OpenSearch is configured.
 async fn sync_db() -> Db {
-    search_outbox::enable();
     let (pool, _) = search_suite::setup().await;
+    search_outbox::enable(&pool).await.expect("enable outbox");
     pool.close().await;
     Db::new(&DbConfig {
         database_url: std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -236,7 +237,7 @@ async fn admission_queues_while_opensearch_is_unreachable() {
         .expect("a message is stored while OpenSearch is down");
 
     Indexer::new(db.pool().clone(), unreachable)
-        .index_next_batch()
+        .drain()
         .await
         .expect_err("indexing fails while OpenSearch is down");
     assert_eq!(search_outbox::depth(db.pool()).await.expect("depth"), 1);
@@ -249,5 +250,97 @@ async fn admission_queues_while_opensearch_is_unreachable() {
     index.refresh().await.expect("refresh");
     let service = SearchService::with_opensearch(db.pool().clone(), index.clone());
     assert_eq!(find(&service, community, "downword").await.len(), 1);
+    index.delete().await.expect("delete index");
+}
+
+fn raw_client() -> OpenSearch {
+    OpenSearch::new(Transport::single_node(&opensearch_url()).expect("transport"))
+}
+
+/// A batch the cluster rejects leaves its rows queued and its community
+/// skipped, while other communities are still indexed in the same pass.
+#[tokio::test]
+#[ignore = "requires Postgres and OpenSearch"]
+async fn a_rejected_community_does_not_hold_back_others() {
+    let db = sync_db().await;
+    // An index whose `content` is a keyword: a term longer than 32766 bytes
+    // is rejected per document with HTTP 400.
+    let prefix = format!("test-{}-", Uuid::new_v4().simple());
+    let response = raw_client()
+        .indices()
+        .create(IndicesCreateParts::Index(&format!("{prefix}messages-v1")))
+        .body(serde_json::json!({
+            "mappings": { "properties": { "content": { "type": "keyword" } } },
+            "aliases": { format!("{prefix}messages"): {} }
+        }))
+        .send()
+        .await
+        .expect("create index");
+    assert!(response.status_code().is_success());
+    let index = SearchIndex::new(&OpenSearchConfig {
+        url: opensearch_url(),
+        basic_auth: None,
+        index_prefix: prefix,
+    })
+    .expect("client");
+
+    let poisoned = search_suite::mk_community(db.pool(), "poisoned.example").await;
+    let healthy = search_suite::mk_community(db.pool(), "healthy.example").await;
+    let keys = Keys::generate();
+    db.insert_event(poisoned, &message(&keys, &"x".repeat(40_000)), None)
+        .await
+        .expect("insert oversized term");
+    db.insert_event(healthy, &message(&keys, "fine"), None)
+        .await
+        .expect("insert");
+
+    let error = Indexer::new(db.pool().clone(), index.clone())
+        .drain()
+        .await
+        .expect_err("the pass reports the rejected batch");
+    assert!(error.to_string().contains("rejected"), "{error}");
+    let queued: Vec<Uuid> = sqlx::query_scalar("SELECT community_id FROM search_outbox")
+        .fetch_all(db.pool())
+        .await
+        .expect("queued rows");
+    assert_eq!(queued, vec![*poisoned.as_uuid()]);
+    index.delete().await.expect("delete index");
+}
+
+/// Writes go through the alias and never create an index themselves, so a
+/// deleted index cannot come back with a dynamic mapping; `ensure` restores
+/// it with its alias.
+#[tokio::test]
+#[ignore = "requires Postgres and OpenSearch"]
+async fn writes_never_create_an_index() {
+    let db = sync_db().await;
+    let (index, prefix) = sync_index().await;
+    index.delete().await.expect("delete index");
+    let community = search_suite::mk_community(db.pool(), "gone.example").await;
+    db.insert_event(community, &message(&Keys::generate(), "orphan"), None)
+        .await
+        .expect("insert");
+
+    let indexer = Indexer::new(db.pool().clone(), index.clone());
+    indexer
+        .drain()
+        .await
+        .expect_err("a write without the index fails");
+    let exists = raw_client()
+        .indices()
+        .exists(IndicesExistsParts::Index(&[&format!(
+            "{prefix}messages-v1"
+        )]))
+        .send()
+        .await
+        .expect("exists");
+    assert_eq!(exists.status_code().as_u16(), 404, "no index was created");
+    assert_eq!(search_outbox::depth(db.pool()).await.expect("depth"), 1);
+
+    index.ensure().await.expect("recreate index");
+    indexer.drain().await.expect("indexing resumes");
+    index.refresh().await.expect("refresh");
+    let service = SearchService::with_opensearch(db.pool().clone(), index.clone());
+    assert_eq!(find(&service, community, "orphan").await.len(), 1);
     index.delete().await.expect("delete index");
 }

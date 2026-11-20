@@ -8,7 +8,12 @@
 //! Each batch re-reads its events from Postgres, writes them (or removes the
 //! documents of events that are gone) in one bulk request, and only then
 //! deletes the rows it claimed. A failed request leaves the rows queued for
-//! the next attempt.
+//! the next attempt. A batch the cluster rejects outright skips its community
+//! for the rest of the pass, so one community cannot hold back the others.
+//!
+//! A batch holds its community's admission open for up to one request
+//! timeout. Community deletion's quiesce step waits for that batch, and once
+//! the community is quiescing no new batch for it can start.
 
 use std::time::Duration;
 
@@ -18,6 +23,7 @@ use tracing::{info, warn};
 
 use crate::opensearch::SearchIndex;
 use crate::SearchError;
+use buzz_core::CommunityId;
 
 /// Deployment-global advisory lock electing the indexing instance.
 const INDEXER_LOCK_KEY: i64 = 0x4255_5A5A_5345_4152;
@@ -55,23 +61,30 @@ impl Indexer {
         Self { pool, index }
     }
 
-    /// Index one batch of one community. Returns `false` when there was
-    /// nothing to claim.
-    pub async fn index_next_batch(&self) -> Result<bool, IndexerError> {
-        let Some(batch) = search_outbox::claim_batch(&self.pool, BATCH_SIZE).await? else {
-            return Ok(false);
-        };
-        self.index
-            .write(batch.community(), &batch.documents, &batch.removed)
-            .await?;
-        batch.complete().await?;
-        Ok(true)
-    }
-
-    /// Index batches until none is left to claim.
+    /// Index batches until none is left to claim. A community whose batch
+    /// the cluster rejects is skipped for the rest of the pass and reported
+    /// once the others are done; any other failure ends the pass.
     pub async fn drain(&self) -> Result<(), IndexerError> {
-        while self.index_next_batch().await? {}
-        Ok(())
+        let mut skipped: Vec<CommunityId> = Vec::new();
+        let mut rejection = None;
+        while let Some(batch) = search_outbox::claim_batch(&self.pool, BATCH_SIZE, &skipped).await?
+        {
+            let community = batch.community();
+            match self
+                .index
+                .write(community, &batch.documents, &batch.removed)
+                .await
+            {
+                Ok(()) => batch.complete().await?,
+                Err(error @ SearchError::Rejected(_)) => {
+                    warn!(%community, error = %error.kind(), "search index rejected a batch; its rows stay queued");
+                    skipped.push(community);
+                    rejection.get_or_insert(error);
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        rejection.map_or(Ok(()), |error| Err(error.into()))
     }
 
     /// Hold the indexer lease and keep the index up to date, forever. Abort
@@ -117,6 +130,8 @@ impl Indexer {
                 match result {
                     Ok(()) => failures = 0,
                     Err(error) => {
+                        // A write may have failed because the index is gone.
+                        index_ready = false;
                         failures = failures.saturating_add(1);
                         warn!(%error, failures, "search indexing failed; rows stay queued");
                     }
