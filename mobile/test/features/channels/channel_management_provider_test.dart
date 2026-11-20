@@ -498,7 +498,9 @@ void main() {
     final session = _RecordingPublishRelaySession()
       ..publishErrors.addAll({
         timedOut: RelayAckTimeoutError('Event e not acknowledged'),
-        rejected: const RelayEventRejectedException('restricted: not allowed'),
+        rejected: const RelayEventRejectedException(
+          'restricted: Exception: sponsor approval required',
+        ),
         lost: RelayAckLostError(Exception('App moved to background')),
       });
     final actionsProvider = Provider<ChannelActions>((ref) {
@@ -523,7 +525,7 @@ void main() {
       throwsA(
         isA<AddMembersException>().having((e) => e.failures, 'failures', {
           timedOut: 'TimeoutException: Event e not acknowledged',
-          rejected: 'restricted: not allowed',
+          rejected: 'restricted: Exception: sponsor approval required',
           lost:
               'Connection lost before the relay acknowledged the event: '
               'App moved to background',

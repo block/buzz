@@ -24,17 +24,23 @@ export 'channel_metadata_updates.dart';
 part 'channel_huddle_actions.dart';
 part 'channel_management_actions.dart';
 
-/// The text of [error] without the `Exception: ` a plain [Exception] adds,
-/// both leading and after a wrapping error's `: ` (such as a
-/// [RelayAckLostError] cause). Named types keep their whole name:
+/// The text of [error] without the `Exception: ` a plain [Exception] adds.
+/// A relay rejection keeps its message verbatim, and a lost acknowledgement
+/// drops the prefix only from its cause. Named types keep their whole name:
 /// `TimeoutException: ...` stays as is.
 String _relayErrorMessage(Object error) {
-  const prefix = 'Exception: ';
+  if (error is RelayEventRejectedException) return error.message;
   final text = error.toString();
-  final stripped = text.startsWith(prefix)
-      ? text.substring(prefix.length)
-      : text;
-  return stripped.replaceAll(': $prefix', ': ');
+  final cause = error is RelayAckLostError ? error.cause : null;
+  if (cause != null) {
+    final causeText = cause.toString();
+    if (text.endsWith(causeText)) {
+      return text.substring(0, text.length - causeText.length) +
+          _relayErrorMessage(cause);
+    }
+  }
+  const prefix = 'Exception: ';
+  return text.startsWith(prefix) ? text.substring(prefix.length) : text;
 }
 
 /// Raised when one or more kind:9000 adds were rejected, keyed by pubkey.
