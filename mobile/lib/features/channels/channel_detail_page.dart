@@ -500,10 +500,14 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       )),
     );
     final messagesState = timeline.messages;
-    final refreshNotice =
-        timeline.previewRefreshFailed &&
-            sessionStatus == SessionStatus.connected
-        ? _PreviewRefreshNotice(onRetry: messagesNotifier.retryHistoryRefresh)
+    final refreshNotice = timeline.isShowingPreview
+        ? _PreviewRefreshNotice(
+            onRetry:
+                timeline.previewRefreshFailed &&
+                    sessionStatus == SessionStatus.connected
+                ? messagesNotifier.retryHistoryRefresh
+                : null,
+          )
         : null;
     final isConnectionInProgress =
         sessionStatus == SessionStatus.connecting ||
