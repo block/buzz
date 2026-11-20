@@ -38,6 +38,7 @@ pub(crate) async fn run_migrations_through(pool: &PgPool, target: i64) -> Result
     with_exclusive_schema_destruction_lock(pool, |mut conn| async move {
         let outcome = async {
             reject_legacy_nip_rs_cardinality_ambiguity(&mut conn).await?;
+            repair_unrecorded_replica_heartbeat(&mut conn).await?;
             MIGRATOR.run_to(target, &mut conn).await?;
             Ok(())
         }
@@ -49,6 +50,7 @@ pub(crate) async fn run_migrations_through(pool: &PgPool, target: i64) -> Result
 
 async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
     reject_legacy_nip_rs_cardinality_ambiguity(conn).await?;
+    repair_unrecorded_replica_heartbeat(conn).await?;
     for (version, doc, indexes) in INLINE_INDEX_BUILDS {
         MIGRATOR.run_to(version - 1, &mut *conn).await?;
         build_indexes_before_migration(conn, *version, doc, indexes).await?;
@@ -224,6 +226,165 @@ where
     let value = outcome?;
     unlock?;
     Ok(value)
+}
+
+/// What to do when migration 0026 may have left `replica_heartbeat` behind
+/// without a `_sqlx_migrations` row. A recorded checksum is never rewritten:
+/// an older relay binary still embeds the original file.
+#[derive(Debug, PartialEq, Eq)]
+enum ReplicaHeartbeatRepair {
+    /// No version-26 row and no table, or the row is already recorded.
+    None,
+    /// Table and operator entry are complete. Record the embedded checksum so
+    /// sqlx does not re-run `CREATE TABLE`.
+    RecordApplied,
+    /// Table exists but is not the finished single row. Drop it and let 0026
+    /// create it.
+    DropPartial,
+}
+
+fn replica_heartbeat_repair(
+    version_recorded: bool,
+    table_exists: bool,
+    complete: bool,
+) -> ReplicaHeartbeatRepair {
+    if version_recorded || !table_exists {
+        ReplicaHeartbeatRepair::None
+    } else if complete {
+        ReplicaHeartbeatRepair::RecordApplied
+    } else {
+        ReplicaHeartbeatRepair::DropPartial
+    }
+}
+
+/// Migration 0026 is checksum-frozen. A failover can leave `replica_heartbeat`
+/// without a version-26 row, and the original `CREATE TABLE` then crash-loops.
+/// Repair that leftover before sqlx runs. Never update a checksum that is
+/// already stored.
+async fn repair_unrecorded_replica_heartbeat(conn: &mut PgConnection) -> Result<()> {
+    const VERSION: i64 = 26;
+    let migrations_table: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations')::text")
+            .fetch_one(&mut *conn)
+            .await?;
+    if migrations_table.is_none() {
+        return Ok(());
+    }
+
+    let recorded: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM _sqlx_migrations WHERE version = $1 AND success)",
+    )
+    .bind(VERSION)
+    .fetch_one(&mut *conn)
+    .await?;
+
+    let table_exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('replica_heartbeat') IS NOT NULL")
+            .fetch_one(&mut *conn)
+            .await?;
+    let operator_table_exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('_operator_global_tables') IS NOT NULL")
+            .fetch_one(&mut *conn)
+            .await?;
+
+    let complete = if table_exists && operator_table_exists {
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM replica_heartbeat WHERE id = 1) \
+             AND EXISTS (\
+                 SELECT 1 FROM _operator_global_tables WHERE table_name = 'replica_heartbeat'\
+             )",
+        )
+        .fetch_one(&mut *conn)
+        .await?
+    } else {
+        false
+    };
+
+    match replica_heartbeat_repair(recorded, table_exists, complete) {
+        ReplicaHeartbeatRepair::None => Ok(()),
+        ReplicaHeartbeatRepair::RecordApplied => {
+            let embedded = MIGRATOR
+                .iter()
+                .find(|migration| migration.version == VERSION)
+                .ok_or_else(|| {
+                    crate::DbError::InvalidData(format!("embedded migration {VERSION} missing"))
+                })?;
+            sqlx::query(
+                "INSERT INTO _sqlx_migrations \
+                     (version, description, success, checksum, execution_time) \
+                 VALUES ($1, $2, true, $3, 0) \
+                 ON CONFLICT (version) DO NOTHING",
+            )
+            .bind(VERSION)
+            .bind(&*embedded.description)
+            .bind(embedded.checksum.as_ref())
+            .execute(&mut *conn)
+            .await?;
+            tracing::info!(
+                version = VERSION,
+                "recorded replica_heartbeat migration without rewriting its checksum"
+            );
+            Ok(())
+        }
+        ReplicaHeartbeatRepair::DropPartial => {
+            sqlx::query("DROP TABLE IF EXISTS replica_heartbeat")
+                .execute(&mut *conn)
+                .await?;
+            if operator_table_exists {
+                sqlx::query(
+                    "DELETE FROM _operator_global_tables WHERE table_name = 'replica_heartbeat'",
+                )
+                .execute(&mut *conn)
+                .await?;
+            }
+            tracing::info!(
+                version = VERSION,
+                "dropped partial replica_heartbeat so migration 0026 can create it"
+            );
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod replica_heartbeat_repair_tests {
+    use super::{replica_heartbeat_repair, ReplicaHeartbeatRepair};
+
+    #[test]
+    fn recorded_checksum_is_left_alone() {
+        assert_eq!(
+            replica_heartbeat_repair(true, true, true),
+            ReplicaHeartbeatRepair::None
+        );
+        assert_eq!(
+            replica_heartbeat_repair(true, true, false),
+            ReplicaHeartbeatRepair::None
+        );
+    }
+
+    #[test]
+    fn complete_unrecorded_table_is_marked_applied() {
+        assert_eq!(
+            replica_heartbeat_repair(false, true, true),
+            ReplicaHeartbeatRepair::RecordApplied
+        );
+    }
+
+    #[test]
+    fn partial_unrecorded_table_is_dropped() {
+        assert_eq!(
+            replica_heartbeat_repair(false, true, false),
+            ReplicaHeartbeatRepair::DropPartial
+        );
+    }
+
+    #[test]
+    fn missing_table_waits_for_the_migration() {
+        assert_eq!(
+            replica_heartbeat_repair(false, false, false),
+            ReplicaHeartbeatRepair::None
+        );
+    }
 }
 
 /// Migration 0007 is checksum-frozen and predates exact NIP-RS tag-cardinality
@@ -1657,11 +1818,11 @@ mod postgres_tests {
         // the routing proof.
         assert_eq!(migrations[25].version, 26);
         let heartbeat = migrations[25].sql.as_str();
-        assert!(heartbeat.contains("CREATE TABLE replica_heartbeat"));
+        assert!(heartbeat.contains("CREATE TABLE replica_heartbeat ("));
         assert!(heartbeat.contains("CHECK (id = 1)"));
         assert!(heartbeat.contains("epoch"));
-        assert!(heartbeat.contains("INSERT INTO replica_heartbeat (id) VALUES (1)"));
-        assert!(heartbeat.contains("_operator_global_tables"));
+        assert!(heartbeat.contains("INSERT INTO replica_heartbeat (id) VALUES (1);"));
+        assert!(heartbeat.contains("INSERT INTO _operator_global_tables"));
 
         // Channel-id lookup index (0027): serves tenant-independent channel lookups.
         assert_eq!(migrations[26].version, 27);
