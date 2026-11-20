@@ -26,17 +26,23 @@ surface at template time regardless of which manifest helm renders first.
 {{- end -}}
 
 {{/* The acceptance probe ships only in relay images that include it, so the
-     chart's default appVersion image can't run it. Probe-owned metric tag
-     keys can't be overridden by acceptance.tags. */}}
+     chart's default appVersion image can't run it. acceptance.tags can't
+     override probe-owned metric tag keys or repeat a key, so one run never
+     lands in two populations of the same tag. */}}
 {{- if .Values.acceptance.enabled -}}
   {{- if not (or .Values.image.tag .Values.image.digest) -}}
     {{- fail "acceptance.enabled requires image.tag or image.digest: the probe binary is not in the chart's default appVersion image." -}}
   {{- end -}}
+  {{- $seen := dict -}}
   {{- range .Values.acceptance.tags -}}
     {{- $key := splitList ":" . | first -}}
     {{- if has $key (list "probe_revision" "relay_version" "check" "stage" "result") -}}
       {{- fail (printf "acceptance.tags: %q uses the probe-owned tag key %q." . $key) -}}
     {{- end -}}
+    {{- if hasKey $seen $key -}}
+      {{- fail (printf "acceptance.tags: tag key %q appears more than once." $key) -}}
+    {{- end -}}
+    {{- $_ := set $seen $key true -}}
   {{- end -}}
 {{- end -}}
 

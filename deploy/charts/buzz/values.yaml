@@ -427,6 +427,7 @@ acceptance:
   # Extra `key:value` metric tags. The chart always adds
   # `probe_revision:<probe image identity>`. The keys probe_revision,
   # relay_version, check, stage and result are probe-owned and rejected here.
+  # Each key may appear once.
   tags: []
   # Empty → the namespace default service account, not the relay's. The token
   # is never mounted.

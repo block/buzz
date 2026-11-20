@@ -540,7 +540,7 @@ image predates the probe.
   run reached: during a rollout, or with `acceptance.relayUrl` set, the probe
   can reach pods of another build. `acceptance.tags` can't reuse the
   probe-owned keys `probe_revision`, `relay_version`, `check`, `stage` or
-  `result`.
+  `result`, and each key may appear once.
 - The Pod runs with `acceptance.serviceAccountName`, or the namespace default
   service account when that is empty. It never inherits the relay's service
   account and never mounts its token.

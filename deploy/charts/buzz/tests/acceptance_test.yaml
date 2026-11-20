@@ -266,6 +266,16 @@ tests:
       - failedTemplate:
           errorPattern: 'uses the probe-owned tag key "relay_version"'
 
+  - it: rejects a tag key given twice
+    set:
+      image.tag: "1.2.3"
+      acceptance:
+        enabled: true
+        tags: ["target:stable", "env:staging", "target:canary"]
+    asserts:
+      - failedTemplate:
+          errorPattern: 'tag key "target" appears more than once'
+
   - it: rejects a pod label that overrides a chart-owned label
     set:
       image.tag: "1.2.3"

@@ -76,8 +76,8 @@ ARG BUZZ_BUILD_URL=unknown
 ENV BUZZ_SOURCE_SHA=${BUZZ_SOURCE_SHA} \
     BUZZ_BUILD_ID=${BUZZ_BUILD_ID} \
     BUZZ_BUILD_URL=${BUZZ_BUILD_URL}
-# buzz-acceptance ships in the relay image so a probe run always matches the
-# relay build it checks (for example a CronJob that uses the relay's image).
+# buzz-acceptance ships in the relay image, so a deployment can run the probe
+# without a second image. The probe can still reach a relay of another build.
 RUN cargo build --release --locked -p buzz-relay --bin buzz-relay \
                                    -p buzz-admin --bin buzz-admin \
                                    -p buzz-pair-relay --bin buzz-pair-relay \
