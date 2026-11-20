@@ -23,7 +23,7 @@ It drops and recreates the `public` schema of its database on every run, so it
 refuses any database whose name does not contain `nip_fi` or that is not on this
 machine. The default is `buzz_nip_fi` on the local-dev Postgres, created on first
 use. The work directory holds a test member key while the run is live, so it must
-be outside the repository; the key is removed from `fixture.json` at teardown.
+be outside the repository, and new or empty (the fixture creates it with mode 0700 and never changes the mode of, or writes into, a directory that already holds other files). The key is removed from `fixture.json` at teardown.
 
 ## Pieces
 

@@ -742,6 +742,32 @@ def wait_ready(relay, health_port, timeout=120):
     raise SystemExit("relay did not become ready")
 
 
+WORKDIR_MARKER = ".nip-fi-live-workdir"
+
+
+def prepare_workdir(workdir: Path):
+    """Uses only a directory this check owns, and never loosens or tightens a
+    directory it did not create.
+
+    A new directory is created here and set to 0700. An existing one must be
+    empty or carry the marker an earlier run left; anything else (`$HOME`,
+    `/tmp`, a project directory) is refused untouched.
+    """
+    if workdir.exists():
+        if not workdir.is_dir():
+            sys.exit(f"refusing work directory {workdir}: it is not a directory")
+        if any(workdir.iterdir()) and not (workdir / WORKDIR_MARKER).exists():
+            sys.exit(
+                f"refusing work directory {workdir}: it already exists and is not "
+                "empty. Pass a new or empty directory (or one an earlier run of "
+                "this check created)."
+            )
+    else:
+        workdir.mkdir(parents=True)
+        workdir.chmod(0o700)
+    (workdir / WORKDIR_MARKER).touch()
+
+
 def main():
     # A dedicated database on the docker-compose.yml local-dev server (same
     # throwaway user, not a secret). It is created on first use and reset on
@@ -783,8 +809,7 @@ def main():
         )
     # Fail on an unsafe database before anything is created or started.
     check_throwaway_database(args.database_url)
-    workdir.mkdir(parents=True, exist_ok=True)
-    workdir.chmod(0o700)
+    prepare_workdir(workdir)
     for stale in ("fixture.json", "fixture-result.json", "markers.jsonl", "relay.log"):
         (workdir / stale).unlink(missing_ok=True)
 
@@ -850,6 +875,7 @@ def main():
                 indent=2,
             )
         )
+        (workdir / "fixture.json").chmod(0o600)
         print(f"fixture ready: {workdir / 'fixture.json'}", flush=True)
         while not stopping.is_set() and relay.poll() is None:
             stopping.wait(0.5)
