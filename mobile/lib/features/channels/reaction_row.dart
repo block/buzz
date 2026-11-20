@@ -612,12 +612,27 @@ Future<void> showReactionDetailSheet({
   VoidCallback? onAddReaction,
 }) async {
   if (reactions.value.isEmpty) return;
+  // A notification can switch community while the sheet is up (or while the
+  // native tray dismisses); nothing picked here may go out as the new account.
+  final stillCurrent = captureReactionCommunity(
+    ProviderScope.containerOf(context, listen: false),
+  );
+  void guardedToggle(String emoji) {
+    if (stillCurrent()) onToggle(emoji);
+  }
+
+  final add = onAddReaction;
+  final guardedAdd = add == null
+      ? null
+      : () {
+          if (stillCurrent()) add();
+        };
   if (await _showNativeReactionDetails(
     context,
     channelId,
     reactions,
-    onToggle,
-    onAddReaction,
+    guardedToggle,
+    guardedAdd,
   )) {
     return;
   }
@@ -642,8 +657,8 @@ Future<void> showReactionDetailSheet({
         return _ReactionDetailSheet(
           channelId: channelId,
           reactions: value,
-          onToggle: onToggle,
-          onAddReaction: onAddReaction,
+          onToggle: guardedToggle,
+          onAddReaction: guardedAdd,
         );
       },
     ),

@@ -9,6 +9,8 @@ import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
 import 'package:buzz/shared/emoji/emoji_picker.dart';
+import 'package:buzz/shared/emoji/emoji_burst.dart';
+import 'package:buzz/shared/emoji/recent_emoji_provider.dart';
 import 'package:flutter/services.dart';
 import 'package:buzz/shared/emoji/emoji_data_provider.dart';
 

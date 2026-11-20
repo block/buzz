@@ -92,6 +92,7 @@ Future<void> showMessageActions({
   // up, so reactions go through the page rather than the row.
   final pageContainer = ProviderScope.containerOf(context, listen: false);
   final pickerContext = Navigator.of(context).context;
+  final stillCurrent = captureReactionCommunity(pageContainer);
   unawaited(HapticFeedback.mediumImpact());
   final restoreFocusOnCancel = composerFocusNode?.hasFocus ?? false;
   composerFocusNode?.unfocus();
@@ -131,6 +132,7 @@ Future<void> showMessageActions({
                     sheetContext: sheetContext,
                     pickerContext: pickerContext,
                     pageContainer: pageContainer,
+                    stillCurrent: stillCurrent,
                   ),
                   SizedBox(height: message.isSystem ? Grid.xxs : Grid.xs),
                   if (!message.isSystem) ...[

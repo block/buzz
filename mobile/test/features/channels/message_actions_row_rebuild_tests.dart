@@ -29,42 +29,53 @@ void _messageActionsRowRebuildTests() {
       resetIosEmojiPickerPresentationForTest();
     });
 
-    testWidgets('a "+" pick made after the active community switched is '
-        'dropped', (tester) async {
-      final previousPlatform = debugDefaultTargetPlatformOverride;
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-      try {
-        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-            .setMockMethodCallHandler(_nativeEmojiPicker, (_) async => true);
-        final actions = _RecordingReactionActions();
-        final harness = await _pumpMessageActionsPopover(
-          tester,
-          message: _message(),
-          prefs: await _mockPrefs(),
-          createChannelActions: (_) => actions,
-          overrides: [
-            customEmojiPaletteProvider.overrideWith(
-              _ReadyCustomEmojiPalette.new,
-            ),
-          ],
-        );
-        await tester.tap(find.byKey(const ValueKey('quick-reaction-more')));
-        await tester.pumpAndSettle();
+    for (final viaPicker in [false, true]) {
+      testWidgets('a ${viaPicker ? '"+" pick' : 'quick tile'} made after the '
+          'active community switched is dropped', (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        try {
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(_nativeEmojiPicker, (_) async => true);
+          final actions = _RecordingReactionActions();
+          final harness = await _pumpMessageActionsPopover(
+            tester,
+            message: _message(),
+            prefs: await _mockPrefs(),
+            createChannelActions: (_) => actions,
+            overrides: [
+              customEmojiPaletteProvider.overrideWith(
+                _ReadyCustomEmojiPalette.new,
+              ),
+            ],
+          );
+          final recentsBefore = harness.container.read(recentEmojiProvider);
 
-        // A notification tap moves the app to another community while the
-        // native picker is still up.
-        harness.container
-            .read(relayConfigProvider.notifier)
-            .update(baseUrl: 'https://other.example');
-        await _sendNativeEmojiPicker(tester, 'selected', '🎉');
-        await _sendNativeEmojiPicker(tester, 'dismissed');
+          // A notification tap moves the app to another community while the
+          // actions sheet is still up.
+          harness.container
+              .read(relayConfigProvider.notifier)
+              .update(baseUrl: 'https://other.example');
+          await tester.pump();
+          if (viaPicker) {
+            await tester.tap(find.byKey(const ValueKey('quick-reaction-more')));
+            await tester.pumpAndSettle();
+            await _sendNativeEmojiPicker(tester, 'selected', '🎉');
+            await _sendNativeEmojiPicker(tester, 'dismissed');
+          } else {
+            await tester.tap(find.byKey(const ValueKey('quick-reaction-👍')));
+            await tester.pumpAndSettle();
+          }
 
-        expect(actions.added, isEmpty);
-        expect(tester.takeException(), isNull);
-      } finally {
-        debugDefaultTargetPlatformOverride = previousPlatform;
-      }
-    });
+          expect(actions.added, isEmpty);
+          expect(harness.container.read(recentEmojiProvider), recentsBefore);
+          expect(harness.container.read(pendingReactionBurstProvider), isNull);
+          expect(tester.takeException(), isNull);
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      });
+    }
 
     for (final unmountWhilePickerOpen in [false, true]) {
       testWidgets('the "+" pick still reacts when the row unmounts '

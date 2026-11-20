@@ -16,6 +16,11 @@ class _QuickReactionRow extends ConsumerWidget {
   /// row, so they must not read through either one's disposed ref.
   final ProviderContainer pageContainer;
 
+  /// Whether the community active when the sheet opened is still active. A
+  /// notification can switch community while the sheet or its picker is up,
+  /// and a reaction must not then go out as the other account.
+  final bool Function() stillCurrent;
+
   const _QuickReactionRow({
     required this.message,
     required this.reactions,
@@ -23,6 +28,7 @@ class _QuickReactionRow extends ConsumerWidget {
     required this.sheetContext,
     required this.pickerContext,
     required this.pageContainer,
+    required this.stillCurrent,
   });
 
   @override
@@ -40,6 +46,7 @@ class _QuickReactionRow extends ConsumerWidget {
     };
 
     void react(String value) {
+      if (!stillCurrent()) return;
       if (reactions.any((r) => r.emoji == value && r.reactedByCurrentUser)) {
         if (onToggleReaction != null) {
           onToggleReaction!(value);
@@ -109,11 +116,10 @@ class _QuickReactionRow extends ConsumerWidget {
               label: 'Add reaction',
               onTap: () {
                 if (!_selectMessageAction(context)) return;
-                final stillCurrent = captureReactionCommunity(pageContainer);
                 showEmojiPicker(
                   context: pickerContext,
                   onSelect: (value) {
-                    if (stillCurrent()) react(value);
+                    react(value);
                   },
                 );
               },

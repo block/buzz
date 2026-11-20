@@ -25,6 +25,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'dart:convert';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/emoji/emoji_burst.dart';
+import 'package:buzz/shared/emoji/recent_emoji_provider.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
 import 'package:buzz/shared/emoji/emoji_data_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
