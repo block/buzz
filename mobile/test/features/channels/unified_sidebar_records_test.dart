@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:buzz/features/channels/channel_sections/channel_sections_manager.dart';
 import 'package:buzz/features/channels/channel_sort/channel_sort_manager.dart';
 import 'package:buzz/features/channels/channel_sort/channel_sort_storage.dart';
@@ -115,6 +117,92 @@ void main() {
       clock.flushMicrotasks();
     });
   }
+
+  fakeAsyncTest('a disposal flush stops reading once the session moves on', (
+    clock,
+  ) {
+    final relay = SidebarRelay();
+    relay.session.debugRelayUrl = 'https://relay.example';
+    final m = ChannelSectionsManager(
+      pubkey: relay.pubkey,
+      relayUrl: 'https://relay.example',
+      prefs: prefs,
+      crypto: ChannelSectionsCrypto(relay.keys.nsec, relay.pubkey),
+      relaySession: relay.session,
+      signedEventRelay: relay.signer,
+      remoteEnabled: true,
+      onChanged: () {},
+    )..initialize();
+    clock.flushMicrotasks();
+    m.createSection('mine');
+    clock.elapse(const Duration(seconds: 2));
+    // The flush's read is in flight when the session switches community,
+    // which cancels it.
+    final hold = relay.holdHistory = Completer<void>();
+    relay.historyFailures = 1;
+    m.dispose();
+    clock.flushMicrotasks();
+    final reads = relay.reqs.where((r) => '${r[1]}'.startsWith('h-')).length;
+    relay.session.debugRelayUrl = 'https://other.example';
+    relay.holdHistory = null;
+    hold.complete();
+    clock.elapse(const Duration(seconds: 60));
+
+    // Nothing goes to the other community under this account's filter.
+    expect(
+      relay.reqs.where((r) => '${r[1]}'.startsWith('h-')),
+      hasLength(reads),
+    );
+    expect(relay.published, isEmpty);
+  });
+
+  fakeAsyncTest('a read after a community switch leaves the locked layout', (
+    clock,
+  ) {
+    final relay = SidebarRelay();
+    relay.session.debugRelayUrl = 'https://relay.example';
+    relay.stored
+      ..add(
+        relay.event('channel-sections', {
+          'version': 1,
+          'sections': [
+            {'id': 'old', 'name': 'Old', 'order': 0},
+          ],
+          'assignments': <String, String>{},
+        }, nowSeconds() - 60),
+      )
+      ..add(relay.event('channel-workspaces', workspaces, nowSeconds()));
+    ChannelSectionsManager manager() => ChannelSectionsManager(
+      pubkey: relay.pubkey,
+      relayUrl: 'https://relay.example',
+      prefs: prefs,
+      crypto: ChannelSectionsCrypto(relay.keys.nsec, relay.pubkey),
+      relaySession: relay.session,
+      signedEventRelay: relay.signer,
+      remoteEnabled: true,
+      onChanged: () {},
+    )..initialize();
+    final first = manager();
+    clock.flushMicrotasks();
+    expect(first.workspace, isNotNull);
+    first.dispose();
+    clock.flushMicrotasks();
+
+    // The next manager starts from that cache, but its startup read fails.
+    relay.historyFailures = 1;
+    final m = manager();
+    clock.flushMicrotasks();
+    // The session rebuilds for another community, which holds no Team
+    // record, before this manager retires; a read lands there.
+    relay.session.debugRelayUrl = 'https://other.example';
+    m.refreshFromRelay();
+    clock.flushMicrotasks();
+
+    expect(m.workspace, isNotNull);
+    expect(m.store.sections.map((s) => s.name), ['Old']);
+    m.dispose();
+    clock.flushMicrotasks();
+  });
 
   // live: the head arrives on the subscription while an edit waits.
   // failedRead: the publish preflight fails while the relay already holds it.

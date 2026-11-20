@@ -445,6 +445,9 @@ class ChannelSectionsManager {
   }
 
   void _mergeEvents(List<NostrEvent> events, {required bool legacy}) {
+    // A read the rebuilt session answered for another community says nothing
+    // about this one's records.
+    if (!_servesThisCommunity) return;
     // Cached sections can hold edits that never reached a relay holding no
     // Team record; a read that finds none confirms only an empty layout.
     if (_lastRemoteEventId == null &&
@@ -572,7 +575,11 @@ class ChannelSectionsManager {
     // the legacy record must not follow.
     var read = await _fetchAndMerge(allowDisposed: allowDisposed);
     // A retired manager cannot schedule a retry, so its flush re-reads here.
-    for (var i = 0; !read && allowDisposed && i < 2; i++) {
+    for (
+      var i = 0;
+      !read && allowDisposed && _servesThisCommunity && i < 2;
+      i++
+    ) {
       read = await _fetchAndMerge(allowDisposed: true);
     }
     if (!read) {
