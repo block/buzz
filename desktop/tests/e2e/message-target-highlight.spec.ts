@@ -112,7 +112,13 @@ for (const targetCase of CASES) {
     const flashedOnScreen = await page.evaluate(
       ([targetId, generalPath, highlightClass]) =>
         new Promise<boolean>((resolve) => {
-          const deadline = performance.now() + 3_000;
+          // The flash starts once the row is on screen, but the product gives
+          // up highlighting if the row is not on screen within 5 s of the
+          // scroll being accepted (HIGHLIGHT_VISIBLE_WAIT_MS in
+          // useAnchoredScroll.ts). This 10 s budget also covers mounting the
+          // channel before acceptance. A starved runner can therefore miss the
+          // flash well inside it; check that 5 s cap first.
+          const deadline = performance.now() + 10_000;
           const tick = () => {
             const timelineEl = document.querySelector(
               '[data-testid="message-timeline"]',
@@ -123,7 +129,13 @@ for (const targetCase of CASES) {
             const flashing =
               row?.closest(`[class*="${highlightClass}"]`) ??
               row?.querySelector(`[class*="${highlightClass}"]`);
-            if (timelineEl && row && flashing) {
+            // The flash is the row's ::before keyframe: full opacity for its
+            // first 60%, then a fade held at 0. The class alone is not enough;
+            // a flash that ran off screen keeps the class but shows nothing.
+            const flashVisible =
+              flashing &&
+              Number(getComputedStyle(flashing, "::before").opacity) > 0.9;
+            if (timelineEl && row && flashVisible) {
               const viewport = timelineEl.getBoundingClientRect();
               const rect = row.getBoundingClientRect();
               if (rect.bottom > viewport.top && rect.top < viewport.bottom) {
