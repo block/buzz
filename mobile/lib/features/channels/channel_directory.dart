@@ -686,10 +686,11 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
         !countQuiet && event.threadReference.parentId != null && !isBroadcast;
     // A reply also sent to the channel earns attention only in one of the
     // viewer's threads; elsewhere it is ordinary unread, like a top-level post.
+    final mentioned = !countQuiet && isHighPriorityEvent(event.tags, myPk);
     final isHighPriority =
         channel.isDm ||
         (!countQuiet &&
-            (isHighPriorityEvent(event.tags, myPk) ||
+            (mentioned ||
                 (isBroadcast &&
                     isInViewerThread(
                       event.threadReference.rootId,
@@ -707,6 +708,7 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
         highPriority: isHighPriority,
         channelType: channel.channelType,
         isThreadedReply: isThreadedReply,
+        mentioned: mentioned,
         isBroadcast: isBroadcast,
         // Activity lists the thread replies that earn attention, including
         // ones also sent to the channel, which earn it only here.

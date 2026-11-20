@@ -7,6 +7,9 @@ import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
+import 'package:buzz/shared/push/app_badge_preference.dart';
+import 'package:buzz/shared/theme/theme_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../helpers/thread_ids.dart';
 
@@ -61,6 +64,7 @@ void main() {
     bool readStateReady = true,
     Map<String, int> highPriorityMap = const {},
     Map<String, List<ObservedUnreadEvent>>? observedEventsByChannel,
+    SharedPreferences? prefs,
   }) {
     final notifier = _StubbedChannelsNotifier(
       channels: channels,
@@ -71,6 +75,7 @@ void main() {
 
     return ProviderContainer(
       overrides: [
+        if (prefs != null) savedPrefsProvider.overrideWithValue(prefs),
         channelsProvider.overrideWith(() => notifier),
         readStateProvider.overrideWith(
           () => _ReadStateNotifier(
@@ -86,6 +91,114 @@ void main() {
       ],
     );
   }
+
+  group('app icon badge', () {
+    // One unread channel each: (case, channel type, events, all, mentions only).
+    final cases = <(String, String, List<ObservedUnreadEvent>, int, int)>[
+      ('ordinary post', 'stream', [_observed(id: 'p', createdAt: t20)], 1, 0),
+      (
+        'reply in a followed thread',
+        'stream',
+        [
+          _observed(id: 'r', createdAt: t20, rootId: 'root'),
+          _observed(
+            id: 'b',
+            createdAt: t20,
+            rootId: 'root',
+            highPriority: true,
+            isBroadcast: true,
+          ),
+        ],
+        1,
+        0,
+      ),
+      (
+        'top-level mention',
+        'stream',
+        [
+          _observed(id: 'p', createdAt: t20),
+          _observed(
+            id: 'm',
+            createdAt: t30,
+            highPriority: true,
+            mentioned: true,
+          ),
+        ],
+        1,
+        1,
+      ),
+      (
+        'two mentions in one thread',
+        'stream',
+        [
+          for (final id in ['m1', 'm2'])
+            _observed(
+              id: id,
+              createdAt: t20,
+              rootId: 'root',
+              highPriority: true,
+              isThreadedReply: true,
+              mentioned: true,
+            ),
+        ],
+        1,
+        2,
+      ),
+      (
+        'DM that mentions the viewer',
+        'dm',
+        [
+          _observed(
+            id: 'd',
+            createdAt: t20,
+            highPriority: true,
+            mentioned: true,
+            channelType: 'dm',
+          ),
+        ],
+        1,
+        1,
+      ),
+    ];
+
+    for (final (name, channelType, events, all, mentionsOnly) in cases) {
+      test(name, () async {
+        SharedPreferences.setMockInitialValues({});
+        final prefs = await SharedPreferences.getInstance();
+        ProviderContainer open() {
+          final container = buildContainer(
+            channels: [
+              makeChannel(
+                id: 'ch',
+                channelType: channelType,
+                lastMessageAtSeconds: t30,
+              ),
+            ],
+            observedEventsByChannel: {'ch': events},
+            prefs: prefs,
+          );
+          addTearDown(container.dispose);
+          return container;
+        }
+
+        final container = open();
+        await container.read(channelsProvider.future);
+        expect(container.read(appBadgeCountProvider), all);
+
+        final setting = container.read(appBadgeMentionsOnlyProvider.notifier);
+        await setting.set(true);
+        expect(container.read(appBadgeCountProvider), mentionsOnly);
+
+        // The choice survives a restart.
+        final restarted = open();
+        await restarted.read(channelsProvider.future);
+        expect(restarted.read(appBadgeCountProvider), mentionsOnly);
+
+        await setting.set(false);
+        expect(container.read(appBadgeCountProvider), all);
+      });
+    }
+  });
 
   test('all channels read returns (0, 0)', () async {
     final container = buildContainer(
@@ -490,6 +603,8 @@ ObservedUnreadEvent _observed({
   String? rootId,
   bool highPriority = false,
   bool isThreadedReply = false,
+  bool isBroadcast = false,
+  bool mentioned = false,
   String channelType = 'stream',
 }) => makeObservedUnreadEvent(
   id: id,
@@ -498,6 +613,8 @@ ObservedUnreadEvent _observed({
   highPriority: highPriority,
   channelType: channelType,
   isThreadedReply: isThreadedReply,
+  isBroadcast: isBroadcast,
+  mentioned: mentioned,
 );
 
 Map<String, List<ObservedUnreadEvent>> _defaultObservedEvents(

@@ -1,6 +1,7 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../channels_provider.dart';
+import '../../../shared/push/app_badge_preference.dart';
 import '../../../shared/read_state/read_state_provider.dart';
 import 'observed_unread_event.dart';
 
@@ -8,10 +9,14 @@ class UnreadBadgeState {
   const UnreadBadgeState({
     this.highPriorityCount = 0,
     this.generalUnreadCount = 0,
+    this.mentionOrDmCount = 0,
   });
 
   final int highPriorityCount;
   final int generalUnreadCount;
+
+  /// Unread DMs and mentions of the viewer, each counted once.
+  final int mentionOrDmCount;
 }
 
 final unreadBadgeProvider = Provider<UnreadBadgeState>((ref) {
@@ -26,6 +31,7 @@ final unreadBadgeProvider = Provider<UnreadBadgeState>((ref) {
 
       var highPriority = 0;
       var general = 0;
+      var mentionOrDm = 0;
 
       for (final channel in channels) {
         if (!channel.isMember || channel.isArchived) continue;
@@ -50,6 +56,10 @@ final unreadBadgeProvider = Provider<UnreadBadgeState>((ref) {
           readAtForObservedEvent,
         );
         if (unreadCount == 0) continue;
+        mentionOrDm += countUnreadMentionOrDmObservedEvents(
+          observedEvents,
+          readAtForObservedEvent,
+        );
 
         if (channel.isDm ||
             countUnreadHighPriorityObservedEvents(
@@ -88,9 +98,19 @@ final unreadBadgeProvider = Provider<UnreadBadgeState>((ref) {
       return UnreadBadgeState(
         highPriorityCount: highPriority,
         generalUnreadCount: general,
+        mentionOrDmCount: mentionOrDm,
       );
     },
     loading: () => const UnreadBadgeState(),
     error: (_, _) => const UnreadBadgeState(),
   );
+});
+
+/// The number on the app icon. By default: the high-priority count, else 1
+/// for ordinary unreads. With mentions only: unread mentions and DMs.
+final appBadgeCountProvider = Provider<int>((ref) {
+  final state = ref.watch(unreadBadgeProvider);
+  if (ref.watch(appBadgeMentionsOnlyProvider)) return state.mentionOrDmCount;
+  if (state.highPriorityCount > 0) return state.highPriorityCount;
+  return state.generalUnreadCount > 0 ? 1 : 0;
 });

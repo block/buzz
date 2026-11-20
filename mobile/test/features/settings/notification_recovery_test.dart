@@ -5,6 +5,7 @@ import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
+import 'package:buzz/shared/push/app_badge_preference.dart';
 import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/push/push_relay_capability_provider.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
@@ -105,15 +106,15 @@ void main() {
         reason:
             '${container.read(activeCommunityProvider)} / ${container.read(communityListProvider)}',
       );
-      expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
-      await tester.tap(find.byType(Switch));
+      expect(tester.widget<Switch>(_pushSwitch).value, isTrue);
+      await tester.tap(_pushSwitch);
       await tester.pumpAndSettle();
       final stored = (await storage.loadAll()).single;
       expect(stored.pushNotificationsEnabled, isFalse);
       expect(stored.pushSubscriptionState.pendingTombstoneGeneration, 8);
       expect(tombstones, [8]);
       expect(snapshots.last.single.pushNotificationsEnabled, isFalse);
-      final offSwitch = tester.widget<Switch>(find.byType(Switch));
+      final offSwitch = tester.widget<Switch>(_pushSwitch);
       expect(offSwitch.value, isFalse);
       expect(offSwitch.onChanged, isNull);
       relayAvailable = true;
@@ -129,6 +130,18 @@ void main() {
         isNull,
       );
       expect(find.text('Notifications'), findsNothing);
+
+      // The badge choice stays available without push, and persists.
+      final badgeSwitch = find.descendant(
+        of: find.byKey(const ValueKey('app-badge-mentions-only')),
+        matching: find.byType(Switch),
+      );
+      expect(tester.widget<Switch>(badgeSwitch).value, isFalse);
+      await tester.tap(find.text('Badge only mentions and DMs'));
+      await tester.pumpAndSettle();
+      expect(tester.widget<Switch>(badgeSwitch).value, isTrue);
+      expect(container.read(appBadgeMentionsOnlyProvider), isTrue);
+      expect(prefs.getBool('buzz-app-badge-mentions-only.v1'), isTrue);
       expect(tester.takeException(), isNull);
       debugDefaultTargetPlatformOverride = null;
     });
@@ -145,3 +158,8 @@ class _Auth extends AuthNotifier {
   Future<AuthState> build() async =>
       const AuthState(status: AuthStatus.unauthenticated);
 }
+
+final _pushSwitch = find.descendant(
+  of: find.byKey(const ValueKey('push-notifications-setting')),
+  matching: find.byType(Switch),
+);
