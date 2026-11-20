@@ -449,35 +449,46 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     );
 
     final relayOrigins = _pushRelayOrigins(communities);
-    useEffect(() {
-      // Authority the phone holds for relays no community uses is revoked:
-      // a community whose push is off, or removed, and at last the whole
-      // installation. A list still loading looks empty, so wait for it.
-      if (!communitiesLoaded) return null;
-      final attempt = relayOrigins.join('|');
-      if (!reconcileAttempt.tryBegin(attempt)) return null;
-      unawaited(() async {
-        try {
-          await reconcileBuzzPushAuthority(
-            desiredRelays: () => _pushRelayOrigins(
-              ref.read(communityListProvider).value ?? const [],
-            ),
-            noCommunities: () =>
-                (ref.read(communityListProvider).value ?? const []).isEmpty,
-          );
-          reconcileAttempt.complete(attempt);
-        } catch (error, stack) {
-          reconcileAttempt.failed(
-            attempt,
-            retry: () {
-              if (context.mounted) reconcileRetry.value += 1;
-            },
-          );
-          reportPushLeaseCleanupError(error, stack);
-        }
-      }());
-      return null;
-    }, [communitiesLoaded, relayOrigins.join('|'), reconcileRetry.value]);
+    // Removing the last community with push already off leaves the relay set
+    // unchanged (empty), but it is what makes the installation revocable.
+    final noCommunities = communities.isEmpty;
+    useEffect(
+      () {
+        // Authority the phone holds for relays no community uses is revoked:
+        // a community whose push is off, or removed, and at last the whole
+        // installation. A list still loading looks empty, so wait for it.
+        if (!communitiesLoaded) return null;
+        final attempt = '${relayOrigins.join('|')}|$noCommunities';
+        if (!reconcileAttempt.tryBegin(attempt)) return null;
+        unawaited(() async {
+          try {
+            await reconcileBuzzPushAuthority(
+              desiredRelays: () => _pushRelayOrigins(
+                ref.read(communityListProvider).value ?? const [],
+              ),
+              noCommunities: () =>
+                  (ref.read(communityListProvider).value ?? const []).isEmpty,
+            );
+            reconcileAttempt.complete(attempt);
+          } catch (error, stack) {
+            reconcileAttempt.failed(
+              attempt,
+              retry: () {
+                if (context.mounted) reconcileRetry.value += 1;
+              },
+            );
+            reportPushLeaseCleanupError(error, stack);
+          }
+        }());
+        return null;
+      },
+      [
+        communitiesLoaded,
+        relayOrigins.join('|'),
+        noCommunities,
+        reconcileRetry.value,
+      ],
+    );
 
     final token = apnsDeviceToken.value ?? fcmDeviceToken.value;
     useEffect(

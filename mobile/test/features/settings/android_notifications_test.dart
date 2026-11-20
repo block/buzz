@@ -155,6 +155,22 @@ void main() {
           expect(gateway.installations, hasLength(1));
           expect(session.leases.last['active'], isTrue);
           expect(session.leases.last['endpoint'], isNotEmpty);
+
+          // Turning push off keeps the installation: the community remains.
+          // Removing that community afterwards is what revokes it.
+          final installation = gateway.installations.values.single;
+          await tester.tap(find.byType(Switch));
+          await tester.pumpAndSettle();
+          expect(installation.revokedDelegations, isNotEmpty);
+          expect(installation.revoked, isFalse);
+          final container = ProviderScope.containerOf(
+            tester.element(find.byType(SettingsPage)),
+          );
+          await container
+              .read(communityListProvider.notifier)
+              .removeCommunity(community.id);
+          await tester.pumpAndSettle();
+          expect(installation.revoked, isTrue);
         } else {
           expect(
             find.byKey(const ValueKey('push-unavailable')),

@@ -285,6 +285,43 @@ void main() {
     },
   );
 
+  test('sign-out settles a rotation whose response was lost', () async {
+    await enroll();
+    gateway.loseResponseFor.add('/v1/installations/endpoint');
+    await expectLater(enroll(token: 'token-2'), throwsA(isA<Exception>()));
+    final installation = gateway.installations.values.single;
+    expect(installation.epoch, 2);
+
+    // The stored epoch is stale. The installation is still revoked, and the
+    // token it held is free again.
+    await authority.reconcile(
+      desiredRelays: () => {},
+      revokeInstallation: () => true,
+    );
+
+    expect(installation.revoked, isTrue);
+    expect(keystore.key, isNull);
+    await enroll(token: 'token-2');
+    expect(gateway.installations, hasLength(2));
+  });
+
+  test('sign-out revokes an installation whose enrollment was lost', () async {
+    gateway.loseResponseFor.add('/v1/installations');
+    await expectLater(enroll(), throwsA(isA<Exception>()));
+    final installation = gateway.installations.values.single;
+
+    await authority.reconcile(
+      desiredRelays: () => {},
+      revokeInstallation: () => true,
+    );
+
+    expect(installation.revoked, isTrue);
+    expect(keystore.key, isNull);
+    expect(gateway.bodiesFor('/v1/installations'), hasLength(2));
+    await enroll();
+    expect(gateway.installations, hasLength(2));
+  });
+
   test(
     'a revocation whose delegation response was lost still finds it',
     () async {

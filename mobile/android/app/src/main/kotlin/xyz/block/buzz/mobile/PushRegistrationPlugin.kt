@@ -65,8 +65,9 @@ internal class PushRegistrationPlugin(
             return
         }
         FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
-            val token = task.result
-            if (task.isSuccessful && !token.isNullOrEmpty()) {
+            // `result` throws for a failed task, so read it only after success.
+            val token = if (task.isSuccessful) task.result else null
+            if (!token.isNullOrEmpty()) {
                 channel.invokeMethod("fcmTokenChanged", mapOf("token" to token))
             } else {
                 channel.invokeMethod(

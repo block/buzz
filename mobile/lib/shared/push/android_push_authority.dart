@@ -157,7 +157,15 @@ class AndroidPushAuthority {
     required Set<String> Function() desiredRelays,
     required bool Function() revokeInstallation,
   }) => _serialized(() async {
-    final state = await _load();
+    var state = await _load();
+    final pending = state.pendingEnrollment;
+    if (state.installation == null && pending != null && revokeInstallation()) {
+      // An enrollment whose response was lost may have created an
+      // installation that holds the FCM token. Learn its handle by replaying
+      // the journaled request, so it can be revoked below.
+      await _settlePendingEnrollment(pending);
+      state = await _load();
+    }
     if (state.installation == null) return;
     final desired = desiredRelays();
     for (final relay in state.relays.values.toList()) {
@@ -287,6 +295,23 @@ class AndroidPushAuthority {
         ),
       ),
     );
+  }
+
+  /// Sign-out's view of a journaled enrollment: replay it so a created
+  /// installation can be revoked. Nothing is enrolled afresh, and a request
+  /// the gateway refuses or that expired created nothing.
+  Future<void> _settlePendingEnrollment(_PendingEnrollment pending) async {
+    if (pending.expiresAt <= _nowSeconds) {
+      await _discardPendingEnrollment();
+      return;
+    }
+    try {
+      await _finishEnrollment(pending);
+    } on AndroidPushAttestationUnavailable {
+      // The gateway refused the attestation, so there is nothing to revoke.
+    } on AndroidPushGatewayRejection catch (rejection) {
+      if (rejection.isTransient) rethrow;
+    }
   }
 
   Future<void> _discardPendingEnrollment() async {
@@ -515,27 +540,36 @@ class AndroidPushAuthority {
 
   Future<void> _revokeInstallation() async {
     final installation = (await _load()).installation!;
-    final epoch = installation.endpointEpoch;
-    try {
-      await _signed(
-        '/v1/installations/revoke',
-        {
-          'installation_handle': installation.handle,
-          'endpoint_epoch': epoch,
-          'new_endpoint_epoch': epoch + 1,
-        },
-        (challenge) => androidRevokeInstallationTranscript(
-          challengeId: challenge.id,
-          challenge: challenge.text,
-          installationHandle: installation.handle,
-          endpointEpoch: epoch,
-          newEndpointEpoch: epoch + 1,
-        ),
-      );
-    } on AndroidPushGatewayRejection catch (rejection) {
-      // Revoking twice succeeds, so a refusal means the installation is
-      // already gone, which is what this call is for.
-      if (!rejection.isNotAuthorized) rethrow;
+    // A journaled rotation may have reached the gateway, which then sits one
+    // epoch ahead of what is stored. Try the stored epoch, then the next. The
+    // key stays until a revocation lands or both are refused.
+    final epochs = [
+      installation.endpointEpoch,
+      if (installation.rotatingTo != null) installation.endpointEpoch + 1,
+    ];
+    for (final epoch in epochs) {
+      try {
+        await _signed(
+          '/v1/installations/revoke',
+          {
+            'installation_handle': installation.handle,
+            'endpoint_epoch': epoch,
+            'new_endpoint_epoch': epoch + 1,
+          },
+          (challenge) => androidRevokeInstallationTranscript(
+            challengeId: challenge.id,
+            challenge: challenge.text,
+            installationHandle: installation.handle,
+            endpointEpoch: epoch,
+            newEndpointEpoch: epoch + 1,
+          ),
+        );
+        break;
+      } on AndroidPushGatewayRejection catch (rejection) {
+        // Revoking twice succeeds, so a refusal at the last epoch means the
+        // installation is already gone, which is what this call is for.
+        if (!rejection.isNotAuthorized) rethrow;
+      }
     }
     await keystore.delete();
     final state = await _load();
