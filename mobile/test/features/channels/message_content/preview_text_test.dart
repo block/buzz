@@ -349,6 +349,14 @@ void main() {
   test('a preview loads only the identity links it draws', () {
     final link = '[@Alice](nostr:${fullNpub(_alice)})';
     expect(messagePreviewIdentityKeys('hi $link', maxLines: 2), {_alice});
+    // A label with brackets draws a pill once normalized, so it loads too.
+    expect(
+      messagePreviewIdentityKeys(
+        'hi [@Pat [QA]](nostr:${fullNpub(_alice)})',
+        maxLines: 2,
+      ),
+      {_alice},
+    );
     for (final content in [
       'hi `$link`',
       'one\ntwo\nthree\nfour\n$link',

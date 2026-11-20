@@ -188,6 +188,11 @@ class IdentityNames {
         _nonBlank(_fallbackNames[key]) != null;
   }
 
+  /// Whether [pubkey] is an agent here: a bot role, agent directory entry
+  /// or owned profile.
+  bool isAgent(String pubkey) =>
+      _factFor(pubkey.toLowerCase())?.isAgent ?? false;
+
   String _plainName(String key) =>
       _nonBlank(_sources.verifiedNames[key])?.trim() ??
       _nonBlank(_sources.profiles[key]?.displayName)?.trim() ??

@@ -157,7 +157,7 @@ Set<String> messagePreviewIdentityKeys(
 }) => content.contains('nostr:npub1')
     ? {
         for (final piece in messagePreviewPieces(
-          messagePreviewSource(content, maxLines: maxLines),
+          normalizeBareLinks(messagePreviewSource(content, maxLines: maxLines)),
           maxLines: maxLines,
         ))
           if (piece is PreviewMention) piece.pubkey,

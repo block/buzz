@@ -5,13 +5,13 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/mentions/agent_identity_provider.dart';
-import '../../shared/mentions/mention_identity_links.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/channel_identity_names_provider.dart';
 import '../channels/message_content.dart';
+import '../channels/message_mention_pill.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../profile/user_profile_sheet.dart';
 import '../../shared/profile/user_profile.dart';
@@ -43,12 +43,6 @@ class ForumPostCard extends HookConsumerWidget {
             ..remove(post.pubkey.toLowerCase()),
       [post],
     );
-    // Identity links name their own keys: resolve those for display only.
-    final linkedPubkeys = useMemoized(
-      // Only the visible preview's links render, so only those resolve.
-      () => mentionIdentityLinkKeys(_previewText(post.content)),
-      [post.content],
-    );
     final mentionPubkeysKey = (mentionPubkeys.toList()..sort()).join('\u0000');
 
     useEffect(() {
@@ -74,7 +68,7 @@ class ForumPostCard extends HookConsumerWidget {
     final profileOwnedMentionPubkeys = ref.watch(
       userCacheProvider.select(
         (cache) =>
-            ([...post.mentionPubkeys, ...linkedPubkeys]
+            (post.mentionPubkeys
                     .where(
                       (pubkey) =>
                           cache[pubkey.toLowerCase()]?.ownerPubkey != null,
@@ -101,10 +95,9 @@ class ForumPostCard extends HookConsumerWidget {
       ref,
       post.channelId,
       post.mentionPubkeys,
-      linkedPubkeys: linkedPubkeys,
     );
-    final preview = post.content.length > _previewLength
-        ? '${_previewText(post.content)}...'
+    final preview = post.content.length > 200
+        ? '${post.content.substring(0, 200)}...'
         : post.content;
     final summary = post.threadSummary;
 
@@ -204,14 +197,17 @@ class ForumPostCard extends HookConsumerWidget {
                 child: IgnorePointer(
                   child: SingleChildScrollView(
                     physics: const NeverScrollableScrollPhysics(),
-                    child: MessageContent(
-                      content: preview,
-                      mentionNames: mentionNames,
-                      mentionLabels: mentionLabels,
-                      agentMentionPubkeys: agentMentionPubkeys,
-                      tags: post.tags,
-                      baseStyle: messageBodyTextStyle.copyWith(
-                        color: context.colors.onSurface,
+                    child: IdentityLinkChannel(
+                      channelId: post.channelId,
+                      child: MessageContent(
+                        content: preview,
+                        mentionNames: mentionNames,
+                        mentionLabels: mentionLabels,
+                        agentMentionPubkeys: agentMentionPubkeys,
+                        tags: post.tags,
+                        baseStyle: messageBodyTextStyle.copyWith(
+                          color: context.colors.onSurface,
+                        ),
                       ),
                     ),
                   ),
@@ -387,9 +383,3 @@ Map<String, String> _buildMentionNames(
   }
   return names;
 }
-
-const _previewLength = 200;
-
-String _previewText(String content) => content.length > _previewLength
-    ? content.substring(0, _previewLength)
-    : content;

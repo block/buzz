@@ -45,29 +45,4 @@ void main() {
     expect(mentionIdentityLinkKey(target), key);
     expect(mentionIdentityLinkKey(target.toUpperCase()), isNull);
   });
-
-  test('a row collects the keys of inline identity links it draws', () {
-    final other = 'c' * 64;
-    final otherTarget =
-        'nostr:${nostr.Nip19.encode(prefix: nostr.Nip19Prefix.npub, data: other)}';
-    // Bare, angle-bracketed and titled destinations all draw a pill.
-    expect(mentionIdentityLinkKeys('hi [@Honey]($target)'), {key});
-    expect(mentionIdentityLinkKeys('hi [@Honey](<$target>)'), {key});
-    expect(mentionIdentityLinkKeys('hi [@Honey]($target "Honey")'), {key});
-    // Code is literal text, and an unused definition draws nothing.
-    for (final text in [
-      'plain @Honey text',
-      'see `[@Honey]($target)`',
-      'see ``[@Honey]($target)``',
-      '```\n[@Honey]($target)\n```',
-      'x\n\n[r]: $otherTarget',
-      'bare $target',
-    ]) {
-      expect(mentionIdentityLinkKeys(text), isEmpty, reason: text);
-    }
-    expect(
-      mentionIdentityLinkKeys('`[@Honey]($target)` and [@Other]($otherTarget)'),
-      {other},
-    );
-  });
 }

@@ -14898,6 +14898,42 @@ void main() {
       expect([pills.first, pills.last], ['Tagged', 'Previous']);
     });
 
+    testWidgets('a row loads only the identity links it draws as pills', (
+      tester,
+    ) async {
+      final drawn = '7' * 64;
+      final quoted = '8' * 64;
+      final commented = '9' * 64;
+      String link(String key) => '[@Name](nostr:${fullNpub(key)})';
+      final preloaded = <String>{};
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'links',
+              pubkey: 'alice',
+              content:
+                  'see ${link(drawn)}\n\n> ~~~\n> ${link(quoted)}\n> ~~~\n\n'
+                  '<!-- ${link(commented)} -->',
+              createdAt: 1000,
+            ),
+          ],
+          userCacheNotifier: _FakeUserCacheNotifier(
+            const {},
+            preload: (pubkeys) async {
+              preloaded.addAll(pubkeys);
+              return true;
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(MessageMentionPill), findsOneWidget);
+      expect(preloaded, contains(drawn));
+      expect(preloaded, isNot(anyOf(contains(quoted), contains(commented))));
+    });
+
     testWidgets('edited messages show updated content and (edited) label', (
       tester,
     ) async {
