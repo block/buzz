@@ -1,4 +1,5 @@
 import '../../shared/widgets/native_route_controls.dart';
+import '../../shared/emoji/emoji_picker.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
@@ -7,7 +8,6 @@ import 'channel_filter/channel_filter_activity.dart';
 import 'channel_filter/channel_filter_provider.dart';
 import 'channel_filter/channel_filter_store.dart';
 import '../../shared/widgets/collapsible_section_body.dart';
-import '../../shared/widgets/collapsible_sliver_body.dart';
 import '../../shared/http/app_http_client.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/hosted/hosted_relay_auth.dart';
@@ -27,7 +27,7 @@ import '../../shared/hosted/organization_sign_in.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math' show max, min;
+import 'dart:math' show Random, max, min;
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
@@ -49,7 +49,7 @@ import '../../shared/community/community_grid_add.dart';
 import '../../shared/community/paired_community_landing.dart';
 import '../../shared/community/community_membership_provider.dart';
 import '../../shared/widgets/app_list.dart';
-import '../../shared/widgets/buzz_sheet_header.dart';
+import 'channels_page/filters.dart';
 import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/app_list_card_item.dart';
 import '../../shared/widgets/sheet_action_section.dart';
@@ -58,6 +58,8 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/buzz_toast.dart';
+import '../../shared/widgets/ios_composition_layer.dart';
 import '../../shared/widgets/buzz_setting_menu.dart';
 import '../../shared/widgets/buzz_titled_sheet_layout.dart';
 import '../../shared/widgets/ios_glass_navigation_action.dart';
@@ -68,6 +70,7 @@ import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/confirmation_dialog.dart';
 import '../../shared/widgets/skeleton.dart';
+import '../../shared/widgets/tabler_star_icon.dart';
 import '../profile/profile_provider.dart';
 import '../profile/presence_cache_provider.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
@@ -87,8 +90,11 @@ import 'mentions/stable_mention_rows.dart';
 import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
 import 'channel_mutes/channel_mutes_provider.dart';
+import 'channel_sections/section_options_button.dart';
+import 'channel_sections/filtered_channel_section_body.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_sections/workspace_layout.dart';
+import 'channel_sections/section_reorder_sheet.dart';
 import '../../shared/custom_emoji/custom_emoji.dart' show normalizeShortcode;
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
@@ -104,8 +110,10 @@ import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 
 part 'channels_page/body.dart';
+part 'channels_page/activity_recovery.dart';
 part 'channels_page/sections.dart';
-part 'channels_page/filters.dart';
+part 'channels_page/rename_section.dart';
+
 part 'channels_page/channel_tile.dart';
 part 'channels_page/sheets.dart';
 part 'channels_page/badges.dart';
@@ -613,7 +621,7 @@ class ChannelsPage extends HookConsumerWidget {
         usesPinnedGradient: usesPinnedGradient,
         scrollController: channelsScrollController,
         onRefresh: () async {
-          // Solo has no banner, so pulling must also restart its reader.
+          // Restart the reader for Solo chat and project placement.
           if (soloSliver != null) ref.invalidate(meGroupsProvider);
           ref.invalidate(channelFilterActivityProvider);
           await Future.wait([

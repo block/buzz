@@ -8,8 +8,6 @@ class _CustomChannelSection extends StatelessWidget {
   final bool Function(Channel) isVisible;
   final Widget Function(Channel) buildRow;
   final bool expanded;
-  final bool isFirst;
-  final bool isLast;
   final VoidCallback onToggle;
   final _SectionEdits? edits;
   final ChannelSortMode sortMode;
@@ -22,8 +20,6 @@ class _CustomChannelSection extends StatelessWidget {
     required this.isVisible,
     required this.buildRow,
     required this.expanded,
-    required this.isFirst,
-    required this.isLast,
     required this.onToggle,
     required this.edits,
     required this.sortMode,
@@ -37,15 +33,13 @@ class _CustomChannelSection extends StatelessWidget {
         child: _CustomSectionHeader(
           section: section,
           expanded: expanded,
-          isFirst: isFirst,
-          isLast: isLast,
           onToggle: onToggle,
           edits: edits,
           sortMode: sortMode,
           onSortModeChange: onSortModeChange,
         ),
       ),
-      _SectionChannelsBody(
+      FilteredChannelSectionBody(
         expanded: expanded,
         channels: channels,
         isVisible: isVisible,
@@ -55,27 +49,31 @@ class _CustomChannelSection extends StatelessWidget {
   );
 }
 
-typedef _SectionEdits = ({
-  VoidCallback onRename,
-  VoidCallback onDelete,
-  VoidCallback onMoveUp,
-  VoidCallback onMoveDown,
-});
+typedef _SectionEdits = ({VoidCallback onRename, VoidCallback onDelete});
 
 /// A workspace's decorative icon: a Unicode emoji, or a community custom
 /// emoji. As on desktop, a shortcode the catalog lacks draws nothing.
 class _WorkspaceIcon extends ConsumerWidget {
-  const _WorkspaceIcon(this.icon);
+  const _WorkspaceIcon(this.icon, {this.inHeader = false});
+  final bool inHeader;
   final String icon;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    Widget spaced(Widget child) => Padding(
-      padding: const EdgeInsets.only(right: Grid.quarter),
-      child: ExcludeSemantics(child: child),
-    );
+    Widget display(Widget child) {
+      if (!inHeader) return ExcludeSemantics(child: child);
+      return _SectionLeadingIcon(child);
+    }
+
     if (!(icon.length > 2 && icon.startsWith(':') && icon.endsWith(':'))) {
-      return spaced(Text(icon, style: navigationSectionTextStyle));
+      return display(
+        FittedBox(
+          child: Text(
+            icon,
+            style: const TextStyle(fontSize: _kWorkspaceIconSize, height: 1),
+          ),
+        ),
+      );
     }
     final shortcode = normalizeShortcode(icon);
     final url = shortcode == null
@@ -89,7 +87,7 @@ class _WorkspaceIcon extends ConsumerWidget {
             ),
           );
     if (url == null) return const SizedBox.shrink();
-    return spaced(
+    return display(
       CustomEmojiImage(
         shortcode: shortcode!,
         url: url,
@@ -102,11 +100,31 @@ class _WorkspaceIcon extends ConsumerWidget {
 
 const _kWorkspaceIconSize = 16.0;
 
+class _SectionLeadingIcon extends StatelessWidget {
+  const _SectionLeadingIcon(this.child);
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    const sideInset = (_kChannelIconSize - _kWorkspaceIconSize) / 2;
+    return Padding(
+      padding: const EdgeInsets.only(right: Grid.xxs - sideInset),
+      child: SizedBox.square(
+        dimension: _kChannelIconSize,
+        child: Center(
+          child: SizedBox.square(
+            dimension: _kWorkspaceIconSize,
+            child: ExcludeSemantics(child: child),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _CustomSectionHeader extends StatelessWidget {
   final WorkspaceSection section;
   final bool expanded;
-  final bool isFirst;
-  final bool isLast;
   final VoidCallback onToggle;
   final _SectionEdits? edits;
   final ChannelSortMode sortMode;
@@ -115,8 +133,6 @@ class _CustomSectionHeader extends StatelessWidget {
   const _CustomSectionHeader({
     required this.section,
     required this.expanded,
-    required this.isFirst,
-    required this.isLast,
     required this.onToggle,
     required this.edits,
     required this.sortMode,
@@ -129,43 +145,31 @@ class _CustomSectionHeader extends StatelessWidget {
     final edits = this.edits;
     final onSortModeChange = this.onSortModeChange;
     Future<void> openOptions(BuildContext buttonContext) async {
-      final action = await _showSectionViewSheet(
+      final action = await showSectionViewSheet(
         buttonContext,
         title: label,
         group: sectionSortGroupKey(section.id),
         sortMode: sortMode,
         onSort: (mode) => onSortModeChange?.call(mode),
         custom: edits != null,
-        isFirst: isFirst,
-        isLast: isLast,
       );
       if (!buttonContext.mounted || edits == null) return;
       switch (action) {
         case 'rename':
           edits.onRename();
-        case 'move_up':
-          edits.onMoveUp();
-        case 'move_down':
-          edits.onMoveDown();
         case 'delete':
           edits.onDelete();
       }
     }
 
     final menu = [
-      if (edits != null) ...[
+      if (edits != null)
         (label: 'Rename section', symbol: 'pencil', onPressed: edits.onRename),
-        (
-          label: 'Move up',
-          symbol: 'arrow.up',
-          onPressed: isFirst ? null : edits.onMoveUp,
-        ),
-        (
-          label: 'Move down',
-          symbol: 'arrow.down',
-          onPressed: isLast ? null : edits.onMoveDown,
-        ),
-      ],
+      (
+        label: 'Reorder sections',
+        symbol: 'arrow.up.arrow.down',
+        onPressed: () => SectionOrderScope.of(context)?.show(context),
+      ),
       ..._sortMenu(sortMode, onSortModeChange),
       (
         label: 'Filter…',
@@ -175,17 +179,19 @@ class _CustomSectionHeader extends StatelessWidget {
       if (edits != null)
         (label: 'Delete section', symbol: 'trash', onPressed: edits.onDelete),
     ];
-    final sortAt = edits == null ? 0 : 3;
+    final sortAt = edits == null ? 1 : 2;
 
     final sectionColor = navigationHeadingForeground(context);
     return GestureDetector(
       onTap: onToggle,
       behavior: HitTestBehavior.opaque,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(
+        padding: EdgeInsets.fromLTRB(
           Grid.gutter,
           _kSectionHeaderVerticalPadding,
-          Grid.gutter,
+          _usesNativeSectionMenu(context)
+              ? Grid.gutter + Grid.half
+              : Grid.twelve,
           _kSectionHeaderVerticalPadding,
         ),
         child: Row(
@@ -201,7 +207,7 @@ class _CustomSectionHeader extends StatelessWidget {
                 child: _SectionLabel(
                   label: label,
                   icon: switch (section.icon) {
-                    final icon? => _WorkspaceIcon(icon),
+                    final icon? => _WorkspaceIcon(icon, inHeader: true),
                     null => null,
                   },
                   expanded: expanded,
@@ -232,59 +238,15 @@ class _CustomSectionHeader extends StatelessWidget {
               )
             else
               Builder(
-                builder: (buttonContext) => _SectionOptionsButton(
+                builder: (buttonContext) => SectionOptionsButton(
                   key: ValueKey('section-menu-${section.id}'),
                   tooltip: '$label options',
-                  icon: Icon(
-                    BuzzIcons.ellipsis,
-                    size: 14,
-                    color: navigationAccessoryForeground(context),
-                  ),
                   onPressed: () => openOptions(buttonContext),
                 ),
               ),
           ],
         ),
       ),
-    );
-  }
-}
-
-class _SectionNameDialog extends HookWidget {
-  final String title;
-  final String confirmLabel;
-  final String initialValue;
-
-  const _SectionNameDialog({
-    required this.title,
-    required this.confirmLabel,
-    this.initialValue = '',
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final controller = useTextEditingController(text: initialValue);
-
-    void confirm() {
-      final name = controller.text.trim();
-      if (name.isNotEmpty) Navigator.of(context).pop(name);
-    }
-
-    return AlertDialog(
-      title: Text(title),
-      content: TextField(
-        controller: controller,
-        autofocus: true,
-        decoration: const InputDecoration(labelText: 'Name'),
-        onSubmitted: (_) => confirm(),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        TextButton(onPressed: confirm, child: Text(confirmLabel)),
-      ],
     );
   }
 }
@@ -330,7 +292,7 @@ class _ChannelSection extends StatelessWidget {
           onSortModeChange: onSortModeChange,
         ),
       ),
-      _SectionChannelsBody(
+      FilteredChannelSectionBody(
         expanded: expanded,
         channels: channels,
         isVisible: isVisible,
@@ -359,71 +321,6 @@ class _ChannelSection extends StatelessWidget {
       ),
     ],
   );
-}
-
-class _SectionChannelsBody extends HookWidget {
-  const _SectionChannelsBody({
-    required this.expanded,
-    required this.channels,
-    required this.isVisible,
-    required this.buildRow,
-    this.emptySliver,
-  });
-
-  final bool expanded;
-  final List<Channel> channels;
-  final bool Function(Channel) isVisible;
-  final Widget Function(Channel) buildRow;
-  final Widget? emptySliver;
-
-  @override
-  Widget build(BuildContext context) {
-    final visibleChannels = <Channel>[];
-    final hiddenIds = <String>[];
-    for (final channel in channels) {
-      if (isVisible(channel)) {
-        visibleChannels.add(channel);
-      } else {
-        hiddenIds.add(channel.id);
-      }
-    }
-    final hiddenCount = hiddenIds.length;
-    final reveal = useState(false);
-    useEffect(() {
-      reveal.value = false;
-      return null;
-    }, [hiddenIds.join(',')]);
-    final displayed = reveal.value ? channels : visibleChannels;
-
-    return CollapsibleSliverBody(
-      expanded: expanded,
-      sliver: channels.isEmpty && emptySliver != null
-          ? emptySliver!
-          : SliverList.builder(
-              itemCount: displayed.length + (hiddenCount == 0 ? 0 : 1),
-              findChildIndexCallback: (key) {
-                final index = displayed.indexWhere(
-                  (c) => ValueKey(c.id) == key,
-                );
-                return index < 0 ? null : index;
-              },
-              itemBuilder: (context, index) {
-                if (index < displayed.length) return buildRow(displayed[index]);
-                return Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton(
-                    onPressed: () => reveal.value = !reveal.value,
-                    child: Text(
-                      reveal.value
-                          ? 'Hide filtered channels'
-                          : 'Show hidden channels · $hiddenCount',
-                    ),
-                  ),
-                );
-              },
-            ),
-    );
-  }
 }
 
 class _EmptyState extends StatelessWidget {
@@ -478,7 +375,7 @@ class _SectionHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     void openOptions(BuildContext buttonContext, ChannelSortMode mode) {
-      _showSectionViewSheet(
+      showSectionViewSheet(
         buttonContext,
         title: label,
         group: group,
@@ -493,10 +390,12 @@ class _SectionHeader extends StatelessWidget {
       onTap: onToggle,
       behavior: HitTestBehavior.opaque,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(
+        padding: EdgeInsets.fromLTRB(
           Grid.gutter,
           _kSectionHeaderVerticalPadding,
-          Grid.gutter,
+          _usesNativeSectionMenu(context)
+              ? Grid.gutter + Grid.half
+              : Grid.twelve,
           _kSectionHeaderVerticalPadding,
         ),
         child: Row(
@@ -504,6 +403,15 @@ class _SectionHeader extends StatelessWidget {
             Expanded(
               child: _SectionLabel(
                 label: label,
+                icon: group == 'starred'
+                    ? _SectionLeadingIcon(
+                        TablerStarIcon(
+                          color: sectionColor,
+                          filled: true,
+                          size: _kWorkspaceIconSize,
+                        ),
+                      )
+                    : null,
                 expanded: expanded,
                 color: sectionColor,
               ),
@@ -536,14 +444,9 @@ class _SectionHeader extends StatelessWidget {
                 )
               else
                 Builder(
-                  builder: (buttonContext) => _SectionOptionsButton(
+                  builder: (buttonContext) => SectionOptionsButton(
                     key: ValueKey('sort-menu-$label'),
                     tooltip: '$label options',
-                    icon: Icon(
-                      BuzzIcons.ellipsis,
-                      size: 14,
-                      color: navigationAccessoryForeground(context),
-                    ),
                     onPressed: () => openOptions(buttonContext, mode),
                   ),
                 ),
@@ -572,7 +475,7 @@ class _SectionLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(top: Grid.xxs),
+    padding: EdgeInsets.only(top: icon == null ? Grid.xxs : 0),
     child: Row(
       children: [
         ?icon,
@@ -639,41 +542,3 @@ bool _usesNativeSectionMenu(BuildContext context) =>
     defaultTargetPlatform == TargetPlatform.iOS &&
     (DuoToolbarScope.maybeStripOf(context) ?? FoldGeometry.of(context).strip) !=
         null;
-
-class _SectionOptionsButton extends StatelessWidget {
-  const _SectionOptionsButton({
-    super.key,
-    required this.tooltip,
-    required this.icon,
-    required this.onPressed,
-  });
-
-  final String tooltip;
-  final Widget icon;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) => Semantics(
-    button: true,
-    label: tooltip,
-    onTap: onPressed,
-    excludeSemantics: true,
-    child: Tooltip(
-      message: tooltip,
-      child: SizedBox.square(
-        dimension: 44,
-        child: InkWell(
-          onTap: onPressed,
-          borderRadius: BorderRadius.circular(Radii.full),
-          child: Align(
-            alignment: Alignment.centerRight,
-            child: SizedBox(
-              width: _kChannelIconSize,
-              child: Center(child: icon),
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
-}

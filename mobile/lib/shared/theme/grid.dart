@@ -1,4 +1,7 @@
 class Grid {
+  /// Space beneath the header actions reserved for row accessories.
+  static const double inventoryAccessoryWidth = 92;
+
   /// Gap from inventory icons to labels.
   static const double inventoryLabelGap = 10.0;
 

@@ -43,6 +43,7 @@ private final class JumpToLatestGlassButton: UIButton {
 final class NavigationGlassButton: UIButton {
   var opensMenuAbove = false
   var hitTargetInsets = UIEdgeInsets.zero
+  private static weak var visibleMenuButton: NavigationGlassButton?
   private var pendingMenuAction: (() -> Void)?
   private var menuVisible = false
   private var menuDismissing = false
@@ -56,6 +57,7 @@ final class NavigationGlassButton: UIButton {
   }
 
   private func finishMenuDismissal() {
+    if !menuVisible && Self.visibleMenuButton === self { Self.visibleMenuButton = nil }
     menuDismissing = false
     let action = pendingMenuAction
     pendingMenuAction = nil
@@ -87,6 +89,10 @@ final class NavigationGlassButton: UIButton {
     menuVisible = true
     pendingMenuAction = nil
     super.contextMenuInteraction(interaction, willDisplayMenuFor: configuration, animator: animator)
+    if let previous = Self.visibleMenuButton, previous !== self, previous.window === window {
+      previous.contextMenuInteraction?.dismissMenu()
+    }
+    Self.visibleMenuButton = self
     animateMenu?(true, animator)
     menuVisibilityChanged?(true)
     UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -555,7 +561,8 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     }
     if let menu = arguments?["menu"] as? [[String: Any]] {
       // Keep titled sections in reading order even above a bottom-bar trigger.
-      button.preferredMenuElementOrder = menu.contains { $0["sectionTitle"] is String } ? .fixed : .automatic
+      let hasImages = menu.contains { !(($0["symbol"] as? String) ?? "").isEmpty }
+      button.preferredMenuElementOrder = !hasImages || menu.contains { $0["sectionTitle"] is String } ? .fixed : .automatic
       var groups: [[UIMenuElement]] = [[]]
       var groupTitles = [""]
       for item in menu {
@@ -567,7 +574,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
         if let title = item["sectionTitle"] as? String {
           groupTitles[groupTitles.count - 1] = title
         }
-        let symbol = (item["symbol"] as? String).flatMap {
+        let symbol = (hasImages ? item["symbol"] as? String : nil).flatMap {
           // A transparent image keeps the native menu's icon column aligned.
           $0.isEmpty
             ? UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24)).image { _ in }

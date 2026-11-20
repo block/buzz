@@ -328,8 +328,11 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    final generation = _contextGeneration;
     if (_rateLimitGate.isActive) await _rateLimitGate.wait();
-    if (_disposed) throw StateError('Relay session is disposed');
+    if (_disposed || generation != _contextGeneration) {
+      throw StateError('Relay history request belongs to a retired session');
+    }
     final subId = _nextSubId('h');
     final completer = Completer<List<NostrEvent>>();
 
@@ -510,13 +513,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   @visibleForTesting
   void debugHandleSocketMessageForTest(List<dynamic> data) =>
       _handleMessage(data);
-
-  @visibleForTesting
-  void debugAttachSocketForTest(RelaySocket socket) {
-    _socket?.dispose();
-    _socket = socket;
-    _socketConnected = true;
-  }
 
   /// Registers a visible channel and returns an owner-scoped release callback.
   /// The most recently registered owner is prioritized during reconnect replay.
