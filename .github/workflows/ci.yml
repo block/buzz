@@ -151,7 +151,7 @@ jobs:
       - name: CI required-context isolation contract
         run: scripts/test-ci-required-context-isolation.sh
       - name: CI path selection regression tests
-        run: node --test scripts/ci-selection.test.mjs scripts/ci-required-gates.test.mjs scripts/ci-apt-retry.test.mjs scripts/ci-hermit-retry.test.mjs
+        run: node --test scripts/ci-selection.test.mjs scripts/ci-required-gates.test.mjs scripts/ci-apt-retry.test.mjs scripts/ci-hermit-retry.test.mjs scripts/pre-push-rust.test.mjs
       - name: File size policy
         run: just file-size-check
 
