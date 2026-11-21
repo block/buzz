@@ -1,5 +1,11 @@
 part of 'channels_provider.dart';
 
+/// Runs the activity signature checks off the UI isolate. Tests run them in
+/// place, since fake time never delivers another isolate's result.
+@visibleForTesting
+Future<Set<String>> Function(Set<String> Function() checks)
+debugRunActivityChecks = (checks) => Isolate.run(checks);
+
 /// When anyone last posted in each channel, self-authored and muted messages
 /// included, as the list's reads and live delivery saw it. Unlike
 /// [Channel.lastMessageAt], it does not affect unread or sort state.
@@ -95,12 +101,14 @@ class _ChannelActivity {
   /// known even when it has no messages, and its activity becomes the read's
   /// newest authentic message or a newer arrival since the read began, so a
   /// deleted latest post stops counting. A failed batch or channel, or one
-  /// whose messages all fail verification, stays unknown.
+  /// whose messages all fail verification, stays unknown. [authenticIds] is
+  /// [authenticHeadIds] of [events].
   void noteRead(
     int read,
     Iterable<String> requested,
     Set<String> failedIds,
     List<NostrEvent>? events,
+    Set<String> authenticIds,
   ) {
     if (read < _firstRead) return;
     final arrivals = _arrivalsByRead.remove(read);
@@ -116,7 +124,9 @@ class _ChannelActivity {
     final invalid = <String>{};
     for (final MapEntry(key: channelId, value: posts) in byChannel.entries) {
       posts.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-      final head = posts.where(_isAuthentic).firstOrNull;
+      final head = posts
+          .where((post) => authenticIds.contains(post.id))
+          .firstOrNull;
       if (head == null) {
         invalid.add(channelId);
       } else {
@@ -155,8 +165,7 @@ class _ChannelActivity {
   void noteLive(NostrEvent event) {
     final channelId = event.channelId;
     if (channelId == null) return;
-    _known.add(channelId);
-    note(channelId, event);
+    if (note(channelId, event, _isAuthentic)) _known.add(channelId);
   }
 
   /// Records an unread catch-up's outcome per channel. Returns whether that
@@ -180,8 +189,13 @@ class _ChannelActivity {
   }
 
   /// Records a message that arrived live or by catch-up. Returns whether it
-  /// advanced the channel's activity. Only an authentic message counts.
-  bool note(String channelId, NostrEvent event) {
+  /// advanced the channel's activity. Only a message [isAuthentic] accepts
+  /// counts, and it is asked only about one that would change the activity.
+  bool note(
+    String channelId,
+    NostrEvent event,
+    bool Function(NostrEvent) isAuthentic,
+  ) {
     final at = _clamp(event.createdAt);
     final current = _latest[channelId]?.at;
     final raises = current == null || at > current;
@@ -189,7 +203,7 @@ class _ChannelActivity {
       (arrivals) => (arrivals[channelId]?.at ?? -1) < at,
     );
     if (!raises && !arrives) return false;
-    if (!_isAuthentic(event)) return false;
+    if (!isAuthentic(event)) return false;
     final head = (at: at, id: event.id);
     for (final arrivals in _arrivalsByRead.values) {
       arrivals.update(
@@ -208,10 +222,41 @@ class _ChannelActivity {
     return true;
   }
 
+  /// The ids of each channel's newest authentic message among [events],
+  /// ignoring [skippedIds], with the newer messages that failed verification
+  /// left out. Checked off the UI isolate, newest first, so a read checks about
+  /// one message per channel.
+  static Future<Set<String>> authenticHeadIds(
+    List<NostrEvent> events, [
+    Set<String> skippedIds = const {},
+  ]) {
+    final byChannel = <String, List<NostrEvent>>{};
+    for (final event in events) {
+      if (skippedIds.contains(event.id) ||
+          !EventKind.channelMessageEventKinds.contains(event.kind)) {
+        continue;
+      }
+      if (event.channelId case final channelId?) {
+        byChannel.putIfAbsent(channelId, () => []).add(event);
+      }
+    }
+    if (byChannel.isEmpty) return Future.value(const {});
+    final candidates = byChannel.values.toList();
+    return debugRunActivityChecks(() => _newestAuthenticIds(candidates));
+  }
+
+  static Set<String> _newestAuthenticIds(List<List<NostrEvent>> channels) => {
+    for (final posts in channels)
+      ?(posts..sort((a, b) => b.createdAt.compareTo(a.createdAt)))
+          .where(_isAuthentic)
+          .firstOrNull
+          ?.id,
+  };
+
   // The activity time decides which rows the filter shows, so it comes only
   // from messages with a valid id and signature, as the old per-channel lookup
-  // required. Only a message that would change the activity is checked, so a
-  // read checks about one per channel, natively, as read-state sync does.
+  // required. A live message is checked here only when it would change the
+  // activity; reads check their candidates with [authenticHeadIds].
   static bool _isAuthentic(NostrEvent event) {
     try {
       verifiedNostrEventFromJson(jsonEncode(event.toJson()));
@@ -244,15 +289,19 @@ extension _ChannelLatestMessages on ChannelsNotifier {
   };
 
   /// Fetches each channel's independent latest-message window in one HTTP
-  /// bridge request. The relay preserves NIP-01 per-filter limits while
-  /// executing the filters with bounded concurrency, avoiding an unbounded
-  /// burst of websocket REQs on communities with many channels.
-  Future<List<NostrEvent>?> _fetchLastMessageEvents(
+  /// bridge request, with [_ChannelActivity.authenticHeadIds] of the result.
+  /// The relay preserves NIP-01 per-filter limits while executing the filters
+  /// with bounded concurrency, avoiding an unbounded burst of websocket REQs
+  /// on communities with many channels.
+  Future<({List<NostrEvent> events, Set<String> authentic})?>
+  _fetchLastMessageEvents(
     RelaySessionNotifier session,
     List<ChannelData> channels, {
     Set<String>? failedChannelIds,
   }) async {
-    if (channels.isEmpty) return const [];
+    if (channels.isEmpty) {
+      return (events: const <NostrEvent>[], authentic: const <String>{});
+    }
 
     final filters = [
       for (final channel in channels)
@@ -265,11 +314,16 @@ extension _ChannelLatestMessages on ChannelsNotifier {
         ),
     ];
 
-    return _fetchChannelHistoryBatch(
+    final events = await _fetchChannelHistoryBatch(
       session,
       filters,
       operation: 'latest-message query',
       failedChannelIds: failedChannelIds,
+    );
+    if (events == null) return null;
+    return (
+      events: events,
+      authentic: await _ChannelActivity.authenticHeadIds(events),
     );
   }
 }

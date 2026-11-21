@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:isolate';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
@@ -588,7 +589,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     final channelById = {
       for (final channel in activeChannels) channel.id: channel,
     };
-    final events = latestEvents;
+    final events = latestEvents?.events;
     final lastMessageMap = <String, int>{};
     // An unavailable batch keeps the timestamps already known rather than
     // installing channels whose latest message looks absent.
@@ -605,6 +606,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       latestRequested.map((c) => c.id),
       latestFailedIds,
       events,
+      latestEvents?.authentic ?? const {},
     );
     final mutedChannelIds = _mutedChannelIds();
     for (final event in events ?? const <NostrEvent>[]) {

@@ -103,6 +103,9 @@ extension _UnreadCatchUp on ChannelsNotifier {
         operation: 'unread catch-up',
         failedChannelIds: failedChannelIds,
       );
+      final authenticIds = events == null
+          ? const <String>{}
+          : await _authenticActivityHeads(events, const {});
       // The relay round-trip above is the window Jed's probes park in: a newer
       // refresh, a community switch or an identity switch here means every
       // write below belongs to a channel list the user has left.
@@ -184,7 +187,13 @@ extension _UnreadCatchUp on ChannelsNotifier {
             _unreadDeletedIdsByChannel[channelId]?.contains(event.id) == true) {
           continue;
         }
-        if (_activity.note(channelId, event)) activityAdvanced = true;
+        if (_activity.note(
+          channelId,
+          event,
+          (event) => authenticIds.contains(event.id),
+        )) {
+          activityAdvanced = true;
+        }
         _noteThreadChannel(event, channelId);
         if (event.pubkey.toLowerCase() == myPk.toLowerCase()) continue;
         if (readAt != null && event.createdAt <= readAt) continue;
@@ -309,6 +318,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
     final channelIds = filtersByChannel.keys.toSet();
     final failedChannelIds = <String>{};
     List<NostrEvent>? events;
+    var authenticIds = const <String>{};
     try {
       events = await _fetchChannelHistoryBatch(
         session,
@@ -317,6 +327,9 @@ extension _UnreadCatchUp on ChannelsNotifier {
         failedChannelIds: failedChannelIds,
         optional: true,
       );
+      if (events != null) {
+        authenticIds = await _authenticActivityHeads(events, deletedIds);
+      }
     } catch (error) {
       debugPrint('[ChannelsNotifier] activity gap read failed: $error');
     }
@@ -334,12 +347,32 @@ extension _UnreadCatchUp on ChannelsNotifier {
           _unreadDeletedIdsByChannel[channelId]?.contains(event.id) == true) {
         continue;
       }
-      changed |= _activity.note(channelId, event);
+      changed |= _activity.note(
+        channelId,
+        event,
+        (event) => authenticIds.contains(event.id),
+      );
     }
     final failed = events == null ? channelIds : failedChannelIds;
     changed |= _activity.noteCatchUp(channelIds, failed, sentAt: sentAt);
     if (changed) _publishUnreadCatchUp(const {});
   }
+
+  /// [_ChannelActivity.authenticHeadIds] of [events], skipping posts that are
+  /// deleted, in [deletedIds], by a deletion among [events] or by a deletion
+  /// seen before, since those never count.
+  Future<Set<String>> _authenticActivityHeads(
+    List<NostrEvent> events,
+    Set<String> deletedIds,
+  ) => _ChannelActivity.authenticHeadIds(events, {
+    ...deletedIds,
+    for (final event in events)
+      if (event.kind == EventKind.deletion ||
+          event.kind == EventKind.nip29DeleteEvent)
+        ..._deletionTargets(event),
+    ..._unscopedUnreadDeletedIds,
+    for (final ids in _unreadDeletedIdsByChannel.values) ...ids,
+  });
 
   /// Where a channel's catch-up starts.
   ///

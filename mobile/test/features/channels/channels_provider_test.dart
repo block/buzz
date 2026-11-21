@@ -2588,6 +2588,25 @@ void main() {
         cold.read(channelFilterActivityProvider(_channelA)).isLoading,
         isTrue,
       );
+      // A live post that fails verification leaves it unknown; one that
+      // passes makes it known.
+      failed.emit(
+        NostrEvent.fromJson({
+          ...message('forged live', now - 30).toJson(),
+          'sig': 'f' * 128,
+        }),
+      );
+      await _settle();
+      expect(cold.read(channelsProvider.notifier).activityFor(_channelA), (
+        known: false,
+        at: null,
+      ));
+      failed.emit(message('live', now - 40));
+      await _settle();
+      expect(cold.read(channelsProvider.notifier).activityFor(_channelA), (
+        known: true,
+        at: now - 40,
+      ));
 
       // So does a read whose only post fails verification, and the next
       // list read asks for that channel again.
