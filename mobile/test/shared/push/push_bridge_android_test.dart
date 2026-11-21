@@ -51,25 +51,85 @@ void main() {
     expect(methods, ['startRegistration', 'refreshToken']);
   });
 
-  test('a token clears an earlier registration failure', () async {
-    await native('fcmRegistrationFailed', {'message': 'no network'});
-    expect(fcmRegistrationError.value, 'no network');
-    expect(pushUnavailableReason.value, 'no network');
+  // Each row: the state before, native token events, then what Settings sees.
+  // "Unavailable" is reserved for a phone that cannot get a token at all or
+  // cannot attest; a token fetch failing while a token is held is transient.
+  const attest = 'The phone cannot attest its key.';
+  for (final row
+      in <
+        ({
+          String name,
+          String? token,
+          String? shown,
+          List<(String, String)> events,
+          String? reason,
+        })
+      >[
+        (
+          name: 'a token clears an earlier registration failure',
+          token: null,
+          shown: null,
+          events: [('fail', 'no network'), ('token', 'fcm-token')],
+          reason: null,
+        ),
+        (
+          name: 'a failure with no token shows unavailable',
+          token: null,
+          shown: null,
+          events: [('fail', 'no network')],
+          reason: 'no network',
+        ),
+        (
+          name: 'a token does not clear an attestation failure',
+          token: null,
+          shown: attest,
+          events: [('token', 'fcm-token')],
+          reason: attest,
+        ),
+        (
+          name: 'a failure while a token is held shows nothing',
+          token: 'fcm-token',
+          shown: null,
+          events: [('fail', 'SERVICE_NOT_AVAILABLE')],
+          reason: null,
+        ),
+        (
+          name: 'a failure then a token leave an attestation failure',
+          token: null,
+          shown: attest,
+          events: [('fail', 'no network'), ('token', 'fcm-token')],
+          reason: attest,
+        ),
+        (
+          name: 'two different failures then a token clear the row',
+          token: null,
+          shown: null,
+          events: [
+            ('fail', 'no network'),
+            ('fail', 'SERVICE_NOT_AVAILABLE'),
+            ('token', 'fcm-token'),
+          ],
+          reason: null,
+        ),
+      ]) {
+    test(row.name, () async {
+      fcmDeviceToken.value = row.token;
+      pushUnavailableReason.value = row.shown;
 
-    await native('fcmTokenChanged', {'token': 'fcm-token'});
+      for (final (kind, value) in row.events) {
+        if (kind == 'fail') {
+          await native('fcmRegistrationFailed', {'message': value});
+          expect(fcmRegistrationError.value, value);
+        } else {
+          await native('fcmTokenChanged', {'token': value});
+          expect(fcmDeviceToken.value, value);
+          expect(fcmRegistrationError.value, isNull);
+        }
+      }
 
-    expect(fcmDeviceToken.value, 'fcm-token');
-    expect(fcmRegistrationError.value, isNull);
-    expect(pushUnavailableReason.value, isNull);
-  });
-
-  test('a token does not clear an attestation failure', () async {
-    pushUnavailableReason.value = 'The phone cannot attest its key.';
-
-    await native('fcmTokenChanged', {'token': 'fcm-token'});
-
-    expect(pushUnavailableReason.value, 'The phone cannot attest its key.');
-  });
+      expect(pushUnavailableReason.value, row.reason);
+    });
+  }
 
   test('enrolls through the Dart authority and exposes its grants', () async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;

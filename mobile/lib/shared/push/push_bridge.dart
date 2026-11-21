@@ -625,8 +625,15 @@ void installBuzzPushMethodHandler() {
         final reason = message is String && message.isNotEmpty
             ? message
             : 'FCM registration failed';
+        final previous = fcmRegistrationError.value;
         fcmRegistrationError.value = reason;
-        pushUnavailableReason.value = reason;
+        // A held token still delivers, so a failed refresh is transient. Never
+        // overwrite another reason, such as attestation, which enrollment owns.
+        final shown = pushUnavailableReason.value;
+        if (fcmDeviceToken.value == null &&
+            (shown == null || shown == previous)) {
+          pushUnavailableReason.value = reason;
+        }
         debugPrint('FCM registration failed: $reason');
         return null;
       default:
