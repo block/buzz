@@ -30,6 +30,7 @@ final _community = Community(
   id: 'community',
   name: 'Example',
   relayUrl: 'https://relay.example.org',
+  pubkey: 'me',
   addedAt: DateTime.utc(2026),
 );
 
@@ -37,6 +38,7 @@ final _elsewhere = Community(
   id: 'elsewhere',
   name: 'Elsewhere',
   relayUrl: 'https://other.example.org',
+  pubkey: 'me elsewhere',
   addedAt: DateTime.utc(2026),
 );
 
@@ -67,6 +69,7 @@ Map<String, String> _reply(
   String? replyRootId,
   int createdAt = 1000,
   bool inSolo = false,
+  String? recipientPubkey,
 }) => {
   'id': id,
   'text': 'reply $id',
@@ -75,6 +78,8 @@ Map<String, String> _reply(
   'channelId': channelId,
   'threadRootId': ?threadRootId,
   'senderPubkey': _sender,
+  'recipientPubkey':
+      recipientPubkey ?? (communityId == 'elsewhere' ? 'me elsewhere' : 'me'),
   'replyRootId': ?replyRootId,
   'messageCreatedAt': '$createdAt',
   if (inSolo) 'inSolo': 'true',
@@ -143,6 +148,23 @@ void main() {
 
         // Once iOS has ended a reply as not sent, it never goes out.
         _reply('18'),
+
+        // A community signed in again as another account on the same relay
+        // keeps its ID, but the reply was typed for the earlier account: it
+        // is never sent or kept as the new one's draft, so iOS shows its text
+        // in a notification, as for a gone community.
+        _reply('19', recipientPubkey: 'earlier account'),
+        {
+          ..._reply(
+            '20',
+            communityId: 'elsewhere',
+            recipientPubkey: 'earlier account',
+          ),
+          'recovered': 'true',
+        },
+        // A notification from an earlier build doesn't say whose it was, so
+        // only its community is checked.
+        {..._reply('21')}..remove('recipientPubkey'),
       ];
       // What iOS hears, in order, alongside each message sent.
       final log = <String>[];
@@ -187,11 +209,14 @@ void main() {
       final sender = _RecordingSender(onSend: (text) => log.add('sent $text'));
       final session = _Session();
       var active = _community;
+      var communities = [_community, _elsewhere];
       final container = ProviderContainer(
         overrides: [
           savedPrefsProvider.overrideWithValue(prefs),
           authProvider.overrideWith(_Auth.new),
-          communityListProvider.overrideWith(_Communities.new),
+          communityListProvider.overrideWith(
+            () => _Communities(() => communities),
+          ),
           communityStorageProvider.overrideWithValue(_Storage()),
           activeCommunityProvider.overrideWith((ref) async => active),
           channelsProvider.overrideWith(
@@ -235,6 +260,9 @@ void main() {
         '15': 'unknown',
         '16': 'no draft',
         '18': 'draft in $_message',
+        '19': 'no draft',
+        '20': 'no draft',
+        '21': 'sent',
       });
       // iOS knows a reply may go out before anything is published.
       expect(log, [
@@ -243,6 +271,8 @@ void main() {
           'sent reply $id',
         ],
         'may publish 18',
+        'may publish 21',
+        'sent reply 21',
       ]);
       expect(sender.calls, [
         ('general', 'reply 1', _message, _message, _sender),
@@ -250,6 +280,7 @@ void main() {
         ('solo', 'reply 3', null, null, _sender),
         ('left', 'reply 10', _message, _message, ''),
         ('lost', 'reply 11', _message, _message, _sender),
+        ('general', 'reply 21', _message, _message, _sender),
       ]);
       // Read only up to each notified message, so newer ones stay unread.
       expect(container.read(readStateProvider).contexts, {
@@ -267,10 +298,13 @@ void main() {
         elsewhere,
         contains('"key":"own","channel_id":"own","text":"reply 13"'),
       );
-      // The gone community's reply is kept nowhere.
-      expect([
-        for (final key in prefs.getKeys()) '${prefs.get(key)}',
-      ], everyElement(isNot(contains('reply 16'))));
+      // The gone community's reply is kept nowhere, nor is another
+      // account's.
+      for (final id in ['16', '19', '20']) {
+        expect([
+          for (final key in prefs.getKeys()) '${prefs.get(key)}',
+        ], everyElement(isNot(contains('reply $id'))));
+      }
       expect(
         drafts.textFor(composeDraftKey('broken', threadHeadId: _message)),
         'reply 5',
@@ -331,6 +365,36 @@ void main() {
         contains('"text":"reply 8\\n\\nreply 9"'),
       );
       expect(prefs.getString(_elsewhereDrafts), isNot(contains('reply 9')));
+
+      // Credentials replaced in place while the relay connects: the same
+      // community and stored key, but it now signs as another account. The
+      // reply is never sent or kept as that account's draft.
+      final keys = nostr.Keys.generate();
+      final signedIn = _community.copyWith(
+        pubkey: keys.public,
+        nsec: keys.nsec,
+      );
+      final replaced = signedIn.copyWith(nsec: nostr.Keys.generate().nsec);
+      active = signedIn;
+      communities = [signedIn, _elsewhere];
+      container
+        ..invalidate(activeCommunityProvider)
+        ..invalidate(communityListProvider);
+      await container.read(activeCommunityProvider.future);
+      session.onConnect = () async {
+        active = replaced;
+        communities = [replaced, _elsewhere];
+        container
+          ..invalidate(activeCommunityProvider)
+          ..invalidate(communityListProvider);
+        await container.read(activeCommunityProvider.future);
+      };
+      await signalReply(_reply('22', recipientPubkey: keys.public));
+      expect(outcomes['22'], 'no draft');
+      expect(sender.calls.last.$2, 'reply 7');
+      expect([
+        for (final key in prefs.getKeys()) '${prefs.get(key)}',
+      ], everyElement(isNot(contains('reply 22'))));
     },
   );
 
@@ -485,8 +549,12 @@ class _Storage extends CommunityStorage {
 }
 
 class _Communities extends CommunityListNotifier {
+  _Communities([this.communities]);
+  final List<Community> Function()? communities;
+
   @override
-  Future<List<Community>> build() async => [_community, _elsewhere];
+  Future<List<Community>> build() async =>
+      communities?.call() ?? [_community, _elsewhere];
 }
 
 class _Session extends RelaySessionNotifier {
