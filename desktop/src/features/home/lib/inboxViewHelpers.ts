@@ -5,6 +5,7 @@ import {
   type InboxItem,
 } from "@/features/home/lib/inbox";
 import { isProjectInboxItem } from "@/features/home/lib/projectInbox";
+import { hasGroupedUnreadOverride } from "@/features/home/useHomeInboxReadState";
 import {
   getChannelIdFromTags,
   getThreadReference,
@@ -249,4 +250,45 @@ export function toTimelineMessage(
     tags: message.tags,
     time: message.timeLabel ?? message.fullTimestampLabel,
   };
+}
+
+/**
+ * Whether an Inbox row is listed under the active filter and Unread toggle.
+ *
+ * With Unread on, a category filter (Mentions, Needs action) needs an unread
+ * item of that category. An unread row is not enough: the mention may be read
+ * while later, unrelated replies are not. A row the user marked unread, and
+ * the selected conversation, stay listed.
+ */
+export function isInboxItemVisible(
+  item: InboxItem,
+  options: {
+    doneSet: ReadonlySet<string>;
+    filter: InboxFilter;
+    localUnreadSet: ReadonlySet<string>;
+    ownedAgentPubkeys?: ReadonlySet<string>;
+    selectedConversationId: string | null;
+    unreadOnly: boolean;
+  },
+): boolean {
+  const { filter } = options;
+  if (!matchesInboxFilter(item, filter, options.ownedAgentPubkeys)) {
+    return false;
+  }
+  if (
+    !options.unreadOnly ||
+    item.conversationId === options.selectedConversationId
+  ) {
+    return true;
+  }
+  if (options.doneSet.has(item.id)) {
+    return false;
+  }
+  if (
+    (filter !== "mention" && filter !== "needs_action") ||
+    hasGroupedUnreadOverride(item, options.localUnreadSet)
+  ) {
+    return true;
+  }
+  return (item.unreadCategories ?? item.categories).includes(filter);
 }
