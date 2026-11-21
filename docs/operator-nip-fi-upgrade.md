@@ -70,13 +70,15 @@ Inspect `mode` and `effective_required` separately from the stored flag.
 `shadow` follows the stored flag, and also requires FI for communities inside
 the `BUZZ_NIP_FI_ENFORCE_PERCENT` cohort; a stored disable does not take a
 community out of the cohort, only lowering the percentage does. An enable
-receipt remains pending even after local sweeps, since it cannot certify fleet-wide connection closure. Required
-host caches can over-restrict for their remaining one-second lease after disable.
-When the effective policy becomes optional, a racing sweep may close one last
-non-FI socket; it can reconnect under optional policy. A community inside the
-cohort, or any community under global `enforce`, stays required: its non-FI
-sockets keep closing on revalidation, and reconnects still need FI. FI-admitted sockets retain their finite deadline. Re-enable repeats the
-optional-lease drain and existing periodic revalidation.
+receipt remains pending even after local sweeps, since it cannot certify
+fleet-wide connection closure. Required host caches can over-restrict for their
+remaining one-second lease after disable. When the effective policy becomes
+optional, a racing sweep may close one last non-FI socket; it can reconnect
+under optional policy. A community inside the cohort, or any community under
+global `enforce`, stays required: its non-FI sockets keep closing on
+revalidation, and reconnects still need FI. FI-admitted sockets retain their
+finite deadline. Re-enable repeats the optional-lease drain and existing
+periodic revalidation.
 
 The old `nip-fi-upgrade` command and endpoint are removed. Requests to that
 route now return 404. Recover historical receipts with `nip-fi-policy status
