@@ -1,0 +1,21 @@
+{
+  "$schema": "https://open-plugin-spec.org/schema/v1/plugin.json",
+  "id": "com.example.demo-crew",
+  "name": "Demo Crew",
+  "version": "0.1.0",
+  "description": "A four-agent team for running Buzz in front of a live audience: Lead plans and delegates, Maker drafts, Challenger red-teams, Guard flags data that should not have been shared.",
+  "keywords": ["demo", "facilitation", "review", "data-security"],
+  "personas": [
+    "agents/lead.persona.md",
+    "agents/maker.persona.md",
+    "agents/challenger.persona.md",
+    "agents/guard.persona.md"
+  ],
+  "pack_instructions": "instructions.md",
+  "defaults": {
+    "temperature": 0.6,
+    "triggers": { "mentions": true, "keywords": [], "all_messages": false },
+    "thread_replies": true,
+    "broadcast_replies": false
+  }
+}
