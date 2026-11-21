@@ -246,8 +246,24 @@ pub(crate) fn terminate_process(pid: u32) -> Result<(), String> {
     // Try graceful shutdown first (SIGTERM to the group).
     signal_process_group_or_leader(pid, libc::SIGTERM, "terminate")?;
 
-    // Wait up to 1s for graceful exit.
-    for _ in 0..10 {
+    // Wait up to 5s for graceful exit before escalating to SIGKILL.
+    //
+    // `pid` here is the buzz-acp harness itself, and this signals its own
+    // process group — NOT its ACP agent children, which each launch as the
+    // leader of their own separate process group (see `process_group(0)` in
+    // buzz-acp's spawn code) specifically so a SIGKILL to the harness's group
+    // can't reach them. Those children are only reaped when the harness's own
+    // SIGTERM handler runs `shutdown_agent_pool()`, which awaits a graceful
+    // `killpg` + bounded reap for every pooled worker in turn. Cutting this
+    // grace window short (previously 1s) races that drain: SIGKILL can land
+    // on the harness mid-drain, leaving any not-yet-reaped worker orphaned
+    // with no parent and no process group any future group-kill can target.
+    // 5s covers a normal-sized pool's drain in the common case; anything that
+    // still leaks past this window is caught within ~2 minutes by the
+    // periodic orphan sweep (`sweep_system_agent_processes_with_grace`,
+    // desktop/src-tauri/src/lib.rs) once the dead harness's PID falls out of
+    // the tracked set.
+    for _ in 0..50 {
         if !process_is_running(pid) {
             return Ok(());
         }
