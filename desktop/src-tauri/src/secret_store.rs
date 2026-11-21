@@ -21,8 +21,81 @@
 //! divergent-behavior trap.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+/// Advice for a credential store that has no room for another entry.
+///
+/// Composed with deliberate single spaces: this is written to a log file and
+/// shown to a person, so a line-continued literal that leaves runs of padding
+/// in the middle of sentences is a defect, not a formatting detail.
+const FULL_CREDENTIAL_STORE_ADVICE: &str = concat!(
+    "The Windows Credential Manager will not accept another entry. ",
+    "Remove unused entries under Control Panel \u{2192} User Accounts \u{2192} ",
+    "Credential Manager \u{2192} Windows Credentials, then start Buzz again. ",
+    "Retrying or rebooting will not help on its own.",
+);
+
+/// Actionable advice for a keyring failure that retrying will never clear.
+///
+/// The generic "retry once the keyring is reachable" wording is wrong for
+/// these: the backend *is* reachable and the service *is* running — it simply
+/// will not accept another entry. Returns `None` for everything else, where
+/// the existing wording is right.
+///
+/// Windows `CredWriteW` reports a full credential store as error code 8,
+/// `ERROR_NOT_ENOUGH_MEMORY`, which reads like a memory problem and is not one
+/// (#5956). `cmdkey /generic:test /user:test /pass:test` fails the same way on
+/// an affected machine, so it is not specific to Buzz.
+///
+/// **The write context is load-bearing.** This advice tells the user to delete
+/// credentials, so it must only fire when a *write* was refused. The same code
+/// can surface from a read, an entry constructor, or an identity file, and
+/// prescribing credential deletion for one of those sends the user to destroy
+/// data over an unrelated failure.
+pub fn keyring_failure_advice(error: &str) -> Option<&'static str> {
+    let lowered = error.to_ascii_lowercase();
+    let refused_a_write = lowered.contains("keyring write") || lowered.contains("credwrite");
+    if !refused_a_write {
+        return None;
+    }
+    let store_is_full = lowered.contains("windows error code 8")
+        || lowered.contains("error_not_enough_memory")
+        || lowered.contains("os error 8");
+    store_is_full.then_some(FULL_CREDENTIAL_STORE_ADVICE)
+}
+
+/// File a fatal startup failure is recorded in, beside the data it could not
+/// read.
+pub const STARTUP_ERROR_LOG: &str = "startup-error.log";
+
+/// Remove a startup error recorded by an earlier launch.
+///
+/// The file outlives the failure it describes. Once identity resolution
+/// succeeds, a leftover copy is a stale fatal reason sitting next to a working
+/// install, and the next person to read it — including the next person
+/// diagnosing an unrelated problem — is looking at a lie. A missing file is
+/// success; anything else is worth reporting, because a file that cannot be
+/// removed will keep misleading.
+pub fn clear_startup_error_log(data_dir: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(data_dir.join(STARTUP_ERROR_LOG)) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
+/// Compose the fatal-startup message for a failed identity resolution.
+///
+/// `buzz-desktop.exe` is a GUI-subsystem binary on Windows, so it has no
+/// console and this text is invisible unless the user knows to redirect
+/// stderr — which is why it has to be worth reading when they finally do, and
+/// why the caller also writes it to a file (#5956).
+pub fn fatal_identity_message(error: &str) -> String {
+    match keyring_failure_advice(error) {
+        Some(advice) => format!("identity resolution failed: {error}\n{advice}"),
+        None => format!("identity resolution failed: {error}"),
+    }
+}
 
 /// Result of probing the keyring before a migration: distinguishes "reachable
 /// but holds no entry" (safe to migrate into) from "unreachable this boot"
@@ -1302,5 +1375,122 @@ mod tests {
         );
         // Agent key should also be gone.
         assert_eq!(store3.load("agent:abc123").unwrap(), None);
+    }
+}
+
+#[cfg(test)]
+mod keyring_failure_advice_tests {
+    use super::{clear_startup_error_log, keyring_failure_advice, STARTUP_ERROR_LOG};
+
+    #[test]
+    fn a_refused_write_to_a_full_store_gets_actionable_advice() {
+        let advice = keyring_failure_advice(
+            "keyring write: Platform secure storage failure: Windows error code 8",
+        )
+        .expect("advice for a full credential store");
+        assert!(advice.contains("Credential Manager"), "{advice}");
+        assert!(
+            advice.contains("not help"),
+            "the advice must say retrying is pointless: {advice}"
+        );
+    }
+
+    #[test]
+    fn the_symbolic_spelling_is_recognised_too() {
+        assert!(
+            keyring_failure_advice("keyring write: CredWrite failed: ERROR_NOT_ENOUGH_MEMORY")
+                .is_some()
+        );
+        assert!(keyring_failure_advice("CredWrite: Windows error code 8").is_some());
+    }
+
+    #[test]
+    fn the_same_code_from_a_read_gets_no_advice() {
+        // The advice says to delete credentials. Prescribing that for a read,
+        // an entry constructor or an identity file sends the user to destroy
+        // data over an unrelated failure.
+        for error in [
+            "keyring read: Platform secure storage failure: Windows error code 8",
+            "keyring entry: Platform secure storage failure: Windows error code 8",
+            "keyring get: Windows error code 8",
+            "keyring unavailable: Windows error code 8",
+            "read identity.key: os error 8",
+        ] {
+            assert_eq!(keyring_failure_advice(error), None, "{error}");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_failure_keeps_the_existing_wording() {
+        for error in [
+            "keyring write: No such file or directory",
+            "keyring write: Access denied",
+            "keyring entry: Platform secure storage failure: the user cancelled",
+        ] {
+            assert_eq!(keyring_failure_advice(error), None, "{error}");
+        }
+    }
+
+    #[test]
+    fn the_advice_reads_as_prose() {
+        let advice = keyring_failure_advice("keyring write: Windows error code 8").unwrap();
+        assert!(
+            !advice.contains("  "),
+            "a line-continued literal left padding mid-sentence: {advice:?}"
+        );
+        assert_eq!(
+            advice,
+            "The Windows Credential Manager will not accept another entry. \
+Remove unused entries under Control Panel \u{2192} User Accounts \u{2192} \
+Credential Manager \u{2192} Windows Credentials, then start Buzz again. \
+Retrying or rebooting will not help on its own."
+        );
+    }
+
+    #[test]
+    fn clearing_the_startup_log_removes_it_and_tolerates_its_absence() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(STARTUP_ERROR_LOG);
+
+        // Missing file is success — nothing failed, nothing to clean.
+        clear_startup_error_log(dir.path()).expect("absent log is not an error");
+
+        std::fs::write(&path, "buzz-desktop: fatal: identity resolution failed\n")
+            .expect("write log");
+        assert!(path.exists());
+        clear_startup_error_log(dir.path()).expect("removes the stale log");
+        assert!(
+            !path.exists(),
+            "a stale fatal reason beside a working install misdiagnoses the next launch"
+        );
+
+        // Idempotent: a second successful launch must not start failing.
+        clear_startup_error_log(dir.path()).expect("second clear is still fine");
+    }
+}
+
+#[cfg(test)]
+mod fatal_identity_message_tests {
+    use super::fatal_identity_message;
+
+    #[test]
+    fn a_recognised_failure_carries_its_advice() {
+        let message = fatal_identity_message(
+            "keyring write: Platform secure storage failure: Windows error code 8",
+        );
+        assert!(
+            message.starts_with("identity resolution failed: "),
+            "{message}"
+        );
+        assert!(message.contains("Credential Manager"), "{message}");
+    }
+
+    #[test]
+    fn an_unrecognised_failure_is_reported_as_is() {
+        let message = fatal_identity_message("app data dir: permission denied");
+        assert_eq!(
+            message,
+            "identity resolution failed: app data dir: permission denied"
+        );
     }
 }
