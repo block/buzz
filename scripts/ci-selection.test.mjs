@@ -223,6 +223,16 @@ const scenarios = [
     ["mobile", "mobile-native"],
   ],
   [
+    "mobile bundled font",
+    ["mobile/assets/fonts/InterVariable.ttf"],
+    ["mobile", "mobile-native"],
+  ],
+  [
+    "mobile build script",
+    ["mobile/scripts/require-push-gateway-origin.sh"],
+    ["mobile", "mobile-native"],
+  ],
+  [
     "mobile iOS source",
     ["mobile/ios/Runner/IosMediaCarousel.swift"],
     ["mobile", "mobile-native"],

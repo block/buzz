@@ -126,6 +126,10 @@ jobs:
             mobile-native:
               - 'mobile/ios/**'
               - 'mobile/packages/**'
+              # Native code loads fonts and emoji data from the Flutter asset
+              # bundle, and the Xcode build runs a script from mobile/scripts.
+              - 'mobile/assets/**'
+              - 'mobile/scripts/**'
               - 'mobile/pubspec.yaml'
               - 'mobile/pubspec.lock'
               - 'bin/flutter'
