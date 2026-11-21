@@ -119,3 +119,38 @@ test("expired-overlay-guard: formatTimeoutRemaining returns null for past/bounda
     `formatTimeoutRemaining must return a non-empty string for a future expiry; got: ${s}`,
   );
 });
+
+test("clearing releases a timeout that carries no expiry", () => {
+  reset();
+  recordTimeoutFromRejection("restricted: you are timed out until 0");
+  const recorded = getTimeoutSnapshot();
+  assert.equal(recorded.active, true);
+  assert.equal(recorded.expiresAtMs, null);
+  clearTimeoutState();
+  assert.equal(getTimeoutSnapshot().active, false);
+});
+
+test("clearing an already-clear store keeps snapshot identity", () => {
+  reset();
+  const before = getTimeoutSnapshot();
+  clearTimeoutState();
+  assert.equal(
+    getTimeoutSnapshot(),
+    before,
+    "snapshot identity must stay stable so useSyncExternalStore does not loop",
+  );
+});
+
+test("a later rejection replaces the recorded expiry", () => {
+  reset();
+  recordTimeoutFromRejection(
+    "restricted: you are timed out until 1000000000",
+  );
+  const first = getTimeoutSnapshot().expiresAtMs;
+  recordTimeoutFromRejection(
+    "restricted: you are timed out until 2000000000",
+  );
+  const second = getTimeoutSnapshot().expiresAtMs;
+  assert.notEqual(first, second);
+  assert.equal(getTimeoutSnapshot().active, true);
+});
