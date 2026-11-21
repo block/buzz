@@ -40,6 +40,12 @@
 //!                            — expose a `_PostCompact` hook tool
 //!   FAKE_MCP_POSTCOMPACT_TEXT=text
 //!                            — `_PostCompact` returns this (default: "")
+//!   FAKE_MCP_PRETURN_HOOK=1  — expose a `_PreTurn` hook tool
+//!   FAKE_MCP_PRETURN_TEXT=text
+//!                            — `_PreTurn` returns this (default: ""). The
+//!                              literal `{prompt}` is replaced by the
+//!                              `prompt` argument the agent passed.
+//!   FAKE_MCP_PRETURN_DELAY=N — `_PreTurn` sleeps N seconds before replying
 //!   FAKE_MCP_SHELL_TOOL=1    — expose a tool whose bare name is `shell`
 //!                              (registered as `<server>__shell`), taking a
 //!                              `command` string. Lets a test drive the
@@ -93,6 +99,7 @@ fn make_tools(
     desc: &str,
     include_stop_hook: bool,
     include_post_compact_hook: bool,
+    include_preturn_hook: bool,
     include_shell_tool: bool,
     named_tools: &[String],
 ) -> Vec<Value> {
@@ -123,6 +130,13 @@ fn make_tools(
         tools.push(json!({
             "name": "_PostCompact",
             "description": "post compact hook",
+            "inputSchema": { "type": "object", "properties": {} },
+        }));
+    }
+    if include_preturn_hook {
+        tools.push(json!({
+            "name": "_PreTurn",
+            "description": "pre turn hook",
             "inputSchema": { "type": "object", "properties": {} },
         }));
     }
@@ -175,6 +189,9 @@ fn main() {
     let post_compact_hook = env_flag("FAKE_MCP_POSTCOMPACT_HOOK");
     let shell_tool = env_flag("FAKE_MCP_SHELL_TOOL");
     let post_compact_text = std::env::var("FAKE_MCP_POSTCOMPACT_TEXT").unwrap_or_default();
+    let preturn_hook = env_flag("FAKE_MCP_PRETURN_HOOK");
+    let preturn_text = std::env::var("FAKE_MCP_PRETURN_TEXT").unwrap_or_default();
+    let preturn_delay_secs = env_u64("FAKE_MCP_PRETURN_DELAY", 0);
     // One extra no-arg tool per comma-separated bare name.
     let named_tools: Vec<String> = std::env::var("FAKE_MCP_NAMED_TOOLS")
         .unwrap_or_default()
@@ -257,6 +274,7 @@ fn main() {
                             &desc,
                             stop_hook,
                             post_compact_hook,
+                            preturn_hook,
                             shell_tool,
                             &named_tools,
                         )
@@ -331,6 +349,28 @@ fn main() {
                         id,
                         json!({
                             "content": [{ "type": "text", "text": post_compact_text }],
+                            "isError": false,
+                        }),
+                    );
+                    continue;
+                }
+                if called_name == "_PreTurn" {
+                    if preturn_delay_secs > 0 {
+                        std::thread::sleep(std::time::Duration::from_secs(preturn_delay_secs));
+                    }
+                    let prompt = msg
+                        .get("params")
+                        .and_then(|p| p.get("arguments"))
+                        .and_then(|a| a.get("prompt"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    write_response(
+                        id,
+                        json!({
+                            "content": [{
+                                "type": "text",
+                                "text": preturn_text.replace("{prompt}", prompt),
+                            }],
                             "isError": false,
                         }),
                     );
