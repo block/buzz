@@ -709,6 +709,17 @@ fn build_query_events_sql(
 
     let reference_tag_fence = reference_tag_fence(q);
     let per_channel = per_channel_scope(q);
+    let auxiliary_refs = q.e_tags.as_deref().filter(|tags| {
+        !tags.is_empty()
+            && q.p_tag_hex.is_none()
+            && per_channel.is_none()
+            && q.kinds.as_deref().is_some_and(|kinds| {
+                !kinds.is_empty()
+                    && kinds
+                        .iter()
+                        .all(|kind| matches!(kind, 5 | 7 | 9005 | 40003))
+            })
+    });
     let mut qb: QueryBuilder<sqlx::Postgres> = if let Some(ref p_hex) = q.p_tag_hex {
         // Join against event_mentions for #p-filtered queries (indexed).
         let mut b = QueryBuilder::new(if reference_tag_fence {
@@ -736,17 +747,29 @@ fn build_query_events_sql(
                 .push("::uuid[]) AS ch) c CROSS JOIN LATERAL (");
         }
         b.push(
-            "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id \
-             FROM events WHERE community_id = ",
+            "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id FROM ",
         );
-        b.push_bind(q.community_id.as_uuid());
-        b.push(" AND deleted_at IS NULL");
+        if let Some(targets) = auxiliary_refs {
+            b.push("(");
+            push_auxiliary_source(
+                &mut b,
+                q.community_id,
+                targets,
+                q.kinds.as_deref().is_some_and(|kinds| kinds.contains(&7)),
+                q.until,
+            );
+            b.push(") AS events WHERE deleted_at IS NULL");
+        } else {
+            b.push("events WHERE community_id = ")
+                .push_bind(q.community_id.as_uuid())
+                .push(" AND deleted_at IS NULL");
+        }
         b
     };
 
     // Use unqualified column names when no join, qualified when joined.
     let col_prefix = if q.p_tag_hex.is_some() { "e." } else { "" };
-    push_event_filters(&mut qb, col_prefix, q);
+    push_event_filters(&mut qb, col_prefix, q, auxiliary_refs.is_some());
     // A per-channel read scopes each lateral to one channel of the set.
     if per_channel.is_some() {
         qb.push(" AND channel_id = c.ch");
@@ -782,7 +805,12 @@ fn build_query_events_sql(
 /// AND every [`EventQuery`] predicate except the community, the `deleted_at`
 /// test, the channel scope (`push_channel_scope`) and the `#p` join, on
 /// columns qualified by `col_prefix` (`""` or `"e."`).
-fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q: &EventQuery) {
+fn push_event_filters(
+    qb: &mut QueryBuilder<sqlx::Postgres>,
+    col_prefix: &str,
+    q: &EventQuery,
+    matched_e_tags: bool,
+) {
     // Generic reads return only current artifact revisions, including delete
     // tombstones; explicit revision IDs also read earlier revisions.
     if q.ids.is_none() {
@@ -836,16 +864,13 @@ fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q
         }
     }
 
-    // e-tag pushdown: exact positional match with a JSONB containment
-    // prefilter, tags @> ANY('[["e","<hex>"]]', ...). Served by idx_events_tags_gin
-    // (GIN, jsonb_path_ops — migrations/0004): the channel-window aux closure
-    // fans this out once per retained row, which made unindexed containment
-    // the dominant scroll-back cost (~1.7s/page on staging).
-    if let Some(ref e_tags) = q.e_tags {
-        if !e_tags.is_empty() {
-            qb.push(" AND ");
-            push_e_tag_match(qb, col_prefix, e_tags);
-        }
+    if let Some(e_tags) = q
+        .e_tags
+        .as_deref()
+        .filter(|tags| !matched_e_tags && !tags.is_empty())
+    {
+        qb.push(" AND ");
+        push_e_tag_match(qb, col_prefix, e_tags);
     }
 
     // a-tag pushdown: the same exact match and GIN prefilter as `#e`.
@@ -1032,7 +1057,7 @@ fn build_thread_reply_sql(q: &EventQuery, root: Vec<u8>) -> QueryBuilder<sqlx::P
         qb.push(" AND tm.event_created_at <= ").push_bind(u);
     }
     qb.push(" AND e.deleted_at IS NULL");
-    push_event_filters(&mut qb, "e.", q);
+    push_event_filters(&mut qb, "e.", q, false);
     push_channel_scope(&mut qb, "e.", q);
     qb.push(" ORDER BY tm.event_created_at DESC, tm.event_id ASC LIMIT ");
     qb.push_bind(page_limit(q));
@@ -1325,6 +1350,64 @@ fn push_exact_tag_match(
     values: &[String],
 ) {
     push_tag_match(qb, col_prefix, name, values, false);
+}
+
+/// Source signed auxiliary events in one snapshot. Projected reactions have a
+/// single canonical reference and are looked up in `reactions`; older and
+/// multi-tag events use the positional auxiliary index. The marker makes the
+/// sources disjoint, even while old and new relay versions coexist.
+pub(crate) fn push_auxiliary_source(
+    qb: &mut QueryBuilder<sqlx::Postgres>,
+    community: CommunityId,
+    targets: &[String],
+    include_reactions: bool,
+    until: Option<DateTime<Utc>>,
+) {
+    // Match the partial predicate of idx_events_window_aux_e_tags. Keeping an
+    // independent expression prevents the all-event tags GIN from serving it.
+    qb.push("SELECT * FROM events WHERE community_id = ")
+        .push_bind(community.as_uuid())
+        .push(
+            r#" AND kind IN (5, 7, 9005, 40003)
+            AND (kind <> 7 OR (deleted_at IS NULL AND NOT reaction_read_projected))
+            AND jsonb_path_query_array(tags,
+            'strict $[*] ? (@.type() == "array" && @[0] == "e" && @[1].type() == "string")[1]',
+            '{}'::jsonb, true) ?| "#,
+        )
+        .push_bind(targets)
+        .push("::text[]");
+
+    if !include_reactions {
+        return;
+    }
+    // Preserve case-sensitive NIP-01 matching. Only lowercase targets can have
+    // the projection marker. Other references remain eligible in the index.
+    let target_ids: Vec<Vec<u8>> = targets
+        .iter()
+        .filter(|id| id.len() == 64 && !id.bytes().any(|byte| byte.is_ascii_uppercase()))
+        .filter_map(|id| hex::decode(id).ok())
+        .collect();
+    if target_ids.is_empty() {
+        return;
+    }
+
+    qb.push(
+        " UNION ALL SELECT e.* FROM reactions r JOIN LATERAL ( \
+        SELECT * FROM events e WHERE e.community_id = r.community_id \
+        AND e.created_at = r.reaction_event_created_at AND e.id = r.reaction_event_id \
+        AND e.kind = 7 AND e.reaction_read_projected AND e.deleted_at IS NULL LIMIT 1 \
+        ) e ON true WHERE r.community_id = ",
+    )
+    .push_bind(community.as_uuid())
+    .push(" AND r.event_id = ANY(")
+    .push_bind(target_ids)
+    .push(") AND r.reaction_event_created_at IS NOT NULL");
+    // The signed event determines visibility. Old writers and post-commit
+    // removal handlers can leave removed_at behind the event tombstone.
+    if let Some(until) = until {
+        qb.push(" AND r.reaction_event_created_at <= ")
+            .push_bind(until);
+    }
 }
 
 /// Above this many `#e` values, [`push_e_tag_match`] hides them from the
@@ -2020,6 +2103,18 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
     channel_id: Option<Uuid>,
     thread_meta: Option<ThreadMetadataParams<'_>>,
 ) -> Result<(StoredEvent, bool)> {
+    insert_event_with_reaction_projection_tx(tx, event, channel_id, thread_meta, false).await
+}
+
+/// Insert a signed event and its thread metadata. Reaction ingestion sets the
+/// projection marker only when the same transaction stores its source key.
+pub(crate) async fn insert_event_with_reaction_projection_tx(
+    tx: &mut AdmittedTx,
+    event: &Event,
+    channel_id: Option<Uuid>,
+    thread_meta: Option<ThreadMetadataParams<'_>>,
+    reaction_read_projected: bool,
+) -> Result<(StoredEvent, bool)> {
     let community_id = tx.community();
     let kind_u16 = event.kind.as_u16();
     let kind_u32 = u32::from(kind_u16);
@@ -2067,8 +2162,8 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
 
     let result = sqlx::query(
         r#"
-        INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag, not_before, reaction_read_projected)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         ON CONFLICT DO NOTHING
         "#,
     )
@@ -2084,6 +2179,7 @@ pub(crate) async fn insert_event_with_thread_metadata_tx(
     .bind(channel_id)
     .bind(d_tag.as_deref())
     .bind(not_before)
+    .bind(reaction_read_projected)
     .execute(tx.conn())
     .await?;
 
@@ -3103,7 +3199,7 @@ mod e_tag_filter_shape_tests {
     #[test]
     fn e_tag_query_filters_in_materialized_fence_before_order_limit() {
         let mut q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
-        q.kinds = Some(vec![7]);
+        q.kinds = Some(vec![9]);
         q.e_tags = Some((0..188).map(|i| format!("{i:064x}")).collect());
         let qb = build_query_events_sql(&q, Range::All, page_limit(&q));
         let sql = qb.sql().as_str().to_owned();

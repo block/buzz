@@ -321,6 +321,122 @@ async fn thread_window_predicates_corruption_and_legacy() {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn thread_aux_indexes_live_references_and_skips_removed_reactions() {
+    use sqlx::Execute as _;
+
+    let (db, community, channel, keys, root) = fixture().await;
+    let ts = root.created_at.as_secs();
+    let live = make_event(&keys, channel, 7, "+", Some(&root), ts);
+    let removed = make_event(&keys, channel, 7, "-", Some(&root), ts);
+    let edit = make_event(&keys, channel, 40003, "old edit", Some(&root), ts);
+    for event in [&live, &removed, &edit] {
+        db.insert_event(community, event, Some(channel))
+            .await
+            .unwrap();
+    }
+    sqlx::query("UPDATE events SET deleted_at = now() WHERE community_id = $1 AND id = ANY($2)")
+        .bind(community.as_uuid())
+        .bind([removed.id.to_bytes().to_vec(), edit.id.to_bytes().to_vec()])
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let projected = make_event(&keys, channel, 7, "😄", Some(&root), ts);
+    db.insert_reaction_event_with_thread_metadata(
+        community,
+        &projected,
+        Some(channel),
+        None,
+        root.id.as_bytes(),
+        &keys.public_key().to_bytes(),
+        &projected.content,
+    )
+    .await
+    .unwrap();
+
+    let targets = [root.id.to_hex()];
+    let kinds = [5, 7, 9005, 40003];
+    let query = AuxQuery {
+        community,
+        targets: &targets,
+        kinds: &kinds,
+        accessible: &[channel],
+        cursor: None,
+    };
+    let mut session = ReadSession {
+        inner: ReadSessionInner::Writer(db.pool.clone()),
+    };
+    let mut budget = ScanBudget::default();
+    let page = session
+        .thread_window_aux(&query, &mut budget)
+        .await
+        .unwrap();
+    let returned_ids: std::collections::BTreeSet<_> =
+        page.events.iter().map(|row| row.event.id).collect();
+    assert_eq!(returned_ids, [live.id, projected.id].into_iter().collect());
+    assert_eq!(budget.rows, 3);
+    assert!(page.target_ids.contains(&edit.id.to_hex()));
+    assert!(!page.target_ids.contains(&removed.id.to_hex()));
+    assert!(page.next_cursor.is_none());
+
+    let mut generic = crate::EventQuery::for_community(community);
+    generic.kinds = Some(kinds.map(|kind| kind as i32).to_vec());
+    generic.e_tags = Some(targets.to_vec());
+    let events = db.query_events(&generic).await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|row| row.event.id)
+            .collect::<std::collections::BTreeSet<_>>(),
+        returned_ids
+    );
+
+    // Give the planner a selective lookup among ordinary live references.
+    // Avoid an execution-time threshold, which varies with CI load and cache.
+    let unrelated_root = make_event(&keys, channel, 9, "unrelated root", None, ts);
+    db.insert_event(community, &unrelated_root, Some(channel))
+        .await
+        .unwrap();
+    for n in 0..256 {
+        let unrelated = make_event(
+            &keys,
+            channel,
+            40003,
+            &format!("unrelated edit {n}"),
+            Some(&unrelated_root),
+            ts,
+        );
+        db.insert_event(community, &unrelated, Some(channel))
+            .await
+            .unwrap();
+    }
+    sqlx::raw_sql("VACUUM (ANALYZE) events")
+        .execute(&db.pool)
+        .await
+        .unwrap();
+    let mut sql = build_aux_sql(&query).unwrap();
+    let explain = sqlx::AssertSqlSafe(format!("EXPLAIN (FORMAT JSON) {}", sql.sql().as_str()));
+    let args = sql.build().take_arguments().unwrap().unwrap();
+    let plan: serde_json::Value = sqlx::query_scalar_with(explain, args)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    let child_indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT child.relname FROM pg_inherits i JOIN pg_class child ON child.oid = i.inhrelid \
+         WHERE i.inhparent = 'idx_events_window_aux_e_tags'::regclass",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    let plan = plan.to_string();
+    assert!(
+        child_indexes.iter().any(|index| plan.contains(index)),
+        "{plan}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn thread_aux_tombstone_ids_and_raw_cursor_survive_damaged_payload() {
     let (db, cid, ch, keys, root) = fixture().await;
     let rows = replies(&db, cid, ch, &keys, &root, 1001).await;

@@ -10,6 +10,71 @@ async fn ingest(f: &Fixture, event: &Event) {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn thread_window_signed_reaction_removal_and_readd() {
+    let f = Fixture::new().await;
+    let ts = f.root.created_at.as_secs();
+    let reaction = |offset| {
+        buzz_sdk::build_reaction(f.root.id, "👍")
+            .unwrap()
+            .custom_created_at(Timestamp::from(ts + offset))
+            .sign_with_keys(&f.keys)
+            .unwrap()
+    };
+    let original = reaction(1);
+    let replacement = reaction(3);
+    let filter = f.filter();
+
+    ingest(&f, &original).await;
+    let page = f.query(&filter).await;
+    assert_eq!(ids(&page, Some(7)), [original.id.to_hex()]);
+
+    let deletion = buzz_sdk::build_remove_reaction(original.id)
+        .unwrap()
+        .custom_created_at(Timestamp::from(ts + 2))
+        .sign_with_keys(&f.keys)
+        .unwrap();
+    ingest(&f, &deletion).await;
+    let removed_row_exists: bool = sqlx::query_scalar(
+        "SELECT deleted_at IS NOT NULL FROM events WHERE community_id = $1 AND id = $2",
+    )
+    .bind(f.community.as_uuid())
+    .bind(original.id.as_bytes().as_slice())
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert!(removed_row_exists, "the removed reaction is still stored");
+
+    ingest(&f, &replacement).await;
+    let signed_timestamp = chrono::DateTime::from_timestamp((ts + 3) as i64, 0).unwrap();
+    let source_key: (bool, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
+        "SELECT e.reaction_read_projected, r.reaction_event_created_at \
+         FROM events e JOIN reactions r ON r.community_id = e.community_id \
+         AND r.reaction_event_id = e.id WHERE e.community_id = $1 AND e.id = $2",
+    )
+    .bind(f.community.as_uuid())
+    .bind(replacement.id.as_bytes().as_slice())
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(source_key, (true, Some(signed_timestamp)));
+
+    let channel = json!({"top_level":true,"#h":[f.channel],"kinds":[9],"include_aux":true});
+    let by_target = json!({"#e":[f.root.id.to_hex()],"kinds":[7]});
+    for read in [&filter, &channel, &by_target] {
+        let page = f.query(read).await;
+        assert_eq!(ids(&page, Some(7)), [replacement.id.to_hex()]);
+        assert!(
+            !ids(&page, Some(5)).contains(&deletion.id.to_hex().as_str()),
+            "the auxiliary scan followed a removed reaction"
+        );
+    }
+
+    let explicit = f.query(&json!({"ids":[deletion.id.to_hex()]})).await;
+    assert_eq!(ids(&explicit, Some(5)), [deletion.id.to_hex()]);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn thread_window_signed_aux_requires_positional_target() {
     let f = Fixture::new().await;
     let other = event(
@@ -43,9 +108,19 @@ async fn thread_window_signed_aux_requires_positional_target() {
         ingest(&f, &edit).await;
         edits.push(edit);
     }
+    let reaction = EventBuilder::new(Kind::Reaction, "+")
+        .tags([
+            Tag::parse(["e", &a]).unwrap(),
+            Tag::parse(["e", &b]).unwrap(),
+        ])
+        .sign_with_keys(&f.keys)
+        .unwrap();
+    ingest(&f, &reaction).await;
+
     let filter = f.filter();
     let page = f.query(&filter).await;
     assert_eq!(f.bounds(&page, &filter)["has_more"], false);
+    assert_eq!(ids(&page, Some(7)), [reaction.id.to_hex()]);
     let aux = ids(&page, Some(40003));
     for (n, edit) in edits.iter().enumerate() {
         assert_eq!(aux.contains(&edit.id.to_hex().as_str()), n >= 2, "case {n}");
@@ -53,7 +128,9 @@ async fn thread_window_signed_aux_requires_positional_target() {
     // Both non-target shapes really were stored and remain reachable under B.
     let mut other_filter = filter;
     other_filter["#e"] = json!([b]);
-    assert_eq!(ids(&f.query(&other_filter).await, Some(40003)).len(), 3);
+    let other_page = f.query(&other_filter).await;
+    assert_eq!(ids(&other_page, Some(40003)).len(), 3);
+    assert_eq!(ids(&other_page, Some(7)), [reaction.id.to_hex()]);
 }
 
 #[tokio::test]

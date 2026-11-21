@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::AdmittedTx;
 use crate::{
     error::Result,
-    event::{insert_event_with_thread_metadata_tx, ThreadMetadataParams},
+    event::{insert_event_with_reaction_projection_tx, ThreadMetadataParams},
     Db,
 };
 use buzz_core::{CommunityId, StoredEvent};
@@ -87,12 +87,16 @@ pub struct ActiveReactionRecord {
 // -- Write operations ---------------------------------------------------------
 
 const ADD_REACTION_SQL: &str = r#"
-        INSERT INTO reactions (community_id, event_created_at, event_id, pubkey, emoji, reaction_event_id)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO reactions (community_id, event_created_at, event_id, pubkey, emoji, reaction_event_id, reaction_event_created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (community_id, event_created_at, event_id, pubkey, emoji) DO UPDATE SET
             created_at = NOW(),
             removed_at = NULL,
-            reaction_event_id = COALESCE(EXCLUDED.reaction_event_id, reactions.reaction_event_id)
+            reaction_event_id = COALESCE(EXCLUDED.reaction_event_id, reactions.reaction_event_id),
+            reaction_event_created_at = CASE
+                WHEN EXCLUDED.reaction_event_id IS NULL THEN reactions.reaction_event_created_at
+                ELSE EXCLUDED.reaction_event_created_at
+            END
         WHERE reactions.removed_at IS NOT NULL
         "#;
 
@@ -125,6 +129,7 @@ pub async fn add_reaction(
         .bind(pubkey)
         .bind(emoji)
         .bind(reaction_event_id)
+        .bind(None::<DateTime<Utc>>)
         .execute(tx.conn())
         .await?;
 
@@ -150,7 +155,8 @@ pub(crate) async fn add_reaction_tx(
     event_created_at: DateTime<Utc>,
     pubkey: &[u8],
     emoji: &str,
-    reaction_event_id: Option<&[u8]>,
+    reaction_event_id: &[u8],
+    reaction_event_created_at: Option<DateTime<Utc>>,
 ) -> Result<bool> {
     let community = tx.community();
     let result = sqlx::query(ADD_REACTION_SQL)
@@ -160,6 +166,7 @@ pub(crate) async fn add_reaction_tx(
         .bind(pubkey)
         .bind(emoji)
         .bind(reaction_event_id)
+        .bind(reaction_event_created_at)
         .execute(tx.conn())
         .await?;
 
@@ -205,6 +212,29 @@ pub async fn insert_reaction_event_with_thread_metadata(
     };
     let target_created_at: DateTime<Utc> = target_row.get("created_at");
 
+    // The current-state row can answer exact reference queries when the signed
+    // event has only its canonical lowercase target. Keep other shapes in the
+    // positional event index so all of their signed references remain visible.
+    let mut references = reaction_event
+        .tags
+        .iter()
+        .filter_map(|tag| match tag.as_slice() {
+            [name, value, ..] if name == "e" => Some(value.as_str()),
+            _ => None,
+        });
+    let projected = reaction_event.kind.as_u16() == buzz_core::kind::KIND_REACTION as u16
+        && references.next() == Some(hex::encode(target_event_id).as_str())
+        && references.next().is_none();
+    let reaction_event_created_at = if projected {
+        let seconds = reaction_event.created_at.as_secs() as i64;
+        Some(
+            DateTime::from_timestamp(seconds, 0)
+                .ok_or(crate::DbError::InvalidTimestamp(seconds))?,
+        )
+    } else {
+        None
+    };
+
     // Preserve add_reaction's exact new / re-activate / active-duplicate semantics.
     let reaction_inserted = add_reaction_tx(
         &mut tx,
@@ -212,7 +242,8 @@ pub async fn insert_reaction_event_with_thread_metadata(
         target_created_at,
         actor_pubkey,
         emoji,
-        Some(reaction_event.id.as_bytes()),
+        reaction_event.id.as_bytes(),
+        reaction_event_created_at,
     )
     .await?;
 
@@ -223,9 +254,14 @@ pub async fn insert_reaction_event_with_thread_metadata(
 
     crate::event::acquire_canvas_event_write_lock_if_needed(&mut tx, reaction_event, channel_id)
         .await?;
-    let (stored_event, was_inserted) =
-        insert_event_with_thread_metadata_tx(&mut tx, reaction_event, channel_id, thread_meta)
-            .await?;
+    let (stored_event, was_inserted) = insert_event_with_reaction_projection_tx(
+        &mut tx,
+        reaction_event,
+        channel_id,
+        thread_meta,
+        projected,
+    )
+    .await?;
 
     if was_inserted {
         crate::insert_mentions_in_transaction(&mut tx, reaction_event, channel_id).await?;
@@ -298,7 +334,7 @@ pub async fn remove_reaction_by_source_event_id(
     let result = sqlx::query(
         r#"
         UPDATE reactions
-        SET removed_at = NOW()
+        SET removed_at = NOW(), reaction_event_created_at = NULL
         WHERE community_id = $1
           AND reaction_event_id = $2
           AND removed_at IS NULL

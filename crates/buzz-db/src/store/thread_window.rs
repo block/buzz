@@ -11,8 +11,8 @@ use sqlx::{PgConnection, PgPool, QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::{
-    event::row_to_stored_event, Db, DbError, ReadSession, ReadSessionInner, Result, RouteDecision,
-    RoutePredicate,
+    event::{push_auxiliary_source, row_to_stored_event},
+    Db, DbError, ReadSession, ReadSessionInner, Result, RouteDecision, RoutePredicate,
 };
 use buzz_datastore_tracing::datastore_span;
 
@@ -275,8 +275,8 @@ impl Db {
 
 /// Strict auxiliary scan. Targets are chunked by the bridge, limiting SQL
 /// expression size. Access is applied before the probe, including channel-less
-/// deletions. Deleted aux payloads are NOT returned, but their IDs are retained
-/// to discover deletions-of-aux on the second hop.
+/// deletions. Soft-deleted reactions are excluded from both hops. Other deleted
+/// auxiliary events supply only IDs for deletion-of-aux discovery.
 pub struct AuxQuery<'a> {
     /// Host-bound community.
     pub community: CommunityId,
@@ -348,43 +348,7 @@ async fn select_aux(
         return Err(invalid("invalid thread auxiliary target batch"));
     }
     budget.query()?;
-    let mut q = QueryBuilder::new(
-        "SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, deleted_at, \
-         octet_length(content) + octet_length(tags::text) AS payload_bytes \
-         FROM events WHERE community_id = ");
-    q.push_bind(query.community.as_uuid())
-        .push(" AND ((channel_id IS NULL AND kind IN (5, 9005)) OR channel_id = ANY(")
-        .push_bind(query.accessible)
-        .push("))")
-        .push(" AND kind = ANY(")
-        .push_bind(query.kinds.iter().map(|k| *k as i32).collect::<Vec<_>>())
-        .push(") AND (");
-    for (index, target) in query.targets.iter().enumerate() {
-        if index != 0 {
-            q.push(" OR ");
-        }
-        q.push("tags @> ")
-            .push_bind(serde_json::json!([["e", target]]));
-    }
-    // JSONB containment is an indexable prefilter, not a positional tag match.
-    q.push(
-        ") AND EXISTS (SELECT 1 FROM jsonb_array_elements(tags) tag \
-        WHERE tag->>0 = 'e' AND tag->>1 = ANY(",
-    )
-    .push_bind(query.targets)
-    .push("))");
-    if let Some(cursor) = &query.cursor {
-        let (ts, id) = cursor_key(cursor)?;
-        q.push(" AND (created_at < ")
-            .push_bind(ts)
-            .push(" OR (created_at = ")
-            .push_bind(ts)
-            .push(" AND id > ")
-            .push_bind(id)
-            .push("))");
-    }
-    q.push(" ORDER BY created_at DESC, id ASC LIMIT ")
-        .push_bind(AUX_LIMIT as i64 + 1);
+    let mut q = build_aux_sql(query)?;
     // Never collect a full raw page: 1,001 ingest-valid edits can contain
     // 250 MiB. Charge each row (including tombstones and the probe) before
     // reconstruction, and preserve this request-wide ledger across retries.
@@ -420,6 +384,53 @@ async fn select_aux(
         target_ids,
         next_cursor,
     })
+}
+
+fn build_aux_sql(query: &AuxQuery<'_>) -> Result<QueryBuilder<sqlx::Postgres>> {
+    // Filter on the reference index before sorting. An ORDER BY/LIMIT in the
+    // inner scope can make the planner prefer walking the community time index.
+    let cursor = query.cursor.as_ref().map(cursor_key).transpose()?;
+    let mut q = QueryBuilder::new(
+        "WITH matching_aux AS MATERIALIZED ( \
+         SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, deleted_at \
+         FROM (",
+    );
+    push_auxiliary_source(
+        &mut q,
+        query.community,
+        query.targets,
+        query.kinds.contains(&7),
+        cursor.as_ref().map(|(ts, _)| *ts),
+    );
+    q.push(") AS events WHERE ((channel_id IS NULL AND kind IN (5, 9005)) OR channel_id = ANY(")
+        .push_bind(query.accessible)
+        .push("))")
+        .push(" AND kind = ANY(")
+        .push_bind(
+            query
+                .kinds
+                .iter()
+                .map(|kind| *kind as i32)
+                .collect::<Vec<_>>(),
+        )
+        .push(")");
+    if let Some((ts, id)) = cursor {
+        q.push(" AND created_at <= ")
+            .push_bind(ts)
+            .push(" AND (created_at < ")
+            .push_bind(ts)
+            .push(" OR (created_at = ")
+            .push_bind(ts)
+            .push(" AND id > ")
+            .push_bind(id)
+            .push("))");
+    }
+    q.push(
+        ") SELECT *, octet_length(content) + octet_length(tags::text) AS payload_bytes \
+        FROM matching_aux ORDER BY created_at DESC, id ASC LIMIT ",
+    )
+    .push_bind(AUX_LIMIT as i64 + 1);
+    Ok(q)
 }
 
 async fn writer_aux(
