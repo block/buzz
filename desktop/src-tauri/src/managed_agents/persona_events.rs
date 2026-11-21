@@ -410,8 +410,8 @@ pub(crate) async fn flush_pending_events_at(
         // A boundary publish the relay still rejects self-heals: the submit
         // error below re-queues it for the next sweep.
         const RELAY_ACCEPT_WINDOW_SECS: i64 = 900;
+        let now = nostr::Timestamp::now().as_secs() as i64;
         let event = if current.kind == 5 {
-            let now = nostr::Timestamp::now().as_secs() as i64;
             if current.created_at - now > RELAY_ACCEPT_WINDOW_SECS {
                 // Its replacement must keep deferring behind the unpublished
                 // tombstone so a re-created head is never wiped out of order.
@@ -426,6 +426,13 @@ pub(crate) async fn flush_pending_events_at(
             // timestamp at publish time; kind, tags, and content are preserved,
             // and `mark_synced` below still compares against the retained row's
             // original `created_at`/`content`, which are untouched.
+            resign_with_fresh_timestamp(&event, state)?
+        } else if now - event.created_at.as_secs() as i64 > RELAY_ACCEPT_WINDOW_SECS {
+            // Any other row that stayed pending past the window (relay
+            // unreachable, rejected, or timed out) would be rejected on every
+            // sweep from here on. The re-read above confirmed it is still the
+            // retained head, so re-dating it to `now` changes only the
+            // timestamp.
             resign_with_fresh_timestamp(&event, state)?
         } else {
             event
