@@ -25,4 +25,31 @@ extension RelaySessionTestHooks on RelaySessionNotifier {
   void debugSetSessionStatus(SessionStatus status) {
     _socketConnected = status == SessionStatus.connected;
   }
+
+  @visibleForTesting
+  void debugHandleMessage(List<dynamic> data) => _handleMessage(data);
+
+  @visibleForTesting
+  void debugFlushEventBuffer() => _flushEventBuffer();
+
+  @visibleForTesting
+  Future<void> debugHandleConnected() =>
+      _handleConnected(_connectionGeneration);
+
+  @visibleForTesting
+  Future<void> debugReplayLiveSubscriptions() =>
+      _replayLiveSubscriptions(_connectionGeneration);
+
+  @visibleForTesting
+  void debugDispose() => _dispose();
+
+  @visibleForTesting
+  void debugSupersedeConnection() => _connectionGeneration++;
+
+  @visibleForTesting
+  void debugPauseNow() => _pauseNow();
+
+  @visibleForTesting
+  void debugHandleSocketMessageForTest(List<dynamic> data) =>
+      _handleMessage(data);
 }

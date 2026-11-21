@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
+import '../../shared/http/app_http_client.dart';
 import '../../shared/relay/media_auth.dart';
 import '../../shared/utils/bounded_fetch.dart';
 
@@ -90,24 +91,31 @@ class _VideoFileDownload {
       if (!stop.isCompleted) stop.complete();
     }
 
-    void restartStall() {
-      stall?.cancel();
-      stall = Timer(owner.stallTimeout, abort);
+    http.BaseRequest? request;
+    void timedOut() {
+      if (stop.isCompleted) return;
+      if (request case final request?) noteHttpDeadline(request);
+      abort();
     }
 
-    final deadline = Timer(owner.maxDuration, abort);
+    void restartStall() {
+      stall?.cancel();
+      stall = Timer(owner.stallTimeout, timedOut);
+    }
+
+    final deadline = Timer(owner.maxDuration, timedOut);
     StreamIterator<List<int>>? body;
     RandomAccessFile? output;
     var success = false;
     restartStall();
     try {
       final uri = Uri.parse(url);
-      final request = http.AbortableRequest(
+      final sent = request = http.AbortableRequest(
         'GET',
         uri,
         abortTrigger: stop.future,
       )..headers.addAll(owner.auth.headersFor(url));
-      final response = await owner.client.send(request);
+      final response = await owner.client.send(sent);
       body = StreamIterator(response.stream);
       if (disposed ||
           stop.isCompleted ||
