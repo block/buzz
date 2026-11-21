@@ -20,7 +20,7 @@ pub async fn cmd_add_reaction(
         buzz_sdk::build_custom_emoji_reaction(target_eid, emoji, url)
             .map_err(|e| CliError::Other(format!("build_custom_emoji_reaction failed: {e}")))?
     } else {
-        buzz_sdk::build_reaction(target_eid, emoji)
+        buzz_sdk::build_reaction(target_eid, emoji, None)
             .map_err(|e| CliError::Other(format!("build_reaction failed: {e}")))?
     };
 
