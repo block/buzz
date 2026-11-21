@@ -1622,6 +1622,21 @@ pub enum FeedCmd {
         #[arg(long)]
         types: Option<String>,
     },
+    /// Stream activity feed entries as they arrive (NDJSON, one event per line)
+    #[command(
+        after_help = "Examples:\n  buzz feed watch\n  buzz feed watch --since 1783497600 | jq -r '.content'\n\nType filtering (--types) is only available on `buzz feed get`."
+    )]
+    Watch {
+        /// Unix timestamp — replay entries after this time before going live
+        #[arg(long)]
+        since: Option<i64>,
+        /// Channel UUID — restrict the stream to one channel
+        #[arg(long)]
+        channel: Option<String>,
+        /// Exit if no event arrives for this many seconds (0 = never)
+        #[arg(long, default_value_t = 0)]
+        idle_timeout: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3040,6 +3055,13 @@ mod tests {
     }
 
     #[test]
+    fn feed_watch_rejects_types_but_feed_get_keeps_it() {
+        assert!(Cli::try_parse_from(["buzz", "feed", "watch", "--types", "mentions"]).is_err());
+        assert!(Cli::try_parse_from(["buzz", "feed", "watch"]).is_ok());
+        assert!(Cli::try_parse_from(["buzz", "feed", "get", "--types", "mentions"]).is_ok());
+    }
+
+    #[test]
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
             "agents",
@@ -3184,7 +3206,7 @@ mod tests {
             names(&cmd, "workflows"),
             vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
         );
-        assert_eq!(names(&cmd, "feed"), vec!["get"]);
+        assert_eq!(names(&cmd, "feed"), vec!["get", "watch"]);
         assert_eq!(
             names(&cmd, "social"),
             vec![
@@ -3269,7 +3291,7 @@ mod tests {
             ("channels", 17),
             ("dms", 4),
             ("emoji", 5),
-            ("feed", 1),
+            ("feed", 2),
             ("huddles", 2),
             ("issues", 6),
             ("media", 1),

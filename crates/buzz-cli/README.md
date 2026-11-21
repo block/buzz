@@ -183,6 +183,12 @@ buzz raw publish --kind 1 --tag '["t","example"]' --content 'hello'
 
 # Pipe to jq
 buzz channels list | jq '.[].name'
+
+# Activity feed
+buzz feed get --limit 20
+buzz feed watch                                  # stream NDJSON until Ctrl-C
+buzz feed watch | jq -r '.content'
+buzz feed watch --since 1783497600               # replay backfill, then stay live
 ```
 
 `sidebar sections` edits the signing identity's own sidebar. Each command is
@@ -217,6 +223,13 @@ sections. Desktop keeps a deleted section's `section:<id>` mode, and so does the
 CLI: it still shows in `sort list`, `sort set` refuses it, and `sort reset
 --group section:<id>` clears it. The sidebar keeps at most 104 sort modes
 (stale keys count), and a command that would pass that fails.
+
+`feed watch` writes one JSON event per line and flushes immediately, so it
+composes with `jq --unbuffered` and other line-oriented consumers. Relay
+notices and subscription closures go to stderr, leaving stdout pure NDJSON.
+`feed get` keeps its JSON-array output unchanged. Type filtering (`--types`)
+is only on `feed get`: the relay applies `feed_types` to HTTP queries, not to
+WebSocket subscriptions, so `feed watch` streams every feed entry.
 
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
@@ -296,6 +309,7 @@ The table below mirrors that tree for readers who are not at a terminal.
 | | `runs` | Get workflow run history |
 | | `approve` | Approve/deny a workflow step |
 | `feed` | `get` | Get your activity feed |
+| | `watch` | Stream the activity feed as NDJSON until Ctrl-C |
 | `social` | `publish` | Publish a NIP-01 note |
 | | `set-contacts` | Set NIP-02 contact list |
 | | `event` | Get a Nostr event |
