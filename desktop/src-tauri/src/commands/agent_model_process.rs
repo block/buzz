@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use crate::managed_agents::{
-    build_buzz_agent_provider_defaults, default_agent_workdir, known_acp_runtime,
-    redact_env_values_in, AgentModelsResponse,
+    build_buzz_agent_provider_defaults, claude_config::apply_claude_model_env,
+    default_agent_workdir, known_acp_runtime, redact_env_values_in, AgentModelsResponse,
 };
 
 use super::agent_models::normalize_agent_models;
@@ -18,6 +18,7 @@ pub(super) async fn run_agent_models_command(
     // into the spawn_blocking closure and we still need the values to
     // scrub any user-supplied secrets that the child surfaces in stderr.
     let env_for_redaction = merged_env.clone();
+    let discovery_model = persisted_model.clone();
 
     // Use spawn_blocking because the desktop Tauri crate doesn't enable
     // tokio's `process` feature. std::process::Command is synchronous
@@ -54,6 +55,8 @@ pub(super) async fn run_agent_models_command(
         for (k, v) in &merged_env {
             cmd.env(k, v);
         }
+        // Launch applies the A1 contract after descriptor.env (#8110).
+        apply_discovery_claude_model_env(&mut cmd, &agent_command, discovery_model.as_deref());
         // Demo identity is authoritative and must win over ambient/user env.
         crate::build_identity::apply_demo_config_home(&mut cmd)?;
         crate::managed_agents::configure_runtime_cli(&mut cmd, known_acp_runtime(&agent_command));
@@ -83,4 +86,58 @@ pub(super) async fn run_agent_models_command(
         .map_err(|e| format!("failed to parse model JSON: {e}"))?;
 
     Ok(normalize_agent_models(&raw, persisted_model))
+}
+
+/// Match launch's A1 contract for Claude model discovery.
+///
+/// Launch calls `apply_claude_model_env(None)` when a local Claude agent has no
+/// Buzz model, so an inherited `ANTHROPIC_MODEL` does not override
+/// `settings.model`. Discovery used to keep that env var and report a default
+/// the session would not run (#8110). A selected Buzz model is left untouched:
+/// launch writes that value itself after this layer.
+fn apply_discovery_claude_model_env(
+    cmd: &mut std::process::Command,
+    agent_command: &str,
+    persisted_model: Option<&str>,
+) {
+    if known_acp_runtime(agent_command).is_some_and(|runtime| runtime.id == "claude")
+        && persisted_model.is_none()
+    {
+        apply_claude_model_env(cmd, None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_discovery_claude_model_env;
+    use std::ffi::OsStr;
+
+    fn command_env(cmd: &std::process::Command, key: &str) -> Option<Option<String>> {
+        cmd.get_envs().find_map(|(name, value)| {
+            (name == OsStr::new(key)).then(|| value.map(|v| v.to_string_lossy().into_owned()))
+        })
+    }
+
+    /// #8110: with no Buzz model, launch drops ANTHROPIC_MODEL. Discovery must too.
+    #[test]
+    fn claude_discovery_without_model_drops_anthropic_model() {
+        let mut cmd = std::process::Command::new("buzz-acp");
+        cmd.env("ANTHROPIC_MODEL", "claude-haiku-4-5")
+            .env("BUZZ_ACP_MODEL", "claude-haiku-4-5");
+        apply_discovery_claude_model_env(&mut cmd, "claude-agent-acp", None);
+        assert_eq!(command_env(&cmd, "ANTHROPIC_MODEL"), Some(None));
+        assert_eq!(command_env(&cmd, "BUZZ_ACP_MODEL"), Some(None));
+    }
+
+    /// A selected Buzz model is launch's authority and must survive discovery.
+    #[test]
+    fn claude_discovery_with_model_keeps_user_anthropic_model() {
+        let mut cmd = std::process::Command::new("buzz-acp");
+        cmd.env("ANTHROPIC_MODEL", "claude-opus-4");
+        apply_discovery_claude_model_env(&mut cmd, "claude-agent-acp", Some("claude-sonnet-4"));
+        assert_eq!(
+            command_env(&cmd, "ANTHROPIC_MODEL"),
+            Some(Some("claude-opus-4".to_string()))
+        );
+    }
 }
