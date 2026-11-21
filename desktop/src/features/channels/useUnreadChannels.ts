@@ -399,12 +399,11 @@ export function useUnreadChannels(
     (channelId: string, event: ObservedUnreadEvent): boolean => {
       if (!observedPersistence.isScopeLoaded()) return false;
       if (observedPersistence.isNative()) {
-        observedPersistence.schedule(
+        return observedPersistence.schedule(
           observedPersistence.currentScope,
           channelId,
           event,
         );
-        return true;
       }
       const didRecord = recordObservedUnreadEvent(
         observedUnreadEventsByChannelRef.current,
