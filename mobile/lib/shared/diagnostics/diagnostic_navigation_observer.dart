@@ -30,8 +30,9 @@ final diagnosticScreenTrailProvider = Provider<DiagnosticScreenTrail>(
 /// Give an [observer] to each navigator that holds screens: the app's root
 /// navigator and the pane navigator that holds an open conversation. Only
 /// pages ([PageRoute]) count. Dialogs, sheets and menus are popup routes or
-/// [DiagnosticSheetRoute]s with no screen of their own, so opening or closing
-/// one leaves nothing. A screen equal to the last one left is skipped. A build
+/// [DiagnosticSheetRoute]s with no screen of their own: the screen they cover
+/// is still the one shown, so opening or closing one leaves nothing new. A
+/// screen equal to the last one left is skipped. A build
 /// without a reporting destination does nothing, not even looking at routes.
 class DiagnosticScreenTrail {
   DiagnosticScreenTrail(this._reporter, this._classifier);
@@ -113,20 +114,28 @@ class DiagnosticScreenTrail {
       if (navigator == null || ModalRoute.of(navigator.context) != route) {
         continue;
       }
-      final page = observer._currentPage;
+      final page = observer._topPage;
       if (page != null && !page.isFirst) return page;
     }
     return null;
   }
 
-  /// Whether [route] is current on its navigator and every navigator hosting
-  /// it.
-  static bool _shown(Route<dynamic> route) {
-    if (!route.isCurrent) return false;
+  /// Whether [route] is the top screen of its navigator and of every
+  /// navigator hosting it. A dialog or sheet over a screen leaves it shown.
+  bool _shown(Route<dynamic> route) {
     final navigator = route.navigator;
-    if (navigator == null) return false;
+    if (navigator == null || !route.isActive) return false;
+    final top = _observerOf(navigator)?._topPage;
+    if (top == null ? !route.isCurrent : top != route) return false;
     final host = ModalRoute.of(navigator.context);
     return host == null || _shown(host);
+  }
+
+  DiagnosticNavigationObserver? _observerOf(NavigatorState navigator) {
+    for (final observer in _observers) {
+      if (observer.navigator == navigator) return observer;
+    }
+    return null;
   }
 }
 
@@ -143,12 +152,10 @@ class DiagnosticNavigationObserver extends NavigatorObserver {
   /// This navigator's screens, bottom first. Kept only while reporting.
   final _pages = <PageRoute<dynamic>>[];
 
-  PageRoute<dynamic>? get _currentPage {
+  /// The top screen, which shows even under a dialog or sheet.
+  PageRoute<dynamic>? get _topPage {
     _pages.removeWhere((page) => !page.isActive);
-    for (final page in _pages.reversed) {
-      if (page.isCurrent) return page;
-    }
-    return null;
+    return _pages.lastOrNull;
   }
 
   /// Stops reporting this navigator.
@@ -158,7 +165,7 @@ class DiagnosticNavigationObserver extends NavigatorObserver {
   /// Call it when a page's content changes in place with no navigation, such
   /// as the root page moving from the splash screen to onboarding or Home.
   void refresh() {
-    if (_currentPage case final page?) _trail._announce(page);
+    if (_topPage case final page?) _trail._announce(page);
   }
 
   static bool _isScreen(Route<dynamic>? route) =>
@@ -176,11 +183,11 @@ class DiagnosticNavigationObserver extends NavigatorObserver {
 
   @override
   void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) =>
-      _revealed(route, previousRoute);
+      _revealed(route);
 
   @override
   void didRemove(Route<dynamic> route, Route<dynamic>? previousRoute) =>
-      _revealed(route, previousRoute);
+      _revealed(route);
 
   void _arrived(Route<dynamic>? route) {
     if (!_trail._reporter.reporting || !_isScreen(route)) return;
@@ -189,10 +196,10 @@ class DiagnosticNavigationObserver extends NavigatorObserver {
     _trail._announce(page);
   }
 
-  void _revealed(Route<dynamic> left, Route<dynamic>? revealed) {
+  /// Names the top screen again after any route leaves, even a sheet: a
+  /// screen can leave while covered, such as a channel opened over a sheet.
+  void _revealed(Route<dynamic> left) {
     _pages.remove(left);
-    if (_isScreen(left) && _isScreen(revealed)) {
-      _trail._announce(revealed! as PageRoute<dynamic>);
-    }
+    if (_topPage case final page?) _trail._announce(page);
   }
 }

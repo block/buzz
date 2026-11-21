@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 
 import 'features/activity/activity_page.dart';
 import 'features/agents/agents_page.dart';
+import 'features/agents/create_agent_page.dart';
 import 'features/channels/channel_actions_sheet.dart';
 import 'features/channels/channel_detail_page.dart';
 import 'features/channels/channels_page.dart';
@@ -36,6 +37,7 @@ DiagnosticScreen? diagnosticScreenOf(Widget page) => switch (page) {
   ThemePickerPage() => DiagnosticScreen.appearance,
   ProfileEditPage() => DiagnosticScreen.profile,
   AgentsPage() => DiagnosticScreen.agents,
+  CreateAgentPage() => DiagnosticScreen.createAgent,
   CommunityInvitePage() => DiagnosticScreen.invites,
   CommunitySwitcherPage() => DiagnosticScreen.communitySwitcher,
   OnboardingAppEntry(addingCommunity: true) ||
