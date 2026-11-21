@@ -5,6 +5,10 @@ import 'relay_socket.dart';
 /// a plain [Exception] adds. A relay rejection keeps its message verbatim,
 /// and a lost acknowledgement drops the prefix only from its cause. Named
 /// types keep their whole name: `TimeoutException: ...` stays as is.
+///
+/// Use this where any error can reach the person and its text should stay
+/// whole. For a relay refusal reworded as a sentence (NIP-01 prefix dropped,
+/// first letter capitalized), use `relayErrorMessage` instead.
 String relayErrorText(Object error) {
   if (error is RelayEventRejectedException) return error.message;
   final text = error.toString();
