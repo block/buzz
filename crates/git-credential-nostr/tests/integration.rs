@@ -5,14 +5,56 @@
 
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::Engine as _;
+use daz_secrets::BlockingClient;
 use nostr::{Keys, ToBech32};
 
-/// Spawn the binary, write `input` to stdin, collect output.
-/// `env_vars` are added on top of the inherited environment.
-/// `NOSTR_PRIVATE_KEY` is always cleared first to prevent test pollution.
-fn run_helper(input: &str, env_vars: &[(&str, &str)]) -> std::process::Output {
+static NEXT_ACCOUNT: AtomicU64 = AtomicU64::new(1);
+
+struct ProviderEntry {
+    client: BlockingClient,
+    service: String,
+    account: String,
+}
+
+impl ProviderEntry {
+    fn new(value: Option<&str>) -> Self {
+        let client = BlockingClient::from_default_config().expect("daz-secrets test provider");
+        let service = "buzz-credential-tests".to_string();
+        let account = format!(
+            "pid-{}-{}",
+            std::process::id(),
+            NEXT_ACCOUNT.fetch_add(1, Ordering::Relaxed)
+        );
+        if let Some(value) = value {
+            client
+                .set(&service, &account, value.as_bytes(), None)
+                .expect("seed provider identity");
+        }
+        Self {
+            client,
+            service,
+            account,
+        }
+    }
+}
+
+impl Drop for ProviderEntry {
+    fn drop(&mut self) {
+        let _ = self.client.delete(&self.service, &self.account, None);
+    }
+}
+
+/// Spawn the binary against a real daz-secrets provider, write `input` to
+/// stdin, and collect output. Secret bytes travel only through the provider.
+fn run_helper(
+    input: &str,
+    provider_value: Option<&str>,
+    env_vars: &[(&str, &str)],
+) -> std::process::Output {
+    let entry = ProviderEntry::new(provider_value);
     let bin = env!("CARGO_BIN_EXE_git-credential-nostr");
     let mut cmd = Command::new(bin);
     cmd.stdin(Stdio::piped())
@@ -21,11 +63,14 @@ fn run_helper(input: &str, env_vars: &[(&str, &str)]) -> std::process::Output {
         .current_dir(std::env::temp_dir())
         .env_remove("NOSTR_PRIVATE_KEY")
         .env_remove("BUZZ_AUTH_TAG")
-        .env_remove("GIT_CONFIG_COUNT")
         // Prevent git config on the test machine from supplying credentials.
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("HOME", std::env::temp_dir());
+        .env("GIT_CONFIG_COUNT", "2")
+        .env("GIT_CONFIG_KEY_0", "nostr.secretService")
+        .env("GIT_CONFIG_VALUE_0", &entry.service)
+        .env("GIT_CONFIG_KEY_1", "nostr.secretAccount")
+        .env("GIT_CONFIG_VALUE_1", &entry.account);
     for (k, v) in env_vars {
         cmd.env(k, v);
     }
@@ -36,7 +81,9 @@ fn run_helper(input: &str, env_vars: &[(&str, &str)]) -> std::process::Output {
         .unwrap()
         .write_all(input.as_bytes())
         .unwrap();
-    child.wait_with_output().expect("failed to wait on child")
+    let output = child.wait_with_output().expect("failed to wait on child");
+    drop(entry);
+    output
 }
 
 /// Generate a fresh nsec string for use in tests.
@@ -62,7 +109,7 @@ fn valid_input() -> String {
 #[test]
 fn happy_path() {
     let nsec = fresh_nsec();
-    let out = run_helper(&valid_input(), &[("NOSTR_PRIVATE_KEY", &nsec)]);
+    let out = run_helper(&valid_input(), Some(&nsec), &[]);
 
     assert!(
         out.status.success(),
@@ -135,10 +182,7 @@ fn includes_nip_oa_auth_tag_in_signed_event() {
     ])
     .expect("serialize auth tag");
 
-    let out = run_helper(
-        &valid_input(),
-        &[("NOSTR_PRIVATE_KEY", &nsec), ("BUZZ_AUTH_TAG", &auth_tag)],
-    );
+    let out = run_helper(&valid_input(), Some(&nsec), &[("BUZZ_AUTH_TAG", &auth_tag)]);
     assert!(
         out.status.success(),
         "helper failed: {}",
@@ -175,7 +219,8 @@ fn malformed_nip_oa_auth_tag_fails_closed() {
     let nsec = fresh_nsec();
     let out = run_helper(
         &valid_input(),
-        &[("NOSTR_PRIVATE_KEY", &nsec), ("BUZZ_AUTH_TAG", "not-json")],
+        Some(&nsec),
+        &[("BUZZ_AUTH_TAG", "not-json")],
     );
 
     assert_eq!(out.status.code(), Some(1));
@@ -191,8 +236,7 @@ fn old_git_no_authtype_capability() {
                  path=git/owner/repo.git/info/refs\n\
                  \n";
 
-    let nsec = fresh_nsec();
-    let out = run_helper(input, &[("NOSTR_PRIVATE_KEY", &nsec)]);
+    let out = run_helper(input, None, &[]);
 
     assert!(
         out.status.success(),
@@ -213,12 +257,10 @@ fn old_git_no_authtype_capability() {
     );
 }
 
-/// No key configured at all → exit 1, stderr mentions "no nostr key configured".
+/// No provider item configured → exit 1 without falling back to env or files.
 #[test]
 fn missing_key() {
-    // run_helper already clears NOSTR_PRIVATE_KEY and points HOME at a temp dir
-    // that has no git config, so no keyfile will be found.
-    let out = run_helper(&valid_input(), &[]);
+    let out = run_helper(&valid_input(), None, &[]);
 
     assert_eq!(
         out.status.code(),
@@ -228,8 +270,8 @@ fn missing_key() {
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("no nostr key configured"),
-        "expected 'no nostr key configured' in stderr, got:\n{stderr}"
+        stderr.contains("identity is unavailable from daz-secrets"),
+        "expected provider-unavailable identity error in stderr, got:\n{stderr}"
     );
 }
 
@@ -246,8 +288,7 @@ fn missing_method_hint() {
                  wwwauth[]=Nostr realm=\"buzz\"\n\
                  \n";
 
-    let nsec = fresh_nsec();
-    let out = run_helper(input, &[("NOSTR_PRIVATE_KEY", &nsec)]);
+    let out = run_helper(input, None, &[]);
 
     assert!(
         out.status.success(),
@@ -274,8 +315,7 @@ fn missing_path() {
                  wwwauth[]=Nostr realm=\"buzz\", method=\"GET\"\n\
                  \n";
 
-    let nsec = fresh_nsec();
-    let out = run_helper(input, &[("NOSTR_PRIVATE_KEY", &nsec)]);
+    let out = run_helper(input, None, &[]);
 
     assert_eq!(
         out.status.code(),
@@ -290,67 +330,15 @@ fn missing_path() {
     );
 }
 
-/// Keyfile with 0644 permissions → exit 1, stderr mentions "insecure permissions".
-#[cfg(unix)]
+/// Malformed provider bytes fail closed without emitting a credential.
 #[test]
-fn bad_keyfile_permissions() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let nsec = fresh_nsec();
-
-    // Write keyfile to a temp path.
-    let tmp_dir = std::env::temp_dir();
-    let keyfile = tmp_dir.join(format!(
-        "nostr-test-key-{}.nsec",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .subsec_nanos()
-    ));
-    std::fs::write(&keyfile, &nsec).expect("failed to write temp keyfile");
-
-    // Set insecure permissions (0644).
-    std::fs::set_permissions(&keyfile, std::fs::Permissions::from_mode(0o644))
-        .expect("failed to set permissions");
-
-    // Point a scratch git config at the keyfile.
-    let git_config_dir = tmp_dir.join(format!(
-        "nostr-test-gitconfig-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .subsec_nanos()
-    ));
-    std::fs::create_dir_all(&git_config_dir).unwrap();
-    let git_config_file = git_config_dir.join(".gitconfig");
-    std::fs::write(
-        &git_config_file,
-        format!("[nostr]\n\tkeyfile = {}\n", keyfile.display()),
-    )
-    .expect("failed to write git config");
-
-    let out = run_helper(
-        &valid_input(),
-        &[
-            ("HOME", git_config_dir.to_str().unwrap()),
-            ("GIT_CONFIG_GLOBAL", git_config_file.to_str().unwrap()),
-        ],
-    );
-
-    // Clean up regardless of outcome.
-    let _ = std::fs::remove_file(&keyfile);
-    let _ = std::fs::remove_file(&git_config_file);
-    let _ = std::fs::remove_dir(&git_config_dir);
-
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "expected exit 1 for insecure keyfile permissions"
-    );
-
+fn malformed_provider_key_fails_closed() {
+    let out = run_helper(&valid_input(), Some("not-a-private-key"), &[]);
+    assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("insecure permissions"),
-        "expected 'insecure permissions' in stderr, got:\n{stderr}"
+        stderr.contains("invalid nostr private key"),
+        "got:\n{stderr}"
     );
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("credential="));
 }

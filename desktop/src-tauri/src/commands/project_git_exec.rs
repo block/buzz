@@ -1,11 +1,10 @@
 //! Shared git subprocess plumbing for the project commands.
 //!
-//! Runs the system `git` with an ephemeral, env-only auth configuration:
-//! the identity nsec is handed to `git-credential-nostr` via environment
-//! variables so nothing key-related ever touches disk or global git config.
+//! Runs the system `git` with an ephemeral, nonsecret auth configuration.
+//! `git-credential-nostr` reads the identity directly from daz-secrets, so
+//! private key bytes never enter git's environment, argv, or config.
 
 use crate::{app_state::AppState, managed_agents::resolve_command};
-use nostr::{Keys, ToBech32};
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -47,7 +46,8 @@ fn git_needs_credentials(args: &[&str]) -> bool {
 pub(crate) struct GitAuthConfig {
     git_path: std::path::PathBuf,
     credential_helper: Option<std::path::PathBuf>,
-    nsec: String,
+    secret_service: String,
+    secret_account: String,
     allow_file_transport: bool,
 }
 
@@ -147,9 +147,7 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
     command.env("GIT_CONFIG_GLOBAL", "/dev/null");
 
     // Base entries: disable any inherited credential helper, and neutralize
-    // repo-local hooks — every process git spawns inherits our environment
-    // (including NOSTR_PRIVATE_KEY below), and a cloned repository's hooks
-    // must never run with the identity key in reach.
+    // repo-local hooks. No child receives the identity key itself.
     let mut entries: Vec<(&str, String)> = vec![
         ("credential.helper", String::new()),
         ("core.hooksPath", "/dev/null".to_string()),
@@ -172,12 +170,13 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
         let Some(cred_helper) = &auth.credential_helper else {
             return apply_git_config(command, &entries);
         };
-        command.env("NOSTR_PRIVATE_KEY", &auth.nsec);
         entries.push((
             "credential.helper",
             credential_helper_config_value(cred_helper),
         ));
         entries.push(("credential.useHttpPath", "true".to_string()));
+        entries.push(("nostr.secretService", auth.secret_service.clone()));
+        entries.push(("nostr.secretAccount", auth.secret_account.clone()));
     }
     apply_git_config(command, &entries);
 }
@@ -199,8 +198,8 @@ fn apply_git_config(command: &mut Command, entries: &[(&str, String)]) {
 }
 
 pub(crate) fn build_git_auth_config(state: &AppState) -> Result<GitAuthConfig, String> {
-    let keys = state.signing_keys()?;
-    build_git_auth_config_for_keys(&keys)
+    state.signing_keys()?;
+    build_git_auth_config_for_account("identity")
 }
 
 pub(crate) fn build_git_clone_auth_config(
@@ -212,31 +211,31 @@ pub(crate) fn build_git_clone_auth_config(
             git_path: resolve_command("git")
                 .ok_or_else(|| "git was not found on PATH".to_string())?,
             credential_helper: None,
-            nsec: String::new(),
+            secret_service: crate::app_state::keyring_service().to_string(),
+            secret_account: "identity".to_string(),
             allow_file_transport: false,
         });
     }
     build_git_auth_config(state)
 }
 
-pub(crate) fn build_git_auth_config_for_keys(keys: &Keys) -> Result<GitAuthConfig, String> {
+pub(crate) fn build_git_auth_config_for_account(
+    secret_account: &str,
+) -> Result<GitAuthConfig, String> {
     let git_path = resolve_command("git").ok_or_else(|| "git was not found on PATH".to_string())?;
     let credential_helper = resolve_command("git-credential-nostr");
-    let nsec = keys
-        .secret_key()
-        .to_bech32()
-        .map_err(|error| format!("encode identity key: {error}"))?;
     Ok(GitAuthConfig {
         git_path,
         credential_helper,
-        nsec,
+        secret_service: crate::app_state::keyring_service().to_string(),
+        secret_account: secret_account.to_string(),
         allow_file_transport: false,
     })
 }
 
 #[cfg(test)]
 pub(crate) fn build_test_git_auth_config() -> Result<GitAuthConfig, String> {
-    let mut auth = build_git_auth_config_for_keys(&Keys::generate())?;
+    let mut auth = build_git_auth_config_for_account("identity")?;
     auth.allow_file_transport = true;
     Ok(auth)
 }

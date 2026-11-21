@@ -19,12 +19,30 @@ mod path;
 pub(in crate::managed_agents) use path::build_augmented_path;
 pub(crate) use path::{compose_path_entries, should_skip_claude_executable, should_use_inherited};
 
-/// Custom ACP harnesses do not run buzz-acp's Git bootstrap. Preserve the
-/// Desktop-provided relay credential helper for those commands.
+fn apply_acp_secret_coordinates(
+    command: &mut std::process::Command,
+    acp_command: &str,
+    secret_service: &str,
+    secret_account: &str,
+) {
+    if acp_command == super::DEFAULT_ACP_COMMAND {
+        command.args([
+            "--secret-service",
+            secret_service,
+            "--secret-account",
+            secret_account,
+        ]);
+    }
+}
+
+/// Custom ACP harnesses do not run buzz-acp's Git bootstrap. Point
+/// Desktop's relay credential helper at the agent key's daz-secrets
+/// coordinates for those commands; only nonsecret coordinates are exported.
 fn apply_custom_acp_git_credentials(
     command: &mut std::process::Command,
     acp_command: &str,
-    private_key: &str,
+    secret_service: &str,
+    secret_account: &str,
     relay_url: &str,
     credential_helper: Option<&std::path::Path>,
 ) {
@@ -38,9 +56,8 @@ fn apply_custom_acp_git_credentials(
         return;
     };
     let relay_http_url = crate::relay::relay_http_base_url(relay_url);
-    command.env("NOSTR_PRIVATE_KEY", private_key);
     command.env("GIT_TERMINAL_PROMPT", "0");
-    command.env("GIT_CONFIG_COUNT", "2");
+    command.env("GIT_CONFIG_COUNT", "4");
     command.env(
         "GIT_CONFIG_KEY_0",
         format!("credential.{relay_http_url}/git.helper"),
@@ -54,6 +71,10 @@ fn apply_custom_acp_git_credentials(
         format!("credential.{relay_http_url}/git.useHttpPath"),
     );
     command.env("GIT_CONFIG_VALUE_1", "true");
+    command.env("GIT_CONFIG_KEY_2", "nostr.secretService");
+    command.env("GIT_CONFIG_VALUE_2", secret_service);
+    command.env("GIT_CONFIG_KEY_3", "nostr.secretAccount");
+    command.env("GIT_CONFIG_VALUE_3", secret_account);
 }
 
 pub(crate) use super::access_policy::{build_respond_to_env_with_policy, RespondToEnv};
@@ -610,7 +631,14 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
         command.env("PATH", path);
     }
     command.env("RUST_LOG", child_rust_log_filter());
-    command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
+    let secret_service = crate::app_state::keyring_service();
+    let secret_account = super::storage::agent_keyring_name(&record.pubkey);
+    apply_acp_secret_coordinates(
+        &mut command,
+        &record.acp_command,
+        secret_service,
+        &secret_account,
+    );
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_IDLE_POOL_SLEEP", idle_pool_sleep_env(lazy));
@@ -762,15 +790,16 @@ pub fn spawn_agent_child<R: tauri::Runtime>(
     }
 
     command.env("BUZZ_ACP_RELAY_OBSERVER", "true");
-
     // buzz-acp owns Git identity, scoped credentials, signing and key cleanup.
-    // An advanced custom ACP command bypasses that harness, so retain the
-    // earlier Desktop credential setup for that supported override.
+    // An advanced custom ACP command bypasses that harness, so Desktop points
+    // git-credential-nostr at the agent key's daz-secrets coordinates for that
+    // supported override. Secret bytes never enter the child environment.
     if record.acp_command != super::DEFAULT_ACP_COMMAND {
         apply_custom_acp_git_credentials(
             &mut command,
             &record.acp_command,
-            &record.private_key_nsec,
+            secret_service,
+            &secret_account,
             &effective_relay_url,
             resolve_command("git-credential-nostr").as_deref(),
         );

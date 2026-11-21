@@ -1,8 +1,11 @@
 //! Mock-app fixture for the admission tests at the production spawn sites.
 //! Its agent has no private key, so a start that passes admission reaches
 //! `spawn_agent_child` and stops at the key refusal there — no process runs.
-//! The keyring is swapped for keyring's in-memory mock, which holds no keys,
-//! so the test never touches (or prompts for) the system keychain.
+//! Key lookup goes through the real configured daz-secrets provider (the same
+//! test-provider convention as the crate process tests). The agent's pubkey is
+//! freshly generated, so its provider account is unique and holds no entry:
+//! the only provider traffic is a read that returns NotFound. Buzz never
+//! links or prompts a platform keychain.
 
 use super::{save_managed_agents, ManagedAgentRecord, RELAY_REMOVED_ERROR};
 use tauri::test::MockRuntime;
@@ -17,8 +20,6 @@ pub struct TestApp {
 
 /// A mock app whose store holds one keyless local agent that starts on launch.
 pub fn app_with_keyless_agent() -> TestApp {
-    #[cfg(feature = "system-keyring")]
-    keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
     let data = tempfile::tempdir().unwrap();
     let mut context = tauri::test::mock_context(tauri::test::noop_assets());
     // An absolute identifier replaces the app data base dir.

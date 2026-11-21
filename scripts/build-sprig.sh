@@ -165,10 +165,20 @@ export ANTHROPIC_API_KEY=sk-...
 export ANTHROPIC_MODEL=claude-sonnet-4-20250514
 
 # Nostr identity (shared by buzz-acp, git auth, signing, and buzz CLI)
-export NOSTR_PRIVATE_KEY=nsec1...
-export BUZZ_PRIVATE_KEY="$NOSTR_PRIVATE_KEY"
+# Configure the real daz-secrets provider for the OS user running Sprig in
+# ~/.config/daz-secrets/provider.toml (owned by that user, mode 0600).
+# The SDK resolves the passwd home; overriding HOME does not relocate it.
+# Provision the identity through your provider's secure workflow, or pipe it
+# directly into `daz-secrets set buzz-desktop identity` on stdin.
+# Never put identity bytes in environment variables, arguments or keyfiles.
 export BUZZ_RELAY_URL=https://your-relay.example.com
+buzz-acp --secret-service buzz-desktop --secret-account identity
 ```
+
+Sprig does not bundle a secret provider. Install and configure your production
+provider separately. The harness passes only `nostr.secretService` and
+`nostr.secretAccount` to Git; auth and signing resolve the identity from that
+provider. Missing, empty or unavailable identities fail closed.
 README
 
 ARCHIVE_BASENAME="${ARCHIVE_BASENAME:-sprig-${VERSION}-${TARGET}}"

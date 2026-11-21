@@ -19,3 +19,4 @@ nostr      = { workspace = true }
 serde_json = { workspace = true }
 zeroize    = { workspace = true }
 base64     = "0.22"
+daz-secrets = { workspace = true }

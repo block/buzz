@@ -285,7 +285,7 @@ fn test_key_and_auth_inside_a_variable_name_do_not_make_it_secret() {
         ("GIT_AUTHOR_NAME".to_string(), "Ada Lovelace".to_string()),
         (
             "KEYCHAIN".to_string(),
-            "/Users/dev/Library/login.keychain".to_string(),
+            "/Users/dev/Library/credential-index.db".to_string(),
         ),
         (
             "NPM_CONFIG_KEYFILE".to_string(),

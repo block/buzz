@@ -7,10 +7,18 @@ import time
 
 mode = os.environ.get("TASK_AGENT_MODE", "normal")
 log = open(os.environ["TASK_AGENT_LOG"], "a", buffering=1)
+def git_config(key):
+    found = subprocess.run(["git", "config", key], capture_output=True, text=True)
+    return found.stdout.strip() if found.returncode == 0 else None
+
+
 log.write(json.dumps({"pid": os.getpid(), "relay": os.environ.get("BUZZ_RELAY_URL"),
                       "key": os.environ.get("BUZZ_PRIVATE_KEY"),
+                      "nostrKey": os.environ.get("NOSTR_PRIVATE_KEY"),
                       "outputFormat": os.environ.get("BUZZ_OUTPUT_FORMAT"),
-                      "gitKeyfile": subprocess.check_output(["git", "config", "nostr.keyfile"], text=True).strip()}) + "\n")
+                      "gitKeyfile": git_config("nostr.keyfile"),
+                      "gitSecretService": git_config("nostr.secretService"),
+                      "gitSecretAccount": git_config("nostr.secretAccount")}) + "\n")
 if mode.startswith("descendant"):
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
     log.write(json.dumps({"descendant": child.pid}) + "\n")

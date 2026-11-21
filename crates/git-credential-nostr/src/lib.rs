@@ -11,7 +11,7 @@ use base64::Engine as _;
 use nostr::nips::nip98::{HttpData, HttpMethod};
 use nostr::types::Url;
 use nostr::{EventBuilder, Keys, Tag};
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 fn git_config(key: &str) -> Option<String> {
     let out = std::process::Command::new("git")
@@ -25,50 +25,15 @@ fn git_config(key: &str) -> Option<String> {
     }
 }
 
-#[cfg(unix)]
-fn check_keyfile_permissions(path: &str) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    let meta = std::fs::metadata(path).map_err(|e| format!("cannot stat keyfile {path}: {e}"))?;
-    let mode = meta.permissions().mode() & 0o777;
-    if mode & 0o177 != 0 {
-        return Err(format!(
-            "keyfile {path} has insecure permissions (expected 0600)"
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn check_keyfile_permissions(path: &str) -> Result<(), String> {
-    eprintln!("warning: cannot check keyfile permissions on this platform ({path})");
-    Ok(())
-}
-
-/// Max keyfile size — nsec1 is 63 bytes; hex keys are 64 bytes. 256 is generous.
-const MAX_KEYFILE_BYTES: u64 = 256;
-
-fn load_key() -> Result<String, String> {
-    if let Ok(val) = std::env::var("NOSTR_PRIVATE_KEY") {
-        if !val.is_empty() {
-            return Ok(val);
-        }
-    }
-    let path = git_config("nostr.keyfile").ok_or_else(|| {
-        "no nostr key configured. Set $NOSTR_PRIVATE_KEY or git config nostr.keyfile".to_string()
-    })?;
-    check_keyfile_permissions(&path)?;
-    let meta = std::fs::metadata(&path).map_err(|e| format!("cannot stat keyfile {path}: {e}"))?;
-    if !meta.is_file() {
-        return Err(format!("keyfile {path} is not a regular file"));
-    }
-    if meta.len() > MAX_KEYFILE_BYTES {
-        return Err(format!(
-            "keyfile {path} exceeds {MAX_KEYFILE_BYTES}-byte size limit"
-        ));
-    }
-    let raw =
-        std::fs::read_to_string(&path).map_err(|e| format!("cannot read keyfile {path}: {e}"))?;
-    Ok(raw.trim().to_string())
+fn load_key() -> Result<Zeroizing<Vec<u8>>, String> {
+    let service = git_config("nostr.secretService").unwrap_or_else(|| "buzz-desktop".to_string());
+    let account = git_config("nostr.secretAccount").unwrap_or_else(|| "identity".to_string());
+    let client = daz_secrets::BlockingClient::from_default_config()
+        .map_err(|_| "daz-secrets provider is unavailable".to_string())?;
+    let secret = client
+        .get(&service, &account)
+        .map_err(|_| "nostr identity is unavailable from daz-secrets".to_string())?;
+    Ok(Zeroizing::new(secret.value))
 }
 
 /// Load the NIP-OA owner attestation injected by Buzz Desktop/ACP.
@@ -205,7 +170,7 @@ pub fn run() -> i32 {
         .unwrap_or(path);
     let url = format!("{protocol}://{host}/{repo_path}");
 
-    let mut raw_key = match load_key() {
+    let raw_key = match load_key() {
         Ok(k) => k,
         Err(e) => {
             eprintln!("error: {e}");
@@ -213,15 +178,20 @@ pub fn run() -> i32 {
         }
     };
 
-    let keys = match Keys::parse(&raw_key) {
+    let encoded_key = match std::str::from_utf8(&raw_key) {
+        Ok(value) => value.trim(),
+        Err(_) => {
+            eprintln!("error: invalid nostr private key encoding");
+            return 1;
+        }
+    };
+    let keys = match Keys::parse(encoded_key) {
         Ok(k) => k,
         Err(e) => {
-            raw_key.zeroize();
             eprintln!("error: invalid nostr private key: {e}");
             return 1;
         }
     };
-    raw_key.zeroize();
 
     let parsed_url = Url::parse(&url).unwrap_or_else(|e| panic!("invalid URL {url:?}: {e}"));
     let http_data = HttpData::new(parsed_url, method);
