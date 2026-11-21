@@ -962,17 +962,27 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
             // [FI-TRACE-DENY-SET]
             if let Some(assertion) = &conn.nip_fi_assertion {
                 if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
-                    if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now())
-                    {
-                        attempt.log(AuthResult::Denied(crate::access::AuthReason::DenySet));
-                        metrics::counter!(
-                            "buzz_nip_fi_admission_denied_total",
-                            "reason" => "deny_set_post_registration"
-                        )
-                        .increment(1);
+                    if let Some(refusal) = crate::nip_fi_core::assertion_denied(
+                        deny_map,
+                        assertion,
+                        chrono::Utc::now(),
+                    ) {
+                        let (auth_reason, reason) = match refusal.class {
+                            buzz_auth::DenialClass::AuthorizationDenied => (
+                                crate::access::AuthReason::DenySet,
+                                "deny_set_post_registration",
+                            ),
+                            _ => (
+                                crate::access::AuthReason::AuthorizationUnavailable,
+                                "deny_set_restoring",
+                            ),
+                        };
+                        attempt.log(AuthResult::Denied(auth_reason));
+                        metrics::counter!("buzz_nip_fi_admission_denied_total", "reason" => reason)
+                            .increment(1);
                         conn.community_control
-                            .deny_nip_fi_enforce(crate::nip_fi_shadow::DENY_SET.by(Some(pubkey)));
-                        deny_nip_fi_auth(&conn, buzz_auth::DenialClass::AuthorizationDenied);
+                            .deny_nip_fi_enforce(refusal.by(Some(pubkey)));
+                        deny_nip_fi_auth(&conn, refusal.class);
                         return;
                     }
                 }

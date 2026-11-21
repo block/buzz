@@ -186,6 +186,12 @@ pub(crate) trait HttpDenyMap: sealed::Sealed {
     /// `now` (`now < until`).  Implementations fail closed: a poisoned or
     /// unavailable backing store returns `true` (deny).
     fn is_denied(&self, issuer: &str, pubkey: &PublicKey, now: DateTime<Utc>) -> bool;
+
+    /// Whether the deny set is complete.  While it is not (a restore is
+    /// pending), admission is refused as authorization unavailable.
+    fn is_restored(&self) -> bool {
+        true
+    }
 }
 
 pub(crate) mod sealed {
@@ -198,6 +204,10 @@ impl HttpDenyMap for buzz_auth::NipFiDenyMap {
     /// scoped and returns `true` on a poisoned shard.
     fn is_denied(&self, issuer: &str, pubkey: &PublicKey, now: DateTime<Utc>) -> bool {
         buzz_auth::NipFiDenyMap::is_denied(self, issuer, pubkey, now)
+    }
+
+    fn is_restored(&self) -> bool {
+        buzz_auth::NipFiDenyMap::is_restored(self)
     }
 }
 
@@ -749,11 +759,12 @@ where
     // Step 7: deny-map check — (iss, pubkey) and, for an agent assertion,
     // (iss, owner) must not be in an active deny window.  Private-state
     // denial.  [FI-INV-14] [NIP-FI.md:624-627]
-    if assertion_denied(deny_map, &assertion, Utc::now()) {
-        return Err(denied(
-            crate::nip_fi_shadow::DENY_SET,
-            crate::access::AuthReason::DenySet,
-        ));
+    if let Some(refusal) = assertion_denied(deny_map, &assertion, Utc::now()) {
+        let reason = match refusal.class {
+            DenialClass::AuthorizationDenied => crate::access::AuthReason::DenySet,
+            _ => crate::access::AuthReason::AuthorizationUnavailable,
+        };
+        return Err(denied(refusal, reason));
     }
 
     Ok((proof, assertion))

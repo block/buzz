@@ -117,7 +117,7 @@ pub struct InMemoryCommandReplayGuard(std::sync::Mutex<InMemoryStore>);
 
 #[cfg(any(test, feature = "test-utils"))]
 #[derive(Default)]
-pub struct InMemoryStore {
+struct InMemoryStore {
     claims: std::collections::HashSet<String>,
     denies: std::collections::HashMap<String, std::collections::HashMap<PublicKey, DateTime<Utc>>>,
 }

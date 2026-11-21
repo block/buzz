@@ -259,12 +259,17 @@ What this covers, and what it does not:
   it, that pod neither closes the target's open sessions nor refuses the
   target at its own admission check until its next restore.
 - **Not covered:** losing Redis data. Run Redis with a non-evicting
-  `maxmemory-policy` (`noeviction` or a `volatile-*` policy that never picks
-  these keys), with persistence if you need revocations to survive a Redis
-  restart.
-- **Redis down at startup:** the pod stays closed to assertion-bearing
-  connections until it can restore. Watch
-  `buzz_nip_fi_deny_restore_failures_total{reason}`.
+  `maxmemory-policy` of `noeviction`, with persistence if you need
+  revocations to survive a Redis restart. Every deny key carries an expiry,
+  so any `volatile-*` policy can evict it.
+- **Redis down at startup:** if Redis is completely unreachable at boot, the
+  relay exits before it binds, and the process supervisor restarts it. If
+  Redis is reachable but the restore fails, the pod runs and refuses
+  assertion-bearing connections with `503` (authorization unavailable) until
+  it has restored. Watch `buzz_nip_fi_deny_restore_failures_total{reason}`.
+- **Deny set over capacity on a pod:** if a revocation this pod receives does
+  not fit its `deny_set_capacity`, the pod closes admission the same way and
+  restores until its active entries fit.
 
 ### Disconnect responses
 

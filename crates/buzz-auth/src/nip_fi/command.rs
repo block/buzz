@@ -15,11 +15,12 @@
 //!    claim ([`super::command_replay`]), then commit the slot (both-or-neither).
 //! 7. Return [`CommandResult`].
 //!
-//! Fail-closed: any failure inserts no deny entry, closes no session and
-//! publishes nothing.  A failure after step 6's shared claim may leave that
-//! claim in place until its TTL (a guard error whose `SET` reply was lost, or a
-//! process stopped between claim and commit); that is fail closed, since a
-//! retry is then denied.
+//! Fail-closed: a rejected command inserts no deny entry, closes no session
+//! and publishes nothing.  A guard error is an unknown outcome: the shared
+//! claim and durable deny may already be written (a lost reply), so a retry
+//! of the same command may be refused as a replay and the issuer sends a
+//! fresh command.  A process stopped between claim and local commit leaves
+//! the durable deny for the next restore.
 
 use chrono::{DateTime, Utc};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};

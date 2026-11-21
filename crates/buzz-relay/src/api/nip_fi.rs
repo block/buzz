@@ -363,7 +363,9 @@ pub async fn run_nip_fi_disconnect_consumer(
         loop {
             match rx.try_recv() {
                 Ok(msg) => {
-                    apply_nip_fi_disconnect(&state, &msg, chrono::Utc::now());
+                    if !retained(apply_nip_fi_disconnect(&state, &msg, chrono::Utc::now())) {
+                        continue 'generation;
+                    }
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Lagged(n)) => {
@@ -386,7 +388,10 @@ pub async fn run_nip_fi_disconnect_consumer(
             tokio::select! {
                 msg = rx.recv() => match msg {
                     Ok(msg) => {
-                        apply_nip_fi_disconnect(&state, &msg, chrono::Utc::now());
+                        if !retained(apply_nip_fi_disconnect(&state, &msg, chrono::Utc::now())) {
+                            tracing::warn!("NIP-FI deny not retained; closing admission and restoring");
+                            continue 'generation;
+                        }
                     }
                     Err(RecvError::Lagged(n)) => {
                         count_disconnect_event(mode, "buzz_nip_fi_disconnect_lag_total", "cross_pod", "lag", n);
@@ -407,6 +412,20 @@ pub async fn run_nip_fi_disconnect_consumer(
             }
         }
     }
+}
+
+/// Whether a consumed disconnect left the deny map complete.  A capacity miss
+/// or poisoned shard did not record the deny, so admission must close and the
+/// consumer restore until the active union fits.  A rejected message (unknown
+/// issuer, bad key) carries no deny this pod could hold.
+fn retained(result: NipFiDisconnectApplyResult) -> bool {
+    !matches!(
+        result,
+        NipFiDisconnectApplyResult::Applied(
+            buzz_auth::CrossPodMergeResult::CapacityExceeded
+                | buzz_auth::CrossPodMergeResult::ShardPoisoned
+        )
+    )
 }
 
 /// Count a disconnect-path event on its `real` counter, or in shadow on
@@ -3816,6 +3835,165 @@ mod route_integration_tests {
         consumer.abort();
     }
 
+    /// A store whose first load misses `hidden`: a deny accepted while that
+    /// snapshot was being read.
+    struct StaleFirstLoad {
+        inner: Arc<buzz_auth::InMemoryCommandReplayGuard>,
+        hidden: std::sync::Mutex<Option<nostr::PublicKey>>,
+    }
+
+    impl buzz_auth::CommandReplayGuard for StaleFirstLoad {
+        fn try_claim<'a>(
+            &'a self,
+            claim: buzz_auth::CommandClaim<'a>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<buzz_auth::ClaimOutcome, buzz_auth::AuthError>,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            self.inner.try_claim(claim)
+        }
+
+        fn load_denies<'a>(
+            &'a self,
+            issuer: &'a str,
+            now: chrono::DateTime<chrono::Utc>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            Vec<(nostr::PublicKey, chrono::DateTime<chrono::Utc>)>,
+                            buzz_auth::AuthError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async move {
+                let hidden = self.hidden.lock().unwrap().take();
+                let mut denies = self.inner.load_denies(issuer, now).await?;
+                denies.retain(|(key, _)| Some(*key) != hidden);
+                Ok(denies)
+            })
+        }
+    }
+
+    /// Records a deny for `target` in `store` as another pod's accept would.
+    async fn store_deny(
+        store: &buzz_auth::InMemoryCommandReplayGuard,
+        target: &nostr::PublicKey,
+    ) -> buzz_pubsub::NipFiDisconnect {
+        use buzz_auth::CommandReplayGuard as _;
+        let until = chrono::Utc::now() + chrono::Duration::seconds(300);
+        let jti = uuid::Uuid::new_v4().to_string();
+        let outcome = store
+            .try_claim(buzz_auth::CommandClaim {
+                issuer: TEST_ISS,
+                jti: &jti,
+                ttl_secs: 60,
+                target,
+                until,
+                capacity: 10,
+                now: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome, buzz_auth::ClaimOutcome::Claimed);
+        buzz_pubsub::NipFiDisconnect {
+            issuer: TEST_ISS.to_owned(),
+            pubkey_bytes: target.to_bytes().to_vec(),
+            until_unix: until.timestamp(),
+            until_unix_nanos: until.timestamp_subsec_nanos(),
+        }
+    }
+
+    /// Runs the consumer for a capacity-one pod over `source`, fed by the
+    /// returned broadcast sender, with a live subscription.
+    async fn capacity_one_consumer(
+        source: Arc<dyn buzz_auth::CommandReplayGuard>,
+    ) -> (
+        Arc<AppState>,
+        tokio::sync::broadcast::Sender<buzz_pubsub::NipFiDisconnect>,
+        tokio::sync::watch::Sender<buzz_pubsub::NipFiSubscription>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let pod = store_pod(1, Arc::clone(&source)).await;
+        pod.nip_fi_deny_map.as_deref().unwrap().begin_restore();
+        let (tx, rx) = tokio::sync::broadcast::channel(16);
+        let (sub_tx, sub_rx) =
+            tokio::sync::watch::channel(buzz_pubsub::NipFiSubscription::default());
+        let consumer = tokio::spawn(run_nip_fi_disconnect_consumer(
+            Arc::clone(&pod),
+            rx,
+            sub_rx,
+            vec![source],
+        ));
+        (pod, tx, sub_tx, consumer)
+    }
+
+    fn go_live(sub_tx: &tokio::sync::watch::Sender<buzz_pubsub::NipFiSubscription>) {
+        sub_tx.send_modify(|s| {
+            s.epoch += 1;
+            s.live = true;
+        });
+    }
+
+    /// A deny that arrives during the restore and does not fit keeps the pod
+    /// closed: it restores again and finds the union over capacity.
+    #[tokio::test]
+    async fn capacity_miss_during_handoff_keeps_admission_closed() {
+        let store = Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
+        let (a, b, other) = (
+            nostr::Keys::generate().public_key(),
+            nostr::Keys::generate().public_key(),
+            nostr::Keys::generate().public_key(),
+        );
+        store_deny(&store, &a).await;
+        let message = store_deny(&store, &b).await;
+        let source = Arc::new(StaleFirstLoad {
+            inner: Arc::clone(&store),
+            hidden: std::sync::Mutex::new(Some(b)),
+        });
+        let (pod, tx, sub_tx, consumer) = capacity_one_consumer(source).await;
+        tx.send(message).unwrap();
+        go_live(&sub_tx);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !pod.nip_fi_deny_map.as_deref().unwrap().is_restored(),
+            "a missed deny never reopens admission"
+        );
+        assert!(is_denied(&pod, &other));
+        consumer.abort();
+    }
+
+    /// A live deny that does not fit after a successful restore closes
+    /// admission again until the active union fits.
+    #[tokio::test]
+    async fn capacity_miss_after_restore_closes_admission() {
+        let store = Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
+        let (a, b, other) = (
+            nostr::Keys::generate().public_key(),
+            nostr::Keys::generate().public_key(),
+            nostr::Keys::generate().public_key(),
+        );
+        store_deny(&store, &a).await;
+        let (pod, tx, sub_tx, consumer) = capacity_one_consumer(store.clone()).await;
+        go_live(&sub_tx);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!is_denied(&pod, &other), "open once restored");
+        tx.send(store_deny(&store, &b).await).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !pod.nip_fi_deny_map.as_deref().unwrap().is_restored(),
+            "closed after the miss"
+        );
+        assert!(is_denied(&pod, &other));
+        consumer.abort();
+    }
+
     /// A Redis error before the script ran: 503, and the same signed command
     /// succeeds on retry.
     #[tokio::test]
@@ -4092,12 +4270,26 @@ mod route_integration_tests {
     mod external_infra_redis {
         use super::*;
 
-        fn redis_guard() -> Arc<dyn buzz_auth::CommandReplayGuard> {
+        /// A store on its own connection under `namespace`: pods built with
+        /// the same namespace share one store; other cases never share its
+        /// capacity.
+        fn redis_guard_in(namespace: &str) -> Arc<dyn buzz_auth::CommandReplayGuard> {
             let url = std::env::var("BUZZ_TEST_REDIS_URL")
                 .or_else(|_| std::env::var("REDIS_URL"))
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
             let pool = buzz_pubsub::redis_connection(&url).expect("redis pool");
-            Arc::new(buzz_pubsub::RedisCommandReplayGuard::new(pool))
+            Arc::new(buzz_pubsub::RedisCommandReplayGuard::namespaced(
+                pool, namespace,
+            ))
+        }
+
+        fn test_namespace() -> String {
+            format!("buzz:test:nip-fi:{}", uuid::Uuid::new_v4())
+        }
+
+        /// A store private to one case.
+        fn redis_guard() -> Arc<dyn buzz_auth::CommandReplayGuard> {
+            redis_guard_in(&test_namespace())
         }
 
         async fn pod_in(mode: NipFiMode) -> Arc<AppState> {
@@ -4484,9 +4676,10 @@ mod route_integration_tests {
         #[tokio::test]
         #[ignore = "requires Redis"]
         async fn redis_command_replay_on_second_pod_is_denied() {
+            let namespace = test_namespace();
             command_replayed_on_second_pod_is_denied_without_effect(
-                redis_guard(),
-                redis_guard(),
+                redis_guard_in(&namespace),
+                redis_guard_in(&namespace),
                 true,
             )
             .await;

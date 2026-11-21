@@ -19,7 +19,7 @@ use nostr::PublicKey;
 use tokio_util::sync::CancellationToken;
 
 use crate::nip_fi_core::NipFiSession;
-use crate::nip_fi_shadow::{Stage, WouldDeny, DENY_SET};
+use crate::nip_fi_shadow::{Stage, WouldDeny};
 use crate::state::AppState;
 
 #[derive(Clone, Copy)]
@@ -167,8 +167,8 @@ impl ShadowSession {
         self.sessions
             .registered()
             .insert(self.id, Arc::downgrade(self));
-        if deny_listed(state, &self.assertion) {
-            self.decide(Err(DENY_SET.by(self.assertion.asserted_key())));
+        if let Some(refusal) = deny_refusal(state, &self.assertion) {
+            self.decide(Err(refusal));
         }
     }
 
@@ -318,19 +318,20 @@ pub(crate) fn upgrade_denied(
     community: &metrics::SharedString,
     assertion: &VerifiedAssertion,
 ) -> bool {
-    let denied = deny_listed(state, assertion);
-    if denied {
-        let verdict = Err(DENY_SET.by(assertion.asserted_key()));
-        crate::nip_fi_shadow::record_for("ws", community.clone(), verdict);
+    let refusal = deny_refusal(state, assertion);
+    if let Some(refusal) = refusal {
+        crate::nip_fi_shadow::record_for("ws", community.clone(), Err(refusal));
     }
-    denied
+    refusal.is_some()
 }
 
-fn deny_listed(state: &AppState, assertion: &VerifiedAssertion) -> bool {
+/// The deny-set step's would-deny: revoked for an active entry, unavailable
+/// while the deny map is still restoring.
+fn deny_refusal(state: &AppState, assertion: &VerifiedAssertion) -> Option<WouldDeny> {
     state
         .nip_fi_deny_map
         .as_deref()
-        .is_some_and(|map| crate::nip_fi_core::assertion_denied(map, assertion, chrono::Utc::now()))
+        .and_then(|map| crate::nip_fi_core::assertion_denied(map, assertion, chrono::Utc::now()))
 }
 
 #[cfg(test)]

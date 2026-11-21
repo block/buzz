@@ -898,15 +898,31 @@ async fn run_active_audio_connection(
     crate::nip_fi_test_hooks::before_deny_set_check(tenant.community()).await;
     if let Some(assertion) = &nip_fi_assertion {
         if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
-            if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now()) {
+            if let Some(refusal) =
+                crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now())
+            {
                 warn!(
                     channel_id = %channel_id,
                     pubkey = %pubkey_hex,
-                    "NIP-FI deny-set hit at audio post-registration check — denying"
+                    class = ?refusal.class,
+                    "NIP-FI deny-set check refused audio post-registration — denying"
                 );
-                control.deny_nip_fi_enforce(crate::nip_fi_shadow::DENY_SET.by(Some(pubkey)));
-                auth_line.finish(AuthResult::Denied(crate::access::AuthReason::DenySet));
-                deny_audio_authorization(&mut ws_send, &control, &mut terminal_ctrl_rx).await;
+                control.deny_nip_fi_enforce(refusal.by(Some(pubkey)));
+                auth_line.finish(AuthResult::Denied(match refusal.class {
+                    buzz_auth::DenialClass::AuthorizationDenied => {
+                        crate::access::AuthReason::DenySet
+                    }
+                    _ => crate::access::AuthReason::AuthorizationUnavailable,
+                }));
+                exit_authorization_refusal(
+                    &mut ws_send,
+                    &control,
+                    &mut terminal_ctrl_rx,
+                    true,
+                    refusal.class,
+                    serde_json::Value::Null,
+                )
+                .await;
                 return;
             }
         }

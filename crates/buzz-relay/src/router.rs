@@ -944,13 +944,15 @@ async fn nip11_or_ws_handler(
     // [FI-TRACE-DENY-SET]
     if let Some(assertion) = &nip_fi_assertion {
         if let Some(deny_map) = state.nip_fi_deny_map.as_deref() {
-            if crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now()) {
+            if let Some(refusal) =
+                crate::nip_fi_core::assertion_denied(deny_map, assertion, chrono::Utc::now())
+            {
                 crate::nip_fi_shadow::record_denial(
                     "ws",
                     crate::nip_fi_shadow::enforce_label(&state, raw_host),
-                    crate::nip_fi_shadow::DENY_SET.by(assertion.asserted_key()),
+                    refusal,
                 );
-                return http_denial(buzz_auth::DenialClass::AuthorizationDenied).into_response();
+                return http_denial(refusal.class).into_response();
             }
         }
     }

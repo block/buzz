@@ -69,8 +69,8 @@ return 'claimed'
 /// Redis-backed NIP-FI command replay seen-set and deny store.
 pub struct RedisCommandReplayGuard {
     pool: crate::RedisConnection,
-    prefix: &'static str,
-    deny_prefix: &'static str,
+    prefix: std::borrow::Cow<'static, str>,
+    deny_prefix: std::borrow::Cow<'static, str>,
 }
 
 impl RedisCommandReplayGuard {
@@ -78,8 +78,8 @@ impl RedisCommandReplayGuard {
     pub fn new(pool: crate::RedisConnection) -> Self {
         Self {
             pool,
-            prefix: COMMAND_REPLAY_PREFIX,
-            deny_prefix: DENY_STORE_PREFIX,
+            prefix: COMMAND_REPLAY_PREFIX.into(),
+            deny_prefix: DENY_STORE_PREFIX.into(),
         }
     }
 
@@ -87,8 +87,19 @@ impl RedisCommandReplayGuard {
     pub fn shadow(pool: crate::RedisConnection) -> Self {
         Self {
             pool,
-            prefix: SHADOW_COMMAND_REPLAY_PREFIX,
-            deny_prefix: SHADOW_DENY_STORE_PREFIX,
+            prefix: SHADOW_COMMAND_REPLAY_PREFIX.into(),
+            deny_prefix: SHADOW_DENY_STORE_PREFIX.into(),
+        }
+    }
+
+    /// Claims and deny records under `namespace`, disjoint from both modes.
+    /// For tests that must not share capacity with other cases on one Redis.
+    #[doc(hidden)]
+    pub fn namespaced(pool: crate::RedisConnection, namespace: &str) -> Self {
+        Self {
+            pool,
+            prefix: format!("{namespace}:command").into(),
+            deny_prefix: format!("{namespace}:deny").into(),
         }
     }
 }
@@ -123,11 +134,11 @@ impl CommandReplayGuard for RedisCommandReplayGuard {
             let ttl = claim
                 .ttl_secs
                 .clamp(DEFAULT_REPLAY_TTL_SECS, MAX_REPLAY_TTL_SECS);
-            let (index, exact) = deny_store_keys(self.deny_prefix, claim.issuer);
+            let (index, exact) = deny_store_keys(&self.deny_prefix, claim.issuer);
             let mut conn = self.pool.clone();
             let reply: String = redis::Script::new(ACCEPT_SCRIPT)
                 .key(namespaced_command_replay_key(
-                    self.prefix,
+                    &self.prefix,
                     claim.issuer,
                     claim.jti,
                 ))
@@ -160,7 +171,7 @@ impl CommandReplayGuard for RedisCommandReplayGuard {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<(PublicKey, DateTime<Utc>)>, AuthError>> + Send + 'a>>
     {
         Box::pin(async move {
-            let (_, exact) = deny_store_keys(self.deny_prefix, issuer);
+            let (_, exact) = deny_store_keys(&self.deny_prefix, issuer);
             let mut conn = self.pool.clone();
             let entries: Vec<(String, String)> = redis::cmd("HGETALL")
                 .arg(exact)

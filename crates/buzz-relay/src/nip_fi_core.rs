@@ -216,18 +216,30 @@ pub(crate) fn asserted_key_matches(
     assertion.asserted_key() == Some(proven_pubkey)
 }
 
-/// Whether the deny set holds `(iss, k)` or, for an agent assertion,
-/// `(iss, owner)` (NIP-FI.md, admission step 7).
+/// The deny-set step's refusal, if any (NIP-FI.md, admission step 7):
+/// [`DENY_SET_RESTORING`](crate::nip_fi_shadow::DENY_SET_RESTORING)
+/// (authorization unavailable) while the deny map is still restoring, else
+/// [`DENY_SET`](crate::nip_fi_shadow::DENY_SET) when the deny set holds
+/// `(iss, k)` or, for an agent assertion, `(iss, owner)`.
 pub(crate) fn assertion_denied(
     deny_map: &impl crate::nip_fi_http::HttpDenyMap,
     assertion: &VerifiedAssertion,
     now: chrono::DateTime<chrono::Utc>,
-) -> bool {
-    let issuer = assertion.identity().issuer();
-    [assertion.asserted_key(), assertion.owner()]
-        .into_iter()
-        .flatten()
-        .any(|key| deny_map.is_denied(issuer, &key, now))
+) -> Option<crate::nip_fi_shadow::WouldDeny> {
+    let refusal = if !deny_map.is_restored() {
+        crate::nip_fi_shadow::DENY_SET_RESTORING
+    } else {
+        let issuer = assertion.identity().issuer();
+        let denied = [assertion.asserted_key(), assertion.owner()]
+            .into_iter()
+            .flatten()
+            .any(|key| deny_map.is_denied(issuer, &key, now));
+        if !denied {
+            return None;
+        }
+        crate::nip_fi_shadow::DENY_SET
+    };
+    Some(refusal.by(assertion.asserted_key()))
 }
 
 /// The NIP-FI facts a live session is registered under: its admitting issuer
@@ -560,19 +572,33 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_restoring_deny_map_refuses_as_unavailable_not_revoked() {
+        let key = nostr::Keys::generate().public_key();
+        let assertion = agent_assertion(key, nostr::Keys::generate().public_key());
+        let now = chrono::Utc::now();
+        let map = deny_map_denying(&key);
+        map.begin_restore();
+        let refusal = assertion_denied(&map, &assertion, now).expect("restoring refuses");
+        assert_eq!(
+            refusal.class,
+            buzz_auth::DenialClass::AuthorizationUnavailable
+        );
+        let generation = map.begin_restore();
+        assert!(map.finish_restore(generation));
+        let refusal = assertion_denied(&map, &assertion, now).expect("active entry refuses");
+        assert_eq!(refusal.class, buzz_auth::DenialClass::AuthorizationDenied);
+    }
+
+    #[test]
     fn deny_entry_for_the_owner_denies_its_agent_assertion() {
         let agent = nostr::Keys::generate().public_key();
         let owner = nostr::Keys::generate().public_key();
         let unrelated = nostr::Keys::generate().public_key();
         let assertion = agent_assertion(agent, owner);
         let now = chrono::Utc::now();
-        assert!(assertion_denied(&deny_map_denying(&owner), &assertion, now));
-        assert!(assertion_denied(&deny_map_denying(&agent), &assertion, now));
-        assert!(!assertion_denied(
-            &deny_map_denying(&unrelated),
-            &assertion,
-            now
-        ));
+        assert!(assertion_denied(&deny_map_denying(&owner), &assertion, now).is_some());
+        assert!(assertion_denied(&deny_map_denying(&agent), &assertion, now).is_some());
+        assert!(assertion_denied(&deny_map_denying(&unrelated), &assertion, now).is_none());
     }
 
     #[test]
@@ -583,11 +609,9 @@ pub(crate) mod tests {
             Some(key),
             vec![chrono::Utc::now() + chrono::Duration::seconds(300)],
         );
-        assert!(!assertion_denied(
-            &deny_map_denying(&other),
-            &assertion,
-            chrono::Utc::now()
-        ));
+        assert!(
+            assertion_denied(&deny_map_denying(&other), &assertion, chrono::Utc::now()).is_none()
+        );
     }
 
     #[test]
