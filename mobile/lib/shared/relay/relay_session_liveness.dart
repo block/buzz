@@ -13,6 +13,15 @@ const relayNetworkChangeReconnectSpread = Duration(seconds: 3);
 class _LivenessProbe {
   String? subId;
   Timer? timer;
+
+  /// A probe found the socket dead after a network change and spread out its
+  /// reconnect. A later change leaves that wait and the attempt it starts
+  /// alone, so phones do not bunch up again when the network comes back.
+  bool spreadReconnect = false;
+
+  /// A network change restarted the connection, and that attempt is still
+  /// in flight. A return from a brief inactive spell keeps it.
+  bool networkAttempt = false;
 }
 
 /// Notices a socket that looks open but no longer delivers anything, as one
@@ -36,10 +45,12 @@ extension _RelaySessionLiveness on RelaySessionNotifier {
   }) {
     if (_disposed || _paused || _ageRestricted) return;
     if (!_socketConnected || status != SessionStatus.connected) {
-      // An attempt in flight may be stuck on the old network: replace it.
-      if (networkChanged) {
+      // An attempt in flight may be stuck on the old network: replace it,
+      // unless an earlier change spread out the reconnect.
+      if (networkChanged && !_liveness.spreadReconnect) {
         _reconnectTimer?.cancel();
         _reconnectDelayMs = RelaySessionNotifier._baseReconnectDelayMs;
+        _liveness.networkAttempt = true;
         _connect(ref.read(relayConfigProvider));
       }
       return;
@@ -90,6 +101,7 @@ extension _RelaySessionLiveness on RelaySessionNotifier {
       if (!networkChanged || _disposed || _paused) return;
       _reconnectTimer?.cancel();
       final spread = relayNetworkChangeReconnectSpread.inMilliseconds;
+      _liveness.spreadReconnect = true;
       _reconnectTimer = _reconnectTimerFactory(
         Duration(milliseconds: (_random.nextDouble() * spread).round()),
         () => _connect(ref.read(relayConfigProvider)),
@@ -103,6 +115,13 @@ extension _RelaySessionLiveness on RelaySessionNotifier {
     _resetLiveness();
     if (!closed) _sendClose(subId);
     return true;
+  }
+
+  /// Ends what a network change started, once its attempt connected or
+  /// failed, or the session paused or ended.
+  void _endNetworkReconnect() {
+    _liveness.spreadReconnect = false;
+    _liveness.networkAttempt = false;
   }
 
   /// Forgets the probe, as when its connection ends.

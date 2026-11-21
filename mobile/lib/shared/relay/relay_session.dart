@@ -559,6 +559,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _paused = true;
     _socketConnected = false;
     _resetLiveness();
+    _endNetworkReconnect();
     _reconnectTimer?.cancel();
     _cancelAllHistory(Exception('App moved to background'));
     _rejectAllPending(Exception('App moved to background'));
@@ -651,6 +652,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   Future<void> _handleConnected(int generation) async {
     if (_disposed || generation != _connectionGeneration) return;
+    _endNetworkReconnect();
     _socketConnected = true;
     ref.read(hostedRelayAuthProvider).connected(ref.read(relayConfigProvider));
     _hasConnectedOnce = true;
@@ -669,6 +671,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     if (_disposed || generation != _connectionGeneration) return;
     _socketConnected = false;
     _resetLiveness();
+    _endNetworkReconnect();
     final connectedAt = _connectedAt;
     _noteDisconnected(error, denied: _authorizationDenied);
     _noteLostOperations();
@@ -1160,6 +1163,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _connectionGeneration++;
     _reconnectTimer?.cancel();
     _resetLiveness();
+    _endNetworkReconnect();
     _flushTimer?.cancel();
     _backgroundGraceTimer?.cancel();
     _backgroundedAt = null;

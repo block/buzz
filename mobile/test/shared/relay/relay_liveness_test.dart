@@ -228,4 +228,47 @@ void main() {
       expect(async.pendingTimers, isEmpty);
     });
   });
+
+  test('a second network change keeps the spread-out reconnect', () {
+    fakeAsync((async) {
+      final (:relay, :container) = connect(async);
+      final session = container.read(relaySessionProvider.notifier);
+
+      relay.holdReq();
+      session.onNetworkChanged();
+      async.elapse(pastProbe);
+      expect(relay.sockets.first.isOpen, isFalse);
+      // Wi-Fi coming back while the reconnect waits must not bunch it up.
+      session.onNetworkChanged();
+      async.elapse(const Duration(milliseconds: 50));
+      expect(relay.sockets, hasLength(1));
+      relay.holdAuth();
+      async.elapse(const Duration(milliseconds: 1400));
+      expect(relay.sockets, hasLength(2));
+      // Nor the attempt the spread-out wait started.
+      session.onNetworkChanged();
+      async.elapse(const Duration(milliseconds: 50));
+      expect(relay.sockets, hasLength(2));
+    });
+  });
+
+  test('returning from inactive keeps an attempt a network change started', () {
+    fakeAsync((async) {
+      final (:relay, :container) = connect(async);
+      final session = container.read(relaySessionProvider.notifier);
+
+      relay.holdAuth();
+      relay.drop();
+      async.elapse(const Duration(seconds: 2));
+      relay.holdAuth();
+      // Toggling Wi-Fi from Control Center: the change arrives while
+      // inactive, and closing Control Center resumes.
+      session.onNetworkChanged();
+      async.elapse(const Duration(milliseconds: 50));
+      expect(relay.sockets, hasLength(3));
+      session.onAppResumed();
+      async.elapse(const Duration(milliseconds: 50));
+      expect(relay.sockets, hasLength(3));
+    });
+  });
 }
