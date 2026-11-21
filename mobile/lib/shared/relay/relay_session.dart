@@ -38,6 +38,7 @@ part 'relay_session_auth.dart';
 part 'relay_session_background.dart';
 part 'relay_session_delivery.dart';
 part 'relay_session_diagnostics.dart';
+part 'relay_session_liveness.dart';
 part 'relay_session_test_hooks.dart';
 part 'relay_session_subscriptions.dart';
 part 'relay_session_snapshot.dart';
@@ -98,6 +99,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Timer? _reconnectTimer;
   Timer? _flushTimer;
   Timer? _backgroundGraceTimer;
+  final _liveness = _LivenessProbe();
   DateTime? _backgroundedAt;
   DateTime? _connectedAt;
   DateTime? _connectStartedAt;
@@ -358,6 +360,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         );
       }
       if (sub?.heldFilter == null) _sendClose(subId);
+      if (_socketConnected) _checkConnection(state.status, ref);
     });
 
     final subscription = _HistorySubscription(
@@ -492,6 +495,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
           ),
         );
       }
+      if (_socketConnected) _checkConnection(state.status, ref);
     });
 
     _pendingEvents[event.id] = _PendingEvent(
@@ -570,30 +574,11 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       _connectForBackgroundWork(timeout, state.status, ref);
 
   /// Called by the app lifecycle provider when the app returns to foreground.
-  void onAppResumed() {
-    _paused = false;
-    final backgroundedAt = _backgroundedAt;
-    _backgroundedAt = null;
-    _backgroundGraceTimer?.cancel();
-    _backgroundGraceTimer = null;
+  void onAppResumed() => _resumeFromBackground(state.status, ref);
 
-    final backgroundedLongEnoughToRequireReconnect =
-        backgroundedAt != null &&
-        _now().difference(backgroundedAt) >= _backgroundGraceDuration;
-    // Keep a socket held open for background work: an OK may still come.
-    final heldOpen = _backgroundWorkHolds > 0 && _socketConnected;
-    if ((heldOpen || !backgroundedLongEnoughToRequireReconnect) &&
-        state.status == SessionStatus.connected) {
-      return;
-    }
-
-    // Cancel any in-flight reconnect backoff timer so we reconnect immediately
-    // instead of waiting for the (possibly large) exponential delay.
-    _reconnectTimer?.cancel();
-    _reconnectDelayMs = _baseReconnectDelayMs;
-    final config = ref.read(relayConfigProvider);
-    _connect(config);
-  }
+  /// Called when the device's network changes while the app is in the
+  /// foreground. See [_RelaySessionLiveness._checkConnection].
+  void onNetworkChanged() => _checkConnection(state.status, ref);
 
   Future<void> _connect(RelayConfig config, {bool renewed = false}) async {
     if (_disposed || _ageRestricted) return;
@@ -865,6 +850,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _handleEose(List<dynamic> data) {
     if (data.length < 2) return;
     final subId = data[1] as String;
+    if (_answerLivenessProbe(subId)) return;
 
     // History subscription: resolve with collected events.
     final historySub = _historySubscriptions.remove(subId);
