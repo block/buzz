@@ -33,6 +33,23 @@
       "minimum": 1,
       "description": "Replica count for the relay Deployment. replicaCount > 1 requires Redis (for buzz-pubsub) — enforced by _validate.tpl. Git storage does NOT need ReadWriteMany: git state is object-store-backed and repo names live in Postgres, so ReadWriteOnce is fine per replica."
     },
+    "strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Relay Deployment update strategy. rollingUpdate is only rendered when type is RollingUpdate, so switching type to Recreate needs no other change.",
+      "properties": {
+        "type": { "type": "string", "enum": ["RollingUpdate", "Recreate"] },
+        "rollingUpdate": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxSurge": { "type": ["integer", "string"] },
+            "maxUnavailable": { "type": ["integer", "string"] }
+          }
+        }
+      },
+      "required": ["type"]
+    },
     "relayUrl": {
       "type": "string",
       "pattern": "^(wss?://.+)?$",
