@@ -427,7 +427,7 @@ mod tests {
             );
             tokio::time::timeout(Duration::from_secs(2), async {
                 loop {
-                    let alive = tokio::process::Command::new("/bin/kill")
+                    let alive = tokio::process::Command::new("kill")
                         .args(["-0", &pid.to_string()])
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::null())
