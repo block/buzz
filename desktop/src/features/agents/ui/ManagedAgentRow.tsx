@@ -261,7 +261,11 @@ function AgentSummary({
             <PubKey pubkey={agent.pubkey} />
             {agent.backend.type === "local" ? (
               <span>
-                {agent.startOnAppLaunch ? "Auto-start" : "Manual start"}
+                {agent.disableLocalSpawn
+                  ? "Remote runtime"
+                  : agent.startOnAppLaunch
+                    ? "Auto-start"
+                    : "Manual start"}
               </span>
             ) : (
               <span>Remote deployment</span>
