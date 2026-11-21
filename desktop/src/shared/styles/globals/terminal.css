@@ -273,6 +273,7 @@
   }
 
   .buzz-terminal-substrate[data-terminal-visible="false"] {
+    /* biome-ignore lint/complexity/noImportantStyles: must override the inline docked height set by TerminalSubstrate */
     height: 0 !important;
     min-height: 0;
     pointer-events: none;
