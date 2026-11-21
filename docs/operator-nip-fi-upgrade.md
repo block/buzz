@@ -67,10 +67,10 @@ read its status or retry that exact file. A committed replay never reapplies pol
 
 Inspect `mode` and `effective_required` separately from the stored flag.
 `enforce` keeps FI required after disable; `off` suspends FI after enable.
-`shadow` follows the stored flag, and also requires FI for communities inside the
-`BUZZ_NIP_FI_ENFORCE_PERCENT` cohort; a stored disable does not take a community
-out of the cohort, only lowering the percentage does. An enable receipt remains pending even after
-local sweeps, since it cannot certify fleet-wide connection closure. Required
+`shadow` follows the stored flag, and also requires FI for communities inside
+the `BUZZ_NIP_FI_ENFORCE_PERCENT` cohort; a stored disable does not take a
+community out of the cohort, only lowering the percentage does. An enable
+receipt remains pending even after local sweeps, since it cannot certify fleet-wide connection closure. Required
 host caches can over-restrict for their remaining one-second lease after disable.
 When the effective policy becomes optional, a racing sweep may close one last
 non-FI socket; it can reconnect under optional policy. A community inside the
