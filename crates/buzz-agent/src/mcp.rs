@@ -313,6 +313,40 @@ impl McpRegistry {
             .unwrap_or(false)
     }
 
+    /// Resolve a tool name emitted without its server prefix.
+    ///
+    /// Small local models occasionally drop the `<server>__` prefix from an
+    /// MCP-qualified tool name, emitting e.g. `shell` instead of `dev__shell`.
+    /// When `name` contains no `__` separator and exactly one registered
+    /// non-hook tool has that bare name, return its qualified form so the
+    /// call can proceed normally. Returns `None` when the bare name is absent,
+    /// ambiguous (two servers expose a tool with the same bare name), or the
+    /// name already contains the separator (intentional qualified form that
+    /// failed for a different reason).
+    pub fn resolve_suffix_match(&self, name: &str) -> Option<&str> {
+        // A name containing the separator was deliberately qualified —
+        // it failed exact lookup for a different reason; do not alias it.
+        if name.contains(SEP) {
+            return None;
+        }
+        let mut found: Option<&str> = None;
+        for (qname, entry) in &self.by_qname {
+            // Hooks are hidden from the LLM and ineligible for alias resolution.
+            if entry.bare.starts_with('_') {
+                continue;
+            }
+            if entry.bare == name {
+                if found.is_some() {
+                    // Two servers expose a tool with this bare name — refuse
+                    // to guess which one the model intended.
+                    return None;
+                }
+                found = Some(qname.as_str());
+            }
+        }
+        found
+    }
+
     pub fn tools(&self) -> Vec<ToolDef> {
         self.defs
             .iter()
