@@ -171,7 +171,7 @@ The gate applies to **all** inbound events — @mentions, DMs, thread replies, a
 
 Under the default `channel` policy, a session scope is the whole channel, so these commands retain their channel-wide behavior. Under the `thread` policy, post the command as a reply in the target thread so `!cancel` or `!rotate` affects only that thread. DMs remain one conversation scope. `!cancel` is a no-op when its scope is idle.
 
-Owner control commands must be kind:9 stream messages from the owner, must have body exactly `!cancel`, `!rotate`, or `!shutdown` after trimming, and must mention this agent with a separate `p` tag. They are consumed by the harness instead of being forwarded to the agent. An inline `@Name` changes the body and does not match. With the Buzz CLI, target a thread while preserving the exact command body by passing the mention separately:
+Owner control commands must be kind:9 stream messages from the owner, must mention this agent with a `p` tag, and are consumed by the harness instead of being forwarded to the agent. Send them the way you would any mention — `@Fountain Maintainer !rotate` — the harness ignores the mention text the client renders into the body (`@Name …` or `nostr:npub…`, before or after the command) and matches on the command alone. Content that does not begin with the mention, or that continues past the command ("please !rotate", "!rotate now"), is an ordinary message and is forwarded to the agent. With the Buzz CLI, you can also send the bare command and pass the mention separately, for example to target a thread:
 
 ```bash
 buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
