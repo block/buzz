@@ -39,14 +39,15 @@
 //! literal floor, the start of the month of the read's earliest possible row,
 //! and stops at the first window that completes the page. A regular-kind read
 //! stops at the same ceiling; any other read ends with one open window. A
-//! channel read starts at the month of [`channel_floor`] ([`oldest_first`]):
-//! a page whose cursor is below that month first reads every row below it in
-//! one pass ([`Range::Below`]), since a restore or backfill can store rows
-//! older than the channel, then walks from it. A later cursor walks from its
-//! own month. A page reads at most that pass and one window per two months of
-//! the channel's life. Without the channel's row a page walks from its cursor,
-//! and a read with neither plans every partition below the ceiling in one
-//! window.
+//! channel read starts at the month of [`channel_floor`] ([`oldest_first`]),
+//! and a page whose cursor is below that month walks from it. A channel the
+//! write path created holds no row below it, so it reads nothing older. Any
+//! other channel can: a restore or backfill can store rows older than the
+//! channel, so its page first reads every row below that month in one pass
+//! ([`Range::Below`]), then walks. A later cursor walks from its own month. A
+//! page reads at most that pass and one window per two months of the
+//! channel's life. Without the channel's row a page walks from its cursor, and
+//! a read with neither plans every partition below the ceiling in one window.
 //!
 //! The walk locks one more partition set per window it reads, and the locks
 //! stay until the read's transaction ends, so a read that must reach the
@@ -273,8 +274,8 @@ fn regular_only(kinds: Option<&[i32]>) -> bool {
 /// its `created_at` against the database clock, and the channel exists before
 /// its first row, so no write the relay serves stores an older row. A restore
 /// or backfill that bypasses that check (see [`crate::replica_fence`]) can,
-/// so an oldest-first channel page reads below the floor's month in one pass
-/// and walks from it ([`oldest_first`]).
+/// so only a channel row marked `history_from_creation` bounds a read at the
+/// floor ([`ChannelFloor`]).
 pub(crate) fn channel_floor(channel_created_at: DateTime<Utc>) -> DateTime<Utc> {
     channel_created_at - Duration::seconds(CREATED_AT_FLOOR_SECS)
 }
@@ -296,25 +297,59 @@ pub(crate) fn oldest_for(
     Forward::from(floor, horizon, regular_only(kinds))
 }
 
-/// The first pass of an oldest-first channel page read. `floor` is the
-/// channel's [`channel_floor`] (`None`: its row is not visible); `cursor`
-/// the page's cursor (`None`: the head page). A page whose cursor is below
-/// the floor's month reads every row below that month first, then walks from
-/// it; a later cursor walks from its own month. Without a floor a page walks
-/// from its cursor.
+/// What a channel's row says about the channel's oldest rows, for
+/// [`oldest_first`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChannelFloor {
+    /// The channel's row is not visible.
+    Unknown,
+    /// The channel's [`channel_floor`], with no row of the channel below it:
+    /// the write path created the channel and marked its row
+    /// `history_from_creation`.
+    FromCreation(DateTime<Utc>),
+    /// The channel's [`channel_floor`], which rows can be older than: a channel
+    /// from before the mark, or one a restore or import stored older rows in.
+    SplitAt(DateTime<Utc>),
+}
+
+impl ChannelFloor {
+    /// The floor for a channel row created at `created_at` and marked
+    /// `history_from_creation` (only `true` bounds it).
+    pub(crate) fn of(created_at: DateTime<Utc>, history_from_creation: Option<bool>) -> Self {
+        let floor = channel_floor(created_at);
+        if history_from_creation == Some(true) {
+            Self::FromCreation(floor)
+        } else {
+            Self::SplitAt(floor)
+        }
+    }
+}
+
+/// The first pass of an oldest-first channel page read. `cursor` is the
+/// page's cursor (`None`: the head page). A page whose cursor is below the
+/// month of the channel's floor walks from that month, first reading every
+/// row below it when the floor is [`ChannelFloor::SplitAt`]; a later cursor
+/// walks from its own month. Without the channel's row a page walks from its
+/// cursor.
 pub(crate) fn oldest_first(
     now: DateTime<Utc>,
     kinds: Option<&[i32]>,
-    floor: Option<DateTime<Utc>>,
+    floor: ChannelFloor,
     cursor: Option<DateTime<Utc>>,
 ) -> Range {
-    match floor.map(|floor| oldest_for(now, kinds, Some(floor))) {
-        Some(walk)
-            if walk
-                .from
-                .is_some_and(|from| cursor.is_none_or(|ts| ts < from)) =>
-        {
-            Range::Below(walk)
+    let (floor, rows_below) = match floor {
+        ChannelFloor::Unknown => return Range::Forward(oldest_for(now, kinds, cursor)),
+        ChannelFloor::FromCreation(floor) => (floor, false),
+        ChannelFloor::SplitAt(floor) => (floor, true),
+    };
+    let walk = oldest_for(now, kinds, Some(floor));
+    match walk.from {
+        Some(from) if cursor.is_none_or(|ts| ts < from) => {
+            if rows_below {
+                Range::Below(walk)
+            } else {
+                Range::Forward(walk)
+            }
         }
         _ => Range::Forward(oldest_for(now, kinds, cursor)),
     }
@@ -708,35 +743,44 @@ mod tests {
     }
 
     /// A channel page whose cursor is below its floor's month, the head page
-    /// included, reads every row below that month in one pass and then walks
-    /// from it. A later cursor walks from its own month, and so does a page
-    /// without a floor.
+    /// included, walks from that month. Unless the channel's row is marked
+    /// `history_from_creation`, it first reads every row below that month in
+    /// one pass. A later cursor walks from its own month, and so does a page
+    /// without the channel's row.
     #[test]
     fn oldest_first_reads_below_the_floor_month_in_one_pass() {
         let now = at(2026, 11, 4);
         let kinds = Some(&[9][..]);
-        let floor = Some(channel_floor(midnight(2026, 3, 1) + Duration::seconds(10)));
-        let walk = oldest_for(now, kinds, floor);
+        let created = midnight(2026, 3, 1) + Duration::seconds(10);
+        let walk = oldest_for(now, kinds, Some(channel_floor(created)));
         assert_eq!(walk.from, Some(midnight(2026, 2, 1)));
         for cursor in [
             None,
             Some(DateTime::<Utc>::UNIX_EPOCH),
             Some(at(2026, 1, 31)),
         ] {
-            let first = oldest_first(now, kinds, floor, cursor);
-            assert_eq!(first, Range::Below(walk), "{cursor:?}");
+            for mark in [None, Some(false)] {
+                let first = oldest_first(now, kinds, ChannelFloor::of(created, mark), cursor);
+                assert_eq!(first, Range::Below(walk), "{mark:?}, {cursor:?}");
+                assert_eq!(
+                    first.predicate("created_at").as_deref(),
+                    Some(" AND created_at < '2026-02-01T00:00:00Z'::timestamptz")
+                );
+                assert_eq!(next(first, 2, 5), Some((Range::Forward(walk), 3)));
+                assert_eq!(next(first, 5, 5), None);
+            }
             assert_eq!(
-                first.predicate("created_at").as_deref(),
-                Some(" AND created_at < '2026-02-01T00:00:00Z'::timestamptz")
+                oldest_first(now, kinds, ChannelFloor::of(created, Some(true)), cursor),
+                Range::Forward(walk),
+                "{cursor:?}"
             );
-            assert_eq!(next(first, 2, 5), Some((Range::Forward(walk), 3)));
-            assert_eq!(next(first, 5, 5), None);
         }
         for (floor, cursor) in [
-            (floor, Some(midnight(2026, 2, 1))),
-            (floor, Some(at(2026, 6, 20))),
-            (None, Some(at(2026, 6, 20))),
-            (None, None),
+            (ChannelFloor::of(created, None), Some(midnight(2026, 2, 1))),
+            (ChannelFloor::of(created, None), Some(at(2026, 6, 20))),
+            (ChannelFloor::of(created, Some(true)), Some(at(2026, 6, 20))),
+            (ChannelFloor::Unknown, Some(at(2026, 6, 20))),
+            (ChannelFloor::Unknown, None),
         ] {
             assert_eq!(
                 oldest_first(now, kinds, floor, cursor),

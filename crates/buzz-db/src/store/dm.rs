@@ -382,8 +382,8 @@ async fn find_or_create_dm(
     let inserted = sqlx::query(
         r#"
         INSERT INTO channels
-            (id, community_id, name, channel_type, visibility, created_by, participant_hash)
-        VALUES ($1, $2, $3, 'dm', 'private', $4, $5)
+            (id, community_id, name, channel_type, visibility, created_by, participant_hash, history_from_creation)
+        VALUES ($1, $2, $3, 'dm', 'private', $4, $5, true)
         "#,
     )
     .bind(id)

@@ -675,8 +675,10 @@ pub(crate) async fn get_channel_window_on(
     // Recent-first (see `recent_pass`): the newest partitions answer a window
     // that fills there (with its +1 probe row); older rows are read only for
     // what is still missing. A newer page walks forward a window at a time
-    // from its cursor's month, or reads every row below the month of the
-    // channel's creation first and walks from there (`oldest_first`).
+    // from its cursor's month or the month of the channel's floor, whichever
+    // is later. Unless the channel is marked `history_from_creation`, a page
+    // that starts below that month first reads every row below it
+    // (`oldest_first`).
     let kinds: Option<Vec<i32>> =
         kind_filter.map(|ks| ks.iter().filter_map(|&k| i32::try_from(k).ok()).collect());
     let cursor_ts = cursor.as_ref().map(|(ts, _)| *ts);
@@ -721,19 +723,24 @@ pub(crate) async fn get_channel_window_on(
             let first = match first {
                 Some(first) => first,
                 None => {
-                    let floor = read
+                    let floor = match read
                         .fetch(
                             sqlx::query(
-                                "SELECT created_at FROM channels WHERE community_id = $1 AND id = $2",
+                                "SELECT created_at, history_from_creation FROM channels \
+                                 WHERE community_id = $1 AND id = $2",
                             )
                             .bind(community_id.as_uuid())
                             .bind(channel_id),
                         )
                         .await?
                         .first()
-                        .map(|row| row.try_get::<DateTime<Utc>, _>("created_at"))
-                        .transpose()?
-                        .map(crate::store::recent_pass::channel_floor);
+                    {
+                        Some(row) => crate::store::recent_pass::ChannelFloor::of(
+                            row.try_get("created_at")?,
+                            row.try_get("history_from_creation")?,
+                        ),
+                        None => crate::store::recent_pass::ChannelFloor::Unknown,
+                    };
                     crate::store::recent_pass::oldest_first(
                         Utc::now(),
                         kinds.as_deref(),
@@ -2854,10 +2861,11 @@ mod postgres_tests {
     }
 
     /// The head page of an oldest-first window reads only the partitions it
-    /// needs. It reads below the month the channel was created in one pass,
-    /// then walks forward two months at a time, so the newer partitions are
-    /// planned only when the page is still short. Its rows are the oldest rows
-    /// of an unbounded read, for every limit.
+    /// needs. For a channel from before `history_from_creation`, it reads
+    /// below the month the channel was created in one pass, then walks
+    /// forward two months at a time, so the newer partitions are planned only
+    /// when the page is still short. Its rows are the oldest rows of an
+    /// unbounded read, for every limit.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_window_newer_head_plans_only_the_partitions_it_reads() {
@@ -2933,7 +2941,9 @@ mod postgres_tests {
     /// Rows older than the channel, as a restore or backfill stores them, and
     /// one inside the write path's tolerance before its creation page the
     /// same from both ends, for every limit: oldest first from the head and
-    /// from a cursor at 0, newest first in the reverse order.
+    /// from a cursor at 0, newest first in the reverse order. That holds for
+    /// a channel from before `history_from_creation` (NULL) and one an import
+    /// unmarked (false).
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn channel_window_pages_rows_older_than_the_channel_from_both_ends() {
@@ -2954,39 +2964,173 @@ mod postgres_tests {
         let newest: Vec<_> = oldest.iter().rev().copied().collect();
         let epoch = (DateTime::<Utc>::UNIX_EPOCH, vec![0u8; 32]);
         let mut conn = pool.acquire().await.expect("acquire");
-        for limit in 1..=oldest.len() as u32 {
-            for (direction, start, expected) in [
-                (Direction::Newer, None, &oldest),
-                (Direction::Newer, Some(epoch.clone()), &oldest),
-                (Direction::Older, None, &newest),
-            ] {
-                let mut cursor = start.clone();
-                let mut rows = Vec::new();
-                loop {
-                    let window = get_channel_window_on(
-                        &mut conn,
-                        community,
-                        channel,
-                        limit,
-                        direction,
-                        cursor,
-                        None,
-                        ReadDeadline::PerRead,
-                    )
-                    .await
-                    .expect("page");
-                    rows.extend(row_ids(&window));
-                    if !window.has_more {
-                        break;
+        for mark in [None, Some(false)] {
+            sqlx::query(
+                "UPDATE channels SET history_from_creation = $3 \
+                 WHERE community_id = $1 AND id = $2",
+            )
+            .bind(community.as_uuid())
+            .bind(channel)
+            .bind(mark)
+            .execute(&pool)
+            .await
+            .expect("mark channel");
+            for limit in 1..=oldest.len() as u32 {
+                for (direction, start, expected) in [
+                    (Direction::Newer, None, &oldest),
+                    (Direction::Newer, Some(epoch.clone()), &oldest),
+                    (Direction::Older, None, &newest),
+                ] {
+                    let mut cursor = start.clone();
+                    let mut rows = Vec::new();
+                    loop {
+                        let window = get_channel_window_on(
+                            &mut conn,
+                            community,
+                            channel,
+                            limit,
+                            direction,
+                            cursor,
+                            None,
+                            ReadDeadline::PerRead,
+                        )
+                        .await
+                        .expect("page");
+                        rows.extend(row_ids(&window));
+                        if !window.has_more {
+                            break;
+                        }
+                        cursor = Some(window.next_cursor.expect("has_more implies next_cursor"));
                     }
-                    cursor = Some(window.next_cursor.expect("has_more implies next_cursor"));
+                    assert_eq!(
+                        &rows, expected,
+                        "{mark:?}: {direction:?} from {start:?}, limit {limit}"
+                    );
                 }
-                assert_eq!(
-                    &rows, expected,
-                    "{direction:?} from {start:?}, limit {limit}"
-                );
             }
         }
+    }
+
+    /// Every channel the write path creates (a channel, one with its own id,
+    /// a DM) pages both heads, and oldest first from a cursor before it, with
+    /// no partition from before its creation planned: a lock on one delays no
+    /// page, in a custom or a generic plan.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_window_pages_of_a_new_channel_skip_older_partitions() {
+        let pool = setup_pool().await;
+        let author = Keys::generate();
+        let creator = author.public_key().to_bytes();
+        let peer = Keys::generate().public_key().to_bytes();
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let channels = [
+            crate::channel::create_channel(
+                &pool,
+                community,
+                &format!("new-{}", Uuid::new_v4()),
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &creator,
+                None,
+                &[],
+                false,
+            )
+            .await
+            .expect("create channel")
+            .id,
+            crate::channel::create_channel_with_id(
+                &pool,
+                community,
+                Uuid::new_v4(),
+                &format!("new-{}", Uuid::new_v4()),
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &creator,
+                None,
+                &[],
+            )
+            .await
+            .expect("create channel with id")
+            .0
+            .id,
+            crate::dm::create_dm(
+                &pool,
+                community,
+                &[creator.as_slice(), peer.as_slice()],
+                &creator,
+                false,
+                &|_: &str, _: &[u8]| Ok(()),
+            )
+            .await
+            .expect("create DM")
+            .0
+            .id,
+        ];
+        let now = Utc::now().timestamp() as u64;
+        let mut pages = Vec::new();
+        for channel in channels {
+            let mut oldest_first = Vec::new();
+            for age in (1..=8).rev() {
+                let event = EventBuilder::new(Kind::Custom(9), format!("{channel} {age}s ago"))
+                    .custom_created_at(nostr::Timestamp::from(now - age))
+                    .sign_with_keys(&author)
+                    .expect("sign");
+                insert_root(&pool, community, channel, &event).await;
+                oldest_first.push(event.id);
+            }
+            let newest_first: Vec<_> = oldest_first.iter().rev().copied().collect();
+            pages.push((channel, oldest_first, newest_first));
+        }
+        let epoch = (DateTime::<Utc>::UNIX_EPOCH, vec![0u8; 32]);
+        let mut conn = pool.acquire().await.expect("acquire");
+        // Every partition below July 2026, all of them before these channels.
+        let older = ["events_p_past"]
+            .into_iter()
+            .map(String::from)
+            .chain((1..=6).map(|month| format!("events_p2026_{month:02}")));
+        let locker = lock(&pool, &mut conn, older).await;
+        for generic in [false, true] {
+            if generic {
+                sqlx::query("SET plan_cache_mode = force_generic_plan")
+                    .execute(&mut *conn)
+                    .await
+                    .expect("force generic plans");
+            }
+            for (channel, oldest_first, newest_first) in &pages {
+                for limit in [1, 2, 4] {
+                    for (direction, cursor, expected) in [
+                        (Direction::Older, None, newest_first),
+                        (Direction::Newer, None, oldest_first),
+                        (Direction::Newer, Some(epoch.clone()), oldest_first),
+                    ] {
+                        let case = format!(
+                            "{channel} {direction:?} from {cursor:?}, limit {limit}, generic {generic}"
+                        );
+                        let window = get_channel_window_on(
+                            &mut conn,
+                            community,
+                            *channel,
+                            limit as u32,
+                            direction,
+                            cursor,
+                            None,
+                            ReadDeadline::PerRead,
+                        )
+                        .await
+                        .unwrap_or_else(|e| panic!("{case}: {e:?}"));
+                        assert_eq!(row_ids(&window), expected[..limit].to_vec(), "{case}");
+                        assert!(window.has_more, "{case}");
+                    }
+                }
+            }
+        }
+        sqlx::query("RESET plan_cache_mode")
+            .execute(&mut *conn)
+            .await
+            .expect("reset plan_cache_mode");
+        unlock(locker, &mut conn).await;
     }
 
     /// A cursor page whose channel's row is gone walks from its cursor: a

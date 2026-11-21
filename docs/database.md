@@ -267,7 +267,10 @@ holding a write-blocking lock. Scans that do not block writes, such as
   enforces the floor, and an operator session runs none of it, so nothing
   in the database stops the write. Its PR MUST document a
   reviewed procedure that keeps replica routing closed from before the first
-  batch until its WAL has replayed on every replica.
+  batch until its WAL has replayed on every replica. When such a row is also
+  older than its channel's `created_at` less the floor's tolerance, the same
+  transaction MUST set that channel's `history_from_creation` to false: an
+  oldest-first page of a channel marked true reads nothing older.
 - A script MUST NOT disable triggers or set `session_replication_role`.
 - The normal write path that maintains the new invariant MUST be fully rolled
   out, with old writers drained, before the backfill starts. The backfill spec

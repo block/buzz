@@ -42,6 +42,12 @@ CREATE TABLE channels (
     -- channel listings for non-members. Matters only while the channel is open.
     unlisted        BOOLEAN NOT NULL DEFAULT FALSE,
     auto_join       BOOLEAN NOT NULL DEFAULT false,
+    -- True when every row of the channel is at or after its creation, less
+    -- the write path's created_at tolerance: the relay sets it when it creates
+    -- the channel. NULL or false lets rows be older (a channel from before
+    -- this column, or one a restore or import stored older rows in). No
+    -- default, so adding the column marks no existing channel.
+    history_from_creation BOOLEAN,
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_channels_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
 );

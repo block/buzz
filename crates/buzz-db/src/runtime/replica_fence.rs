@@ -59,7 +59,10 @@
 //!
 //! Raw SQL and `session_replication_role = replica` restores bypass the
 //! application floor check. These operational bypasses are outside the proof
-//! and require holding the fence closed.
+//! and require holding the fence closed. One that stores a row in a channel
+//! older than the channel's creation, less [`CREATED_AT_FLOOR_SECS`], must
+//! also set the channel's `history_from_creation` to false in the same
+//! transaction, or an oldest-first channel page skips the row.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
