@@ -85,8 +85,19 @@ async fn create_test_channel(keys: &Keys) -> String {
 
 /// Run `git` with the Buzz credential helper and isolated config.
 fn git_status(args: &[&str], cwd: &Path, owner_nsec: &str) -> std::process::Output {
+    git_status_with_env(args, cwd, owner_nsec, &[])
+}
+
+/// Run isolated `git` with additional process-scoped environment variables.
+fn git_status_with_env(
+    args: &[&str],
+    cwd: &Path,
+    owner_nsec: &str,
+    extra_env: &[(&str, &str)],
+) -> std::process::Output {
     let helper = credential_helper();
-    Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args([
             "-c",
             "credential.useHttpPath=true",
@@ -107,9 +118,11 @@ fn git_status(args: &[&str], cwd: &Path, owner_nsec: &str) -> std::process::Outp
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env_remove("GIT_CONFIG_COUNT")
-        .env("NOSTR_PRIVATE_KEY", owner_nsec)
-        .output()
-        .expect("spawn git")
+        .env("NOSTR_PRIVATE_KEY", owner_nsec);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    command.output().expect("spawn git")
 }
 
 /// Run `git` with the Buzz credential helper and isolated config. Asserts the
@@ -406,6 +419,120 @@ async fn git_clone_push_fetch_force_roundtrip() {
     );
     let tags = git(&["tag"], &tmp.path().join("clone4"), &owner_nsec);
     assert!(tags.contains("v1.0"), "tag v1.0 cloned back: {tags}");
+}
+
+/// Git switches to its large-request smart-HTTP sequence only when the pack
+/// exceeds `http.postBuffer`. Compressible text fixtures do not exercise that
+/// path, so generate deterministic pseudo-random bytes and verify Git stores
+/// more than one MiB of compressed loose objects before pushing.
+#[tokio::test]
+#[ignore = "requires live relay + MinIO + git"]
+async fn git_large_push_crosses_post_buffer_and_roundtrips() {
+    use nostr::ToBech32;
+
+    let owner = Keys::generate();
+    let owner_hex = owner.public_key().to_hex();
+    let owner_nsec = owner.secret_key().to_bech32().unwrap();
+    let repo = format!("e2e-git-large-{}", uuid::Uuid::new_v4().simple());
+    let s3 = GitS3Probe::from_env();
+
+    let channel = create_test_channel(&owner).await;
+    let announce = EventBuilder::new(Kind::from(30617), "")
+        .tags(vec![
+            Tag::parse(["d", &repo]).unwrap(),
+            Tag::parse(["name", "e2e large-push git repo"]).unwrap(),
+            Tag::parse(["buzz-channel", &channel]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    post_event(&announce).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let tmp = tempdir_named("buzz-e2e-git-large");
+    let url = format!("{}/git/{}/{}", relay_http_url(), owner_hex, repo);
+    git(
+        &["clone", "--quiet", &url, "source"],
+        tmp.path(),
+        &owner_nsec,
+    );
+    let source = tmp.path().join("source");
+    let empty_pointer = s3.require_pointer(&owner_hex, &repo).await;
+
+    let mut state = 0x4d59_5df4_d0f3_3173u64;
+    let mut large_blob = vec![0u8; 2 * 1024 * 1024];
+    for byte in &mut large_blob {
+        // xorshift64* is deterministic but sufficiently noise-like that Git's
+        // zlib compression cannot shrink this fixture below the one-MiB gate.
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        *byte = state.wrapping_mul(0x2545_f491_4f6c_dd1d).to_le_bytes()[0];
+    }
+    std::fs::write(source.join("large.bin"), &large_blob).unwrap();
+    git(&["add", "large.bin"], &source, &owner_nsec);
+    git(
+        &["commit", "--quiet", "-m", "large incompressible fixture"],
+        &source,
+        &owner_nsec,
+    );
+    git(&["branch", "-M", "main"], &source, &owner_nsec);
+
+    let count = git(&["count-objects", "-v"], &source, &owner_nsec);
+    let loose_kib = count
+        .lines()
+        .find_map(|line| line.strip_prefix("size: "))
+        .and_then(|value| value.parse::<usize>().ok())
+        .expect("git count-objects reports loose-object size");
+    assert!(
+        loose_kib > 1024,
+        "fixture must remain above the 1 MiB postBuffer after compression; got {loose_kib} KiB"
+    );
+
+    // Pin the threshold rather than relying on a machine's Git defaults. This
+    // forces the unauthenticated four-byte probe followed by the authenticated
+    // chunked receive-pack request that regressed in issue #2880.
+    let push = git_status_with_env(
+        &[
+            "-c",
+            "http.postBuffer=1048576",
+            "push",
+            "--quiet",
+            "origin",
+            "main",
+        ],
+        &source,
+        &owner_nsec,
+        &[("GIT_TRACE_CURL", "1"), ("GIT_TRACE_CURL_NO_DATA", "1")],
+    );
+    let trace = String::from_utf8_lossy(&push.stderr).to_lowercase();
+    assert!(
+        push.status.success(),
+        "large push failed (authorization-bearing trace omitted)"
+    );
+    assert!(
+        trace.contains("content-length: 4"),
+        "push did not exercise Git's four-byte compatibility probe"
+    );
+    assert!(
+        trace.contains("transfer-encoding: chunked"),
+        "push did not follow the probe with a chunked pack request"
+    );
+    let published = s3.require_pointer(&owner_hex, &repo).await;
+    assert_ne!(
+        published, empty_pointer,
+        "large push must advance the S3 manifest pointer"
+    );
+
+    git(
+        &["clone", "--quiet", &url, "verify"],
+        tmp.path(),
+        &owner_nsec,
+    );
+    let roundtripped = std::fs::read(tmp.path().join("verify/large.bin")).unwrap();
+    assert_eq!(
+        roundtripped, large_blob,
+        "large blob roundtrips byte-for-byte"
+    );
 }
 
 #[tokio::test]
