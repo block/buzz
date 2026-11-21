@@ -312,6 +312,13 @@ This requirement covers model context, conversation summaries, engrams, and othe
 
 A membership change creates a new audience epoch.
 
+This is a proposed broker lifecycle rule. The `buzz-ifc` library compares
+current policy state and does not implement epoch rotation or revocation. If a
+member leaves and later returns, the resulting policy domain can equal its
+earlier value. Enforcing the lifecycle rule below requires the broker to track
+conversation generations independently; structural equality alone does not
+establish that an old session's authorization remains current.
+
 $$
 \{\text{Alice}, \text{Bob}\}
 \longrightarrow
@@ -440,6 +447,32 @@ $$
 $$
 
 The coarse initial rule sets $R(z)=A(D)$. An exact human declassification grant may authorize one otherwise-forbidden publication. The grant names the exact content, source domain, and destination. None of these checks asks the model whether content is sensitive.
+
+### Mapping to the policy library
+
+The `ExecutionDomain` in `buzz-ifc` is a policy key:
+
+$$
+D_{\mathrm{policy}} = (\mathrm{community},\mathrm{agent},\mathrm{owner},
+\mathrm{audience},\mathrm{context},\mathrm{capabilities}).
+$$
+
+Its equality means the current information-flow and operation policies agree.
+Restricted audiences contain the verified members minus the executing agent;
+raw conversation resource labels retain the complete member set. Public
+domains use a community-wide context, so `#general` and `#random` can have equal
+policy keys. This permits them to share an audience-bound instance or labeled
+public resources. It does not require merging their model histories: the
+broker separately identifies each conversation session, as described above.
+
+To implement the proposed lifecycle rule, a broker must additionally select
+retained conversation state by conversation identity and membership generation
+and revoke old authorization when that generation changes. Neither the
+conversation-session distinction nor temporal epoch revocation follows from
+policy equality. The current library leaves generation tracking, session
+rotation, and authorization revocation to the broker. Whenever the broker does
+retain state, it must retain the corresponding `IfcSession` restrictions,
+including any record of unknown input.
 
 ## Appendix E: Example workflows
 
