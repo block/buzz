@@ -2,7 +2,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import type { ProjectsWorkItemsResult } from "@/features/projects/projectWorkItems";
-import type { Project } from "@/features/projects/hooks";
+import type { Project, Repository } from "@/features/projects/hooks";
 import { hasLocalRepositoryCheckout } from "@/features/projects/lib/projectLocalRepos";
 import { selectProjectRepository } from "@/features/projects/projectModels";
 import type { useOpenProjectTerminal } from "@/features/projects/ui/useOpenProjectTerminal";
@@ -53,6 +53,31 @@ export function useDeleteProjectHandler(
       } catch (error) {
         toast.error(
           error instanceof Error ? error.message : "Failed to delete project",
+        );
+      }
+    },
+    [mutateAsync],
+  );
+}
+
+/**
+ * Delete-repository handler with toast feedback. Depends on the stable
+ * mutateAsync, not the per-render mutation object, so memoized card/row
+ * trees keep their identity across renders.
+ */
+export function useDeleteRepositoryHandler(
+  mutateAsync: (repository: Repository) => Promise<unknown>,
+) {
+  return React.useCallback(
+    async (repository: Repository) => {
+      try {
+        await mutateAsync(repository);
+        toast.success("Repository deleted");
+      } catch (error) {
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : "Failed to delete repository",
         );
       }
     },
