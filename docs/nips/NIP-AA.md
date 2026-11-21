@@ -10,7 +10,7 @@ Agent Authentication
 
 ## Abstract
 
-This NIP defines how a relay that implements NIP-43 relay membership SHOULD handle connection requests from agent keys that carry NIP-OA credentials. An agent whose owner is a relay member MAY gain implicit relay access — without being explicitly enrolled in the member list — by presenting a NIP-OA `auth` tag during NIP-42 authentication.
+This NIP defines how a relay that implements NIP-43 relay membership SHOULD handle connection requests from agent keys that carry NIP-OA credentials. An agent whose ownership chain reaches an active relay root member within a relay-configured depth limit MAY gain implicit relay access — without being explicitly enrolled in the member list — by presenting a NIP-OA `auth` tag during NIP-42 authentication.
 
 ## Motivation
 
@@ -18,18 +18,22 @@ NIP-43 defines relay membership metadata; relays that enforce membership restric
 
 This creates friction and a synchronization hazard. When a human's membership is revoked, their agents remain enrolled until manually removed. When a human spawns a new agent, it cannot connect until the operator adds it.
 
-NIP-AA closes this gap. An agent presents its NIP-OA credential during NIP-42 authentication. The relay verifies the credential and checks that the owner is an active member. If both pass, the agent connects. If the owner's membership is later revoked, the agent's next connection attempt fails automatically — no separate cleanup required.
+NIP-AA closes this gap. An agent presents its NIP-OA credential during NIP-42 authentication. The relay verifies the credential and resolves the ownership chain to an active root member. If the chain satisfies relay policy, the agent connects. If the root's membership is later revoked, the agent's next connection attempt fails automatically — no separate cleanup required.
 
 ## Terminology
 
 This document uses MUST, MUST NOT, SHOULD, SHOULD NOT, MAY, and RECOMMENDED as defined in RFC 2119.
 
-- **owner key**: The Nostr keypair that issued the NIP-OA authorization. The owner is a relay member per NIP-43.
+- **owner key**: The Nostr keypair that issued the NIP-OA authorization. The owner may itself be an agent.
 - **agent key**: An AI agent, bot, or automation process with its own Nostr keypair. The agent need not be a relay member.
 - **`auth` tag**: The NIP-OA credential tag `["auth", "<owner-pubkey-hex>", "<conditions>", "<sig-hex>"]`.
 - **NIP-42 AUTH event**: A `kind:22242` event sent by a client in response to a relay's `AUTH` challenge.
-- **virtual membership**: Connection access derived from owner membership, with no persistent membership record created for the agent.
+- **virtual membership**: Connection access derived from root membership, with no persistent membership record created for the agent.
 - **active member**: A pubkey is an *active member* if the relay's authoritative access-control state lists it as an unrevoked, current member with an explicit membership record. Virtual members (agents granted access via NIP-AA) are not active members. NIP-43 `kind:13534` events MAY advertise or reflect this state but are not themselves the authoritative source.
+- **root member**: An active member independently admitted and classified as a non-agent by the relay's authoritative access-control state. Missing ownership evidence alone MUST NOT establish root status.
+- **ownership depth**: The number of owner-to-agent edges from the root to the authenticating agent. Root → agent is depth 1; root → agent → child is depth 2.
+
+Relays MUST enforce a finite, operator-configurable non-negative integer maximum ownership depth `n`. The default MUST be `n = 1` (direct agents only); `n = 0` disables NIP-AA virtual admission. Setting `n > 1` enables agents to authorize descendant agents up to that depth. Root membership and agent classification are relay-local policy, not claims established by a profile's absence.
 
 ## Protocol Flow
 
@@ -54,7 +58,7 @@ Agent                                  Relay
   |                   Verify NIP-42     |
   |                   Check member list |
   |                   Verify auth tag   |
-  |                   Check owner member|
+  |                   Resolve ownership |
   |                                      |
   |<-- ["OK", "<event-id>", true, ""] --|  (access granted)
   |                                      |
@@ -70,7 +74,7 @@ On failure the relay MUST respond per the error prefix rules in the verification
 
 ## Relay Verification Algorithm
 
-When a relay receives a NIP-42 AUTH event (`kind:22242`), it MUST execute the following steps in order. Any failure MUST result in a rejected AUTH attempt. For Step 1 failures (malformed event, invalid `id`/`sig`, wrong `relay` tag, stale `created_at`), the relay MUST respond with `["OK", "<event-id>", false, "invalid: <reason>"]`. For Steps 3–5 failures (missing credential, invalid credential, non-member owner), the relay MUST respond with `["OK", "<event-id>", false, "restricted: <reason>"]`. A failed NIP-AA AUTH attempt does not necessarily invalidate other authenticated pubkeys on the same WebSocket connection.
+When a relay receives a NIP-42 AUTH event (`kind:22242`), it MUST execute the following steps in order. Any failure MUST result in a rejected AUTH attempt. For Step 1 failures (malformed event, invalid `id`/`sig`, wrong `relay` tag, stale `created_at`), the relay MUST respond with `["OK", "<event-id>", false, "invalid: <reason>"]`. For Steps 2–5 failures (local disablement, missing or invalid credential, or rejected ownership chain), the relay MUST respond with `["OK", "<event-id>", false, "restricted: <reason>"]`. A failed NIP-AA AUTH attempt does not necessarily invalidate other authenticated pubkeys on the same WebSocket connection.
 
 **Step 1 — Standard NIP-42 verification**
 
@@ -82,11 +86,11 @@ If any check fails, reject.
 
 **Step 2 — Direct membership check**
 
-If `event.pubkey` is an active member, grant access per the normal NIP-43 flow. The remaining steps do not apply.
+If `event.pubkey` is locally disabled or denied access, reject. Otherwise, if it is a root member, grant access per the normal NIP-43 flow. Known agents MUST continue through Steps 3–6 even if explicitly enrolled; direct membership MUST NOT bypass ancestry validation. Relays MUST retain known-agent classification independently of profile availability; omitting an `auth` tag or removing a profile MUST NOT clear it.
 
 **Step 3 — NIP-OA credential extraction**
 
-If `event.pubkey` is NOT an active member, inspect the AUTH event's tags for an `auth` tag. If no `auth` tag is present, reject. If more than one `auth` tag is present, reject.
+For pubkeys not admitted by Step 2, inspect the AUTH event's tags for an `auth` tag. If no `auth` tag is present, reject. If more than one `auth` tag is present, reject.
 
 **Step 4 — NIP-OA credential verification**
 
@@ -104,19 +108,27 @@ Verify the `auth` tag using the following NIP-AA-specific procedure. This proced
 
 If any check fails, reject.
 
-**Step 5 — Owner membership check**
+**Step 5 — Ownership chain check**
 
-Look up `<owner-pubkey-hex>` in the relay's member store. If the owner is not an active member, reject.
+Start with the verified `<owner-pubkey-hex>`, depth 1, and a visited set containing `event.pubkey`. Repeat:
+
+1. If the depth exceeds `n`, the current owner is already visited, or the current owner is locally disabled or denied access, reject. Add the current owner to the visited set.
+2. If the current owner is a root member, the chain is complete. A known agent MUST NOT terminate the chain, even if it has an explicit membership record.
+3. Otherwise, resolve that owner's latest available `kind:0` metadata event using NIP-01 replaceable-event ordering over the relay's available evidence. Verify the event's `id`, `sig`, and `pubkey`, and its single `auth` tag under NIP-OA. Missing or invalid evidence MUST cause rejection, not root classification or fallback to an older profile.
+4. This intermediate `auth` tag MUST have empty conditions. A conditional endorsement MUST NOT authorize descendant admission: this NIP does not define composition of ancestor kind or timestamp restrictions. The authenticating agent's own credential retains Step 4 and §Kind Conditions handling.
+5. Follow the verified tag's owner pubkey and increment the depth.
+
+Relays MUST bound total lookup and verification work as well as depth, and reject if that budget is exhausted. Profile discovery is implementation-defined; intermediates need not hold active sessions. Resolution uses available evidence, not a claim of globally latest profiles or immutable parentage.
 
 **Step 6 — Grant virtual membership**
 
-Grant the agent virtual membership for the pubkey in `event.pubkey` of the successful AUTH event. MUST NOT create a persistent membership record for the agent. The relay MUST retain the `<owner-pubkey-hex>` from the verified `auth` tag in the virtual session state for the duration of the connection, to support owner-scoped session enumeration, termination, and quota aggregation. The agent's access is virtual, derived from the owner's membership, and scoped to that specific pubkey — not to the WebSocket connection as a whole. If the connection has multiple authenticated pubkeys (per NIP-42), virtual membership applies only to the pubkey that completed NIP-AA authentication.
+Grant the agent virtual membership for the pubkey in `event.pubkey` of the successful AUTH event. MUST NOT create a persistent membership record for the agent. Record the authenticating key and every non-root key in the verified path as known agents. The relay MUST retain the verified ownership path, including the immediate owner and root pubkeys, in the virtual session state for the duration of the connection, to support ancestor-scoped session enumeration, termination, and root-scoped quota aggregation. The agent's access is virtual, derived from the root's membership, and scoped to that specific pubkey — not to the WebSocket connection as a whole. If the connection has multiple authenticated pubkeys (per NIP-42), virtual membership applies only to the pubkey that completed NIP-AA authentication.
 
-If the same agent pubkey completes NIP-AA authentication again on the same connection (e.g., with a different `auth` credential), the relay MUST replace the previously stored credential with the new one. The relay MUST NOT combine credentials from multiple AUTH events for the same pubkey.
+If the same agent pubkey completes NIP-AA authentication again on the same connection (e.g., with a different `auth` credential), the relay MUST replace the previously stored credential and ownership path with the newly verified ones. The relay MUST NOT combine credentials from multiple AUTH events for the same pubkey.
 
 ### Kind Conditions
 
-`kind=` clauses in the NIP-OA credential are NOT evaluated at connection admission and do not affect whether the relay grants access. They are a signal of the owner's intent — a declaration of which event kinds the owner intended to authorize — but the relay's enforcement is at the connection level.
+`kind=` clauses in the NIP-OA credential are NOT evaluated at connection admission and do not affect whether the relay grants access. This applies to the authenticating agent's credential only; intermediate credentials MUST be unconditional (Step 5). They are a signal of the owner's intent — a declaration of which event kinds the owner intended to authorize — but the relay's enforcement is at the connection level.
 
 **Credential scope warning**: An `auth` tag presented during NIP-42 authentication grants connection-level access regardless of any `kind=` clauses in the credential. Owners SHOULD be aware that issuing any valid `auth` tag — even one with narrow `kind=` conditions — grants the agent full relay-level read and write access unless the relay implements optional per-event enforcement.
 
@@ -128,29 +140,29 @@ Multiple `kind=` clauses in a single credential are conjunctive per NIP-OA: an e
 
 ## Virtual Member Privileges
 
-An agent granted virtual membership via NIP-AA MAY pass relay-level membership checks, including both read (subscriptions) and write (event publishing) access. Channel-level, group-level, quota, and role checks MUST continue to evaluate the agent's own pubkey (`event.pubkey`) unless another specification explicitly defines owner inheritance. NIP-AA does not grant the agent the owner's channel memberships, group roles, or administrative privileges.
+An agent granted virtual membership via NIP-AA MAY pass relay-level membership checks, including both read (subscriptions) and write (event publishing) access. Channel-level, group-level, quota, and role checks MUST continue to evaluate the agent's own pubkey (`event.pubkey`) unless another specification explicitly defines owner inheritance. NIP-AA does not grant the agent any ancestor's channel memberships, group roles, or administrative privileges.
 
 For `EVENT` submissions, the relay MUST verify that `event.pubkey` is an authenticated pubkey on the connection that holds active or virtual membership; events from unauthenticated or non-member pubkeys MUST be rejected. For `REQ`, `COUNT`, and other non-`EVENT` operations, relay-level access MUST pass if at least one authenticated pubkey on the connection holds active or virtual membership. Channel-level, group-level, and resource-scoped access checks MUST evaluate the specific pubkey that holds virtual membership — not the owner's pubkey. When multiple pubkeys are authenticated on a single connection, the relay MUST NOT combine their privileges; each pubkey's access is evaluated independently. A resource-scoped operation passes only if at least one authenticated pubkey independently satisfies all required relay-level and resource-level checks for that operation.
 
-Relays SHOULD aggregate rate limits and quotas by owner pubkey across all virtual members derived from that owner, in addition to per-agent-pubkey enforcement. Without owner-scoped aggregation, a single member can mint many agent keys and multiply per-pubkey quotas.
+Relays SHOULD aggregate rate limits and quotas by root pubkey across all virtual members derived from that root, in addition to per-agent-pubkey enforcement. Without root-scoped aggregation, a single member can mint many agent keys and multiply per-pubkey quotas.
 
 Virtual members MUST NOT be granted relay administration privileges. The specific mechanism for restricting administrative access is implementation-defined. For example, an implementation might assign a restricted role that excludes admin operations, or it might check virtual membership status before processing admin commands.
 
-Virtual members MUST NOT be permitted to modify relay membership (add or remove members).
+Virtual members MUST NOT be permitted to modify relay membership (add or remove members). Issuing a child's `auth` tag within the configured depth limit grants only eligibility for virtual admission, not permission to enroll an explicit member.
 
 Implementations SHOULD identify virtual members as such in relay audit logs and any membership introspection APIs.
 
 ## Revocation Semantics
 
-Virtual membership is checked on each new connection, not cached across reconnects.
+Virtual membership, including the full ownership path and current relay policy, is checked on each authentication, not cached across reconnects. A later profile replacement affects the next authentication; it does not silently change an established session's retained path.
 
-**Owner removal**: When an owner's membership is revoked, all agents whose access derived from that owner will fail step 5 on their next connection attempt. Active sessions are not forcibly terminated; they continue until the underlying WebSocket connection closes. Operators who require immediate session termination MUST disconnect active WebSocket connections when revoking a member. The relay SHOULD expose a mechanism to enumerate and terminate sessions by owner pubkey.
+**Root removal or ancestor disablement**: When a root's membership is revoked or any ancestor is locally disabled, all agents whose resolved paths include that key will fail Step 5 on their next authentication attempt. Active sessions are not forcibly terminated; they continue until the underlying WebSocket connection closes. Operators who require immediate session termination MUST disconnect active WebSocket connections when revoking a root or disabling an ancestor. The relay SHOULD expose a mechanism to enumerate and terminate sessions by any ancestor pubkey.
 
 **Auth tag expiry**: If the `auth` tag's conditions include a `created_at<t` clause, the relay evaluates that clause against the AUTH event's `created_at` field at connection time (step 4). This constrains the AUTH event's self-declared `created_at` field. It provides a bounded authorization window only when combined with relay-enforced AUTH event freshness (see Step 1). Auth-tag condition evaluation occurs only at connection admission (Step 4). The relay does not re-evaluate conditions during an active session unless it implements explicit session revalidation.
 
 > **Note**: `created_at` is agent-controlled. A misbehaving agent can set `created_at` to any value. Operators who require hard wall-clock expiry MUST enforce it independently. Issuing `auth` tags with short `created_at<` windows and rotating them provides bounded authorization only because Step 1 requires the AUTH event's `created_at` to be within the relay's freshness window — preventing the agent from backdating past an expired condition.
 
-**Agent key compromise**: An agent that possesses a valid `auth` tag can reconnect as long as the owner remains an active relay member and any `created_at` conditions in the tag are satisfied. Revocation requires one of: (a) removing the owner from the relay's member list, (b) the `auth` tag's `created_at` conditions expiring, or (c) the relay applying an independent denylist. NIP-OA credentials are reusable capabilities — the owner cannot unilaterally revoke a previously issued `auth` tag without one of these mechanisms.
+**Agent key compromise**: An agent that possesses a valid `auth` tag can reconnect as long as its ownership chain remains admissible and any `created_at` conditions in its own credential are satisfied. Revocation requires one of: (a) removing the root from the relay's member list, (b) the `auth` tag's `created_at` conditions expiring, or (c) the relay applying an independent denylist to the agent or an ancestor. Removing an intermediate agent's explicit membership is not sufficient: virtual admission does not require that record. NIP-OA credentials are reusable capabilities — the owner cannot unilaterally revoke a previously issued `auth` tag without one of these mechanisms.
 
 ## Security Considerations
 
@@ -158,21 +170,23 @@ Virtual membership is checked on each new connection, not cached across reconnec
 
 **Credential scope**: The `auth` tag is not bound to a specific relay or purpose. An agent that connects to multiple relays presents the same `auth` tag at each; a credential issued for event provenance is equally valid for NIP-AA relay admission. Operators SHOULD use `created_at<` conditions to limit the authorization window when appropriate.
 
+**Chained authority**: Enabling `n > 1` allows existing unconditional endorsements to sponsor descendants without a new root signature. This is an intentional expansion of admission authority; there is no signed per-agent delegation budget or opt-out in this format. A compromised intermediate key can authorize descendants within the relay's cap. Empty intermediate conditions provide no expiry, so local disablement or root removal is needed to stop that authority. Profile replacement is not global credential revocation, and a child's credential does not bind its owner to a particular ancestor profile.
+
 **Owner key exposure**: The owner pubkey is visible in the `auth` tag on the AUTH event. This links the owner and agent identities to any relay that processes the connection. See §Privacy Considerations.
 
 **Self-attestation**: An `auth` tag where `<owner-pubkey-hex>` equals `event.pubkey` MUST be rejected (step 4). This prevents an agent from bootstrapping its own access by signing its own credential.
 
-**Forged credentials**: The relay verifies the Schnorr signature in step 4. A forged `auth` tag (wrong signature) fails cryptographic verification. An `auth` tag signed by a non-member owner fails step 5. Neither attack grants access.
+**Forged credentials**: The relay verifies the Schnorr signature in step 4. A forged `auth` tag (wrong signature) fails cryptographic verification. An `auth` tag whose ownership chain does not reach an active root within the configured limit fails Step 5. Neither attack grants access.
 
 **Kind=overbroad**: Because `kind=` conditions are not enforced at the connection level, a credential issued with `kind=1` conditions grants the same connection-level access as an unconstrained credential. Operators who require kind-level restrictions MUST implement optional per-event enforcement (see §Kind Conditions).
 
 ## Privacy Considerations
 
-Presenting an `auth` tag during NIP-42 authentication discloses the owner-agent relationship to the relay. The relay learns that `<owner-pubkey-hex>` authorized `event.pubkey` (the agent). This is an intentional disclosure — the relay needs this information to perform the membership check.
+Presenting an `auth` tag during NIP-42 authentication discloses the owner-agent relationship to the relay. The relay learns that `<owner-pubkey-hex>` authorized `event.pubkey` (the agent), and chained admission discloses the resolved ancestors. Publishing endorsements on `kind:0` profiles also makes those links discoverable to profile readers. This is an intentional disclosure — the relay needs this information to perform the membership check.
 
 Relays SHOULD NOT expose the owner-agent relationship to other relay members beyond what is necessary for virtual member identification.
 
-Agents that do not require relay access via NIP-AA MAY omit the `auth` tag from the AUTH event and rely on explicit membership enrollment instead, avoiding this disclosure.
+Known agents cannot avoid ancestry validation by omitting the `auth` tag and relying on explicit membership enrollment (Step 2).
 
 ## Verification Examples
 
@@ -199,13 +213,13 @@ The cryptographic verification of this tag (preimage, SHA256, and signature) is 
 
 ### Accept: agent connecting with valid NIP-OA credential
 
-**Conditions**: `owner_pubkey` is an active relay member. AUTH event `created_at = 1713956400`. Relay wall-clock time is assumed to be near `1713956400` (within the ±120-second freshness window). The `created_at<1713957000` condition is satisfied.
+**Conditions**: `owner_pubkey` is a root member and `n >= 1`. AUTH event `created_at = 1713956400`. Relay wall-clock time is assumed to be near `1713956400` (within the ±120-second freshness window). The `created_at<1713957000` condition is satisfied.
 
 - Step 1: NIP-42 verification passes; `created_at` within freshness window.
 - Step 2: `agent_pubkey` is not in member store → continue.
 - Step 3: Exactly one `auth` tag found → continue.
 - Step 4: Tag has four elements; `owner_pubkey` is valid; `owner_pubkey` ≠ `agent_pubkey`; conditions string is syntactically valid; Schnorr signature verifies; `created_at<1713957000` is satisfied by `1713956400` → pass.
-- Step 5: `owner_pubkey` is an active member → pass.
+- Step 5: `owner_pubkey` is an active root at depth 1 → pass.
 - Step 6: Agent pubkey granted virtual membership.
 
 ### Reject cases
@@ -220,10 +234,28 @@ Relays MUST reject each of the following:
 | `auth` tag `<conditions>` is malformed (e.g., `kind=01`) | Step 4 |
 | AUTH event `created_at` is `1713957001` with conditions `created_at<1713957000` | Step 4 |
 | AUTH event `created_at` is outside relay freshness window | Step 1 |
-| `owner_pubkey` is not an active relay member | Step 5 |
+| The ownership chain does not reach an active root within `n` edges | Step 5 |
+| A required intermediate profile is missing, invalid, or has zero or multiple `auth` tags | Step 5 |
+| An intermediate `auth` tag has non-empty conditions | Step 5 |
+| An ownership key repeats, an ancestor is disabled, or the work budget is exhausted | Step 5 |
 | AUTH event has two `auth` tags | Step 3 |
-| AUTH event has no `auth` tag and `agent_pubkey` is not a member | Step 3 |
+| AUTH event has no `auth` tag and `agent_pubkey` is not a root member | Step 3 |
 | Virtual member submits a relay membership admin command (e.g., add/remove member) | Virtual Member Privileges (post-admission) |
+
+### Chained admission examples
+
+Assume root `H` is independently admitted, agent `A` publishes a valid `kind:0` carrying an unconditional endorsement from `H`, and child `B` authenticates with a valid endorsement from `A`. All keys are distinct and not locally disabled.
+
+| Scenario | Result |
+|----------|--------|
+| `B` authenticates with `n = 2` | Accepted: `H → A → B` has two edges |
+| `B` authenticates with `n = 1`, even if `A` is explicitly enrolled | Rejected: an agent is not a root; depth exceeds `n` |
+| `A`'s profile endorsement has `kind=0` or a timestamp condition | `B` rejected: intermediate endorsements must be unconditional |
+| `H` is revoked or `A` is locally disabled | `B` rejected on its next authentication |
+| `B` later authorizes `C`, with `n = 2` | `C` rejected: three edges exceed `n` |
+| Any agent authenticates with `n = 0` | Virtual admission rejected |
+
+These are normative behavior examples, not executable test vectors.
 
 ### Kind enforcement examples
 
