@@ -442,20 +442,21 @@ pub async fn cmd_search(
     client: &BuzzClient,
     query: Option<&str>,
     author: Option<&str>,
+    channel: Option<&str>,
     since: Option<i64>,
     before: Option<i64>,
     before_id: Option<&str>,
     limit: Option<u32>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
-    if query.is_none() && author.is_none() {
+    if query.is_none() && author.is_none() && channel.is_none() {
         return Err(CliError::Usage(
-            "at least one of --query or --author is required".into(),
+            "at least one of --query, --author, or --channel is required".into(),
         ));
     }
     // Validate the cursor before resolving the author, so a bad flag fails
     // without a relay round trip.
-    search_filter(query, None, since, before, before_id, None)?;
+    search_filter(query, None, channel, since, before, before_id, None)?;
 
     let author_hex = match author {
         Some(a) => Some(resolve_author(client, a).await?),
@@ -465,6 +466,7 @@ pub async fn cmd_search(
     let filter = search_filter(
         query,
         author_hex.as_deref(),
+        channel,
         since,
         before,
         before_id,
@@ -493,11 +495,15 @@ pub async fn cmd_search(
 fn search_filter(
     query: Option<&str>,
     author_hex: Option<&str>,
+    channel: Option<&str>,
     since: Option<i64>,
     before: Option<i64>,
     before_id: Option<&str>,
     limit: Option<u32>,
 ) -> Result<serde_json::Value, CliError> {
+    if let Some(c) = channel {
+        validate_uuid(c)?;
+    }
     if let Some(bid) = before_id {
         if query.is_some() {
             return Err(CliError::Usage(
@@ -518,6 +524,9 @@ fn search_filter(
     }
     if let Some(pk) = author_hex {
         filter["authors"] = serde_json::json!([pk]);
+    }
+    if let Some(c) = channel {
+        filter["#h"] = serde_json::json!([c]);
     }
     if let Some(s) = since {
         filter["since"] = serde_json::json!(s);
@@ -680,6 +689,11 @@ pub async fn cmd_send_message(
     validate_content_size(&p.content)?;
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
+    }
+    if p.broadcast && !matches!(p.kind, None | Some(9)) {
+        return Err(CliError::Usage(
+            "--broadcast is only supported for kind 9 messages".into(),
+        ));
     }
     let channel_uuid = parse_uuid(&p.channel_id)?;
     if p.from_thread.is_some() && !matches!(p.kind, None | Some(9)) {
@@ -1132,6 +1146,7 @@ pub async fn dispatch(
         MessagesCmd::Search {
             query,
             author,
+            channel,
             since,
             before,
             before_id,
@@ -1141,6 +1156,7 @@ pub async fn dispatch(
                 client,
                 query.as_deref(),
                 author.as_deref(),
+                channel.as_deref(),
                 since,
                 before,
                 before_id.as_deref(),
@@ -1217,7 +1233,7 @@ mod tests {
 
         // No cursor flags: the filter is unchanged from before.
         assert_eq!(
-            search_filter(None, Some(&pk), Some(100), None, None, None).unwrap(),
+            search_filter(None, Some(&pk), None, Some(100), None, None, None).unwrap(),
             serde_json::json!({
                 "kinds": [9, 40002, 45001, 45003],
                 "limit": 20,
@@ -1228,7 +1244,16 @@ mod tests {
 
         // --before maps to `until`; --before-id rides along, lowercased.
         assert_eq!(
-            search_filter(None, Some(&pk), Some(100), Some(200), Some(&id), Some(500)).unwrap(),
+            search_filter(
+                None,
+                Some(&pk),
+                None,
+                Some(100),
+                Some(200),
+                Some(&id),
+                Some(500)
+            )
+            .unwrap(),
             serde_json::json!({
                 "kinds": [9, 40002, 45001, 45003],
                 "limit": 100,
@@ -1240,7 +1265,7 @@ mod tests {
         );
 
         // --before alone is a plain time bound, allowed with --query.
-        let f = search_filter(Some("q"), None, None, Some(200), None, None).unwrap();
+        let f = search_filter(Some("q"), None, None, None, Some(200), None, None).unwrap();
         assert_eq!(f["until"], 200);
         assert_eq!(f["search"], "q");
         assert!(f.get("before_id").is_none());
@@ -1252,11 +1277,53 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    search_filter(query, Some(&pk), None, before, before_id, None),
+                    search_filter(query, Some(&pk), None, None, before, before_id, None),
                     Err(CliError::Usage(_))
                 ),
                 "{query:?} {before:?} {before_id:?}"
             );
+        }
+    }
+
+    #[test]
+    fn search_filter_scopes_by_channel() {
+        use super::{search_filter, CliError};
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+
+        let f = search_filter(Some("q"), None, Some(channel), Some(100), None, None, None).unwrap();
+        assert_eq!(f["#h"], serde_json::json!([channel]));
+        assert_eq!(f["search"], "q");
+        assert_eq!(f["since"], 100);
+
+        let f = search_filter(None, None, Some(channel), None, None, None, None).unwrap();
+        assert_eq!(f["#h"], serde_json::json!([channel]));
+        assert!(f.get("search").is_none());
+
+        let f = search_filter(Some("q"), None, None, None, None, None, None).unwrap();
+        assert!(f.get("#h").is_none());
+
+        assert!(matches!(
+            search_filter(Some("q"), None, Some("not-a-uuid"), None, None, None, None),
+            Err(CliError::Usage(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn cmd_search_rejects_bad_selectors_before_any_relay_call() {
+        let client = BuzzClient::new(
+            "http://127.0.0.1:1".to_string(),
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
+        let format = crate::OutputFormat::Json;
+
+        for (query, channel) in [(None, None), (Some("x"), Some("not-a-uuid"))] {
+            let err = super::cmd_search(
+                &client, query, None, channel, None, None, None, None, &format,
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(err, CliError::Usage(_)), "got {err:?}");
         }
     }
 
@@ -2038,6 +2105,35 @@ mod tests {
                 .any(|t| t.get(1).map(|s| s.as_str()) == Some("notreal")),
             "unknown shortcodes must not produce emoji tags"
         );
+    }
+
+    #[tokio::test]
+    async fn cmd_send_message_rejects_broadcast_for_forum_kinds() {
+        let reply_to = "a".repeat(64);
+        for kind in [45001u16, 45003] {
+            let (url, _query_count, captured_event) =
+                fake_send_relay(send_palette_response()).await;
+            let client = BuzzClient::new(
+                url,
+                crate::credentials::Credentials::from_keys(Keys::generate()),
+            )
+            .unwrap();
+            let mut params = send_params("forum reply");
+            params.kind = Some(kind);
+            params.reply_to = Some(reply_to.clone());
+            params.broadcast = true;
+
+            let err = cmd_send_message(&client, params).await.unwrap_err();
+
+            assert!(
+                matches!(&err, CliError::Usage(m) if m.contains("--broadcast")),
+                "kind {kind} must reject --broadcast, got {err:?}"
+            );
+            assert!(
+                captured_event.lock().unwrap().is_none(),
+                "kind {kind} must not publish when --broadcast is rejected"
+            );
+        }
     }
 
     #[tokio::test]
