@@ -49,6 +49,61 @@ void main() {
     ]);
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  testWidgets('the age restriction is its own screen while it shows', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final age = _MutableAgeSignalNotifier();
+    final reporter = _RecordingReporter();
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          authProvider.overrideWith(
+            () => _PendingAuthNotifier(
+              Future.value(const AuthState(status: AuthStatus.unauthenticated)),
+            ),
+          ),
+          ageSignalProvider.overrideWith(() => age),
+          savedPrefsProvider.overrideWithValue(prefs),
+          diagnosticReporterProvider.overrideWithValue(reporter),
+          diagnosticScreenClassifierProvider.overrideWithValue(
+            diagnosticScreenOf,
+          ),
+        ],
+        child: const App(),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+    expect(reporter.screens.last, DiagnosticScreen.onboarding);
+    final before = reporter.screens.length;
+
+    // The restriction replaces the navigator, with no auth change or route.
+    age.setState(AgeSignalState.restricted);
+    await tester.pump();
+    await tester.pump();
+    age.setState(AgeSignalState.allowed);
+    await tester.pump();
+    await tester.pump();
+
+    expect(reporter.screens.skip(before), [
+      DiagnosticScreen.ageRestriction,
+      DiagnosticScreen.onboarding,
+    ]);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+}
+
+class _MutableAgeSignalNotifier extends AgeSignalNotifier {
+  @override
+  AgeSignalState build() => AgeSignalState.allowed;
+
+  @override
+  Future<void> request() async {}
+
+  void setState(AgeSignalState next) => state = next;
 }
 
 class _PendingAuthNotifier extends AuthNotifier {

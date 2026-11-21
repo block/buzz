@@ -41,6 +41,7 @@ class DiagnosticScreenTrail {
   final DiagnosticScreenClassifier Function() _classifier;
   final _observers = <DiagnosticNavigationObserver>{};
   DiagnosticScreen? _last;
+  DiagnosticScreen? _cover;
 
   /// How many elements a search below a route may look at. A page sits near
   /// the top of its route; this keeps an unlisted page from costing a walk of
@@ -55,17 +56,37 @@ class DiagnosticScreenTrail {
     return observer;
   }
 
+  /// Shows [screen] in place of every navigator, such as the age restriction
+  /// that replaces the app, or with null takes it away. While a cover shows,
+  /// the navigators under it name nothing; taking it away names the screen
+  /// shown again.
+  void cover(DiagnosticScreen? screen) {
+    if (screen == _cover) return;
+    _cover = screen;
+    if (!_reporter.reporting) return;
+    if (screen != null) {
+      _leave(screen);
+    } else {
+      for (final observer in _observers) {
+        observer.refresh();
+      }
+    }
+  }
+
+  void _leave(DiagnosticScreen screen) {
+    if (screen == _last) return;
+    _last = screen;
+    _reporter.leaveBreadcrumb(DiagnosticBreadcrumb.screen(screen));
+  }
+
   /// Names [route] once the frame has built it, if it is then what the person
   /// sees. Several pops in one go, or a route replaced at once, leave only the
   /// screen they end on.
   void _announce(PageRoute<dynamic> route) {
     if (!_reporter.reporting) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_shown(route)) return;
-      final screen = screenOf(route);
-      if (screen == _last) return;
-      _last = screen;
-      _reporter.leaveBreadcrumb(DiagnosticBreadcrumb.screen(screen));
+      if (_cover != null || !_shown(route)) return;
+      _leave(screenOf(route));
     });
   }
 
