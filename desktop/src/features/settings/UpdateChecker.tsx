@@ -1,4 +1,4 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalUrl } from "@/shared/lib/openExternalUrl";
 import { useUpdaterContext } from "./hooks/UpdaterProvider";
 import { Button } from "@/shared/ui/button";
 import {
@@ -94,7 +94,7 @@ export function UpdateChecker() {
                 <span>Switch to the AppImage build for automatic updates.</span>
               </p>
             </div>
-            <Button size="sm" onClick={() => void openUrl(status.releaseUrl)}>
+            <Button size="sm" onClick={() => void openExternalUrl(status.releaseUrl)}>
               Download Update
             </Button>
           </SettingsOptionRow>

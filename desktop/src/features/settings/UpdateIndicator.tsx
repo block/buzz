@@ -1,4 +1,4 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalUrl } from "@/shared/lib/openExternalUrl";
 import type { ComponentType } from "react";
 import { ExternalLink, RefreshCcw, RotateCw } from "lucide-react";
 
@@ -85,7 +85,7 @@ export function UpdateIndicator({ className }: { className?: string }) {
       ? installAndRelaunch
       : status.state === "manual-required"
         ? () => {
-            void openUrl(status.releaseUrl);
+            void openExternalUrl(status.releaseUrl);
           }
         : null;
 

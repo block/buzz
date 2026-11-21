@@ -1,6 +1,6 @@
 import * as React from "react";
 import { ExternalLink, Plus, RefreshCw } from "lucide-react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openExternalUrl } from "@/shared/lib/openExternalUrl";
 
 import {
   useAcpRuntimesQueryForced,
@@ -51,7 +51,7 @@ function GitBashCard({
           {!prerequisite.available ? (
             <button
               className="inline-flex shrink-0 items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
-              onClick={() => void openUrl(prerequisite.installInstructionsUrl)}
+              onClick={() => void openExternalUrl(prerequisite.installInstructionsUrl)}
               type="button"
             >
               <ExternalLink className="h-4 w-4" /> Install Git for Windows
