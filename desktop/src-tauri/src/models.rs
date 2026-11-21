@@ -66,6 +66,8 @@ pub struct UsersBatchResponse {
 pub struct UserSearchResultInfo {
     pub pubkey: String,
     pub display_name: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
     pub avatar_url: Option<String>,
     pub nip05_handle: Option<String>,
     pub owner_pubkey: Option<String>,

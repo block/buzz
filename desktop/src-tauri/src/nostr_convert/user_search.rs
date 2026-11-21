@@ -18,6 +18,7 @@ pub fn user_search_result_from_event(ev: &Event) -> UserSearchResultInfo {
             .and_then(Value::as_str)
             .or_else(|| v.get("name").and_then(Value::as_str))
             .map(str::to_string),
+        name: v.get("name").and_then(Value::as_str).map(str::to_string),
         avatar_url: v.get("picture").and_then(Value::as_str).map(str::to_string),
         nip05_handle: v.get("nip05").and_then(Value::as_str).map(str::to_string),
         is_agent: owner_pubkey.is_some(),
@@ -126,10 +127,11 @@ pub fn rank_user_search_results(
 
         let info = user_search_result_from_event(ev);
         let display = info.display_name.as_deref().unwrap_or("").to_lowercase();
+        let name = info.name.as_deref().unwrap_or("").to_lowercase();
         let nip05 = info.nip05_handle.as_deref().unwrap_or("").to_lowercase();
         let pubkey = info.pubkey.to_lowercase();
 
-        let score = match_score(&q, &display, &nip05, &pubkey);
+        let score = match_score(&q, &display, &name, &nip05, &pubkey);
         if score == 0 {
             continue;
         }
@@ -156,7 +158,7 @@ pub fn rank_user_search_results(
     }
 }
 
-fn match_score(q: &str, display_name: &str, nip05: &str, pubkey_hex: &str) -> u32 {
+fn match_score(q: &str, display_name: &str, name: &str, nip05: &str, pubkey_hex: &str) -> u32 {
     const DISPLAY_EXACT: u32 = 1000;
     const DISPLAY_PREFIX: u32 = 900;
     const DISPLAY_CONTAINS: u32 = 800;
@@ -184,7 +186,13 @@ fn match_score(q: &str, display_name: &str, nip05: &str, pubkey_hex: &str) -> u3
         DISPLAY_EXACT,
         DISPLAY_PREFIX,
         DISPLAY_CONTAINS,
-    );
+    )
+    .max(score_field(
+        name,
+        DISPLAY_EXACT,
+        DISPLAY_PREFIX,
+        DISPLAY_CONTAINS,
+    ));
     let nip05_score = score_field(nip05, NIP05_EXACT, NIP05_PREFIX, NIP05_CONTAINS);
     let pubkey_score = if !pubkey_hex.is_empty() && pubkey_hex.starts_with(q) {
         PUBKEY_PREFIX
@@ -405,5 +413,14 @@ mod tests {
         let r = rank_user_search_results(&[e], "alice", 10);
         assert_eq!(r.users.len(), 1);
         assert_eq!(r.users[0].display_name.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn rank_matches_name_when_display_name_differs() {
+        let e = ev(0, r#"{"name":"Starfish Sol","display_name":"S"}"#, vec![]);
+        let r = rank_user_search_results(&[e], "starfish", 10);
+        assert_eq!(r.users.len(), 1);
+        assert_eq!(r.users[0].display_name.as_deref(), Some("S"));
+        assert_eq!(r.users[0].name.as_deref(), Some("Starfish Sol"));
     }
 }
