@@ -5866,9 +5866,9 @@ pub(crate) mod postgres_tests {
         config.nip_fi.communities =
             crate::nip_fi_core::test_support::any_host("https://relay.example");
         // Pin the GIF provider absent: `Config::from_env()` imports
-        // `BUZZ_KLIPY_API_KEY`, and the GIF positive control's exact 404
-        // (`gifs.rs` "GIF search is not configured") depends on `klipy = None`.
-        config.klipy = None;
+        // `BUZZ_GIPHY_API_KEY`, and the GIF positive control's exact 404
+        // (`gifs.rs` "GIF search is not configured") depends on `giphy = None`.
+        config.giphy = None;
         // No issuers configured → nip_fi_verifier = None (startup-race path).
         // The seam test fires before verifier is needed (missing assertion → 401).
 
@@ -7136,7 +7136,7 @@ pub(crate) mod postgres_tests {
     //
     // The exact body/CT/challenge oracles discriminate any implementation that
     // returns a different status or body (e.g. 404 if BOTH admission layers were
-    // removed and Klipy config was absent).
+    // removed and GIPHY config was absent).
     #[test]
     #[ignore = "requires Postgres"]
     fn nip_fi_enforce_gif_search_no_assertion_is_401() {
@@ -7299,7 +7299,7 @@ pub(crate) mod postgres_tests {
         rt.block_on(state.db.ensure_configured_community(&host))
             .expect("ensure community");
 
-        // `nip_fi_enforce_test_state` pins `config.klipy = None`.
+        // `nip_fi_enforce_test_state` pins `config.giphy = None`.
         let keys = Keys::generate();
         let url = format!("https://{host}{}", crate::api::gifs::SEARCH_PATH);
         let headers = same_key_nip98_and_assertion_headers(&keys, &url, "POST", b"{}");
@@ -8092,12 +8092,6 @@ pub(crate) mod postgres_tests {
                     crate::api::gifs::SEARCH_PATH.into(),
                     Some(crate::api::gifs::SEARCH_PATH.into()),
                     br#"{"query":"cat"}"#.to_vec(),
-                ),
-                (
-                    "POST",
-                    crate::api::gifs::SHARE_PATH.into(),
-                    Some(crate::api::gifs::SHARE_PATH.into()),
-                    br#"{"id":"x"}"#.to_vec(),
                 ),
                 (
                     "POST",

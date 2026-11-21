@@ -80,7 +80,7 @@ export function imetaMediaFromTags(
  * on the edit event), so the two stay perfectly symmetric.
  *
  * `url`, `m`, and `x` are emitted for verified relay-hosted media. Entries
- * without a hash represent external content (for example KLIPY GIFs); their
+ * without a hash represent external content (for example GIPHY GIFs); their
  * markdown URL remains in the message body, but they are omitted from imeta
  * because Buzz's relay validator requires a hash-backed local `/media/` path.
  * Other fields remain conditional so legacy entries do not emit invalid

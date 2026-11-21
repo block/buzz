@@ -85,25 +85,25 @@ pub struct JoinPolicyConfig {
     pub version: String,
 }
 
-/// Optional KLIPY GIF-search integration owned by the relay operator.
+/// Optional GIPHY GIF-search integration owned by the relay operator.
 ///
 /// The API key deliberately stays private and its [`Debug`] implementation is
 /// redacted so dumping [`Config`] cannot disclose it.
 #[derive(Clone)]
-pub struct KlipyConfig {
+pub struct GiphyConfig {
     api_key: String,
 }
 
-impl KlipyConfig {
-    /// Return the key only to the outbound KLIPY client.
+impl GiphyConfig {
+    /// Return the key only to the outbound GIPHY client.
     pub(crate) fn api_key(&self) -> &str {
         &self.api_key
     }
 }
 
-impl std::fmt::Debug for KlipyConfig {
+impl std::fmt::Debug for GiphyConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("KlipyConfig")
+        f.debug_struct("GiphyConfig")
             .field("api_key", &"[REDACTED]")
             .finish()
     }
@@ -319,9 +319,9 @@ pub struct Config {
     /// Default: `false`. Set via `BUZZ_ALLOW_NIP_OA_AUTH=true`.
     pub allow_nip_oa_auth: bool,
 
-    /// Relay-owned KLIPY integration. Unset means GIF search is not advertised
-    /// and its proxy routes return 404.
-    pub klipy: Option<KlipyConfig>,
+    /// Relay-owned GIPHY integration. Unset means GIF search is not advertised
+    /// and its proxy route returns 404.
+    pub giphy: Option<GiphyConfig>,
 
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
@@ -902,11 +902,11 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
-        let klipy = std::env::var("BUZZ_KLIPY_API_KEY")
+        let giphy = std::env::var("BUZZ_GIPHY_API_KEY")
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
-            .map(|api_key| KlipyConfig { api_key });
+            .map(|api_key| GiphyConfig { api_key });
 
         // Note: intentionally not prefixed with BUZZ_ — this is a relay-identity
         // config that may be shared across multiple services (e.g., ACP agent).
@@ -1573,7 +1573,7 @@ impl Config {
             operator_listener_delivery_urls,
             storage_usage_delivery_url,
             allow_nip_oa_auth,
-            klipy,
+            giphy,
             media,
             media_read_mode,
             media_max_concurrent_uploads,
@@ -1641,14 +1641,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn klipy_config_debug_redacts_the_api_key() {
-        let config = KlipyConfig {
-            api_key: "private-klipy-key".to_string(),
+    fn giphy_config_debug_redacts_the_api_key() {
+        let config = GiphyConfig {
+            api_key: "private-giphy-key".to_string(),
         };
 
         let debug = format!("{config:?}");
         assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("private-klipy-key"));
+        assert!(!debug.contains("private-giphy-key"));
     }
 
     // Mutex to serialize tests that mutate environment variables.

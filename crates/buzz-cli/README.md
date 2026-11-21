@@ -101,10 +101,9 @@ buzz reactions get --event <event-id>
 buzz huddles list --channel <uuid> --active   # huddles with state and start/end times
 buzz huddles participants --channel <uuid> --huddle <huddle-id>
 
-# GIFs (requires relay to advertise buzz-gif / KLIPY)
+# GIFs (requires relay to advertise buzz-gif / GIPHY)
 buzz gifs search                              # trending GIFs
-buzz gifs search --query "celebration"        # search GIFs
-buzz gifs share --slug <slug>                 # report selection to provider Recents
+buzz gifs search --query "celebration"        # search GIFs (query max 50 chars)
 # Paste the `cdn_url` from a search result directly into messages send --content
 
 # Custom emoji in messages

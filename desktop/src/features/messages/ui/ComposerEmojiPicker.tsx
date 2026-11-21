@@ -4,9 +4,9 @@ import { motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
-import { klipyGifAttachment, type KlipyGif } from "@/features/gifs/api";
-import { relayKlipyEndpoints, reportKlipyShare } from "@/features/gifs/relay";
-import { KlipyGifPicker } from "@/features/gifs/ui/KlipyGifPicker";
+import { type GiphyGif, giphyGifAttachment } from "@/features/gifs/api";
+import { relayGiphyEndpoints } from "@/features/gifs/relay";
+import { GiphyGifPicker } from "@/features/gifs/ui/GiphyGifPicker";
 import { useCommunities } from "@/features/communities/useCommunities";
 import type { MediaUploadController } from "@/features/messages/lib/useMediaUpload";
 import { Button } from "@/shared/ui/button";
@@ -46,41 +46,30 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
   const shouldReduceMotion = useReducedMotion();
   const { activeCommunity } = useCommunities();
   const relayUrl = activeCommunity?.relayUrl ?? "";
-  const klipyCapabilityQuery = useQuery({
+  const giphyCapabilityQuery = useQuery({
     enabled: relayUrl.length > 0,
-    queryFn: ({ signal }) => relayKlipyEndpoints(relayUrl, signal),
-    queryKey: ["relay-capability", relayUrl, "klipy"],
+    queryFn: ({ signal }) => relayGiphyEndpoints(relayUrl, signal),
+    queryKey: ["relay-capability", relayUrl, "giphy"],
     retry: 1,
     staleTime: 5 * 60 * 1_000,
   });
-  const gifSearchPath = klipyCapabilityQuery.data?.searchPath ?? "";
-  const gifSharePath = klipyCapabilityQuery.data?.sharePath ?? "";
-  const gifsAvailable = gifSearchPath.length > 0 && gifSharePath.length > 0;
+  const gifSearchPath = giphyCapabilityQuery.data?.searchPath ?? "";
+  const gifsAvailable = gifSearchPath.length > 0;
 
   React.useEffect(() => {
     if (!open) setPickerTab("emoji");
   }, [open]);
 
   const handleGifSelect = React.useCallback(
-    (gif: KlipyGif) => {
+    (gif: GiphyGif) => {
       if (!relayUrl || gifsDisabled) return;
       onOpenChange(false);
       gifMediaController.setPendingImeta((current) => [
         ...current,
-        klipyGifAttachment(gif),
+        giphyGifAttachment(gif),
       ]);
-      void reportKlipyShare(relayUrl, gifSharePath, gif.slug).catch(() => {
-        // Sharing the GIF remains successful if best-effort Recents reporting
-        // fails; the authenticated relay endpoint keeps provider details hidden.
-      });
     },
-    [
-      gifMediaController.setPendingImeta,
-      gifsDisabled,
-      gifSharePath,
-      onOpenChange,
-      relayUrl,
-    ],
+    [gifMediaController.setPendingImeta, gifsDisabled, onOpenChange, relayUrl],
   );
 
   return (
@@ -180,7 +169,7 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
               <EmojiPicker autoFocus onSelect={onEmojiSelect} perLine={9} />
             </TabsContent>
             <TabsContent className="m-0" value="gifs">
-              <KlipyGifPicker
+              <GiphyGifPicker
                 onSelect={handleGifSelect}
                 relayUrl={relayUrl}
                 searchPath={gifSearchPath}

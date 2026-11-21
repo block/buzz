@@ -118,8 +118,6 @@ pub struct GifDescriptor {
     pub provider: String,
     /// Relay-relative authenticated metadata search endpoint.
     pub search: String,
-    /// Relay-relative authenticated share-reporting endpoint.
-    pub share: String,
 }
 
 /// Protocol and resource limits advertised in the NIP-11 document.
@@ -273,7 +271,6 @@ impl RelayInfo {
             GifDescriptor {
                 provider: provider.to_string(),
                 search: crate::api::gifs::SEARCH_PATH.to_string(),
-                share: crate::api::gifs::SHARE_PATH.to_string(),
             }
         });
 
@@ -475,7 +472,7 @@ pub(crate) async fn nip11_document(
         state.config.max_frame_bytes,
         state.config.pairing_relay_url.as_deref(),
         admin_api.as_deref(),
-        state.config.klipy.as_ref().map(|_| "klipy"),
+        state.config.giphy.as_ref().map(|_| "giphy"),
     );
     info.requires_nip_fi = policy.required;
     info.workflow_agent_mentions = state.config.workflow_agent_mentions;
@@ -789,13 +786,13 @@ mod tests {
             DEFAULT_MAX_FRAME_BYTES,
             None,
             None,
-            Some("klipy"),
+            Some("giphy"),
         );
 
         let json = serde_json::to_value(&info).expect("serialize");
-        assert_eq!(json["gif"]["provider"], "klipy");
+        assert_eq!(json["gif"]["provider"], "giphy");
         assert_eq!(json["gif"]["search"], "/gifs/search");
-        assert_eq!(json["gif"]["share"], "/gifs/share");
+        assert!(json["gif"].get("share").is_none());
         assert!(json["supported_extensions"]
             .as_array()
             .expect("extensions")
