@@ -104,6 +104,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   // The relay sent its terminal authorization denial on this connection.
   bool _authorizationDenied = false;
   DateTime? _lastInboundAt;
+  ({DateTime at, int context})? _connectionLost;
   int _reconnectDelayMs = _baseReconnectDelayMs;
   int _subIdCounter = 0;
   bool _disposed = false;
@@ -553,6 +554,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   void _pauseNow() {
     _paused = true;
+    _connectionLost = null;
     _socketConnected = false;
     _reconnectTimer?.cancel();
     _cancelAllHistory(Exception('App moved to background'));
@@ -669,7 +671,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _connectedRelay = ref.read(relayConfigProvider).baseUrl;
     // The backoff is not reset here: a client bounced repeatedly must keep
     // backing off. [_handleDisconnected] resets it after a stable connection.
-    _noteNetwork(NetworkEndpoint.relayConnection, since: _connectStartedAt);
+    _noteConnected();
     _connectStartedAt = null;
     _connectedAt = _now();
     _lastInboundAt = _connectedAt;

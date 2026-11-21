@@ -27,6 +27,18 @@ extension _RelaySessionDiagnostics on RelaySessionNotifier {
     );
   }
 
+  /// Counts a connection completing AUTH, and the recovery it ends when an
+  /// open connection was lost before it.
+  void _noteConnected() {
+    _noteNetwork(NetworkEndpoint.relayConnection, since: _connectStartedAt);
+    final lost = _connectionLost;
+    _connectionLost = null;
+    // A loss in another community's connection is not this one's recovery.
+    if (lost != null && lost.context == _contextGeneration) {
+      _noteNetwork(NetworkEndpoint.relayRecovery, since: lost.at);
+    }
+  }
+
   /// Counts the end of a connect attempt or of an open connection, once: a
   /// socket that fails while authenticating reports it twice.
   ///
@@ -35,6 +47,14 @@ extension _RelaySessionDiagnostics on RelaySessionNotifier {
   void _noteDisconnected(Object? error, {bool denied = false}) {
     final since = _connectStartedAt;
     if (since == null && _connectedAt == null) return;
+    // Recovery runs from the last frame, since a dead socket can look open
+    // for a while. Failed attempts after the loss keep the first time.
+    if (_connectedAt != null) {
+      _connectionLost ??= (
+        at: _lastInboundAt ?? _now(),
+        context: _contextGeneration,
+      );
+    }
     _connectStartedAt = null;
     _noteNetwork(
       NetworkEndpoint.relayConnection,

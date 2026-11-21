@@ -1,11 +1,13 @@
 import 'dart:async';
 
+import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/channels/saved_message_store.dart';
 import '../../shared/relay/relay.dart';
 import 'channel_event_order.dart';
+import 'channel_open_timing.dart';
 import 'pending_local_messages_provider.dart';
 import 'saved_channel_page.dart';
 import 'channel_window.dart';
@@ -245,6 +247,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
   Future<void> _init() async {
     final initVersion = ++_initVersion;
+    final openedAt = _hasLoadedHistory ? null : clock.now();
     _initInFlight = true;
     _historyRefreshFailed = false;
     _clearSubscription();
@@ -345,6 +348,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       // catching up.
       _initInFlight = false;
       state = AsyncData(merged);
+      if (openedAt != null) noteChannelOpen(ref, openedAt);
       if (ticket != null && _hasListeners) {
         unawaited(
           saveMessagePage(
@@ -360,6 +364,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       unawaited(_fillNotices());
     } catch (e, st) {
       if (!_isCurrentInit(initVersion)) return;
+      if (openedAt != null) noteChannelOpen(ref, openedAt, error: e);
       if (isRelayChannelAccessDenied(e)) {
         _denyAccess(e, st, cache, cacheScope);
         return;

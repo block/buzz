@@ -16,6 +16,7 @@ import '../../helpers/recording_diagnostics.dart';
 const _connection = NetworkEndpoint.relayConnection;
 const _query = NetworkEndpoint.relayQuery;
 const _publish = NetworkEndpoint.relayPublish;
+const _recovery = NetworkEndpoint.relayRecovery;
 
 /// What the session counts for what the network and the relay do, with only
 /// the socket and HTTP boundary fake. None of it is an error report.
@@ -63,6 +64,7 @@ void main() {
         (_connection, failure),
         (NetworkEndpoint.relayReconnect, null),
         (_connection, null),
+        (_recovery, null),
       ],
     ]);
     // Everything on the trail too, and nothing was reported as an error.
@@ -72,7 +74,7 @@ void main() {
     // A relay that refuses the member ends it for good, with no reconnect.
     s.relay.drop(const RelayAuthRejectedException('restricted: not a member'));
     s.settle(const Duration(seconds: 40));
-    expect(s.counts.outcomes.skip(1 + losses.length * 3), [
+    expect(s.counts.outcomes.skip(1 + losses.length * 4), [
       (_connection, NetworkFailure.authRefused),
     ]);
   });
@@ -171,6 +173,7 @@ void main() {
       (_publish, NetworkFailure.disconnected),
       (NetworkEndpoint.relayReconnect, null),
       (_connection, null),
+      (_recovery, null),
     ]);
     expect(s.counts.errors, isEmpty);
 
@@ -262,17 +265,76 @@ void main() {
       (_connection, NetworkFailure.disconnected),
       (NetworkEndpoint.relayReconnect, null),
       (_connection, null),
+      (_recovery, null),
       (_connection, NetworkFailure.authRefused),
       (NetworkEndpoint.relayReconnect, null),
       (_connection, null),
+      (_recovery, null),
       (_connection, NetworkFailure.disconnected),
       (NetworkEndpoint.relayReconnect, null),
       (_connection, null),
+      (_recovery, null),
     ]);
+  });
+
+  journey('recovery is timed from the last frame the lost socket delivered', (
+    async,
+    s,
+  ) {
+    s.settle();
+    // The socket goes quiet for 20 s before the loss is noticed.
+    s.session.debugHandleMessage(['NOTICE', 'still here']);
+    s.settle(const Duration(seconds: 20));
+    s.counts.clear();
+    s.relay.drop();
+    s.settle(const Duration(seconds: 40));
+    final recovery = s.counts.events.singleWhere(
+      (e) => e.endpoint == _recovery,
+    );
+    final reconnected = s.counts.events.lastWhere(
+      (e) => e.endpoint == _connection,
+    );
+    expect(recovery.duration, greaterThan(const Duration(seconds: 20)));
+    expect(recovery.duration, lessThan(const Duration(seconds: 25)));
+    expect(recovery.duration, greaterThan(reconnected.duration!));
+
+    // Failed attempts in between are part of the same recovery.
+    s.settle(const Duration(minutes: 1));
+    s.counts.clear();
+    s.relay.holdAuth();
+    s.relay.drop();
+    s.settle(const Duration(seconds: 10));
+    s.relay.drop();
+    s.settle(const Duration(minutes: 1));
+    expect(s.counts.outcomes, [
+      (_connection, NetworkFailure.disconnected),
+      (NetworkEndpoint.relayReconnect, null),
+      (_connection, NetworkFailure.disconnected),
+      (NetworkEndpoint.relayReconnect, null),
+      (_connection, null),
+      (_recovery, null),
+    ]);
+
+    // Time in the background is not recovery: a loss just before it is
+    // forgotten.
+    s.counts.clear();
+    s.relay.holdAuth();
+    s.relay.drop();
+    s.settle(const Duration(seconds: 5));
+    s.session.onAppPaused();
+    s.settle(const Duration(seconds: 40));
+    s.session.onAppResumed();
+    s.settle(const Duration(seconds: 40));
+    expect(s.counts.outcomes, isNot(contains((_recovery, null))));
+    expect(s.counts.outcomes.last, (_connection, null));
   });
 
   journey('a community switch\'s first connect is not a reconnect', (async, s) {
     s.settle();
+    // Nor a recovery, though the old connection was lost and not yet back.
+    s.relay.holdAuth();
+    s.relay.drop();
+    s.settle(const Duration(seconds: 5));
     s.counts.clear();
 
     s.container
