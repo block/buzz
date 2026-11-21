@@ -25,6 +25,7 @@ use buzz_db::moderation::{NewReport, ReportTarget};
 use nostr::Event;
 use uuid::Uuid;
 
+use super::ingest::{ChannelWriteRefusal, IngestError};
 use crate::state::AppState;
 
 /// NIP-56 report types accepted at ingest.
@@ -40,7 +41,8 @@ pub const REPORT_TYPES: &[&str] = &[
 
 /// Validate a kind:1984 report and persist it to `moderation_reports`.
 ///
-/// Rejections use client-safe `invalid:`/`restricted:` reasons. On success
+/// Rejections use client-safe `invalid:`/`restricted:` reasons; a failed
+/// lookup is an internal error naming only the error kind. On success
 /// the report is queued (idempotently, keyed by the signed event id) and the
 /// event itself is **not** stored or broadcast as a regular event.
 ///
@@ -50,8 +52,8 @@ pub async fn handle_report_event(
     event: &Event,
     state: &Arc<AppState>,
     token_channels: Option<&[Uuid]>,
-) -> Result<(), String> {
-    let parsed = parse_report(event)?;
+) -> Result<(), IngestError> {
+    let parsed = parse_report(event).map_err(IngestError::Rejected)?;
     let reporter_pubkey = event.pubkey.to_bytes();
 
     let (target, channel_id) = match parsed.target {
@@ -60,7 +62,7 @@ pub async fn handle_report_event(
                 .db
                 .get_event_by_id(tenant.community(), &event_id)
                 .await
-                .map_err(|e| format!("error: database error resolving report target: {e}"))?;
+                .map_err(|e| IngestError::db(&e))?;
             // A target the reporter cannot read is rejected exactly like a
             // missing one, so the response never reveals whether it exists.
             let readable = match &stored {
@@ -72,7 +74,11 @@ pub async fn handle_report_event(
             };
             match stored {
                 Some(stored) if readable => (ReportTarget::Event(event_id), stored.channel_id),
-                _ => return Err("invalid: report target event not found".to_string()),
+                _ => {
+                    return Err(IngestError::Rejected(
+                        "invalid: report target event not found".to_string(),
+                    ))
+                }
             }
         }
         ParsedReportTarget::Blob { sha256, .. } => {
@@ -84,7 +90,9 @@ pub async fn handle_report_event(
                 .media_storage
                 .get_sidecar(tenant, &sha_hex)
                 .await
-                .map_err(|_| "invalid: report target blob not found".to_string())?;
+                .map_err(|_| {
+                    IngestError::Rejected("invalid: report target blob not found".to_string())
+                })?;
             if state.config.media_read_mode == crate::api::media_access::MediaReadMode::Enforce {
                 let base = crate::api::media::media_base_url_for_tenant(
                     &state.config.relay_url,
@@ -107,7 +115,9 @@ pub async fn handle_report_event(
                     Ok(buzz_db::media::MediaAccess::Allowed
                         | buzz_db::media::MediaAccess::UploaderPreview)
                 ) {
-                    return Err("invalid: report target blob not found".to_owned());
+                    return Err(IngestError::Rejected(
+                        "invalid: report target blob not found".to_owned(),
+                    ));
                 }
             }
             (ReportTarget::Blob(sha256), None)
@@ -129,7 +139,7 @@ pub async fn handle_report_event(
             },
         )
         .await
-        .map_err(|e| format!("error: database error inserting report: {e}"))?;
+        .map_err(|e| IngestError::db(&e))?;
 
     Ok(())
 }
@@ -143,7 +153,7 @@ async fn reporter_can_read(
     target: &StoredEvent,
     reporter: &[u8],
     token_channels: Option<&[Uuid]>,
-) -> Result<bool, String> {
+) -> Result<bool, IngestError> {
     if !super::req::event_visible_to_reader(&target.event, reporter) {
         return Ok(false);
     }
@@ -166,8 +176,8 @@ async fn reporter_can_read(
     .await
     {
         Ok(()) => Ok(true),
-        Err(reason) if reason.starts_with("error:") => Err(reason),
-        Err(_) => Ok(false),
+        Err(ChannelWriteRefusal::Denied(_)) => Ok(false),
+        Err(ChannelWriteRefusal::Db(e)) => Err(IngestError::db(&e)),
     }
 }
 
