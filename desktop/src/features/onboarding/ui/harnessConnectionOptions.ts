@@ -19,6 +19,7 @@ const API_RUNTIME_IDS = new Set([
   "kimi",
   "hermes",
   "openclaw",
+  "dsh",
 ]);
 
 export function runtimeSupportsConnectionMethod(

@@ -1265,6 +1265,7 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
         .expect("spawn true for placeholder");
     let process = crate::managed_agents::ManagedAgentProcess {
         child,
+        harness_stdin: None,
         log_path: Default::default(),
         spawn_config: crate::managed_agents::spawn_snapshot::prospective_spawn_config_snapshot(
             &minimal_record(&"cc".repeat(32)),
@@ -1281,4 +1282,49 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
         job: None,
     };
     crate::managed_agents::ManagedAgentPairRuntime::starting(process)
+}
+
+/// The dsh branch of `spawn_agent_child` hands the harness a piped stdin and
+/// retains the write end in `ManagedAgentProcess` for the child's whole life —
+/// dropping it would close the pipe, and dsh's `exitOnStdinEnd` would then
+/// shut the harness down at boot, before it serves a single request. This
+/// mirrors that seam and asserts the write end survives into the process.
+#[test]
+fn dsh_spawn_retains_the_harness_stdin_write_end() {
+    use std::process::{Command, Stdio};
+    #[cfg(unix)]
+    let program = "/usr/bin/true";
+    #[cfg(windows)]
+    let program = "true";
+    let mut child = Command::new(program)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn placeholder with piped stdin");
+    // Same sequence as the dsh branch of spawn_agent_child: the write end is
+    // captured from the child *before* the child moves into the struct.
+    let harness_stdin = child.stdin.take();
+    let process = crate::managed_agents::ManagedAgentProcess {
+        child,
+        harness_stdin,
+        log_path: Default::default(),
+        spawn_config: crate::managed_agents::spawn_snapshot::prospective_spawn_config_snapshot(
+            &minimal_record(&"cc".repeat(32)),
+            &[],
+            &[],
+            "wss://relay.example",
+            &Default::default(),
+            false,
+        ),
+        setup_mode: false,
+        adapter_availability: None,
+        start_nonce: "test-nonce".to_string(),
+        #[cfg(windows)]
+        job: None,
+    };
+    assert!(
+        process.harness_stdin.is_some(),
+        "the dsh spawn must retain the stdin write end in the process"
+    );
 }
