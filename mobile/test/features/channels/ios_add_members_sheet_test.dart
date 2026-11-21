@@ -36,14 +36,17 @@ class _Lifecycle extends AppLifecycleNotifier {
 
 class _Actions extends Fake implements ChannelActions {
   final calls = <List<String>>[];
+  final agentCalls = <Set<String>>[];
   bool failBob = false;
   @override
   Future<void> addMembers({
     required String channelId,
     required List<String> pubkeys,
     String role = 'member',
+    Set<String> agentPubkeys = const {},
   }) async {
     calls.add(pubkeys);
+    agentCalls.add(agentPubkeys);
     if (failBob) throw AddMembersException({_bob: 'Try again'});
   }
 }
@@ -238,6 +241,10 @@ void main() {
         await _event(tester, session, 'submit');
         expect(actions.calls, [
           [_alice, _bob],
+        ]);
+        // Bob is an agent: the add must record him with the bot role.
+        expect(actions.agentCalls, [
+          {_bob},
         ]);
         expect((states.last['selected'] as List).map((row) => row['pubkey']), [
           _bob,
