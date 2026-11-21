@@ -1434,14 +1434,7 @@ mod tests {
             &'a self,
             _issuer: &'a str,
             _now: DateTime<Utc>,
-        ) -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<
-                        Output = Result<Vec<(PublicKey, DateTime<Utc>)>, crate::error::AuthError>,
-                    > + Send
-                    + 'a,
-            >,
-        > {
+        ) -> crate::nip_fi::LoadDenies<'a> {
             Box::pin(async { Ok(Vec::new()) })
         }
     }

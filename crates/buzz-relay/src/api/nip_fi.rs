@@ -3629,17 +3629,7 @@ mod route_integration_tests {
             &'a self,
             issuer: &'a str,
             now: chrono::DateTime<chrono::Utc>,
-        ) -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<
-                        Output = Result<
-                            Vec<(nostr::PublicKey, chrono::DateTime<chrono::Utc>)>,
-                            buzz_auth::AuthError,
-                        >,
-                    > + Send
-                    + 'a,
-            >,
-        > {
+        ) -> buzz_auth::LoadDenies<'a> {
             self.inner.load_denies(issuer, now)
         }
     }
@@ -3899,17 +3889,7 @@ mod route_integration_tests {
             &'a self,
             issuer: &'a str,
             now: chrono::DateTime<chrono::Utc>,
-        ) -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<
-                        Output = Result<
-                            Vec<(nostr::PublicKey, chrono::DateTime<chrono::Utc>)>,
-                            buzz_auth::AuthError,
-                        >,
-                    > + Send
-                    + 'a,
-            >,
-        > {
+        ) -> buzz_auth::LoadDenies<'a> {
             Box::pin(async move {
                 self.loads.send_modify(|loads| *loads += 1);
                 let hidden = self.hidden.lock().unwrap().take();
@@ -4090,12 +4070,9 @@ mod route_integration_tests {
             "same jti is a replay"
         );
 
-        let restarted = store_pod(
-            1000,
-            Arc::clone(&store) as Arc<dyn buzz_auth::CommandReplayGuard>,
-        )
-        .await;
-        restore_nip_fi_denies(&restarted, &[store.clone()])
+        let store: Arc<dyn buzz_auth::CommandReplayGuard> = store;
+        let restarted = store_pod(1000, Arc::clone(&store)).await;
+        restore_nip_fi_denies(&restarted, std::slice::from_ref(&store))
             .await
             .expect("restore");
         assert!(is_denied(&restarted, &key), "the applied deny was stored");
@@ -4213,17 +4190,7 @@ mod route_integration_tests {
             &'a self,
             issuer: &'a str,
             now: chrono::DateTime<chrono::Utc>,
-        ) -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<
-                        Output = Result<
-                            Vec<(nostr::PublicKey, chrono::DateTime<chrono::Utc>)>,
-                            buzz_auth::AuthError,
-                        >,
-                    > + Send
-                    + 'a,
-            >,
-        > {
+        ) -> buzz_auth::LoadDenies<'a> {
             if self.load_fails {
                 return Box::pin(async {
                     Err(buzz_auth::AuthError::Internal(

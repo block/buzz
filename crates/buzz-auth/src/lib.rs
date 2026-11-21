@@ -82,11 +82,11 @@ pub use nip_fi::{
     DenialClass, DenySetFull, DenyStatus, FederatedAssertionVerifier, FederatedIdentity,
     FederatedIdentityDiscovery, FreshnessClass, HttpJwksFetcher, IssuerCapacity, IssuerJwksConfig,
     IssuerKeySource, IssuerPolicy, IssuerPolicyError, IssuerRegistry, JwksFetchError, JwksFetcher,
-    JwksSourceContract, NipFiDenyMap, NipFiMode, NipFiStartupError, ProductionJwksSource,
-    ProvisionBindingError, ProvisionBindingPolicy, RevalidationDependencies, SubjectClass,
-    SubjectClassContract, TokenClass, TransportContractId, VerifiedAssertion, VerifierError,
-    VerifyAssertion, CLIENT_ATTACHED_HEADER, COMMAND_JWT_TYP, MAX_COMMAND_AGE_SECONDS,
-    NOSTR_OWNER_PUBKEY_CLAIM, NOSTR_PUBKEY_CLAIM, OAUTH_CLIENT_ID_CLAIM,
+    JwksSourceContract, LoadDenies, NipFiDenyMap, NipFiMode, NipFiStartupError,
+    ProductionJwksSource, ProvisionBindingError, ProvisionBindingPolicy, RevalidationDependencies,
+    SubjectClass, SubjectClassContract, TokenClass, TransportContractId, VerifiedAssertion,
+    VerifierError, VerifyAssertion, CLIENT_ATTACHED_HEADER, COMMAND_JWT_TYP,
+    MAX_COMMAND_AGE_SECONDS, NOSTR_OWNER_PUBKEY_CLAIM, NOSTR_PUBKEY_CLAIM, OAUTH_CLIENT_ID_CLAIM,
 };
 
 #[cfg(any(test, feature = "test-utils"))]

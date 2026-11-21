@@ -113,7 +113,7 @@ pub fn deny_store_keys(prefix: &str, issuer: &str) -> (String, String) {
 /// `until` in whole ms, rounded up.
 fn ceil_ms(t: DateTime<Utc>) -> i64 {
     let ms = t.timestamp_millis();
-    if t.timestamp_subsec_nanos() % 1_000_000 == 0 {
+    if t.timestamp_subsec_nanos().is_multiple_of(1_000_000) {
         ms
     } else {
         ms + 1
@@ -164,12 +164,7 @@ impl CommandReplayGuard for RedisCommandReplayGuard {
         })
     }
 
-    fn load_denies<'a>(
-        &'a self,
-        issuer: &'a str,
-        now: DateTime<Utc>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<(PublicKey, DateTime<Utc>)>, AuthError>> + Send + 'a>>
-    {
+    fn load_denies<'a>(&'a self, issuer: &'a str, now: DateTime<Utc>) -> buzz_auth::LoadDenies<'a> {
         Box::pin(async move {
             let (_, exact) = deny_store_keys(&self.deny_prefix, issuer);
             let mut conn = self.pool.clone();

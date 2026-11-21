@@ -72,12 +72,12 @@ pub trait CommandReplayGuard: Send + Sync {
 
     /// Every recorded deny entry for `issuer` with `until > now`, at its exact
     /// signed `until`.
-    fn load_denies<'a>(
-        &'a self,
-        issuer: &'a str,
-        now: DateTime<Utc>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<(PublicKey, DateTime<Utc>)>, AuthError>> + Send + 'a>>;
+    fn load_denies<'a>(&'a self, issuer: &'a str, now: DateTime<Utc>) -> LoadDenies<'a>;
 }
+
+/// The future [`CommandReplayGuard::load_denies`] returns.
+pub type LoadDenies<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<(PublicKey, DateTime<Utc>)>, AuthError>> + Send + 'a>>;
 
 /// Redis key for a command replay claim:
 /// `buzz:nip-fi:command:{sha256(len(iss) || iss || len(jti) || jti)}`.
@@ -150,12 +150,7 @@ impl CommandReplayGuard for InMemoryCommandReplayGuard {
         Box::pin(async move { Ok(outcome) })
     }
 
-    fn load_denies<'a>(
-        &'a self,
-        issuer: &'a str,
-        now: DateTime<Utc>,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<(PublicKey, DateTime<Utc>)>, AuthError>> + Send + 'a>>
-    {
+    fn load_denies<'a>(&'a self, issuer: &'a str, now: DateTime<Utc>) -> LoadDenies<'a> {
         let denies = self
             .0
             .lock()
