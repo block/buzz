@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  AGENT_PARALLELISM_HELP,
   DEFAULT_AGENT_PARALLELISM,
   resolveAgentParallelism,
   parallelismCapHint,
@@ -18,6 +19,14 @@ test("parallelism uses the app default only when input and definition omit it", 
   );
   assert.equal(resolveAgentParallelism(undefined, 4), 4);
   assert.equal(resolveAgentParallelism(2, 4), 2);
+});
+
+test("definition parallelism help distinguishes new and existing instances", () => {
+  assert.match(AGENT_PARALLELISM_HELP, /new agent instances/i);
+  assert.match(
+    AGENT_PARALLELISM_HELP,
+    /Existing instances keep their current value/i,
+  );
 });
 
 // ── parallelismCapHint: persona/instance hint data path ───────────────────────
