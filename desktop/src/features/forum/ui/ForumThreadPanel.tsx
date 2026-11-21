@@ -2,6 +2,8 @@ import { ArrowLeft, MessageSquare } from "lucide-react";
 import * as React from "react";
 
 import { handleTimelineMentionCopy } from "@/features/messages/lib/timelineMentionCopy";
+import { TypingIndicatorRow } from "@/features/messages/ui/TypingIndicatorRow";
+
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -29,6 +31,7 @@ type ForumThreadPanelProps = {
   isSendingReply: boolean;
   channelId: string;
   postId: string;
+  typingPubkeys?: string[];
   currentPubkey?: string;
   profiles?: UserProfileLookup;
   onBack: () => void;
@@ -146,6 +149,7 @@ export function ForumThreadPanel({
   thread,
   isLoading,
   isSendingReply,
+  typingPubkeys = [],
   channelId,
   postId,
   currentPubkey,
@@ -332,6 +336,14 @@ export function ForumThreadPanel({
         </div>
       </div>
 
+      {typingPubkeys.length > 0 ? (
+        <TypingIndicatorRow
+          channel={null}
+          currentPubkey={currentPubkey}
+          profiles={profiles}
+          typingPubkeys={typingPubkeys}
+        />
+      ) : null}
       <div className="border-t border-border/60 p-4">
         <ForumComposer
           channelId={channelId}
