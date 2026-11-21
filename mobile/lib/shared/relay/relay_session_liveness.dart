@@ -104,7 +104,10 @@ extension _RelaySessionLiveness on RelaySessionNotifier {
       _liveness.spreadReconnect = true;
       _reconnectTimer = _reconnectTimerFactory(
         Duration(milliseconds: (_random.nextDouble() * spread).round()),
-        () => _connect(ref.read(relayConfigProvider)),
+        () {
+          _liveness.networkAttempt = true;
+          _connect(ref.read(relayConfigProvider));
+        },
       );
     });
   }

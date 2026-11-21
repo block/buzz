@@ -25,7 +25,9 @@ extension _RelaySessionBackgroundWork on RelaySessionNotifier {
     if (backgroundedAt == null && _liveness.networkAttempt) return;
 
     // Cancel any in-flight reconnect backoff timer so we reconnect immediately
-    // instead of waiting for the (possibly large) exponential delay.
+    // instead of waiting for the (possibly large) exponential delay. This
+    // attempt replaces any a network change started.
+    _endNetworkReconnect();
     _reconnectTimer?.cancel();
     _reconnectDelayMs = RelaySessionNotifier._baseReconnectDelayMs;
     final config = ref.read(relayConfigProvider);
@@ -72,6 +74,7 @@ extension _RelaySessionBackgroundWork on RelaySessionNotifier {
         _reconnectTimer?.isActive == true ||
         status == SessionStatus.disconnected) {
       _paused = false;
+      _endNetworkReconnect();
       _reconnectTimer?.cancel();
       _reconnectDelayMs = RelaySessionNotifier._baseReconnectDelayMs;
       unawaited(_connect(ref.read(relayConfigProvider)));

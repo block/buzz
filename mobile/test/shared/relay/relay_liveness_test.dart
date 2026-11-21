@@ -245,12 +245,56 @@ void main() {
       relay.holdAuth();
       async.elapse(const Duration(milliseconds: 1400));
       expect(relay.sockets, hasLength(2));
-      // Nor the attempt the spread-out wait started.
+      // Nor the attempt the spread-out wait started, even when closing
+      // Control Center resumes the app.
       session.onNetworkChanged();
+      session.onAppResumed();
       async.elapse(const Duration(milliseconds: 50));
       expect(relay.sockets, hasLength(2));
     });
   });
+
+  // Work that replaces the spread-out wait leaves later network changes free
+  // to restart its attempt.
+  for (final (name, supersede)
+      in <(String, void Function(RelaySessionNotifier))>[
+        (
+          'a return from the background',
+          (session) {
+            session.onAppPaused();
+            session.onAppResumed();
+          },
+        ),
+        (
+          'background work',
+          (session) => session.connectForBackgroundWork(
+            timeout: const Duration(seconds: 1),
+          ),
+        ),
+      ]) {
+    test('$name during the spread-out wait replaces it', () {
+      fakeAsync((async) {
+        final (:relay, :container) = connect(async);
+        final session = container.read(relaySessionProvider.notifier);
+
+        relay.holdReq();
+        session.onNetworkChanged();
+        async.elapse(pastProbe);
+        relay.holdAuth();
+        supersede(session);
+        async.elapse(const Duration(milliseconds: 50));
+        expect(relay.sockets, hasLength(2), reason: 'it reconnects');
+        // Wi-Fi returning during that attempt restarts it on the new network.
+        session.onNetworkChanged();
+        async.elapse(const Duration(seconds: 3));
+        expect(relay.sockets, hasLength(3));
+        expect(
+          container.read(relaySessionProvider).status,
+          SessionStatus.connected,
+        );
+      });
+    });
+  }
 
   test('returning from inactive keeps an attempt a network change started', () {
     fakeAsync((async) {
