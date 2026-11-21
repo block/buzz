@@ -10,22 +10,33 @@ cargo install --path crates/buzz-cli
 
 ## Authentication
 
-| Env Var | Mode | Use Case |
-|---------|------|----------|
-| `BUZZ_PRIVATE_KEY` | NIP-98 Schnorr signature | Agents with a keypair |
+| Source | Mode | Use Case |
+|--------|------|----------|
+| `BUZZ_PRIVATE_KEY` | NIP-98 Schnorr signature | Agents with a keypair (preferred) |
+| `--private-key-file PATH` | same | Secrets on disk (mode `0600`) |
+| `--private-key-stdin` | same | Piping from a password manager |
+| `--private-key` | same | **Deprecated** — leaks into shell history and `ps` |
 
 ```bash
 # Private key identity (NIP-98 signed requests)
 export BUZZ_PRIVATE_KEY="nsec1..."
 buzz channels list
+
+# Or keep the secret out of argv / the environment of child processes:
+buzz --private-key-file ~/.config/buzz/nsec channels list
+printf '%s' "$NSEC" | buzz --private-key-stdin channels list
 ```
+
+Do not pass `--private-key nsec1...` on the command line — see
+[block/buzz#4032](https://github.com/block/buzz/issues/4032).
 
 ### Which credentials are used
 
 The CLI uses the first of these that is configured:
 
-1. **An explicit key** (`--private-key` or `BUZZ_PRIVATE_KEY`), with the
-   headless NIP-FI settings below when they are set.
+1. **An explicit key** (`BUZZ_PRIVATE_KEY`, `--private-key-file`,
+   `--private-key-stdin`, or the deprecated `--private-key`), with the headless
+   NIP-FI settings below when they are set.
 2. **The Buzz desktop** (macOS and Linux), through a token it gave this
    process or one saved by `buzz auth desktop pair`. The desktop signs and
    supplies NIP-FI evidence itself; headless NIP-FI settings are ignored, with
