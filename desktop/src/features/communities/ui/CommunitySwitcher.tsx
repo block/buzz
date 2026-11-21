@@ -92,7 +92,7 @@ export function CommunityEmojiIcon({
     return (
       <span
         aria-hidden="true"
-        className={cn(className, "h-5 overflow-hidden rounded-md")}
+        className={cn("h-5 overflow-hidden rounded-md", className)}
       >
         <img
           alt=""
