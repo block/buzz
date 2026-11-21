@@ -845,20 +845,13 @@ export function useMentionSendFlow({
             : uniqueNormalizedPubkeys(pubkeys).filter(
                 (pubkey) => !mentions.memberPubkeys.has(pubkey),
               );
-        let promptNonMemberPubkeys = nonMemberPubkeys.filter(
+        // Include managed agents that aren't channel members so a mention
+        // cannot silently re-attach a previously removed agent (#3577).
+        // Newly created persona agents are already being attached above.
+        const promptNonMemberPubkeys = nonMemberPubkeys.filter(
           (pubkey) =>
-            !mentions.isManagedAgentPubkey(pubkey) &&
             !createdPersonaAgentPubkeySet.has(normalizePubkey(pubkey)),
         );
-        if (promptNonMemberPubkeys.length > 0) {
-          try {
-            const managedAgentsByPubkey = await getManagedAgentsByPubkey();
-            if (isSendCancelled()) return;
-            promptNonMemberPubkeys = promptNonMemberPubkeys.filter(
-              (pubkey) => !managedAgentsByPubkey.has(normalizePubkey(pubkey)),
-            );
-          } catch {}
-        }
         const pendingDraft: PendingNonMemberMentionSend = {
           sourceOwner,
           composerRevision,
@@ -920,12 +913,10 @@ export function useMentionSendFlow({
       channelType,
       createMentionedPersonaAgents,
       customEmoji,
-      getManagedAgentsByPubkey,
       mentions.extractMentionPersonas,
       mentions.extractMentionPubkeys,
       mentions.hasResolvedMembers,
       mentions.isAgentPubkey,
-      mentions.isManagedAgentPubkey,
       mentions.memberPubkeys,
       mentions.getDraftMentionRefs,
       mentions.settlePendingMentionBindings,
