@@ -308,9 +308,9 @@ extension _UnreadCatchUp on ChannelsNotifier {
     _ChannelRefreshFence fence,
     int subscriptionGeneration,
   ) async {
-    Set<String>? authenticIds;
+    ({Set<String> authentic, Set<String> rejected})? checked;
     try {
-      authenticIds = await _authenticActivityHeads(candidates, deletedIds);
+      checked = await _authenticActivityHeads(candidates, deletedIds);
     } catch (error) {
       debugPrint('[ChannelsNotifier] activity verification failed: $error');
     }
@@ -332,11 +332,12 @@ extension _UnreadCatchUp on ChannelsNotifier {
       );
     }
 
-    if (authenticIds == null) {
+    if (checked == null) {
       if (_activity.noteCatchUp(covered, covered)) _publishUnreadCatchUp({});
       readGaps(gaps);
       return;
     }
+    final authenticIds = checked.authentic;
     var changed = false;
     for (final event in candidates) {
       final channelId = event.channelId!;
@@ -347,10 +348,13 @@ extension _UnreadCatchUp on ChannelsNotifier {
       changed |= _activity.note(
         channelId,
         event,
-        (event) => authenticIds!.contains(event.id),
+        (event) => authenticIds.contains(event.id),
       );
     }
-    final stale = _deletedHeadChannels(candidates, authenticIds, deletedIds);
+    final stale = {
+      ...checked.rejected,
+      ..._deletedHeadChannels(candidates, authenticIds, deletedIds),
+    };
     // A verified post at or after a gap's end makes the gap moot.
     final moot = {
       for (final MapEntry(key: channelId, value: gap) in gaps.entries)
@@ -366,9 +370,11 @@ extension _UnreadCatchUp on ChannelsNotifier {
         ) |
         _activity.noteCatchUp(stale, stale);
     if (changed) _publishUnreadCatchUp(const {});
+    // A stale channel stays unknown until the next list read re-reads it.
     readGaps({
       for (final MapEntry(key: channelId, value: gap) in gaps.entries)
-        if (!moot.contains(channelId)) channelId: gap,
+        if (!moot.contains(channelId) && !stale.contains(channelId))
+          channelId: gap,
     });
   }
 
@@ -387,6 +393,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
     final failedChannelIds = <String>{};
     List<NostrEvent>? events;
     var authenticIds = const <String>{};
+    var rejected = const <String>{};
     try {
       events = await _fetchChannelHistoryBatch(
         session,
@@ -396,7 +403,10 @@ extension _UnreadCatchUp on ChannelsNotifier {
         optional: true,
       );
       if (events != null) {
-        authenticIds = await _authenticActivityHeads(events, deletedIds);
+        (authentic: authenticIds, :rejected) = await _authenticActivityHeads(
+          events,
+          deletedIds,
+        );
       }
     } catch (error) {
       debugPrint('[ChannelsNotifier] activity gap read failed: $error');
@@ -425,6 +435,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
         ? channelIds
         : {
             ...failedChannelIds,
+            ...rejected,
             ..._deletedHeadChannels(events, authenticIds, deletedIds),
           };
     changed |= _activity.noteCatchUp(channelIds, failed, sentAt: sentAt);
@@ -434,18 +445,17 @@ extension _UnreadCatchUp on ChannelsNotifier {
   /// [_ChannelActivity.authenticHeadIds] of [events], skipping posts that are
   /// deleted, in [deletedIds], by a deletion among [events] or by a deletion
   /// seen before, since those never count.
-  Future<Set<String>> _authenticActivityHeads(
-    List<NostrEvent> events,
-    Set<String> deletedIds,
-  ) => _ChannelActivity.authenticHeadIds(events, {
-    ...deletedIds,
-    for (final event in events)
-      if (event.kind == EventKind.deletion ||
-          event.kind == EventKind.nip29DeleteEvent)
-        ..._deletionTargets(event),
-    ..._unscopedUnreadDeletedIds,
-    for (final ids in _unreadDeletedIdsByChannel.values) ...ids,
-  });
+  Future<({Set<String> authentic, Set<String> rejected})>
+  _authenticActivityHeads(List<NostrEvent> events, Set<String> deletedIds) =>
+      _ChannelActivity.authenticHeadIds(events, {
+        ...deletedIds,
+        for (final event in events)
+          if (event.kind == EventKind.deletion ||
+              event.kind == EventKind.nip29DeleteEvent)
+            ..._deletionTargets(event),
+        ..._unscopedUnreadDeletedIds,
+        for (final ids in _unreadDeletedIdsByChannel.values) ...ids,
+      });
 
   /// The channels whose verified head among [events] was deleted, in
   /// [deletedIds] or by a deletion seen since it was verified. Their older

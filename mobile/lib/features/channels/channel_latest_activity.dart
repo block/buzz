@@ -114,7 +114,7 @@ class _ChannelActivity {
   /// deleted latest post stops counting. A failed batch or channel, or one
   /// whose messages all fail verification, stays unknown, as does one whose
   /// latest post was deleted while the read was in flight. [authenticIds] is
-  /// [authenticHeadIds] of [events].
+  /// the verified [authenticHeadIds] of [events].
   void noteRead(
     int read,
     Iterable<String> requested,
@@ -238,36 +238,49 @@ class _ChannelActivity {
     return true;
   }
 
-  /// The ids of each channel's newest authentic message among [events],
-  /// ignoring [skippedIds], with the newer messages that failed verification
-  /// left out. Checked off the UI isolate, newest first, so a read checks about
-  /// one message per channel.
-  static Future<Set<String>> authenticHeadIds(
+  /// Checks each channel's newest message among [events], ignoring
+  /// [skippedIds], off the UI isolate. Gives the ids that verified and the
+  /// channels whose newest message did not, which stay unknown rather than
+  /// fall back to an older, unchecked message.
+  static Future<({Set<String> authentic, Set<String> rejected})>
+  authenticHeadIds(
     List<NostrEvent> events, [
     Set<String> skippedIds = const {},
-  ]) {
-    final byChannel = <String, List<NostrEvent>>{};
+  ]) async {
+    final heads = <String, NostrEvent>{};
     for (final event in events) {
       if (skippedIds.contains(event.id) ||
           !EventKind.channelMessageEventKinds.contains(event.kind)) {
         continue;
       }
       if (event.channelId case final channelId?) {
-        byChannel.putIfAbsent(channelId, () => []).add(event);
+        final head = heads[channelId];
+        if (head == null || event.createdAt > head.createdAt) {
+          heads[channelId] = event;
+        }
       }
     }
-    if (byChannel.isEmpty) return Future.value(const {});
-    final candidates = byChannel.values.toList();
-    return debugRunActivityChecks(() => _newestAuthenticIds(candidates));
+    if (heads.isEmpty) {
+      return (authentic: const <String>{}, rejected: const <String>{});
+    }
+    final authentic = await _checkOffIsolate(heads.values.toList());
+    return (
+      authentic: authentic,
+      rejected: {
+        for (final MapEntry(key: channelId, value: head) in heads.entries)
+          if (!authentic.contains(head.id)) channelId,
+      },
+    );
   }
 
-  static Set<String> _newestAuthenticIds(List<List<NostrEvent>> channels) => {
-    for (final posts in channels)
-      ?(posts..sort((a, b) => b.createdAt.compareTo(a.createdAt)))
-          .where(_isAuthentic)
-          .firstOrNull
-          ?.id,
-  };
+  // Its own function, so the isolate's closure captures only [heads].
+  static Future<Set<String>> _checkOffIsolate(List<NostrEvent> heads) =>
+      debugRunActivityChecks(
+        () => {
+          for (final head in heads)
+            if (_isAuthentic(head)) head.id,
+        },
+      );
 
   // The activity time decides which rows the filter shows, so it comes only
   // from messages with a valid id and signature, as the old per-channel lookup
@@ -340,7 +353,7 @@ extension _ChannelLatestMessages on ChannelsNotifier {
     if (events == null) return null;
     return (
       events: events,
-      authentic: await _ChannelActivity.authenticHeadIds(events),
+      authentic: (await _ChannelActivity.authenticHeadIds(events)).authentic,
     );
   }
 }

@@ -2785,6 +2785,54 @@ void main() {
     },
   );
 
+  test('a catch-up whose newest post fails verification leaves activity '
+      'unknown rather than counting an older unchecked post', () async {
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final old = _signedPost(now - 10 * 86400);
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, _activityPk)],
+      metadata: [_meta(id: _channelA, name: 'general')],
+      recentMessages: [old],
+      enforceHistoryLimits: true,
+    );
+    final container = _buildContainer(
+      session: session,
+      overrides: [
+        _testPubkeyProvider.overrideWith(_ActivityPubkey.new),
+        readStateProvider.overrideWith(_ActivityReadState.new),
+      ],
+    );
+    addTearDown(container.dispose);
+    final listening = container.listen(
+      channelFilterActivityProvider(_channelA),
+      (_, _) {},
+    );
+    addTearDown(listening.close);
+    await container.read(channelsProvider.future);
+    final notifier = container.read(channelsProvider.notifier);
+    await notifier.waitForUnreadCatchUp();
+    expect(notifier.activityFor(_channelA), (known: true, at: old.createdAt));
+
+    session.recentMessages = [
+      old,
+      _signedPost(now - 60),
+      NostrEvent.fromJson({
+        ..._signedPost(now - 30).toJson(),
+        'sig': 'f' * 128,
+      }),
+    ];
+    final batches = session.queryBatches.length;
+    session.setStatus(SessionStatus.reconnecting);
+    session.setStatus(SessionStatus.connected);
+    await _waitUntil(
+      () => session.queryBatches
+          .skip(batches)
+          .any((batch) => batch.every((filter) => filter.since != null)),
+    );
+    await notifier.waitForUnreadCatchUp();
+    await _waitUntil(() => !notifier.activityFor(_channelA).known);
+  });
+
   test('Active filter activity survives rebuilds, read gaps, failed catch-ups '
       'and deletions', () async {
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -3043,8 +3091,16 @@ void main() {
         };
         session.recentMessages = [old, if (catchUp) middle, head];
         Future<void>? refreshing;
+        final batchesBefore = session.queryBatches.length;
         if (catchUp) {
-          if (before) session.pauseNextUnreadCatchUpQuery();
+          if (before) {
+            session.pauseNextUnreadCatchUpQuery();
+          } else {
+            // Read on another device between the two posts, so the catch-up
+            // starts after `middle` and leaves it in a gap.
+            (container.read(readStateProvider.notifier) as _ActivityReadState)
+                .markReadThrough(_channelA, now - 75);
+          }
           session.setStatus(SessionStatus.reconnecting);
           session.setStatus(SessionStatus.connected);
         } else {
@@ -3080,7 +3136,17 @@ void main() {
         await _settle();
         final result = notifier.activityFor(_channelA);
         if (catchUp) {
-          if (before) expect(result, (known: true, at: middle.createdAt));
+          if (before) {
+            expect(result, (known: true, at: middle.createdAt));
+          } else {
+            // The deleted head leaves the channel unknown, with no gap read
+            // that could settle it on a post older than the deleted one.
+            expect(result.known, isFalse);
+            expect(
+              session.queryBatches.skip(batchesBefore).where(_isGapBatch),
+              isEmpty,
+            );
+          }
           expect(result.known && result.at == old.createdAt, isFalse);
         } else {
           final pre = session.queryBatches.length;
