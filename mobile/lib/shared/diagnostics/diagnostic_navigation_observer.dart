@@ -154,6 +154,13 @@ class DiagnosticNavigationObserver extends NavigatorObserver {
   /// Stops reporting this navigator.
   void dispose() => _trail._observers.remove(this);
 
+  /// Names this navigator's current page again, once the frame has built it.
+  /// Call it when a page's content changes in place with no navigation, such
+  /// as the root page moving from the splash screen to onboarding or Home.
+  void refresh() {
+    if (_currentPage case final page?) _trail._announce(page);
+  }
+
   static bool _isScreen(Route<dynamic>? route) =>
       route is PageRoute<dynamic> && route is! DiagnosticSheetRoute<dynamic>;
 
