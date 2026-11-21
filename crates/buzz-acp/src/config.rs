@@ -1415,11 +1415,15 @@ pub fn resolve_channel_filters(
             }
         }
         SubscribeMode::All => {
+            let kinds = config
+                .kinds_override
+                .clone()
+                .unwrap_or_else(default_mention_kinds);
             for ch in &target_channels {
                 result.insert(
                     *ch,
                     ChannelFilter {
-                        kinds: config.kinds_override.clone(),
+                        kinds: Some(kinds.clone()),
                         require_mention: false,
                     },
                 );
@@ -1506,7 +1510,12 @@ pub fn resolve_dynamic_channel_filter(
             require_mention: !config.no_mention_filter,
         }),
         SubscribeMode::All => Some(ChannelFilter {
-            kinds: config.kinds_override.clone(),
+            kinds: Some(
+                config
+                    .kinds_override
+                    .clone()
+                    .unwrap_or_else(default_mention_kinds),
+            ),
             require_mention: false,
         }),
         SubscribeMode::Config => {
@@ -1924,19 +1933,22 @@ mod tests {
     }
 
     #[test]
-    fn test_all_mode_wildcard() {
+    fn test_all_mode_defaults_to_message_kinds() {
+        // SubscribeMode::All should mean "same kinds as Mentions, without
+        // the mention requirement" — not "all event kinds" (wildcard).
+        // Without this default, typing indicators (kind 20002) and other
+        // ephemeral kinds open agent turns and cancel pending wakeups.
+        // See #4949.
         let config = test_config(SubscribeMode::All);
         let channels = vec![Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
         let result = resolve_channel_filters(&config, &channels, &[]);
+        let expected = default_mention_kinds();
 
         assert_eq!(result.len(), 3);
         for ch in &channels {
             let f = result.get(ch).unwrap();
-            assert!(
-                f.kinds.is_none(),
-                "all mode with no override = wildcard kinds"
-            );
-            assert!(!f.require_mention);
+            assert_eq!(f.kinds.as_deref(), Some(expected.as_slice()));
+            assert!(!f.require_mention, "All mode must not require mention");
         }
     }
 
@@ -1949,6 +1961,20 @@ mod tests {
 
         let f = result.get(&channels[0]).unwrap();
         assert_eq!(f.kinds.as_ref().unwrap(), &[9, 7]);
+    }
+
+    #[test]
+    fn test_all_mode_dynamic_filter_defaults_to_message_kinds() {
+        // resolve_dynamic_channel_filter must also default to the message
+        // kinds list when BUZZ_ACP_KINDS is not set, not wildcard.
+        // See #4949.
+        let config = test_config(SubscribeMode::All);
+        let ch = Uuid::new_v4();
+        let result = resolve_dynamic_channel_filter(&config, ch, &[]);
+
+        let f = result.expect("All mode must return a filter");
+        assert_eq!(f.kinds, Some(default_mention_kinds()));
+        assert!(!f.require_mention, "All mode must not require mention");
     }
 
     #[test]
