@@ -125,6 +125,23 @@ async fn read_connection(db: &Db) -> Result<PoolConnection<Postgres>> {
     .map_err(Into::into)
 }
 
+/// See [`Db::relay_artifact_state`].
+#[derive(Debug)]
+pub struct RelayArtifactState {
+    /// The current head's event ID.
+    pub head: Vec<u8>,
+    /// The current home channel.
+    pub channel: Uuid,
+    /// The head is a deletion.
+    pub deleted: bool,
+    /// The head is signed by the author asked about.
+    pub authored: bool,
+    /// A moderator redacted the head, which retires the artifact.
+    pub redacted: bool,
+    /// The author's latest unredacted revision.
+    pub own: Option<StoredEvent>,
+}
+
 /// Why a sync snapshot did not open.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SnapshotDenied {
@@ -247,6 +264,136 @@ impl Db {
             .into_iter()
             .next()
             .map(|head| (head, deleted)))
+    }
+
+    /// The current head of one artifact, including a deletion, for a relay
+    /// writer that answers to no reader. Callers authorize before acting on it.
+    pub async fn relay_artifact_head(
+        &self,
+        community: CommunityId,
+        artifact: Uuid,
+    ) -> Result<Option<(StoredEvent, bool)>> {
+        let mut connection = read_connection(self).await?;
+        let row = sqlx::query(
+            "SELECT e.id,e.pubkey,e.created_at,e.kind,e.tags,e.content,e.sig,e.received_at,e.channel_id,a.deleted FROM artifact_heads a JOIN events e ON e.community_id=a.community_id AND e.id=a.event_id WHERE a.community_id=$1 AND a.artifact_id=$2 AND e.deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(artifact)
+        .fetch_optional(&mut *connection)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let deleted: bool = sqlx::Row::try_get(&row, "deleted")?;
+        Ok(rows_to_events(vec![row])?
+            .into_iter()
+            .next()
+            .map(|head| (head, deleted)))
+    }
+
+    /// One artifact as a relay writer that answers to no reader sees it: where
+    /// its head is, and `author`'s latest unredacted revision. Callers
+    /// authorize before acting on it.
+    pub async fn relay_artifact_state(
+        &self,
+        community: CommunityId,
+        artifact: Uuid,
+        author: &[u8],
+    ) -> Result<Option<RelayArtifactState>> {
+        let connection = read_connection(self).await?;
+        let mut tx = Transaction::begin(connection, None).await?;
+        sqlx::query("SET LOCAL statement_timeout='2s'")
+            .execute(&mut *tx)
+            .await?;
+        let Some(head) = sqlx::query(
+            "SELECT a.event_id,a.channel_id,a.deleted,e.pubkey,e.deleted_at IS NOT NULL AS redacted FROM artifact_heads a LEFT JOIN events e ON e.community_id=a.community_id AND e.id=a.event_id WHERE a.community_id=$1 AND a.artifact_id=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(artifact)
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
+            return Ok(None);
+        };
+        let mut qb = QueryBuilder::<Postgres>::new(EVENT_COLUMNS);
+        qb.push("WHERE e.community_id=")
+            .push_bind(community.as_uuid())
+            .push(" AND e.kind=45010 AND e.deleted_at IS NULL AND e.pubkey=")
+            .push_bind(author.to_vec());
+        tag_predicates(&mut qb, &[("d".to_owned(), vec![artifact.to_string()])]);
+        qb.push(" ORDER BY e.received_at DESC,e.id ASC LIMIT 1");
+        let own = rows_to_events(qb.build().fetch_all(&mut *tx).await?)?
+            .into_iter()
+            .next();
+        tx.commit().await?;
+        let head_author: Option<Vec<u8>> = sqlx::Row::try_get(&head, "pubkey")?;
+        Ok(Some(RelayArtifactState {
+            head: sqlx::Row::try_get(&head, "event_id")?,
+            channel: sqlx::Row::try_get(&head, "channel_id")?,
+            deleted: sqlx::Row::try_get(&head, "deleted")?,
+            authored: head_author.as_deref() == Some(author),
+            redacted: sqlx::Row::try_get::<Option<bool>, _>(&head, "redacted")?.unwrap_or(true),
+            own,
+        }))
+    }
+
+    /// Current, undeleted heads of `artifact_type` in `channel` signed by
+    /// `author` and carrying every `[name, value]` in `tags`, for a relay
+    /// writer that answers to no reader.
+    pub async fn relay_artifact_heads_tagged(
+        &self,
+        community: CommunityId,
+        channel: Uuid,
+        artifact_type: &str,
+        author: &[u8],
+        tags: &[(&str, &str)],
+        limit: i64,
+    ) -> Result<Vec<StoredEvent>> {
+        let connection = read_connection(self).await?;
+        let mut tx = Transaction::begin(connection, None).await?;
+        sqlx::query("SET LOCAL statement_timeout='2s'")
+            .execute(&mut *tx)
+            .await?;
+        let mut qb = QueryBuilder::<Postgres>::new(EVENT_COLUMNS);
+        qb.push("JOIN artifact_heads a ON a.community_id=e.community_id AND a.event_id=e.id AND NOT a.deleted WHERE e.community_id=")
+            .push_bind(community.as_uuid())
+            .push(" AND e.kind=45010 AND e.deleted_at IS NULL AND e.pubkey=")
+            .push_bind(author.to_vec())
+            .push(" AND a.channel_id=")
+            .push_bind(channel)
+            .push(" AND a.artifact_type=")
+            .push_bind(artifact_type.to_owned());
+        let tags: Vec<_> = tags
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), vec![(*value).to_owned()]))
+            .collect();
+        tag_predicates(&mut qb, &tags);
+        qb.push(" ORDER BY e.received_at DESC,e.id ASC LIMIT ")
+            .push_bind(limit);
+        let rows = qb.build().fetch_all(&mut *tx).await?;
+        tx.commit().await?;
+        rows_to_events(rows)
+    }
+
+    /// A transaction holding the relay writer lock for one artifact, or `None`
+    /// while another writer holds it. Dropping the transaction releases it.
+    pub async fn try_relay_artifact_lock(
+        &self,
+        community: CommunityId,
+        artifact: Uuid,
+    ) -> Result<Option<Transaction<'static, Postgres>>> {
+        let connection = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        let mut tx = Transaction::begin(connection, None).await?;
+        let locked: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))")
+                .bind(format!("relay-artifact:{}:{artifact}", community.as_uuid()))
+                .fetch_one(&mut *tx)
+                .await?;
+        Ok(locked.then_some(tx))
     }
 
     /// Open a sync snapshot over `channels`, after confirming in the same
