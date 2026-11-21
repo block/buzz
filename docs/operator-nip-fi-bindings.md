@@ -233,13 +233,16 @@ community in a higher bucket.
 ### Enforce
 
 Set `BUZZ_NIP_FI_MODE=enforce` and leave `BUZZ_NIP_FI_ENFORCE_PERCENT` at 100.
-It has no effect in `enforce`, and rolling back to `shadow` then returns to the
-last cohort.
+It has no effect in `enforce`.
 Watch the same signals, plus the rate of 503 responses on login.
 
 - Go: the shadow signals keep holding, and 503s stay at their shadow baseline.
-- No-go: logins return 503 or are refused unexpectedly. Set `mode=shadow`, not
-  `mode=off`: `off` also turns off stored-Required enforcement.
+- No-go: logins return 503 or are refused unexpectedly. Set `mode=shadow` and
+  lower `BUZZ_NIP_FI_ENFORCE_PERCENT` to the last known-good value. A mode-only
+  rollback at 100 still requires every community: it restores only the staged
+  revocation behavior, not optional admission. Stored-Required communities stay
+  required either way. Never roll back with `mode=off`: `off` also turns off
+  stored-Required enforcement.
 
 ### Alerts
 
