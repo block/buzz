@@ -154,6 +154,13 @@ fn configure_git_auth(command: &mut Command, auth: &GitAuthConfig, needs_credent
         ("credential.helper", String::new()),
         ("core.hooksPath", "/dev/null".to_string()),
         ("core.fsmonitor", "false".to_string()),
+        // Git escapes every byte >= 0x80 in a path octally and wraps the path
+        // in quotes unless `core.quotepath` is off. Because the system and
+        // global configs are disabled above, a user cannot turn that off in
+        // their own `.gitconfig` — so non-ASCII paths would reach the UI as
+        // `"Auftr\303\244ge/..."`, and any path parsed out of one git call
+        // and fed back into the next as a pathspec would match nothing.
+        ("core.quotepath", "false".to_string()),
         ("protocol.allow", "never".to_string()),
         ("protocol.http.allow", "always".to_string()),
         ("protocol.https.allow", "always".to_string()),
@@ -393,10 +400,63 @@ fn validate_clone_url_against_relay(clone_url: &str, relay_base: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::{
-        clean_branch, clean_target_ref, credential_helper_config_value, git_needs_credentials,
-        git_subcommand, validate_clone_url, validate_clone_url_against_relay,
-        validate_local_clone_url,
+        build_test_git_auth_config, clean_branch, clean_target_ref, configure_git_auth,
+        credential_helper_config_value, git_needs_credentials, git_subcommand, validate_clone_url,
+        validate_clone_url_against_relay, validate_local_clone_url,
     };
+    use std::collections::HashMap;
+    use std::process::Command;
+
+    /// Reassembles the `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` pairs that
+    /// `configure_git_auth` injected into a command.
+    fn injected_git_config(command: &Command) -> HashMap<String, String> {
+        let env: HashMap<String, String> = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((
+                    key.to_str()?.to_string(),
+                    value?.to_str().unwrap_or_default().to_string(),
+                ))
+            })
+            .collect();
+        let count: usize = env
+            .get("GIT_CONFIG_COUNT")
+            .expect("GIT_CONFIG_COUNT")
+            .parse()
+            .expect("numeric GIT_CONFIG_COUNT");
+        (0..count)
+            .map(|index| {
+                let key = env
+                    .get(&format!("GIT_CONFIG_KEY_{index}"))
+                    .unwrap_or_else(|| panic!("GIT_CONFIG_KEY_{index}"))
+                    .clone();
+                let value = env
+                    .get(&format!("GIT_CONFIG_VALUE_{index}"))
+                    .unwrap_or_else(|| panic!("GIT_CONFIG_VALUE_{index}"))
+                    .clone();
+                (key, value)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn injected_config_disables_path_quoting() {
+        // The system and global configs are disabled, so this is the only
+        // place `core.quotepath` can be turned off — without it git escapes
+        // non-ASCII bytes in every path it prints.
+        let auth = build_test_git_auth_config().expect("build test git config");
+        for needs_credentials in [false, true] {
+            let mut command = Command::new("git");
+            configure_git_auth(&mut command, &auth, needs_credentials);
+            assert_eq!(
+                injected_git_config(&command)
+                    .get("core.quotepath")
+                    .map(String::as_str),
+                Some("false"),
+                "core.quotepath must be injected (needs_credentials = {needs_credentials})"
+            );
+        }
+    }
 
     #[test]
     fn credential_helper_config_value_uses_forward_slashes() {

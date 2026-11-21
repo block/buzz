@@ -148,18 +148,56 @@ fn parse_count(value: &str) -> usize {
     value.parse::<usize>().unwrap_or_default()
 }
 
+/// Parses `git diff --numstat -z` output.
+///
+/// NUL-separated records sidestep git's path quoting entirely — not just the
+/// octal escaping of non-ASCII bytes that `core.quotepath=false` disables, but
+/// also the quoting git still applies to paths containing `"`, a backslash or
+/// a newline. The path handed back is therefore the literal one on disk and is
+/// safe to reuse as a pathspec.
+///
+/// Record shapes:
+/// - normal: `additions \t deletions \t path NUL`
+/// - rename or copy: `additions \t deletions \t NUL old NUL new NUL` — the
+///   empty third field signals that two more NUL-terminated fields follow.
+///   The new path is reported, because that is what the patch and the UI
+///   refer to.
+///
+/// Binary files carry `-` counts; [`parse_count`] maps those to 0 and the
+/// record is kept, so a binary change still shows up as a file.
 fn parse_numstat(output: &str) -> Vec<(String, usize, usize)> {
-    output
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split('\t');
-            let additions = parse_count(parts.next()?);
-            let deletions = parse_count(parts.next()?);
-            let path = parts.next()?.to_string();
-            Some((path, additions, deletions))
-        })
-        .take(250)
-        .collect()
+    let mut records = output.split('\0');
+    let mut files = Vec::new();
+    while let Some(record) = records.next() {
+        if record.is_empty() {
+            continue;
+        }
+        let mut fields = record.splitn(3, '\t');
+        let (Some(additions), Some(deletions), Some(path)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let path = if path.is_empty() {
+            // Rename or copy: skip the old path, take the new one.
+            records.next();
+            match records.next() {
+                Some(new_path) if !new_path.is_empty() => new_path,
+                _ => continue,
+            }
+        } else {
+            path
+        };
+        files.push((
+            path.to_string(),
+            parse_count(additions),
+            parse_count(deletions),
+        ));
+        if files.len() == 250 {
+            break;
+        }
+    }
+    files
 }
 
 fn empty_tree_ref(repo_dir: &std::path::Path, auth: &GitAuthConfig) -> Result<String, String> {
@@ -360,10 +398,13 @@ fn diff_from_repo(
         })
         .transpose()?
         .filter(|body| !body.is_empty());
-    let numstat = run_git(&["diff", "--numstat", range], Some(repo_dir), auth)?;
+    let numstat = run_git(&["diff", "--numstat", "-z", range], Some(repo_dir), auth)?;
     let files = parse_numstat(&numstat)
         .into_iter()
         .map(|(path, additions, deletions)| {
+            // `:(literal)` keeps glob metacharacters (`*`, `?`, `[`) in a file
+            // name from being read as a pattern.
+            let pathspec = format!(":(literal){path}");
             let patch = run_git(
                 &[
                     "diff",
@@ -375,12 +416,23 @@ fn diff_from_repo(
                     "--dst-prefix=b/",
                     range,
                     "--",
-                    &path,
+                    &pathspec,
                 ],
                 Some(repo_dir),
                 auth,
             )
-            .unwrap_or_default();
+            .unwrap_or_else(|error| {
+                tracing::warn!("project diff: git diff failed for {path}: {error}");
+                String::new()
+            });
+            if patch.is_empty() && (additions > 0 || deletions > 0) {
+                // git exits 0 with empty stdout when a pathspec matches
+                // nothing, so a mismatch between the numstat path and the
+                // pathspec would otherwise be silent.
+                tracing::warn!(
+                    "project diff: empty patch for {path} despite +{additions} -{deletions}"
+                );
+            }
             let (patch, truncated) = truncate_patch(patch);
             ProjectRepoDiffFileInfo {
                 path,
@@ -502,4 +554,159 @@ pub async fn get_project_local_repo_diff(
     })
     .await
     .map_err(|error| format!("local repo diff task failed: {error}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{diff_from_repo, parse_numstat};
+    use crate::commands::project_git_exec::{build_test_git_auth_config, run_git, GitAuthConfig};
+
+    /// A path that exercises both octal escaping (`ä` → `\303\244`) and a
+    /// multi-byte punctuation character (`—` → `\342\200\224`), plus a space.
+    const NON_ASCII_PATH: &str = "Beppo-Aufträge/B1 — Ergebnis.md";
+
+    #[test]
+    fn parse_numstat_reads_nul_terminated_records() {
+        assert_eq!(
+            parse_numstat("1\t0\tsrc/main.rs\0"),
+            vec![("src/main.rs".to_string(), 1, 0)]
+        );
+    }
+
+    #[test]
+    fn parse_numstat_keeps_non_ascii_paths_verbatim() {
+        let output = format!("158\t0\t{NON_ASCII_PATH}\0");
+        assert_eq!(
+            parse_numstat(&output),
+            vec![(NON_ASCII_PATH.to_string(), 158, 0)]
+        );
+    }
+
+    #[test]
+    fn parse_numstat_reports_the_new_path_of_a_rename() {
+        assert_eq!(
+            parse_numstat("0\t0\t\0alt.md\0neu.md\0"),
+            vec![("neu.md".to_string(), 0, 0)]
+        );
+    }
+
+    #[test]
+    fn parse_numstat_reads_a_mixed_record_sequence() {
+        let output = format!(
+            "3\t1\ta.rs\0\
+             -\t-\tbin.dat\0\
+             7\t2\t\0old.md\0new.md\0\
+             9\t0\t{NON_ASCII_PATH}\0"
+        );
+        assert_eq!(
+            parse_numstat(&output),
+            vec![
+                ("a.rs".to_string(), 3, 1),
+                // Binary counts are `-`; the record must survive as a 0/0 file
+                // rather than being swallowed.
+                ("bin.dat".to_string(), 0, 0),
+                ("new.md".to_string(), 7, 2),
+                (NON_ASCII_PATH.to_string(), 9, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_numstat_caps_the_file_list() {
+        let output = (0..300)
+            .map(|index| format!("1\t0\tfile{index}.txt\0"))
+            .collect::<String>();
+        assert_eq!(parse_numstat(&output).len(), 250);
+    }
+
+    fn commit(repo: &std::path::Path, auth: &GitAuthConfig, message: &str) {
+        run_git(&["add", "-A"], Some(repo), auth).expect("stage fixture");
+        run_git(
+            &[
+                "-c",
+                "user.name=Buzz Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                message,
+            ],
+            Some(repo),
+            auth,
+        )
+        .expect("commit fixture");
+    }
+
+    #[test]
+    fn diff_reports_unescaped_non_ascii_paths_with_a_populated_patch() {
+        let auth = build_test_git_auth_config().expect("build test git config");
+        let root = tempfile::tempdir().expect("create test directory");
+        let repo = root.path().join("repo");
+        run_git(
+            &["init", "--", repo.to_str().expect("repo path")],
+            None,
+            &auth,
+        )
+        .expect("init repo");
+
+        let file = repo.join(NON_ASCII_PATH);
+        std::fs::create_dir_all(file.parent().expect("parent")).expect("create directory");
+        std::fs::write(&file, "hallo\n").expect("write fixture");
+        commit(&repo, &auth, "init");
+        std::fs::write(&file, "hallo\nzeile2\n").expect("update fixture");
+        commit(&repo, &auth, "second");
+
+        let diff = diff_from_repo(&repo, &auth, "HEAD~1..HEAD", None).expect("diff repo");
+        let [file] = diff.files.as_slice() else {
+            panic!(
+                "expected exactly one changed file, got {}",
+                diff.files.len()
+            );
+        };
+        assert_eq!(file.path, NON_ASCII_PATH);
+        assert_eq!((file.additions, file.deletions), (1, 0));
+        assert!(
+            file.patch.contains("+zeile2"),
+            "patch should carry the changed line, got {:?}",
+            file.patch
+        );
+        // The patch header repeats the path; without `core.quotepath=false`
+        // it arrives octal-escaped and the UI renders it that way.
+        assert!(
+            file.patch.contains(&format!("--- a/{NON_ASCII_PATH}")),
+            "patch header should carry the unescaped path, got {:?}",
+            file.patch
+        );
+    }
+
+    #[test]
+    fn diff_reports_the_new_path_and_patch_of_a_rename() {
+        let auth = build_test_git_auth_config().expect("build test git config");
+        let root = tempfile::tempdir().expect("create test directory");
+        let repo = root.path().join("repo");
+        run_git(
+            &["init", "--", repo.to_str().expect("repo path")],
+            None,
+            &auth,
+        )
+        .expect("init repo");
+
+        std::fs::write(repo.join("alt.md"), "a\nb\nc\n").expect("write fixture");
+        commit(&repo, &auth, "init");
+        run_git(&["mv", "alt.md", "neu.md"], Some(&repo), &auth).expect("rename fixture");
+        commit(&repo, &auth, "rename");
+
+        let diff = diff_from_repo(&repo, &auth, "HEAD~1..HEAD", None).expect("diff repo");
+        let [file] = diff.files.as_slice() else {
+            panic!(
+                "expected exactly one changed file, got {}",
+                diff.files.len()
+            );
+        };
+        assert_eq!(file.path, "neu.md");
+        assert!(
+            !file.patch.is_empty(),
+            "a rename must still render a patch for the new path"
+        );
+    }
 }
