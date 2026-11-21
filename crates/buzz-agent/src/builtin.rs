@@ -99,11 +99,7 @@ pub async fn call_load_skill(arguments: &Value, skills: &[SkillEntry]) -> ToolRe
 
     // Apply the size cap to the full output (body + Supporting Files section)
     // so the total tool result stays within MAX_SKILL_BODY_BYTES.
-    let output = if output.len() > MAX_SKILL_BODY_BYTES {
-        truncate_at_boundary(&output, MAX_SKILL_BODY_BYTES).to_owned()
-    } else {
-        output
-    };
+    let output = truncate_skill_output(output);
 
     ToolResult {
         provider_id: String::new(),
@@ -203,11 +199,7 @@ async fn load_supporting_file(
                         "# Loaded: {}/{}\n\n{}\n\n---\nFile loaded into context.",
                         skill_name, rel_path_owned, content
                     );
-                    let output = if output.len() > MAX_SKILL_BODY_BYTES {
-                        truncate_at_boundary(&output, MAX_SKILL_BODY_BYTES).to_owned()
-                    } else {
-                        output
-                    };
+                    let output = truncate_skill_output(output);
                     ToolResult {
                         provider_id: String::new(),
                         content: vec![ToolResultContent::Text(output)],
@@ -227,6 +219,33 @@ async fn load_supporting_file(
             "load_skill: could not resolve {skill_name:?}/{rel_path_owned}: {e}"
         )),
     }
+}
+
+/// Marker appended when `load_skill` output is truncated at the size cap.
+///
+/// The marker is in-band so the model can see that content was lost and the
+/// caller can detect it without a separate channel. It is deliberately included
+/// in the truncation budget: the visible content is shortened so the marker
+/// still fits within `MAX_SKILL_BODY_BYTES`.
+const TRUNCATION_MARKER: &str = "\n\n[…truncated…]";
+
+/// Apply the `MAX_SKILL_BODY_BYTES` cap to a `load_skill` output, leaving an
+/// in-band marker when truncation occurred (#4163).
+///
+/// Previously the truncated text was returned silently — the model received
+/// the body as if it were complete, so instructions in the tail of a SKILL.md
+/// (output format, refusal rules, verification checklist) were silently gone.
+fn truncate_skill_output(output: String) -> String {
+    if output.len() <= MAX_SKILL_BODY_BYTES {
+        return output;
+    }
+    // Reserve room for the marker so the total stays within the cap.
+    let budget = MAX_SKILL_BODY_BYTES.saturating_sub(TRUNCATION_MARKER.len());
+    let truncated = truncate_at_boundary(&output, budget);
+    let mut result = String::with_capacity(truncated.len() + TRUNCATION_MARKER.len());
+    result.push_str(truncated);
+    result.push_str(TRUNCATION_MARKER);
+    result
 }
 
 fn error_result(msg: &str) -> ToolResult {
@@ -571,5 +590,59 @@ mod tests {
             text.starts_with("# Loaded: big/references/huge.md"),
             "missing supporting-file header: {text}"
         );
+        assert!(
+            text.ends_with(TRUNCATION_MARKER.trim_end()),
+            "truncated supporting-file output must carry the in-band marker: {text}"
+        );
+    }
+
+    #[test]
+    fn truncate_skill_output_under_cap_is_unchanged() {
+        let input = "short skill body".to_owned();
+        let out = truncate_skill_output(input.clone());
+        assert_eq!(out, input);
+        assert!(!out.contains("truncated"));
+    }
+
+    #[test]
+    fn truncate_skill_output_over_cap_appends_marker_and_stays_within_cap() {
+        // Build a body well over the cap with a sentinel at the very end.
+        let mut body = String::with_capacity(MAX_SKILL_BODY_BYTES + 1024);
+        while body.len() < MAX_SKILL_BODY_BYTES + 1024 {
+            body.push_str("padding line of moderate length\n");
+        }
+        body.push_str("SENTINEL_TAIL_DO_NOT_DROP_MARKER");
+
+        let out = truncate_skill_output(body);
+        assert!(
+            out.len() <= MAX_SKILL_BODY_BYTES,
+            "truncated output {} exceeds cap {}",
+            out.len(),
+            MAX_SKILL_BODY_BYTES
+        );
+        assert!(
+            out.ends_with(TRUNCATION_MARKER.trim_end()),
+            "output must end with the truncation marker, got tail: {:?}",
+            &out[out.len().saturating_sub(64)..]
+        );
+        // The tail sentinel was truncated away, but the marker signals the loss.
+        assert!(!out.contains("SENTINEL_TAIL_DO_NOT_DROP_MARKER"));
+    }
+
+    #[test]
+    fn truncate_skill_output_emits_valid_utf8_at_boundary() {
+        // Multi-byte chars straddling the budget must not split — the boundary
+        // fn handles it, and the marker must follow valid UTF-8.
+        let mut body = String::new();
+        while body.len() < MAX_SKILL_BODY_BYTES {
+            body.push('é'); // 2 bytes in UTF-8
+        }
+        body.push_str("extra to exceed the cap");
+
+        let out = truncate_skill_output(body);
+        assert!(out.len() <= MAX_SKILL_BODY_BYTES);
+        assert!(out.ends_with(TRUNCATION_MARKER.trim_end()));
+        // If we'd split a char this would panic on access; reaching here proves validity.
+        assert!(out.is_char_boundary(out.len() - TRUNCATION_MARKER.trim_end().len()));
     }
 }
