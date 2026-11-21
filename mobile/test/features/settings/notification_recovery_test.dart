@@ -61,6 +61,7 @@ void main() {
       final snapshots = <List<Community>>[];
       final tombstones = <int?>[];
       var relayAvailable = false;
+      Completer<void>? hung;
       // A new ProviderScope over the same storage is a process restart.
       Future<void> launch() => tester.pumpWidget(
         ProviderScope(
@@ -79,6 +80,7 @@ void main() {
               generation,
             }) async {
               tombstones.add(generation);
+              if (hung != null) await hung.future;
               if (!relayAvailable) throw StateError('relay unavailable');
             }),
             currentRelayPushDescriptorProvider.overrideWith((ref) {
@@ -125,6 +127,7 @@ void main() {
         expect(find.text("Couldn't turn off notifications"), findsOneWidget);
         expect(find.text('They may continue.'), findsOneWidget);
         expect(find.widgetWithText(TextButton, 'Retry'), findsOneWidget);
+        expect(find.widgetWithText(TextButton, 'Keep on'), findsOneWidget);
       }
 
       expectFailedOptOut();
@@ -134,11 +137,38 @@ void main() {
       await tester.pumpAndSettle();
       expectFailedOptOut();
       expect(tombstones, [8]);
+      // Keep on abandons the opt-out and turns push back on.
+      await tester.tap(find.widgetWithText(TextButton, 'Keep on'));
+      await tester.pumpAndSettle();
+      expect((await storage.loadAll()).single.pushNotificationsEnabled, isTrue);
+      expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+      expect(find.text("Couldn't turn off notifications"), findsNothing);
+      expect(tombstones, [8]);
+      // An attempt that never answers is bounded: it shows as pending, then
+      // as a failure, and is not retried.
+      hung = Completer<void>();
+      await tester.tap(find.byType(Switch));
+      // Let the attempt start, then rebuild once more. No settle: the
+      // timeout timer is still running.
+      for (var i = 0; i < 5 && tombstones.length < 2; i++) {
+        await tester.pump();
+      }
+      await tester.pump();
+      expect(find.text('Turning off…'), findsOneWidget);
+      expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
+      final attempted = List.of(tombstones);
+      expect(attempted, hasLength(2));
+      await tester.pump(pushOptOutTimeout);
+      await tester.pumpAndSettle();
+      expectFailedOptOut();
+      expect(find.text('Turning off…'), findsNothing);
+      expect(tombstones, attempted);
+      hung = null;
       // Retry makes one explicit attempt at a new generation.
       relayAvailable = true;
       await tester.tap(find.widgetWithText(TextButton, 'Retry'));
       await tester.pumpAndSettle();
-      expect(tombstones, [8, 9]);
+      expect(tombstones, [...attempted, attempted.last! + 1]);
       expect(
         (await storage.loadAll())
             .single

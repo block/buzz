@@ -236,6 +236,11 @@ void main() {
       );
       await tester.tap(find.byType(Switch));
       await tester.pumpAndSettle();
+      // Until the relay answers, the row says off is not yet confirmed.
+      expect(
+        find.text('Turning off…'),
+        outcome == 'pending' ? findsOneWidget : findsNothing,
+      );
       final stored = (await storage.loadAll()).single;
       expect(stored.pushNotificationsEnabled, isFalse);
       expect(
