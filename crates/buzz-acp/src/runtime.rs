@@ -74,7 +74,7 @@ impl PoolStartup {
     }
 }
 
-fn make_prompt_context(
+pub(crate) fn make_prompt_context(
     config: &Config,
     rest_client: relay::RestClient,
     channels: HashMap<Uuid, relay::ChannelInfo>,
@@ -114,6 +114,9 @@ fn make_prompt_context(
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
         permission_mode: config.permission_mode,
+        permission_mode_timeout: std::time::Duration::from_secs(
+            config.permission_mode_timeout_secs,
+        ),
         agent_keys: config.keys.clone(),
         agent_owner_pubkey: resolve_agent_owner(config)
             .as_deref()
