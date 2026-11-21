@@ -558,6 +558,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _pauseNow() {
     _paused = true;
     _socketConnected = false;
+    _resetLiveness();
     _reconnectTimer?.cancel();
     _cancelAllHistory(Exception('App moved to background'));
     _rejectAllPending(Exception('App moved to background'));
@@ -586,6 +587,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
     // Whatever connection came before ends here, capped at its last frame.
     _markLiveSubscriptionsClosed();
+    _resetLiveness();
     _connectedAt = null;
     _connectStartedAt = _now();
     _authorizationDenied = false;
@@ -666,6 +668,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _handleDisconnected(int generation, Object? error, {int? closeCode}) {
     if (_disposed || generation != _connectionGeneration) return;
     _socketConnected = false;
+    _resetLiveness();
     final connectedAt = _connectedAt;
     _noteDisconnected(error, denied: _authorizationDenied);
     _noteLostOperations();
@@ -889,6 +892,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void _handleClosed(List<dynamic> data) {
     if (data.length < 2) return;
     final subId = data[1] as String;
+    if (_answerLivenessProbe(subId, closed: true)) return;
     final message = data.length >= 3 && data[2] is String
         ? data[2] as String
         : 'subscription closed by relay';
@@ -1155,6 +1159,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _beforePauseCallbacks.clear();
     _connectionGeneration++;
     _reconnectTimer?.cancel();
+    _resetLiveness();
     _flushTimer?.cancel();
     _backgroundGraceTimer?.cancel();
     _backgroundedAt = null;

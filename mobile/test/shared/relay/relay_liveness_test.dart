@@ -35,12 +35,20 @@ void main() {
       // previous network does.
       relay.holdReq();
       session.onNetworkChanged();
-      expect(probes(relay), hasLength(1));
+      expect(probes(relay).single['kinds'], [
+        13534,
+      ], reason: 'a membership-list filter skips the channel access lookup');
       async.elapse(const Duration(milliseconds: 4900));
       expect(relay.sockets, hasLength(1), reason: 'still within the wait');
 
       async.elapse(const Duration(milliseconds: 200));
-      expect(relay.sockets, hasLength(2), reason: 'reconnected at once');
+      expect(relay.sockets.first.isOpen, isFalse, reason: 'let go at once');
+      // The reconnect starts after a random share of the spread, here half,
+      // so a shared outage does not reconnect everyone at the same instant.
+      async.elapse(const Duration(milliseconds: 1300));
+      expect(relay.sockets, hasLength(1));
+      async.elapse(const Duration(milliseconds: 200));
+      expect(relay.sockets, hasLength(2));
       async.elapse(const Duration(milliseconds: 50));
       expect(
         container.read(relaySessionProvider).status,
@@ -118,6 +126,106 @@ void main() {
         container.read(relaySessionProvider).status,
         SessionStatus.connected,
       );
+    });
+  });
+
+  test('a network change replaces a connection attempt in flight', () {
+    fakeAsync((async) {
+      final (:relay, :container) = connect(async);
+      final session = container.read(relaySessionProvider.notifier);
+
+      // The attempt after a drop is stuck in AUTH on the old network.
+      relay.holdAuth();
+      relay.drop();
+      async.elapse(const Duration(seconds: 2));
+      expect(relay.sockets, hasLength(2));
+      expect(
+        container.read(relaySessionProvider).status,
+        SessionStatus.reconnecting,
+      );
+
+      session.onNetworkChanged();
+      async.elapse(const Duration(milliseconds: 50));
+      expect(relay.sockets, hasLength(3));
+      expect(
+        container.read(relaySessionProvider).status,
+        SessionStatus.connected,
+      );
+    });
+  });
+
+  test('a refusal answers the probe as well as an end of results does', () {
+    fakeAsync((async) {
+      final (:relay, :container) = connect(async);
+      final session = container.read(relaySessionProvider.notifier);
+
+      relay.refuseReq((filter) => filter['limit'] == 0, 'blocked: no');
+      session.onNetworkChanged();
+      async.elapse(pastProbe);
+      expect(relay.sockets, hasLength(1));
+      expect(relay.closes, isEmpty, reason: 'the relay already closed it');
+      expect(
+        container.read(relaySessionProvider).status,
+        SessionStatus.connected,
+      );
+    });
+  });
+
+  test('a network change during a pending probe sends a fresh one', () {
+    fakeAsync((async) {
+      final (:relay, :container) = connect(async);
+      final session = container.read(relaySessionProvider.notifier);
+
+      relay.holdReq();
+      session
+          .fetchHistory(const NostrFilter(kinds: [1], limit: 1))
+          .then<void>((_) {}, onError: (_) {});
+      async.elapse(const Duration(seconds: 8));
+      expect(probes(relay), hasLength(1));
+      session.onNetworkChanged();
+      expect(probes(relay), hasLength(2));
+
+      // It expires as a network change does: within the spread, not after
+      // the backoff a timeout earns.
+      async.elapse(pastProbe + relayNetworkChangeReconnectSpread);
+      expect(relay.sockets, hasLength(2));
+    });
+  });
+
+  test('a late close from a socket found dead changes nothing', () {
+    fakeAsync((async) {
+      final (:relay, :container) = connect(async);
+      final session = container.read(relaySessionProvider.notifier);
+
+      relay.holdReq();
+      session
+          .fetchHistory(const NostrFilter(kinds: [1], limit: 1))
+          .then<void>((_) {}, onError: (_) {});
+      async.elapse(const Duration(seconds: 8) + pastProbe);
+      final dead = relay.sockets.single;
+      expect(dead.isOpen, isFalse);
+      final attempt = container.read(relaySessionProvider).reconnectAttempt;
+
+      dead.closeLate(Exception('closed late'));
+      async.flushMicrotasks();
+      expect(
+        container.read(relaySessionProvider).reconnectAttempt,
+        attempt,
+        reason: 'the backoff did not restart',
+      );
+    });
+  });
+
+  test('a pending probe ends with its session', () {
+    fakeAsync((async) {
+      final relay = FakeRelay();
+      final container = ProviderContainer(overrides: relay.overrides);
+      container.listen(relaySessionProvider, (_, _) {});
+      async.elapse(const Duration(milliseconds: 50));
+      relay.holdReq();
+      container.read(relaySessionProvider.notifier).onNetworkChanged();
+      container.dispose();
+      expect(async.pendingTimers, isEmpty);
     });
   });
 }
