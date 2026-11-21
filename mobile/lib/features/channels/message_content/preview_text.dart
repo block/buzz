@@ -197,17 +197,23 @@ Iterable<({String text, bool code, int end})> _keptLines(
     // A backtick or tilde fence, quoted or not, opens at a line starting
     // with three or more of its character and closes only at a line holding
     // nothing else but at least as many, as the full message reads it.
+    // A quoted fence ends with its quote; an unquoted one only at an
+    // unquoted closer.
     final unquoted = line.replaceFirst(_quote, '').trim();
+    if (fence != null && fenceQuoted && unquoted == line) fence = null;
     if (fence == null) {
       if (_fenceRun.firstMatch(unquoted) case final open?) {
         fence = open[1];
         fenceQuoted = unquoted != line;
         continue;
       }
-    } else if (unquoted.startsWith(fence) &&
-        unquoted.split('').every((c) => c == fence![0])) {
-      fence = null;
-      continue;
+    } else {
+      final closer = fenceQuoted ? unquoted : line;
+      if (closer.startsWith(fence) &&
+          closer.split('').every((c) => c == fence![0])) {
+        fence = null;
+        continue;
+      }
     }
     final fenceOpen = fence != null;
     if (fenceOpen && fenceQuoted) line = unquoted;

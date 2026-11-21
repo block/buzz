@@ -82,6 +82,10 @@ void main() {
       expect(_text('~~~\n**x**\n~~~\nafter'), '**x**\nafter');
       expect(_text('> ```\n> **x**\n> ```\nafter'), '**x**\nafter');
       expect(_text('```\n> **x**\n```'), '> **x**');
+      // A quoted closer doesn't end an unquoted fence.
+      expect(_text('```\n> ```\n**x**\n```'), '> ```\n**x**');
+      // A quoted fence ends with its quote.
+      expect(_text('> ```\n> code\n**after**'), 'code\nafter');
     });
   });
 
@@ -368,6 +372,7 @@ void main() {
       '```\n$link\n```',
       '~~~\n$link\n~~~',
       '> ```\n> $link\n> ```',
+      '```\n> ```\n$link\n```',
       'one\ntwo\nthree\nfour\n$link',
       'plain',
     ]) {
