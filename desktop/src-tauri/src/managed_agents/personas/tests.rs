@@ -390,7 +390,7 @@ fn migrate_is_idempotent() {
 #[test]
 fn fizz_builtin_has_no_pinned_runtime() {
     // The Fizz built-in must not hard-pin a runtime so it inherits the
-    // bundled default (buzz-agent) rather than requiring goose on PATH.
+    // bundled Goose ACP default without requiring a separate Goose installation.
     let records = built_in_persona_records("2026-01-01T00:00:00Z");
     let fizz = records
         .iter()
@@ -403,18 +403,17 @@ fn fizz_builtin_has_no_pinned_runtime() {
 }
 
 #[test]
-fn fizz_builtin_resolves_to_buzz_agent() {
-    // With no runtime pin, effective_agent_command must fall through to
-    // default_agent_command(), which resolves the bundled buzz-agent.
+fn fizz_builtin_resolves_to_bundled_goose_acp() {
+    // With no runtime pin, Fizz inherits the bundled lean Goose ACP harness.
     let records = built_in_persona_records("2026-01-01T00:00:00Z");
     assert_eq!(
         effective_agent_command(Some("builtin:fizz"), &records, None),
         default_agent_command(),
-        "Fizz must resolve to the bundled default harness, not goose"
+        "Fizz must resolve to the bundled default harness"
     );
     assert_eq!(
         effective_agent_command(Some("builtin:fizz"), &records, None),
-        "buzz-agent",
-        "Fizz must resolve to buzz-agent specifically"
+        "goose-acp",
+        "Fizz must resolve to the bundled Goose ACP executable"
     );
 }
