@@ -548,7 +548,7 @@ enum _NonMemberMentionChoice { invite, sendWithoutInviting }
 /// User-facing text for a failed add or send.
 String _composeSendErrorMessage(Object error) {
   if (error is AddMembersException) return error.message;
-  return error.toString().replaceFirst('Exception: ', '');
+  return relayErrorText(error);
 }
 
 /// Describes why a text send failed. A community switch is reported
