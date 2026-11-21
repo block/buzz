@@ -61,8 +61,10 @@ void main() {
       final snapshots = <List<Community>>[];
       final tombstones = <int?>[];
       var relayAvailable = false;
-      await tester.pumpWidget(
+      // A new ProviderScope over the same storage is a process restart.
+      Future<void> launch() => tester.pumpWidget(
         ProviderScope(
+          key: UniqueKey(),
           overrides: [
             savedPrefsProvider.overrideWithValue(prefs),
             authProvider.overrideWith(_Auth.new),
@@ -95,6 +97,7 @@ void main() {
           ),
         ),
       );
+      await launch();
       await tester.pumpAndSettle();
       final container = ProviderScope.containerOf(
         tester.element(find.byType(SettingsPage)),
@@ -113,14 +116,29 @@ void main() {
       expect(stored.pushSubscriptionState.pendingTombstoneGeneration, 8);
       expect(tombstones, [8]);
       expect(snapshots.last.single.pushNotificationsEnabled, isFalse);
-      final offSwitch = tester.widget<Switch>(find.byType(Switch));
-      expect(offSwitch.value, isFalse);
-      expect(offSwitch.onChanged, isNull);
-      relayAvailable = true;
-      await container
-          .read(communityListProvider.notifier)
-          .retryPendingPushLeaseTombstone(community.id);
+      // A rejected opt-out ends in a failure, not an endless "Turning off":
+      // the switch shows the last confirmed setting, with a Retry.
+      void expectFailedOptOut() {
+        final shownSwitch = tester.widget<Switch>(find.byType(Switch));
+        expect(shownSwitch.value, isTrue);
+        expect(shownSwitch.onChanged, isNotNull);
+        expect(find.text("Couldn't turn off notifications"), findsOneWidget);
+        expect(find.text('They may continue.'), findsOneWidget);
+        expect(find.widgetWithText(TextButton, 'Retry'), findsOneWidget);
+      }
+
+      expectFailedOptOut();
+      // A restart keeps the failure and makes no attempt of its own.
+      await tester.pumpWidget(const SizedBox());
+      await launch();
       await tester.pumpAndSettle();
+      expectFailedOptOut();
+      expect(tombstones, [8]);
+      // Retry makes one explicit attempt at a new generation.
+      relayAvailable = true;
+      await tester.tap(find.widgetWithText(TextButton, 'Retry'));
+      await tester.pumpAndSettle();
+      expect(tombstones, [8, 9]);
       expect(
         (await storage.loadAll())
             .single

@@ -264,6 +264,41 @@ Future<void> syncStoredCommunitySnapshot(Ref ref) async {
   await syncCommunitySnapshot(ref, communities);
 }
 
+/// How long one opt-out attempt may stay pending before it counts as failed.
+const pushOptOutTimeout = Duration(seconds: 30);
+
+/// Communities whose opt-out tombstone is being published right now.
+///
+/// A saved pending tombstone with no attempt in flight is a failed opt-out:
+/// Settings shows the last confirmed setting (on) with a Retry, and nothing
+/// retries it automatically.
+class PushOptOutAttemptsNotifier extends Notifier<Set<String>> {
+  final Map<String, int> _counts = {};
+
+  @override
+  Set<String> build() => const {};
+
+  void begin(String id) {
+    _counts[id] = (_counts[id] ?? 0) + 1;
+    state = {..._counts.keys};
+  }
+
+  void end(String id) {
+    final count = (_counts[id] ?? 0) - 1;
+    if (count > 0) {
+      _counts[id] = count;
+    } else {
+      _counts.remove(id);
+    }
+    state = {..._counts.keys};
+  }
+}
+
+final pushOptOutAttemptsProvider =
+    NotifierProvider<PushOptOutAttemptsNotifier, Set<String>>(
+      PushOptOutAttemptsNotifier.new,
+    );
+
 class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   Future<void> _pushMutationTail = Future.value();
   final Map<String, Future<void>> _tombstoneAttempts = {};
@@ -649,6 +684,18 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   });
 
   Future<void> setPushNotificationsEnabled(String id, bool enabled) async {
+    if (enabled) return _setPushNotificationsEnabled(id, enabled);
+    // Covers the gap between saving the pending tombstone and starting its
+    // attempt, so Settings never flashes the failed state.
+    final attempts = ref.read(pushOptOutAttemptsProvider.notifier)..begin(id);
+    try {
+      await _setPushNotificationsEnabled(id, enabled);
+    } finally {
+      attempts.end(id);
+    }
+  }
+
+  Future<void> _setPushNotificationsEnabled(String id, bool enabled) async {
     var shouldDeactivate = false;
     await _serializePushMutation(() async {
       final storage = ref.read(communityStorageProvider);
@@ -681,9 +728,20 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       try {
         await retryPendingPushLeaseTombstone(id);
       } catch (_) {
-        // The durable journal remains pending. BuzzPushBootstrap retries it
-        // after reconnect while all registration/enrollment paths stay off.
+        // The pending tombstone stays saved as a failed opt-out. Settings
+        // shows it with Retry, nothing retries it automatically, and every
+        // registration and enrollment path stays off meanwhile.
       }
+    }
+  }
+
+  /// Makes one explicit attempt to finish a failed opt-out, for the user's
+  /// Retry. The failure stays saved and shown when this attempt fails too.
+  Future<void> retryPushOptOut(String id) async {
+    try {
+      await retryPendingPushLeaseTombstone(id, advanceGeneration: true);
+    } catch (_) {
+      // Reported by the attempt; the saved pending tombstone is the record.
     }
   }
 
@@ -698,6 +756,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   }) {
     final existing = _tombstoneAttempts[id];
     if (existing != null) return existing;
+    final attempts = ref.read(pushOptOutAttemptsProvider.notifier)..begin(id);
     final attempt = _retryPendingPushLeaseTombstone(
       id,
       advanceGeneration: advanceGeneration,
@@ -706,6 +765,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     void clearAttempt() {
       if (identical(_tombstoneAttempts[id], attempt)) {
         _tombstoneAttempts.remove(id);
+        attempts.end(id);
       }
     }
 
@@ -749,10 +809,12 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     final generation = pendingGeneration;
     if (community == null || generation == null) return;
     try {
-      await ref.read(communityPushLeaseDeactivatorProvider)(
-        community,
-        generation: generation,
-      );
+      await ref
+          .read(communityPushLeaseDeactivatorProvider)(
+            community,
+            generation: generation,
+          )
+          .timeout(pushOptOutTimeout);
       await _markPushLeaseTombstoneAccepted(id, generation);
       pushLeaseCleanupError.value = null;
     } catch (error, stackTrace) {

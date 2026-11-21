@@ -244,12 +244,7 @@ void main() {
             ? greaterThanOrEqualTo(9)
             : isNull,
       );
-      expect(tombstones.first, 9);
-      expect(
-        tombstones.length,
-        lessThanOrEqualTo(2),
-        reason: 'failed cleanup must not defeat the retry backoff',
-      );
+      expect(tombstones, [9]);
       expect(discoveries, 2);
       session.setStatus(SessionStatus.disconnected);
       await tester.pumpAndSettle();
@@ -261,6 +256,16 @@ void main() {
       );
       expect(discoveries, 3);
       expect(snapshots.last.single.pushNotificationsEnabled, isFalse);
+      if (outcome == 'failed') {
+        // A reconnect retries nothing: the failure waits for the user.
+        expect(tombstones, [9]);
+        expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+        expect(find.widgetWithText(TextButton, 'Retry'), findsOneWidget);
+        await tester.pumpWidget(const SizedBox.shrink());
+        semantics.dispose();
+        debugDefaultTargetPlatformOverride = null;
+        return;
+      }
       final offSwitch = tester.widget<Switch>(find.byType(Switch));
       expect(offSwitch.value, isFalse);
       expect(offSwitch.onChanged, isNotNull);

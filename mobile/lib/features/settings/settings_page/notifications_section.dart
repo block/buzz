@@ -40,14 +40,24 @@ class _NotificationsSection extends ConsumerWidget {
         !capability.hasError &&
         capability.value != null;
 
-    final canToggle = hasCapability || community.pushNotificationsEnabled;
+    final pendingOff =
+        !community.pushNotificationsEnabled &&
+        community.pushSubscriptionState.pendingTombstoneGeneration != null;
+    final turningOff =
+        pendingOff &&
+        ref.watch(pushOptOutAttemptsProvider).contains(community.id);
+    // A failed opt-out shows the last confirmed setting: the relay may still
+    // hold the lease, so notifications may continue.
+    final optOutFailed = pendingOff && !turningOff;
+    final shownEnabled = community.pushNotificationsEnabled || optOutFailed;
+    final canToggle = hasCapability || shownEnabled;
+    final communities = ref.read(communityListProvider.notifier);
+
+    void retryOptOut() => unawaited(communities.retryPushOptOut(community.id));
 
     void setEnabled(bool enabled) {
-      unawaited(
-        ref
-            .read(communityListProvider.notifier)
-            .setPushNotificationsEnabled(community.id, enabled),
-      );
+      if (optOutFailed) return retryOptOut();
+      unawaited(communities.setPushNotificationsEnabled(community.id, enabled));
     }
 
     return AppListCard(
@@ -92,16 +102,14 @@ class _NotificationsSection extends ConsumerWidget {
                 // Reserve horizontal room without letting the switch's 48dp
                 // layout height expand this single-line row.
                 trailing: const SizedBox(width: 60),
-                onTap: canToggle
-                    ? () => setEnabled(!community.pushNotificationsEnabled)
-                    : null,
+                onTap: canToggle ? () => setEnabled(!shownEnabled) : null,
               ),
               Positioned.fill(
                 right: Grid.xs,
                 child: Align(
                   alignment: Alignment.centerRight,
                   child: Switch.adaptive(
-                    value: community.pushNotificationsEnabled,
+                    value: shownEnabled,
                     onChanged: canToggle ? setEnabled : null,
                   ),
                 ),
@@ -109,6 +117,17 @@ class _NotificationsSection extends ConsumerWidget {
             ],
           ),
         ),
+        if (optOutFailed)
+          AppListRow(
+            key: const ValueKey('push-opt-out-failed'),
+            title: "Couldn't turn off notifications",
+            titleColor: context.colors.error,
+            subtitle: 'They may continue.',
+            trailing: TextButton(
+              onPressed: retryOptOut,
+              child: const Text('Retry'),
+            ),
+          ),
       ],
     );
   }
