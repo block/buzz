@@ -6,6 +6,7 @@ import {
   accumulateScrollLines,
   encodePaste,
   encodeTerminalKey,
+  isTerminalPasteChord,
   matchTabChord,
   reduceHandoff,
   stepSession,
@@ -84,6 +85,37 @@ test("terminal key encoding covers control, navigation, and alt prefixes", () =>
 test("bracketed paste wraps the entire payload exactly once", () => {
   assert.equal(encodePaste("a\nb", false), "a\nb");
   assert.equal(encodePaste("a\nb", true), "\u001b[200~a\nb\u001b[201~");
+});
+
+test("paste chords preserve Windows and Linux terminal conventions", () => {
+  const chord = (overrides = {}) => ({
+    altKey: false,
+    code: "KeyV",
+    ctrlKey: true,
+    key: "v",
+    metaKey: false,
+    shiftKey: false,
+    ...overrides,
+  });
+
+  assert.equal(isTerminalPasteChord(chord(), "windows"), true);
+  assert.equal(
+    isTerminalPasteChord(chord({ shiftKey: true }), "windows"),
+    true,
+  );
+  assert.equal(isTerminalPasteChord(chord(), "linux"), false);
+  assert.equal(isTerminalPasteChord(chord({ shiftKey: true }), "linux"), true);
+  assert.equal(
+    isTerminalPasteChord(chord({ ctrlKey: false, metaKey: true }), "mac"),
+    true,
+  );
+  assert.equal(isTerminalPasteChord(chord({ altKey: true }), "windows"), false);
+  assert.equal(
+    isTerminalPasteChord(chord({ code: "Period", key: "v" }), "windows"),
+    true,
+    "matching follows the typed key across keyboard layouts",
+  );
+  assert.equal(isTerminalPasteChord(chord({ key: "c" }), "windows"), false);
 });
 
 test("pixel scrolling retains fractional lines in both directions", () => {
