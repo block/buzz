@@ -60,6 +60,9 @@ class ChannelOpenTimer {
   /// the background, so a later load starts a new one.
   bool get isDone => _done || _session.pauses != _pauses;
 
+  /// This timer while it still runs, so a carried open ends on it.
+  ChannelOpenTimer? get running => isDone ? null : this;
+
   /// Counts the open once, as a failure when [error] is set. Later calls do
   /// nothing.
   void finish({Object? error}) {

@@ -347,4 +347,41 @@ void main() {
       expect(open.duration, greaterThanOrEqualTo(const Duration(seconds: 2)));
     });
   });
+
+  for (final away in [false, true]) {
+    test('a refusal on reconnect before the history ends the carried open'
+        '${away ? ', untimed after a stay in the background' : ''}', () {
+      fakeAsync((async) {
+        final (:relay, :counts, :container, :opens) = _start(async);
+        relay.holdQuery();
+        container.listen(channelMessagesProvider(_channel), (_, _) {});
+        async.elapse(const Duration(seconds: 2));
+        final auth = relay.holdAuth();
+        relay.drop();
+        relay.refuseReq(
+          (filter) => filter.containsKey('#h'),
+          'restricted: not a channel member',
+        );
+        if (away) {
+          final session = container.read(relaySessionProvider.notifier);
+          session.onAppPaused();
+          async.elapse(const Duration(seconds: 1));
+          session.onAppResumed();
+        }
+        async.elapse(const Duration(seconds: 20));
+        auth.complete();
+        async.elapse(const Duration(milliseconds: 100));
+        final open = opens().single;
+        expect(open.failure, NetworkFailure.relayRefused);
+        if (away) {
+          expect(open.duration, isNull, reason: 'it measured the time away');
+        } else {
+          expect(
+            open.duration,
+            greaterThanOrEqualTo(const Duration(seconds: 22)),
+          );
+        }
+      });
+    });
+  }
 }

@@ -301,7 +301,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
               StackTrace.current,
               cache,
               cacheScope,
-              openTimer,
+              openTimer ?? _openTimer?.running,
             );
           },
         );
