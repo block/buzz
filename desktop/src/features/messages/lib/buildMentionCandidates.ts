@@ -236,7 +236,7 @@ export function buildMentionCandidates({
       isAgent: true,
     }))
     .filter((candidate) => candidate.displayName.trim().length > 0);
-  return coalesceAgentAutocompleteCandidates(
+  const candidates = coalesceAgentAutocompleteCandidates(
     coalesceAutocompleteCandidatesByKey(
       [...candidatesByPubkey.values(), ...personaCandidates],
       globalSearchIdentityKey,
@@ -247,4 +247,9 @@ export function buildMentionCandidates({
       preferredPubkeys: memberPubkeys,
     },
   );
+  return mentionChannelId === null
+    ? candidates
+    : candidates.filter(
+        (candidate) => candidate.isAgent !== true || candidate.isMember,
+      );
 }
