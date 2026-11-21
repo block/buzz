@@ -110,7 +110,8 @@ policy operation. This removal does not erase receipts or rewrite schema.
 
 ## Request enforcement and discovery
 
-`off` ignores stored requirements; `shadow` enforces stored true; `enforce` is a
+`off` ignores stored requirements; `shadow` enforces stored true and communities inside the
+`BUZZ_NIP_FI_ENFORCE_PERCENT` cohort; `enforce` is a
 global requirement floor; `deny_protected` denies protected traffic. Report
 `effective_required` alongside stored state so disable under enforce and enable
 under off cannot be mistaken for effective changes. Evaluating policy lookups
@@ -125,9 +126,12 @@ lease after disable. It cannot renew that stale lease. `/info` advertises effect
 ### Existing connections
 
 The periodic revalidator reads stored policy without row-locking transactions.
-After disable it stops requesting required-policy closes; a concurrent sweep may
-request one last non-FI close from its earlier snapshot. That client reconnects
-under optional policy. FI-admitted sockets retain their finite lifetime and then
+When disable makes the effective policy optional, it stops requesting
+required-policy closes; a concurrent sweep may request one last non-FI close from
+its earlier snapshot. That client reconnects under optional policy. A community
+inside the `BUZZ_NIP_FI_ENFORCE_PERCENT` cohort, or any community under global
+`enforce`, stays required: its non-FI sockets keep closing on revalidation, and
+reconnects still need FI. FI-admitted sockets retain their finite lifetime and then
 reconnect under current policy. Disable does not reopen or force-logout sessions.
 Re-enable repeats the optional-lease drain; non-FI root/audio sockets close through
 existing revalidation. Valid FI-admitted sockets retain existing rules.

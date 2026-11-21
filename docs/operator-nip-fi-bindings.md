@@ -178,8 +178,9 @@ snapshot loads in `off`, but every `BUZZ_NIP_FI_RESOLVER_*` and
 
 Set `BUZZ_NIP_FI_MODE=shadow`. Each pod now loads the snapshot before any
 listener binds, refreshes it every 30 s, and records what enforce would decide
-without refusing anything. Shadow labels database-source records
-`community="bound"` or `"unmapped"`, never a host.
+without refusing anything in communities whose effective policy is optional;
+stored-Required and cohort communities still enforce. Shadow labels
+database-source records `community="bound"` or `"unmapped"`, never a host.
 
 - Go, held for at least a day of normal traffic:
   - `time() - buzz_nip_fi_binding_snapshot_loaded_timestamp_seconds` stays
@@ -194,13 +195,85 @@ without refusing anything. Shadow labels database-source records
     for its token owner.
 - No-go: any of these fails. Return to `off` and investigate.
 
+### Staged enforce
+
+To enforce for a growing share of communities before switching the whole relay,
+keep `BUZZ_NIP_FI_MODE=shadow` and set `BUZZ_NIP_FI_ENFORCE_PERCENT`, an integer
+from 0 to 100 (default 0). It is read once at startup, so each change is a
+rollout; a malformed or out-of-range value refuses startup.
+
+- It acts only in `shadow`. In `off` it has no effect, and `enforce` ignores it
+  because every community already enforces.
+- A community stored as Optional enforces when its bucket is below the
+  percentage. The bucket is the SHA-256 digest of the community UUID's 16
+  RFC 4122 bytes, with the digest's first 8 bytes read as a big-endian `u64`,
+  mod 100. The bucket never changes for a community, so raising the
+  percentage only adds communities, and lowering it removes the most recently
+  added ones.
+- A community stored as Required enforces at any percentage.
+- An enforcing community gets the same treatment as a stored-Required one:
+  logins without valid evidence are refused, its NIP-11 document reports
+  `requires_nip_fi: true`, and open sockets without valid evidence are closed.
+  Its stored flag does not change.
+- A required admission, stored Required or inside the cohort, is refused when
+  the receiving pod holds an active deny for the key. A revocation closes open
+  connections only in `enforce`; in `shadow` an open connection stays until its
+  deadline. Stored-Required communities already behave this way.
+- Denies spread asynchronously and live only in each pod's memory, so a pod
+  can miss one. See [Revocation during a deploy](#revocation-during-a-deploy).
+
+Raise the percentage in steps, holding each one for normal traffic.
+
+- Go: the shadow signals keep holding, the `nip-fi enforce deny` lines on log
+  target `buzz_relay::nip_fi_enforce` are only what you expect to deny, and
+  login 503s stay at their shadow baseline.
+- No-go: set `BUZZ_NIP_FI_ENFORCE_PERCENT=0` and investigate.
+
+A rollback is a full rollout too: pods run mixed percentages until it
+finishes. There is no per-community exemption, so removing one community
+means lowering the percentage to its bucket or below, which also drops every
+community in a higher bucket.
+
 ### Enforce
 
-Set `BUZZ_NIP_FI_MODE=enforce`. Watch the same signals, plus the rate of 503
-responses on login.
+Set `BUZZ_NIP_FI_MODE=enforce` and leave `BUZZ_NIP_FI_ENFORCE_PERCENT` at 100.
+It has no effect in `enforce`.
+Watch the same signals, plus the rate of 503 responses on login.
 
 - Go: the shadow signals keep holding, and 503s stay at their shadow baseline.
-- No-go: logins return 503 or are refused unexpectedly. Set `mode=off` (below).
+- No-go: logins return 503 or are refused unexpectedly. Set `mode=shadow` and
+  lower `BUZZ_NIP_FI_ENFORCE_PERCENT` to the last known-good value. A mode-only
+  rollback at 100 still requires every community: it restores only the staged
+  revocation behavior, not optional admission. Stored-Required communities stay
+  required either way. Never roll back with `mode=off`: `off` also turns off
+  stored-Required enforcement.
+
+### Revocation during a deploy
+
+Each pod keeps its denies in memory and receives new ones asynchronously.
+
+- A pod that restarts starts empty and does not recover earlier denies.
+- A revocation accepted by a `shadow` pod does not reach `enforce` pods. During
+  the switch to `enforce`, while both modes are serving, an `enforce` pod can
+  miss it.
+
+A missed revocation lets the revoked key sign in until its outstanding
+assertions expire. That is bounded by the issuer's
+`maximum_assertion_age_seconds` plus `skew_seconds`, provided the issuer stops
+issuing to that key. A connection admitted in that window can stay open until
+its connection deadline.
+
+Finishing a rollout does not restore missed denies. Recovery is possible, but
+it does not make revocation continuous:
+
+- Re-pushing active disconnects once the new pods are serving, or waiting out
+  the assertion bound, are recovery steps. A revoked key can still be admitted
+  between the deploy and the recovery, and in `shadow` a later re-push does not
+  close a connection opened in that window.
+- Re-pushing means sending freshly signed disconnect commands. Replay and
+  command-age checks can reject a resent old command.
+- The wait counts from when the issuer stopped issuing to the key, not from the
+  start of the deploy.
 
 ### Alerts
 
