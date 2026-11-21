@@ -352,6 +352,29 @@ Fields:
 
 Invalid files (bad JSON, unknown id, empty command) are skipped with a warning and do not break discovery for other entries.
 
+### Writing an agent that works as a custom harness
+
+Two details of the launch path matter for any ACP agent registered this way:
+
+- **Expect a bare `acp` argument.** The harness's agent arguments default to `acp` (the Goose entrypoint), and `normalize_agent_args` strips that default only for runtimes it recognizes. A custom command launched with no configured args therefore receives a literal `acp` token: accept and ignore it, or set `args` in the definition so the default never applies.
+- **No commas in `args`.** Arguments travel through the comma-delimited `BUZZ_ACP_AGENT_ARGS` transport, so a value containing a comma is split at spawn time; the Desktop validator rejects such definitions. Put each token in its own array entry (`["--top-k", "5"]`, not `["--top-k 5"]`).
+
+The agent itself only needs the stdio ACP surface described under [Using Any ACP Agent](#using-any-acp-agent): `initialize`, `session/new`, and `session/prompt` streaming `session/update` chunks and returning a `stopReason`. It does not have to post to Buzz: the harness delivers the mention as the prompt, and the agent speaks in the channel through the Buzz CLI when it has something to say (step 5 of [How It Works](#how-it-works)).
+
+A worked example is [kannaka-acp](https://github.com/kannaka-labs/kannaka-memory/blob/master/src/bin/kannaka_acp.rs), which serves a memory store as a read-only ACP agent (a prompt is a recall; the reply is the memories that resonated). Its definition sets `args`, so the `acp` default never reaches it, and scopes the store through `env`:
+
+```json
+{
+  "id": "kannaka",
+  "label": "Kannaka",
+  "command": "kannaka-acp",
+  "args": ["--top-k", "5"],
+  "env": { "KANNAKA_DATA_DIR": "/home/me/.kannaka" },
+  "installInstructionsUrl": "https://github.com/kannaka-labs/kannaka-memory",
+  "installHint": "cargo install --path . --bin kannaka-acp from a kannaka-memory checkout"
+}
+```
+
 ### Security guarantees
 
 - No install shell commands in preset or custom definitions — only the user's own PATH is consulted.
