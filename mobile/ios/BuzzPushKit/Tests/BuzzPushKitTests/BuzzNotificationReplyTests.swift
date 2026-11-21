@@ -126,13 +126,18 @@ func `Forum posts and other kinds offer no reply`(kind: Int) {
       threadIdentifier: "t")
   ) { outcomes["5", default: []].append($0) }
 
+  // Taken, a reply is still held until it finishes; then it's no longer
+  // allowed to go out.
+  #expect(buffer.holds(id: "1"))
   #expect(buffer.complete(id: "1", outcome: .sent))
+  #expect(!buffer.holds(id: "1"))
   // A deadline after the app reported the outcome changes nothing.
   buffer.expire(id: "1", mayHavePublished: false)
   #expect(!buffer.complete(id: "1", outcome: .sent))
   buffer.complete(id: "2", outcome: .notSent(draftThreadRootID: "head"))
   buffer.complete(id: "3", outcome: .unknown)
   buffer.expire(id: "4", mayHavePublished: false)
+  #expect(!buffer.holds(id: "4"))
   buffer.expire(id: "5", mayHavePublished: false)
   // One the app may already have published can't be called not sent.
   buffer.add(request("6")) { outcomes["6", default: []].append($0) }

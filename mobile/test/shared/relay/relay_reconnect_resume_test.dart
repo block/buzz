@@ -223,6 +223,10 @@ void main() {
       );
       final published = h.session.publish(event);
       final socketsBefore = h.sockets.length;
+      expect(
+        h.sockets.last.sent.where((m) => m.first == 'EVENT'),
+        hasLength(1),
+      );
 
       h.session.onAppResumed();
       await h.settle();

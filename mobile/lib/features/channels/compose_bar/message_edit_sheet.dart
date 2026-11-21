@@ -40,6 +40,11 @@ class _MessageEditSheet extends HookConsumerWidget {
     );
     useEffect(() => controller.dispose, [controller]);
     final focusNode = useFocusNode();
+    final stylusHandwriting = useMemoized(
+      () => StylusHandwritingCutoff(controller, focusNode),
+      [controller, focusNode],
+    );
+    useEffect(() => stylusHandwriting.dispose, [stylusHandwriting]);
     final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
 
@@ -136,6 +141,9 @@ class _MessageEditSheet extends HookConsumerWidget {
       seeded.value = (text: seed.text, bound: seedBound);
       return null;
     }, [controller, seedBound.join(',')]);
+    // Read after seeding, so a long message opens with handwriting already off
+    // and the first frame never measures it.
+    final stylusHandwritingEnabled = useValueListenable(stylusHandwriting);
 
     _usePlatformUndoBindings(controller, focusNode);
     final chooser = _useMentionChooser(
@@ -262,6 +270,7 @@ class _MessageEditSheet extends HookConsumerWidget {
                   autofocus: true,
                   minLines: 1,
                   maxLines: 5,
+                  stylusHandwritingEnabled: stylusHandwritingEnabled,
                   inputFormatters: [_ComposerChipEditingFormatter(controller)],
                   decoration: const InputDecoration(hintText: 'Edit message'),
                 ),
