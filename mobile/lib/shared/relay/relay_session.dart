@@ -521,6 +521,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// Counts moves to the background, so work can tell it spanned one.
   int get pauses => _pauses;
 
+  /// Whether the app is in the background now.
+  bool get backgrounded => _backgroundedAt != null;
+
   /// Called by the app lifecycle provider when the app goes to background.
   void onAppPaused() {
     _backgroundedAt = _now();

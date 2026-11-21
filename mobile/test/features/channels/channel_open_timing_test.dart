@@ -261,4 +261,90 @@ void main() {
       expect(open.failure, NetworkFailure.timeout);
     });
   });
+
+  test('an open started in the background is not counted', () {
+    fakeAsync((async) {
+      final (:relay, :counts, :container, :opens) = _start(async);
+      final session = container.read(relaySessionProvider.notifier);
+      session.onAppPaused();
+      final held = relay.holdQuery();
+      container.listen(channelMessagesProvider(_channel), (_, _) {});
+      async.elapse(const Duration(seconds: 2));
+      session.onAppResumed();
+      held.complete();
+      async.elapse(const Duration(milliseconds: 50));
+      expect(opens(), isEmpty, reason: 'it measured the time away');
+    });
+  });
+
+  test('a return after leaving before the history, once live detached, '
+      'is a new open', () {
+    fakeAsync((async) {
+      final (:relay, :counts, :container, :opens) = _start(async);
+      final req = relay.holdReq();
+      final held = relay.holdQuery();
+      final page = container.listen(
+        channelMessagesProvider(_channel),
+        (_, _) {},
+      );
+      async.elapse(const Duration(milliseconds: 10));
+      page.close();
+      req.complete();
+      async.elapse(const Duration(milliseconds: 50));
+      expect(relay.queries, isNotEmpty);
+      relay.drop();
+      async.elapse(const Duration(minutes: 10));
+      held.complete();
+      container.listen(channelMessagesProvider(_channel), (_, _) {});
+      async.elapse(const Duration(seconds: 1));
+      expect(opens().single.duration, lessThan(const Duration(seconds: 1)));
+    });
+  });
+
+  test('a refused retry after a failed open counts as a new open', () {
+    fakeAsync((async) {
+      final (:relay, :counts, :container, :opens) = _start(async);
+      relay.failQuery((_) => true, body: '{"error":"query timed out"}');
+      final page = container.listen(
+        channelMessagesProvider(_channel),
+        (_, _) {},
+      );
+      async.elapse(const Duration(seconds: 1));
+      expect(opens().single.failure, NetworkFailure.timeout);
+      counts.clear();
+      relay.refuseReq((_) => true, 'restricted: not a channel member');
+      container
+          .read(channelMessagesProvider(_channel).notifier)
+          .retryHistoryRefresh();
+      async.elapse(const Duration(seconds: 1));
+      expect(page.read().hasError, isTrue);
+      final open = opens().single;
+      expect(open.failure, NetworkFailure.relayRefused);
+      expect(open.duration, isNull, reason: 'nothing timed it');
+    });
+  });
+
+  test('a refusal after the member backed out ends the open with its time', () {
+    fakeAsync((async) {
+      final (:relay, :counts, :container, :opens) = _start(async);
+      final held = relay.holdQuery();
+      final page = container.listen(
+        channelMessagesProvider(_channel),
+        (_, _) {},
+      );
+      async.elapse(const Duration(seconds: 2));
+      expect(relay.queries, isNotEmpty);
+      page.close();
+      relay.closeLive(
+        (filter) => filter.containsKey('#h'),
+        'restricted: not a channel member',
+      );
+      async.elapse(const Duration(milliseconds: 50));
+      held.complete();
+      async.elapse(const Duration(milliseconds: 50));
+      final open = opens().single;
+      expect(open.failure, NetworkFailure.relayRefused);
+      expect(open.duration, greaterThanOrEqualTo(const Duration(seconds: 2)));
+    });
+  });
 }

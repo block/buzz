@@ -301,6 +301,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
               StackTrace.current,
               cache,
               cacheScope,
+              openTimer,
             );
           },
         );
@@ -356,6 +357,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       state = AsyncData(merged);
       // An open the member left before it finished still took this long.
       openTimer?.finish();
+      _openTimer = null;
       if (ticket != null && _hasListeners) {
         unawaited(
           saveMessagePage(
@@ -376,6 +378,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         return;
       }
       openTimer?.finish(error: e);
+      _openTimer = null;
       if (_accessDenial != null) return;
       _historyRefreshFailed = true;
       final fallbackMessages = state.value ?? _lastKnownMessages;
@@ -418,11 +421,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   ]) {
     _detachLive();
     // A live refusal can end the first open, even before its request.
-    if ((openTimer ?? _openTimer) case final timer?) {
-      timer.finish(error: error);
-    } else if (!_hasLoadedHistory) {
-      ChannelOpenTimer.refused(ref, error);
-    }
+    _openTimer = null;
+    ChannelOpenTimer.refused(ref, openTimer, error, loaded: _hasLoadedHistory);
     _lastKnownMessages = null;
     _hasLoadedHistory = false;
     _windowStore = const ChannelWindowStore.empty();

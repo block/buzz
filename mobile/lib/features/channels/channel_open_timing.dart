@@ -13,7 +13,7 @@ import '../../shared/relay/relay.dart';
 /// The relay and its member are fixed when the request starts. An open that
 /// finishes after the reporter moved to another member belonged to someone
 /// else, and one that spanned a move to the background measured the time
-/// away, so neither is counted.
+/// away, so neither is counted. Nor is one started in the background.
 class ChannelOpenTimer {
   factory ChannelOpenTimer(Ref ref) {
     final config = ref.read(relayConfigProvider);
@@ -28,17 +28,25 @@ class ChannelOpenTimer {
   ChannelOpenTimer._(this._reporter, this._host, this._session)
     : _memberChanges = _reporter.memberChanges,
       _pauses = _session.pauses,
-      _startedAt = clock.now();
+      _startedAt = clock.now(),
+      _done = _session.backgrounded;
 
   /// Continues [pending] if it is still running, since an open cut short by
   /// a reconnect keeps its clock and the wait counts; otherwise starts one.
   static ChannelOpenTimer resume(ChannelOpenTimer? pending, Ref ref) =>
       pending != null && !pending.isDone ? pending : ChannelOpenTimer(ref);
 
-  /// Counts an open the relay refused before its history was asked for,
-  /// with no duration since nothing timed it.
-  static void refused(Ref ref, Object error) =>
-      ChannelOpenTimer(ref)._count(error, timed: false);
+  /// Ends [timer] with the relay's refusal. A first open refused before its
+  /// history was asked for has no timer and counts with no duration.
+  static void refused(
+    Ref ref,
+    ChannelOpenTimer? timer,
+    Object error, {
+    required bool loaded,
+  }) {
+    if (timer != null) return timer.finish(error: error);
+    if (!loaded) ChannelOpenTimer(ref)._count(error, timed: false);
+  }
 
   final DiagnosticReporter _reporter;
   final String? _host;
@@ -46,7 +54,7 @@ class ChannelOpenTimer {
   final int _memberChanges;
   final int _pauses;
   final DateTime _startedAt;
-  bool _done = false;
+  bool _done;
 
   /// Whether the open was already counted or dropped, or spanned a move to
   /// the background, so a later load starts a new one.
