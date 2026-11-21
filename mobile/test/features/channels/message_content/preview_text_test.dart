@@ -77,6 +77,12 @@ void main() {
     test('a fence closes only at a bare fence line', () {
       expect(_text('```\n```not a close\n```\nafter'), '```not a close\nafter');
     });
+
+    test('tilde and quoted fences keep their code literal too', () {
+      expect(_text('~~~\n**x**\n~~~\nafter'), '**x**\nafter');
+      expect(_text('> ```\n> **x**\n> ```\nafter'), '**x**\nafter');
+      expect(_text('```\n> **x**\n```'), '> **x**');
+    });
   });
 
   group('line limit', () {
@@ -359,6 +365,9 @@ void main() {
     );
     for (final content in [
       'hi `$link`',
+      '```\n$link\n```',
+      '~~~\n$link\n~~~',
+      '> ```\n> $link\n> ```',
       'one\ntwo\nthree\nfour\n$link',
       'plain',
     ]) {

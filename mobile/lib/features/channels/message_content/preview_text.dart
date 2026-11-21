@@ -174,7 +174,9 @@ Iterable<({String text, bool code, int end})> _keptLines(
   int maxLines,
 ) sync* {
   var kept = 0;
-  var fenceOpen = false;
+  // The open fence's run (for example ``` or ~~~~), or null outside one.
+  String? fence;
+  var fenceQuoted = false;
   var start = 0;
   while (start <= content.length &&
       start <= _maxScanLength &&
@@ -192,12 +194,23 @@ Iterable<({String text, bool code, int end})> _keptLines(
     final cut = end == cap && cap < content.length;
     var line = content.substring(start, end).trim();
     start = cut ? content.length + 1 : end + 1;
-    // A fence opens at any line starting with backticks and closes only at a
-    // line holding nothing else, as in gpt_markdown.
-    if (!fenceOpen && line.startsWith('```') || fenceOpen && line == '```') {
-      fenceOpen = !fenceOpen;
+    // A backtick or tilde fence, quoted or not, opens at a line starting
+    // with three or more of its character and closes only at a line holding
+    // nothing else but at least as many, as the full message reads it.
+    final unquoted = line.replaceFirst(_quote, '').trim();
+    if (fence == null) {
+      if (_fenceRun.firstMatch(unquoted) case final open?) {
+        fence = open[1];
+        fenceQuoted = unquoted != line;
+        continue;
+      }
+    } else if (unquoted.startsWith(fence) &&
+        unquoted.split('').every((c) => c == fence![0])) {
+      fence = null;
       continue;
     }
+    final fenceOpen = fence != null;
+    if (fenceOpen && fenceQuoted) line = unquoted;
     if (line.isEmpty) continue;
     if (!fenceOpen) {
       if (_rule.hasMatch(line) || _tableDivider.hasMatch(line)) continue;
@@ -223,6 +236,7 @@ bool _isHighSurrogate(int unit) => unit >= 0xD800 && unit <= 0xDBFF;
 final _rule = RegExp(r'^([-*_])(?:\s*\1){2,}$');
 final _tableDivider = RegExp(r'^\|?(?:\s*:?-+:?\s*\|)+\s*:?-*:?\s*\|?$');
 final _quote = RegExp(r'^(?:>\s?)+');
+final _fenceRun = RegExp(r'^(`{3,}|~{3,})');
 final _heading = RegExp(r'^#{1,6}\s+');
 final _task = RegExp(r'^[-*+]\s+\[[ xX]\]\s+');
 final _bullet = RegExp(r'^[-*+]\s+');

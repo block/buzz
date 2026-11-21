@@ -60,8 +60,9 @@ String watchChannelIdentityLabel(
 /// [linkedPubkeys] are keys an identity link names, tagged or not: each gets
 /// a label only once it has a real name ([IdentityNames.hasName]), so an
 /// unknown key keeps the label written into its link instead of a compact
-/// npub. Their uncached profiles are requested after this build, so a link's
-/// written label gives way to its key's name once that loads.
+/// npub. Their profiles are requested after this build through
+/// [UserCacheNotifier.requestLinked], so a link's written label gives way to
+/// its key's current name once that loads.
 Map<String, String> watchChannelIdentityLabels(
   WidgetRef ref,
   String channelId,
@@ -71,20 +72,7 @@ Map<String, String> watchChannelIdentityLabels(
   final keys = {for (final pubkey in pubkeys) pubkey.toLowerCase()};
   final linked = {for (final pubkey in linkedPubkeys) pubkey.toLowerCase()};
   if (keys.isEmpty && linked.isEmpty) return const {};
-  if (linked.isNotEmpty) {
-    final cache = ref.read(userCacheProvider);
-    final missing = [
-      for (final key in linked)
-        if (!cache.containsKey(key)) key,
-    ];
-    if (missing.isNotEmpty) {
-      Future.microtask(() {
-        if (ref.context.mounted) {
-          ref.read(userCacheProvider.notifier).preload(missing);
-        }
-      });
-    }
-  }
+  requestLinkedProfiles(ref, linked);
   return ref.watch(
     channelIdentityNamesProvider(
       channelId,
@@ -115,4 +103,18 @@ class _LabelMap extends UnmodifiableMapView<String, String> {
   int get hashCode => Object.hashAllUnordered(
     entries.map((entry) => Object.hash(entry.key, entry.value)),
   );
+}
+
+/// Requests, after this build, the profiles of the keys identity links in a
+/// row name ([UserCacheNotifier.requestLinked]), so each link's written label
+/// gives way to its key's current name. Free when none needs a lookup.
+void requestLinkedProfiles(WidgetRef ref, Iterable<String> linkedPubkeys) {
+  final cache = ref.read(userCacheProvider.notifier);
+  if (!linkedPubkeys.any(cache.needsLinkedLookup)) return;
+  final keys = linkedPubkeys.toList();
+  Future.microtask(() {
+    if (ref.context.mounted) {
+      ref.read(userCacheProvider.notifier).requestLinked(keys);
+    }
+  });
 }

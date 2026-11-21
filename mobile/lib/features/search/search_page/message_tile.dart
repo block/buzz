@@ -48,6 +48,7 @@ class _MessageTile extends ConsumerWidget {
         ...labelPubkeys,
         ...linkedPubkeys,
       });
+      requestLinkedProfiles(ref, linkedPubkeys);
       labels = identityLabels(names, labelPubkeys, linkedPubkeys);
     } else {
       labels = watchChannelIdentityLabels(

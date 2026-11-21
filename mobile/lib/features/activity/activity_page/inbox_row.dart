@@ -60,6 +60,7 @@ class _InboxRow extends HookConsumerWidget {
     if (channelId == null) {
       // No channel: the row's own identities are the comparison context.
       final names = watchIdentityNames(ref, relevantPubkeys);
+      requestLinkedProfiles(ref, linkedPubkeys);
       contextualLabels = identityLabels(names, {
         senderPubkey,
         ...mentionPubkeys,

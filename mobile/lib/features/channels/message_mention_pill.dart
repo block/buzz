@@ -198,10 +198,10 @@ class _IdentityLinkPill extends HookConsumerWidget {
     final channelId = IdentityLinkChannel.of(context);
     useEffect(() {
       if (channelId != null &&
-          !ref.read(userCacheProvider).containsKey(pubkey)) {
+          ref.read(userCacheProvider.notifier).needsLinkedLookup(pubkey)) {
         Future.microtask(() {
           if (context.mounted) {
-            ref.read(userCacheProvider.notifier).preload([pubkey]);
+            ref.read(userCacheProvider.notifier).requestLinked([pubkey]);
           }
         });
       }

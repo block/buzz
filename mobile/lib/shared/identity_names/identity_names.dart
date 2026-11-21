@@ -168,9 +168,28 @@ class IdentityNames {
     if (_candidates.contains(key)) return _members[key];
     return _outside.putIfAbsent(key, () {
       if (!isHexPubkey(key)) return null;
+      // A name no member's label can ever take never collides, so it needs
+      // no qualifier and leaves the members' labels as they are: skip
+      // resolving the whole context again for each such outsider.
+      final name = trimIdentityName(_factFor(key)!.name);
+      if (!_mayCollide(name)) return ResolvedIdentityName(name, null);
       return _resolve({..._candidates, key})[key];
     });
   }
+
+  /// Whether a context member's label could ever read [name]: it is a
+  /// member's name, or has the shape of a qualified label (an owner prefix,
+  /// an agent mark or a key suffix), which a member's label can grow into.
+  bool _mayCollide(String name) =>
+      _memberNames.contains(name) ||
+      name.contains('\u2019s ') ||
+      name.endsWith(' (agent)') ||
+      name.contains(' \u00b7 ');
+
+  late final Set<String> _memberNames = {
+    for (final key in _candidates)
+      if (_factFor(key) case final fact?) trimIdentityName(fact.name),
+  };
 
   /// The unambiguous display label for [pubkey], including any qualifier
   /// needed to distinguish identities with the same name and owner.
