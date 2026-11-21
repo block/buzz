@@ -55,7 +55,7 @@ pub(crate) async fn accept(
         }
         ArtifactOutcome::Duplicate => {}
         ArtifactOutcome::Conflict(message) => {
-            return Err(IngestError::CanvasConflict(format!("conflict: {message}")))
+            return Err(IngestError::Conflict(format!("conflict: {message}")))
         }
         ArtifactOutcome::Rejected(message) => {
             return Err(IngestError::Rejected(format!("invalid: {message}")))
@@ -69,7 +69,7 @@ pub(crate) async fn accept(
 }
 
 fn head_unavailable() -> IngestError {
-    IngestError::CanvasConflict(format!("conflict: {}", buzz_db::artifact::HEAD_UNAVAILABLE))
+    IngestError::Conflict(format!("conflict: {}", buzz_db::artifact::HEAD_UNAVAILABLE))
 }
 
 /// Live delivery only; unlike kind 9 there are no audit, workflow, or thread
