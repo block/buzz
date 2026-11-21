@@ -25,14 +25,33 @@ final savedChannelPreviewProvider = FutureProvider.autoDispose
       ), _preparePreview),
     );
 
+final _threadPreviewRevision = Provider.autoDispose.family<Object, String>(
+  (ref, channelId) => Object(),
+);
+
 final savedThreadPreviewProvider = FutureProvider.autoDispose
-    .family<List<NostrEvent>?, SavedMessagePage>(
-      (ref, page) => _readSavedPage(ref, page, (events) => events),
-    );
+    .family<List<NostrEvent>?, SavedMessagePage>((ref, page) {
+      ref.watch(_threadPreviewRevision(page.channelId));
+      return _readSavedPage(ref, page, (events) => events);
+    });
 
 void invalidateSavedMessagePreviews(Ref ref, String channelId) {
   ref.invalidate(savedChannelPreviewProvider(channelId));
-  ref.invalidate(savedThreadPreviewProvider);
+  ref.invalidate(_threadPreviewRevision(channelId));
+}
+
+/// Retires the displayed thread pages as well as their old disk rows.
+void pruneSavedMessageTargets(
+  Ref ref,
+  SavedMessageScope scope,
+  String channelId,
+  Set<String> targets,
+) {
+  if (targets.isEmpty) return;
+  ref
+      .read(savedMessageStoreProvider)
+      .removeChannelEvents(scope, channelId, targets);
+  ref.invalidate(_threadPreviewRevision(channelId));
 }
 
 Future<T?> _readSavedPage<T>(

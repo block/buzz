@@ -64,8 +64,6 @@ extension _UnreadDeletions on ChannelsNotifier {
     if (targets.isEmpty) return;
     final scope = _lifecycleRef.read(savedMessageScopeProvider);
     if (scope == null) return;
-    _lifecycleRef
-        .read(savedMessageStoreProvider)
-        .removeChannelEvents(scope, channelId, targets);
+    pruneSavedMessageTargets(_lifecycleRef, scope, channelId, targets);
   }
 }

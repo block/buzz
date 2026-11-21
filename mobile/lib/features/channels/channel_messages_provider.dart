@@ -273,12 +273,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
                 (event.kind == EventKind.deletion ||
                     event.kind == EventKind.nip29DeleteEvent ||
                     event.kind == EventKind.streamMessageEdit)) {
-              // Remove stale rows and retire a pending save of the old page.
-              final targets = {
+              pruneSavedMessageTargets(ref, cacheScope, channelId, {
                 for (final tag in event.tags)
                   if (tag.length > 1 && tag[0] == 'e') tag[1],
-              };
-              cache.removeChannelEvents(cacheScope, channelId, targets);
+              });
             }
             _handleLiveEvent(event);
           },

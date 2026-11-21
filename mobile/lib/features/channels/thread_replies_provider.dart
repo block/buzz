@@ -68,16 +68,24 @@ final threadRepliesProvider = FutureProvider.autoDispose
         args.rootId,
       );
       final queryVersion = channelMessages?.beginThreadQuery(args.rootId);
-      if (queryVersion != null) {
-        ref.onDispose(
-          () => channelMessages?.failThreadQuery(args.rootId, queryVersion),
-        );
-      }
+      // Riverpod can invalidate this build while its element remains mounted.
+      var current = true;
+      ref.onDispose(() {
+        current = false;
+        if (queryVersion != null) {
+          channelMessages?.failThreadQuery(args.rootId, queryVersion);
+        }
+      });
       try {
         // Edits, reactions and deletions of the root and its replies ride
         // along, so a reply edited before the thread opens shows that edit.
         // Only the replies themselves feed the reply cache below.
-        final (:replies, :aux) = await fetchCompleteThread(session, args);
+        final (:replies, :aux) = await fetchCompleteThread(
+          session,
+          args,
+          isCurrent: () => current,
+        );
+        if (!current) return const [];
         // Explicit markers also settle unacknowledged local sends, whose
         // absence cannot prove deletion even in an insertion-complete scan.
         final missingIds =
@@ -107,7 +115,8 @@ final threadRepliesProvider = FutureProvider.autoDispose
             ]),
           );
         }
-        if (ref.mounted && ref.exists(channelProvider)) {
+        if (!current) return const [];
+        if (ref.exists(channelProvider)) {
           final channel = ref.read(channelProvider.notifier);
           final deletedTargets = {
             for (final event in deletions)
@@ -130,24 +139,24 @@ final threadRepliesProvider = FutureProvider.autoDispose
           }
         }
         final events = [...replies, ...aux];
-        if (ref.mounted && ticket != null) {
+        if (current && ticket != null) {
           unawaited(
             saveMessagePage(
               ref,
               cache,
               ticket,
               events,
-              isCurrent: () => ref.mounted,
+              isCurrent: () => current,
             ),
           );
         }
         return events;
       } catch (error) {
-        if (ref.mounted && scope != null && isRelayChannelAccessDenied(error)) {
+        if (current && scope != null && isRelayChannelAccessDenied(error)) {
           unawaited(cache.removeChannel(scope, args.channelId));
           invalidateSavedMessagePreviews(ref, args.channelId);
         }
-        if (queryVersion != null) {
+        if (current && queryVersion != null) {
           channelMessages?.failThreadQuery(args.rootId, queryVersion);
         }
         rethrow;
