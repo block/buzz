@@ -354,14 +354,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
           failure: NetworkFailure.timeout,
           since: sub.startedAt,
         );
-        sub.completer.completeError(
-          RelayTimeoutException(
-            RelayCall.history,
-            'Relay history request timed out after $timeout',
-            timeout,
-          ),
-          sub.callSite,
-        );
+        sub.timedOut(timeout);
       }
       if (sub?.heldFilter == null) _sendClose(subId);
     });
@@ -492,13 +485,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
           failure: NetworkFailure.timeout,
           since: pending.startedAt,
         );
-        pending.completer.completeError(
-          RelayAckTimeoutError(
-            'Event ${event.id} not acknowledged within $timeout',
-            timeout,
-          ),
-          pending.callSite,
-        );
+        pending.timedOut(event.id, timeout);
       }
     });
 
@@ -928,10 +915,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
           failure: _relayMessageFailure(message),
           since: historySub.startedAt,
         );
-        historySub.completer.completeError(
-          RelayClosedException(RelayCall.history, message),
-          historySub.callSite,
-        );
+        historySub.fail(RelayClosedException(RelayCall.history, message));
       }
       return;
     }
@@ -1078,11 +1062,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         _rateLimitGate.activate(parseRateLimitRetrySeconds(message));
       }
       if (!pending.completer.isCompleted) {
-        pending.completer.completeError(
+        pending.fail(
           RelayEventRejectedException(
             message.isNotEmpty ? message : 'Event rejected',
           ),
-          pending.callSite,
         );
       }
     }
@@ -1161,10 +1144,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     for (final entry in _historySubscriptions.values) {
       entry.timeout.cancel();
       if (!entry.completer.isCompleted) {
-        entry.completer.completeError(
-          error ?? Exception('Connection lost'),
-          entry.callSite,
-        );
+        entry.fail(error ?? Exception('Connection lost'));
       }
     }
     _historySubscriptions.clear();
@@ -1174,7 +1154,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     for (final entry in _pendingEvents.values) {
       entry.timeout.cancel();
       if (!entry.completer.isCompleted) {
-        entry.completer.completeError(RelayAckLostError(error), entry.callSite);
+        entry.fail(RelayAckLostError(error));
       }
     }
     _pendingEvents.clear();
