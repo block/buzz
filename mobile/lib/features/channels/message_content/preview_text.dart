@@ -150,15 +150,18 @@ String messagePreviewSource(String content, {required int maxLines}) {
 
 /// The keys of the identity links a [maxLines] preview of [content] draws,
 /// read as the preview reads them (outside code, within its source limit),
-/// so a row resolves and loads only names it shows.
+/// so a row resolves and loads only names it shows. The preview reads one
+/// line past [maxLines] to know it overflows; that line is never drawn.
 Set<String> messagePreviewIdentityKeys(
   String content, {
   required int maxLines,
-}) => content.contains('nostr:npub1')
+}) => maxLines > 0 && content.contains('nostr:npub1')
     ? {
         for (final piece in messagePreviewPieces(
-          normalizeBareLinks(messagePreviewSource(content, maxLines: maxLines)),
-          maxLines: maxLines,
+          normalizeBareLinks(
+            messagePreviewSource(content, maxLines: maxLines - 1),
+          ),
+          maxLines: maxLines - 1,
         ))
           if (piece is PreviewMention) piece.pubkey,
       }

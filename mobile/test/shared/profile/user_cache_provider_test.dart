@@ -463,6 +463,37 @@ void main() {
     expect(cache.state.keys, contains('a'));
   });
 
+  test('a reconnect during a failing link lookup retries after it', () async {
+    final firstBatch = Completer<List<NostrEvent>>();
+    final session = _RecordingProfileSession(
+      results: [
+        firstBatch.future,
+        Future.value([
+          _profileEvent(id: 'a', pubkey: 'a', createdAt: 1, name: 'A'),
+        ]),
+      ],
+    );
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    final cache = container.read(userCacheProvider.notifier);
+    cache.requestLinked(['a']);
+    await session.firstRequest.future;
+
+    // The relay reconnects before the old request gives up.
+    session.setStatus(SessionStatus.reconnecting);
+    session.setStatus(SessionStatus.connected);
+    expect(session.requestCount, 1);
+    firstBatch.completeError('socket replaced');
+
+    await session.secondRequest.future;
+    expect(session.requestCount, 2);
+    expect(session.requestedFilter?.authors, ['a']);
+    expect(await cache.preload(['a']), isTrue);
+    expect(cache.state.keys, contains('a'));
+  });
+
   test(
     'refresh verifies real OA batch while allowing main-isolate timers',
     () async {

@@ -41,7 +41,7 @@ class _MentionMd {
       return TextSpan(text: text, style: style);
     }
 
-    final name = raw.substring(1).replaceAll('\u00A0', ' ').toLowerCase();
+    final name = foldMentionLabel(raw.substring(1).replaceAll('\u00A0', ' '));
     final matches = bindings[name] ?? const <String>{};
     final pubkey = matches.length == 1 ? matches.single : null;
     if (bindings.containsKey(name) && matches.length != 1) {

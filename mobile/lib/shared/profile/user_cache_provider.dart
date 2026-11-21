@@ -47,6 +47,10 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   /// batch leaves them here, and the next reconnect asks once more.
   final Set<String> _linkedUnanswered = {};
   ProviderSubscription<SessionStatus>? _reconnects;
+
+  /// A reconnect came while unanswered keys were still in flight, so they
+  /// are asked again once that flight settles.
+  var _retryAfterFlight = false;
   static const _maxAbsent = 1000;
 
   /// Completes when the batch query on the wire has finished.
@@ -64,6 +68,7 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     _inFlight.clear();
     _absentSince.clear();
     _linkedUnanswered.clear();
+    _retryAfterFlight = false;
     // A rebuild closes the subscription, so the next link opens a new one.
     _reconnects = null;
     ref.onDispose(() {
@@ -185,6 +190,9 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         if (next == SessionStatus.connected &&
             previous != SessionStatus.connected) {
           _linkedUnanswered.forEach(_scheduleFetch);
+          if (_linkedUnanswered.any(_inFlight.contains)) {
+            _retryAfterFlight = true;
+          }
         }
       },
     );
@@ -374,7 +382,13 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
       // Silently fail — non-gating callers will just show pubkeys, or the
       // restored profile, which the next lookup revalidates again.
     } finally {
-      if (_isCurrent(generation)) _inFlight.removeAll(pubkeys);
+      if (_isCurrent(generation)) {
+        _inFlight.removeAll(pubkeys);
+        if (_retryAfterFlight && ref.mounted) {
+          _retryAfterFlight = false;
+          _linkedUnanswered.forEach(_scheduleFetch);
+        }
+      }
       if (!completer.isCompleted) completer.complete(succeeded);
       if (identical(_flightCompleter, completer)) _flightCompleter = null;
       _flushInFlight = false;

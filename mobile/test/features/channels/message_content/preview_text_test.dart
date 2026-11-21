@@ -365,6 +365,9 @@ void main() {
   test('a preview loads only the identity links it draws', () {
     final link = '[@Alice](nostr:${fullNpub(_alice)})';
     expect(messagePreviewIdentityKeys('hi $link', maxLines: 2), {_alice});
+    // The last drawn line loads; the overflow line read past it doesn't.
+    expect(messagePreviewIdentityKeys('one\n$link', maxLines: 2), {_alice});
+    expect(messagePreviewIdentityKeys('one\ntwo\n$link', maxLines: 2), isEmpty);
     // A label with brackets draws a pill once normalized, so it loads too.
     expect(
       messagePreviewIdentityKeys(

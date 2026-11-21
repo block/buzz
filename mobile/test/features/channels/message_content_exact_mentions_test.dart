@@ -34,6 +34,35 @@ void main() {
     expect(tapped, 'c' * 64);
   });
 
+  testWidgets('signed names that fold alike leave a plain mention as text', (
+    tester,
+  ) async {
+    final sam = 'd' * 64;
+    final longS = 'e' * 64;
+    for (final names in [
+      {sam: 'Sam', longS: 'ſam'},
+      {longS: 'ſam', sam: 'Sam'},
+    ]) {
+      String? tapped;
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          child: MessageContent(
+            content: 'hi @Sam',
+            mentionNames: names,
+            tags: [
+              for (final key in names.keys) ['p', key],
+            ],
+            onMentionTap: (key) => tapped = key,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(MessageMentionPill), findsNothing, reason: '$names');
+      await tester.tap(find.textContaining('@Sam', findRichText: true));
+      expect(tapped, isNull, reason: '$names');
+    }
+  });
+
   testWidgets('a tagged mention keeps its pill before a suffix', (
     tester,
   ) async {
