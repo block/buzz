@@ -1621,6 +1621,29 @@ mod tests {
     }
 
     #[test]
+    fn cli_pipeline_keeps_tool_output_with_package_scopes_sendable() {
+        // A message that quotes tool output mentions no one. Before the
+        // path/scope exemption this failed with "mention '@biomejs' does not
+        // match a current channel member", so the message could never be
+        // signed and the caller retried the same undeliverable post forever.
+        let mut name_to_pubkeys: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        name_to_pubkeys.insert("alice".to_string(), vec![PK_VALID_A.to_string()]);
+
+        let content = "Failure reason: specifiers in the lockfile don't match:\n\
+                       - @biomejs/biome (lockfile: 2.3.14, package.json: 2.2.0)";
+        let names = extract_at_mentions_with_known(content, &[]);
+        assert!(names.is_empty(), "path tokens must not become mentions");
+        assert!(resolve_names_to_pubkeys(&names, &name_to_pubkeys, false).is_ok());
+
+        // A typo in a human-looking name still fails closed, so a real intended
+        // mention is never silently published as plain text.
+        let typo = extract_at_mentions_with_known("ping @alyce please", &[]);
+        assert_eq!(typo, vec!["alyce"]);
+        assert!(resolve_names_to_pubkeys(&typo, &name_to_pubkeys, false).is_err());
+    }
+
+    #[test]
     fn cli_pipeline_returns_empty_when_no_at_names() {
         // Sanity: no `@names` in body → no profile match attempt needed.
         let names = extract_at_names("plain message, no mentions");
