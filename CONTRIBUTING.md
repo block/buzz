@@ -72,6 +72,8 @@ This installs a `commit-msg` hook that adds the sign-off trailer automatically f
 
 We review as capacity allows — focused PRs that follow this guide move fastest.
 
+Hosted community vs Buzz identity questions (Builderlab email vs nsec) are covered in [docs/hosted-community-identity.md](docs/hosted-community-identity.md).
+
 ---
 
 ## Setting Up the Development Environment
