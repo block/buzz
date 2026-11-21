@@ -22,6 +22,15 @@
 /// design. Tyler's ruling: "try 5 and lower if needed."
 pub const OPENCLAW_MAX_PARALLELISM: u32 = 5;
 
+/// Maximum parallelism for the Hermes Agent harness.
+///
+/// Each `hermes-acp` worker is a full Python runtime (~100 MB resident before
+/// its own MCP children) and, like OpenClaw, runs tools through a shared
+/// Hermes gateway. A woken lazy pool spawns every slot at once, so the default
+/// parallelism of 10 put 50+ Python processes on a laptop running five Hermes
+/// agents and exhausted memory.
+pub const HERMES_MAX_PARALLELISM: u32 = 3;
+
 /// Return the maximum allowed parallelism for the given harness command, or
 /// `None` when the harness has no cap.
 ///
@@ -30,6 +39,7 @@ pub const OPENCLAW_MAX_PARALLELISM: u32 = 5;
 pub fn harness_max_parallelism(command: &str) -> Option<u32> {
     match super::discovery::normalize_command_identity(command).as_str() {
         "openclaw" => Some(OPENCLAW_MAX_PARALLELISM),
+        "hermes-acp" => Some(HERMES_MAX_PARALLELISM),
         _ => None,
     }
 }
@@ -164,7 +174,7 @@ mod tests {
     fn policy_table() {
         let cap = super::OPENCLAW_MAX_PARALLELISM;
 
-        // harness_max_parallelism: openclaw variants → Some(cap); others → None.
+        // harness_max_parallelism: openclaw variants → Some(cap); others (bar hermes-acp) → None.
         assert_eq!(super::harness_max_parallelism("openclaw"), Some(cap));
         assert_eq!(
             super::harness_max_parallelism("/usr/local/bin/openclaw"),
@@ -201,6 +211,19 @@ mod tests {
             "BUZZ_ACP_AGENTS for openclaw with parallelism 10 must be \"5\""
         );
         assert_eq!(super::acp_agents_value("goose", 10), "10");
+    }
+
+    /// Hermes record at the default parallelism (10) must not spawn 10 Python
+    /// workers per wake: BUZZ_ACP_AGENTS is capped, including for a path command.
+    #[test]
+    fn acp_agents_value_hermes_above_cap_is_capped() {
+        let cap = super::HERMES_MAX_PARALLELISM.to_string();
+        assert_eq!(super::acp_agents_value("hermes-acp", 10), cap);
+        assert_eq!(
+            super::acp_agents_value("/Users/me/.local/bin/hermes-acp", 10),
+            cap
+        );
+        assert_eq!(super::acp_agents_value("hermes-acp", 1), "1");
     }
 
     // ── Override-direction: summary seam agreement ────────────────────────────
