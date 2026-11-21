@@ -890,7 +890,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       return;
     }
     if (_applyUnreadDeletion(event)) {
-      _reconcileDeletedActivity(_deletionTargets(event));
+      _activity.forgetHeads(_deletionTargets(event));
       state = state.whenData((channels) => List<Channel>.of(channels));
       return;
     }

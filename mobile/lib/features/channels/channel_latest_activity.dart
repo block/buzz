@@ -30,8 +30,9 @@ class _ChannelActivity {
   /// The channel's activity time, for deciding whether a read can change it.
   int? latestAt(String channelId) => _latest[channelId]?.at;
 
-  /// Whether a latest read or live message ever covered [channelId]. A list
-  /// read that keeps the list's times still reads the channels without one.
+  /// Whether a latest read or live message covered [channelId] since its
+  /// latest post was last deleted, if ever. A list read that keeps the list's
+  /// times still reads the channels without one.
   bool hasBaseline(String channelId) => _known.contains(channelId);
 
   /// Whether an Active section shows [channelId], so reads that only serve
@@ -58,12 +59,21 @@ class _ChannelActivity {
     at: _latest[channelId]?.at,
   );
 
-  /// The channels whose activity is one of [eventIds]. Event ids are unique,
-  /// so a deletion without an `h` tag finds its channel too.
-  Set<String> headsAmong(Set<String> eventIds) => {
-    for (final MapEntry(key: id, value: head) in _latest.entries)
-      if (eventIds.contains(head.id)) id,
-  };
+  /// Forgets the channels whose activity is one of [eventIds], so a deleted
+  /// latest post stops counting: each reads as unknown until a later list read
+  /// re-reads it. Event ids are unique, so a deletion without an `h` tag finds
+  /// its channel too. Returns whether any channel was forgotten.
+  bool forgetHeads(Set<String> eventIds) {
+    final channelIds = [
+      for (final MapEntry(key: id, value: head) in _latest.entries)
+        if (eventIds.contains(head.id)) id,
+    ];
+    for (final channelId in channelIds) {
+      _latest.remove(channelId);
+      _known.remove(channelId);
+    }
+    return channelIds.isNotEmpty;
+  }
 
   /// Whether [read] began since the last [clear].
   bool isCurrent(int read) => read >= _firstRead;
@@ -232,54 +242,6 @@ extension _ChannelLatestMessages on ChannelsNotifier {
     for (final tag in deletion.tags)
       if (tag.length >= 2 && tag[0] == 'e') tag[1],
   };
-
-  /// Re-reads the newest post of each channel whose activity was one of
-  /// [deletedIds], so a deleted latest post stops counting. Activity can only
-  /// rise otherwise. One `limit: 1` filter per such channel; a failed read
-  /// leaves the channel unknown, which the Active filter shows.
-  void _reconcileDeletedActivity(Set<String> deletedIds) {
-    if (deletedIds.isEmpty) return;
-    final channelIds = _activity.headsAmong(deletedIds);
-    if (channelIds.isNotEmpty) unawaited(_rereadActivity(channelIds));
-  }
-
-  Future<void> _rereadActivity(Set<String> channelIds) async {
-    final read = _activity.beginRead();
-    final failed = <String>{};
-    List<NostrEvent>? events;
-    try {
-      events = await _fetchChannelHistoryBatch(
-        _lifecycleRef.read(relaySessionProvider.notifier),
-        [
-          for (final channelId in channelIds)
-            NostrFilter(
-              kinds: EventKind.channelMessageEventKinds,
-              tags: {
-                '#h': [channelId],
-              },
-              limit: 1,
-            ),
-        ],
-        operation: 'activity re-read',
-        failedChannelIds: failed,
-        optional: true,
-      );
-    } catch (error) {
-      debugPrint('[ChannelsNotifier] activity re-read failed: $error');
-    }
-    if (!_lifecycleRef.mounted || !_activity.isCurrent(read)) return;
-    final surviving = events
-        ?.where(
-          (event) =>
-              !_unscopedUnreadDeletedIds.contains(event.id) &&
-              _unreadDeletedIdsByChannel[event.channelId]?.contains(event.id) !=
-                  true,
-        )
-        .toList();
-    _activity.noteRead(read, channelIds, failed, surviving);
-    if (surviving == null) _activity.noteCatchUp(channelIds, channelIds);
-    _publishUnreadCatchUp(const {});
-  }
 
   /// Fetches each channel's independent latest-message window in one HTTP
   /// bridge request. The relay preserves NIP-01 per-filter limits while

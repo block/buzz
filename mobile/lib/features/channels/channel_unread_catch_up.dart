@@ -251,8 +251,8 @@ extension _UnreadCatchUp on ChannelsNotifier {
             failedChannelIds,
             sentAt: requestedAt,
           ) |
-          _activity.noteCatchUp(deferredGaps, deferredGaps);
-      _reconcileDeletedActivity(batchDeletedIds);
+          _activity.noteCatchUp(deferredGaps, deferredGaps) |
+          _activity.forgetHeads(batchDeletedIds);
       if (recordedAtByChannel.isNotEmpty ||
           appliedDeletion ||
           activityAdvanced ||
