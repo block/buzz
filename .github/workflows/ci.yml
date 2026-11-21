@@ -296,7 +296,10 @@ jobs:
     with:
       web: ${{ needs.changes.outputs.web == 'true' }}
       mobile: ${{ needs.changes.outputs.mobile == 'true' }}
-      mobile_native: ${{ needs.changes.outputs.mobile-native == 'true' }}
+      # Pull requests skip the Native lane for changes outside its paths. A
+      # push still runs it for every mobile change, so a Dart change that
+      # breaks a native test fails on its own commit.
+      mobile_native: ${{ github.event_name == 'push' || needs.changes.outputs.mobile-native == 'true' }}
       lane: mobile-swift
 
   # Advisory flake check: repeats the tests a pull request changes. Its lanes
