@@ -263,9 +263,17 @@ assertions expire. That is bounded by the issuer's
 issuing to that key. A connection admitted in that window can stay open until
 its connection deadline.
 
-Finishing a rollout does not restore missed denies. To keep revocation
-uninterrupted across a deploy, push the active disconnects again once the new
-pods are serving, or wait out the assertion bound.
+Finishing a rollout does not restore missed denies. Recovery is possible, but
+it does not make revocation continuous:
+
+- Re-pushing active disconnects once the new pods are serving, or waiting out
+  the assertion bound, are recovery steps. A revoked key can still be admitted
+  between the deploy and the recovery, and in `shadow` a later re-push does not
+  close a connection opened in that window.
+- Re-pushing means sending freshly signed disconnect commands. Replay and
+  command-age checks can reject a resent old command.
+- The wait counts from when the issuer stopped issuing to the key, not from the
+  start of the deploy.
 
 ### Alerts
 
