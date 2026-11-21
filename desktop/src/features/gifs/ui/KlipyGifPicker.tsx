@@ -9,6 +9,8 @@ import { Input } from "@/shared/ui/input";
 import { Skeleton } from "@/shared/ui/skeleton";
 
 type KlipyGifPickerProps = {
+  /** Search to run on mount, e.g. the query from a `/giphy` command. */
+  initialSearch?: string;
   onSelect: (gif: KlipyGif) => void;
   relayUrl: string;
   searchPath: string;
@@ -28,12 +30,15 @@ const LOADING_SKELETONS = [
 ] as const;
 
 export const KlipyGifPicker = React.memo(function KlipyGifPicker({
+  initialSearch = "",
   onSelect,
   relayUrl,
   searchPath,
 }: KlipyGifPickerProps) {
-  const [search, setSearch] = React.useState("");
-  const [debouncedSearch, setDebouncedSearch] = React.useState("");
+  const [search, setSearch] = React.useState(initialSearch);
+  const [debouncedSearch, setDebouncedSearch] = React.useState(() =>
+    initialSearch.trim(),
+  );
   const prefersReducedMotion = useReducedMotion() ?? false;
 
   React.useEffect(() => {

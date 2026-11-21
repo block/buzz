@@ -1,13 +1,12 @@
-import { useQuery } from "@tanstack/react-query";
 import { Images, Smile, SmilePlus } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import { klipyGifAttachment, type KlipyGif } from "@/features/gifs/api";
-import { relayKlipyEndpoints, reportKlipyShare } from "@/features/gifs/relay";
+import { reportKlipyShare } from "@/features/gifs/relay";
 import { KlipyGifPicker } from "@/features/gifs/ui/KlipyGifPicker";
-import { useCommunities } from "@/features/communities/useCommunities";
+import { useRelayKlipyCapability } from "@/features/gifs/useRelayKlipyCapability";
 import type { MediaUploadController } from "@/features/messages/lib/useMediaUpload";
 import { Button } from "@/shared/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
@@ -18,10 +17,15 @@ type ComposerEmojiPickerProps = {
   disabled?: boolean;
   gifsDisabled?: boolean;
   gifMediaController: Pick<MediaUploadController, "setPendingImeta">;
+  /** Query from a `/giphy` command. While set, the picker opens on the GIFs
+   *  tab with this search already run. */
+  gifCommandQuery?: string | null;
   /** Called when the popover closes without an emoji selection (Escape,
    *  click-outside). Use this to restore focus to the editor. */
   onClose?: () => void;
   onEmojiSelect: (emoji: string) => void;
+  /** Called after a GIF is chosen for a `/giphy` command. */
+  onGifCommandSelect?: () => void;
   onOpenChange: (open: boolean) => void;
   onTriggerMouseDown: () => void;
   open: boolean;
@@ -36,30 +40,28 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
   disabled = false,
   gifsDisabled = false,
   gifMediaController,
+  gifCommandQuery = null,
   onClose,
   onEmojiSelect,
+  onGifCommandSelect,
   onOpenChange,
   onTriggerMouseDown,
   open,
 }: ComposerEmojiPickerProps) {
   const [pickerTab, setPickerTab] = React.useState<ComposerPickerTab>("emoji");
   const shouldReduceMotion = useReducedMotion();
-  const { activeCommunity } = useCommunities();
-  const relayUrl = activeCommunity?.relayUrl ?? "";
-  const klipyCapabilityQuery = useQuery({
-    enabled: relayUrl.length > 0,
-    queryFn: ({ signal }) => relayKlipyEndpoints(relayUrl, signal),
-    queryKey: ["relay-capability", relayUrl, "klipy"],
-    retry: 1,
-    staleTime: 5 * 60 * 1_000,
-  });
-  const gifSearchPath = klipyCapabilityQuery.data?.searchPath ?? "";
-  const gifSharePath = klipyCapabilityQuery.data?.sharePath ?? "";
-  const gifsAvailable = gifSearchPath.length > 0 && gifSharePath.length > 0;
+  const {
+    available: gifsAvailable,
+    relayUrl,
+    searchPath: gifSearchPath,
+    sharePath: gifSharePath,
+  } = useRelayKlipyCapability();
 
-  React.useEffect(() => {
+  // Layout effect so a `/giphy` open never paints the emoji tab first.
+  React.useLayoutEffect(() => {
     if (!open) setPickerTab("emoji");
-  }, [open]);
+    else if (gifCommandQuery !== null) setPickerTab("gifs");
+  }, [gifCommandQuery, open]);
 
   const handleGifSelect = React.useCallback(
     (gif: KlipyGif) => {
@@ -69,15 +71,18 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
         ...current,
         klipyGifAttachment(gif),
       ]);
+      if (gifCommandQuery !== null) onGifCommandSelect?.();
       void reportKlipyShare(relayUrl, gifSharePath, gif.slug).catch(() => {
         // Sharing the GIF remains successful if best-effort Recents reporting
         // fails; the authenticated relay endpoint keeps provider details hidden.
       });
     },
     [
+      gifCommandQuery,
       gifMediaController.setPendingImeta,
       gifsDisabled,
       gifSharePath,
+      onGifCommandSelect,
       onOpenChange,
       relayUrl,
     ],
@@ -181,6 +186,7 @@ export const ComposerEmojiPicker = React.memo(function ComposerEmojiPicker({
             </TabsContent>
             <TabsContent className="m-0" value="gifs">
               <KlipyGifPicker
+                initialSearch={gifCommandQuery ?? ""}
                 onSelect={handleGifSelect}
                 relayUrl={relayUrl}
                 searchPath={gifSearchPath}
