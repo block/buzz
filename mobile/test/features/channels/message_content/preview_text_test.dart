@@ -84,8 +84,14 @@ void main() {
       expect(_text('```\n> **x**\n```'), '> **x**');
       // A quoted closer doesn't end an unquoted fence.
       expect(_text('```\n> ```\n**x**\n```'), '> ```\n**x**');
-      // A quoted fence ends with its quote.
-      expect(_text('> ```\n> code\n**after**'), 'code\nafter');
+      // A quoted fence ends with its blockquote, at a blank line.
+      expect(_text('> ```\n> code\n**after**'), 'code\n**after**');
+      expect(_text('> ```\n> code\n\n**after**'), 'code\nafter');
+      // A quoted fence closes at a closer with or without the marker.
+      expect(_text('> ```\ncode\n```\n**after**'), 'code\nafter');
+      expect(_text('> ```\nx\n> ```\n> **y**'), 'x\ny');
+      // A fence opened inside a blockquote is quoted without its own marker.
+      expect(_text('> x\n~~~\n\n**after**'), 'x\nafter');
     });
   });
 

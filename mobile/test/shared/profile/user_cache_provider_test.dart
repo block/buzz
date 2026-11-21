@@ -454,10 +454,12 @@ void main() {
     session.setStatus(SessionStatus.disconnected);
     session.setStatus(SessionStatus.connected);
     // The retry rides the next coalesced batch.
-    await Future<void>.delayed(const Duration(milliseconds: 200));
-
+    await session.secondRequest.future;
     expect(session.requestCount, 2);
     expect(session.requestedFilter?.authors, ['a']);
+
+    expect(await cache.preload(['a']), isTrue);
+    expect(session.requestCount, 2);
     expect(cache.state.keys, contains('a'));
   });
 
@@ -564,6 +566,7 @@ class _RecordingProfileSession extends RelaySessionNotifier {
   NostrFilter? requestedFilter;
   int requestCount = 0;
   final firstRequest = Completer<void>();
+  final secondRequest = Completer<void>();
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -576,6 +579,7 @@ class _RecordingProfileSession extends RelaySessionNotifier {
     requestCount++;
     requestedFilter = filter;
     if (!firstRequest.isCompleted) firstRequest.complete();
+    if (requestCount == 2) secondRequest.complete();
     return _results.isEmpty ? const [] : _results.removeAt(0);
   }
 

@@ -177,6 +177,7 @@ Iterable<({String text, bool code, int end})> _keptLines(
   // The open fence's run (for example ``` or ~~~~), or null outside one.
   String? fence;
   var fenceQuoted = false;
+  var inQuote = false;
   var start = 0;
   while (start <= content.length &&
       start <= _maxScanLength &&
@@ -194,17 +195,26 @@ Iterable<({String text, bool code, int end})> _keptLines(
     final cut = end == cap && cap < content.length;
     var line = content.substring(start, end).trim();
     start = cut ? content.length + 1 : end + 1;
-    // A backtick or tilde fence, quoted or not, opens at a line starting
-    // with three or more of its character and closes only at a line holding
-    // nothing else but at least as many, as the full message reads it.
-    // A quoted fence ends with its quote; an unquoted one only at an
-    // unquoted closer.
+    // A backtick or tilde fence opens at a line starting with three or more
+    // of its character and closes only at a line holding nothing else but at
+    // least as many, as the full message reads it. Outside an unquoted fence,
+    // a quote marker enters a blockquote and only a blank line leaves it,
+    // closing a fence opened inside it. That quoted fence closes at a closer
+    // with or without the marker; an unquoted fence closes only at an
+    // unmarked closer, and markers and blank lines inside it are code.
+    if (line.isEmpty) {
+      if (fence == null || fenceQuoted) {
+        inQuote = false;
+        fence = null;
+      }
+      continue;
+    }
     final unquoted = line.replaceFirst(_quote, '').trim();
-    if (fence != null && fenceQuoted && unquoted == line) fence = null;
     if (fence == null) {
+      if (unquoted != line) inQuote = true;
       if (_fenceRun.firstMatch(unquoted) case final open?) {
         fence = open[1];
-        fenceQuoted = unquoted != line;
+        fenceQuoted = inQuote;
         continue;
       }
     } else {
