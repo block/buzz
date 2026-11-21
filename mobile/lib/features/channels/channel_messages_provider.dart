@@ -169,6 +169,11 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   @override
   AsyncValue<List<NostrEvent>> build() {
     final sessionState = ref.watch(relaySessionProvider);
+    // The session pauses in the background: an open's clock carries across
+    // reconnects, but not across that, since a later return is a new open.
+    if (sessionState.status == SessionStatus.disconnected) {
+      _openTimer?.cancel();
+    }
     // Riverpod defers rebuilding a provider nobody is listening to until it
     // is listened to or read again, and then skips onResume. So a build
     // always means the chat is wanted.
@@ -176,6 +181,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     _liveDetached = false;
     ref.onCancel(() {
       _hasListeners = false;
+      _openTimer = null;
       _deletionOwnerQueue.pause();
       _summaryRefreshes.pause();
       _liveDetachTimer?.cancel();
@@ -315,13 +321,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         );
       }
 
-      // An open cut short by a reconnect keeps its clock: the wait counts.
-      final pending = _openTimer;
       openTimer = _openTimer = _hasLoadedHistory
           ? null
-          : pending != null && !pending.isDone
-          ? pending
-          : ChannelOpenTimer(ref);
+          : ChannelOpenTimer.resume(_openTimer, ref);
       final historyVersion = ++_threadQuerySerial;
       final (history, wireEvents) = await _fetchNewestHistory(
         session,
@@ -355,8 +357,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       // catching up.
       _initInFlight = false;
       state = AsyncData(merged);
-      // An open that finished after its page closed kept nobody waiting.
-      _hasListeners ? openTimer?.finish() : openTimer?.cancel();
+      // An open the member left before it finished still took this long.
+      openTimer?.finish();
       if (ticket != null && _hasListeners) {
         unawaited(
           saveMessagePage(

@@ -120,7 +120,7 @@ void main() {
     });
   });
 
-  test('an open nobody waited out is not counted', () {
+  test('an open the member left still counts', () {
     fakeAsync((async) {
       final (:relay, :counts, :container, :opens) = _start(async);
       final held = relay.holdQuery();
@@ -132,7 +132,51 @@ void main() {
       page.close();
       held.complete();
       async.elapse(const Duration(seconds: 1));
-      expect(opens(), isEmpty);
+      expect(opens().single.outcome, NetworkOutcome.success);
+    });
+  });
+
+  test('a return after leaving a cut-short open is a new open', () {
+    fakeAsync((async) {
+      final (:relay, :counts, :container, :opens) = _start(async);
+      var held = relay.holdQuery();
+      final page = container.listen(
+        channelMessagesProvider(_channel),
+        (_, _) {},
+      );
+      async.elapse(const Duration(seconds: 1));
+      page.close();
+      relay.drop();
+      async.elapse(const Duration(minutes: 10));
+      held.complete();
+      held = relay.holdQuery();
+      container.listen(channelMessagesProvider(_channel), (_, _) {});
+      async.elapse(const Duration(seconds: 2));
+      held.complete();
+      async.elapse(const Duration(seconds: 1));
+      final open = opens().single;
+      expect(open.duration, lessThan(const Duration(minutes: 1)));
+    });
+  });
+
+  test('an open cut short by the background is not carried past it', () {
+    fakeAsync((async) {
+      final (:relay, :counts, :container, :opens) = _start(async);
+      final held = relay.holdQuery();
+      container.listen(channelMessagesProvider(_channel), (_, _) {});
+      async.elapse(const Duration(seconds: 1));
+      final session = container.read(relaySessionProvider.notifier);
+      session.onAppPaused();
+      async.elapse(const Duration(minutes: 1));
+      session.onAppResumed();
+      async.elapse(const Duration(seconds: 1));
+      held.complete();
+      async.elapse(const Duration(seconds: 1));
+      expect(
+        opens().single.duration,
+        lessThan(const Duration(minutes: 1)),
+        reason: 'the open after the return is a new one',
+      );
     });
   });
 

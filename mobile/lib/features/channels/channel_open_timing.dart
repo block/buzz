@@ -21,6 +21,11 @@ class ChannelOpenTimer {
     _memberChanges = _reporter.memberChanges;
   }
 
+  /// Continues [pending] if it is still running, since an open cut short by
+  /// a reconnect keeps its clock and the wait counts; otherwise starts one.
+  static ChannelOpenTimer resume(ChannelOpenTimer? pending, Ref ref) =>
+      pending != null && !pending.isDone ? pending : ChannelOpenTimer(ref);
+
   final DiagnosticReporter _reporter;
   final String? _host;
   final DateTime _startedAt;
