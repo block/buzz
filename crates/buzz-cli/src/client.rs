@@ -1381,15 +1381,26 @@ impl BuzzClient {
     /// `buzz_ws_client::publish_event` which handles connect, NIP-42 auth,
     /// EVENT send, OK wait, and graceful close.
     pub async fn publish_ephemeral_event(&self, event: nostr::Event) -> Result<String, CliError> {
-        let ws_url = &self.ws_url;
-        // Two kinds of deadline: each network phase is capped as a whole,
-        // writes included (the connect below, then buzz_ws_client's challenge,
-        // AUTH, EVENT and close phases), and NIP-42 signing between them is
-        // bounded by the signer itself. A
-        // desktop provider may wait out throttling and hold `sign_event` for a
-        // person's decision, which no relay budget should cut short.
-        let signer = crate::credentials::CapturingSigner::new(&self.credentials);
-        let ws_error = |e: buzz_ws_client::WsClientError| match e.upgrade_rejection() {
+        let mut conn = self.connect_authenticated_ws().await?;
+        let ok = conn.send_event(event).await.map_err(|e| self.ws_error(e))?;
+        let _ = conn.disconnect().await;
+
+        if !ok.accepted {
+            return Err(CliError::Relay {
+                status: 400,
+                body: ok.message,
+            });
+        }
+        Ok(serde_json::json!({
+            "event_id": ok.event_id,
+            "accepted": true,
+            "message": ok.message,
+        })
+        .to_string())
+    }
+
+    fn ws_error(&self, e: buzz_ws_client::WsClientError) -> CliError {
+        match e.upgrade_rejection() {
             // A denial decided on the upgrade is an HTTP response (NIP-FI).
             Some((status, body)) => self.relay_error(status, body),
             // A post-upgrade denial (e.g. a NIP-FI key mismatch) is a 1008 close.
@@ -1397,24 +1408,35 @@ impl BuzzClient {
                 CliError::Auth(e.to_string())
             }
             None => CliError::Other(e.to_string()),
-        };
-        //
+        }
+    }
+
+    /// Connect to the relay WebSocket and complete NIP-42 sign-in.
+    async fn connect_authenticated_ws(
+        &self,
+    ) -> Result<buzz_ws_client::NostrWsConnection, CliError> {
+        // Two kinds of deadline: each network phase is capped as a whole,
+        // writes included (the connect below, then buzz_ws_client's challenge,
+        // AUTH, EVENT and close phases), and NIP-42 signing between them is
+        // bounded by the signer itself. A
+        // desktop provider may wait out throttling and hold `sign_event` for a
+        // person's decision, which no relay budget should cut short.
+        let signer = crate::credentials::CapturingSigner::new(&self.credentials);
         // The relay closes a socket that has not signed in within seconds,
         // so a slow or throttled sign-in signature reconnects and signs the
         // new challenge, a bounded number of times, with current evidence:
         // the old assertion may have expired meanwhile. A throttled sign-in
-        // is waited out between connections, never on one. EVENT, signed
-        // before any of this, is sent only once AUTH succeeds.
+        // is waited out between connections, never on one.
         let mut attempt = 1;
-        let mut conn = loop {
+        let conn = loop {
             let headers = self.upgrade_headers().await?;
             let mut conn = tokio::time::timeout(
                 WS_CONNECT_TIMEOUT,
-                buzz_ws_client::NostrWsConnection::connect_with_headers(ws_url, headers),
+                buzz_ws_client::NostrWsConnection::connect_with_headers(&self.ws_url, headers),
             )
             .await
             .map_err(|_| CliError::Other("relay WebSocket connect timed out".into()))?
-            .map_err(ws_error)?;
+            .map_err(|e| self.ws_error(e))?;
             let signed_in = conn
                 .authenticate(&signer, self.credentials.auth_tag().map(|t| &t.tag))
                 .await;
@@ -1430,7 +1452,7 @@ impl BuzzClient {
             let throttled = matches!(failure, Some(CliError::Throttled(_)));
             let _ = conn.disconnect().await;
             if !(lost || throttled) {
-                return Err(failure.unwrap_or_else(|| ws_error(e)));
+                return Err(failure.unwrap_or_else(|| self.ws_error(e)));
             }
             if attempt == WS_SIGN_IN_ATTEMPTS {
                 return Err(failure.unwrap_or_else(|| {
@@ -1443,21 +1465,77 @@ impl BuzzClient {
             tokio::time::sleep(wait.unwrap_or_else(|| jitter_delay(attempt - 1))).await;
             attempt += 1;
         };
-        let ok = conn.send_event(event).await.map_err(ws_error)?;
-        let _ = conn.disconnect().await;
+        Ok(conn)
+    }
 
-        if !ok.accepted {
-            return Err(CliError::Relay {
-                status: 400,
-                body: ok.message,
-            });
+    /// Subscribe with `filter` over an authenticated WebSocket and collect the
+    /// matching events that arrive during `window`, stored or live.
+    ///
+    /// The window starts once NIP-42 auth completes. Only the newest
+    /// `max_events` distinct events are kept. A relay refusal of the
+    /// subscription is an error, never an empty result; transport failures are
+    /// network errors.
+    pub async fn listen_events(
+        &self,
+        filter: &serde_json::Value,
+        window: Duration,
+        max_events: usize,
+    ) -> Result<Vec<nostr::Event>, CliError> {
+        use buzz_ws_client::{RelayMessage, WsClientError};
+
+        const SUB_ID: &str = "buzz-cli-listen";
+        let ws_error = |e: WsClientError| match e {
+            WsClientError::AuthFailed(message) => CliError::Auth(message),
+            other => CliError::Relay {
+                status: 503,
+                body: other.to_string(),
+            },
+        };
+        let mut conn = self.connect_authenticated_ws().await?;
+        conn.send_raw(&serde_json::json!(["REQ", SUB_ID, filter]))
+            .await
+            .map_err(ws_error)?;
+
+        let deadline = tokio::time::Instant::now() + window;
+        let mut events: std::collections::VecDeque<nostr::Event> =
+            std::collections::VecDeque::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match conn.next_event(remaining).await {
+                Ok(RelayMessage::Event {
+                    subscription_id,
+                    event,
+                }) if subscription_id == SUB_ID => {
+                    if !events.iter().any(|seen| seen.id == event.id) {
+                        if events.len() >= max_events {
+                            events.pop_front();
+                        }
+                        events.push_back(*event);
+                    }
+                }
+                Ok(RelayMessage::Closed { message, .. }) => {
+                    return Err(
+                        if message.starts_with("auth") || message.starts_with("restricted") {
+                            CliError::Auth(message)
+                        } else {
+                            CliError::Relay {
+                                status: 502,
+                                body: format!("relay closed the subscription: {message}"),
+                            }
+                        },
+                    );
+                }
+                Ok(_) => {}
+                Err(WsClientError::Timeout) => break,
+                Err(e) => return Err(ws_error(e)),
+            }
         }
-        Ok(serde_json::json!({
-            "event_id": ok.event_id,
-            "accepted": true,
-            "message": ok.message,
-        })
-        .to_string())
+        let _ = conn.send_raw(&serde_json::json!(["CLOSE", SUB_ID])).await;
+        let _ = conn.disconnect().await;
+        Ok(events.into())
     }
 
     /// Upload a file to the relay's Blossom endpoint.
