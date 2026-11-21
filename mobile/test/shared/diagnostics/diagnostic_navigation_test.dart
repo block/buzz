@@ -38,6 +38,7 @@ void main() {
     const channelId = 'c0ffee-secret-channel-id';
     late _RecordingReporter reporter;
     late GlobalKey<NavigatorState> root;
+    late DiagnosticNavigationObserver rootObserver;
 
     Future<void> pumpApp(
       WidgetTester tester, {
@@ -57,6 +58,7 @@ void main() {
       addTearDown(container.dispose);
       final observer = container.read(diagnosticScreenTrailProvider).observer();
       addTearDown(observer.dispose);
+      rootObserver = observer;
       await tester.pumpWidget(
         UncontrolledProviderScope(
           container: container,
@@ -118,6 +120,31 @@ void main() {
         reporter.crumbs.map((crumb) => crumb.toString()).join(),
         isNot(contains(channelId)),
       );
+    });
+
+    testWidgets('a root page whose content changes in place is named again', (
+      tester,
+    ) async {
+      // Like a cold start: a splash first, then onboarding in the same route.
+      final home = ValueNotifier<DiagnosticScreen?>(null);
+      addTearDown(home.dispose);
+      await pumpApp(
+        tester,
+        home: ValueListenableBuilder(
+          valueListenable: home,
+          builder: (_, screen, _) =>
+              screen == null ? const Text('splash') : _Page(screen),
+        ),
+      );
+
+      home.value = DiagnosticScreen.onboarding;
+      rootObserver.refresh();
+      await tester.pumpAndSettle();
+      // Unchanged content leaves nothing more.
+      rootObserver.refresh();
+      await tester.pumpAndSettle();
+
+      expect(trail(), ['other', 'onboarding']);
     });
 
     testWidgets('a phone pane names the screen the person is on', (

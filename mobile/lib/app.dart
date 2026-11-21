@@ -481,6 +481,17 @@ class App extends HookConsumerWidget {
       ref.read(diagnosticScreenTrailProvider).observer,
     );
     useEffect(() => screenObserver.dispose, [screenObserver]);
+    // The root page's content changes in place as auth settles (splash, then
+    // onboarding or Home) with no navigation, so name it again.
+    final homeKind = authState.when(
+      loading: () => null,
+      error: (_, _) => false,
+      data: (state) => state.status,
+    );
+    useEffect(() {
+      screenObserver.refresh();
+      return null;
+    }, [homeKind]);
 
     return MaterialApp(
       navigatorKey: _mobileRootNavigatorKey,
