@@ -143,6 +143,15 @@ impl BatchEvent {
         reaction_target_id(&self.event)
     }
 
+    /// Event id that ordinary replies to this event anchor on. A kind:7
+    /// reaction is not a visible message, so a reply anchored on it would sit
+    /// in a thread no client renders: it anchors on the message it reacts to
+    /// (see [`reacted_event_id`]). Everything else uses
+    /// [`routing_event_id`](Self::routing_event_id).
+    pub fn reply_anchor_event_id(&self) -> String {
+        reacted_event_id(&self.event).unwrap_or_else(|| self.routing_event_id())
+    }
+
     /// Thread tags that route replies for this event. For an edit these are
     /// the original message's tags; the edit's own bare `e` tag is never a
     /// thread link. An unresolved edit routes as a top-level reply to its
@@ -1336,6 +1345,25 @@ pub fn edit_target_id(event: &Event) -> Option<String> {
     })
 }
 
+/// Return the message a kind:7 reaction reacts to: its last `e` tag with a
+/// valid event id (NIP-25). `None` for other kinds, and for a reaction without
+/// such a tag, which keeps its own id as the reply anchor.
+pub fn reacted_event_id(event: &Event) -> Option<String> {
+    if u32::from(event.kind.as_u16()) != buzz_core::kind::KIND_REACTION {
+        return None;
+    }
+    event.tags.iter().rev().find_map(|tag| {
+        let parts = tag.as_slice();
+        if parts.first().map(String::as_str) != Some("e") {
+            return None;
+        }
+        parts
+            .get(1)
+            .and_then(|target| nostr::EventId::from_hex(target).ok())
+            .map(|target| target.to_hex())
+    })
+}
+
 /// Event ID that should own lifecycle reactions and reply anchors for an
 /// inbound event.
 ///
@@ -2348,8 +2376,9 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     };
     // An edit routes through its original message: the edit's own bare `e`
     // tag is not a thread link, and the edit event is not a visible row.
+    // A reaction routes through the message it reacts to, for the same reason.
     let thread_tags = last_event.routing_thread_tags();
-    let routing_event_id = last_event.routing_event_id();
+    let routing_event_id = last_event.reply_anchor_event_id();
     let is_dm = args
         .channel_info
         .map(|ci| ci.channel_type == "dm")
@@ -4970,6 +4999,167 @@ mod tests {
             resolve_prompt_label(pubkey, Some(&profiles)),
             Some("wes@example.com".into()),
         );
+    }
+
+    // ── Reaction-triggered turns ─────────────────────────────────────────────
+
+    /// A kind:7 reaction signed by `keys`, with `tags`.
+    fn reaction_event(keys: &Keys, content: &str, tags: Vec<Vec<&str>>) -> Event {
+        let tags: Vec<nostr::Tag> = tags
+            .into_iter()
+            .map(|t| nostr::Tag::parse(t).unwrap())
+            .collect();
+        EventBuilder::new(Kind::Reaction, content)
+            .tags(tags)
+            .sign_with_keys(keys)
+            .unwrap()
+    }
+
+    fn reaction_prompt(
+        policy: crate::scope::SessionPolicy,
+        event: &Event,
+        prompt_tag: &str,
+        profile_lookup: Option<&PromptProfileLookup>,
+    ) -> String {
+        let channel_id = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id,
+            scope: SessionScope::derive(policy, channel_id, false, event),
+            events: vec![BatchEvent {
+                edit: None,
+                event: event.clone(),
+                prompt_tag: prompt_tag.into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let ci = PromptChannelInfo {
+            name: "test".into(),
+            channel_type: "stream".into(),
+            description: None,
+            project: None,
+        };
+        format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                standing_context_sent: true,
+                profile_lookup,
+                ..Default::default()
+            },
+        )
+        .join("\n\n")
+    }
+
+    #[test]
+    fn reaction_replies_anchor_on_the_reacted_message() {
+        // Desktop publishes a reaction with a bare `e` tag only. The reaction
+        // is not a visible message: a reply anchored on it is never rendered.
+        use crate::scope::SessionPolicy;
+        let target = "a".repeat(64);
+        let reaction = reaction_event(&Keys::generate(), "✅", vec![vec!["e", &target]]);
+        assert_eq!(
+            reacted_event_id(&reaction).as_deref(),
+            Some(target.as_str())
+        );
+        for policy in [SessionPolicy::Channel, SessionPolicy::Thread] {
+            let prompt = reaction_prompt(policy, &reaction, "reaction", None);
+            assert!(prompt.contains(&format!("--reply-to {target}")), "{prompt}");
+            assert!(
+                !prompt.contains(&format!("--reply-to {}", reaction.id.to_hex())),
+                "{prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn reaction_anchors_on_its_last_valid_e_tag() {
+        // NIP-25: the last `e` tag is the reacted-to event. A reaction to a
+        // threaded message names that message, and `buzz messages send
+        // --reply-to` derives the thread root from it, as for any parent.
+        let root = "a".repeat(64);
+        let target = "b".repeat(64);
+        let reaction = reaction_event(
+            &Keys::generate(),
+            "✅",
+            vec![vec!["e", &root], vec!["e", &target], vec!["e", "not-an-id"]],
+        );
+        assert_eq!(
+            reacted_event_id(&reaction).as_deref(),
+            Some(target.as_str())
+        );
+        let prompt = reaction_prompt(
+            crate::scope::SessionPolicy::Channel,
+            &reaction,
+            "reaction",
+            None,
+        );
+        assert!(prompt.contains(&format!("--reply-to {target}")), "{prompt}");
+        assert!(!prompt.contains(&format!("--reply-to {root}")), "{prompt}");
+    }
+
+    #[test]
+    fn reaction_without_a_valid_target_keeps_its_own_anchor() {
+        // No usable `e` tag: nothing to route through, so the reaction keeps
+        // the anchor every event without one has (its own id).
+        for tags in [
+            vec![],
+            vec![vec!["e", "not-an-id"]],
+            vec![vec!["p", &"c".repeat(64)]],
+        ] {
+            let reaction = reaction_event(&Keys::generate(), "✅", tags);
+            assert_eq!(reacted_event_id(&reaction), None);
+            let prompt = reaction_prompt(
+                crate::scope::SessionPolicy::Channel,
+                &reaction,
+                "reaction",
+                None,
+            );
+            assert!(
+                prompt.contains(&format!("--reply-to {}", reaction.id.to_hex())),
+                "{prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_reactions_route_through_an_e_tag() {
+        // A kind:9 with a bare `e` tag is neither a reaction nor a thread link.
+        let target = "a".repeat(64);
+        let message = make_event_with_tags("hi", vec![vec!["e".into(), target.clone()]]);
+        assert_eq!(reacted_event_id(&message), None);
+        let prompt = reaction_prompt(
+            crate::scope::SessionPolicy::Channel,
+            &message,
+            "@mention",
+            None,
+        );
+        assert!(
+            prompt.contains(&format!("--reply-to {}", message.id.to_hex())),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {target}")),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn agent_reaction_at_top_level_still_gets_no_anchor() {
+        // Agent↔agent top-level turns leave the destination to the agent;
+        // routing through the reacted message must not change that.
+        let agent = Keys::generate();
+        let lookup: PromptProfileLookup =
+            HashMap::from([(agent.public_key().to_hex(), profile(true))]);
+        let reaction = reaction_event(&agent, "✅", vec![vec!["e", &"a".repeat(64)]]);
+        let prompt = reaction_prompt(
+            crate::scope::SessionPolicy::Channel,
+            &reaction,
+            "reaction",
+            Some(&lookup),
+        );
+        assert!(!prompt.contains("--reply-to"), "{prompt}");
     }
 
     // ── Human-aware reply anchoring ──────────────────────────────────────────
