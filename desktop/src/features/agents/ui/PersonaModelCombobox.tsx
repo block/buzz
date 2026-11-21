@@ -12,19 +12,28 @@ import { OptionLabel } from "./PersonaDropdownOptionLabel";
 
 type PersonaModelComboboxProps = {
   disabled?: boolean;
+  /** Copy for the empty state when the query matches nothing. */
+  emptyLabel?: string;
   id: string;
   onValueChange: (value: string) => void;
   options: readonly PersonaDropdownOption[];
   placeholder: string;
+  /** Accessible name for the filter input (defaults to the model wording). */
+  searchLabel?: string;
+  /** Placeholder for the filter input (defaults to the model wording). */
+  searchPlaceholder?: string;
   value: string;
 };
 
 export function PersonaModelCombobox({
   disabled,
+  emptyLabel = "No models match",
   id,
   onValueChange,
   options,
   placeholder,
+  searchLabel = "Search models",
+  searchPlaceholder = "Search models\u2026",
   value,
 }: PersonaModelComboboxProps) {
   const [open, setOpen] = React.useState(false);
@@ -157,14 +166,14 @@ export function PersonaModelCombobox({
           <div className="group/search flex cursor-text items-center gap-2 border-b border-border/50 px-3 py-2">
             <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground/55 transition-colors duration-150 ease-out group-focus-within/search:text-foreground" />
             <input
-              aria-label="Search models"
+              aria-label={searchLabel}
               autoCapitalize="none"
               autoComplete="off"
               autoCorrect="off"
               className="block min-w-0 flex-1 border-0 bg-transparent p-0 text-sm leading-5 text-muted-foreground/55 shadow-none outline-none placeholder:text-muted-foreground/55 focus:text-foreground focus:placeholder:text-muted-foreground"
               onChange={(event) => setQuery(event.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Search models…"
+              placeholder={searchPlaceholder}
               // Popover supports onOpenAutoFocus; we preventDefault above so
               // Radix doesn't move focus to the first focusable. But we still
               // want the input focused immediately, so use the callback ref.
@@ -192,6 +201,7 @@ export function PersonaModelCombobox({
                       "bg-muted/50 text-foreground",
                     option.value === value && "font-medium",
                   )}
+                  data-testid={`${id}-option-${option.value}`}
                   disabled={option.disabled}
                   key={option.value}
                   onClick={() => selectOption(option.value)}
@@ -213,7 +223,7 @@ export function PersonaModelCombobox({
               ))
             ) : (
               <p className="px-3 py-6 text-center text-sm text-muted-foreground/55">
-                No models match
+                {emptyLabel}
               </p>
             )}
           </div>

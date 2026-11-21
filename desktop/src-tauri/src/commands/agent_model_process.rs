@@ -14,6 +14,31 @@ pub(super) async fn run_agent_models_command(
     persisted_model: Option<String>,
     merged_env: BTreeMap<String, String>,
 ) -> Result<AgentModelsResponse, String> {
+    let raw = run_agent_helper_command(
+        resolved_acp,
+        "models",
+        agent_command,
+        agent_args,
+        merged_env,
+    )
+    .await?;
+    Ok(normalize_agent_models(&raw, persisted_model))
+}
+
+/// Spawn `<resolved_acp> <subcommand> --json` with the exact env/PATH/identity
+/// layering the runtime spawn uses, and return its parsed stdout.
+///
+/// Shared by model discovery (`models`) and provider-inventory discovery
+/// (`providers`): both are short-lived local probes that must see the same
+/// environment a launched agent would, and keeping one spawner means a fix to
+/// PATH/redaction/identity applies to both.
+pub(super) async fn run_agent_helper_command(
+    resolved_acp: PathBuf,
+    subcommand: &'static str,
+    agent_command: String,
+    agent_args: Vec<String>,
+    merged_env: BTreeMap<String, String>,
+) -> Result<serde_json::Value, String> {
     // Clone the env map for redaction below — `merged_env` is moved
     // into the spawn_blocking closure and we still need the values to
     // scrub any user-supplied secrets that the child surfaces in stderr.
@@ -36,7 +61,7 @@ pub(super) async fn run_agent_models_command(
         if let Some(ref path) = crate::managed_agents::readiness::cli_probe::augmented_path() {
             cmd.env("PATH", path);
         }
-        cmd.arg("models")
+        cmd.arg(subcommand)
             .arg("--json")
             .env("BUZZ_ACP_AGENT_COMMAND", &agent_command)
             .env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
@@ -61,10 +86,10 @@ pub(super) async fn run_agent_models_command(
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()
-            .map_err(|e| format!("failed to spawn buzz-acp models: {e}"))
+            .map_err(|e| format!("failed to spawn buzz-acp {subcommand}: {e}"))
     })
     .await
-    .map_err(|e| format!("model discovery task failed: {e}"))?
+    .map_err(|e| format!("agent {subcommand} discovery task failed: {e}"))?
     .map_err(|e: String| e)?;
 
     if !output.status.success() {
@@ -74,13 +99,11 @@ pub(super) async fn run_agent_models_command(
         // a failing child process echoed back.
         let stderr_redacted = redact_env_values_in(stderr.as_ref(), &env_for_redaction);
         return Err(format!(
-            "buzz-acp models failed (exit {}): {stderr_redacted}",
+            "buzz-acp {subcommand} failed (exit {}): {stderr_redacted}",
             output.status.code().unwrap_or(-1)
         ));
     }
 
-    let raw: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("failed to parse model JSON: {e}"))?;
-
-    Ok(normalize_agent_models(&raw, persisted_model))
+    serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("failed to parse {subcommand} JSON: {e}"))
 }
