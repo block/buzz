@@ -94,6 +94,25 @@
     }
   },
   {
+    "id": "anthropic-claude-haiku-5-5",
+    "provider": "anthropic",
+    "raw_model_id": "claude-haiku-5-5",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "not-applicable",
+      "normalization_policy": "none",
+      "registry_label": null
+    }
+  },
+  {
     "id": "anthropic-claude-fable-5",
     "provider": "anthropic",
     "raw_model_id": "claude-fable-5",
@@ -1547,6 +1566,66 @@
       ],
       "default_effort": "high",
       "databricks_v2_wire_route": "not-applicable",
+      "normalization_policy": "none",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "anthropic-haiku-5-5-dated-probe",
+    "provider": "anthropic",
+    "raw_model_id": "claude-haiku-5-5-20261007",
+    "_note": "Probes a dated snapshot of the claude-haiku-5 prefix.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "not-applicable",
+      "normalization_policy": "none",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "anthropic-haiku-4-5-stays-unknown-probe",
+    "provider": "anthropic",
+    "raw_model_id": "claude-haiku-4-5",
+    "_note": "Haiku 4.5 must not match the claude-haiku-5 prefix.",
+    "expect": {
+      "thinking_mode": "omit-fields",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "not-applicable",
+      "normalization_policy": "none",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-claude-haiku-5-5-family-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-claude-haiku-5-5",
+    "_note": "Probes Haiku 5.5 beating the broad dbv2 claude prefix.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "anthropic-messages",
       "normalization_policy": "none",
       "registry_label": null
     }

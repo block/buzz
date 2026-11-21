@@ -677,6 +677,7 @@ mod tests {
     Q::Vector { id: "anthropic-claude-opus-4-7", provider: "anthropic", raw_model_id: "claude-opus-4-7", note: None },
     Q::Vector { id: "anthropic-claude-opus-4-8", provider: "anthropic", raw_model_id: "claude-opus-4-8", note: None },
     Q::Vector { id: "anthropic-claude-sonnet-5", provider: "anthropic", raw_model_id: "claude-sonnet-5-20260101", note: None },
+    Q::Vector { id: "anthropic-claude-haiku-5-5", provider: "anthropic", raw_model_id: "claude-haiku-5-5", note: None },
     Q::Vector { id: "anthropic-claude-fable-5", provider: "anthropic", raw_model_id: "claude-fable-5", note: None },
     Q::Vector { id: "anthropic-claude-mythos-5", provider: "anthropic", raw_model_id: "claude-mythos-5", note: None },
     Q::Vector { id: "anthropic-claude-opus-4-6", provider: "anthropic", raw_model_id: "claude-opus-4-6", note: None },
@@ -761,6 +762,9 @@ mod tests {
     Q::Vector { id: "dbv2-gpt-opus-5-dual-marker-probe", provider: "databricks_v2", raw_model_id: "gpt-opus-5", note: Some("Probes a name carrying both a gpt marker and a claude code word.") },
     Q::Section { group: "Additional coverage probes", note: None },
     Q::Vector { id: "anthropic-opus-5-prefix-probe", provider: "anthropic", raw_model_id: "claude-opus-5-20270101", note: Some("Probes the claude-opus-5 prefix rule.") },
+    Q::Vector { id: "anthropic-haiku-5-5-dated-probe", provider: "anthropic", raw_model_id: "claude-haiku-5-5-20261007", note: Some("Probes a dated snapshot of the claude-haiku-5 prefix.") },
+    Q::Vector { id: "anthropic-haiku-4-5-stays-unknown-probe", provider: "anthropic", raw_model_id: "claude-haiku-4-5", note: Some("Haiku 4.5 must not match the claude-haiku-5 prefix.") },
+    Q::Vector { id: "dbv2-claude-haiku-5-5-family-probe", provider: "databricks_v2", raw_model_id: "databricks-claude-haiku-5-5", note: Some("Probes Haiku 5.5 beating the broad dbv2 claude prefix.") },
     Q::Vector { id: "dbv2-gpt-5-6-sol-normalization-probe", provider: "databricks_v2", raw_model_id: "databricks-gpt-5-6-sol", note: Some("Probes the sol exact record's normalization and effort axes.") },
     Q::Vector { id: "dbv2-gpt-5-6-luna-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-gpt-5-6-luna", note: Some("Probes the luna exact record against its family rule.") },
     Q::Vector { id: "dbv2-gpt-5-6-terra-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-gpt-5-6-terra", note: Some("Probes the terra exact record against its family rule.") },
@@ -957,7 +961,7 @@ mod tests {
     }
 
     #[test]
-    fn corpus_has_exactly_168_executable_vectors() {
+    fn corpus_has_exactly_172_executable_vectors() {
         // Locks the vector count so a silent INPUTS edit can't quietly drop
         // coverage; must equal the gate in the TS harness
         // (modelCapabilitiesCorpus.test.mjs).
@@ -966,7 +970,7 @@ mod tests {
             .filter(|q| matches!(q, Q::Vector { .. }))
             .count();
         assert_eq!(
-            vectors, 168,
+            vectors, 172,
             "corpus executable-vector count changed; update this gate deliberately"
         );
     }
@@ -1092,6 +1096,54 @@ mod tests {
         let b = resolve("openai", "gpt-5.1");
         assert_eq!(a, b);
         assert_eq!(a.default_effort, Some(ThinkingEffort::None));
+    }
+
+    #[test]
+    fn haiku_5_5_is_adaptive_with_medium_default() {
+        // Official API id. Default effort is medium, not the high default
+        // the other adaptive families and the unknown-model fallback use.
+        let got = resolve("anthropic", "claude-haiku-5-5");
+        assert_eq!(got.thinking_mode, ThinkingMode::Adaptive);
+        assert_eq!(got.default_effort, Some(ThinkingEffort::Medium));
+        assert_eq!(
+            got.supported_efforts,
+            &[
+                ThinkingEffort::Low,
+                ThinkingEffort::Medium,
+                ThinkingEffort::High,
+                ThinkingEffort::XHigh,
+                ThinkingEffort::Max,
+            ]
+        );
+        assert!(got.registry_label.is_none());
+    }
+
+    #[test]
+    fn haiku_4_5_does_not_match_haiku_5_prefix() {
+        let got = resolve("anthropic", "claude-haiku-4-5");
+        assert_eq!(got.thinking_mode, ThinkingMode::OmitFields);
+        assert_eq!(got.default_effort, Some(ThinkingEffort::High));
+    }
+
+    #[test]
+    fn databricks_haiku_5_5_beats_broad_claude_prefix() {
+        let got = resolve("databricks_v2", "databricks-claude-haiku-5-5");
+        assert_eq!(got.thinking_mode, ThinkingMode::Adaptive);
+        assert_eq!(got.default_effort, Some(ThinkingEffort::Medium));
+        assert_eq!(
+            got.databricks_v2_wire_route,
+            DatabricksV2Route::AnthropicMessages
+        );
+        let haiku_4_5 = resolve("databricks_v2", "databricks-claude-haiku-4-5");
+        assert_eq!(haiku_4_5.thinking_mode, ThinkingMode::OmitFields);
+        assert_eq!(haiku_4_5.default_effort, Some(ThinkingEffort::High));
+        assert_eq!(
+            haiku_4_5.databricks_v2_wire_route,
+            DatabricksV2Route::AnthropicMessages
+        );
+        // The curated exact record beats both the haiku-5 prefix and the
+        // broad claude prefix. The label is the proof it did not fall through.
+        assert_eq!(haiku_4_5.registry_label, Some("Claude Haiku 4.5 (latest)"));
     }
 
     #[test]

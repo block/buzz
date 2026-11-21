@@ -1621,6 +1621,22 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_thinking_config_haiku_5_5_emits_adaptive_and_medium_effort() {
+        // Haiku 5.5 is adaptive. Medium is the API default and the code-harness default.
+        let (thinking, output_config) = anthropic_thinking_config(
+            "anthropic",
+            "claude-haiku-5-5",
+            ThinkingEffort::Medium,
+            32_768,
+        );
+        let t = thinking.expect("thinking must be present for claude-haiku-5-5");
+        assert_eq!(t["type"], "adaptive");
+        assert_eq!(t["display"], "summarized");
+        let oc = output_config.expect("output_config must be present for claude-haiku-5-5");
+        assert_eq!(oc["effort"], "medium");
+    }
+
+    #[test]
     fn anthropic_thinking_config_sonnet_5_emits_adaptive_and_effort() {
         // Sonnet 5 — adaptive family.
         let (thinking, output_config) = anthropic_thinking_config(
@@ -1848,6 +1864,7 @@ mod tests {
             "claude-opus-4-7",
             "claude-opus-4-8",
             "claude-sonnet-5-20250901",
+            "claude-haiku-5-5",
             "claude-fable-5",
             "claude-mythos-5",
         ] {
