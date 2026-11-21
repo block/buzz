@@ -13,14 +13,28 @@
 # tree, not the pushed commit — the always-on `push-head-scope` lane warns when
 # they diverge and CI remains the authoritative gate for that ref.
 # Deliberate deviations:
+# - Pre-push is for fast local feedback only; it never runs the full Rust unit
+#   suite locally. Dependency, config, migration, schema, and cross-crate
+#   effects are left to CI, which runs the full suite on every PR.
+# - `rust-tests` triggers only on `crates/**` and `examples/countdown-bot/**`,
+#   and runs unit tests only for the workspace crates changed in
+#   `origin/main...HEAD` (no reverse dependencies). Changes to `Cargo.toml`,
+#   `Cargo.lock`, `rust-toolchain.toml`, `deny.toml`, `migrations/**`,
+#   `schema/**`, `Justfile`, or `scripts/run-tests.sh` skip `rust-tests`
+#   locally and are verified by CI.
+# - `desktop-tauri-checks` triggers only on `desktop/src-tauri/**` (never
+#   `crates/**`), and scopes to `buzz-terminal` or `buzz-desktop` when only
+#   one changed (skipping `Cargo.lock`-only pushes). Cross-crate and root
+#   dependency effects are left to CI.
 # - The `.github/workflows/ci.yml` path CI adds to its `rust`/`desktop`/`mobile`
 #   filters, `scripts/ci-apt-retry.sh` in `rust`/`desktop`, and
 #   `scripts/ci-hermit-retry.sh` in `rust`/`mobile`, are omitted; a
 #   CI-plumbing-only edit doesn't need a local test run.
 # - `desktop-test` doesn't trigger on `crates/**` changes, though CI's Desktop
 #   JS job does: a few node:test cases read relay/DB crate sources to pin shared
-#   constants. Running the full desktop suite on every crate push would be
-#   expensive locally, so CI is the authoritative check for that coupling.
+#   constants. `node --test` (desktop-test) and `flutter test` (mobile-checks)
+#   have no changed-files/related selector like Vitest, so they keep their
+#   surface-scoped runs and CI covers cross-surface coupling.
 # - The repository-wide `file-size-check` is deliberately unfiltered. Its own
 #   merge-base diff is the path filter; duplicating its governed roots here is
 #   the coverage drift this gate is intended to prevent.
@@ -100,14 +114,14 @@ pre-push:
       run: ./scripts/without-git-env.sh just file-size-check
     rust-tests:
       files: git diff --name-only origin/main...HEAD
-      glob: ["crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "Justfile"]
+      glob: ["crates/**", "examples/countdown-bot/**"]
       env:
         # Lanes run under a pty; with agent shells' TERM=dumb, nextest's
         # progress bar swallows every FAIL line, panic, and summary.
         NEXTEST_SHOW_PROGRESS: counter
         # An orphaned nextest otherwise spins on the dead pty's input.
         NEXTEST_NO_INPUT_HANDLER: "1"
-      run: ./scripts/without-git-env.sh just test-unit
+      run: ./scripts/without-git-env.sh node scripts/pre-push-rust.mjs workspace
     desktop-check:
       files: git diff --name-only origin/main...HEAD
       glob: ["desktop/**", "pnpm-lock.yaml", "Justfile"]
@@ -133,12 +147,13 @@ pre-push:
       env: *pnpm-verify-deps
       run: ./scripts/without-git-env.sh just desktop-test
     desktop-tauri-checks:
-      # Keep local lint parity with Desktop Tauri CI for every path that can
-      # affect the Tauri crate or its path dependencies. Run clippy and tests
-      # serially so parallel pre-push hooks do not contend for Cargo's lock.
+      # Trigger only on desktop/src-tauri/** (never crates/**) and scope to the
+      # changed Tauri crate when straightforward. Cross-crate and root
+      # dependency effects are left to CI. Run clippy and tests serially so
+      # parallel pre-push hooks do not contend for Cargo's lock.
       files: git diff --name-only origin/main...HEAD
-      glob: ["desktop/src-tauri/**", "crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "Justfile"]
-      run: ./scripts/without-git-env.sh sh -c 'just desktop-tauri-clippy && just desktop-tauri-test'
+      glob: ["desktop/src-tauri/**"]
+      run: ./scripts/without-git-env.sh node scripts/pre-push-rust.mjs tauri
     mobile-checks:
       # Run analysis and tests serially so parallel pre-push hooks do not
       # contend for shared Flutter state (.dart_tool, shader bundle).

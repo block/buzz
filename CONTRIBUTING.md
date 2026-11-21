@@ -205,6 +205,13 @@ just test-unit
 Unit tests are self-contained and run without Docker. They cover event
 parsing, filter matching, auth logic, workflow YAML parsing, and more.
 
+For fast local feedback on `git push`, the `pre-push` hook does not run the
+full `just test-unit` suite: `rust-tests` runs unit tests only for the workspace
+crates changed in `origin/main...HEAD` (no reverse dependencies), and
+`desktop-tauri-checks` triggers only on `desktop/src-tauri/**`. Dependency,
+config, migration, schema, and cross-crate effects are left to CI, which runs
+the full suite on every PR.
+
 ### Integration Tests (requires running infrastructure)
 
 ```bash
