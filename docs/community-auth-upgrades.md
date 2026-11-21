@@ -110,7 +110,8 @@ policy operation. This removal does not erase receipts or rewrite schema.
 
 ## Request enforcement and discovery
 
-`off` ignores stored requirements; `shadow` enforces stored true; `enforce` is a
+`off` ignores stored requirements; `shadow` enforces stored true and communities inside the
+`BUZZ_NIP_FI_ENFORCE_PERCENT` cohort; `enforce` is a
 global requirement floor; `deny_protected` denies protected traffic. Report
 `effective_required` alongside stored state so disable under enforce and enable
 under off cannot be mistaken for effective changes. Evaluating policy lookups
