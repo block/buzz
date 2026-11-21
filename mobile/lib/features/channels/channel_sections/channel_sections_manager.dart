@@ -265,6 +265,7 @@ class ChannelSectionsManager {
     );
     _persist();
     markDirty();
+    _onChanged();
   }
 
   void renameSection(String sectionId, String? newName, {String? icon}) {
@@ -286,6 +287,7 @@ class ChannelSectionsManager {
     );
     _persist();
     markDirty();
+    _onChanged();
   }
 
   void deleteSection(String sectionId) {
@@ -301,6 +303,7 @@ class ChannelSectionsManager {
     );
     _persist();
     markDirty();
+    _onChanged();
   }
 
   void moveSectionUp(String sectionId) {
@@ -310,6 +313,7 @@ class ChannelSectionsManager {
     if (idx <= 0) return;
     _swapOrders(sorted, idx, idx - 1);
     markDirty();
+    _onChanged();
   }
 
   void moveSectionDown(String sectionId) {
@@ -319,6 +323,7 @@ class ChannelSectionsManager {
     if (idx < 0 || idx >= sorted.length - 1) return;
     _swapOrders(sorted, idx, idx + 1);
     markDirty();
+    _onChanged();
   }
 
   void assignChannel(String channelId, String sectionId) {
@@ -331,6 +336,7 @@ class ChannelSectionsManager {
     );
     _persist();
     markDirty();
+    _onChanged();
   }
 
   void unassignChannel(String channelId) {
@@ -343,6 +349,7 @@ class ChannelSectionsManager {
     );
     _persist();
     markDirty();
+    _onChanged();
   }
 
   void markDirty() {
