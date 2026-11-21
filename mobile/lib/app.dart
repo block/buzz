@@ -12,6 +12,7 @@ import 'organization_app_entry.dart';
 import 'shared/share/signed_out_share_notice.dart';
 import 'shared/hosted/organization_environment.dart';
 import 'shared/widgets/ios_navigation_metrics.dart';
+import 'shared/widgets/orphaned_keyboard_guard.dart';
 import 'shared/community/paired_community_landing.dart';
 import 'shared/community/community_loading_surface.dart';
 
@@ -354,6 +355,7 @@ class App extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    useOrphanedKeyboardGuard();
     final ageSignalState = ref.watch(ageSignalProvider);
     ref.listen(ageSignalProvider, (_, next) {
       if (next == AgeSignalState.restricted) {

@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../shared/theme/app_theme.dart';
 import '../../shared/widgets/ios_navigation_metrics.dart';
+import '../../shared/widgets/orphaned_keyboard_guard.dart';
 import '../../shared/theme/theme_provider.dart';
 import 'profile_avatar_draft.dart';
 import 'profile_setup_avatar_editor.dart';
@@ -33,6 +34,8 @@ class _ProfileAvatarTheme extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
+    // This engine never mounts App, so it needs its own guard.
+    useOrphanedKeyboardGuard();
     final dark = useState(initial['dark'] == true);
     useEffect(() {
       const appearanceChannel = MethodChannel('buzz/profile_avatar_theme');
