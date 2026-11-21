@@ -40,6 +40,63 @@ fn legacy_app_data_dir_maps_dev_worktree_identifier() {
 }
 
 #[test]
+fn legacy_app_data_dir_maps_desktop_release_identifier() {
+    let current = PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.desktop");
+    let legacy = legacy_app_data_dir(&current).unwrap();
+    assert_eq!(
+        legacy,
+        PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.app")
+    );
+}
+
+#[test]
+fn legacy_app_data_dir_maps_desktop_dev_identifier() {
+    let current = PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.desktop.dev");
+    let legacy = legacy_app_data_dir(&current).unwrap();
+    assert_eq!(
+        legacy,
+        PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.app.dev")
+    );
+}
+
+#[test]
+fn legacy_app_data_dir_maps_desktop_dev_worktree_identifier() {
+    let current =
+        PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.desktop.dev.my-branch");
+    let legacy = legacy_app_data_dir(&current).unwrap();
+    assert_eq!(
+        legacy,
+        PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.app.dev.my-branch")
+    );
+}
+
+#[test]
+fn migrate_legacy_app_data_dir_copies_files_from_desktop_to_buzz_app() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join("xyz.block.buzz.app");
+    let current = dir.path().join("xyz.block.buzz.desktop");
+    std::fs::create_dir_all(legacy.join("agents")).unwrap();
+    std::fs::write(legacy.join("identity.key"), "my-key").unwrap();
+    std::fs::write(
+        legacy.join("agents/managed-agents.json"),
+        r#"[{"name":"agent1"}]"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(&current).unwrap();
+
+    copy_dir_all(&legacy, &current).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(current.join("identity.key")).unwrap(),
+        "my-key"
+    );
+    assert_eq!(
+        std::fs::read_to_string(current.join("agents/managed-agents.json")).unwrap(),
+        r#"[{"name":"agent1"}]"#
+    );
+}
+
+#[test]
 fn copy_dir_all_preserves_nested_files_without_overwriting() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("old");
