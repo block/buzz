@@ -103,9 +103,6 @@ extension _UnreadCatchUp on ChannelsNotifier {
         operation: 'unread catch-up',
         failedChannelIds: failedChannelIds,
       );
-      final authenticIds = events == null
-          ? const <String>{}
-          : await _authenticActivityHeads(events, const {});
       // The relay round-trip above is the window Jed's probes park in: a newer
       // refresh, a community switch or an identity switch here means every
       // write below belongs to a channel list the user has left.
@@ -136,7 +133,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
       // cross-request tombstones: a large batch can evict its own early IDs.
       final batchDeletedIds = <String>{};
       var appliedDeletion = false;
-      var activityAdvanced = false;
+      final activityCandidates = <NostrEvent>[];
       for (final event in events) {
         final channelId = event.channelId;
         if (channelById.containsKey(channelId) ||
@@ -187,13 +184,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
             _unreadDeletedIdsByChannel[channelId]?.contains(event.id) == true) {
           continue;
         }
-        if (_activity.note(
-          channelId,
-          event,
-          (event) => authenticIds.contains(event.id),
-        )) {
-          activityAdvanced = true;
-        }
+        activityCandidates.add(event);
         _noteThreadChannel(event, channelId);
         if (event.pubkey.toLowerCase() == myPk.toLowerCase()) continue;
         if (readAt != null && event.createdAt <= readAt) continue;
@@ -247,27 +238,35 @@ extension _UnreadCatchUp on ChannelsNotifier {
       // from here, so a second check would be dead code.
       // Recorded events also advance `lastMessageAt`, as live events do: a
       // deadline-unavailable latest-message batch leaves it unset.
-      // Newer activity also republishes, so the Active filter sees it.
-      // So does a channel whose activity became known or unknown.
-      // A channel with a gap to read stays as it was until that read answers.
+      // So does a channel whose activity became unknown. Newer activity and
+      // channels that became known republish once their signatures are
+      // checked. A channel with a gap to read stays as it was until that read
+      // answers.
       gapFilters.removeWhere((id, _) => failedChannelIds.contains(id));
       deferredGaps.removeAll(failedChannelIds);
       final coverageChanged =
-          _activity.noteCatchUp(
-            catchUpChannelIds
-                .difference(gapFilters.keys.toSet())
-                .difference(deferredGaps),
-            failedChannelIds,
-            sentAt: requestedAt,
-          ) |
           _activity.noteCatchUp(deferredGaps, deferredGaps) |
           _activity.forgetHeads(batchDeletedIds);
       if (recordedAtByChannel.isNotEmpty ||
           appliedDeletion ||
-          activityAdvanced ||
           coverageChanged) {
         _publishUnreadCatchUp(recordedAtByChannel);
       }
+      // Activity waits on signature checks, so it lands after the unread
+      // state rather than holding it back.
+      unawaited(
+        _noteCatchUpActivity(
+          activityCandidates,
+          catchUpChannelIds
+              .difference(gapFilters.keys.toSet())
+              .difference(deferredGaps),
+          failedChannelIds,
+          requestedAt,
+          batchDeletedIds,
+          fence,
+          subscriptionGeneration,
+        ),
+      );
       if (gapFilters.isNotEmpty) {
         unawaited(
           _catchUpActivityGaps(
@@ -302,6 +301,56 @@ extension _UnreadCatchUp on ChannelsNotifier {
         }
       }
     }
+  }
+
+  /// Records the activity an unread catch-up found once its signatures are
+  /// checked, and marks [covered] channels known, except [failedIds] and those
+  /// whose verified head was deleted meanwhile.
+  Future<void> _noteCatchUpActivity(
+    List<NostrEvent> candidates,
+    Set<String> covered,
+    Set<String> failedIds,
+    int sentAt,
+    Set<String> deletedIds,
+    _ChannelRefreshFence fence,
+    int subscriptionGeneration,
+  ) async {
+    Set<String>? authenticIds;
+    try {
+      authenticIds = await _authenticActivityHeads(candidates, deletedIds);
+    } catch (error) {
+      debugPrint('[ChannelsNotifier] activity verification failed: $error');
+    }
+    if (!_lifecycleRef.mounted ||
+        _isCatchUpRetired(fence, subscriptionGeneration)) {
+      return;
+    }
+    if (authenticIds == null) {
+      if (_activity.noteCatchUp(covered, covered)) _publishUnreadCatchUp({});
+      return;
+    }
+    var changed = false;
+    for (final event in candidates) {
+      final channelId = event.channelId!;
+      if (_unscopedUnreadDeletedIds.contains(event.id) ||
+          _unreadDeletedIdsByChannel[channelId]?.contains(event.id) == true) {
+        continue;
+      }
+      changed |= _activity.note(
+        channelId,
+        event,
+        (event) => authenticIds!.contains(event.id),
+      );
+    }
+    final stale = _deletedHeadChannels(candidates, authenticIds, deletedIds);
+    changed |=
+        _activity.noteCatchUp(
+          covered.difference(stale),
+          failedIds,
+          sentAt: sentAt,
+        ) |
+        _activity.noteCatchUp(stale, stale);
+    if (changed) _publishUnreadCatchUp(const {});
   }
 
   /// Reads the newest post in each channel's [_activityGap], after the unread
@@ -353,7 +402,12 @@ extension _UnreadCatchUp on ChannelsNotifier {
         (event) => authenticIds.contains(event.id),
       );
     }
-    final failed = events == null ? channelIds : failedChannelIds;
+    final failed = events == null
+        ? channelIds
+        : {
+            ...failedChannelIds,
+            ..._deletedHeadChannels(events, authenticIds, deletedIds),
+          };
     changed |= _activity.noteCatchUp(channelIds, failed, sentAt: sentAt);
     if (changed) _publishUnreadCatchUp(const {});
   }
@@ -373,6 +427,24 @@ extension _UnreadCatchUp on ChannelsNotifier {
     ..._unscopedUnreadDeletedIds,
     for (final ids in _unreadDeletedIdsByChannel.values) ...ids,
   });
+
+  /// The channels whose verified head among [events] was deleted, in
+  /// [deletedIds] or by a deletion seen since it was verified. Their older
+  /// posts went unchecked, so the read leaves them unknown.
+  Set<String> _deletedHeadChannels(
+    List<NostrEvent> events,
+    Set<String> authenticIds,
+    Set<String> deletedIds,
+  ) => {
+    for (final event in events)
+      if (event.channelId case final channelId?
+          when authenticIds.contains(event.id) &&
+              (deletedIds.contains(event.id) ||
+                  _unscopedUnreadDeletedIds.contains(event.id) ||
+                  _unreadDeletedIdsByChannel[channelId]?.contains(event.id) ==
+                      true))
+        channelId,
+  };
 
   /// Where a channel's catch-up starts.
   ///

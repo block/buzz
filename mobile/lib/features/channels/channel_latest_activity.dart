@@ -20,6 +20,10 @@ class _ChannelActivity {
   // is dropped once newer reads begin.
   final Map<int, Map<String, ({int at, String id})>> _arrivalsByRead = {};
   final Map<int, int> _readSentAt = {};
+  // Per latest-message read in flight, the channels whose latest post was
+  // deleted since it began. Its answer may still hold that post, so it leaves
+  // them unknown for the next list read to ask again.
+  final Map<int, Set<String>> _forgottenByRead = {};
   int _nextRead = 0;
   // Reads begun before the last [clear] belong to another scope.
   int _firstRead = 0;
@@ -77,6 +81,11 @@ class _ChannelActivity {
     for (final channelId in channelIds) {
       _latest.remove(channelId);
       _known.remove(channelId);
+      for (final MapEntry(key: read, value: arrivals)
+          in _arrivalsByRead.entries) {
+        arrivals.remove(channelId);
+        _forgottenByRead[read]!.add(channelId);
+      }
     }
     return channelIds.isNotEmpty;
   }
@@ -89,10 +98,12 @@ class _ChannelActivity {
     final read = _nextRead++;
     _arrivalsByRead[read] = {};
     _readSentAt[read] = currentUnixSeconds();
+    _forgottenByRead[read] = {};
     if (_arrivalsByRead.length > 8) {
       final oldest = _arrivalsByRead.keys.first;
       _arrivalsByRead.remove(oldest);
       _readSentAt.remove(oldest);
+      _forgottenByRead.remove(oldest);
     }
     return read;
   }
@@ -101,7 +112,8 @@ class _ChannelActivity {
   /// known even when it has no messages, and its activity becomes the read's
   /// newest authentic message or a newer arrival since the read began, so a
   /// deleted latest post stops counting. A failed batch or channel, or one
-  /// whose messages all fail verification, stays unknown. [authenticIds] is
+  /// whose messages all fail verification, stays unknown, as does one whose
+  /// latest post was deleted while the read was in flight. [authenticIds] is
   /// [authenticHeadIds] of [events].
   void noteRead(
     int read,
@@ -113,6 +125,7 @@ class _ChannelActivity {
     if (read < _firstRead) return;
     final arrivals = _arrivalsByRead.remove(read);
     final sentAt = _readSentAt.remove(read);
+    final forgotten = _forgottenByRead.remove(read) ?? const {};
     if (events == null) return;
     final byChannel = <String, List<NostrEvent>>{};
     for (final event in events) {
@@ -135,7 +148,9 @@ class _ChannelActivity {
     }
     final covered = <String>{};
     for (final channelId in requested) {
-      if (failedIds.contains(channelId) || invalid.contains(channelId)) {
+      if (failedIds.contains(channelId) ||
+          invalid.contains(channelId) ||
+          forgotten.contains(channelId)) {
         continue;
       }
       covered.add(channelId);
@@ -156,6 +171,7 @@ class _ChannelActivity {
       }
     }
     for (final MapEntry(key: channelId, value: head) in newest.entries) {
+      if (forgotten.contains(channelId)) continue;
       if (arrivals == null || !covered.contains(channelId)) {
         _raise(channelId, head);
       }
@@ -277,6 +293,7 @@ class _ChannelActivity {
     _catchUpFailed.clear();
     _arrivalsByRead.clear();
     _readSentAt.clear();
+    _forgottenByRead.clear();
     _coveredAt.clear();
     _firstRead = _nextRead;
   }

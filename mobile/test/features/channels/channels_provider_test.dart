@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:ui' as ui;
 
 import 'package:fake_async/fake_async.dart';
@@ -77,6 +78,142 @@ void main() {
   _savedDirectoryCases();
   _threadInterestCases();
   const myPk = 'me';
+
+  test('unread readiness does not wait on activity signature checks', () async {
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final mention = _signedPost(
+      now - 5,
+      content: 'mention',
+      key: _aliceKey,
+      tags: [
+        ['p', _activityPk],
+      ],
+    );
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, _activityPk)],
+      metadata: [_meta(id: _channelA, name: 'general')],
+      recentMessages: [mention],
+    )..pauseNextUnreadCatchUpQuery();
+    final container = _buildContainer(
+      session: session,
+      overrides: [_testPubkeyProvider.overrideWith(_ActivityPubkey.new)],
+    );
+    addTearDown(container.dispose);
+    await container.read(channelsProvider.future);
+    final notifier = container.read(channelsProvider.notifier);
+    await session.nextUnreadCatchUpQueryStarted;
+    final prior = debugRunActivityChecks;
+    final started = Completer<void>();
+    final release = Completer<void>();
+    debugRunActivityChecks = (checks) async {
+      started.complete();
+      await release.future;
+      return checks();
+    };
+    try {
+      var ready = false;
+      final presentation = notifier.waitForUnreadCatchUp().then(
+        (_) => ready = true,
+      );
+      session.resumePausedUnreadCatchUpQuery();
+      await started.future;
+      await _settle();
+      final readyDuringCheck = ready;
+      final unreadDuringCheck =
+          notifier.observedUnreadEventsByChannel[_channelA]?.containsKey(
+            mention.id,
+          ) ??
+          false;
+      release.complete();
+      await presentation;
+      expect(
+        notifier.observedUnreadEventsByChannel[_channelA]?.keys,
+        contains(mention.id),
+      );
+      expect((readyDuringCheck, unreadDuringCheck), (true, true));
+    } finally {
+      debugRunActivityChecks = prior;
+      if (!release.isCompleted) release.complete();
+    }
+  });
+
+  test(
+    'a list read cannot restore a latest post deleted during its signature checks',
+    () async {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final old = _signedPost(now - 10 * 86400, content: 'old');
+      final newest = _signedPost(now - 5, content: 'newest');
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, _activityPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        recentMessages: [old, newest],
+        enforceHistoryLimits: true,
+      );
+      final container = _buildContainer(
+        session: session,
+        overrides: [
+          _testPubkeyProvider.overrideWith(_ActivityPubkey.new),
+          readStateProvider.overrideWith(_ActivityReadState.new),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      final notifier = container.read(channelsProvider.notifier);
+      await notifier.waitForUnreadCatchUp();
+      expect(notifier.activityFor(_channelA).at, newest.createdAt);
+      (container.read(readStateProvider.notifier) as _ActivityReadState)
+          .markReadThrough(_channelA, now);
+      final prior = debugRunActivityChecks;
+      final started = Completer<void>();
+      final release = Completer<void>();
+      debugRunActivityChecks = (checks) async {
+        final result = checks();
+        if (!started.isCompleted) {
+          started.complete();
+          await release.future;
+        }
+        return result;
+      };
+      try {
+        final refreshing = notifier.refresh();
+        await started.future;
+        final before = session.queryBatches.length;
+        final deletion = NostrEvent.fromJson(
+          signNostrEvent(
+            kind: EventKind.deletion,
+            content: '',
+            secretKey: _activityKey,
+            createdAt: now - 1,
+            tags: [
+              ['h', _channelA],
+              ['e', newest.id],
+            ],
+          ).toMap(),
+        );
+        session.recentMessages = [old, deletion];
+        session.emit(deletion);
+        await _waitUntil(() => !notifier.activityFor(_channelA).known);
+        expect(session.queryBatches.length, before);
+        release.complete();
+        await refreshing;
+        await notifier.waitForUnreadCatchUp();
+        final afterRefresh = notifier.activityFor(_channelA);
+        final beforeReconnect = session.queryBatches.length;
+        session.setStatus(SessionStatus.reconnecting);
+        session.setStatus(SessionStatus.connected);
+        await _waitUntil(() => session.queryBatches.length > beforeReconnect);
+        await notifier.waitForUnreadCatchUp();
+        final afterReconnect = notifier.activityFor(_channelA);
+        expect(
+          [afterRefresh.at, afterReconnect.at],
+          [isNot(newest.createdAt), old.createdAt],
+        );
+      } finally {
+        debugRunActivityChecks = prior;
+        if (!release.isCompleted) release.complete();
+      }
+    },
+  );
 
   test(
     'discovers open channels for a user with zero channel memberships',
@@ -2842,6 +2979,119 @@ void main() {
     session.setStatus(SessionStatus.connected);
     await _waitUntil(() => !notifier.activityFor(_channelA).known);
   });
+
+  for (final (catchUp, before) in [
+    (true, true),
+    (true, false),
+    (false, false),
+  ]) {
+    test(
+      'a latest post deleted during signature checks leaves no stale activity '
+      '(catch-up: $catchUp, deleted before the read: $before)',
+      () async {
+        final configured = debugRunActivityChecks;
+        addTearDown(() => debugRunActivityChecks = configured);
+        debugRunActivityChecks = (checks) => Isolate.run(checks);
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final old = _signedPost(now - 10 * 86400);
+        final middle = _signedPost(now - 90);
+        final head = _signedPost(now - 60);
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, _activityPk)],
+          metadata: [_meta(id: _channelA, name: 'general')],
+          recentMessages: [old, if (!catchUp) head],
+          enforceHistoryLimits: true,
+        );
+        final container = _buildContainer(
+          session: session,
+          overrides: [
+            _testPubkeyProvider.overrideWith(_ActivityPubkey.new),
+            readStateProvider.overrideWith(_ActivityReadState.new),
+          ],
+        );
+        addTearDown(container.dispose);
+        final listening = container.listen(
+          channelFilterActivityProvider(_channelA),
+          (_, _) {},
+        );
+        addTearDown(listening.close);
+        await container.read(channelsProvider.future);
+        final notifier = container.read(channelsProvider.notifier);
+        await notifier.waitForUnreadCatchUp();
+        expect(notifier.activityFor(_channelA), (
+          known: true,
+          at: catchUp ? old.createdAt : head.createdAt,
+        ));
+        final sampled = Completer<void>();
+        final release = Completer<void>();
+        debugRunActivityChecks = (checks) async {
+          final verified = await Isolate.run(checks);
+          if (!before && !sampled.isCompleted && verified.contains(head.id)) {
+            sampled.complete();
+            await release.future;
+          }
+          return verified;
+        };
+        session.recentMessages = [old, if (catchUp) middle, head];
+        Future<void>? refreshing;
+        if (catchUp) {
+          if (before) session.pauseNextUnreadCatchUpQuery();
+          session.setStatus(SessionStatus.reconnecting);
+          session.setStatus(SessionStatus.connected);
+        } else {
+          // The other device has already read through the deletion's second.
+          (container.read(readStateProvider.notifier) as _ActivityReadState)
+              .markReadThrough(_channelA, now);
+          refreshing = notifier.refresh();
+        }
+        if (before) {
+          await session.nextUnreadCatchUpQueryStarted;
+        } else {
+          await sampled.future.timeout(const Duration(seconds: 5));
+        }
+        final deletion = NostrEvent.fromJson(
+          signNostrEvent(
+            kind: EventKind.deletion,
+            secretKey: _activityKey,
+            content: '',
+            createdAt: now,
+            tags: [
+              ['h', _channelA],
+              ['e', head.id],
+            ],
+          ).toMap(),
+        );
+        session.recentMessages = [old, if (catchUp) middle, deletion];
+        session.emit(deletion);
+        await _settle();
+        release.complete();
+        if (before) session.resumePausedUnreadCatchUpQuery();
+        if (refreshing != null) await refreshing;
+        await notifier.waitForUnreadCatchUp();
+        await _settle();
+        final result = notifier.activityFor(_channelA);
+        if (catchUp) {
+          if (before) expect(result, (known: true, at: middle.createdAt));
+          expect(result.known && result.at == old.createdAt, isFalse);
+        } else {
+          final pre = session.queryBatches.length;
+          session.setStatus(SessionStatus.reconnecting);
+          session.setStatus(SessionStatus.connected);
+          await _waitUntil(
+            () => session.queryBatches
+                .skip(pre)
+                .any((b) => b.every((f) => f.since != null)),
+          );
+          await notifier.waitForUnreadCatchUp();
+          await _settle();
+          expect(notifier.activityFor(_channelA), (
+            known: true,
+            at: old.createdAt,
+          ));
+        }
+      },
+    );
+  }
 
   test('live channel events update channel lastMessageAt', () async {
     final session = _FakeRelaySession(
