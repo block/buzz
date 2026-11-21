@@ -30,6 +30,12 @@
       "name": "Agent-managed profiles",
       "description": "Let agents manage their own relay name and avatar instead of restoring the desktop copy",
       "platforms": ["desktop"]
+    },
+    {
+      "id": "agentActivityPanel",
+      "name": "Agent activity panel",
+      "description": "File activity map with DVR replay for agent sessions",
+      "platforms": ["desktop"]
     }
   ]
 }
