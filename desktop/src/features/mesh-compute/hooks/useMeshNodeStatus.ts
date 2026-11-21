@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { meshNodeStatus } from "@/shared/api/tauriMesh";
 import type { MeshNodeStatus } from "@/shared/api/tauriMesh";
+import { useDocumentVisible } from "@/shared/lib/useDocumentVisible";
 
 /**
  * Polls `mesh_node_status` faster than availability — lifecycle transitions
@@ -44,7 +45,10 @@ export function useMeshNodeStatus(): {
   React.useEffect(() => fetchOnce(), [fetchOnce]);
 
   // Fast poll while in a transitioning state; slow poll while steady or off.
+  const documentVisible = useDocumentVisible();
   React.useEffect(() => {
+    // Nobody can see the status while hidden; skip the IPC wakeups.
+    if (!documentVisible) return;
     const transitioning =
       status?.state === "starting" || status?.state === "stopping";
     const interval = transitioning ? 750 : 4000;
@@ -52,7 +56,7 @@ export function useMeshNodeStatus(): {
       fetchOnce();
     }, interval);
     return () => window.clearInterval(handle);
-  }, [status?.state, fetchOnce]);
+  }, [status?.state, fetchOnce, documentVisible]);
 
   return { status, error, refresh: fetchOnce };
 }

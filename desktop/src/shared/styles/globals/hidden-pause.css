@@ -1,0 +1,12 @@
+/*
+ * While the window is hidden (minimized / occluded / other desktop) nothing
+ * visible can benefit from running animations, but with background throttling
+ * disabled the compositor and style engine can keep ticking them. Pausing
+ * (not cancelling) keeps state intact: animations resume where they left off.
+ * The attribute is toggled by shared/lib/pauseAnimationsWhenHidden.ts.
+ */
+html[data-window-hidden] *,
+html[data-window-hidden] *::before,
+html[data-window-hidden] *::after {
+  animation-play-state: paused !important;
+}
