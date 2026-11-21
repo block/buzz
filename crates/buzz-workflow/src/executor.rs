@@ -139,22 +139,37 @@ fn resolve_variable(
         return trigger_ctx.get_field(field).map(|s| s.to_owned());
     }
 
-    // Pattern: `steps.STEP_ID.output.FIELD`
     if let Some(rest) = path.strip_prefix("steps.") {
-        let mut parts = rest.splitn(3, '.');
-        let step_id = parts.next()?;
-        let middle = parts.next()?; // must be "output"
-        let field = parts.next()?;
-
-        if middle != "output" {
-            return None;
-        }
-
+        let (step_id, field) = parse_step_output_path(rest)?;
         let output = step_outputs.get(step_id)?;
         return json_get_str(output, field);
     }
 
     None
+}
+
+/// Split the part of a `steps.STEP_ID.output.FIELD` path after `steps.` into
+/// `(STEP_ID, FIELD)`. Any other shape can never resolve.
+pub(crate) fn parse_step_output_path(rest: &str) -> Option<(&str, &str)> {
+    let mut parts = rest.splitn(3, '.');
+    let step_id = parts.next()?;
+    let middle = parts.next()?;
+    let field = parts.next()?;
+    (middle == "output").then_some((step_id, field))
+}
+
+/// The variable path of every `{{...}}` placeholder [`resolve_template`]
+/// would try to resolve, with filters stripped.
+pub(crate) fn template_variable_paths(template: &str) -> impl Iterator<Item = &str> {
+    let mut remaining = template;
+    std::iter::from_fn(move || {
+        let start = remaining.find("{{")?;
+        let after = &remaining[start + 2..];
+        let end = after.find("}}")?;
+        remaining = &after[end + 2..];
+        let expr = after[..end].trim();
+        Some(expr.split('|').next().unwrap_or("").trim())
+    })
 }
 
 /// Navigate a JSON value by a single key and return it as a string.
@@ -330,6 +345,13 @@ pub fn build_eval_context(
     Ok(ctx)
 }
 
+/// True when some run can define `name` in the [`build_eval_context`]
+/// context: every trigger field, webhook body field included, is
+/// `trigger_*`, and every step output is `steps_<id>_output_<field>`.
+pub(crate) fn may_be_run_variable(name: &str) -> bool {
+    name.starts_with("trigger_") || (name.starts_with("steps_") && name.contains("_output_"))
+}
+
 /// Convert a `serde_json::Value` to an `evalexpr::Value`.
 fn json_value_to_eval(v: &JsonValue) -> evalexpr::Value {
     use evalexpr::Value as EV;
@@ -357,6 +379,14 @@ fn json_value_to_eval(v: &JsonValue) -> evalexpr::Value {
 /// blocking thread and impose a hard timeout.
 const EVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// Maximum byte length of an `if:` or trigger `filter` expression.
+///
+/// Bounds expression complexity to prevent pathological evaluation times.
+/// The spawn_blocking thread cannot be cancelled by tokio::time::timeout —
+/// it will run to completion even after timeout. Length-limiting the expression
+/// prevents worst-case O(2^n) evaluation paths.
+pub(crate) const MAX_CONDITION_LEN: usize = 4096;
+
 /// Evaluate a boolean `if:` expression against the current execution context.
 ///
 /// Returns `true` if the step should run, `false` if it should be skipped.
@@ -371,15 +401,10 @@ pub async fn evaluate_condition(
     let ctx = build_eval_context(trigger_ctx, step_outputs)?;
     let expr_owned = expr.to_owned();
 
-    // Bound expression complexity to prevent pathological evaluation times.
-    // The spawn_blocking thread cannot be cancelled by tokio::time::timeout —
-    // it will run to completion even after timeout. Length-limiting the expression
-    // prevents worst-case O(2^n) evaluation paths.
-    const MAX_EXPR_LEN: usize = 4096;
-    if expr_owned.len() > MAX_EXPR_LEN {
+    if expr_owned.len() > MAX_CONDITION_LEN {
         return Err(WorkflowError::ConditionError(format!(
             "condition expression exceeds {} byte limit",
-            MAX_EXPR_LEN
+            MAX_CONDITION_LEN
         )));
     }
 
@@ -2159,7 +2184,7 @@ mod tests {
         // contributing any rendered characters; the whole definition is out.
         let webhook_selects_text = format!(
             "  - id: hook\n    action: call_webhook\n    url: https://example.com/x\n\
-             {send}    if: steps.hook.output.status == 200\n"
+             {send}    if: steps_hook_output_status == 200\n"
         );
         assert!(!definition_may_direct_agents(&def_with_steps(
             &webhook_selects_text

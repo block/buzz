@@ -631,13 +631,13 @@ Parses, validates, and executes channel-scoped workflow definitions. In multi-co
 name: "Incident Triage"
 trigger:
   on: message_posted
-  filter: "str_contains(trigger_text, 'P1')"
+  filter: 'str_contains(trigger_text, "P1")'
 steps:
   - id: notify
     action: send_message
     text: "P1 incident detected: {{trigger.text}}"
   - id: page
-    if: "str_contains(trigger_text, 'production')"
+    if: 'str_contains(trigger_text, "production")'
     action: request_approval
     from: "{{trigger.author}}"
     message: "Page on-call?"
@@ -661,7 +661,7 @@ Note: Both `TriggerDef` and `ActionDef` use serde internally-tagged enums. Trigg
 
 **Template variables:** `{{trigger.text}}`, `{{trigger.author}}`, `{{steps.ID.output.FIELD}}`. Single-pass resolution (not recursive). Unknown variables left as literal text.
 
-**Condition evaluation:** `evalexpr` with `HashMapContext`. Dot notation converted to underscores (`trigger.text` → `trigger_text`). Custom functions registered: `str_contains`, `str_starts_with`, `str_ends_with`, `str_len`. 100ms timeout prevents adversarial expressions from blocking.
+**Condition evaluation:** `evalexpr` with `HashMapContext`. Dot notation converted to underscores (`trigger.text` → `trigger_text`). Custom functions registered: `str_contains`, `str_starts_with`, `str_ends_with`, `str_len`. 100ms timeout prevents adversarial expressions from blocking. String literals use double quotes; a single-quoted or unquoted value is read as a variable. Saving rejects a `filter` or `if` that can never evaluate (a syntax error, an assignment, an unknown variable, or over 4096 bytes) and a `{{steps...}}` reference not shaped `steps.ID.output.FIELD`.
 
 **Concurrency:** `Arc<Semaphore>` with 100 permits. `try_acquire()` — returns `CapacityExceeded` immediately rather than queuing.
 

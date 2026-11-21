@@ -154,6 +154,54 @@ pub enum ActionDef {
     },
 }
 
+impl TriggerDef {
+    /// The evalexpr `filter` of a message-based trigger, if it has one.
+    pub fn filter(&self) -> Option<&str> {
+        match self {
+            TriggerDef::MessagePosted { filter }
+            | TriggerDef::ReactionAdded { filter, .. }
+            | TriggerDef::DiffPosted { filter } => filter.as_deref(),
+            TriggerDef::Schedule { .. } | TriggerDef::Webhook => None,
+        }
+    }
+}
+
+impl ActionDef {
+    /// Every field whose `{{...}}` placeholders
+    /// [`resolve_step_templates`](crate::executor::resolve_step_templates)
+    /// substitutes. Patterns name every field so a new one must be sorted here.
+    fn template_fields(&self) -> Vec<&str> {
+        match self {
+            ActionDef::SendMessage {
+                text,
+                channel,
+                reply_in_thread: _,
+            } => [Some(text.as_str()), channel.as_deref()]
+                .into_iter()
+                .flatten()
+                .collect(),
+            ActionDef::SendDm { to, text } => vec![to, text],
+            ActionDef::SetChannelTopic { topic } => vec![topic],
+            ActionDef::AddReaction { emoji } => vec![emoji],
+            ActionDef::CallWebhook {
+                url,
+                method: _,
+                headers,
+                body,
+            } => std::iter::once(url.as_str())
+                .chain(headers.iter().flat_map(|h| h.values().map(String::as_str)))
+                .chain(body.as_deref())
+                .collect(),
+            ActionDef::RequestApproval {
+                from,
+                message,
+                timeout: _,
+            } => vec![from, message],
+            ActionDef::Delay { duration: _ } => Vec::new(),
+        }
+    }
+}
+
 impl WorkflowDef {
     /// True when any step performs an action that can exfiltrate channel data
     /// outside the workflow channel (`call_webhook` or `send_dm`).
@@ -247,6 +295,30 @@ impl WorkflowDef {
             }
         }
 
+        // A broken filter or `if` saves fine but then fails on every
+        // evaluation: the workflow is skipped on every event, or the run fails
+        // at that step. Reject what can never evaluate now instead.
+        if let Some(filter) = self.trigger.filter() {
+            // Filters run against a trigger built from the event alone.
+            let event_ctx = crate::executor::build_eval_context(
+                &crate::executor::TriggerContext::default(),
+                &HashMap::new(),
+            )?;
+            validate_condition(filter, "trigger filter", |name| {
+                evalexpr::Context::get_value(&event_ctx, name).is_some()
+            })?;
+        }
+        for step in &self.steps {
+            if let Some(expr) = &step.if_expr {
+                validate_condition(
+                    expr,
+                    &format!("step '{}' if", step.id),
+                    crate::executor::may_be_run_variable,
+                )?;
+            }
+            validate_step_output_references(step)?;
+        }
+
         if let TriggerDef::Schedule { cron, interval } = &self.trigger {
             if cron.is_none() && interval.is_none() {
                 return Err(WorkflowError::InvalidDefinition(
@@ -282,6 +354,99 @@ impl WorkflowDef {
 
         Ok(())
     }
+}
+
+/// Reject an evalexpr condition that fails on every evaluation.
+///
+/// Conditions are evaluated with `eval_boolean_with_context` on an immutable
+/// context, and evalexpr 11 evaluates every operand (no short-circuiting), so
+/// a syntax error, an assignment, an over-long expression, or a read of a
+/// variable the context never defines fails every time. Anything else may
+/// work depending on run-time values and is accepted.
+fn validate_condition(
+    expr: &str,
+    location: &str,
+    is_defined: impl Fn(&str) -> bool,
+) -> Result<(), WorkflowError> {
+    let invalid =
+        |reason: String| WorkflowError::InvalidDefinition(format!("{location}: {reason}"));
+    if expr.trim().is_empty() {
+        return Err(invalid("expression is empty".into()));
+    }
+    let limit = crate::executor::MAX_CONDITION_LEN;
+    if expr.len() > limit {
+        return Err(invalid(format!(
+            "expression is {} bytes, over the {limit}-byte limit",
+            expr.len()
+        )));
+    }
+    let tree = evalexpr::build_operator_tree(expr)
+        .map_err(|e| invalid(format!("invalid expression '{expr}': {e}")))?;
+    // The parser accepts a dangling operator (`a &&`), but evaluation
+    // requires exactly this many operands.
+    let missing_operand = tree.iter().any(|node| {
+        use evalexpr::Operator as Op;
+        let operands = match node.operator() {
+            Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Mod
+            | Op::Exp
+            | Op::Eq
+            | Op::Neq
+            | Op::Gt
+            | Op::Lt
+            | Op::Geq
+            | Op::Leq
+            | Op::And
+            | Op::Or => 2,
+            Op::Neg | Op::Not => 1,
+            _ => return false,
+        };
+        node.children().len() != operands
+    });
+    if missing_operand {
+        return Err(invalid(format!(
+            "invalid expression '{expr}': an operator is missing an operand"
+        )));
+    }
+    if let Some(name) = tree.iter_write_variable_identifiers().next() {
+        return Err(invalid(format!(
+            "'{expr}' assigns to '{name}'; compare with '==' instead"
+        )));
+    }
+    if let Some(name) = tree
+        .iter_read_variable_identifiers()
+        .find(|n| !is_defined(n))
+    {
+        return Err(invalid(format!(
+            "'{expr}' reads unknown variable '{name}'; string values need double quotes"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject a `{{steps...}}` placeholder that is not shaped
+/// `steps.<id>.output.<field>`: the resolver leaves it as literal text on
+/// every run. Step ids are not checked, because a run resumed after an edit
+/// keeps the outputs of steps the new revision may have renamed.
+fn validate_step_output_references(step: &Step) -> Result<(), WorkflowError> {
+    for template in step.action.template_fields() {
+        for path in crate::executor::template_variable_paths(template) {
+            let Some(rest) = path.strip_prefix("steps.") else {
+                continue;
+            };
+            if crate::executor::parse_step_output_path(rest).is_none() {
+                return Err(WorkflowError::InvalidDefinition(format!(
+                    "step '{}': '{{{{{path}}}}}' never resolves; \
+                     reference step outputs as {{{{steps.<id>.output.<field>}}}}",
+                    step.id
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Enforce the recipient forms before trigger-controlled template resolution.
@@ -1014,5 +1179,274 @@ mod tests {
             trigger,
             TriggerDef::DiffPosted { filter: Some(_) }
         ));
+    }
+
+    // ── Expressions and templates that can never work at run time ──────────
+
+    use crate::executor::{evaluate_condition, resolve_template, TriggerContext};
+    use serde_json::{json, Value as JsonValue};
+
+    const MESSAGE_TRIGGERS: [&str; 3] = ["message_posted", "reaction_added", "diff_posted"];
+
+    /// YAML is a superset of JSON, so build definitions as JSON to avoid
+    /// hand-escaping quotes inside expressions.
+    fn with_filter(on: &str, filter: &str) -> String {
+        json!({
+            "name": "Filtered",
+            "trigger": { "on": on, "filter": filter },
+            "steps": [{ "id": "s1", "action": "send_message", "text": "hi" }],
+        })
+        .to_string()
+    }
+
+    fn with_steps(trigger: JsonValue, after: JsonValue) -> String {
+        json!({
+            "name": "Two steps",
+            "trigger": trigger,
+            "steps": [
+                { "id": "hit", "action": "call_webhook", "url": "https://hooks.example.com/x" },
+                after,
+            ],
+        })
+        .to_string()
+    }
+
+    fn with_step_if(trigger: JsonValue, if_expr: &str) -> String {
+        with_steps(
+            trigger,
+            json!({ "id": "after", "if": if_expr, "action": "send_message", "text": "hi" }),
+        )
+    }
+
+    fn rejection(yaml: &str) -> String {
+        match parse_yaml(yaml) {
+            Err(WorkflowError::InvalidDefinition(msg)) => msg,
+            other => panic!("expected InvalidDefinition, got: {other:?}"),
+        }
+    }
+
+    /// A fully populated run: every trigger field is set, a webhook field
+    /// `ref` is present, and the earlier `hit` step has produced output.
+    fn runtime_context() -> (TriggerContext, HashMap<String, JsonValue>) {
+        let trigger = TriggerContext {
+            text: "P1 incident!".into(),
+            author: "a".repeat(64),
+            channel_id: "channel".into(),
+            timestamp: "1700000000".into(),
+            emoji: "fire".into(),
+            message_id: "b".repeat(64),
+            is_reply: false,
+            webhook_fields: HashMap::from([("ref".to_owned(), "main".to_owned())]),
+        };
+        let outputs = HashMap::from([("hit".to_owned(), json!({ "status": 200, "body": "ok" }))]);
+        (trigger, outputs)
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_trigger_filters_that_can_never_evaluate() {
+        let cases = [
+            ("str_contains(trigger_text, \"P1\"", "invalid expression"),
+            ("trigger_text == \"a\" &&", "invalid expression"),
+            ("trigger_text ==", "invalid expression"),
+            ("!", "invalid expression"),
+            // An unquoted value is a variable read, which no event defines.
+            ("trigger_author != npub1example", "'npub1example'"),
+            // evalexpr string literals use double quotes only.
+            ("str_contains(trigger_text, 'P1')", "'P1'"),
+            ("trigger_text == \"a\" || text == \"a\"", "'text'"),
+            ("trigger_text = \"deploy\"", "'=='"),
+            ("", "empty"),
+            ("   ", "empty"),
+        ];
+        for on in MESSAGE_TRIGGERS {
+            for (filter, needle) in cases {
+                let msg = rejection(&with_filter(on, filter));
+                assert!(
+                    msg.contains("trigger filter") && msg.contains(needle),
+                    "{on} {filter:?}: {msg}"
+                );
+            }
+        }
+        // Each rejected filter also fails on every real event.
+        let (trigger, _) = runtime_context();
+        let trigger = TriggerContext {
+            webhook_fields: HashMap::new(),
+            ..trigger
+        };
+        for (filter, _) in cases {
+            assert!(
+                evaluate_condition(filter, &trigger, &HashMap::new())
+                    .await
+                    .is_err(),
+                "{filter:?} evaluated at run time, so it must not be rejected"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn validate_accepts_trigger_filters_over_event_variables() {
+        let filters = [
+            "str_contains(trigger_text, \"P1\")",
+            "trigger_is_reply == false",
+            "trigger_author != \"x\" && trigger_channel_id != \"\" && trigger_timestamp != \"\" \
+             && trigger_emoji != \"\" && trigger_message_id != \"\"",
+            "str_starts_with(trigger_text, \"P\") || str_ends_with(trigger_text, \"!\") \
+             || str_len(trigger_text) > 3",
+            // evalexpr built-in functions are not in the context but still resolve.
+            "str::to_lowercase(trigger_text) == \"p1 incident!\"",
+        ];
+        for on in MESSAGE_TRIGGERS {
+            for filter in filters {
+                parse_yaml(&with_filter(on, filter))
+                    .unwrap_or_else(|e| panic!("{on} {filter:?} rejected: {e}"));
+            }
+        }
+        let (trigger, _) = runtime_context();
+        for filter in filters {
+            evaluate_condition(filter, &trigger, &HashMap::new())
+                .await
+                .unwrap_or_else(|e| panic!("{filter:?} failed at run time: {e}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_step_conditions_that_can_never_evaluate() {
+        let cases = [
+            ("steps_hit_output_status ==", "invalid expression"),
+            ("text == \"P1\"", "'text'"),
+            // Step outputs are `steps_<id>_output_<field>`.
+            ("steps_hit_status == 200", "'steps_hit_status'"),
+            ("steps_hit_output_status = 200", "'=='"),
+            ("", "empty"),
+        ];
+        let triggers = [
+            json!({ "on": "message_posted" }),
+            json!({ "on": "webhook" }),
+            json!({ "on": "schedule", "cron": "0 9 * * *" }),
+        ];
+        for trigger in triggers {
+            for (if_expr, needle) in cases {
+                let msg = rejection(&with_step_if(trigger.clone(), if_expr));
+                assert!(
+                    msg.contains("step 'after'") && msg.contains(needle),
+                    "{trigger} {if_expr:?}: {msg}"
+                );
+            }
+        }
+        let (trigger, outputs) = runtime_context();
+        for (if_expr, _) in cases {
+            assert!(
+                evaluate_condition(if_expr, &trigger, &outputs)
+                    .await
+                    .is_err(),
+                "{if_expr:?} evaluated at run time, so it must not be rejected"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn validate_accepts_step_conditions_over_run_variables() {
+        let conditions = [
+            "steps_hit_output_status == 200",
+            "trigger_is_reply == false && str_contains(trigger_text, \"P1\")",
+            // Webhook body fields arrive as `trigger_<field>`.
+            "trigger_ref == \"main\"",
+        ];
+        for on in ["message_posted", "webhook"] {
+            for if_expr in conditions {
+                parse_yaml(&with_step_if(json!({ "on": on }), if_expr))
+                    .unwrap_or_else(|e| panic!("{on} {if_expr:?} rejected: {e}"));
+            }
+        }
+        let (trigger, outputs) = runtime_context();
+        for if_expr in conditions {
+            evaluate_condition(if_expr, &trigger, &outputs)
+                .await
+                .unwrap_or_else(|e| panic!("{if_expr:?} failed at run time: {e}"));
+        }
+    }
+
+    #[test]
+    fn validate_rejects_conditions_over_the_runtime_length_limit() {
+        let long = format!("{}true", "true || ".repeat(625));
+        assert!(long.len() > crate::executor::MAX_CONDITION_LEN);
+        assert!(rejection(&with_filter("message_posted", &long)).contains("limit"));
+        assert!(
+            rejection(&with_step_if(json!({ "on": "message_posted" }), &long)).contains("limit")
+        );
+    }
+
+    #[test]
+    fn validate_rejects_step_references_that_can_never_resolve() {
+        let refs = [
+            "{{steps.hit.status}}",
+            "{{ steps.hit.status | truncate(3) }}",
+            "{{steps.hit.output}}",
+            "{{steps.hit}}",
+        ];
+        for r in refs {
+            let after_steps = [
+                json!({ "id": "after", "action": "send_message", "text": format!("status {r}") }),
+                json!({ "id": "after", "action": "send_message", "text": "hi", "channel": r }),
+                json!({ "id": "after", "action": "send_dm", "to": "{{trigger.author}}", "text": r }),
+                json!({ "id": "after", "action": "set_channel_topic", "topic": r }),
+                json!({ "id": "after", "action": "add_reaction", "emoji": r }),
+                json!({ "id": "after", "action": "call_webhook", "url": r }),
+                json!({ "id": "after", "action": "call_webhook", "url": "https://hooks.example.com/x", "body": r }),
+                json!({ "id": "after", "action": "call_webhook", "url": "https://hooks.example.com/x", "headers": { "X-Status": r } }),
+                json!({ "id": "after", "action": "request_approval", "from": r, "message": "ok?" }),
+                json!({ "id": "after", "action": "request_approval", "from": "@lead", "message": r }),
+            ];
+            for after in after_steps {
+                let msg = rejection(&with_steps(json!({ "on": "webhook" }), after.clone()));
+                assert!(
+                    msg.contains("step 'after'") && msg.contains("steps.<id>.output.<field>"),
+                    "{after}: {msg}"
+                );
+            }
+        }
+        // The shape reported in block/buzz#8016.
+        let reported = with_steps(
+            json!({ "on": "message_posted" }),
+            json!({ "id": "after", "action": "send_message", "text": "status {{steps.hit.status}}" }),
+        );
+        assert_eq!(
+            rejection(&reported),
+            "step 'after': '{{steps.hit.status}}' never resolves; \
+             reference step outputs as {{steps.<id>.output.<field>}}"
+        );
+        // The resolver leaves each one literal even when `hit` has output.
+        let (trigger, outputs) = runtime_context();
+        for r in refs {
+            let out = resolve_template(r, &trigger, &outputs).unwrap();
+            assert!(out.contains("steps.hit"), "{r:?} resolved to {out:?}");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_template_references_that_can_resolve() {
+        let texts = [
+            "{{steps.hit.output.status}}",
+            "{{ steps.hit.output.status | truncate(2) }}",
+            "{{trigger.text}} {{trigger.ref}}",
+            // Not checked: a resumed run can carry outputs saved under an
+            // earlier revision of the definition.
+            "{{steps.renamed.output.status}}",
+            // Not references: the resolver emits these as written.
+            "{{steps.hit",
+            "{{ anything else }}",
+        ];
+        for text in texts {
+            let yaml = with_steps(
+                json!({ "on": "webhook" }),
+                json!({ "id": "after", "action": "send_message", "text": text }),
+            );
+            parse_yaml(&yaml).unwrap_or_else(|e| panic!("{text:?} rejected: {e}"));
+        }
+        let (trigger, outputs) = runtime_context();
+        assert_eq!(
+            resolve_template(texts[0], &trigger, &outputs).unwrap(),
+            "200"
+        );
     }
 }
