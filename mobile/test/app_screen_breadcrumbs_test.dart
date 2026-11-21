@@ -50,9 +50,7 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('the age restriction is its own screen while it shows', (
-    tester,
-  ) async {
+  testWidgets('the age restriction shows as an unnamed screen', (tester) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
     final age = _MutableAgeSignalNotifier();
@@ -89,7 +87,7 @@ void main() {
     await tester.pump();
 
     expect(reporter.screens.skip(before), [
-      DiagnosticScreen.ageRestriction,
+      DiagnosticScreen.other,
       DiagnosticScreen.onboarding,
     ]);
     await tester.pumpWidget(const SizedBox.shrink());

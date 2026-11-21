@@ -493,10 +493,11 @@ class App extends HookConsumerWidget {
       return null;
     }, [homeKind]);
     // The age restriction replaces the navigator rather than covering a route.
+    // It is named only as `other`: its own name would reveal an age signal.
     useEffect(() {
       screenTrail.cover(
         ageSignalState == AgeSignalState.restricted
-            ? DiagnosticScreen.ageRestriction
+            ? DiagnosticScreen.other
             : null,
       );
       return null;
