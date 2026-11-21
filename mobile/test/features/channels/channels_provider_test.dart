@@ -2844,8 +2844,8 @@ void main() {
     await reconnect();
     expect(notifier.activityFor(_channelA).at, offline.createdAt);
 
-    // A failed gap read leaves activity unknown but keeps the unread post the
-    // catch-up returned.
+    // An unread post newer than the gap makes reading the gap moot, so a
+    // failing gap read is never sent.
     final mention = _signedPost(
       now - 5,
       content: 'hey',
@@ -2859,11 +2859,20 @@ void main() {
         .markReadThrough(_channelA, now - 8);
     session.gapBatchError = RelayException(503, '{"error":"query timed out"}');
     await reconnect();
-    await _waitUntil(() => !notifier.activityFor(_channelA).known);
+    expect(notifier.activityFor(_channelA), (
+      known: true,
+      at: mention.createdAt,
+    ));
     expect(
       notifier.observedUnreadEventsByChannel[_channelA]?.keys,
       contains(mention.id),
     );
+
+    // A failed gap read with nothing newer leaves activity unknown.
+    (container.read(readStateProvider.notifier) as _ActivityReadState)
+        .markReadThrough(_channelA, now - 3);
+    await reconnect();
+    await _waitUntil(() => !notifier.activityFor(_channelA).known);
     session.gapBatchError = null;
     session.recentMessages = [old, offline];
 

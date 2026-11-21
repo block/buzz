@@ -256,10 +256,12 @@ extension _UnreadCatchUp on ChannelsNotifier {
       // state rather than holding it back.
       unawaited(
         _noteCatchUpActivity(
+          session,
           activityCandidates,
           catchUpChannelIds
               .difference(gapFilters.keys.toSet())
               .difference(deferredGaps),
+          gapFilters,
           failedChannelIds,
           requestedAt,
           batchDeletedIds,
@@ -267,18 +269,6 @@ extension _UnreadCatchUp on ChannelsNotifier {
           subscriptionGeneration,
         ),
       );
-      if (gapFilters.isNotEmpty) {
-        unawaited(
-          _catchUpActivityGaps(
-            session,
-            gapFilters,
-            requestedAt,
-            batchDeletedIds,
-            fence,
-            subscriptionGeneration,
-          ),
-        );
-      }
     } catch (error) {
       incomplete = true;
       if (!_lifecycleRef.mounted) return;
@@ -305,10 +295,13 @@ extension _UnreadCatchUp on ChannelsNotifier {
 
   /// Records the activity an unread catch-up found once its signatures are
   /// checked, and marks [covered] channels known, except [failedIds] and those
-  /// whose verified head was deleted meanwhile.
+  /// whose verified head was deleted meanwhile. Then reads the [gaps] that a
+  /// newer verified post has not made moot.
   Future<void> _noteCatchUpActivity(
+    RelaySessionNotifier session,
     List<NostrEvent> candidates,
     Set<String> covered,
+    Map<String, NostrFilter> gaps,
     Set<String> failedIds,
     int sentAt,
     Set<String> deletedIds,
@@ -325,8 +318,23 @@ extension _UnreadCatchUp on ChannelsNotifier {
         _isCatchUpRetired(fence, subscriptionGeneration)) {
       return;
     }
+    void readGaps(Map<String, NostrFilter> gaps) {
+      if (gaps.isEmpty) return;
+      unawaited(
+        _catchUpActivityGaps(
+          session,
+          gaps,
+          sentAt,
+          deletedIds,
+          fence,
+          subscriptionGeneration,
+        ),
+      );
+    }
+
     if (authenticIds == null) {
       if (_activity.noteCatchUp(covered, covered)) _publishUnreadCatchUp({});
+      readGaps(gaps);
       return;
     }
     var changed = false;
@@ -343,14 +351,25 @@ extension _UnreadCatchUp on ChannelsNotifier {
       );
     }
     final stale = _deletedHeadChannels(candidates, authenticIds, deletedIds);
+    // A verified post at or after a gap's end makes the gap moot.
+    final moot = {
+      for (final MapEntry(key: channelId, value: gap) in gaps.entries)
+        if (!stale.contains(channelId) &&
+            (_activity.latestAt(channelId) ?? -1) >= gap.until!)
+          channelId,
+    };
     changed |=
         _activity.noteCatchUp(
-          covered.difference(stale),
+          covered.union(moot).difference(stale),
           failedIds,
           sentAt: sentAt,
         ) |
         _activity.noteCatchUp(stale, stale);
     if (changed) _publishUnreadCatchUp(const {});
+    readGaps({
+      for (final MapEntry(key: channelId, value: gap) in gaps.entries)
+        if (!moot.contains(channelId)) channelId: gap,
+    });
   }
 
   /// Reads the newest post in each channel's [_activityGap], after the unread
