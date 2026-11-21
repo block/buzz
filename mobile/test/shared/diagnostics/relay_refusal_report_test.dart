@@ -131,6 +131,45 @@ void main() {
         expect(sent['tags'], isNot(contains('relay.call')));
         expect(jsonEncode(sent), isNot(contains(marker)));
       });
+
+      test('a stalled discovery is an untyped timeout, not tagged', () async {
+        final relay = session(
+          MockClient((_) => Completer<http.Response>().future),
+        );
+
+        final (error, stack) = await failure(
+          relay.fetchReadStateSnapshot(
+            timeout: const Duration(milliseconds: 50),
+          ),
+        );
+        final sent = await escaped(error, stack);
+
+        expect(error, isA<TimeoutException>());
+        expect(error, isNot(isA<RelayCallError>()));
+        expect(sent['tags'], isNot(contains('relay.call')));
+        expect(sent['tags'], isNot(contains('relay.reason')));
+      });
+
+      test('a stalled snapshot POST is a query timeout', () async {
+        final relay = session(
+          MockClient(
+            (request) => request.method == 'GET'
+                ? Future.value(http.Response(discovery, 200))
+                : Completer<http.Response>().future,
+          ),
+        );
+
+        final (error, stack) = await failure(
+          relay.fetchReadStateSnapshot(
+            timeout: const Duration(milliseconds: 50),
+          ),
+        );
+        final sent = await escaped(error, stack);
+
+        expect(error, isA<RelayTimeoutException>());
+        expect(sent['tags']['relay.call'], 'query');
+        expect(sent['tags']['relay.reason'], 'timeout');
+      });
     });
   });
 

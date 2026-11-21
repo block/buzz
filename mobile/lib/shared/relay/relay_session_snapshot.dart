@@ -34,6 +34,7 @@ extension on RelaySessionNotifier {
         request,
         maxBytes: maxBytes,
         timeout: timeout,
+        call: query ? RelayCall.query : null,
         decorate: (client, active) => HostedRelayHttpClient(
           _snapshotAuth,
           config,

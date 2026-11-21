@@ -37,14 +37,17 @@ class RelayHttpQueryClient {
   _ClientGeneration? _currentGeneration;
   final Set<_ClientGeneration> _generations = {};
 
-  /// The error for a request that outlived [timeout]. Its stack is the
+  /// The error for a request that outlived [timeout]: a [call] when the
+  /// request is one, otherwise a plain [TimeoutException]. Its stack is the
   /// caller's, since the timer that raises it has no frames from the app.
-  static RelayTimeoutException _timedOut(Duration timeout) =>
-      RelayTimeoutException(
-        RelayCall.query,
-        'Relay query timed out after $timeout',
-        timeout,
-      );
+  static TimeoutException _timedOut(Duration timeout, RelayCall? call) =>
+      call == null
+      ? TimeoutException('Relay request timed out after $timeout', timeout)
+      : RelayTimeoutException(
+          call,
+          'Relay query timed out after $timeout',
+          timeout,
+        );
 
   Future<http.Response> post(
     Uri url, {
@@ -82,7 +85,7 @@ class RelayHttpQueryClient {
         _currentGeneration = null;
       }
       generation?.retire();
-      Error.throwWithStackTrace(_timedOut(timeout), callSite);
+      Error.throwWithStackTrace(_timedOut(timeout, RelayCall.query), callSite);
     } finally {
       active = false;
       generation?.release();
@@ -90,11 +93,13 @@ class RelayHttpQueryClient {
   }
 
   /// Sends a non-redirecting request, bounding bytes before buffering or parsing.
-  /// The deadline includes headers and the entire response body.
+  /// The deadline includes headers and the entire response body. A timeout is
+  /// a [RelayTimeoutException] for [call], or untyped when [call] is null.
   Future<http.Response> sendBounded(
     http.Request request, {
     required int maxBytes,
     required Duration timeout,
+    required RelayCall? call,
     http.Client Function(http.Client, bool Function())? decorate,
   }) async {
     final callSite = StackTrace.current;
@@ -153,7 +158,7 @@ class RelayHttpQueryClient {
         _currentGeneration = null;
       }
       generation?.retire();
-      Error.throwWithStackTrace(_timedOut(timeout), callSite);
+      Error.throwWithStackTrace(_timedOut(timeout, call), callSite);
     } finally {
       finished = true;
       // Cancelling an iterator that never listened leaves the body
