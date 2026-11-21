@@ -66,6 +66,8 @@ pub(crate) fn effective_team_instructions(
 pub(crate) struct SpawnConfigInputs<'a> {
     pub record: &'a ManagedAgentRecord,
     pub descriptor: &'a EffectiveHarnessDescriptor,
+    /// Effective ACP command the launch runs (definition-owned when linked).
+    pub acp_command: &'a str,
     /// Resolved workspace/pair relay — never the record's legacy pin.
     pub relay_url: &'a str,
     pub team_instructions: Option<&'a str>,
@@ -183,6 +185,7 @@ impl SpawnConfigSnapshot {
         let SpawnConfigInputs {
             record,
             descriptor,
+            acp_command,
             relay_url,
             team_instructions,
             system_prompt,
@@ -194,7 +197,7 @@ impl SpawnConfigSnapshot {
         let (respond_to, respond_to_allowlist) =
             super::projected_access_with_policy(record, enforced_owner_only);
         Self {
-            acp_command: record.acp_command.clone(),
+            acp_command: acp_command.to_string(),
             command: descriptor.command.clone(),
             args: descriptor.args.clone(),
             mcp_command: known_acp_runtime(&descriptor.command)
@@ -329,16 +332,23 @@ pub(crate) fn prospective_spawn_config_snapshot(
     // definition) resolves as if all three were absent: `spawn_agent_child`
     // refuses to spawn an orphan regardless, and `eligible_restart_diff`
     // suppresses the badge for one.
-    let (prompt, model, provider) = match resolve_effective_config(record, personas, global) {
-        EffectiveConfigResult::Resolved(cfg) => {
-            (cfg.system_prompt.value, cfg.model.value, cfg.provider.value)
-        }
-        EffectiveConfigResult::OrphanedInstance { .. } => (None, None, None),
-    };
+    let (prompt, model, provider, acp_command) =
+        match resolve_effective_config(record, personas, global) {
+            EffectiveConfigResult::Resolved(cfg) => (
+                cfg.system_prompt.value,
+                cfg.model.value,
+                cfg.provider.value,
+                cfg.acp_command,
+            ),
+            EffectiveConfigResult::OrphanedInstance { .. } => {
+                (None, None, None, record.acp_command.clone())
+            }
+        };
 
     SpawnConfigSnapshot::from_inputs(SpawnConfigInputs {
         record,
         descriptor: &descriptor,
+        acp_command: &acp_command,
         // Resolved, not stored: every record spawns on the workspace relay
         // (legacy pins ignored), so a workspace relay change must badge.
         relay_url: &crate::relay::effective_agent_relay_url(&record.relay_url, workspace_relay),

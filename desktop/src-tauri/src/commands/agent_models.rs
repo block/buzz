@@ -62,13 +62,16 @@ pub async fn get_agent_models(
             .find(|r| r.pubkey == pubkey)
             .ok_or_else(|| format!("agent {pubkey} not found"))?;
 
-        let resolved = resolve_command(&record.acp_command)
-            .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
-
         // Resolve the effective harness from the linked persona (mirrors spawn),
         // so model discovery runs against the persona's current harness, not the
         // frozen record snapshot. An explicit per-agent override wins.
         let personas = load_personas(&app).unwrap_or_default();
+        let acp_command = crate::managed_agents::effective_config::resolve_effective_acp_command(
+            record, &personas,
+        )
+        .unwrap_or_else(|| record.acp_command.clone());
+        let resolved = resolve_command(&acp_command)
+            .ok_or_else(|| missing_command_message(&acp_command, "ACP harness command"))?;
         let global = load_global_agent_config(&app).unwrap_or_default();
 
         // Single pure helper — descriptor + authoritative model/provider

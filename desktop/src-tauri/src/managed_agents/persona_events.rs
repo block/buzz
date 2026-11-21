@@ -629,8 +629,8 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
     if let Some(prompt) = snapshot.system_prompt {
         record.system_prompt = Some(prompt);
     }
-    // The definition view omits stock buzz-acp. Absence therefore resets a
-    // previously selected wrapper; preserving the instance would resurrect it.
+    // Mirror only: spawn reads the command from `resolve_effective_config`.
+    // The definition view omits stock buzz-acp, so absence mirrors stock.
     record.acp_command = snapshot
         .acp_command
         .unwrap_or_else(|| super::DEFAULT_ACP_COMMAND.to_string());
