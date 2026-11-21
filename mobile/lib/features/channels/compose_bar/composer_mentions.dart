@@ -64,13 +64,14 @@ class _ComposerMention {
   );
 }
 
-/// The channel's members as a send reads them: by lowercase name, and
+/// The channel's members as a send reads them: by folded name
+/// ([foldMentionLabel], as the text scan compares names), and
 /// indexed for the text scan. Built once per roster, since both cost a pass
 /// over every member; see [_useMemberMentions].
 class _MemberMentions {
   _MemberMentions(this.candidates) {
     for (final member in candidates) {
-      (byName[member.label.toLowerCase()] ??= {}).putIfAbsent(
+      (byName[foldMentionLabel(member.label)] ??= {}).putIfAbsent(
         member.pubkey.toLowerCase(),
         () => member,
       );
@@ -80,7 +81,7 @@ class _MemberMentions {
 
   final List<MentionCandidate> candidates;
 
-  /// The members under each lowercase name, by lowercase key.
+  /// The members under each folded name, by lowercase key.
   final byName = <String, Map<String, MentionCandidate>>{};
   late final MentionLabelIndex labels;
 }
@@ -242,7 +243,7 @@ _resolveComposerMentions(
   ];
   final byName = <String, Map<String, MentionCandidate>>{};
   for (final mention in mentions) {
-    (byName[mention.label(text).toLowerCase()] ??= {})[mention.pubkey] =
+    (byName[foldMentionLabel(mention.label(text))] ??= {})[mention.pubkey] =
         mention.candidate;
   }
   final nameEnds = <int, int>{};
@@ -263,10 +264,8 @@ _resolveComposerMentions(
   ]);
   for (final (i, range) in typed.indexed) {
     if (literal.contains(i)) continue;
-    final identities = {
-      ...?members.byName[range.label],
-      ...?byName[range.label],
-    };
+    final folded = foldMentionLabel(range.label);
+    final identities = {...?members.byName[folded], ...?byName[folded]};
     if (identities.isEmpty) continue;
     if (identities.length > 1) {
       throw FormatException(
@@ -302,11 +301,13 @@ String _qualifiedMentionContent(
 }) {
   final keysByName = <String, Set<String>>{};
   for (final mention in mentions) {
-    (keysByName[mention.label(text).toLowerCase()] ??= {}).add(mention.pubkey);
+    (keysByName[foldMentionLabel(mention.label(text))] ??= {}).add(
+      mention.pubkey,
+    );
   }
   var content = text;
   for (final mention in mentions.reversed) {
-    if (keysByName[mention.label(text).toLowerCase()]!.length < 2 &&
+    if (keysByName[foldMentionLabel(mention.label(text))]!.length < 2 &&
         (nameEnds[mention.start] ?? 0) <= mention.end) {
       continue;
     }

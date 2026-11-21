@@ -37,6 +37,22 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
   /// Lookups whose batch query is on the wire.
   final Set<String> _inFlight = {};
 
+  /// Keys the relay confirmed have no profile this scope, with when it said
+  /// so: [requestLinked] skips them until [_absentFor] passes, so a link to a
+  /// nameless key costs one query, not one per rebuild.
+  final Map<String, DateTime> _absentSince = {};
+  static const _absentFor = Duration(minutes: 5);
+
+  /// Keys [requestLinked] asked for that no batch has answered yet. A failed
+  /// batch leaves them here, and the next reconnect asks once more.
+  final Set<String> _linkedUnanswered = {};
+  ProviderSubscription<SessionStatus>? _reconnects;
+
+  /// A reconnect came while unanswered keys were still in flight, so they
+  /// are asked again once that flight settles.
+  var _retryAfterFlight = false;
+  static const _maxAbsent = 1000;
+
   /// Completes when the batch query on the wire has finished.
   Completer<bool>? _flightCompleter;
   void Function()? _snapshotWriter;
@@ -50,6 +66,11 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     _profileEventOrders.clear();
     _unrevalidated.clear();
     _inFlight.clear();
+    _absentSince.clear();
+    _linkedUnanswered.clear();
+    _retryAfterFlight = false;
+    // A rebuild closes the subscription, so the next link opens a new one.
+    _reconnects = null;
     ref.onDispose(() {
       _generation++;
       _pending.clear();
@@ -128,6 +149,53 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     final key = pubkey.toLowerCase();
     _scheduleFetch(key);
     return state[key];
+  }
+
+  /// Whether [requestLinked] would ask the relay for [pubkey], or enroll it
+  /// for the reconnect retry: it has no profile, or only a restored one not
+  /// yet revalidated, and no recent answer said it has none. A key another
+  /// lookup already has on the way still enrolls once, so a link to it is
+  /// retried if that batch fails. Cheap, so a build can check it.
+  bool needsLinkedLookup(String pubkey) {
+    final key = pubkey.toLowerCase();
+    if (_isCached(key)) return false;
+    if (_pending.contains(key) || _inFlight.contains(key)) {
+      return !_linkedUnanswered.contains(key);
+    }
+    final absent = _absentSince[key];
+    return absent == null || DateTime.now().difference(absent) >= _absentFor;
+  }
+
+  /// Requests profiles for keys that identity links name, outside any
+  /// roster. Restored profiles are revalidated, so a renamed key's link
+  /// shows its current name; a key the relay just said has no profile is
+  /// not asked again for [_absentFor]; and a failed batch is retried once
+  /// the relay reconnects. Coalesced with every other lookup.
+  void requestLinked(Iterable<String> pubkeys) {
+    final keys = [
+      for (final pubkey in pubkeys)
+        if (needsLinkedLookup(pubkey)) pubkey.toLowerCase(),
+    ];
+    if (keys.isEmpty) return;
+    _trackVerified(keys);
+    _linkedUnanswered.addAll(keys);
+    // Bounded like the absent answers: the oldest unanswered key goes first.
+    while (_linkedUnanswered.length > _maxAbsent) {
+      _linkedUnanswered.remove(_linkedUnanswered.first);
+    }
+    keys.forEach(_scheduleFetch);
+    _reconnects ??= ref.listen(
+      relaySessionProvider.select((session) => session.status),
+      (previous, next) {
+        if (next == SessionStatus.connected &&
+            previous != SessionStatus.connected) {
+          _linkedUnanswered.forEach(_scheduleFetch);
+          if (_linkedUnanswered.any(_inFlight.contains)) {
+            _retryAfterFlight = true;
+          }
+        }
+      },
+    );
   }
 
   /// Stores a profile that was fetched or updated outside the batch loader.
@@ -291,6 +359,18 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
         if (!await _verifyAndMerge(events, generation)) return;
         // Confirmed by the relay, whether or not it still has a profile.
         _unrevalidated.removeAll(batch);
+        _linkedUnanswered.removeAll(batch);
+        final answered = DateTime.now();
+        for (final pubkey in batch) {
+          if (state.containsKey(pubkey)) continue;
+          // Reinserted at the end, so the oldest answer is evicted first.
+          _absentSince
+            ..remove(pubkey)
+            ..[pubkey] = answered;
+          if (_absentSince.length > _maxAbsent) {
+            _absentSince.remove(_absentSince.keys.first);
+          }
+        }
         remaining -= batch.length;
         if (remaining == 0) {
           // All requested pages are ready.
@@ -302,7 +382,13 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
       // Silently fail — non-gating callers will just show pubkeys, or the
       // restored profile, which the next lookup revalidates again.
     } finally {
-      if (_isCurrent(generation)) _inFlight.removeAll(pubkeys);
+      if (_isCurrent(generation)) {
+        _inFlight.removeAll(pubkeys);
+        if (_retryAfterFlight && ref.mounted) {
+          _retryAfterFlight = false;
+          _linkedUnanswered.forEach(_scheduleFetch);
+        }
+      }
       if (!completer.isCompleted) completer.complete(succeeded);
       if (identical(_flightCompleter, completer)) _flightCompleter = null;
       _flushInFlight = false;

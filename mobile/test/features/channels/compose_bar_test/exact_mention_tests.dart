@@ -772,24 +772,75 @@ void exactMentionTests() {
   testWidgets('ambiguous typed names fail visibly without clearing the draft', (
     tester,
   ) async {
-    var sent = false;
-    await mountComposer(tester, members(), (
-      _,
+    ChannelMember named(String key, String name) => ChannelMember(
+      pubkey: key,
+      displayName: name,
+      role: 'member',
+      joinedAt: DateTime(2025),
+    );
+    // Names the text scan reads alike are one name here, in either roster
+    // order: `ſ` folds with `s`, though toLowerCase keeps them apart.
+    for (final (roster, typed) in [
+      (members(), '@Scout hello'),
+      ([named(first, 'Sam'), named(second, 'ſam')], '@ſam hello'),
+      ([named(second, 'ſam'), named(first, 'Sam')], '@ſam hello'),
+    ]) {
+      var sent = false;
+      await mountComposer(tester, roster, (_, _, {mediaTags = const []}) async {
+        sent = true;
+      });
+      await tester.enterText(find.byType(TextField), typed);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+      expect(sent, isFalse, reason: typed);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        typed,
+      );
+      expect(find.textContaining('is ambiguous'), findsOneWidget);
+      // Let this composer's timers end before the next one mounts.
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(minutes: 1));
+    }
+  });
+
+  testWidgets('picked names that fold alike are both qualified on send', (
+    tester,
+  ) async {
+    ChannelMember named(String key, String name) => ChannelMember(
+      pubkey: key,
+      displayName: name,
+      role: 'member',
+      joinedAt: DateTime(2025),
+    );
+    String? sentText;
+    await mountComposer(tester, [named(first, 'Sam'), named(second, 'ſam')], (
+      text,
       _, {
       mediaTags = const [],
     }) async {
-      sent = true;
+      sentText = text;
     });
-    await tester.enterText(find.byType(TextField), '@Scout hello');
+    Finder rows(String name) => find.descendant(
+      of: find.byKey(const ValueKey('mention-suggestions-popover')),
+      matching: find.textContaining(name),
+    );
+    await tester.enterText(find.byType(TextField), '@Sa');
+    await tester.pumpAndSettle();
+    await tester.tap(rows('Sam').first);
+    await tester.pumpAndSettle();
+    final controller = tester
+        .widget<TextField>(find.byType(TextField))
+        .controller!;
+    await tester.enterText(find.byType(TextField), '${controller.text}@ſa');
+    await tester.pumpAndSettle();
+    await tester.tap(rows('ſam').first);
     await tester.pumpAndSettle();
     await tester.tap(find.byIcon(BuzzIcons.arrowUp));
     await tester.pumpAndSettle();
-    expect(sent, isFalse);
-    expect(
-      tester.widget<TextField>(find.byType(TextField)).controller!.text,
-      '@Scout hello',
-    );
-    expect(find.textContaining('is ambiguous'), findsOneWidget);
+    // The scan reads both as one name, so each carries its key.
+    expect(sentText, '@Sam ($first) @ſam ($second)');
   });
 
   testWidgets('closing punctuation never selects a shared name', (

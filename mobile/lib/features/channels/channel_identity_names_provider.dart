@@ -6,6 +6,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/identity_names/identity_names.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
+import '../../shared/profile/user_cache_provider.dart';
 import 'channel_management_provider.dart';
 import 'channels_provider.dart';
 
@@ -55,19 +56,41 @@ String watchChannelIdentityLabel(
 
 /// Watches contextual labels for [pubkeys] in [channelId], keyed by
 /// lowercase pubkey. Rebuilds only when one of these labels changes.
+///
+/// [linkedPubkeys] are keys an identity link names, tagged or not: each gets
+/// a label only once it has a real name ([IdentityNames.hasName]), so an
+/// unknown key keeps the label written into its link instead of a compact
+/// npub. Their profiles are requested after this build through
+/// [UserCacheNotifier.requestLinked], so a link's written label gives way to
+/// its key's current name once that loads.
 Map<String, String> watchChannelIdentityLabels(
   WidgetRef ref,
   String channelId,
-  Iterable<String> pubkeys,
-) {
+  Iterable<String> pubkeys, {
+  Iterable<String> linkedPubkeys = const [],
+}) {
   final keys = {for (final pubkey in pubkeys) pubkey.toLowerCase()};
-  if (keys.isEmpty) return const {};
+  final linked = {for (final pubkey in linkedPubkeys) pubkey.toLowerCase()};
+  if (keys.isEmpty && linked.isEmpty) return const {};
+  requestLinkedProfiles(ref, linked);
   return ref.watch(
-    channelIdentityNamesProvider(channelId).select(
-      (names) => _LabelMap({for (final key in keys) key: names.labelFor(key)}),
-    ),
+    channelIdentityNamesProvider(
+      channelId,
+    ).select((names) => _LabelMap(identityLabels(names, keys, linked))),
   );
 }
+
+/// Labels for [pubkeys] and [linkedPubkeys], leaving out a linked key with
+/// no real name; see [watchChannelIdentityLabels].
+Map<String, String> identityLabels(
+  IdentityNames names,
+  Iterable<String> pubkeys, [
+  Set<String> linkedPubkeys = const {},
+]) => {
+  for (final key in {...pubkeys, ...linkedPubkeys})
+    if (!linkedPubkeys.contains(key) || names.hasName(key))
+      key: names.labelFor(key),
+};
 
 class _LabelMap extends UnmodifiableMapView<String, String> {
   _LabelMap(super.labels);
@@ -80,4 +103,18 @@ class _LabelMap extends UnmodifiableMapView<String, String> {
   int get hashCode => Object.hashAllUnordered(
     entries.map((entry) => Object.hash(entry.key, entry.value)),
   );
+}
+
+/// Requests, after this build, the profiles of the keys identity links in a
+/// row name ([UserCacheNotifier.requestLinked]), so each link's written label
+/// gives way to its key's current name. Free when none needs a lookup.
+void requestLinkedProfiles(WidgetRef ref, Iterable<String> linkedPubkeys) {
+  final cache = ref.read(userCacheProvider.notifier);
+  if (!linkedPubkeys.any(cache.needsLinkedLookup)) return;
+  final keys = linkedPubkeys.toList();
+  Future.microtask(() {
+    if (ref.context.mounted) {
+      ref.read(userCacheProvider.notifier).requestLinked(keys);
+    }
+  });
 }

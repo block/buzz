@@ -11,6 +11,7 @@ import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../channels/channel_identity_names_provider.dart';
 import '../channels/message_content.dart';
+import '../channels/message_mention_pill.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../profile/user_profile_sheet.dart';
 import '../../shared/profile/user_profile.dart';
@@ -196,14 +197,17 @@ class ForumPostCard extends HookConsumerWidget {
                 child: IgnorePointer(
                   child: SingleChildScrollView(
                     physics: const NeverScrollableScrollPhysics(),
-                    child: MessageContent(
-                      content: preview,
-                      mentionNames: mentionNames,
-                      mentionLabels: mentionLabels,
-                      agentMentionPubkeys: agentMentionPubkeys,
-                      tags: post.tags,
-                      baseStyle: messageBodyTextStyle.copyWith(
-                        color: context.colors.onSurface,
+                    child: IdentityLinkChannel(
+                      channelId: post.channelId,
+                      child: MessageContent(
+                        content: preview,
+                        mentionNames: mentionNames,
+                        mentionLabels: mentionLabels,
+                        agentMentionPubkeys: agentMentionPubkeys,
+                        tags: post.tags,
+                        baseStyle: messageBodyTextStyle.copyWith(
+                          color: context.colors.onSurface,
+                        ),
                       ),
                     ),
                   ),

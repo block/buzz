@@ -425,6 +425,75 @@ void main() {
     expect(cache.state.keys, containsAll(['a', 'b', 'c']));
   });
 
+  test('a link joining a pending preload is retried after reconnect', () async {
+    final firstBatch = Completer<List<NostrEvent>>();
+    final session = _RecordingProfileSession(
+      results: [
+        firstBatch.future,
+        Future.value([
+          _profileEvent(id: 'a', pubkey: 'a', createdAt: 1, name: 'A'),
+        ]),
+      ],
+    );
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    final cache = container.read(userCacheProvider.notifier);
+    final preload = cache.preload(['a']);
+    await session.firstRequest.future;
+
+    // The link shares the batch on the wire instead of asking again.
+    expect(cache.needsLinkedLookup('a'), isTrue);
+    cache.requestLinked(['a']);
+    expect(cache.needsLinkedLookup('a'), isFalse);
+    expect(session.requestCount, 1);
+
+    firstBatch.completeError('offline');
+    expect(await preload, isFalse);
+    session.setStatus(SessionStatus.disconnected);
+    session.setStatus(SessionStatus.connected);
+    // The retry rides the next coalesced batch.
+    await session.secondRequest.future;
+    expect(session.requestCount, 2);
+    expect(session.requestedFilter?.authors, ['a']);
+
+    expect(await cache.preload(['a']), isTrue);
+    expect(session.requestCount, 2);
+    expect(cache.state.keys, contains('a'));
+  });
+
+  test('a reconnect during a failing link lookup retries after it', () async {
+    final firstBatch = Completer<List<NostrEvent>>();
+    final session = _RecordingProfileSession(
+      results: [
+        firstBatch.future,
+        Future.value([
+          _profileEvent(id: 'a', pubkey: 'a', createdAt: 1, name: 'A'),
+        ]),
+      ],
+    );
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    final cache = container.read(userCacheProvider.notifier);
+    cache.requestLinked(['a']);
+    await session.firstRequest.future;
+
+    // The relay reconnects before the old request gives up.
+    session.setStatus(SessionStatus.reconnecting);
+    session.setStatus(SessionStatus.connected);
+    expect(session.requestCount, 1);
+    firstBatch.completeError('socket replaced');
+
+    await session.secondRequest.future;
+    expect(session.requestCount, 2);
+    expect(session.requestedFilter?.authors, ['a']);
+    expect(await cache.preload(['a']), isTrue);
+    expect(cache.state.keys, contains('a'));
+  });
+
   test(
     'refresh verifies real OA batch while allowing main-isolate timers',
     () async {
@@ -528,6 +597,7 @@ class _RecordingProfileSession extends RelaySessionNotifier {
   NostrFilter? requestedFilter;
   int requestCount = 0;
   final firstRequest = Completer<void>();
+  final secondRequest = Completer<void>();
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -540,8 +610,11 @@ class _RecordingProfileSession extends RelaySessionNotifier {
     requestCount++;
     requestedFilter = filter;
     if (!firstRequest.isCompleted) firstRequest.complete();
+    if (requestCount == 2) secondRequest.complete();
     return _results.isEmpty ? const [] : _results.removeAt(0);
   }
+
+  void setStatus(SessionStatus status) => state = SessionState(status: status);
 }
 
 class _FailingProfileSession extends RelaySessionNotifier {

@@ -118,6 +118,42 @@ void main() {
     expect(names.labelFor(_human), 'Honey');
   });
 
+  test('a non-member labels as it would as a member, whatever its name', () {
+    // Review of #9841: a non-member whose name no member's label can take
+    // skips re-resolving the roster, so it must label exactly as it would
+    // inside it, including names shaped like a qualified label.
+    final members = [_logan, _human, _wesAgent];
+    for (final name in [
+      'Quinn',
+      'Honey',
+      'Wes\u2019s Honey',
+      'Honey (agent)',
+      'Honey \u00b7 abcd',
+      ' Logan ',
+    ]) {
+      // As a person, and as Wes's agent, which loses a tie to a person.
+      for (final owner in [null, _wes]) {
+        final outsider = _key('e');
+        final sources = IdentityNameSources(
+          viewer: _logan,
+          profiles: {
+            ..._sources().profiles,
+            outsider: UserProfile(
+              pubkey: outsider,
+              displayName: name,
+              ownerPubkey: owner,
+            ),
+          },
+        );
+        expect(
+          sources.scope(members).labelFor(outsider),
+          sources.scope([...members, outsider]).labelFor(outsider),
+          reason: '$name, owner $owner',
+        );
+      }
+    }
+  });
+
   test('profiles outside the context do not create collisions', () {
     final names = _sources().scope([_wesAgent]);
     expect(names.labelFor(_wesAgent), 'Honey');
