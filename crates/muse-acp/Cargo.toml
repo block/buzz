@@ -1,0 +1,34 @@
+[package]
+name = "muse-acp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ACP agent bridge that drives a Muse web session from Buzz. Speaks ACP over stdio to buzz-acp and relays prompts to muse.ai through a persistent Chromium session, so a Buzz channel talks to the same Muse a user talks to in the browser."
+readme = "README.md"
+keywords = ["acp", "agent", "muse", "buzz"]
+categories = ["command-line-utilities", "web-programming"]
+
+[lib]
+name = "muse_acp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "muse-acp"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync", "process", "time", "net"] }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros", "io-std", "io-util", "sync", "process", "time", "net"] }
+tempfile = "3"
