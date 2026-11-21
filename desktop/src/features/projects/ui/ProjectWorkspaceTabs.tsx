@@ -42,10 +42,8 @@ import { ProjectCommitDetailPanel } from "./ProjectCommitDetailPanel";
 import { ActivityPanel, ContributorsPanel } from "./ProjectDetailFeedPanels";
 import { ProjectIssuesPanel } from "./ProjectIssuesPanel";
 import type { OpenMergeRecoveryTerminal } from "./MergePullRequestButton";
-import {
-  type GitDataState,
-  ProjectOverviewPanel,
-} from "./ProjectOverviewPanel";
+import { projectGitDataState } from "@/features/projects/lib/projectGitDataState";
+import { ProjectOverviewPanel } from "./ProjectOverviewPanel";
 import { PullRequestsPanel } from "./ProjectPullRequestsPanel";
 import { ProjectTabsList } from "./ProjectWorkspaceTabList";
 import { ProjectPullRequestFilesChangedPanel } from "./ProjectPullRequestFilesChangedPanel";
@@ -214,13 +212,12 @@ export function WorkspaceTabs({
     repoSource === "remote" && repoHost.kind === "external"
       ? repoHost.host
       : undefined;
-  const gitDataState: GitDataState = displayedSnapshot
-    ? files.length === 0
-      ? "empty"
-      : "available"
-    : displayedSnapshotLoading
-      ? "checking"
-      : "unavailable";
+  const gitDataState = projectGitDataState({
+    error: displayedSnapshotError,
+    fileCount: files.length,
+    hasSnapshot: Boolean(displayedSnapshot),
+    loading: displayedSnapshotLoading,
+  });
   const unavailableReason =
     gitDataState === "unavailable" && !externalHost
       ? repoSource === "remote"
@@ -591,8 +588,8 @@ export function WorkspaceTabs({
                 profiles={profiles}
                 snapshot={displayedSnapshot}
                 unavailableMessage={
-                  externalHost
-                    ? `Not mirrored on Buzz. Repository files are hosted on ${externalHost}.`
+                  gitDataState === "unavailable" && externalHost
+                    ? `Could not read ${externalHost} yet. Clone locally to browse offline, or retry if the remote is public.`
                     : undefined
                 }
               />
