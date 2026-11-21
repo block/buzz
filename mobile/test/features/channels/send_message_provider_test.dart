@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:uuid/uuid.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
@@ -71,6 +72,39 @@ void main() {
     await expectLater(result, throwsException);
     expect(completedIds, isEmpty);
     expect(removedIds, [localMessages.single.id]);
+  });
+
+  test('signed event carries a client-id and its millisecond offset', () async {
+    final session = _PendingPublishRelaySession();
+    final send = SendMessage(
+      signedEventRelay: SignedEventRelay(
+        session: session,
+        nsec: nostr.Keys.generate().nsec,
+      ),
+      fetchMembers: (_) async => const [],
+      readUserCache: () => const {},
+      addLocalMessage: (_, _) {},
+      completeLocalMessage: (_, _) {},
+      removeLocalMessage: (_, _) {},
+    );
+
+    final before = DateTime.now().millisecondsSinceEpoch;
+    final result = send(channelId: _channelId, content: 'hello');
+    await session.published;
+    final after = DateTime.now().millisecondsSinceEpoch;
+
+    final tags = session.event.tags;
+    final clientIds = tags.where((tag) => tag.first == 'client-id').toList();
+    expect(clientIds, hasLength(1));
+    expect(clientIds.single, hasLength(2));
+    expect(Uuid.isValidUUID(fromString: clientIds.single[1]), isTrue);
+    final offsets = tags.where((tag) => tag.first == 'ms').toList();
+    expect(offsets, hasLength(1));
+    final at = session.event.createdAt * 1000 + int.parse(offsets.single[1]);
+    expect(at, inInclusiveRange(before, after));
+
+    session.accept();
+    await result;
   });
 
   test('final signed event addresses the current DM agent member', () async {
