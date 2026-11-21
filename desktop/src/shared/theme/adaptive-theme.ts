@@ -56,6 +56,17 @@ export function luminance(hex: string): number {
   return 0.2126 * rs + 0.7152 * gs + 0.0722 * bs;
 }
 
+/**
+ * WCAG 2.x contrast ratio between two colors: `(lighter + 0.05) / (darker +
+ * 0.05)` over their relative luminances. Ranges from 1 (identical colors) to
+ * 21 (black on white).
+ */
+export function contrastRatio(hexA: string, hexB: string): number {
+  const lumA = luminance(hexA);
+  const lumB = luminance(hexB);
+  return (Math.max(lumA, lumB) + 0.05) / (Math.min(lumA, lumB) + 0.05);
+}
+
 function mix(hex1: string, hex2: string, factor: number): string {
   const c1 = hexToRgb(hex1);
   const c2 = hexToRgb(hex2);
@@ -168,6 +179,73 @@ export function hexToHsl(hex: string): string {
 }
 
 // =============================================================================
+// Destructive Accent Contrast Guard
+// =============================================================================
+
+const DESTRUCTIVE_KEEP_FLOOR = 3;
+const MIN_DESTRUCTIVE_CONTRAST = 4.5;
+
+function minContrastAcross(color: string, surfaces: readonly string[]): number {
+  return Math.min(...surfaces.map((surface) => contrastRatio(color, surface)));
+}
+
+/**
+ * Pick a destructive accent that stays legible as text on every surface it can
+ * render on.
+ *
+ * A theme's git-decoration colors are diff-gutter tints rather than text
+ * colors and carry no readability guarantee: slack-ochin ships `#FFF` for
+ * `gitDecoration.deletedResourceForeground`, which `--destructive` then painted
+ * as white-on-white menu text (issue #2725).
+ *
+ * Two-tier on purpose: a theme accent is kept verbatim as long as it clears
+ * {@link DESTRUCTIVE_KEEP_FLOOR} (the WCAG 3:1 floor for large text — below it
+ * the accent no longer reads at all), so curated palettes that merely miss AA
+ * are not retinted. Only a genuinely unreadable accent is replaced, and the
+ * replacement must clear {@link MIN_DESTRUCTIVE_CONTRAST}: the curated fallback
+ * red when it does, otherwise the fallback pushed toward whichever pole (white
+ * or black) the surfaces leave the most room for, by the smallest amount that
+ * clears the threshold (or the pole itself on surfaces where the ratio is
+ * unreachable).
+ */
+export function resolveDestructiveAccent(
+  themeAccent: string,
+  fallbackAccent: string,
+  surfaces: readonly string[],
+): string {
+  if (minContrastAcross(themeAccent, surfaces) >= DESTRUCTIVE_KEEP_FLOOR) {
+    return themeAccent;
+  }
+  if (minContrastAcross(fallbackAccent, surfaces) >= MIN_DESTRUCTIVE_CONTRAST) {
+    return fallbackAccent;
+  }
+
+  const pole =
+    minContrastAcross("#ffffff", surfaces) >=
+    minContrastAcross("#000000", surfaces)
+      ? "#ffffff"
+      : "#000000";
+  let low = 0;
+  let high = 1;
+
+  for (let i = 0; i < 20; i++) {
+    const mid = (low + high) / 2;
+    const minContrast = minContrastAcross(
+      mix(fallbackAccent, pole, mid),
+      surfaces,
+    );
+
+    if (minContrast >= MIN_DESTRUCTIVE_CONTRAST) {
+      high = mid;
+    } else {
+      low = mid;
+    }
+  }
+
+  return mix(fallbackAccent, pole, high);
+}
+
+// =============================================================================
 // Adaptive Theme Generator — emits shadcn CSS vars directly
 // =============================================================================
 
@@ -214,6 +292,15 @@ export function createThemeVars(
   // Derived colors
   const borderColor = mix(primaryBg, syntaxFg, isDark ? 0.15 : 0.12);
   const hoverBg = elevate(0.06);
+  // Mirrors POPOVER_SURFACE_CLASS in shared/ui/popoverSurface.ts
+  const popoverSurface = mix(primaryBg, hoverBg, 0.2);
+  // Mirrors the `focus:bg-muted/50` dropdown item in shared/ui/dropdown-menu.tsx
+  const focusedRowSurface = mix(popoverSurface, hoverBg, 0.5);
+  const destructiveAccent = resolveDestructiveAccent(accentRed, fallbackRed, [
+    primaryBg,
+    popoverSurface,
+    focusedRowSurface,
+  ]);
   const huddleControlBg = isDark ? mix(hoverBg, syntaxFg, 0.14) : "#333333";
   const huddleControlHoverBg = isDark
     ? mix(huddleControlBg, syntaxFg, 0.08)
@@ -261,7 +348,7 @@ export function createThemeVars(
       "--secondary-foreground": textFg,
 
       // Destructive
-      "--destructive": hexToHsl(accentRed),
+      "--destructive": hexToHsl(destructiveAccent),
       "--destructive-foreground": primaryFg,
 
       // Borders
