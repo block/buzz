@@ -5522,6 +5522,24 @@ pub(crate) async fn post_failure_notice(
     }
 }
 
+/// Marker tag name written onto every failure notice by
+/// [`build_failure_notice_event`], value always `"1"`.
+///
+/// Unprefixed, single-purpose tag name — the same shape `build_message`
+/// already uses for its own boolean flags (`["broadcast", "1"]`, see
+/// `buzz-sdk/src/builders.rs`), not the two-segment `["buzz",
+/// "failure-notice"]` form floated in #7778. This repo reserves the
+/// `buzz-*` prefix for `kind:40003` project-event metadata
+/// (`buzz-channel`, `buzz-visibility`); a `kind:9` stream message marker
+/// fits the unprefixed flag convention instead, and a dedicated name
+/// avoids colliding with any future generic `buzz`/`t`-style namespace tag.
+///
+/// The inbound author gate in `lib.rs` (`inbound_author_gate::is_failure_notice`)
+/// checks for this exact tag so a sibling agent can never be woken by
+/// another agent's dead-letter notice — see
+/// <https://github.com/block/buzz/issues/7778>.
+pub(crate) const FAILURE_NOTICE_TAG: &str = "failure-notice";
+
 /// Build the signed failure-notice event published by [`post_failure_notice`].
 pub(crate) fn build_failure_notice_event(
     keys: &nostr::Keys,
@@ -5556,7 +5574,14 @@ pub(crate) fn build_failure_notice_event(
             return None;
         }
     };
-    match builder.sign_with_keys(keys) {
+    let marker = match nostr::Tag::parse([FAILURE_NOTICE_TAG, "1"]) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(channel = %channel_id, "failure notice: marker tag failed: {e}");
+            return None;
+        }
+    };
+    match builder.tag(marker).sign_with_keys(keys) {
         Ok(e) => Some(e),
         Err(e) => {
             tracing::warn!(channel = %channel_id, "failure notice: sign failed: {e}");
@@ -12438,6 +12463,26 @@ done"#
         assert!(
             cap["configOptions"].is_null(),
             "an optionless switch caches the target's (empty) options, never the pre-switch model-a options with a patched effort"
+        );
+    }
+
+    /// A failure notice must carry the `["failure-notice", "1"]` marker tag
+    /// so the inbound author gate (`lib.rs::inbound_author_gate`) can tell it
+    /// apart from an ordinary message and never let it wake a sibling agent —
+    /// see <https://github.com/block/buzz/issues/7778>.
+    #[tokio::test]
+    async fn test_build_failure_notice_event_carries_failure_notice_marker_tag() {
+        let keys = nostr::Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let thread_tags = ThreadTags::default();
+        let event = build_failure_notice_event(&keys, channel_id, &thread_tags, "dead-lettered")
+            .expect("failure notice must build");
+        assert!(
+            event
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice() == [FAILURE_NOTICE_TAG, "1"]),
+            "a failure notice must carry the [\"failure-notice\", \"1\"] marker tag"
         );
     }
 }
