@@ -48,6 +48,19 @@ export function relayAgentIsSharedWithUser(
   }
 
   if (agent.respondTo === "allowlist" && normalizedCurrentPubkey) {
+    // The harness accepts the owner under `allowlist` as well as under
+    // `owner-only`: `author_allowed` ORs the explicit list with
+    // `is_owner_or_sibling` (`crates/buzz-acp/src/lib.rs`). Reading the array
+    // literally here made a *wider* policy hide the agent from its own owner.
+    // An unresolved owner still falls through to the list, so a missing NIP-OA
+    // attestation fails closed rather than admitting everyone.
+    if (
+      agent.ownerPubkey &&
+      normalizePubkey(agent.ownerPubkey) === normalizedCurrentPubkey
+    ) {
+      return true;
+    }
+
     return agent.respondToAllowlist
       .map((pubkey) => normalizePubkey(pubkey))
       .includes(normalizedCurrentPubkey);
