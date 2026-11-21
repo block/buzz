@@ -214,6 +214,9 @@ rollout; a malformed or out-of-range value refuses startup.
   logins without valid evidence are refused, its NIP-11 document reports
   `requires_nip_fi: true`, and open sockets without valid evidence are closed.
   Its stored flag does not change.
+- A revocation closes open connections only in `enforce`. In staged enforce, a
+  revoked key can't sign in again, but its open connection stays until its
+  deadline. Stored-Required communities already behave this way.
 
 Raise the percentage in steps, holding each one for normal traffic.
 
