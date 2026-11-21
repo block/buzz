@@ -1849,6 +1849,29 @@ pub(crate) async fn get_event_by_id_with_operation(
     }
 }
 
+pub(crate) async fn live_event_exists(
+    conn: &mut sqlx::PgConnection,
+    community_id: CommunityId,
+    event: &Event,
+) -> Result<bool> {
+    let seconds = i64::try_from(event.created_at.as_secs())
+        .map_err(|_| DbError::InvalidTimestamp(i64::MAX))?;
+    let created_at =
+        DateTime::<Utc>::from_timestamp(seconds, 0).ok_or(DbError::InvalidTimestamp(seconds))?;
+    // Plan with the signed timestamp so Postgres can prune partitions before
+    // taking locks. A generic prepared plan would lock all partitions on PG16.
+    let row = sqlx::query(
+        "SELECT 1 FROM events WHERE community_id = $1 AND id = $2 AND created_at = $3 AND deleted_at IS NULL LIMIT 1",
+    )
+    .persistent(false)
+    .bind(community_id.as_uuid())
+    .bind(event.id.as_bytes().as_slice())
+    .bind(created_at)
+    .fetch_optional(conn)
+    .await?;
+    Ok(row.is_some())
+}
+
 /// Fetches the latest global (non-channel, `channel_id IS NULL`) replaceable event
 /// for a (kind, pubkey) pair.
 ///
@@ -2844,6 +2867,21 @@ impl Db {
             crate::observability::WriterOperation::EventWrite,
         )
         .await
+    }
+
+    /// Checks the writer for a live event by its signed ID and timestamp.
+    #[datastore_span(name = "live_event_exists_for_event_write", system = "postgresql")]
+    pub async fn live_event_exists_for_event_write(
+        &self,
+        community_id: CommunityId,
+        event: &Event,
+    ) -> Result<bool> {
+        let mut conn = crate::observability::acquire_writer(
+            &self.pool,
+            crate::observability::WriterOperation::EventWrite,
+        )
+        .await?;
+        live_event_exists(&mut conn, community_id, event).await
     }
 
     /// Fetches a single event by its raw ID bytes, **including soft-deleted rows**.

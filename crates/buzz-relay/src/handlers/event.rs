@@ -764,6 +764,12 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         return;
     }
 
+    if let Err(message) = crate::admission::migration::validate_kind(&event) {
+        reject("invalid");
+        write.ok(&conn, &event_id_hex, false, message);
+        return;
+    }
+
     // Observer frames and ephemeral kinds return before ingest, so they take
     // the ban / timeout write-block here. Persistent kinds get the same check
     // in ingest, and so does NIP-43 leave (28936), which is ephemeral-range but
@@ -777,7 +783,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         {
             let (message, reason) = match e.into_legacy() {
                 // `into_legacy` never returns `Ban`; it would fail closed here.
-                IngestError::Internal(_) | IngestError::Ban { .. } => (
+                IngestError::Internal(_) | IngestError::Migration(_) | IngestError::Ban { .. } => (
                     "error: internal error checking restriction state".to_string(),
                     "error",
                 ),
@@ -918,6 +924,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                     IngestError::CanvasConflict(message) => (message, "invalid"),
                     IngestError::AuthFailed(message) => (message, "auth"),
                     IngestError::Internal(message) => (message, "error"),
+                    IngestError::Migration(refusal) => (refusal.message(), "rate-limited"),
                     // `into_legacy` never returns `Ban`; it would fail closed here.
                     IngestError::Ban { .. } => {
                         ("error: internal server error".to_string(), "error")
@@ -990,6 +997,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                 IngestError::Rejected(m) => (m.clone(), "invalid"),
                 IngestError::CanvasConflict(m) => (m.clone(), "invalid"),
                 IngestError::AuthFailed(m) => (m.clone(), "auth"),
+                IngestError::Migration(refusal) => (refusal.message(), "rate-limited"),
                 // `into_legacy` never returns `Ban`; it would fail closed here.
                 IngestError::Internal(_) | IngestError::Ban { .. } => {
                     ("error: internal server error".to_string(), "error")

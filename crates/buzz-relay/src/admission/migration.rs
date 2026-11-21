@@ -1,0 +1,199 @@
+//! A deployment-wide budget for signed events labeled as migration writes.
+
+use buzz_core::kind::{event_kind_u32, KIND_NIP29_CREATE_GROUP, KIND_NIP29_PUT_USER};
+use buzz_pubsub::RedisConnection;
+use nostr::Event;
+use redis::{RedisResult, Script};
+
+const KEY: &str = "buzz:ratelimit:migration_writes";
+const DEFAULT_EVENTS_PER_MINUTE: u32 = 12;
+pub(crate) const MAX_EVENTS_PER_MINUTE: u32 = 60_000;
+const RETRY_AFTER_SECS: u64 = 5;
+
+// Read the live limit and grant admission in one Redis operation. Use Redis
+// time so all callers spend the same budget. Keep enough credit for an
+// importer to create a channel and send its first membership batch together.
+const ADMIT_SCRIPT: &str = r#"
+local rate = redis.call('HGET', KEYS[1], 'events_per_minute')
+if rate == false then rate = ARGV[1] end
+if not string.match(rate, '^%d+$') or tonumber(rate) > tonumber(ARGV[2]) then
+    return redis.error_reply('invalid migration write limit')
+end
+rate = tonumber(rate)
+if rate == 0 then return -1 end
+
+local time = redis.call('TIME')
+local now = tonumber(time[1]) * 1000000 + tonumber(time[2])
+-- At rate N, each elapsed microsecond earns N credits. One event costs
+-- 60 seconds' worth of credits at one event per minute.
+local cost = 60000000
+local capacity = 2 * cost
+local balance = capacity
+local stored = redis.call('HMGET', KEYS[1], 'last_admitted_us', 'remaining_credit')
+local last = stored[1]
+local credit = stored[2]
+if last then
+    if not string.match(last, '^%d+$') or tonumber(last) > 9007199254740991 then
+        return redis.error_reply('invalid migration admission timestamp')
+    end
+    -- A timestamp from the one-permit version carries no unused credit.
+    credit = credit or '0'
+    if not string.match(credit, '^%d+$') or tonumber(credit) > capacity - cost then
+        return redis.error_reply('invalid migration admission credit')
+    end
+    now = math.max(now, tonumber(last))
+    balance = math.min(capacity, tonumber(credit) + (now - tonumber(last)) * rate)
+elseif credit then
+    return redis.error_reply('missing migration admission timestamp')
+end
+if balance < cost then return math.ceil((cost - balance) / (rate * 1000000)) end
+
+redis.call('HSET', KEYS[1], 'last_admitted_us', string.format('%.0f', now),
+    'remaining_credit', string.format('%.0f', balance - cost))
+return 0
+"#;
+
+/// A verified, authorized migration write that cannot proceed.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// The shared budget is exhausted. The value is the retry delay in seconds.
+    Throttled(u64),
+    /// Operators have set the limit to zero.
+    Paused,
+    /// The relay cannot check the shared budget.
+    Unavailable,
+}
+
+impl Refusal {
+    pub(crate) fn retry_after(&self) -> u64 {
+        match self {
+            Self::Throttled(seconds) => *seconds,
+            Self::Paused | Self::Unavailable => RETRY_AFTER_SECS,
+        }
+    }
+
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::Throttled(_) => "quota",
+            Self::Paused => "paused",
+            Self::Unavailable => "unavailable",
+        }
+    }
+
+    pub(crate) fn message(&self) -> String {
+        // Desktop classifies publish delivery from these exact wire messages.
+        match self {
+            Self::Throttled(seconds) => quota_message(*seconds),
+            Self::Paused => quota_message(RETRY_AFTER_SECS),
+            Self::Unavailable => "rate-limited: shared admission unavailable".to_owned(),
+        }
+    }
+}
+
+fn quota_message(seconds: u64) -> String {
+    format!("rate-limited: quota exceeded; retry in {seconds}s")
+}
+
+pub(crate) async fn read_limit(redis: &RedisConnection) -> RedisResult<u32> {
+    let rate: Option<String> = redis::cmd("HGET")
+        .arg(KEY)
+        .arg("events_per_minute")
+        .query_async(&mut redis.clone())
+        .await?;
+    match rate {
+        None => Ok(DEFAULT_EVENTS_PER_MINUTE),
+        Some(rate) => rate
+            .parse::<u32>()
+            .ok()
+            .filter(|value| {
+                rate.bytes().all(|b| b.is_ascii_digit()) && *value <= MAX_EVENTS_PER_MINUTE
+            })
+            .ok_or_else(|| {
+                redis::RedisError::from((
+                    redis::ErrorKind::UnexpectedReturnType,
+                    "invalid migration write limit",
+                ))
+            }),
+    }
+}
+
+pub(crate) async fn set_limit(redis: &RedisConnection, events_per_minute: u32) -> RedisResult<()> {
+    redis::cmd("HSET")
+        .arg(KEY)
+        .arg("events_per_minute")
+        .arg(events_per_minute)
+        .query_async(&mut redis.clone())
+        .await
+}
+
+pub(crate) fn is_labeled(event: &Event) -> bool {
+    event.tags.iter().any(
+        |tag| matches!(tag.as_slice(), [name, source] if name == "migration" && !source.is_empty()),
+    )
+}
+
+pub(crate) fn validate_kind(event: &Event) -> Result<(), &'static str> {
+    if matches!(
+        event_kind_u32(event),
+        KIND_NIP29_CREATE_GROUP | KIND_NIP29_PUT_USER
+    ) || !is_labeled(event)
+    {
+        Ok(())
+    } else {
+        Err("invalid: migration tags require a channel create or membership add")
+    }
+}
+
+pub(crate) async fn admit_authorized_write(
+    redis: &RedisConnection,
+    transport: &'static str,
+) -> Result<(), Refusal> {
+    let result = Script::new(ADMIT_SCRIPT)
+        .key(KEY)
+        .arg(DEFAULT_EVENTS_PER_MINUTE)
+        .arg(MAX_EVENTS_PER_MINUTE)
+        .invoke_async::<i64>(&mut redis.clone())
+        .await;
+    let refusal = match result {
+        Ok(0) => return Ok(()),
+        Ok(-1) => Refusal::Paused,
+        Ok(seconds) if seconds > 0 => Refusal::Throttled(seconds as u64),
+        result => {
+            tracing::warn!(?result, "migration write admission unavailable");
+            Refusal::Unavailable
+        }
+    };
+    metrics::counter!(
+        "buzz_admission_rejections_total",
+        "transport" => transport,
+        "reason" => refusal.reason(),
+        "bucket" => "migration_writes",
+    )
+    .increment(1);
+    Err(refusal)
+}
+
+#[cfg(test)]
+mod tests {
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn classifies_only_exact_migration_tags_with_a_source() {
+        let keys = Keys::generate();
+        for (tag, expected) in [
+            (vec!["migration", "slack"], true),
+            (vec!["migration", "example-import"], true),
+            (vec!["migration", "slack", "extra"], false),
+            (vec!["migration", ""], false),
+            (vec!["migration"], false),
+            (vec!["Migration", "slack"], false),
+            (vec!["t", "migration"], false),
+        ] {
+            let event = EventBuilder::new(Kind::TextNote, "")
+                .tag(Tag::parse(tag.clone()).unwrap())
+                .sign_with_keys(&keys)
+                .unwrap();
+            assert_eq!(super::is_labeled(&event), expected, "{tag:?}");
+        }
+    }
+}
