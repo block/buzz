@@ -1,0 +1,3 @@
+tags:
+  nip-fi-live:
+    skip: "Needs the NIP-FI fixture relay: run mobile/scripts/nip_fi_live/run.sh"
