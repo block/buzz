@@ -23,24 +23,59 @@ pub(crate) fn validate_agent_definition_text(
     display_name: &str,
     system_prompt: &str,
 ) -> Result<(), String> {
-    if display_name.trim().is_empty() {
-        return Err("Display name is required".to_string());
+    validate_reviewed_text(
+        display_name,
+        "Display name",
+        system_prompt,
+        "Agent instructions",
+    )
+}
+
+/// Validate the human-reviewed text carried by a team.
+///
+/// A team's `instructions` are runtime-layered into every member deployment,
+/// so they are executable text under the same review contract as an agent
+/// definition. A team carrying no instructions has no executable text and only
+/// its name is checked.
+pub(crate) fn validate_team_definition_text(
+    name: &str,
+    instructions: Option<&str>,
+) -> Result<(), String> {
+    validate_reviewed_text(
+        name,
+        "Team name",
+        instructions.unwrap_or_default(),
+        "Team instructions",
+    )
+}
+
+/// Shared contract for reviewed-then-executed text. The labels differ per
+/// surface so the error a person sees names the field they were editing; the
+/// limits and the invisible-character rules are deliberately identical.
+fn validate_reviewed_text(
+    name: &str,
+    name_label: &str,
+    instructions: &str,
+    instructions_label: &str,
+) -> Result<(), String> {
+    if name.trim().is_empty() {
+        return Err(format!("{name_label} is required"));
     }
-    let display_name_chars = display_name.chars().count();
-    if display_name_chars > MAX_DISPLAY_NAME_CHARS {
+    let name_chars = name.chars().count();
+    if name_chars > MAX_DISPLAY_NAME_CHARS {
         return Err(format!(
-            "Display name is too long ({display_name_chars} characters, max {MAX_DISPLAY_NAME_CHARS})"
+            "{name_label} is too long ({name_chars} characters, max {MAX_DISPLAY_NAME_CHARS})"
         ));
     }
-    if system_prompt.len() > MAX_SYSTEM_PROMPT_BYTES {
+    if instructions.len() > MAX_SYSTEM_PROMPT_BYTES {
         return Err(format!(
-            "Agent instructions are too long ({} bytes, max {MAX_SYSTEM_PROMPT_BYTES})",
-            system_prompt.len()
+            "{instructions_label} are too long ({} bytes, max {MAX_SYSTEM_PROMPT_BYTES})",
+            instructions.len()
         ));
     }
 
-    validate_visible_text(display_name, "Display name", false)?;
-    validate_visible_text(system_prompt, "Agent instructions", true)
+    validate_visible_text(name, name_label, false)?;
+    validate_visible_text(instructions, instructions_label, true)
 }
 
 /// Validate an optional public agent description: max 280 characters and the
@@ -182,6 +217,76 @@ fn is_default_ignorable(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Team text: same contract, team-shaped labels ─────────────────────────
+    //
+    // Team `instructions` are runtime-layered into every member deployment, so
+    // they are executed exactly like an agent's `system_prompt`. Before this
+    // they were the one shared executable text with no review contract at all,
+    // which made the same hidden characters safer in a team than in the agent
+    // wrapped by it.
+
+    #[test]
+    fn team_text_rejects_the_same_invisible_characters_as_an_agent() {
+        for character in [
+            '\u{00AD}',
+            '\u{034F}',
+            '\u{200B}',
+            '\u{202E}',
+            '\u{2060}',
+            '\u{2066}',
+            '\u{3164}',
+            '\u{E007F}',
+        ] {
+            let name = format!("Release{character} Team");
+            let instructions = format!("Ship the release.{character}");
+            assert!(validate_team_definition_text(&name, Some("Ship it.")).is_err());
+            assert!(validate_team_definition_text("Release Team", Some(&instructions)).is_err());
+        }
+    }
+
+    #[test]
+    fn team_text_accepts_ordinary_whitespace_and_emoji() {
+        assert!(validate_team_definition_text(
+            "Release Team 🚀",
+            Some("Ship the release.\n\tPost the ledger row 🚀")
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_team_without_instructions_carries_no_executable_text() {
+        assert!(validate_team_definition_text("Release Team", None).is_ok());
+    }
+
+    #[test]
+    fn team_errors_name_the_team_field_the_person_was_editing() {
+        let name_error = validate_team_definition_text("", Some("Ship it.")).unwrap_err();
+        assert!(
+            name_error.starts_with("Team name"),
+            "expected a team-shaped error, got {name_error}"
+        );
+
+        let long_instructions = "x".repeat(MAX_SYSTEM_PROMPT_BYTES + 1);
+        let instructions_error =
+            validate_team_definition_text("Release Team", Some(&long_instructions)).unwrap_err();
+        assert!(
+            instructions_error.starts_with("Team instructions"),
+            "expected a team-shaped error, got {instructions_error}"
+        );
+    }
+
+    #[test]
+    fn agent_error_wording_is_unchanged_by_the_shared_contract() {
+        assert_eq!(
+            validate_agent_definition_text("", "Review code.").unwrap_err(),
+            "Display name is required"
+        );
+        let long_prompt = "x".repeat(MAX_SYSTEM_PROMPT_BYTES + 1);
+        assert!(validate_agent_definition_text("Reviewer", &long_prompt)
+            .unwrap_err()
+            .starts_with("Agent instructions are too long"));
+    }
 
     #[test]
     fn accepts_plain_multiline_instructions() {
