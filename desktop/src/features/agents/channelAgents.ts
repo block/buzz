@@ -175,6 +175,20 @@ export async function attachManagedAgentToChannel(
   const role = input.role ?? "bot";
   const ensureRunning = input.ensureRunning ?? true;
   const agentPubkey = normalizePubkey(input.agent.pubkey);
+
+  if (!ensureRunning) {
+    if (input.agent.backend.type !== "local") {
+      throw new Error(
+        "Adding without starting is only available for local agents.",
+      );
+    }
+    if (input.agent.status !== "stopped") {
+      throw new Error(
+        "This agent is no longer stopped. Refresh and choose Add and start instead.",
+      );
+    }
+  }
+
   const membershipResult = await addChannelMembers({
     channelId,
     pubkeys: [input.agent.pubkey],
@@ -189,11 +203,28 @@ export async function attachManagedAgentToChannel(
   const membershipAdded = membershipResult.added.some(
     (pubkey) => normalizePubkey(pubkey) === agentPubkey,
   );
+  if (!ensureRunning && !membershipAdded) {
+    throw new Error("Agent membership was not confirmed.");
+  }
 
   let agent = input.agent;
   let started = false;
 
-  if (ensureRunning) {
+  if (!ensureRunning) {
+    try {
+      const verifiedAgent = (await listManagedAgents()).find(
+        (candidate) => normalizePubkey(candidate.pubkey) === agentPubkey,
+      );
+      if (verifiedAgent?.status !== "stopped") {
+        throw new Error("stopped state changed");
+      }
+      agent = verifiedAgent;
+    } catch {
+      throw new Error(
+        "Agent was added, but its stopped state could not be verified.",
+      );
+    }
+  } else {
     // Running agents (local or provider) auto-discover new channel membership
     // via the harness's membership notifications — no restart needed. Only
     // not-yet-running agents need a start/deploy call before the first mention
