@@ -10,36 +10,57 @@ import '../../shared/relay/relay.dart';
 /// it, or to the failure that stopped it. A catch-up after a reconnect is not
 /// an open, so callers time only a channel's first load.
 ///
-/// The relay and the reporter's member are fixed when the request starts. An
-/// open that finishes after the member changed belonged to someone else and
-/// is not counted.
+/// The relay and its member are fixed when the request starts. An open that
+/// finishes after the reporter moved to another member belonged to someone
+/// else, and one that spanned a move to the background measured the time
+/// away, so neither is counted.
 class ChannelOpenTimer {
-  ChannelOpenTimer(Ref ref)
-    : _reporter = ref.read(diagnosticReporterProvider),
-      _host = Uri.tryParse(ref.read(relayConfigProvider).baseUrl)?.host,
-      _startedAt = clock.now() {
-    _memberChanges = _reporter.memberChanges;
+  factory ChannelOpenTimer(Ref ref) {
+    final config = ref.read(relayConfigProvider);
+    final reporter = ref.read(diagnosticReporterProvider);
+    return ChannelOpenTimer._(
+      SignerDiagnosticReporter(reporter, signer: pubkeyFromNsec(config.nsec)),
+      Uri.tryParse(config.baseUrl)?.host,
+      ref.read(relaySessionProvider.notifier),
+    );
   }
+
+  ChannelOpenTimer._(this._reporter, this._host, this._session)
+    : _memberChanges = _reporter.memberChanges,
+      _pauses = _session.pauses,
+      _startedAt = clock.now();
 
   /// Continues [pending] if it is still running, since an open cut short by
   /// a reconnect keeps its clock and the wait counts; otherwise starts one.
   static ChannelOpenTimer resume(ChannelOpenTimer? pending, Ref ref) =>
       pending != null && !pending.isDone ? pending : ChannelOpenTimer(ref);
 
+  /// Counts an open the relay refused before its history was asked for,
+  /// with no duration since nothing timed it.
+  static void refused(Ref ref, Object error) =>
+      ChannelOpenTimer(ref)._count(error, timed: false);
+
   final DiagnosticReporter _reporter;
   final String? _host;
+  final RelaySessionNotifier _session;
+  final int _memberChanges;
+  final int _pauses;
   final DateTime _startedAt;
-  late final int _memberChanges;
   bool _done = false;
 
-  /// Whether the open was already counted or dropped.
-  bool get isDone => _done;
+  /// Whether the open was already counted or dropped, or spanned a move to
+  /// the background, so a later load starts a new one.
+  bool get isDone => _done || _session.pauses != _pauses;
 
   /// Counts the open once, as a failure when [error] is set. Later calls do
   /// nothing.
   void finish({Object? error}) {
-    if (_done) return;
+    if (isDone) return;
     _done = true;
+    _count(error);
+  }
+
+  void _count(Object? error, {bool timed = true}) {
     final host = _host;
     if (host == null || host.isEmpty) return;
     if (_reporter.memberChanges != _memberChanges) return;
@@ -52,13 +73,10 @@ class ChannelOpenTimer {
             ? NetworkOutcome.success
             : NetworkOutcome.failure,
         failure: failure,
-        duration: clock.now().difference(_startedAt),
+        duration: timed ? clock.now().difference(_startedAt) : null,
       ),
     );
   }
-
-  /// Drops the open uncounted, as when nobody is waiting for it any more.
-  void cancel() => _done = true;
 }
 
 /// The kind of failure that ended an open: the relay's own answers first,

@@ -120,6 +120,42 @@ void main() {
     });
   });
 
+  test('an open started after the reporter moved to another member '
+      'is not counted for them', () {
+    fakeAsync((async) {
+      final (:relay, :counts, :container, :opens) = _start(async);
+      // A switch names the next member before the old relay is replaced.
+      counts.setMember('someone else');
+      final messages = container.listen(
+        channelMessagesProvider(_channel),
+        (_, _) {},
+      );
+      async.elapse(const Duration(seconds: 1));
+      expect(messages.read().hasValue, isTrue);
+      expect(opens(), isEmpty);
+    });
+  });
+
+  test('an open spanning a brief stay in the background is not counted', () {
+    fakeAsync((async) {
+      final (:relay, :counts, :container, :opens) = _start(async);
+      final held = relay.holdQuery();
+      final messages = container.listen(
+        channelMessagesProvider(_channel),
+        (_, _) {},
+      );
+      async.elapse(const Duration(seconds: 1));
+      final session = container.read(relaySessionProvider.notifier);
+      session.onAppPaused();
+      async.elapse(const Duration(seconds: 2));
+      session.onAppResumed();
+      held.complete();
+      async.elapse(const Duration(milliseconds: 50));
+      expect(messages.read().hasValue, isTrue);
+      expect(opens(), isEmpty, reason: 'it measured the time away');
+    });
+  });
+
   test('an open the member left still counts', () {
     fakeAsync((async) {
       final (:relay, :counts, :container, :opens) = _start(async);
@@ -196,6 +232,21 @@ void main() {
       final open = opens().single;
       expect(open.outcome, NetworkOutcome.failure);
       expect(open.failure, NetworkFailure.relayRefused);
+    });
+  });
+
+  test('a refusal before the history was asked for counts once', () {
+    fakeAsync((async) {
+      final (:relay, :counts, :container, :opens) = _start(async);
+      relay.refuseReq(
+        (filter) => filter.containsKey('#h'),
+        'restricted: not a channel member',
+      );
+      container.listen(channelMessagesProvider(_channel), (_, _) {});
+      async.elapse(const Duration(seconds: 1));
+      final open = opens().single;
+      expect(open.failure, NetworkFailure.relayRefused);
+      expect(open.duration, isNull, reason: 'nothing timed it');
     });
   });
 

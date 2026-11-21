@@ -169,11 +169,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   @override
   AsyncValue<List<NostrEvent>> build() {
     final sessionState = ref.watch(relaySessionProvider);
-    // The session pauses in the background: an open's clock carries across
-    // reconnects, but not across that, since a later return is a new open.
-    if (sessionState.status == SessionStatus.disconnected) {
-      _openTimer?.cancel();
-    }
     // Riverpod defers rebuilding a provider nobody is listening to until it
     // is listened to or read again, and then skips onResume. So a build
     // always means the chat is wanted.
@@ -321,9 +316,11 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         );
       }
 
-      openTimer = _openTimer = _hasLoadedHistory
+      openTimer = _hasLoadedHistory
           ? null
           : ChannelOpenTimer.resume(_openTimer, ref);
+      // Shared only while the chat is open: a return later is a new open.
+      if (_hasListeners) _openTimer = openTimer;
       final historyVersion = ++_threadQuerySerial;
       final (history, wireEvents) = await _fetchNewestHistory(
         session,
@@ -374,11 +371,11 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       unawaited(_fillNotices());
     } catch (e, st) {
       if (!_isCurrentInit(initVersion)) return;
-      openTimer?.finish(error: e);
       if (isRelayChannelAccessDenied(e)) {
-        _denyAccess(e, st, cache, cacheScope);
+        _denyAccess(e, st, cache, cacheScope, openTimer);
         return;
       }
+      openTimer?.finish(error: e);
       if (_accessDenial != null) return;
       _historyRefreshFailed = true;
       final fallbackMessages = state.value ?? _lastKnownMessages;
@@ -416,11 +413,16 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     Object error,
     StackTrace stackTrace,
     SavedMessageStore cache,
-    SavedMessageScope? scope,
-  ) {
+    SavedMessageScope? scope, [
+    ChannelOpenTimer? openTimer,
+  ]) {
     _detachLive();
-    // A refusal on the live subscription can end the first open first.
-    _openTimer?.finish(error: error);
+    // A live refusal can end the first open, even before its request.
+    if ((openTimer ?? _openTimer) case final timer?) {
+      timer.finish(error: error);
+    } else if (!_hasLoadedHistory) {
+      ChannelOpenTimer.refused(ref, error);
+    }
     _lastKnownMessages = null;
     _hasLoadedHistory = false;
     _windowStore = const ChannelWindowStore.empty();

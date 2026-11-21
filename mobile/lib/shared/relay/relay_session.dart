@@ -99,12 +99,13 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   Timer? _flushTimer;
   Timer? _backgroundGraceTimer;
   DateTime? _backgroundedAt;
+  int _pauses = 0;
   DateTime? _connectedAt;
   DateTime? _connectStartedAt;
   // The relay sent its terminal authorization denial on this connection.
   bool _authorizationDenied = false;
   DateTime? _lastInboundAt;
-  ({DateTime at, int context})? _connectionLost;
+  ({DateTime at, int context, int pauses})? _connectionLost;
   int _reconnectDelayMs = _baseReconnectDelayMs;
   int _subIdCounter = 0;
   bool _disposed = false;
@@ -316,22 +317,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     return events;
   }
 
-  void _activateRateLimitGateFromHttpError(String body) {
-    final dynamic decoded;
-    try {
-      decoded = jsonDecode(body);
-    } on FormatException {
-      return;
-    }
-    if (decoded is! Map<String, dynamic>) return;
-    final message = decoded['error'];
-    if (message is! String ||
-        classifyRelayClosed(message) != RelayClosedClass.rateLimited) {
-      return;
-    }
-    _rateLimitGate.activate(parseRateLimitRetrySeconds(message));
-  }
-
   /// Fetch historical events matching [filter]. Sends REQ, collects events
   /// until EOSE, then resolves. One-shot subscription.
   Future<List<NostrEvent>> fetchHistory(
@@ -533,10 +518,13 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     return () => _beforePauseCallbacks.remove(owner);
   }
 
+  /// Counts moves to the background, so work can tell it spanned one.
+  int get pauses => _pauses;
+
   /// Called by the app lifecycle provider when the app goes to background.
   void onAppPaused() {
     _backgroundedAt = _now();
-    _connectionLost = null;
+    _pauses++;
     _backgroundGraceTimer?.cancel();
     _backgroundGraceTimer = Timer(_backgroundGraceDuration, () {
       unawaited(_pauseAfterCallbacks());

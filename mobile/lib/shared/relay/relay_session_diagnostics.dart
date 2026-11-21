@@ -33,8 +33,11 @@ extension _RelaySessionDiagnostics on RelaySessionNotifier {
     _noteNetwork(NetworkEndpoint.relayConnection, since: _connectStartedAt);
     final lost = _connectionLost;
     _connectionLost = null;
-    // A loss in another community's connection is not this one's recovery.
-    if (lost != null && lost.context == _contextGeneration) {
+    // A loss in another community's connection, or before a move to the
+    // background, is not this one's recovery.
+    if (lost != null &&
+        lost.context == _contextGeneration &&
+        lost.pauses == _pauses) {
       _noteNetwork(NetworkEndpoint.relayRecovery, since: lost.at);
     }
   }
@@ -60,6 +63,7 @@ extension _RelaySessionDiagnostics on RelaySessionNotifier {
             ? inbound
             : provenAlive,
         context: _contextGeneration,
+        pauses: _pauses,
       );
     }
     _connectStartedAt = null;
