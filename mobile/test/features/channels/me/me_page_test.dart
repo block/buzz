@@ -171,11 +171,12 @@ void main() {
           channelsProvider.overrideWith(LabeledChannels.new),
           soloFilterProvider.overrideWithValue(manager),
           channelFilterActivityProvider('filed').overrideWith(
-            (ref) async =>
-                DateTime.now()
-                    .subtract(const Duration(days: 8))
-                    .millisecondsSinceEpoch ~/
-                1000,
+            (ref) => AsyncData(
+              DateTime.now()
+                      .subtract(const Duration(days: 8))
+                      .millisecondsSinceEpoch ~/
+                  1000,
+            ),
           ),
           meGroupsProvider.overrideWith(
             (ref) => Stream.value(

@@ -570,13 +570,12 @@ class _SliverChannelsList extends HookConsumerWidget {
           ],
       ],
     );
-    final content = _ActivityRecovery(activity: activity, child: inventory);
-    if (orderKey == null) return content;
+    if (orderKey == null) return inventory;
     return SectionOrderScope(
       labels: labels,
       defaultOrder: keys,
       storageKey: orderKey,
-      child: content,
+      child: inventory,
     );
   }
 }

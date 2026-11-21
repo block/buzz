@@ -22,13 +22,9 @@ extension _UnreadCatchUp on ChannelsNotifier {
     if (!_lifecycleRef.mounted) return;
     // A catch-up that misses channels is retried, as a list read.
     var incomplete = false;
+    var catchUpChannelIds = const <String>{};
     try {
-      final myPk = _lifecycleRef.read(myPubkeyProvider);
-      if (myPk == null) return;
-
-      final session = _lifecycleRef.read(relaySessionProvider.notifier);
-      final mutedChannelIds = _mutedChannelIds();
-      final readState = _lifecycleRef.read(readStateProvider);
+      // Before any read that can throw, so a failed setup marks them unknown.
       final activeChannels = [
         for (final channel in channels)
           if (channel.isMember && !channel.isArchived) channel,
@@ -36,6 +32,13 @@ extension _UnreadCatchUp on ChannelsNotifier {
       final channelById = {
         for (final channel in activeChannels) channel.id: channel,
       };
+      catchUpChannelIds = channelById.keys.toSet();
+      final myPk = _lifecycleRef.read(myPubkeyProvider);
+      if (myPk == null) return;
+
+      final session = _lifecycleRef.read(relaySessionProvider.notifier);
+      final mutedChannelIds = _mutedChannelIds();
+      final readState = _lifecycleRef.read(readStateProvider);
       final readAtByChannel = {
         for (final channel in activeChannels)
           channel.id: readState.effectiveTimestamp(channel.id),
@@ -44,6 +47,14 @@ extension _UnreadCatchUp on ChannelsNotifier {
       final cursorsAtStart = {
         for (final channel in activeChannels)
           channel.id: _unreadCaughtUpByChannel[channel.id],
+      };
+      final sinceByChannel = {
+        for (final channel in activeChannels)
+          channel.id: _unreadCatchUpSince(
+            channel.id,
+            readAtByChannel[channel.id],
+            muted: mutedChannelIds.contains(channel.id),
+          ),
       };
       final filters = [
         for (final channel in activeChannels)
@@ -56,14 +67,34 @@ extension _UnreadCatchUp on ChannelsNotifier {
               tags: {
                 '#h': [channel.id],
               },
-              since: _unreadCatchUpSince(
-                channel.id,
-                readAtByChannel[channel.id],
-                muted: mutedChannelIds.contains(channel.id),
-              ),
+              since: sinceByChannel[channel.id],
               limit: _unreadCatchUpLimit,
             ),
       ];
+      // A gap only matters to the Active filter, and only when a post in it
+      // could be newer than the activity already known. A channel no Active
+      // section shows keeps its gap for a later catch-up, and reads as
+      // unknown meanwhile.
+      final gapFilters = <String, NostrFilter>{};
+      final deferredGaps = <String>{};
+      for (final channel in activeChannels) {
+        final gap = _activityGap(channel.id, sinceByChannel[channel.id]!);
+        if (gap == null) continue;
+        if ((_activity.latestAt(channel.id) ?? -1) >= gap.until) continue;
+        if (!_activity.isWatched(channel.id)) {
+          deferredGaps.add(channel.id);
+          continue;
+        }
+        gapFilters[channel.id] = NostrFilter(
+          kinds: EventKind.channelMessageEventKinds,
+          tags: {
+            '#h': [channel.id],
+          },
+          since: gap.since,
+          until: gap.until,
+          limit: 1,
+        );
+      }
 
       final failedChannelIds = <String>{};
       final events = await _fetchChannelHistoryBatch(
@@ -72,16 +103,20 @@ extension _UnreadCatchUp on ChannelsNotifier {
         operation: 'unread catch-up',
         failedChannelIds: failedChannelIds,
       );
-      // Unavailable: keep the unread state already observed.
-      if (events == null) {
-        incomplete = true;
-        return;
-      }
       // The relay round-trip above is the window Jed's probes park in: a newer
       // refresh, a community switch or an identity switch here means every
       // write below belongs to a channel list the user has left.
       if (!_lifecycleRef.mounted ||
           _isCatchUpRetired(fence, subscriptionGeneration)) {
+        return;
+      }
+      // Unavailable: keep the unread state already observed, but not the
+      // activity, which may have missed a post.
+      if (events == null) {
+        incomplete = true;
+        if (_activity.noteCatchUp(catchUpChannelIds, catchUpChannelIds)) {
+          _publishUnreadCatchUp(const {});
+        }
         return;
       }
 
@@ -98,6 +133,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
       // cross-request tombstones: a large batch can evict its own early IDs.
       final batchDeletedIds = <String>{};
       var appliedDeletion = false;
+      var activityAdvanced = false;
       for (final event in events) {
         final channelId = event.channelId;
         if (channelById.containsKey(channelId) ||
@@ -133,13 +169,22 @@ extension _UnreadCatchUp on ChannelsNotifier {
         if (channelId == null) continue;
         final channel = channelById[channelId];
         if (channel == null) continue;
-        windowSizeByChannel.update(channelId, (n) => n + 1, ifAbsent: () => 1);
+        final readAt = readAtByChannel[channelId];
+        // Read posts say nothing about whether the window hides an older
+        // unread one.
+        if (readAt == null || event.createdAt > readAt) {
+          windowSizeByChannel.update(
+            channelId,
+            (n) => n + 1,
+            ifAbsent: () => 1,
+          );
+        }
         if (batchDeletedIds.contains(event.id) ||
             _unscopedUnreadDeletedIds.contains(event.id) ||
             _unreadDeletedIdsByChannel[channelId]?.contains(event.id) == true) {
           continue;
         }
-        final readAt = readAtByChannel[channelId];
+        if (_activity.note(channelId, event)) activityAdvanced = true;
         _noteThreadChannel(event, channelId);
         if (event.pubkey.toLowerCase() == myPk.toLowerCase()) continue;
         if (readAt != null && event.createdAt <= readAt) continue;
@@ -193,13 +238,47 @@ extension _UnreadCatchUp on ChannelsNotifier {
       // from here, so a second check would be dead code.
       // Recorded events also advance `lastMessageAt`, as live events do: a
       // deadline-unavailable latest-message batch leaves it unset.
-      if (recordedAtByChannel.isNotEmpty || appliedDeletion) {
+      // Newer activity also republishes, so the Active filter sees it.
+      // So does a channel whose activity became known or unknown.
+      // A channel with a gap to read stays as it was until that read answers.
+      gapFilters.removeWhere((id, _) => failedChannelIds.contains(id));
+      deferredGaps.removeAll(failedChannelIds);
+      final coverageChanged =
+          _activity.noteCatchUp(
+            catchUpChannelIds
+                .difference(gapFilters.keys.toSet())
+                .difference(deferredGaps),
+            failedChannelIds,
+            sentAt: requestedAt,
+          ) |
+          _activity.noteCatchUp(deferredGaps, deferredGaps) |
+          _activity.forgetHeads(batchDeletedIds);
+      if (recordedAtByChannel.isNotEmpty ||
+          appliedDeletion ||
+          activityAdvanced ||
+          coverageChanged) {
         _publishUnreadCatchUp(recordedAtByChannel);
+      }
+      if (gapFilters.isNotEmpty) {
+        unawaited(
+          _catchUpActivityGaps(
+            session,
+            gapFilters,
+            requestedAt,
+            batchDeletedIds,
+            fence,
+            subscriptionGeneration,
+          ),
+        );
       }
     } catch (error) {
       incomplete = true;
       if (!_lifecycleRef.mounted) return;
       debugPrint('[ChannelsNotifier] unread catch-up failed: $error');
+      if (!_isCatchUpRetired(fence, subscriptionGeneration) &&
+          _activity.noteCatchUp(catchUpChannelIds, catchUpChannelIds)) {
+        _publishUnreadCatchUp(const {});
+      }
     } finally {
       // Optional history can terminate without data. Release this destination
       // with its retained unread state, but never settle a retired request.
@@ -214,6 +293,52 @@ extension _UnreadCatchUp on ChannelsNotifier {
         }
       }
     }
+  }
+
+  /// Reads the newest post in each channel's [_activityGap], after the unread
+  /// catch-up and apart from it, so its failure only leaves activity unknown.
+  /// A failed gap is not retried: the next list read's catch-up reads it again.
+  Future<void> _catchUpActivityGaps(
+    RelaySessionNotifier session,
+    Map<String, NostrFilter> filtersByChannel,
+    int sentAt,
+    Set<String> deletedIds,
+    _ChannelRefreshFence fence,
+    int subscriptionGeneration,
+  ) async {
+    final channelIds = filtersByChannel.keys.toSet();
+    final failedChannelIds = <String>{};
+    List<NostrEvent>? events;
+    try {
+      events = await _fetchChannelHistoryBatch(
+        session,
+        filtersByChannel.values.toList(),
+        operation: 'activity gap read',
+        failedChannelIds: failedChannelIds,
+        optional: true,
+      );
+    } catch (error) {
+      debugPrint('[ChannelsNotifier] activity gap read failed: $error');
+    }
+    if (!_lifecycleRef.mounted ||
+        _isCatchUpRetired(fence, subscriptionGeneration)) {
+      return;
+    }
+    var changed = false;
+    for (final event in events ?? const <NostrEvent>[]) {
+      final channelId = event.channelId;
+      if (channelId == null ||
+          !channelIds.contains(channelId) ||
+          deletedIds.contains(event.id) ||
+          _unscopedUnreadDeletedIds.contains(event.id) ||
+          _unreadDeletedIdsByChannel[channelId]?.contains(event.id) == true) {
+        continue;
+      }
+      changed |= _activity.note(channelId, event);
+    }
+    final failed = events == null ? channelIds : failedChannelIds;
+    changed |= _activity.noteCatchUp(channelIds, failed, sentAt: sentAt);
+    if (changed) _publishUnreadCatchUp(const {});
   }
 
   /// Where a channel's catch-up starts.
@@ -242,6 +367,18 @@ extension _UnreadCatchUp on ChannelsNotifier {
       return afterRead;
     }
     return max(afterRead, caughtUp.sentAt - relayCrossDeviceSkewSeconds);
+  }
+
+  /// The stretch a catch-up starting at [since] skips since the last read
+  /// that covered the channel, for the Active filter: a post that arrived
+  /// while disconnected and was read on another device lies there, as does one
+  /// before an unread cursor reset. The catch-up asks for its newest post.
+  /// Null when no read covered the channel yet or nothing is skipped.
+  ({int since, int until})? _activityGap(String channelId, int since) {
+    final coveredAt = _activity.coveredAt(channelId);
+    if (coveredAt == null) return null;
+    final from = coveredAt - relayCrossDeviceSkewSeconds;
+    return since > from ? (since: from, until: since - 1) : null;
   }
 
   /// Remembers when a catch-up over [readAtByChannel] was sent, and the read
