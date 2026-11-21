@@ -142,7 +142,7 @@ jobs:
         env:
           NATIVE_TOOLCHAIN_ID: ${{ steps.native_toolchain.outputs.id }}
         run: |
-          KEY=$(scripts/desktop-release-cache-key.py --platform "$RUNNER_OS" --target x86_64-pc-windows-msvc --features default --native-inputs "$NATIVE_TOOLCHAIN_ID")
+          KEY=$(scripts/desktop-release-cache-key.py --platform "$RUNNER_OS" --target x86_64-pc-windows-msvc --features mesh-llm --native-inputs "$NATIVE_TOOLCHAIN_ID")
           echo "key=$KEY" >> "$GITHUB_OUTPUT"
       - name: Restore exact default-branch cache from tag
         id: rust_cache
