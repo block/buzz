@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import * as React from "react";
 import { AgentStatusBadge } from "@/features/agents/ui/AgentStatusBadge";
+import { runtimeLabel } from "@/features/profile/lib/runtimeLabel";
 import { canonicalNpub, truncateNpub } from "@/shared/lib/pubkey";
 import {
   HoverCopyIndicator,
@@ -24,17 +25,6 @@ import type {
   Profile,
   RelayAgent,
 } from "@/shared/api/types";
-
-const RUNTIME_LABELS: Record<string, string> = {
-  goose: "Goose",
-  "claude-code": "Claude Code",
-  "codex-acp": "Codex",
-  aider: "Aider",
-};
-
-function runtimeLabel(command: string): string {
-  return RUNTIME_LABELS[command] ?? command;
-}
 
 export type ProfileField = {
   copyValue?: string;
