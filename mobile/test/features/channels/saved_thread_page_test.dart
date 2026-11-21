@@ -8,7 +8,6 @@ import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/shared/channels/saved_message_store.dart';
 import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:buzz/shared/relay/relay.dart';
-import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -175,7 +174,11 @@ void main() {
     relay.emit(
       _event('', kind: EventKind.deletion, deletionTarget: removed.id),
     );
-    expect(await container.read(preview.future), [retained]);
+    final displayed = await container.read(preview.future);
+    expect(await store.read(store.capture(_scope, _args.savedPage)), [
+      retained,
+    ]);
+    expect(displayed, [retained]);
     expect(container.read(otherPreview), same(unaffected));
   });
 }
