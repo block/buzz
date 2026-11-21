@@ -54,6 +54,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# A directory an earlier run left (it carries the fixture's marker) may hold that
+# run's fixture.json; clear it so the wait below sees only this run's. A
+# directory without the marker is never touched here: the fixture refuses it.
+if [[ -f "$work/.nip-fi-live-workdir" ]]; then
+  rm -f "$work/fixture.json" "$work/fixture-result.json" "$work/markers.jsonl" "$work/relay.log"
+fi
 uv run --quiet --with cryptography python "$here/fixture.py" --workdir "$work" \
   >"$fixture_out" 2>&1 &
 fixture_pid=$!
