@@ -70,6 +70,7 @@ export async function refreshProfileCaches(
   const baseCache = {
     version: 1 as const,
     displayName: profile.displayName,
+    name: profile.name,
     avatarUrl: profile.avatarUrl,
     about: profile.about,
     avatarDataUrl: resolveAvatarDataUrl(profile.avatarUrl, null, existing),

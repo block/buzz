@@ -8,6 +8,8 @@ import {
   profilePanelTabFromSearch,
   profilePanelTargetKey,
   profilePanelViewFromSearch,
+  resolveOwnerHandle,
+  resolveProfileDisplayName,
 } from "./UserProfilePanelUtils.ts";
 
 function agent(overrides = {}) {
@@ -242,5 +244,34 @@ test("profile target identity stays stable while a requested pubkey is canonical
   assert.equal(
     profilePanelTargetKey(undefined, "requested-persona"),
     "persona:requested-persona",
+  );
+});
+
+test("profile labels use Nostr name only as a fallback", () => {
+  assert.equal(
+    resolveProfileDisplayName({
+      persona: { displayName: "Persona" },
+      profile: { displayName: "", name: "Nostr handle" },
+      pubkey: "deadbeef",
+    }),
+    "Nostr handle",
+  );
+  assert.equal(
+    resolveOwnerHandle(
+      { nip05Handle: null, displayName: null, name: "owner-handle" },
+      "deadbeef",
+    ),
+    "owner-handle",
+  );
+  assert.equal(
+    resolveOwnerHandle(
+      {
+        nip05Handle: "owner@example.test",
+        displayName: "Owner",
+        name: "handle",
+      },
+      "deadbeef",
+    ),
+    "owner@example.test",
   );
 });

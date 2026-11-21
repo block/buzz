@@ -8,6 +8,7 @@ import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
 import { cn } from "@/shared/lib/cn";
 import { isRelayUnreachableError } from "@/shared/lib/relayError";
 import { Button } from "@/shared/ui/button";
+import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { useOnboardingCardLayout } from "./OnboardingCard";
@@ -205,9 +206,11 @@ export function ProfileStep({
     skipForNow,
     submit,
     updateDisplayName,
+    updateName,
   } = actions;
-  const { isReadyToSubmit, isSaving, name, saveRecovery } = state;
+  const { handle, isReadyToSubmit, isSaving, name, saveRecovery } = state;
   const displayNameDraft = name.draftValue;
+  const handleDraft = handle.draftValue;
   const hasDisplayNameDraft = displayNameDraft.length > 0;
   const canSubmit =
     displayNameDraft.trim().length > 0 && isReadyToSubmit && !isSaving;
@@ -234,8 +237,8 @@ export function ProfileStep({
           What should we call you?
         </h1>
         <p className="mt-5 text-sm leading-6 text-muted-foreground">
-          Pick the name people and agents will see in Buzz. You can change it
-          anytime.
+          Choose the display name people and agents will see in Buzz. You can
+          also set an optional Nostr handle.
         </p>
       </div>
 
@@ -244,9 +247,9 @@ export function ProfileStep({
           className="mt-8 block w-full text-sm font-medium text-foreground"
           htmlFor="onboarding-display-name"
         >
-          <span className="mb-2 block">Name</span>
+          <span className="mb-2 block">Display name</span>
           <OnboardingInput
-            aria-label="Name"
+            aria-label="Display name"
             autoCapitalize="none"
             autoComplete="off"
             autoCorrect="off"
@@ -260,7 +263,7 @@ export function ProfileStep({
                 submit();
               }
             }}
-            placeholder="Enter your name"
+            placeholder="Enter your display name"
             ref={inputRef}
             spellCheck={false}
             value={displayNameDraft}
@@ -271,7 +274,7 @@ export function ProfileStep({
           className="mt-12 flex w-full cursor-text flex-col items-center"
           htmlFor="onboarding-display-name"
         >
-          <span className="sr-only">Name</span>
+          <span className="sr-only">Display name</span>
           <div className="relative h-20 w-full max-w-[576px]">
             {!hasDisplayNameDraft ? (
               <div
@@ -283,12 +286,12 @@ export function ProfileStep({
                     aria-hidden="true"
                     className="buzz-onboarding-name-placeholder-caret h-[0.9em] w-0.5 rounded-full bg-primary"
                   />
-                  Enter your name
+                  Enter your display name
                 </span>
               </div>
             ) : null}
             <input
-              aria-label="Name"
+              aria-label="Display name"
               autoCapitalize="none"
               autoComplete="off"
               autoCorrect="off"
@@ -313,6 +316,39 @@ export function ProfileStep({
           </div>
         </label>
       )}
+
+      <label
+        className="mt-6 block w-full max-w-[576px] text-left"
+        htmlFor="onboarding-name"
+      >
+        <span className="text-sm font-medium text-foreground">
+          Nostr handle{" "}
+          <span className="font-normal text-muted-foreground">(optional)</span>
+        </span>
+        <p className="mt-1 text-sm text-muted-foreground">
+          A short profile name. It does not need to be unique.
+        </p>
+        <Input
+          aria-label="Nostr handle"
+          autoCapitalize="none"
+          autoComplete="off"
+          autoCorrect="off"
+          className="mt-3"
+          data-testid="onboarding-name"
+          disabled={isSaving}
+          id="onboarding-name"
+          onChange={(event) => updateName(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && canSubmit) {
+              event.preventDefault();
+              submit();
+            }
+          }}
+          placeholder="e.g. alice"
+          spellCheck={false}
+          value={handleDraft}
+        />
+      </label>
 
       {saveRecovery.errorMessage ? (
         <ErrorBanner isSaving={isSaving} message={saveRecovery.errorMessage} />

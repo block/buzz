@@ -10,6 +10,7 @@ import type {
 
 type RawProfile = {
   pubkey: string;
+  name: string | null;
   display_name: string | null;
   avatar_url: string | null;
   about: string | null;
@@ -18,7 +19,10 @@ type RawProfile = {
   has_profile_event?: boolean;
 };
 
-type RawUserProfileSummary = Omit<RawProfile, "pubkey" | "about"> & {
+type RawUserProfileSummary = Omit<
+  RawProfile,
+  "pubkey" | "name" | "about" | "has_profile_event"
+> & {
   name?: string | null;
   is_agent?: boolean;
 };
@@ -38,6 +42,7 @@ type RawSearchUsersResponse = {
 function fromRawProfile(profile: RawProfile): Profile {
   return {
     pubkey: profile.pubkey,
+    name: profile.name ?? null,
     displayName: profile.display_name,
     avatarUrl: profile.avatar_url,
     about: profile.about,

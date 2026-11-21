@@ -206,6 +206,7 @@ export function useProfileInteractionActions({
         ) ?? (await openDm({ pubkeys: [targetPubkey] }));
       const senderName =
         selfProfileQuery.data?.displayName?.trim() ||
+        selfProfileQuery.data?.name?.trim() ||
         identity.displayName.trim() ||
         truncateNpub(identity.pubkey);
       const content = buildWaveMessageContent(senderName);
@@ -269,6 +270,7 @@ export function useProfileInteractionActions({
     queryClient,
     runAction,
     selfProfileQuery.data?.displayName,
+    selfProfileQuery.data?.name,
   ]);
 
   return {

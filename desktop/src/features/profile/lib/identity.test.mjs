@@ -47,6 +47,29 @@ test("formatOwnerLabel prefers the owner’s authored labels over the compact np
   );
 });
 
+test("formatOwnerLabel keeps display name and NIP-05 ahead of Nostr name", () => {
+  assert.equal(
+    formatOwnerLabel(OWNER_PUBKEY, null, {
+      [OWNER_PUBKEY]: summary({
+        displayName: "Display",
+        nip05Handle: "id@x",
+        name: "short",
+      }),
+    }),
+    "Display",
+  );
+  assert.equal(
+    formatOwnerLabel(OWNER_PUBKEY, null, {
+      [OWNER_PUBKEY]: summary({
+        displayName: null,
+        nip05Handle: "id@x",
+        name: "short",
+      }),
+    }),
+    "id@x",
+  );
+});
+
 test("formatOwnerLabel calls the viewer-owned agent's owner you", () => {
   assert.equal(formatOwnerLabel(OWNER_PUBKEY, OWNER_PUBKEY, {}), "you");
 });
@@ -80,6 +103,18 @@ test("resolveUserLabel falls back to the key’s compact npub, never raw hex", (
   );
 });
 
+test("resolveUserLabel uses the Nostr name when display name is absent", () => {
+  assert.equal(
+    resolveUserLabel({
+      pubkey: OWNER_PUBKEY,
+      profiles: {
+        [OWNER_PUBKEY]: summary({ displayName: "  ", name: "  bob  " }),
+      },
+    }),
+    "bob",
+  );
+});
+
 test("profileLookupsEqual: same reference is equal", () => {
   const a = { p1: summary() };
   assert.equal(profileLookupsEqual(a, a), true);
@@ -106,6 +141,7 @@ test("profileLookupsEqual: same count, different keys is not equal", () => {
 test("profileLookupsEqual: a changed field is not equal", () => {
   for (const field of [
     "displayName",
+    "name",
     "avatarUrl",
     "nip05Handle",
     "ownerPubkey",

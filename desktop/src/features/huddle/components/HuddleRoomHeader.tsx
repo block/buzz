@@ -131,8 +131,9 @@ export function HuddleRoomHeader() {
             selfProfileCache?.avatarDataUrl ??
             null,
           displayName:
-            profileQuery.data?.displayName ??
-            identityQuery.data?.displayName ??
+            profileQuery.data?.displayName?.trim() ||
+            profileQuery.data?.name?.trim() ||
+            identityQuery.data?.displayName ||
             null,
           pubkey: currentPubkey,
         }}

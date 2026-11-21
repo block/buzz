@@ -35,7 +35,7 @@ export function resolveSelectedAgentSession({
   const profile = profiles?.[openAgentSessionPubkey.toLowerCase()];
   return {
     pubkey: openAgentSessionPubkey,
-    name: profile?.displayName?.trim() || "Agent",
+    name: profile?.displayName?.trim() || profile?.name?.trim() || "Agent",
     status: "deployed",
     agentSource: "relay",
     canInterruptTurn: false,
