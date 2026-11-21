@@ -147,3 +147,70 @@ async fn cluster_global_concurrent_dm_creation_reports_only_the_inserter() {
         db.pool().close().await;
     }
 }
+
+/// One participant is a DM only when it is the creator: a note to self.
+/// Mutation: drop the creator check → a DM of one stranger opens → RED; keep the
+/// `< 2` refusal → the note to self is refused → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn one_participant_opens_a_dm_only_when_it_is_the_creator() {
+    let url = crate::test_support::database_url();
+    let db = Db::from_pool(PgPool::connect(&url).await.expect("database"));
+    let me = nostr::Keys::generate().public_key().to_bytes();
+    let other = nostr::Keys::generate().public_key().to_bytes();
+    let community = match db
+        .create_community_with_owner(
+            &format!("dm-self-{}.example.org", Uuid::new_v4().simple()),
+            &hex::encode(me),
+            &nostr::Keys::generate(),
+        )
+        .await
+        .expect("community")
+        .outcome
+    {
+        CreateCommunityWithOwnerResult::Created(row) => row.id,
+        other => panic!("unexpected community: {other:?}"),
+    };
+    for key in [&me, &other] {
+        db.ensure_user(community, key).await.expect("user");
+    }
+
+    let (note, created) = db
+        .create_dm(community, &[&me], &me, false, ALLOW)
+        .await
+        .expect("note to self");
+    assert!(created);
+    assert_eq!(note.name, "DM");
+    assert_eq!(
+        db.get_members(community, note.id)
+            .await
+            .expect("members")
+            .len(),
+        1
+    );
+    let (again, created) = db
+        .open_dm(community, &[&me], &me, false, ALLOW)
+        .await
+        .expect("reopen");
+    assert_eq!((again.id, created), (note.id, false));
+    // Opening with no one else is the same note: `open_dm` adds the caller.
+    let (again, _) = db
+        .open_dm(community, &[], &me, true, ALLOW)
+        .await
+        .expect("reopen by people");
+    assert_eq!(again.id, note.id);
+
+    // Anything else with one participant, or none, is refused.
+    for (participants, created_by) in [
+        (vec![&other[..]], &me[..]),
+        (vec![&me[..]], &other[..]),
+        (vec![], &me[..]),
+    ] {
+        let err = db
+            .create_dm(community, &participants, created_by, false, ALLOW)
+            .await
+            .expect_err("refused");
+        assert!(matches!(err, DbError::InvalidData(_)), "{err:?}");
+    }
+    db.pool().close().await;
+}

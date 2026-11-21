@@ -29,8 +29,11 @@ async fn submit(
         // A unique tag so identical commands are distinct events.
         .chain([Tag::parse(["client", &Uuid::new_v4().to_string()]).expect("tag")])
         .collect();
+    // Keep a `p` tag naming the actor, as the SDK's DM builders do: a note to
+    // self names only its creator.
     let event = EventBuilder::new(Kind::Custom(kind), "")
         .tags(tags)
+        .allow_self_tagging()
         .sign_with_keys(actor)
         .expect("sign");
     ingest_event(state, tenant, event, http_auth(actor)).await
@@ -1784,4 +1787,112 @@ async fn only_people_ask_and_only_when_adding() {
         submit(&state, &tenant, &a, 41010, tags).await.map(|_| ()),
         "history",
     );
+}
+
+/// Naming only yourself opens your note-to-self DM: one member, found again by
+/// the same open, never anyone else's. No `p` tag at all is still refused.
+/// Mutation: keep the "at least 1 other participant" refusal → the open fails →
+/// RED; drop the creator check in `find_or_create_dm` → a DM of one stranger
+/// opens (see the buzz-db test) → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_person_can_open_a_dm_with_only_themselves() {
+    let state = state().await;
+    let tenant = community(&state, "dm-note-to-self").await;
+    let (a, b) = (Keys::generate(), Keys::generate());
+
+    let me = open(&state, &tenant, &a, &[&a])
+        .await
+        .expect("note to self");
+    assert_eq!(members(&state, &tenant, me).await, set_of(&[&a]));
+    assert_eq!(open(&state, &tenant, &a, &[&a]).await.expect("reopen"), me);
+    // The history tag finds the same DM.
+    assert_eq!(
+        open_with_history(&state, &tenant, &a, &[&a])
+            .await
+            .expect("reopen with history"),
+        me
+    );
+
+    // Nobody else's DM is it, and it is not a DM with anyone.
+    let theirs = open(&state, &tenant, &b, &[&b]).await.expect("b's own");
+    let pair = open(&state, &tenant, &a, &[&b]).await.expect("pair");
+    assert_ne!(theirs, me);
+    assert_ne!(pair, me);
+    assert_eq!(members(&state, &tenant, pair).await, set_of(&[&a, &b]));
+
+    // No `p` tag is not a note to self.
+    match open(&state, &tenant, &a, &[]).await {
+        Err(IngestError::Rejected(m)) => assert!(m.contains("at least 1 participant"), "{m}"),
+        other => panic!("an open naming no one must be refused, got {other:?}"),
+    }
+}
+
+/// A note to self never gains people in place: adding someone starts a DM of
+/// both and leaves the note alone, as it does for any DM of one person.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_note_to_self_never_gains_people() {
+    let state = state().await;
+    let tenant = community(&state, "dm-note-to-self-add").await;
+    let (a, b) = (Keys::generate(), Keys::generate());
+    let me = open(&state, &tenant, &a, &[&a])
+        .await
+        .expect("note to self");
+
+    for history in [true, false] {
+        let (target, _) = add(&state, &tenant, &a, me, &[&b], history)
+            .await
+            .expect("add a person");
+        assert_ne!(target, me, "history={history}");
+        assert_eq!(members(&state, &tenant, me).await, set_of(&[&a]));
+        assert_eq!(members(&state, &tenant, target).await, set_of(&[&a, &b]));
+    }
+}
+
+/// A note to self never gains an agent in place either: adding one opens the
+/// owner's DM with that agent, and the note keeps its one member.
+/// Mutation: let agents join a one-person DM that is a note to self → the note
+/// gains the agent → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn a_note_to_self_never_gains_agents() {
+    let state = state().await;
+    let tenant = community(&state, "dm-note-to-self-agent").await;
+    let (a, x) = (Keys::generate(), Keys::generate());
+    make_agent(&state, &tenant, &x, &a, "anyone").await;
+    let me = open(&state, &tenant, &a, &[&a])
+        .await
+        .expect("note to self");
+    let with_x = open(&state, &tenant, &a, &[&x])
+        .await
+        .expect("dm with agent");
+
+    let (target, _) = add(&state, &tenant, &a, me, &[&x], true)
+        .await
+        .expect("add agent");
+    assert_eq!(target, with_x);
+    assert_eq!(members(&state, &tenant, me).await, set_of(&[&a]));
+    assert_eq!(open(&state, &tenant, &a, &[&a]).await.expect("reopen"), me);
+}
+
+/// Adding only yourself to a DM of you and your agent does not make a note to
+/// self: the DM it would start is you alone, which only opening one makes.
+/// Mutation: drop the `fork_dm` refusal → the add lands in a new note → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn adding_yourself_never_starts_a_note_to_self() {
+    let state = state().await;
+    let tenant = community(&state, "dm-fork-not-a-note").await;
+    let (a, x) = (Keys::generate(), Keys::generate());
+    make_agent(&state, &tenant, &x, &a, "anyone").await;
+    let with_x = open(&state, &tenant, &a, &[&x])
+        .await
+        .expect("dm with agent");
+
+    rejected(
+        add(&state, &tenant, &a, with_x, &[&a], false).await,
+        "at least 2 participants",
+    );
+    assert_eq!(members(&state, &tenant, with_x).await, set_of(&[&a, &x]));
 }

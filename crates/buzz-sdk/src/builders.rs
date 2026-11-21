@@ -2023,7 +2023,7 @@ pub fn build_workflow_approval(
 /// Build a DM open event (kind 41010).
 ///
 /// `pubkeys` are the hex-encoded pubkeys of everyone else in the DM, at least
-/// one. The relay finds the DM of exactly these members or, when they are all
+/// one. Naming only yourself opens your note-to-self DM. The relay finds the DM of exactly these members or, when they are all
 /// people, their DM, which agents may have joined (there is one DM per group
 /// of people). Otherwise it makes a DM of exactly these members. It refuses
 /// a DM of more than nine people, the caller included; agents do not count.
@@ -2061,7 +2061,11 @@ fn dm_open(pubkeys: &[&str], include_history: bool) -> Result<EventBuilder, SdkE
     if include_history {
         tags.push(tag(&["history", "include"])?);
     }
-    Ok(EventBuilder::new(Kind::Custom(KIND_DM_OPEN as u16), "").tags(tags))
+    // Naming yourself alone opens your note-to-self DM; nostr 0.44 would
+    // otherwise scrub a `p` tag that matches the signer.
+    Ok(EventBuilder::new(Kind::Custom(KIND_DM_OPEN as u16), "")
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a DM add-member event (kind 41011).
@@ -5314,6 +5318,17 @@ mod tests {
             let err = build_dm_open_with_history(pubkeys).unwrap_err();
             assert!(matches!(err, SdkError::InvalidInput(_)));
         }
+    }
+
+    #[test]
+    fn dm_open_keeps_a_self_p_tag_for_a_note_to_self() {
+        let me = keys();
+        let pk = me.public_key().to_hex();
+        let ev = build_dm_open(&[&pk])
+            .unwrap()
+            .sign_with_keys(&me)
+            .expect("sign");
+        assert!(has_tag(&ev, "p", &pk), "self p tag must survive signing");
     }
 
     #[test]

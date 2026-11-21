@@ -265,8 +265,9 @@ async fn find_opened_dm(
 /// existing one if a DM with the same participant set already exists.
 ///
 /// Rules:
-/// - `participants` must contain at least 2 entries, and at most
-///   [`MAX_DM_PEOPLE`] people; agents do not count (enforced here).
+/// - `participants` must contain at least 2 entries, or exactly one that is
+///   `created_by` (a note to self), and at most [`MAX_DM_PEOPLE`] people;
+///   agents do not count (enforced here).
 /// - `created_by` must be one of the participants.
 /// - The operation is idempotent: the same identity (see
 ///   [`opened_identity_hash`] for `by_people`) -> the same channel returned.
@@ -334,7 +335,10 @@ async fn find_or_create_dm(
     by_people: bool,
     policy: AgentAddPolicy<'_>,
 ) -> Result<(ChannelRecord, bool)> {
-    if participants.len() < 2 {
+    // A DM has at least two participants, except a note to self: exactly its
+    // creator.
+    let note_to_self = participants == [created_by];
+    if participants.len() < 2 && !note_to_self {
         return Err(DbError::InvalidData(
             "DM requires at least 2 participants".to_string(),
         ));
@@ -368,7 +372,7 @@ async fn find_or_create_dm(
     }
 
     // Name the DM based on participant count.
-    let name = if participants.len() == 2 {
+    let name = if participants.len() <= 2 {
         "DM".to_string()
     } else {
         format!("Group DM ({})", participants.len())
@@ -663,8 +667,9 @@ pub enum DmGrowth {
     /// DM cannot take its identity. Nothing was written.
     Existing(Uuid),
     /// This DM has at most one person, and the additions would bring it to
-    /// two or more. Such a DM never gains people in place; the caller starts
-    /// a DM of everyone instead. Nothing was written.
+    /// two or more, or it is a note to self and the additions are not empty.
+    /// Such a DM never gains people in place; the caller starts a DM of
+    /// everyone instead. Nothing was written.
     PeopleStartNewDm,
     /// People would join this DM of two or more people, and the caller asked
     /// first: they choose whether those people see its history. Nothing was
@@ -679,8 +684,9 @@ pub enum DmGrowth {
 /// opening a DM with the original members afterwards starts a new one. If
 /// people join and a DM of the grown set already exists, nothing is written and
 /// that DM is returned as [`DmGrowth::Existing`], provided `actor` is in it;
-/// agents alone join in place, and the DM keeps the identity it has. People never
-/// join a DM of at most one person: that is [`DmGrowth::PeopleStartNewDm`].
+/// agents alone join in place, except into a note to self, and the DM keeps the
+/// identity it has. People never join a DM of at most one person, and no one
+/// joins a note to self: that is [`DmGrowth::PeopleStartNewDm`].
 ///
 /// The DM's stored fingerprint is brought up to date even when nothing is
 /// added, so a DM still identified by all its members (from before agents
@@ -753,9 +759,15 @@ pub async fn grow_dm(
     }
 
     // A DM of at most one person and their agents stays theirs: people
-    // joining it start a DM of everyone instead.
+    // joining it start a DM of everyone instead. A note to self gains no one
+    // in place, agents included. It is known by its identity, not its size: a
+    // DM everyone else left also has one member, but no identity.
     let current: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
-    if count_people(&current, &agents) < 2 && count_people(&grown, &agents) >= 2 {
+    let note_to_self = current == [actor]
+        && stored.as_deref() == Some(compute_participant_hash(&[actor]).as_slice());
+    if (note_to_self && !added.is_empty())
+        || (count_people(&current, &agents) < 2 && count_people(&grown, &agents) >= 2)
+    {
         tx.rollback().await?;
         return Ok(DmGrowth::PeopleStartNewDm);
     }
@@ -873,6 +885,12 @@ pub async fn fork_dm(
         }
     }
     let refs: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
+    // Only opening makes a note to self; a DM started from another never is.
+    if refs == [actor] {
+        return Err(DbError::InvalidData(
+            "DM requires at least 2 participants".to_string(),
+        ));
+    }
     let (channel, created) = find_or_create_dm(
         tx.conn(),
         community_id,

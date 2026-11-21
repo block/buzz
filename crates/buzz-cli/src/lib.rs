@@ -1403,7 +1403,8 @@ pub enum DmsCmd {
     /// Open a new direct message with one or more users
     Open {
         /// User pubkey(s) to DM (64-char hex). A DM holds at most 9 people,
-        /// you included; agents do not count.
+        /// you included; agents do not count. Your own pubkey alone opens a
+        /// note to yourself.
         #[arg(long = "pubkey")]
         pubkeys: Vec<String>,
     },
