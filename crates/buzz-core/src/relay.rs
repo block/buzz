@@ -54,7 +54,13 @@ pub fn normalize_relay_url(raw: &str) -> Result<String, NormalizeRelayUrlError> 
         Host::Ipv6(address) => address.is_loopback(),
     };
     if loopback {
-        url.set_host(Some("127.0.0.1"))
+        // Normalize all loopback forms to "localhost" (not 127.0.0.1) so the
+        // canonical URL matches the host the relay's community lookup resolves
+        // (the dev seed registers `localhost` as a community host). Pinning to
+        // 127.0.0.1 here previously caused managed agents — spawned with this
+        // canonical relay URL — to land in a separate, empty `127.0.0.1`
+        // community and discover 0 channels.
+        url.set_host(Some("localhost"))
             .map_err(|_| NormalizeRelayUrlError::MissingHost)?;
     } else if let Host::Domain(domain) = host {
         let lowercase = domain.to_ascii_lowercase();
@@ -88,7 +94,11 @@ mod tests {
         let localhost = normalize_relay_url("wss://localhost/").unwrap();
         assert_eq!(ipv6, ipv4);
         assert_eq!(ipv4, localhost);
-        assert_eq!(localhost, "wss://127.0.0.1");
+        // Canonical loopback form is "localhost", not "127.0.0.1": the dev seed
+        // (scripts/seed-local-community.sh) registers `localhost` as a community
+        // host, so a canonical relay URL pinned to 127.0.0.1 landed managed
+        // agents in a separate, empty community. See issue #3505.
+        assert_eq!(localhost, "wss://localhost");
     }
 
     #[test]
