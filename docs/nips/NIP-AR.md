@@ -75,6 +75,8 @@ Write permission means permission to post a kind-9 message in the channel, inclu
 
 These rules apply to every type and do not depend on who created the artifact. DM participants are peers. The relay determines channel type from the stored channel, not from an artifact tag.
 
+**Relay-provisioned channels.** A relay MAY provision labeled system channels (NIP-CL, *Provisioned system channels*). In a provisioned channel, only the author of an artifact's current revision may update, move, delete or restore it; the relay rejects another key's revision with `restricted:`, even when that key may post there. Creation is unchanged, and the author of a move or restore that the relay accepts becomes the author of the new current revision. Moderation removals (kind 9005) are unaffected. Clients that keep one record per member in such a channel can rely on no other member overwriting it.
+
 Relationship tags organize work without changing access. Linking a task to a project does not move it or share it. References to repositories or other services retain those services' access and action permissions. Errors MUST NOT disclose inaccessible artifact details.
 
 ## Moving and deleting

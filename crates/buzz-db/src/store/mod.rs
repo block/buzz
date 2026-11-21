@@ -107,6 +107,9 @@ pub use artifact_query::{ArtifactSnapshot, SnapshotDenied};
 mod artifact_postgres_tests;
 
 #[cfg(test)]
+mod provisioned_channel_postgres_tests;
+
+#[cfg(test)]
 mod legacy_channel_types_postgres_tests;
 
 #[cfg(test)]

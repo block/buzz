@@ -101,7 +101,7 @@ labels as `["t", <label>]` tags. On kind:9002 (edit metadata):
 - `["t", ""]` tags and no other `t` tag clear the set;
 - no `t` tag leaves the labels as they are.
 
-Only an owner or admin of the channel MAY change its labels.
+Only an owner or admin of the channel MAY change its labels. A relay MAY reserve labels for its own channels (see **Provisioned system channels**).
 
 **Rules.** A label is 1–64 characters from `a-z`, `0-9`, `.`, `:` and `-`. A
 label MUST NOT be `stream`, `forum`, `dm`, `workflow` or `system`. These are
@@ -280,6 +280,32 @@ mean "a system channel with this label". Use `#P` and the label instead.
 
 Private system channels stay hidden from non-members, as for every private
 channel.
+
+## Provisioned system channels
+
+A relay MAY provision system channels: for each label in its configuration,
+it keeps one open system channel in every community, created by the relay's
+own key (the `pubkey` or `self` key of its NIP-11 document). Clients that need
+one shared channel per community, for example for per-member records, find it
+without creating anything:
+
+```json
+{"kinds": [39000], "#t": ["<label>"], "#P": ["<relay pubkey>"]}
+```
+
+The query returns the relay's channel and no member's, because `P` names the
+creator. When it returns more than one, clients use the oldest (see
+**Choosing one channel**). The relay creates a missing one, and replaces one
+that was archived or deleted, within its reconciliation interval.
+
+A provisioned label is reserved: the relay MUST reject a kind:9007 or
+kind:9002 from any other key that sets it. In a provisioned channel only an
+artifact's author may change it (NIP-AR, *Access*).
+
+A client SHOULD prefer the relay's channel and MAY fall back to creating its
+own on a relay that does not provision the label. If its own create is
+rejected because the label is reserved, the relay's channel is not ready yet,
+and the client retries the query later instead of creating another.
 
 ## Advertising support
 

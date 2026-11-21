@@ -23,7 +23,13 @@ pub enum ArtifactOutcome {
     Conflict(&'static str),
     /// Protocol violation with a public-safe reason.
     Rejected(&'static str),
+    /// The sender may not change this artifact; public-safe reason.
+    Restricted(&'static str),
 }
+
+/// [`ArtifactOutcome::Restricted`] for a change to another author's artifact
+/// in a relay-provisioned channel.
+pub const AUTHOR_ONLY: &str = "only the artifact's author may change it in this channel";
 
 /// Conflict for a non-create revision whose artifact is missing or lives
 /// outside every channel the sender was authorized for.
@@ -94,6 +100,10 @@ impl Db {
     /// the head, and on a move store the source removal. `authorized_source` is
     /// the move source the caller authorized; a head that has since moved elsewhere
     /// conflicts. Relay keys only sign removals.
+    ///
+    /// `author_owned_labels` are the provisioned system-channel labels: in a
+    /// system channel the relay key created with one of them, only the
+    /// author of the current head may revise, move, delete or restore it.
     pub async fn accept_artifact(
         &self,
         community: CommunityId,
@@ -101,6 +111,7 @@ impl Db {
         env: &ArtifactEnvelope,
         authorized_source: Option<Uuid>,
         relay_keys: &Keys,
+        author_owned_labels: &[String],
     ) -> Result<ArtifactOutcome> {
         let mut tx = self.begin_event_write_transaction(community).await?;
         sqlx::query("SET LOCAL statement_timeout='5s'")
@@ -154,6 +165,32 @@ impl Db {
                 let current: Vec<u8> = head.get("event_id");
                 if env.prev.as_deref() != Some(current.as_slice()) {
                     return Ok(ArtifactOutcome::Conflict("artifact head changed"));
+                }
+                if !author_owned_labels.is_empty() {
+                    let author_owned: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM channels WHERE community_id=$1 AND id=$2 AND channel_type='system' AND created_by=$3 AND labels && $4::text[])",
+                    )
+                    .bind(community.as_uuid())
+                    .bind(source)
+                    .bind(relay_keys.public_key().to_bytes().as_slice())
+                    .bind(author_owned_labels)
+                    .fetch_one(tx.conn())
+                    .await?;
+                    if author_owned {
+                        // Not a cached prepared statement: a generic plan
+                        // would lock every `events` partition.
+                        let author: Option<Vec<u8>> = sqlx::query_scalar(
+                            "SELECT pubkey FROM events WHERE community_id=$1 AND id=$2 LIMIT 1",
+                        )
+                        .persistent(false)
+                        .bind(community.as_uuid())
+                        .bind(current.as_slice())
+                        .fetch_optional(tx.conn())
+                        .await?;
+                        if author.as_deref() != Some(event.pubkey.to_bytes().as_slice()) {
+                            return Ok(ArtifactOutcome::Restricted(AUTHOR_ONLY));
+                        }
+                    }
                 }
                 if env.artifact_type != head.get::<String, _>("artifact_type") {
                     return Ok(ArtifactOutcome::Rejected("artifact type is immutable"));
