@@ -28,10 +28,13 @@ function toManagedBackend(
 
 export function useApplyTemplate() {
   const queryClient = useQueryClient();
-  const channelTemplatesQuery = useChannelTemplatesQuery();
-  const acpRuntimesQuery = useAvailableAcpRuntimes();
-  const personasQuery = usePersonasQuery();
-  const teamsQuery = useTeamsQuery();
+  // Read `data` during render. These results are otherwise only touched in the
+  // click handlers below, and React Query re-renders on every fetch-state change
+  // when a render reads no property, which re-rendered AppShell on each poll.
+  const { data: channelTemplates } = useChannelTemplatesQuery();
+  const { data: acpRuntimes } = useAvailableAcpRuntimes();
+  const { data: personas } = usePersonasQuery();
+  const { data: teams } = useTeamsQuery();
   const { lastRuntimeId } = useLastRuntime();
 
   async function applyCanvas(
@@ -40,9 +43,7 @@ export function useApplyTemplate() {
     channelName: string,
   ) {
     if (!templateId) return;
-    const template = channelTemplatesQuery.data?.find(
-      (t) => t.id === templateId,
-    );
+    const template = channelTemplates?.find((t) => t.id === templateId);
     if (!template?.canvasTemplate) return;
     const content = template.canvasTemplate
       .replace(/\{channel\.name\}/g, channelName)
@@ -59,17 +60,15 @@ export function useApplyTemplate() {
     channelId: string,
   ) {
     if (!templateId) return;
-    const template = channelTemplatesQuery.data?.find(
-      (t) => t.id === templateId,
-    );
+    const template = channelTemplates?.find((t) => t.id === templateId);
     if (!template) return;
     const { personas: templatePersonas, teams: templateTeams } =
       template.agents;
     if (templatePersonas.length === 0 && templateTeams.length === 0) return;
 
-    const allPersonas = personasQuery.data ?? [];
-    const allTeams = teamsQuery.data ?? [];
-    const runtimes = acpRuntimesQuery.data ?? [];
+    const allPersonas = personas ?? [];
+    const allTeams = teams ?? [];
+    const runtimes = acpRuntimes ?? [];
     if (runtimes.length === 0) return; // No runtimes — skip silently
 
     // Resolve default provider: user's last-used preference, or first available

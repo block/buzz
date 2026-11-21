@@ -46,7 +46,6 @@ function buildChannelActivityFeed(items: FeedItem[]): HomeFeedResponse {
     meta: {
       since: 0,
       total: items.length,
-      generatedAt: 0,
     },
   };
 }

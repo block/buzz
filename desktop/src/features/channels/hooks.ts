@@ -1,5 +1,6 @@
 import * as React from "react";
 import {
+  hashKey,
   useMutation,
   useQuery,
   useQueryClient,
@@ -54,6 +55,7 @@ import {
 import { dmVisibilityQueryKeyFor } from "@/features/channels/useHiddenDmIds";
 
 export const channelsQueryKey = ["channels"] as const;
+const channelsQueryHash = hashKey(channelsQueryKey);
 /** Keeps focused polling at the established one-minute cadence. */
 export const CHANNELS_REFETCH_INTERVAL_MS = 60_000;
 /** Suppresses the expensive focus refetch until the channel list is old. */
@@ -428,6 +430,27 @@ export async function refreshChannelsQuery({
   return sorted;
 }
 
+/**
+ * True once the channel list holds relay data rather than only the persisted
+ * snapshot. Reads the cache so callers re-render when this flips, not on every
+ * poll the way a `dataUpdatedAt` read on the query result would.
+ */
+export function useChannelsFetched(): boolean {
+  const queryClient = useQueryClient();
+  const subscribe = React.useCallback(
+    (onChange: () => void) =>
+      queryClient.getQueryCache().subscribe((event) => {
+        if (event.query.queryHash === channelsQueryHash) onChange();
+      }),
+    [queryClient],
+  );
+  const getSnapshot = () => {
+    const state = queryClient.getQueryState(channelsQueryKey);
+    return state?.status === "success" && state.dataUpdatedAt > 0;
+  };
+  return React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
 export function useChannelsQuery(options?: { enabled?: boolean }) {
   const { activeCommunity } = useCommunities();
   const relayUrl = activeCommunity?.relayUrl ?? null;
@@ -483,24 +506,31 @@ export function useChannelsQuery(options?: { enabled?: boolean }) {
     ...channelsFocusRefetchPolicy,
   });
 
+  // Watch the cache rather than reading `fetchStatus`/`dataUpdatedAt` from the
+  // result: a read during render makes every caller of this hook re-render on
+  // each poll, even when the channel list did not change.
   React.useEffect(() => {
-    if (
-      relayUrl &&
-      ownerPubkey &&
-      query.isSuccess &&
-      query.fetchStatus === "idle" &&
-      query.dataUpdatedAt > 0
-    ) {
-      measureFullSidebarPaint(relayUrl, ownerPubkey, query.data.length);
-    }
-  }, [
-    query.data,
-    query.dataUpdatedAt,
-    query.fetchStatus,
-    query.isSuccess,
-    ownerPubkey,
-    relayUrl,
-  ]);
+    if (!relayUrl || !ownerPubkey) return;
+    const measureOnceSettled = () => {
+      const state = queryClient.getQueryState<Channel[]>(channelsQueryKey);
+      if (
+        state?.status !== "success" ||
+        state.fetchStatus !== "idle" ||
+        state.dataUpdatedAt <= 0 ||
+        !state.data
+      ) {
+        return false;
+      }
+      measureFullSidebarPaint(relayUrl, ownerPubkey, state.data.length);
+      return true;
+    };
+    if (measureOnceSettled()) return;
+    const unsubscribe = queryClient.getQueryCache().subscribe((event) => {
+      if (event.query.queryHash !== channelsQueryHash) return;
+      if (measureOnceSettled()) unsubscribe();
+    });
+    return unsubscribe;
+  }, [ownerPubkey, queryClient, relayUrl]);
 
   return query;
 }

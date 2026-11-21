@@ -86,7 +86,7 @@ test("hidden feed items are projected as DMs for Inbox presentation", () => {
       activity: [],
       agentActivity: [],
     },
-    meta: { since: 0, total: 1, generatedAt: 10 },
+    meta: { since: 0, total: 1 },
   };
   const marked = markHiddenDmFeedItems(feed, new Set(["dm-1"]));
   assert.equal(marked.feed.mentions[0].channelType, "dm");
