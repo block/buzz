@@ -764,6 +764,17 @@ impl RunCtx<'_> {
                         push_hook_outputs_as_tool_results(self.history, "_Stop", &objections);
                         continue;
                     }
+                    // end_turn is accepted — the turn is ending. Close the steer
+                    // channel first so the steer handler rejects any steer that
+                    // races this decision (its `steer_tx.send` fails), instead of
+                    // acknowledging it and then silently dropping it when the turn
+                    // ends. Then fold in any steer that WAS accepted before the
+                    // close: if one arrived, run one more round to act on it
+                    // rather than losing it, so a successful steer response
+                    // guarantees the run consumes the steer.
+                    if settle_steers_at_end_turn(self.steer, self.history) {
+                        continue;
+                    }
                 }
                 return Ok(stop);
             }
@@ -801,20 +812,9 @@ impl RunCtx<'_> {
     /// steer whose blocks all fail to render (e.g. unsupported content) is
     /// skipped rather than aborting the turn — steering is best-effort
     /// augmentation, not a hard input contract like the initial prompt.
-    fn drain_steers(&mut self) {
-        while let Ok(blocks) = self.steer.try_recv() {
-            match prompt_to_text(blocks) {
-                Ok(text) if !text.trim().is_empty() => {
-                    self.history.push(HistoryItem::User(text));
-                }
-                Ok(_) => {
-                    tracing::debug!("dropping empty steer message");
-                }
-                Err(e) => {
-                    tracing::warn!("dropping unrenderable steer message: {e}");
-                }
-            }
-        }
+    /// Returns `true` if at least one non-empty steer was folded into history.
+    fn drain_steers(&mut self) -> bool {
+        drain_steer_queue(self.steer, self.history)
     }
 
     /// Unified tool-call execution. Three phases:
@@ -1187,6 +1187,44 @@ async fn emit_failed(wire: &WireSender, sid: &str, call: &ToolCall, err: &str) {
     .await;
 }
 
+/// Fold every queued steer into `history` as a user turn, skipping empty and
+/// unrenderable ones. Returns `true` if at least one non-empty steer was
+/// folded in.
+fn drain_steer_queue(
+    steer: &mut mpsc::UnboundedReceiver<Vec<ContentBlock>>,
+    history: &mut Vec<HistoryItem>,
+) -> bool {
+    let mut folded = false;
+    while let Ok(blocks) = steer.try_recv() {
+        match prompt_to_text(blocks) {
+            Ok(text) if !text.trim().is_empty() => {
+                history.push(HistoryItem::User(text));
+                folded = true;
+            }
+            Ok(_) => {
+                tracing::debug!("dropping empty steer message");
+            }
+            Err(e) => {
+                tracing::warn!("dropping unrenderable steer message: {e}");
+            }
+        }
+    }
+    folded
+}
+
+/// Settle the steer queue when an `end_turn` is accepted. Closing first makes
+/// the steer handler's `send` fail for any steer that races the decision, so
+/// it is refused rather than acknowledged and dropped. A steer accepted before
+/// the close is folded into `history`; `true` means the run must take one
+/// more round to act on it.
+fn settle_steers_at_end_turn(
+    steer: &mut mpsc::UnboundedReceiver<Vec<ContentBlock>>,
+    history: &mut Vec<HistoryItem>,
+) -> bool {
+    steer.close();
+    drain_steer_queue(steer, history)
+}
+
 fn prompt_to_text(prompt: Vec<ContentBlock>) -> Result<String, AgentError> {
     let mut parts = Vec::with_capacity(prompt.len());
     for block in prompt {
@@ -1374,6 +1412,53 @@ fn warn_if_silent_turn(
             );
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod steer_settle_tests {
+    use super::*;
+
+    fn steer_text(text: &str) -> Vec<ContentBlock> {
+        vec![ContentBlock::Text { text: text.into() }]
+    }
+
+    /// #4942: a steer the handler accepted while the final request was in
+    /// flight is folded into the run when `end_turn` is accepted, so the
+    /// turn takes one more round instead of acknowledging and dropping it.
+    #[test]
+    fn end_turn_folds_in_a_steer_accepted_before_it() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut history = Vec::new();
+        tx.send(steer_text("also check the logs"))
+            .expect("steer accepted");
+        assert!(settle_steers_at_end_turn(&mut rx, &mut history));
+        assert!(
+            matches!(history.as_slice(), [HistoryItem::User(t)] if t == "also check the logs"),
+            "{history:?}"
+        );
+    }
+
+    /// Once `end_turn` is accepted, a steer racing it is refused at the
+    /// handler's `send`, so the client is never told a dropped steer landed.
+    #[test]
+    fn end_turn_refuses_steers_that_arrive_after_it() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut history = Vec::new();
+        assert!(!settle_steers_at_end_turn(&mut rx, &mut history));
+        assert!(history.is_empty());
+        assert!(tx.send(steer_text("too late")).is_err());
+    }
+
+    /// Empty and unrenderable steers are skipped and do not force a round.
+    #[test]
+    fn end_turn_ignores_empty_and_unrenderable_steers() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut history = Vec::new();
+        tx.send(steer_text("   ")).unwrap();
+        tx.send(vec![ContentBlock::Unsupported]).unwrap();
+        assert!(!settle_steers_at_end_turn(&mut rx, &mut history));
+        assert!(history.is_empty());
     }
 }
 
