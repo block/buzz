@@ -346,20 +346,16 @@ class _ThreadMessage extends HookConsumerWidget {
                                             ? null
                                             : () {
                                                 if (!context.mounted) return;
-                                                Navigator.of(context).push(
-                                                  MaterialPageRoute<void>(
-                                                    builder: (_) =>
-                                                        ThreadDetailPage(
-                                                          threadHead: message,
-                                                          allMessages:
-                                                              allMessages!,
-                                                          channelId: channelId,
-                                                          currentPubkey:
-                                                              currentPubkey,
-                                                          isMember: isMember,
-                                                          isArchived:
-                                                              isArchived,
-                                                        ),
+                                                openThreadPane(
+                                                  context,
+                                                  (_) => ThreadDetailPage(
+                                                    threadHead: message,
+                                                    allMessages: allMessages!,
+                                                    channelId: channelId,
+                                                    currentPubkey:
+                                                        currentPubkey,
+                                                    isMember: isMember,
+                                                    isArchived: isArchived,
                                                   ),
                                                 );
                                               },

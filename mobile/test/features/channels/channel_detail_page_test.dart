@@ -18461,7 +18461,18 @@ void main() {
           reason:
               'Opening draft attempt $attempt must reach the thread composer',
         );
-        expect(find.text('Retained thread draft'), findsNWidgets(2));
+        // A tablet thread pane hides the Activity list while it is open.
+        expect(
+          find.byKey(const ValueKey('conversation-thread')),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(
+            of: find.byType(ThreadDetailPage),
+            matching: find.text('Retained thread draft'),
+          ),
+          findsOneWidget,
+        );
         Navigator.of(tester.element(find.byType(ThreadDetailPage))).pop();
         await tester.pumpAndSettle();
         expect(find.byType(ThreadDetailPage), findsNothing);

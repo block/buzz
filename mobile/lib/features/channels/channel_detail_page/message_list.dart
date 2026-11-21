@@ -742,23 +742,22 @@ class _MessageList extends HookConsumerWidget {
         if (!context.mounted || ModalRoute.of(context)?.isCurrent != true) {
           return;
         }
-        final route = MaterialPageRoute<void>(
-          builder: (_) => ThreadDetailPage(
-            threadHead: threadHead,
-            allMessages: allMessages,
-            channelId: channelId,
-            currentPubkey: currentPubkey,
-            isMember: isMember,
-            isArchived: isArchived,
-            initialMessageId: initialMessageId,
-          ),
+        Widget thread(BuildContext _) => ThreadDetailPage(
+          threadHead: threadHead,
+          allMessages: allMessages,
+          channelId: channelId,
+          currentPubkey: currentPubkey,
+          isMember: isMember,
+          isArchived: isArchived,
+          initialMessageId: initialMessageId,
         );
-        final navigator = Navigator.of(context);
         switch (initialThreadRouteBehavior) {
           case InitialThreadRouteBehavior.push:
-            navigator.push(route);
+            openThreadPane(context, thread);
           case InitialThreadRouteBehavior.replaceCurrentRoute:
-            navigator.pushReplacement(route);
+            Navigator.of(
+              context,
+            ).pushReplacement(MaterialPageRoute<void>(builder: thread));
         }
       });
       return null;

@@ -403,7 +403,7 @@ class HomePage extends HookConsumerWidget {
       body: Scaffold(
         resizeToAvoidBottomInset: false,
         extendBody: true,
-        bottomNavigationBar: strip == null && showWorkspaceNavigation
+        bottomNavigationBar: strip == null && showWorkspaceNavigation && !wide
             ? Padding(
                 padding: EdgeInsets.only(bottom: bottom),
                 child: SizedBox(
@@ -436,14 +436,14 @@ class HomePage extends HookConsumerWidget {
                 padding: media.padding.copyWith(
                   bottom:
                       media.padding.bottom +
-                      (strip == null && showWorkspaceNavigation
+                      (strip == null && showWorkspaceNavigation && !wide
                           ? mobileTabBarHeight + mobileTabBarBottomGap
                           : 0),
                 ),
                 viewPadding: media.viewPadding.copyWith(
                   bottom:
                       media.viewPadding.bottom +
-                      (strip == null && showWorkspaceNavigation
+                      (strip == null && showWorkspaceNavigation && !wide
                           ? mobileTabBarHeight + mobileTabBarBottomGap
                           : 0),
                 ),
@@ -466,7 +466,7 @@ class HomePage extends HookConsumerWidget {
                           colorBlendMode: BlendMode.srcIn,
                           semanticLabel: 'Buzz',
                         ),
-                  list: wide && strip != null
+                  list: wide
                       ? Builder(
                           builder: (paneContext) {
                             final paneMedia = MediaQuery.of(paneContext);
@@ -514,8 +514,14 @@ class HomePage extends HookConsumerWidget {
                                   bottom: mobileTabBarBottom(paneContext),
                                   height: mobileTabBarHeight,
                                   child: _NativeControlsGate(
+                                    // Only native iOS controls hide under a
+                                    // covering route; Flutter's stay mounted
+                                    // so their menus can finish an action.
                                     builder: (_, nativeControlsVisible) =>
-                                        nativeControlsVisible
+                                        nativeControlsVisible ||
+                                            (strip == null &&
+                                                defaultTargetPlatform !=
+                                                    TargetPlatform.iOS)
                                         ? Center(
                                             child: navigationBar(
                                               Axis.horizontal,
@@ -532,7 +538,7 @@ class HomePage extends HookConsumerWidget {
                 ),
               ),
             ),
-            if (strip == null && showWorkspaceNavigation)
+            if (strip == null && showWorkspaceNavigation && !wide)
               Positioned(
                 left: 0,
                 right: 0,
