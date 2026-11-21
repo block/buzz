@@ -91,6 +91,10 @@ pub struct RelayInfo {
     /// Which workflow runs may direct agents (`any` or `owner`). Relay-wide,
     /// and always sent, so a missing field means an older relay.
     pub workflow_agent_mentions: buzz_workflow::AgentMentions,
+    /// Whether clients record members' installed community plugins for
+    /// members who haven't chosen (`off` or `on`). Relay-wide; a missing field
+    /// means off.
+    pub plugin_recording_default: crate::config::PluginRecordingDefault,
 }
 
 /// Private read-state accessory contract and enforced client request limits.
@@ -332,6 +336,7 @@ impl RelayInfo {
             federated_identity,
             requires_nip_fi: false,
             workflow_agent_mentions: buzz_workflow::AgentMentions::Any,
+            plugin_recording_default: crate::config::PluginRecordingDefault::Off,
         }
     }
 }
@@ -479,6 +484,7 @@ pub(crate) async fn nip11_document(
     );
     info.requires_nip_fi = policy.required;
     info.workflow_agent_mentions = state.config.workflow_agent_mentions;
+    info.plugin_recording_default = state.config.plugin_recording_default;
     info.artifacts["incremental"] = crate::api::artifact_sync::capability();
     if let Some(tenant) = tenant.as_ref() {
         if let Some(profile) = crate::verified_profiles::discovery(state, tenant).await {
@@ -684,6 +690,38 @@ mod tests {
             )
             .unwrap();
             assert_eq!(document["workflow_agent_mentions"], wire);
+        }
+    }
+
+    #[tokio::test]
+    async fn advertises_the_relay_wide_plugin_recording_default() {
+        use crate::config::PluginRecordingDefault;
+        let base = crate::state::tests::test_state_with_unreachable_database_url(
+            "postgres://127.0.0.1:1/none",
+        )
+        .await;
+        base.tenant_host_cache.insert(
+            "relay.example".into(),
+            (
+                buzz_core::CommunityId::from_uuid(uuid::Uuid::nil()),
+                std::time::Instant::now(),
+            ),
+        );
+        for (value, wire) in [
+            (PluginRecordingDefault::Off, "off"),
+            (PluginRecordingDefault::On, "on"),
+        ] {
+            let mut state = (*base).clone();
+            let mut config = (*state.config).clone();
+            config.plugin_recording_default = value;
+            state.config = std::sync::Arc::new(config);
+            let document = serde_json::to_value(
+                super::nip11_document(&state, "relay.example")
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(document["plugin_recording_default"], wire);
         }
     }
 

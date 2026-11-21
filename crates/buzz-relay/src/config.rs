@@ -347,6 +347,11 @@ pub struct Config {
     ///
     /// Default: `any`. Set via `BUZZ_WORKFLOW_AGENT_MENTIONS=any|owner`.
     pub workflow_agent_mentions: buzz_workflow::AgentMentions,
+    /// Whether clients record members' installed community plugins for
+    /// members who haven't chosen. A member's own choice always wins.
+    ///
+    /// Default: `off`. Set via `BUZZ_PLUGIN_RECORDING_DEFAULT=off|on`.
+    pub plugin_recording_default: PluginRecordingDefault,
 
     /// Optional override for ephemeral channel TTL (in seconds).
     /// When set, any channel created with a TTL tag will use this value instead
@@ -659,6 +664,35 @@ fn parse_workflow_agent_mentions() -> Result<buzz_workflow::AgentMentions, Confi
         Ok(value) => value
             .parse()
             .map_err(|error| ConfigError::InvalidValue(format!("{NAME}: {error}"))),
+    }
+}
+
+/// The relay-wide default for clients' community plugin recording, as NIP-11
+/// `plugin_recording_default` advertises it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginRecordingDefault {
+    /// Members' plugins are recorded only once they turn recording on.
+    #[default]
+    Off,
+    /// Members' plugins are recorded until they turn recording off.
+    On,
+}
+
+fn parse_plugin_recording_default() -> Result<PluginRecordingDefault, ConfigError> {
+    const NAME: &str = "BUZZ_PLUGIN_RECORDING_DEFAULT";
+    match std::env::var(NAME) {
+        Err(std::env::VarError::NotPresent) => Ok(PluginRecordingDefault::Off),
+        Err(error) => Err(ConfigError::InvalidValue(format!(
+            "{NAME} must be valid UTF-8: {error}"
+        ))),
+        Ok(value) => match value.as_str() {
+            "off" => Ok(PluginRecordingDefault::Off),
+            "on" => Ok(PluginRecordingDefault::On),
+            _ => Err(ConfigError::InvalidValue(format!(
+                "{NAME} must be off or on, got {value:?}"
+            ))),
+        },
     }
 }
 
@@ -1318,6 +1352,7 @@ impl Config {
         let age_attestation_required = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED")?;
         let audit_enabled = parse_bool("BUZZ_AUDIT_ENABLED", true)?;
         let workflow_agent_mentions = parse_workflow_agent_mentions()?;
+        let plugin_recording_default = parse_plugin_recording_default()?;
         let join_policy = if terms_markdown.is_none()
             && privacy_markdown.is_none()
             && !age_attestation_required
@@ -1581,6 +1616,7 @@ impl Config {
             media_uploads_per_minute,
             audit_enabled,
             workflow_agent_mentions,
+            plugin_recording_default,
             ephemeral_ttl_override,
             git_repo_path,
             git_pack_cache_path,
@@ -2694,6 +2730,37 @@ mod tests {
             std::env::set_var("BUZZ_AUDIT_ENABLED", value);
         } else {
             std::env::remove_var("BUZZ_AUDIT_ENABLED");
+        }
+    }
+
+    #[test]
+    fn plugin_recording_default_is_off_and_rejects_other_values() {
+        const NAME: &str = "BUZZ_PLUGIN_RECORDING_DEFAULT";
+        let _guards = env_guards();
+        let previous = std::env::var_os(NAME);
+        std::env::remove_var(NAME);
+        assert_eq!(
+            parse_plugin_recording_default().unwrap(),
+            PluginRecordingDefault::Off
+        );
+        std::env::set_var(NAME, "on");
+        assert_eq!(
+            parse_plugin_recording_default().unwrap(),
+            PluginRecordingDefault::On
+        );
+        std::env::set_var(NAME, "off");
+        assert_eq!(
+            parse_plugin_recording_default().unwrap(),
+            PluginRecordingDefault::Off
+        );
+        for invalid in ["true", "", "ON", "yes"] {
+            std::env::set_var(NAME, invalid);
+            assert!(parse_plugin_recording_default().is_err(), "{invalid:?}");
+        }
+        if let Some(value) = previous {
+            std::env::set_var(NAME, value);
+        } else {
+            std::env::remove_var(NAME);
         }
     }
 
