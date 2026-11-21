@@ -19,6 +19,21 @@ pub(crate) fn managed_agent_runtime_keys<T>(
         .collect()
 }
 
+/// The relays the agent's live pairs were actually dialed with, in each
+/// community's configured spelling. Restart flows must reuse these, not the
+/// canonical pair-key URLs: the relay binds communities to the literal
+/// authority, so `localhost` and `127.0.0.1` are distinct tenants.
+pub(crate) fn managed_agent_runtime_dial_urls(
+    runtimes: &HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
+    pubkey: &str,
+) -> Vec<String> {
+    runtimes
+        .iter()
+        .filter(|(key, _)| key.pubkey.eq_ignore_ascii_case(pubkey))
+        .map(|(_, runtime)| runtime.dial_relay_url.clone())
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) fn managed_agent_runtime_relay_urls<T>(
     runtimes: &HashMap<ManagedAgentRuntimeKey, T>,
