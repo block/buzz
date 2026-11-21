@@ -24,16 +24,7 @@ void runProfileEditMotionAndAccessibilityTests() {
       findsOneWidget,
     );
 
-    await tester.tap(find.text('Emoji'));
-    await tester.pump(const Duration(milliseconds: 250));
-    expect(tester.takeException(), isNull);
-    await tester.ensureVisible(
-      find.byKey(const ValueKey('emoji-editor-background')),
-    );
-    await tester.tap(find.byKey(const ValueKey('emoji-editor-background')));
-    await tester.pump(const Duration(milliseconds: 200));
-    expect(tester.takeException(), isNull);
-
+    expect(find.text('Emoji'), findsNothing);
     await tester.drag(
       find.byKey(const ValueKey('avatar-editor-scroll-view')),
       const Offset(0, 1000),
@@ -82,74 +73,52 @@ void runProfileEditMotionAndAccessibilityTests() {
       isTrue,
     );
     expect(
-      modeSemantics('Emoji').every((node) => node.properties.selected == false),
+      modeSemantics(
+        'Animated',
+      ).every((node) => node.properties.selected == false),
       isTrue,
     );
-    await tester.tap(find.byKey(const ValueKey('avatar-mode-emoji')));
+    await tester.tap(find.byKey(const ValueKey('avatar-mode-animated')));
     await tester.pump();
     expect(
       modeSemantics('Image').every((node) => node.properties.selected == false),
       isTrue,
     );
     expect(
-      modeSemantics('Emoji').every((node) => node.properties.selected == true),
+      modeSemantics(
+        'Animated',
+      ).every((node) => node.properties.selected == true),
       isTrue,
     );
     debugDefaultTargetPlatformOverride = null;
   });
 
-  testWidgets('moves segment content in the selected direction', (
-    tester,
-  ) async {
+  testWidgets('image content returns from animated mode', (tester) async {
     await tester.pumpWidget(
       WidgetHelpers.testable(
         overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
-        child: const ProfileEditPage(),
+        child: const ProfileEditPage(startInPhotoEditor: true),
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Edit Photo'));
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('Emoji'));
-    await tester.pump();
-    final trayTransform = tester.widget<Transform>(
-      find.byKey(const ValueKey('avatar-mode-tray-transition-transform')),
-    );
-    expect(trayTransform.transform.getTranslation().x, 0);
-    expect(trayTransform.transform.getTranslation().y, greaterThan(0));
-    final forwardTransform = tester.widget<Transform>(
-      find.byKey(const ValueKey('avatar-mode-transition-transform')),
-    );
-    expect(forwardTransform.transform.getTranslation().x, greaterThan(0));
-    await tester.pump(const Duration(milliseconds: 240));
+    await tester.tap(find.text('Animated'));
+    await tester.pump(const Duration(milliseconds: 250));
     expect(
-      tester
-          .widget<Transform>(
-            find.byKey(const ValueKey('avatar-mode-transition-transform')),
-          )
-          .transform
-          .getTranslation()
-          .x,
-      closeTo(0, 0.01),
+      find.byKey(const ValueKey('animated-avatar-capture-preview')),
+      findsOneWidget,
     );
-    expect(
-      tester
-          .widget<Transform>(
-            find.byKey(const ValueKey('avatar-mode-tray-transition-transform')),
-          )
-          .transform
-          .getTranslation()
-          .y,
-      closeTo(0, 0.01),
-    );
-
     await tester.tap(find.text('Image'));
     await tester.pump();
-    final reverseTransform = tester.widget<Transform>(
+    final transform = tester.widget<Transform>(
       find.byKey(const ValueKey('avatar-mode-transition-transform')),
     );
-    expect(reverseTransform.transform.getTranslation().x, lessThan(0));
+    expect(transform.transform.getTranslation().x, lessThan(0));
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(
+      find.byKey(const ValueKey('avatar-editor-fixed-preview')),
+      findsOneWidget,
+    );
+    expect(find.text('Emoji'), findsNothing);
   });
 
   testWidgets('retains the preview while animated mode initializes', (
@@ -158,49 +127,20 @@ void runProfileEditMotionAndAccessibilityTests() {
     await tester.pumpWidget(
       WidgetHelpers.testable(
         overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
-        child: const ProfileEditPage(),
+        child: const ProfileEditPage(startInPhotoEditor: true),
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Edit Photo'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Emoji'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 150));
-    final emojiCenter = tester
-        .getCenter(find.byKey(const ValueKey('emoji-avatar-preview')))
+    final imageCenter = tester
+        .getCenter(find.byKey(const ValueKey('avatar-editor-fixed-preview')))
         .dy;
-
     await tester.tap(find.text('Animated'));
     await tester.pump();
     final retained = find.byKey(const ValueKey('avatar-mode-retained-preview'));
     expect(retained, findsOneWidget);
-    expect(tester.getCenter(retained).dy, closeTo(emojiCenter, 0.01));
-
-    await tester.pump(const Duration(milliseconds: 75));
-    expect(tester.getCenter(retained).dy, greaterThan(emojiCenter));
-    await tester.pump(const Duration(milliseconds: 75));
+    expect(tester.getCenter(retained).dy, closeTo(imageCenter, 0.01));
+    await tester.pump(const Duration(milliseconds: 150));
     expect(retained, findsNothing);
-
-    final animatedCenter = tester
-        .getCenter(
-          find.byKey(const ValueKey('animated-avatar-capture-preview')),
-        )
-        .dy;
-    await tester.tap(find.text('Emoji'));
-    await tester.pump();
-    final returningPreview = find.byKey(
-      const ValueKey('avatar-preview-position'),
-    );
-    expect(
-      tester.getCenter(returningPreview).dy,
-      closeTo(animatedCenter, 0.01),
-    );
-
-    await tester.pump(const Duration(milliseconds: 75));
-    expect(tester.getCenter(returningPreview).dy, lessThan(animatedCenter));
-    await tester.pump(const Duration(milliseconds: 75));
-    expect(tester.getCenter(returningPreview).dy, closeTo(emojiCenter, 0.01));
   });
 
   testWidgets('plays an animated avatar on the profile and image editor', (
@@ -266,44 +206,6 @@ void runProfileEditMotionAndAccessibilityTests() {
     expect(
       tester.widget<AvatarImage>(find.byType(AvatarImage)).imageUrl,
       'https://relay.example/poster.png',
-    );
-  });
-
-  testWidgets('keeps emoji actions anchored when search opens the keyboard', (
-    tester,
-  ) async {
-    tester.view.devicePixelRatio = 1;
-    tester.view.physicalSize = const Size(800, 900);
-    addTearDown(tester.view.reset);
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
-        child: const ProfileEditPage(),
-      ),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Edit Photo'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Emoji'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 150));
-
-    final action = find.byKey(const ValueKey('emoji-editor-background'));
-    final actionBottomBefore = tester.getRect(action).bottom;
-    await tester.tap(find.byKey(const ValueKey('emoji-avatar-search')));
-    tester.view.viewInsets = const FakeViewPadding(bottom: 300);
-    await tester.pump();
-
-    expect(tester.getRect(action).bottom, actionBottomBefore);
-    expect(
-      tester.getRect(find.byKey(const ValueKey('emoji-avatar-search'))).bottom,
-      lessThan(600),
-    );
-    expect(
-      tester
-          .widgetList<Scaffold>(find.byType(Scaffold))
-          .any((scaffold) => scaffold.resizeToAvoidBottomInset == false),
-      isTrue,
     );
   });
 
@@ -508,28 +410,6 @@ void runProfileEditMotionAndAccessibilityTests() {
         .toList();
     expect(reviewIcons, containsAll(['person', 'palette', 'frame', 'camera']));
     debugDefaultTargetPlatformOverride = null;
-  });
-
-  testWidgets('uses the shared animated background grid for emoji avatars', (
-    tester,
-  ) async {
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
-        child: const ProfileEditPage(),
-      ),
-    );
-    await tester.pump();
-    await tester.tap(find.text('Edit Photo'));
-    await tester.pump(const Duration(milliseconds: 250));
-    await tester.tap(find.text('Emoji'));
-    await tester.pump(const Duration(milliseconds: 250));
-    await tester.tap(find.byKey(const ValueKey('emoji-editor-background')));
-    await tester.pump(const Duration(milliseconds: 200));
-
-    expect(find.byType(AvatarBackgroundGrid), findsOneWidget);
-    final firstColor = find.byKey(const ValueKey('emoji-avatar-color-0'));
-    expect(tester.getSize(firstColor), const Size.square(52));
   });
 
   testWidgets('background colors remain reachable in compact layouts', (

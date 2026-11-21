@@ -2,16 +2,17 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 
-import '../../shared/emoji/emoji_avatar.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/emoji/emoji_avatar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/ios_glass_navigation_action.dart';
 import 'profile_setup_empty_avatar.dart';
+
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -54,17 +55,25 @@ class ProfileSetupAvatarEditor extends HookConsumerWidget {
       });
       return null;
     }, const []);
+    final emojiAvailable = humanAvatarModes.contains(ProfileAvatarMode.emoji);
     final openingDraft = useMemoized(
       () =>
           initialDraft ??
-          ProfileUrlAvatarDraft(
-            emojiAvatarDataUrl('😊', emojiAvatarColors[Random().nextInt(18)]),
-          ),
+          (emojiAvailable
+              ? ProfileUrlAvatarDraft(
+                  emojiAvatarDataUrl(
+                    '😊',
+                    emojiAvatarColors[Random().nextInt(
+                      emojiAvatarColors.length,
+                    )],
+                  ),
+                )
+              : null),
       const [],
     );
     final draft = useState<ProfileAvatarDraft?>(openingDraft);
     final mode = useState(switch (openingDraft) {
-      ProfileUrlAvatarDraft() => ProfileAvatarMode.emoji,
+      ProfileUrlAvatarDraft() when emojiAvailable => ProfileAvatarMode.emoji,
       ProfileAnimatedAvatarDraft() => ProfileAvatarMode.animated,
       _ => ProfileAvatarMode.image,
     });

@@ -35,8 +35,18 @@ enum ProfileAvatarMode {
   emoji,
 
   /// A short camera animation with framing and background controls.
-  animated,
+  animated;
+
+  /// Label displayed in the mode selector.
+  String get label => switch (this) {
+    image => 'Image',
+    emoji => 'Emoji',
+    animated => 'Animated',
+  };
 }
+
+/// Emoji editing is retained but hidden from human profiles.
+const humanAvatarModes = [ProfileAvatarMode.image, ProfileAvatarMode.animated];
 
 /// Builds the animated capture surface for the profile avatar editor.
 typedef AnimatedAvatarCaptureBuilder =
@@ -174,7 +184,6 @@ class ProfileAvatarEditor extends HookConsumerWidget {
     final imageSelectionGeneration = useRef(0);
     final currentMode = useRef(mode)..value = mode;
     final error = useState<String?>(null);
-    final dataset = ref.watch(emojiDatasetOrEmptyProvider);
     final modeTransitionDirection = useRef(1.0);
     final modeTransitionFrom = useRef(mode);
     final retainedPreview = useRef<Widget?>(null);
@@ -466,7 +475,7 @@ class ProfileAvatarEditor extends HookConsumerWidget {
             key: const ValueKey(1),
             height: contentHeight,
             activeSection: emojiSection.value,
-            dataset: dataset,
+            dataset: ref.watch(emojiDatasetOrEmptyProvider),
             selectedEmoji: selectedEmoji.value,
             selectedColor: selectedColor.value,
             transitionProgress: modeTransitionProgress,
@@ -562,14 +571,15 @@ class ProfileAvatarEditor extends HookConsumerWidget {
                       if (defaultTargetPlatform == TargetPlatform.iOS) {
                         return IosNativeSegmentedControl(
                           key: const ValueKey('avatar-mode-control'),
-                          items: const ['Image', 'Emoji', 'Animated'],
-                          selectedIndex: mode.index,
+                          items: [
+                            for (final option in humanAvatarModes) option.label,
+                          ],
+                          selectedIndex: humanAvatarModes.indexOf(mode),
                           onChanged: (index) {
-                            if (index < 0 ||
-                                index >= ProfileAvatarMode.values.length) {
+                            if (index < 0 || index >= humanAvatarModes.length) {
                               return;
                             }
-                            selectMode(ProfileAvatarMode.values[index]);
+                            selectMode(humanAvatarModes[index]);
                           },
                         );
                       }
@@ -766,12 +776,13 @@ class _AvatarModeControl extends StatelessWidget {
       padding: const EdgeInsets.all(Grid.quarter),
       child: LayoutBuilder(
         builder: (context, constraints) {
-          final segmentWidth =
-              constraints.maxWidth / ProfileAvatarMode.values.length;
+          final segmentWidth = constraints.maxWidth / humanAvatarModes.length;
           return Stack(
             children: [
               TweenAnimationBuilder<double>(
-                tween: Tween(end: selected.index.toDouble()),
+                tween: Tween(
+                  end: humanAvatarModes.indexOf(selected).toDouble(),
+                ),
                 duration: reduceMotion ? Duration.zero : _motionDuration,
                 curve: Curves.easeInOut,
                 builder: (context, position, child) => Transform.translate(
@@ -792,14 +803,10 @@ class _AvatarModeControl extends StatelessWidget {
               ),
               Row(
                 children: [
-                  for (final mode in ProfileAvatarMode.values)
+                  for (final mode in humanAvatarModes)
                     Expanded(
                       child: Semantics(
-                        label: switch (mode) {
-                          ProfileAvatarMode.image => 'Image',
-                          ProfileAvatarMode.emoji => 'Emoji',
-                          ProfileAvatarMode.animated => 'Animated',
-                        },
+                        label: mode.label,
                         button: true,
                         selected: mode == selected,
                         onTap: () => onSelected(mode),
@@ -812,11 +819,7 @@ class _AvatarModeControl extends StatelessWidget {
                               height: 36,
                               child: Center(
                                 child: Text(
-                                  switch (mode) {
-                                    ProfileAvatarMode.image => 'Image',
-                                    ProfileAvatarMode.emoji => 'Emoji',
-                                    ProfileAvatarMode.animated => 'Animated',
-                                  },
+                                  mode.label,
                                   style: context.textTheme.labelLarge?.copyWith(
                                     fontWeight: mode == selected
                                         ? FontWeight.w600
