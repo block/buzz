@@ -1321,7 +1321,7 @@ async fn run_active_audio_connection(
             crate::connection::send_exit_frames_bounded(
                 &mut ws_send,
                 error_exit_frames(
-                    serde_json::json!({"type":"error","message":"huddle has ended"}),
+                    serde_json::json!({"type":"error","code":"room_ended","message":"huddle has ended"}),
                     axum::extract::ws::close_code::POLICY,
                 ),
             )
@@ -2035,7 +2035,7 @@ async fn run_active_audio_connection(
             crate::connection::send_exit_frames_bounded(
                 &mut ws_send,
                 [WsMessage::Text(
-                    serde_json::json!({"type":"error","message":"huddle has ended"})
+                    serde_json::json!({"type":"error","code":"room_ended","message":"huddle has ended"})
                         .to_string()
                         .into(),
                 )],
@@ -2103,7 +2103,7 @@ async fn run_active_audio_connection(
                 &mut terminal_ctrl_rx,
                 nip_fi_assertion.is_some(),
                 buzz_auth::DenialClass::AuthorizationDenied,
-                serde_json::json!({"type":"error","message":"huddle has ended"}),
+                serde_json::json!({"type":"error","code":"room_ended","message":"huddle has ended"}),
             )
             .await;
             return;
@@ -14644,9 +14644,16 @@ mod tests {
             HuddleLinkDeleted,
             /// Terminate the join transaction's backend → `JoinCommitError::Db`.
             TransactionBackendLost,
+            /// Archive the huddle's channel after the pre-join check, before
+            /// the room is joined → the pre-room archive re-check refuses.
+            ArchivedBeforeRoom,
+            /// Archive the huddle's channel before the commit takes its row
+            /// lock → `JoinCommitError::Archived`.
+            ArchivedBeforeCommit,
         }
 
-        async fn run_auto_add_commit_race(race: CommitRace) -> String {
+        /// `nip_fi`: authenticate with a NIP-FI assertion, or in Off mode.
+        async fn run_auto_add_commit_race(race: CommitRace, nip_fi: bool) -> String {
             use axum::extract::ws::WebSocketUpgrade;
             use axum::routing::get;
             use axum::Router;
@@ -14742,10 +14749,12 @@ mod tests {
             let community_id = buzz_core::tenant::CommunityId::from_uuid(community_uuid);
             let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host.clone());
 
-            let assertion = VerifiedAssertion::for_test(
-                Some(joiner_key.public_key()),
-                vec![Utc::now() + Duration::hours(1)],
-            );
+            let assertion = nip_fi.then(|| {
+                VerifiedAssertion::for_test(
+                    Some(joiner_key.public_key()),
+                    vec![Utc::now() + Duration::hours(1)],
+                )
+            });
 
             // Arm the hook BEFORE the server starts. The membership-lock hook
             // fires inside commit_participant_join just before the membership
@@ -14755,6 +14764,9 @@ mod tests {
             let (arrived_rx, release) = match race {
                 CommitRace::TransactionBackendLost => {
                     crate::nip_fi_test_hooks::audio_archive_recheck_hook::arm(community_id)
+                }
+                CommitRace::ArchivedBeforeRoom => {
+                    crate::nip_fi_test_hooks::room_archive_recheck_hook::arm(community_id)
                 }
                 _ => crate::nip_fi_test_hooks::audio_membership_lock_hook::arm(community_id),
             };
@@ -14798,7 +14810,7 @@ mod tests {
                                         tenant_i,
                                         child_channel_id,
                                         control_inner,
-                                        Some(assertion_i),
+                                        assertion_i,
                                         conn_time,
                                         None,
                                     )
@@ -14891,6 +14903,13 @@ mod tests {
                         .await
                         .expect("F4b-pml: delete huddle_started link");
                 }
+                CommitRace::ArchivedBeforeRoom | CommitRace::ArchivedBeforeCommit => {
+                    sqlx::query("UPDATE channels SET archived_at = NOW() WHERE id = $1")
+                        .bind(child_channel_id)
+                        .execute(&pool_c)
+                        .await
+                        .expect("F4b-pml: archive huddle channel");
+                }
                 CommitRace::TransactionBackendLost => {
                     // The join transaction holds `FOR NO KEY UPDATE` on the
                     // child row; a waiter on that row names it as its blocker.
@@ -14954,7 +14973,7 @@ mod tests {
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn fix_4b_parent_membership_lost_with_fi_emits_restricted_wire_frame() {
             assert_eq!(
-                run_auto_add_commit_race(CommitRace::ParentMembershipRevoked).await,
+                run_auto_add_commit_race(CommitRace::ParentMembershipRevoked, true).await,
                 restricted(buzz_auth::DenialClass::AuthorizationDenied)
             );
         }
@@ -14965,7 +14984,7 @@ mod tests {
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn huddle_link_gone_before_commit_with_fi_emits_authorization_denied() {
             assert_eq!(
-                run_auto_add_commit_race(CommitRace::HuddleLinkDeleted).await,
+                run_auto_add_commit_race(CommitRace::HuddleLinkDeleted, true).await,
                 restricted(buzz_auth::DenialClass::AuthorizationDenied)
             );
         }
@@ -14976,8 +14995,47 @@ mod tests {
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn join_commit_db_failure_with_fi_emits_authorization_unavailable() {
             assert_eq!(
-                run_auto_add_commit_race(CommitRace::TransactionBackendLost).await,
+                run_auto_add_commit_race(CommitRace::TransactionBackendLost, true).await,
                 restricted(buzz_auth::DenialClass::AuthorizationUnavailable)
+            );
+        }
+
+        fn room_ended() -> serde_json::Value {
+            serde_json::json!({"type": "error", "code": "room_ended", "message": "huddle has ended"})
+        }
+
+        fn parsed(frame: String) -> serde_json::Value {
+            serde_json::from_str(&frame).expect("refusal frame is JSON")
+        }
+
+        // A huddle that ended between the pre-join checks and admission is
+        // refused with the same `room_ended` code as an ended room, so a
+        // client can tell it from a membership denial without reading the
+        // message. Mutation: drop the code from any of these exits → RED.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn huddle_archived_before_room_join_says_room_ended() {
+            assert_eq!(
+                parsed(run_auto_add_commit_race(CommitRace::ArchivedBeforeRoom, false).await),
+                room_ended()
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn huddle_archived_before_join_commit_says_room_ended() {
+            assert_eq!(
+                parsed(run_auto_add_commit_race(CommitRace::ArchivedBeforeCommit, false).await),
+                room_ended()
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn huddle_link_gone_before_commit_without_fi_says_room_ended() {
+            assert_eq!(
+                parsed(run_auto_add_commit_race(CommitRace::HuddleLinkDeleted, false).await),
+                room_ended()
             );
         }
         // ── Cross-pod handler harness (shared by the confirm/bootstrap witnesses) ──
