@@ -6,6 +6,25 @@ export type ProjectRepoHost =
   | { kind: "unresolved" };
 
 /**
+ * Parse git's SCP-like SSH remote (`git@host:owner/repo.git`). WHATWG `URL`
+ * rejects that form (`git@host` is not a scheme), which previously forced
+ * `projectRepoHost` to `{ kind: "unresolved" }` and broke Projects Fetch.
+ */
+export function parseScpStyleSshUrl(
+  cloneUrl: string,
+): { host: string; pathname: string } | null {
+  // Already a real URL (https://, ssh://, …) — leave to `new URL`.
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(cloneUrl)) return null;
+  const match = /^([^@/\s]+)@([^:/\s]+):(.+)$/.exec(cloneUrl.trim());
+  if (!match) return null;
+  const host = match[2];
+  const rawPath = match[3];
+  if (!host || !rawPath || rawPath.includes("://")) return null;
+  const pathname = rawPath.startsWith("/") ? rawPath : `/${rawPath}`;
+  return { host, pathname };
+}
+
+/**
  * Classifies the canonical git remote using the same origin and path boundary
  * enforced by the Tauri git commands. This is presentation/query gating only;
  * Rust remains the security boundary for clone operations.
@@ -15,6 +34,11 @@ export function projectRepoHost(
   relayOrigin: string | null | undefined,
 ): ProjectRepoHost {
   if (!cloneUrl || !relayOrigin) return { kind: "unresolved" };
+
+  const scp = parseScpStyleSshUrl(cloneUrl);
+  if (scp) {
+    return { kind: "external", host: scp.host };
+  }
 
   try {
     const clone = new URL(cloneUrl);
@@ -83,7 +107,10 @@ export function repositoryDisplayPath(
     const path = url.pathname.replace(/\.git$/, "").replace(/\/+$/, "");
     return `${url.host}${path}`;
   } catch {
-    return null;
+    const scp = parseScpStyleSshUrl(cloneUrl);
+    if (!scp) return null;
+    const path = scp.pathname.replace(/\.git$/, "").replace(/\/+$/, "");
+    return `${scp.host}${path}`;
   }
 }
 
