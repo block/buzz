@@ -218,6 +218,11 @@ const scenarios = [
   ],
   ["mobile lockfile", ["mobile/pubspec.lock"], ["mobile", "mobile-native"]],
   [
+    "Flutter SDK pin",
+    ["bin/.flutter-3.47.9.pkg"],
+    ["mobile", "mobile-native"],
+  ],
+  [
     "mobile iOS source",
     ["mobile/ios/Runner/IosMediaCarousel.swift"],
     ["mobile", "mobile-native"],
