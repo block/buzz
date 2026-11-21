@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { expect, test } from "@playwright/test";
+import { type Browser, expect, type Page, test } from "@playwright/test";
 import {
   BUZZ_ANDROID_PLAY_STORE_URL,
   BUZZ_IOS_APP_STORE_URL,
@@ -578,4 +578,196 @@ test("invite swarm follows width and height changes with reduced motion", async 
       .toBeLessThan(0.001);
     await expect(page.locator(".bee-sprite")).toHaveCount(24);
   }
+});
+
+async function trackLaunches(page: Page) {
+  const launches: string[] = [];
+  const cdp = await page.context().newCDPSession(page);
+  cdp.on("Page.frameRequestedNavigation", ({ url }) => {
+    if (url.startsWith("buzz:")) launches.push(url);
+  });
+  await cdp.send("Page.enable");
+  return launches;
+}
+
+const openQuery = `?channel=4f1c2a9e-0000-4000-8000-000000000001&id=${"ab".repeat(32)}`;
+
+test("open link hands the buzz:// link to the app", async ({ page }) => {
+  const query = openQuery;
+  const launches = await trackLaunches(page);
+
+  await page.goto(`/open/message${query}`);
+
+  await expect(
+    page.getByRole("heading", { name: "Opening Buzz…" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Open in Buzz" }),
+  ).toHaveAttribute("href", `buzz://message${query}`);
+  await expect.poll(() => launches).toEqual([`buzz://message${query}`]);
+});
+
+const phones = [
+  {
+    name: "iPhone",
+    platform: "iPhone",
+    userAgent:
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15",
+  },
+  {
+    name: "iPadOS desktop mode",
+    platform: "MacIntel",
+    userAgent:
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/605.1.15",
+  },
+  {
+    name: "Android",
+    platform: "Linux armv8l",
+    userAgent:
+      "Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 Mobile",
+  },
+];
+
+async function openOnPhone(browser: Browser, phone: (typeof phones)[number]) {
+  const context = await browser.newContext({ userAgent: phone.userAgent });
+  await context.addInitScript((platform) => {
+    Object.defineProperties(navigator, {
+      platform: { configurable: true, value: platform },
+      maxTouchPoints: { configurable: true, value: 5 },
+      userAgentData: {
+        configurable: true,
+        value: { platform, mobile: true },
+      },
+    });
+  }, phone.platform);
+  const page = await context.newPage();
+  await page.route("https://api.github.com/**", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: "[]" }),
+  );
+  return { context, page, launches: await trackLaunches(page) };
+}
+
+for (const phone of phones) {
+  test(`open link on ${phone.name} waits for a tap`, async ({ browser }) => {
+    const { context, page, launches } = await openOnPhone(browser, phone);
+
+    await page.goto(`/open/message${openQuery}`);
+    await expect(
+      page.getByRole("heading", { name: "Open in Buzz" }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Tap the button below to open this link in Buzz."),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("link", { name: "Download Buzz" }),
+    ).toBeVisible();
+    await page.waitForLoadState("networkidle");
+    expect(launches).toEqual([]);
+
+    await page.getByRole("link", { name: "Open in Buzz" }).click();
+    await expect.poll(() => launches).toEqual([`buzz://message${openQuery}`]);
+    await context.close();
+  });
+
+  test(`open link on ${phone.name} sends desktop-only links to a computer`, async ({
+    browser,
+  }) => {
+    const { context, page, launches } = await openOnPhone(browser, phone);
+    const owner = "cd".repeat(32);
+    const event = "ef".repeat(32);
+
+    await page.goto("/open/channel/general");
+    await expect(
+      page.getByRole("link", { name: "Open in Buzz" }),
+    ).toHaveAttribute("href", "buzz://channel/general");
+
+    for (const rest of [
+      `channel/general/${event}`,
+      `repo?owner=${owner}&d=demo-repo`,
+      `pr?owner=${owner}&d=demo-repo&id=${event}`,
+      `issue?owner=${owner}&d=demo-repo&id=${event}`,
+    ]) {
+      await page.goto(`/open/${rest}`);
+      await expect(
+        page.getByRole("heading", { name: "Open this link on a computer" }),
+        rest,
+      ).toBeVisible();
+      await expect(
+        page.getByRole("link", { name: "Open in Buzz" }),
+      ).toHaveCount(0);
+      await expect(
+        page.getByRole("link", { name: "Download Buzz" }),
+      ).toHaveCount(0);
+    }
+    await page.waitForLoadState("networkidle");
+    expect(launches).toEqual([]);
+    await context.close();
+  });
+}
+
+test("open link forwards every navigation form", async ({ page }) => {
+  const owner = "cd".repeat(32);
+  const event = "ef".repeat(32);
+  for (const rest of [
+    "channel/4f1c2a9e-0000-4000-8000-000000000001",
+    "channel/general",
+    `channel/general/${event}`,
+    `message?channel=general&id=${event}&thread=${event}`,
+    `message?channel=general&id=${event}&utm_source=chat`,
+    `repo?owner=${owner}&d=demo-repo&tab=commits&commit=${"a1".repeat(20)}`,
+    `repo?owner=${owner}&d=demo-repo`,
+    `pr?owner=${owner}&d=demo-repo&id=${"ef".repeat(32)}`,
+    `issue?owner=${owner}&d=demo-repo&id=${"ef".repeat(32)}`,
+  ]) {
+    await page.goto(`/open/${rest}`);
+    await expect(
+      page.getByRole("link", { name: "Open in Buzz" }),
+    ).toHaveAttribute("href", `buzz://${rest}`);
+  }
+});
+
+test("open link refuses links that are not navigation", async ({ page }) => {
+  const launches = await trackLaunches(page);
+  const owner = "cd".repeat(32);
+  const event = "ef".repeat(32);
+  for (const path of [
+    "/open/join?relay=wss%3A%2F%2Frelay.example&code=demo-code",
+    "/open/connect?relay=wss%3A%2F%2Frelay.example",
+    "/open/add-community?relay=wss%3A%2F%2Frelay.example",
+    "/open/plugin-install?repository=example-org%2Fplugin",
+    "/open/message-extra?channel=general",
+    "/open/MESSAGE?channel=general",
+    "/open/message%2Fjoin?channel=general",
+    "/open//join?code=demo-code",
+    "/open/message",
+    "/open/message?channel=general",
+    `/open/message?id=${event}`,
+    `/open/message?channel=&id=${event}`,
+    `/open/message?channel=general&channel=random&id=${event}`,
+    `/open/message?channel=general&id=${event}&id=${event}`,
+    `/open/message?channel=general&id=${event}&thread=${event}&thread=${event}`,
+    `/open/message/extra?channel=general&id=${event}`,
+    "/open/channel",
+    "/open/channel/",
+    `/open/channel/general/${event}/extra`,
+    "/open/repo",
+    `/open/project?owner=${owner}&d=demo-project&tab=board`,
+    "/open/project",
+    `/open/repo?owner=${owner}`,
+    `/open/repo?owner=${owner}&d=demo-repo&tab=code&tab=commits`,
+    `/open/pr?owner=${owner}&d=demo-repo`,
+    `/open/issue?owner=${owner}&d=demo-repo&id=`,
+    `/open/issue/extra?owner=${owner}&d=demo-repo&id=${event}`,
+  ]) {
+    await page.goto(path);
+    await expect(
+      page.getByRole("heading", { name: "This link doesn't work" }),
+      path,
+    ).toBeVisible();
+    await expect(page.getByRole("link", { name: "Open in Buzz" })).toHaveCount(
+      0,
+    );
+  }
+  await page.waitForLoadState("networkidle");
+  expect(launches).toEqual([]);
 });
