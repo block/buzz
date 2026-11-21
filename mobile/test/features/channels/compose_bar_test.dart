@@ -6,6 +6,7 @@ import 'package:buzz/shared/emoji/emoji_picker.dart';
 import 'package:buzz/shared/widgets/concentric_sheet_surface.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
+import 'package:buzz/shared/utils/stylus_handwriting.dart';
 
 import 'dart:async';
 
@@ -18,6 +19,7 @@ import 'dart:ui' as ui;
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -33,6 +35,8 @@ import 'package:buzz/features/channels/deep_link_dispatcher.dart';
 import 'package:buzz/features/channels/open_channel_routes.dart';
 import 'package:buzz/shared/auth/auth.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
+import 'package:buzz/shared/verified_profiles/verified_profile.dart';
+import 'package:buzz/shared/verified_profiles/verified_profile_directory.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
 
@@ -52,6 +56,7 @@ import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
+import 'package:buzz/shared/mentions/mention_bindings.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/share/pending_share.dart';
 import 'package:buzz/shared/drafts/compose_drafts_provider.dart';
@@ -71,6 +76,9 @@ part 'compose_bar_test/solo_draft_tests.dart';
 part 'compose_bar_test/durable_mention_tests.dart';
 part 'compose_bar_test/agent_prefill_tests.dart';
 part 'compose_bar_test/share_delivery_tests.dart';
+part 'compose_bar_test/mention_chip_tests.dart';
+part 'compose_bar_test/mention_search_tests.dart';
+part 'compose_bar_test/large_roster_tests.dart';
 
 final _pngBytes = Uint8List.fromList([
   0x89,
@@ -829,6 +837,9 @@ void main() {
   durableMentionTests();
   agentPrefillTests();
   shareDeliveryTests();
+  mentionChipTests();
+  mentionSearchTests();
+  largeRosterTests();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {
@@ -1767,10 +1778,12 @@ void main() {
       final container = ProviderScope.containerOf(
         tester.element(find.byType(ComposeBar)),
       );
-      Map<String, String>? storedKeys() => container
+      List<String>? storedKeys() => container
           .read(composeDraftsProvider.notifier)
           .draftFor('channel-1')
-          ?.mentionKeys;
+          ?.mentions
+          .map((m) => m.pubkey)
+          .toList();
 
       // The first composer mentions one of two people named Scout.
       await _expandComposer(tester);
@@ -1778,7 +1791,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(scouts().first);
       await tester.pumpAndSettle();
-      expect(storedKeys(), {'Scout': first});
+      expect(storedKeys(), [first]);
 
       // A second composer for the same conversation, such as the page a
       // notification opens, replaces it with the other Scout.
@@ -1809,7 +1822,7 @@ void main() {
           'hello';
       await tester.enterText(find.byType(TextField), text);
       await tester.pumpAndSettle();
-      expect(storedKeys(), {'Scout': second});
+      expect(storedKeys(), [second]);
 
       // Back on the first composer, the text it shows goes to that Scout.
       navigator.pop();
@@ -1977,6 +1990,186 @@ void main() {
       expect(textField.controller!.selection.baseOffset, 12);
       expect(find.byType(TextField), findsOneWidget);
       expect(textField.focusNode!.hasFocus, isTrue);
+    });
+
+    testWidgets('iOS measures each character only of shorter drafts', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        Future<List<int>> sentSelectionRectCounts(String text) async {
+          tester.testTextInput.log.clear();
+          await tester.enterText(find.byType(TextField), text);
+          await tester.pump();
+          await tester.pump();
+          return [
+            for (final call in tester.testTextInput.log)
+              if (call.method == 'TextInput.setSelectionRects')
+                (call.arguments as List).length,
+          ];
+        }
+
+        // The keyboard trackpad's two-finger selection uses these rectangles.
+        expect(await sentSelectionRectCounts('abc def ghi'), [11]);
+        // Measuring a long draft one character at a time froze the app, so
+        // iOS gets no rectangles, and drops the ones from the shorter draft.
+        expect(
+          await sentSelectionRectCounts('a' * (stylusHandwritingMaxLength + 1)),
+          [0],
+        );
+        expect(await sentSelectionRectCounts('abc def'), [7]);
+        expect(
+          await sentSelectionRectCounts('a' * (stylusHandwritingMaxLength + 1)),
+          [0],
+        );
+        // Flutter skips a list equal to the last one it sent, so iOS has no
+        // rectangles back at the identical draft until the next edit.
+        expect(await sentSelectionRectCounts('abc def'), isEmpty);
+        expect(await sentSelectionRectCounts('abc def g'), [9]);
+
+        // iOS holds rectangles only for the focused field, which may be
+        // another one, so a draft crossing the cutoff without focus sends none.
+        final controller = tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!;
+        FocusManager.instance.primaryFocus?.unfocus();
+        await tester.pump();
+        tester.testTextInput.log.clear();
+        controller.text = 'a' * (stylusHandwritingMaxLength + 1);
+        await tester.pump();
+        await tester.pump();
+        expect(
+          tester.testTextInput.log.map((call) => call.method),
+          isNot(contains('TextInput.setSelectionRects')),
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('iOS closes a Scribble writing gap when a draft gets long', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        Future<void> sendScribble(
+          String method, [
+          List<Object> size = const [],
+        ]) => tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+          SystemChannels.textInput.name,
+          SystemChannels.textInput.codec.encodeMethodCall(
+            MethodCall('TextInputClient.$method', <Object>[-1, ...size]),
+          ),
+          (_) {},
+        );
+        bool hasWritingGap() {
+          var found = false;
+          tester
+              .state<EditableTextState>(find.byType(EditableText))
+              .renderEditable
+              .text
+              ?.visitChildren((span) {
+                found = found || span is WidgetSpan;
+                return !found;
+              });
+          return found;
+        }
+
+        await tester.enterText(find.byType(TextField), 'abc');
+        await tester.pump();
+        await sendScribble('insertTextPlaceholder', [300, 0]);
+        await tester.pump();
+        expect(hasWritingGap(), isTrue);
+
+        // Pencil writing pushes the draft past the cutoff while the gap is
+        // open. Flutter ignores iOS closing the gap once handwriting is off,
+        // so a gap left open would stay in the draft.
+        await tester.enterText(
+          find.byType(TextField),
+          'a' * (stylusHandwritingMaxLength + 1),
+        );
+        await tester.pump();
+        expect(hasWritingGap(), isFalse);
+        await sendScribble('removeTextPlaceholder');
+        await tester.enterText(find.byType(TextField), 'abc');
+        await tester.pump();
+        expect(hasWritingGap(), isFalse);
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('Android starts stylus handwriting in a long draft', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      final scribeCalls = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.scribe,
+        (call) async {
+          scribeCalls.add(call.method);
+          return call.method == 'Scribe.isFeatureAvailable' ? true : null;
+        },
+      );
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        await tester.enterText(
+          find.byType(TextField),
+          'a' * (stylusHandwritingMaxLength + 1),
+        );
+        await tester.pump();
+        // The keyboard inset covers the field's lower half.
+        await tester.tapAt(
+          tester.getTopLeft(find.byType(EditableText)) + const Offset(8, 8),
+          kind: PointerDeviceKind.stylus,
+        );
+        await tester.pump(const Duration(milliseconds: 500));
+        expect(scribeCalls, contains('Scribe.startStylusHandwriting'));
+      } finally {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.scribe,
+          null,
+        );
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
     });
 
     testWidgets('iOS selection handles resize a draft with the system menu', (
@@ -3049,15 +3242,26 @@ void main() {
       });
 
       testWidgets('Shift+Tab does not accept a mention', (tester) async {
-        final controller = await pumpComposer(tester);
+        final focus = FocusNode();
+        addTearDown(focus.dispose);
+        final controller = await pumpComposer(tester, focusNode: focus);
         await tester.enterText(find.byType(TextField), 'hi @a');
         await tester.pump();
+        expect(popover(), findsOneWidget);
 
         await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
         await tester.sendKeyEvent(LogicalKeyboardKey.tab);
         await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
-        await tester.pump();
+        await tester.pumpAndSettle();
 
+        // Shift+Tab traverses focus away from the field, so the chooser
+        // follows it; the query stays live and the chooser returns with it.
+        expect(controller.text, 'hi @a');
+        expect(focus.hasFocus, isFalse);
+        expect(popover(), findsNothing);
+        await tester.tap(find.text('hi @a'));
+        await tester.pumpAndSettle();
+        expect(focus.hasFocus, isTrue);
         expect(controller.text, 'hi @a');
         expect(popover(), findsOneWidget);
         await tester.pump(mentionSearchDebounce * 2);
@@ -4606,11 +4810,10 @@ void main() {
       );
 
       await _expandComposer(tester);
-      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.enterText(find.byType(TextField), 'hello @hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await _inviteOutside(tester);
       await tester.pumpAndSettle();
@@ -4644,7 +4847,7 @@ void main() {
         (jsonDecode(storedDrafts!) as List)
             .map((d) => (d as Map<String, dynamic>)['text'])
             .toList(),
-        contains('hello @Helper Bot'),
+        contains('hello @Helper Bot '),
       );
     });
 
@@ -4736,11 +4939,10 @@ void main() {
         await _openSystemPhotoPicker(tester);
         await tester.pumpAndSettle();
         await _expandComposer(tester);
-        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.enterText(find.byType(TextField), 'hello @hel');
         await tester.pumpAndSettle();
         await tester.tap(find.text('Helper Bot'));
         await tester.pumpAndSettle();
-        await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
         await tester.tap(find.byIcon(BuzzIcons.arrowUp));
         await _inviteOutside(tester);
         await tester.pump();
@@ -6030,7 +6232,7 @@ void main() {
       session.debugAttachSocketForTest(socket);
 
       await _expandComposer(tester);
-      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.enterText(find.byType(TextField), 'hello @hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
@@ -6039,7 +6241,6 @@ void main() {
         find.byKey(const ValueKey('composer-agent-mention-chip')),
         findsOneWidget,
       );
-      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await _inviteOutside(tester);
       await tester.pumpAndSettle();
@@ -6104,11 +6305,10 @@ void main() {
       );
 
       await _expandComposer(tester);
-      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.enterText(find.byType(TextField), 'hello @hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await _inviteOutside(tester);
       await tester.pump();
@@ -6183,6 +6383,12 @@ void main() {
           findsNothing,
         );
 
+        // Text typed after a picked chip, even while the IME composes it,
+        // leaves the chip drawn.
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField), '@Helper Bot typing');
         final textField = tester.widget<TextField>(find.byType(TextField));
         textField.controller!.value = textField.controller!.value.copyWith(
@@ -6350,8 +6556,9 @@ void main() {
         );
         expect(textField.controller!.text, 'xyping');
 
-        // Undo after typing the last letter of a mention restores the
-        // partial mention instead of removing the whole chip.
+        // A typed namesake of a picked chip stays plain text, and Undo after
+        // typing its last letter restores the partial name instead of
+        // removing the picked chip.
         await tester.enterText(find.byType(TextField), '@hel');
         await tester.pumpAndSettle();
         await tester.tap(find.text('Helper Bot'));
@@ -6370,7 +6577,7 @@ void main() {
         await tester.pump(const Duration(seconds: 1));
         expect(
           find.byKey(const ValueKey('composer-agent-mention-chip')),
-          findsNWidgets(2),
+          findsOneWidget,
         );
         // Moving the selection around a lot first changes nothing.
         for (var base = 24; base < 43; base++) {
@@ -6445,13 +6652,12 @@ void main() {
 
       Future<void> mentionMaryAndSend(WidgetTester tester) async {
         await _expandComposer(tester);
-        await tester.enterText(find.byType(TextField), '@Mary J');
+        await tester.enterText(find.byType(TextField), 'hello @Mary J');
         await tester.pump();
         await tester.pump(mentionSearchDebounce * 2);
         await tester.pumpAndSettle();
         await tester.tap(find.text('Mary Jane'));
         await tester.pumpAndSettle();
-        await tester.enterText(find.byType(TextField), 'hello @Mary Jane');
         await tester.tap(find.byIcon(BuzzIcons.arrowUp));
         await tester.pumpAndSettle();
       }
@@ -6617,7 +6823,7 @@ void main() {
         expect(sendCount, 0);
         expect(find.text('Not sent. Couldn’t check members.'), findsOneWidget);
         final field = tester.widget<TextField>(find.byType(TextField));
-        expect(field.controller!.text, 'hello @Mary Jane');
+        expect(field.controller!.text, 'hello @Mary Jane ');
 
         // The membership comes back, as after the relay's own retry.
         membersReady = true;
@@ -6783,11 +6989,10 @@ void main() {
       session.debugAttachSocketForTest(socket);
 
       await _expandComposer(tester);
-      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.enterText(find.byType(TextField), 'hello @hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pump();
 
@@ -6859,11 +7064,10 @@ void main() {
         session.debugAttachSocketForTest(socket);
 
         await _expandComposer(tester);
-        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.enterText(find.byType(TextField), 'hello @hel');
         await tester.pumpAndSettle();
         await tester.tap(find.text('Helper Bot'));
         await tester.pumpAndSettle();
-        await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
         await tester.tap(find.byIcon(BuzzIcons.arrowUp));
         await _inviteOutside(tester);
         await tester.pumpAndSettle();
@@ -7936,11 +8140,10 @@ Future<void> _openSystemPhotoPicker(WidgetTester tester) async {
 
 Future<void> _selectAndSendAgentMention(WidgetTester tester) async {
   await _expandComposer(tester);
-  await tester.enterText(find.byType(TextField), '@hel');
+  await tester.enterText(find.byType(TextField), 'hello @hel');
   await tester.pumpAndSettle();
   await tester.tap(find.text('Helper Bot'));
   await tester.pumpAndSettle();
-  await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
   await tester.tap(find.byIcon(BuzzIcons.arrowUp));
   await tester.pumpAndSettle();
 }

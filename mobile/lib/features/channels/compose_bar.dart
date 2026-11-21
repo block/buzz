@@ -3,6 +3,7 @@ import 'composer_transcription.dart';
 
 import 'package:buzz/shared/widgets/buzz_toast.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+import 'package:buzz/shared/utils/stylus_handwriting.dart';
 
 import 'composer_send_origin.dart';
 
@@ -29,8 +30,13 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/agents/owned_agent_directory.dart';
+import '../../shared/identity_names/identity_name_policy.dart';
+import '../../shared/identity_names/identity_names.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
+import '../../shared/mentions/bound_mentions.dart';
 import '../../shared/mentions/mention_bindings.dart';
+import '../../shared/mentions/mention_identity_links.dart';
 import '../../shared/mentions/mention_rules.dart';
 import '../../shared/huddle/huddle_session.dart';
 import '../../shared/relay/relay.dart';
@@ -56,6 +62,7 @@ import 'channel_management_provider.dart';
 import 'channels_provider.dart';
 import 'timeline_message.dart';
 import '../../shared/emoji/emoji_picker.dart';
+import 'message_content/markdown_link_mentions.dart';
 import 'mentions/mention_candidates.dart';
 import 'mentions/mention_candidates_provider.dart';
 import 'mentions/mention_ranking.dart';
@@ -68,14 +75,17 @@ import 'voice_note_recording.dart';
 import 'package:buzz/shared/crypto/event_signing.dart';
 
 part 'compose_bar/helpers.dart';
-part 'compose_bar/agent_mention_labels.dart';
+part 'compose_bar/composer_mentions.dart';
+part 'compose_bar/mention_chip_qualifiers.dart';
 part 'compose_bar/agent_mention_prefill.dart';
 part 'compose_bar/markdown_editing_controller.dart';
+part 'compose_bar/composer_chips.dart';
 part 'compose_bar/draft_lifecycle.dart';
 part 'compose_bar/suggestions.dart';
 part 'compose_bar/mention_chooser.dart';
 part 'compose_bar/formatting_toolbar.dart';
 part 'compose_bar/attachments.dart';
+part 'compose_bar/binding_history.dart';
 part 'compose_bar/video_thumbnail.dart';
 part 'compose_bar/upload_progress_pill.dart';
 part 'compose_bar/photo_gallery_picker.dart';
@@ -92,6 +102,7 @@ part 'compose_bar/hardware_keyboard.dart';
 part 'compose_bar/dock.dart';
 part 'compose_bar/share_delivery.dart';
 part 'compose_bar/compose_bar_widget.dart';
+part 'compose_bar/message_edit_sheet.dart';
 
 /// Callback used by channels and threads to submit composer content.
 typedef ComposeBarOnSend =

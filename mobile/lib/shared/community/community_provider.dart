@@ -13,6 +13,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../auth/auth_provider.dart';
 import '../channels/channel_list_snapshot.dart';
+import '../channels/saved_message_store.dart';
 import '../diagnostics/diagnostic_reporter.dart';
 import '../hosted/community_entry_requirements.dart';
 import '../profile/profile_snapshot.dart';
@@ -389,8 +390,8 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       ref.read(knownCommunitySyncProvider)?.trigger();
 
       final updatedList = current.where((w) => w.id != id).toList();
-      await _removeOrphanChannelListSnapshots(updatedList);
       state = AsyncData(updatedList);
+      await _removeOrphanChannelListSnapshots(updatedList);
       await syncCommunitySnapshot(ref, updatedList);
 
       // If we removed the active community, switch to another or sign out.
@@ -440,6 +441,10 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       await Future.wait([
         ?snapshots?.remove(pubkey, community.relayUrl),
         ?profiles?.remove(pubkey, community.relayUrl),
+        ref.read(savedMessageStoreProvider).removeScope((
+          communityId: community.id,
+          pubkey: pubkey,
+        )),
       ]);
     } catch (error, stackTrace) {
       developer.log(
@@ -469,6 +474,11 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       ?profiles?.removeOrphans({
         for (final scope in scopes)
           ProfileSnapshotStorage.key(scope.pubkey, scope.relay),
+      }),
+      ref.read(savedMessageStoreProvider).removeOrphans({
+        for (final community in communities)
+          if (_channelSnapshotPubkey(community) case final pubkey?)
+            (communityId: community.id, pubkey: pubkey),
       }),
     ]);
   }

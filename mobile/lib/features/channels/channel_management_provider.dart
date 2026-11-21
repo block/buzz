@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/auth/auth.dart';
+import '../../shared/channels/saved_message_store.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/crypto/nip_oa.dart';
@@ -18,14 +19,31 @@ import '../profile/profile_provider.dart';
 import 'channel.dart';
 import 'channel_metadata_updates.dart';
 import 'channels_provider.dart';
+import 'saved_channel_page.dart';
 
 export 'channel_metadata_updates.dart';
 
 part 'channel_huddle_actions.dart';
 part 'channel_management_actions.dart';
 
-String _relayErrorMessage(Object error) =>
-    error.toString().replaceFirst('Exception: ', '');
+/// The text of [error] without the `Exception: ` a plain [Exception] adds.
+/// A relay rejection keeps its message verbatim, and a lost acknowledgement
+/// drops the prefix only from its cause. Named types keep their whole name:
+/// `TimeoutException: ...` stays as is.
+String _relayErrorMessage(Object error) {
+  if (error is RelayEventRejectedException) return error.message;
+  final text = error.toString();
+  final cause = error is RelayAckLostError ? error.cause : null;
+  if (cause != null) {
+    final causeText = cause.toString();
+    if (text.endsWith(causeText)) {
+      return text.substring(0, text.length - causeText.length) +
+          _relayErrorMessage(cause);
+    }
+  }
+  const prefix = 'Exception: ';
+  return text.startsWith(prefix) ? text.substring(prefix.length) : text;
+}
 
 /// Raised when one or more kind:9000 adds were rejected, keyed by pubkey.
 ///

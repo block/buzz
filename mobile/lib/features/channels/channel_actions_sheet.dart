@@ -263,7 +263,6 @@ class ChannelActionsSheet extends HookConsumerWidget {
                 close();
                 await _showMoveSectionSheet(
                   pageContext,
-                  ref,
                   channel: channel,
                   sectionId: sectionId,
                 );
@@ -616,34 +615,55 @@ Future<void> _confirmAndRun(
 }
 
 Future<void> _showMoveSectionSheet(
-  BuildContext context,
-  WidgetRef ref, {
+  BuildContext context, {
   required Channel channel,
   required String? sectionId,
 }) async {
-  final sections = [...ref.read(channelSectionsProvider).store.sections]
+  // The actions sheet that opened this picker is already closing, and its
+  // WidgetRef is disposed with it. Use the page's container throughout.
+  final container = ProviderScope.containerOf(context, listen: false);
+  // A notification can switch communities while the picker or name dialog is
+  // open. Both close then, and only the community that opened them is edited.
+  final config = container.read(relayConfigProvider);
+  bool inScope() {
+    final current = container.read(relayConfigProvider);
+    return current.storedOrigin == config.storedOrigin &&
+        current.nsec == config.nsec;
+  }
+
+  void edit(void Function(ChannelSectionsNotifier sections) change) {
+    if (inScope()) change(container.read(channelSectionsProvider.notifier));
+  }
+
+  final sections = [...container.read(channelSectionsProvider).store.sections]
     ..sort((a, b) => a.order.compareTo(b.order));
   BuildContext? sheet;
-  // Desktop's unified layout can lock legacy filing while this is open. The
-  // sheet that opened this picker may already be gone, so listen on the
-  // page's container.
-  final container = ProviderScope.containerOf(context, listen: false);
+  void close() {
+    final open = sheet;
+    if (open != null) _closeOwnRoute(open);
+  }
+
+  // Desktop's unified layout can lock legacy filing while this is open.
   final lock = container.listen(
     channelSectionsProvider.select((state) => state.editable),
     (_, editable) {
-      final open = sheet;
-      if (!editable && open != null && open.mounted) Navigator.of(open).pop();
+      if (!editable) close();
     },
   );
+  final scope = container.listen(relayConfigProvider, (_, _) {
+    if (!inScope()) close();
+  });
   await showBuzzModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
     builder: (sheetContext) {
-      // A lock that landed before this first frame found no sheet to close.
-      if (sheet == null && !container.read(channelSectionsProvider).editable) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (sheetContext.mounted) Navigator.of(sheetContext).pop();
-        });
+      // A lock or switch that landed before this first frame found no sheet
+      // to close.
+      if (sheet == null &&
+          (!container.read(channelSectionsProvider).editable || !inScope())) {
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _closeOwnRoute(sheetContext),
+        );
       }
       sheet = sheetContext;
       return SafeArea(
@@ -670,9 +690,7 @@ Future<void> _showMoveSectionSheet(
                         : null,
                     onTap: () {
                       Navigator.of(sheetContext).pop();
-                      ref
-                          .read(channelSectionsProvider.notifier)
-                          .assignChannel(channel.id, section.id);
+                      edit((s) => s.assignChannel(channel.id, section.id));
                     },
                   ),
                 ListTile(
@@ -680,19 +698,12 @@ Future<void> _showMoveSectionSheet(
                   title: const Text('New section…'),
                   onTap: () async {
                     Navigator.of(sheetContext).pop();
-                    final name = await _showSectionNameDialog(context);
+                    final name = await _showSectionNameDialog(
+                      context,
+                      inScope: inScope,
+                    );
                     if (name == null || name.isEmpty) return;
-                    final notifier = ref.read(channelSectionsProvider.notifier);
-                    notifier.createSection(name);
-                    final created = ref
-                        .read(channelSectionsProvider)
-                        .store
-                        .sections
-                        .where((section) => section.name == name.trim())
-                        .lastOrNull;
-                    if (created != null) {
-                      notifier.assignChannel(channel.id, created.id);
-                    }
+                    edit((s) => s.createSection(name, channelId: channel.id));
                   },
                 ),
                 if (sectionId != null)
@@ -701,9 +712,7 @@ Future<void> _showMoveSectionSheet(
                     title: const Text('Remove from section'),
                     onTap: () {
                       Navigator.of(sheetContext).pop();
-                      ref
-                          .read(channelSectionsProvider.notifier)
-                          .unassignChannel(channel.id);
+                      edit((s) => s.unassignChannel(channel.id));
                     },
                   ),
               ],
@@ -712,29 +721,70 @@ Future<void> _showMoveSectionSheet(
         ),
       );
     },
-  ).whenComplete(lock.close);
+  ).whenComplete(() {
+    lock.close();
+    scope.close();
+  });
 }
 
-Future<String?> _showSectionNameDialog(BuildContext context) async {
-  final controller = TextEditingController();
-  final result = await showBuzzDialog<String>(
-    context: context,
-    builder: (dialogContext) => AlertDialog(
+/// Closes the route that [context] belongs to, once. Later calls, such as a
+/// second community switch, find it already leaving and never pop the page
+/// underneath.
+void _closeOwnRoute(BuildContext context) {
+  if (!context.mounted) return;
+  final route = ModalRoute.of(context);
+  if (route == null || !route.isActive) return;
+  final navigator = Navigator.of(context);
+  if (route.isCurrent) {
+    navigator.pop();
+  } else {
+    navigator.removeRoute(route);
+  }
+}
+
+Future<String?> _showSectionNameDialog(
+  BuildContext context, {
+  required bool Function() inScope,
+}) => showBuzzDialog<String>(
+  context: context,
+  builder: (_) => _SectionNameDialog(inScope: inScope),
+);
+
+/// Owns its controller so the field outlives the dialog's exit animation.
+class _SectionNameDialog extends HookConsumerWidget {
+  const _SectionNameDialog({required this.inScope});
+
+  /// False once the community that opened the dialog is no longer active.
+  final bool Function() inScope;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final controller = useTextEditingController();
+    ref.listen(relayConfigProvider, (_, _) {
+      if (!inScope()) _closeOwnRoute(context);
+    });
+    // A switch that landed before this first frame found no dialog to close.
+    useEffect(() {
+      if (!inScope()) {
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _closeOwnRoute(context),
+        );
+      }
+      return null;
+    }, const []);
+    return AlertDialog(
       title: const Text('New Section'),
       content: TextField(controller: controller, autofocus: true),
       actions: [
         TextButton(
-          onPressed: () => Navigator.of(dialogContext).pop(),
+          onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
         FilledButton(
-          onPressed: () =>
-              Navigator.of(dialogContext).pop(controller.text.trim()),
+          onPressed: () => Navigator.of(context).pop(controller.text.trim()),
           child: const Text('Create'),
         ),
       ],
-    ),
-  );
-  controller.dispose();
-  return result;
+    );
+  }
 }

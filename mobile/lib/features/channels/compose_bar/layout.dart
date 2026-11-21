@@ -396,11 +396,17 @@ class _ComposeBarLayout extends HookWidget {
   }
 
   Widget _buildTextField(BuildContext context) {
-    return Focus(
-      canRequestFocus: false,
-      skipTraversal: true,
-      onKeyEvent: onKeyEvent,
-      child: _buildEditableField(context),
+    return Actions(
+      actions: {
+        UndoTextIntent: _ComposerHistoryAction<UndoTextIntent>(controller),
+        RedoTextIntent: _ComposerHistoryAction<RedoTextIntent>(controller),
+      },
+      child: Focus(
+        canRequestFocus: false,
+        skipTraversal: true,
+        onKeyEvent: onKeyEvent,
+        child: _buildEditableField(context),
+      ),
     );
   }
 
@@ -420,6 +426,7 @@ class _ComposeBarLayout extends HookWidget {
       magnifierConfiguration: defaultTargetPlatform == TargetPlatform.iOS
           ? TextMagnifierConfiguration.disabled
           : null,
+      stylusHandwritingEnabled: stylusHandwritingEnabledFor(controller.text),
       contentInsertionConfiguration: ContentInsertionConfiguration(
         allowedMimeTypes: _pastedImageMimeTypes,
         onContentInserted: onContentInserted,

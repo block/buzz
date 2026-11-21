@@ -4,7 +4,9 @@
 //! check failed, and 2 when the probe itself could not run or report.
 //!
 //! Usage:
-//!   buzz-acceptance --relay-url wss://relay.example [--assertion-file <path>]
+//!   buzz-acceptance --relay-url wss://relay.example
+//!       [--connect-addr relay.internal:80]
+//!       [--private-key <key> | --private-key-file <path>] [--assertion-file <path>]
 //!       [--statsd-addr 127.0.0.1:8125] [--tag env:staging]...
 
 use std::net::SocketAddr;
@@ -15,6 +17,9 @@ use std::time::Duration;
 use buzz_test_client::acceptance::{self, metrics, Config};
 use clap::Parser;
 use nostr::Keys;
+
+/// The largest key file the probe reads. An nsec is 63 bytes.
+const MAX_KEY_FILE_BYTES: u64 = 1024;
 
 /// The longest resolving the metrics address or sending the metrics may take.
 const METRICS_TIMEOUT: Duration = Duration::from_secs(5);
@@ -28,10 +33,20 @@ struct Cli {
     /// The relay's WebSocket URL.
     #[arg(long, env = "BUZZ_RELAY_URL")]
     relay_url: String,
-    /// Secret key (hex or nsec) to authenticate and sign as. Without one the
-    /// probe uses a new key, which works only on a relay that admits any key.
+    /// Plaintext `host:port` to dial instead of the relay URL's host, such as
+    /// the relay's in-cluster service. The URL still sets the `Host` header
+    /// and the NIP-42 relay tag.
+    #[arg(long, env = "BUZZ_ACCEPTANCE_CONNECT_ADDR")]
+    connect_addr: Option<String>,
+    /// Secret key (hex or nsec) to authenticate and sign as. Without this or
+    /// a key file the probe uses a new key, which works only on a relay that
+    /// admits any key.
     #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
     private_key: Option<String>,
+    /// File holding the secret key (hex or nsec), for a key another process
+    /// writes, such as one minted with its NIP-FI assertion before the run.
+    #[arg(long, env = "BUZZ_PRIVATE_KEY_FILE", conflicts_with = "private_key")]
+    private_key_file: Option<PathBuf>,
     /// File holding a NIP-FI assertion for the key, read before every
     /// connection. Keep it fresh from another process.
     #[arg(long, env = "BUZZ_ACCEPTANCE_ASSERTION_FILE")]
@@ -84,8 +99,17 @@ fn main() -> ExitCode {
 /// Runs the probe, prints its report and sends its metrics. Returns whether
 /// every check passed.
 async fn probe(cli: Cli) -> anyhow::Result<bool> {
-    let keys = match &cli.private_key {
-        Some(key) => Keys::parse(key).map_err(|e| anyhow::anyhow!("private key: {e}"))?,
+    let key = match (&cli.private_key, &cli.private_key_file) {
+        (Some(key), _) => Some(key.clone()),
+        (None, Some(path)) => Some(acceptance::read_secret_file(
+            path,
+            "private key file",
+            MAX_KEY_FILE_BYTES,
+        )?),
+        (None, None) => None,
+    };
+    let keys = match key {
+        Some(key) => Keys::parse(&key).map_err(|e| anyhow::anyhow!("private key: {e}"))?,
         None => Keys::generate(),
     };
     let statsd = match &cli.statsd_addr {
@@ -94,6 +118,7 @@ async fn probe(cli: Cli) -> anyhow::Result<bool> {
     };
     let cfg = Config {
         relay_url: cli.relay_url,
+        connect_addr: cli.connect_addr,
         keys,
         assertion_file: cli.assertion_file,
         stage_timeout: Duration::from_secs(cli.stage_timeout_secs),

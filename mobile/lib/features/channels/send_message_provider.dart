@@ -55,8 +55,9 @@ class SendMessage {
   /// thread head). Tags are built to match the desktop's `buildReplyTags`
   /// convention with `root` / `reply` markers. Pass [mediaTags] to append
   /// relay-validated `imeta` tags and NIP-30 `emoji` tags. [mayPublish] is
-  /// asked after every wait, right before the event is signed and published;
-  /// when it says no, nothing is published and this throws.
+  /// asked after every wait, once the event is signed and shown locally and
+  /// right before it is published; when it says no, nothing is published,
+  /// the local message is removed and this throws.
   Future<void> call({
     required String channelId,
     required String content,

@@ -16,7 +16,7 @@ pub mod metrics;
 
 use std::future::Future;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context};
@@ -57,6 +57,10 @@ pub const CHECKS: [&str; 8] = [
 pub struct Config {
     /// The relay's WebSocket URL (`wss://…` or `ws://…`).
     pub relay_url: String,
+    /// A plaintext `host:port` to dial instead of the URL's host, such as the
+    /// relay's in-cluster service. `relay_url` still names the relay: it
+    /// supplies the `Host` header, the NIP-42 relay tag and the community.
+    pub connect_addr: Option<String>,
     /// The identity the probe authenticates and signs as.
     pub keys: Keys,
     /// A file holding a NIP-FI assertion for `keys`. It is read again before
@@ -71,6 +75,8 @@ pub struct Config {
 pub struct Report {
     /// The relay the run checked.
     pub relay_url: String,
+    /// The public key (hex) the run authenticated and signed as.
+    pub pubkey: String,
     /// The relay's NIP-11 `version`, when it reported one.
     pub relay_version: Option<String>,
     /// True when no check failed.
@@ -234,6 +240,7 @@ pub async fn run(cfg: &Config) -> Report {
 
     Report {
         relay_url: cfg.relay_url.clone(),
+        pubkey: cfg.keys.public_key().to_hex(),
         relay_version,
         passed: checks.iter().all(|c| c.result != Outcome::Failure),
         seconds: started.elapsed().as_secs_f64(),
@@ -275,13 +282,13 @@ async fn relay_info(cfg: &Config) -> (CheckReport, Option<String>) {
     let mut check = Check::new("relay_info", cfg.stage_timeout);
     let result = check
         .stage("nip11", async {
-            let url = http_url(&cfg.relay_url)?;
-            let response = reqwest::Client::new()
-                .get(url)
+            let response = nip11_request(cfg)?
                 .header("Accept", "application/nostr+json")
                 .send()
-                .await?
-                .error_for_status()?;
+                .await?;
+            if !response.status().is_success() {
+                bail!("NIP-11 request answered {}", response.status());
+            }
             let info: serde_json::Value = response.json().await?;
             if !info["supported_nips"].is_array() {
                 bail!("not a NIP-11 document: no supported_nips");
@@ -298,14 +305,7 @@ async fn relay_info(cfg: &Config) -> (CheckReport, Option<String>) {
 async fn connect_auth(cfg: &Config) -> (CheckReport, Option<NostrWsConnection>) {
     let mut check = Check::new("connect_auth", cfg.stage_timeout);
     let result = async {
-        let mut conn = check
-            .stage("ws_connect", async {
-                Ok(
-                    NostrWsConnection::connect_with_headers(&cfg.relay_url, upgrade_headers(cfg)?)
-                        .await?,
-                )
-            })
-            .await?;
+        let mut conn = check.stage("ws_connect", open(cfg)).await?;
         check
             .stage("nip42_auth", async {
                 Ok(conn.authenticate(&cfg.keys, None).await?)
@@ -381,13 +381,9 @@ async fn fanout(cfg: &Config, conn: &mut NostrWsConnection, channel: &str) -> Ch
     let result = async {
         let mut listener = check
             .stage("connect_second", async {
-                Ok(NostrWsConnection::connect_authenticated_with_headers(
-                    &cfg.relay_url,
-                    &cfg.keys,
-                    None,
-                    upgrade_headers(cfg)?,
-                )
-                .await?)
+                let mut conn = open(cfg).await?;
+                conn.authenticate(&cfg.keys, None).await?;
+                Ok(conn)
             })
             .await?;
         let result = fanout_on(&mut check, cfg, conn, &mut listener, channel).await;
@@ -531,9 +527,7 @@ async fn access_control(cfg: &Config, conn: &mut NostrWsConnection, channel: &st
         check
             .stage("unauthenticated_rejected", async {
                 let event = message(&cfg.keys, channel, "acceptance unauthenticated")?;
-                let mut anon =
-                    NostrWsConnection::connect_with_headers(&cfg.relay_url, upgrade_headers(cfg)?)
-                        .await?;
+                let mut anon = open(cfg).await?;
                 let outcome = anon.send_event(event).await;
                 let _ = anon.disconnect().await;
                 denied(outcome, AUTH_REQUIRED)
@@ -557,13 +551,9 @@ async fn cleanup(cfg: &Config, channel: &str) -> CheckReport {
     let result = async {
         let mut conn = check
             .stage("connect", async {
-                Ok(NostrWsConnection::connect_authenticated_with_headers(
-                    &cfg.relay_url,
-                    &cfg.keys,
-                    None,
-                    upgrade_headers(cfg)?,
-                )
-                .await?)
+                let mut conn = open(cfg).await?;
+                conn.authenticate(&cfg.keys, None).await?;
+                Ok(conn)
             })
             .await?;
         let result = check
@@ -633,41 +623,80 @@ async fn wait_for_eose(
 fn upgrade_headers(cfg: &Config) -> anyhow::Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     if let Some(path) = &cfg.assertion_file {
-        let invalid = || {
-            anyhow!(
-                "assertion file {} must be a regular file of at most {MAX_ASSERTION_BYTES} bytes",
-                path.display()
-            )
-        };
-        let read = || -> std::io::Result<Option<String>> {
-            // Check before opening: opening a FIFO blocks until a writer
-            // appears, and no async timeout can interrupt that.
-            if !std::fs::metadata(path)?.is_file() {
-                return Ok(None);
-            }
-            let file = std::fs::File::open(path)?;
-            if !file.metadata()?.is_file() {
-                return Ok(None);
-            }
-            // Cap the read on the open file: it may grow after the check.
-            let mut assertion = String::new();
-            file.take(MAX_ASSERTION_BYTES + 1)
-                .read_to_string(&mut assertion)?;
-            Ok((assertion.len() as u64 <= MAX_ASSERTION_BYTES).then_some(assertion))
-        };
-        let assertion = read()
-            .with_context(|| format!("read assertion file {}", path.display()))?
-            .ok_or_else(invalid)?;
-        let assertion = assertion.trim();
-        if assertion.is_empty() {
-            bail!("assertion file {} is empty", path.display());
-        }
+        let assertion = read_secret_file(path, "assertion file", MAX_ASSERTION_BYTES)?;
         let mut value = HeaderValue::from_str(&format!("Bearer {assertion}"))
             .map_err(|_| anyhow!("assertion file {} is not a header value", path.display()))?;
         value.set_sensitive(true);
         headers.insert(FEDERATED_IDENTITY_HEADER, value);
     }
     Ok(headers)
+}
+
+/// Reads a small secret another process writes, such as a key or an
+/// assertion, and returns it without surrounding whitespace.
+///
+/// The file must be a regular, non-empty file of at most `max_bytes`.
+/// A FIFO or directory fails at once rather than blocking the run.
+pub fn read_secret_file(path: &Path, what: &str, max_bytes: u64) -> anyhow::Result<String> {
+    let read = || -> std::io::Result<Option<String>> {
+        // Check before opening: opening a FIFO blocks until a writer
+        // appears, and no async timeout can interrupt that.
+        if !std::fs::metadata(path)?.is_file() {
+            return Ok(None);
+        }
+        let file = std::fs::File::open(path)?;
+        if !file.metadata()?.is_file() {
+            return Ok(None);
+        }
+        // Cap the read on the open file: it may grow after the check.
+        let mut text = String::new();
+        file.take(max_bytes + 1).read_to_string(&mut text)?;
+        Ok((text.len() as u64 <= max_bytes).then_some(text))
+    };
+    let text = read()
+        .with_context(|| format!("read {what} {}", path.display()))?
+        .ok_or_else(|| {
+            anyhow!(
+                "{what} {} must be a regular file of at most {max_bytes} bytes",
+                path.display()
+            )
+        })?;
+    let text = text.trim();
+    if text.is_empty() {
+        bail!("{what} {} is empty", path.display());
+    }
+    Ok(text.to_owned())
+}
+
+/// Opens a connection to the relay without authenticating, at
+/// `cfg.connect_addr` when one is set.
+async fn open(cfg: &Config) -> anyhow::Result<NostrWsConnection> {
+    let headers = upgrade_headers(cfg)?;
+    Ok(match &cfg.connect_addr {
+        Some(addr) => NostrWsConnection::connect_to_addr(&cfg.relay_url, addr, headers).await?,
+        None => NostrWsConnection::connect_with_headers(&cfg.relay_url, headers).await?,
+    })
+}
+
+/// The NIP-11 request for the relay. With `cfg.connect_addr` it goes to that
+/// address over plain HTTP, with the relay URL's host as the `Host` header,
+/// so the relay serves the same community's document. Like the WebSocket
+/// connections, it then uses no proxy and follows no redirect: either could
+/// reach another deployment and report its version.
+fn nip11_request(cfg: &Config) -> anyhow::Result<reqwest::RequestBuilder> {
+    let url = http_url(&cfg.relay_url)?;
+    let Some(addr) = &cfg.connect_addr else {
+        return Ok(reqwest::Client::new().get(url));
+    };
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let host = &url[url::Position::BeforeHost..url::Position::AfterPort];
+    let target = &url[url::Position::BeforePath..url::Position::AfterQuery];
+    Ok(client
+        .get(format!("http://{addr}{target}"))
+        .header(reqwest::header::HOST, host))
 }
 
 /// The relay's HTTP base for `ws_url`: `wss` becomes `https`, `ws` `http`.
@@ -714,6 +743,7 @@ mod tests {
     fn config(relay_url: String) -> Config {
         Config {
             relay_url,
+            connect_addr: None,
             keys: Keys::generate(),
             assertion_file: None,
             stage_timeout: Duration::from_secs(2),
@@ -817,6 +847,117 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// With a connect address the probe dials it, but every upgrade and
+    /// AUTH still names the relay URL, so the relay serves that community.
+    #[tokio::test]
+    async fn connect_addr_dials_the_address_and_keeps_the_relay_url() {
+        let dir = std::env::temp_dir().join(format!("acceptance-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let assertion = dir.join("assertion");
+        std::fs::write(&assertion, "header.payload.signature").unwrap();
+        let relay = fake_relay::start(fake_relay::Script::default()).await;
+        let mut cfg = config("wss://relay.invalid".into());
+        cfg.connect_addr = Some(relay.url.trim_start_matches("ws://").to_owned());
+        cfg.assertion_file = Some(assertion);
+        let report = run(&cfg).await;
+        std::fs::remove_dir_all(dir).unwrap();
+
+        assert_all_pass_but_relay_info(&report);
+        let upgrades = relay.upgrades();
+        assert!(!upgrades.is_empty());
+        for headers in &upgrades {
+            assert_eq!(headers["host"], "relay.invalid", "{headers:?}");
+            assert_eq!(
+                headers["nostr-federated-identity"], "Bearer header.payload.signature",
+                "{headers:?}"
+            );
+        }
+        let relays = relay.auth_relays();
+        assert!(!relays.is_empty());
+        assert!(
+            relays.iter().all(|r| r == "wss://relay.invalid"),
+            "{relays:?}"
+        );
+    }
+
+    /// Serves one HTTP request with `head` (status line and headers) and
+    /// `body`. Returns the address and the request it received, lowercased.
+    async fn one_http_response(
+        head: &'static str,
+        body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(async move {
+            let (mut tcp, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                tcp.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+            }
+            let response = format!(
+                "{head}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            tcp.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap().to_ascii_lowercase()
+        });
+        (addr, server)
+    }
+
+    /// With a connect address the NIP-11 fetch goes to it over plain HTTP,
+    /// with the relay URL's path and query, and its host and port as the
+    /// `Host` header.
+    #[tokio::test]
+    async fn nip11_goes_to_the_connect_addr_with_the_relay_host() {
+        let (addr, server) = one_http_response(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/nostr+json",
+            r#"{"supported_nips":[1,11],"version":"1.2.3"}"#,
+        )
+        .await;
+        let mut cfg = config("wss://relay.invalid:8443/relay?route=probe".into());
+        cfg.connect_addr = Some(addr);
+        let (report, version) = relay_info(&cfg).await;
+
+        assert_eq!(report.result, Outcome::Success, "{report:?}");
+        assert_eq!(version.as_deref(), Some("1.2.3"));
+        let request = server.await.unwrap();
+        assert!(
+            request.starts_with("get /relay?route=probe http/1.1\r\n"),
+            "{request}"
+        );
+        assert!(
+            request.contains("\r\nhost: relay.invalid:8443\r\n"),
+            "{request}"
+        );
+    }
+
+    /// With a connect address the NIP-11 fetch follows no redirect: one to
+    /// another host fails the check and reports no version.
+    #[tokio::test]
+    async fn nip11_at_the_connect_addr_does_not_follow_a_redirect() {
+        let (addr, server) = one_http_response(
+            "HTTP/1.1 301 Moved Permanently\r\nlocation: http://127.0.0.1:9/",
+            "",
+        )
+        .await;
+        let mut cfg = config("wss://relay.invalid".into());
+        cfg.connect_addr = Some(addr);
+        let (report, version) = relay_info(&cfg).await;
+
+        assert_eq!(report.result, Outcome::Failure, "{report:?}");
+        assert_eq!(report.failed_stage, Some("nip11"));
+        assert!(
+            report.error.as_deref().unwrap().contains("301"),
+            "{report:?}"
+        );
+        assert_eq!(version, None);
+        server.await.unwrap();
     }
 
     #[test]
@@ -962,6 +1103,33 @@ mod tests {
             assert_eq!(access.failed_stage, Some("unauthenticated_rejected"));
             assert_eq!(check(&report, "cleanup").result, Outcome::Success);
         }
+    }
+
+    /// A relay that accepts a write signed by another key is not enforcing
+    /// the NIP-42 binding: `access_control` fails at `pubkey_mismatch_rejected`.
+    #[tokio::test]
+    async fn access_control_fails_when_the_relay_accepts_another_keys_write() {
+        let relay = fake_relay::start(fake_relay::Script {
+            accept_mismatched: true,
+            ..Default::default()
+        })
+        .await;
+        let report = run(&config(relay.url.clone())).await;
+        let access = check(&report, "access_control");
+        assert_eq!(
+            (access.result, access.failed_stage),
+            (Outcome::Failure, Some("pubkey_mismatch_rejected")),
+            "{access:?}"
+        );
+        assert!(
+            access
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("relay accepted the event"),
+            "{access:?}"
+        );
+        assert_eq!(check(&report, "cleanup").result, Outcome::Success);
     }
 
     /// The create's OK never comes, but the relay stored it: the run fails

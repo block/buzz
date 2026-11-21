@@ -10,6 +10,7 @@ import '../../shared/crypto/event_signing.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/channels/channel_list_snapshot.dart';
 import '../../shared/channels/open_channel_directory_storage.dart';
+import '../../shared/channels/saved_message_store.dart';
 import '../../shared/theme/theme_provider.dart';
 import '../../shared/utils/string_utils.dart';
 import 'channel.dart';
@@ -17,6 +18,7 @@ import 'channel_management_provider.dart'
     show ChannelMember, channelDetailsProvider;
 import 'channel_mutes/channel_mutes_provider.dart';
 import 'huddle_channel_filter.dart';
+import 'saved_channel_page.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 import '../../shared/profile/user_cache_provider.dart';
@@ -75,8 +77,8 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   int _nextLiveChunkGeneration = 0;
   // Closed by the relay for capacity, so retried with backoff.
   final Set<String> _terminallyClosedLiveChunks = {};
-  // This client's own confirmed joins that replicas may not show yet.
-  final Set<String> _confirmedJoins = {};
+  // This client's own confirmed joins and removals that replicas may lag.
+  final Set<String> _confirmedJoins = {}, _confirmedRemovals = {};
   // Refused for good, so left alone until the next connection.
   final Set<String> _refusedLiveChunks = {};
   String? _subscriptionRelayBaseUrl;
@@ -254,7 +256,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _hiddenDmIds = const {};
       _verifiedHuddleIds.clear();
       _checkedHuddleReceiptIds.clear();
-      _confirmedJoins.clear();
+      _forgetConfirmedMemberships();
       // Retire any in-flight directory request: its response describes the
       // previous relay or identity and must not reach this scope's state.
       _refreshCoordinator.retireScope();
@@ -896,6 +898,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     }
     final channelId = event.channelId;
     if (channelId == null) return;
+    _applySavedMessageEdit(event, channelId);
 
     final myPk = ref.read(myPubkeyProvider);
     final mutedChannelIds = _mutedChannelIds();

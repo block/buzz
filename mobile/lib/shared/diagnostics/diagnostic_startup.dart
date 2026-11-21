@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -60,8 +61,16 @@ Future<String?> diagnosticInstallId({
     final dir = await (directory ?? _installIdDirectory)();
     final file = File('${dir.path}/$_installIdFile');
     if (await file.exists()) {
-      final saved = (await file.readAsString()).trim();
-      if (saved.isNotEmpty) return saved;
+      // A failed read goes to the catch below and keeps the file: replacing it
+      // after a passing error would split this device's reports.
+      final bytes = await file.readAsBytes();
+      try {
+        final saved = utf8.decode(bytes).trim();
+        if (saved.isNotEmpty) return saved;
+      } on FormatException {
+        // Not text: a damaged file is replaced below, not a reason to send
+        // reports without an install ID.
+      }
     }
     final created = const Uuid().v4();
     await dir.create(recursive: true);

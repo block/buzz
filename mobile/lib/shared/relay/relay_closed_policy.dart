@@ -55,6 +55,20 @@ class RelayInvalidRequest implements Exception {
   String toString() => 'RelayInvalidRequest';
 }
 
+/// How the relay begins a refusal for a timestamp outside its clock window.
+/// It has one wording per kind of event: ordinary events, canvas events,
+/// relay-admin, moderation and identity archive commands (followed by the
+/// timing details), leave requests (likewise) and observer frames. Matched from
+/// the start of the reason, so a reason about something else that mentions a
+/// timestamp, or echoes a value that does, is still reported.
+const _clockWindowRefusals = [
+  'invalid: event timestamp too far from server time',
+  'invalid: canvas event timestamp too far in the future',
+  'invalid: event timestamp out of range',
+  'invalid: leave request timestamp out of range',
+  'invalid: observer frame timestamp outside',
+];
+
 /// Whether [message], a relay `OK` or `CLOSED` reason, says the app sent
 /// something invalid. Refusals the app handles as expected outcomes, an
 /// archived channel, an Unarchive of a channel that is no longer archived, an
@@ -75,7 +89,7 @@ bool isInvalidRequestRejection(String message) {
         'invalid: only members can add people in this channel',
       ) &&
       !normalized.startsWith('invalid: cannot remove the last owner') &&
-      !normalized.contains('timestamp too far from server time');
+      !_clockWindowRefusals.any(normalized.startsWith);
 }
 
 /// Explicit access refusal; cached private history must not mask this error.
@@ -87,6 +101,33 @@ bool isRelayAccessDenied(Object error) {
   );
   return message.startsWith('restricted:') || message.startsWith('blocked:');
 }
+
+/// A channel-level refusal, distinct from a session authorization failure.
+bool isRelayChannelAccessDenied(Object error) {
+  var reason = error.toString();
+  if (error is RelayException) {
+    if (error.statusCode != 403) return false;
+    reason = error.body;
+    try {
+      final decoded = jsonDecode(reason);
+      if (decoded is Map<String, dynamic> && decoded['error'] is String) {
+        reason = decoded['error'] as String;
+      }
+    } on FormatException {
+      // Relay admission can return plain text.
+    }
+  }
+  final message = reason.trim().toLowerCase().replaceFirst(
+    RegExp(r'^exception:\s*'),
+    '',
+  );
+  return message == 'restricted: not a channel member' ||
+      isRelayChannelSubscriptionRevoked(message);
+}
+
+/// The relay ends live delivery on archive as well as on membership loss.
+bool isRelayChannelSubscriptionRevoked(String message) =>
+    message.trim().toLowerCase() == 'restricted: channel access revoked';
 
 /// Recovery policy for a relay `CLOSED` subscription message.
 enum RelayClosedClass {

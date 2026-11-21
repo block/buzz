@@ -417,7 +417,9 @@ void iosControlsTests() {
       speech.result.complete('Keep the exact recipient.');
       await tester.pumpAndSettle();
       expect(agentDraft()?.text, '@Scout Keep the exact recipient.');
-      expect(agentDraft()?.mentionKeys, {'Scout': agent});
+      expect(agentDraft()?.mentions.map((m) => (m.start, m.end, m.pubkey)), [
+        (0, 6, agent),
+      ]);
       expect(agentDraft()?.transcriptionId, endsWith('.saved'));
       // The agent is renamed and another member takes its old name.
       renamed = true;

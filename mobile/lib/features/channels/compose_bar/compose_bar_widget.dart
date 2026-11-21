@@ -64,6 +64,11 @@ class ComposeBar extends HookConsumerWidget {
     final androidImeFallbackTimer = useRef<Timer?>(null);
     final ownedFocusNode = useFocusNode();
     final focusNode = this.focusNode ?? ownedFocusNode;
+    final stylusHandwriting = useMemoized(
+      () => StylusHandwritingCutoff(controller, focusNode),
+      [controller, focusNode],
+    );
+    useEffect(() => stylusHandwriting.dispose, [stylusHandwriting]);
     useEffect(
       () => () {
         androidImeFallbackTimer.value?.cancel();
@@ -131,13 +136,15 @@ class ComposeBar extends HookConsumerWidget {
       attachments: attachments,
     );
     final voiceNoteRef = useRef(voiceNote)..value = voiceNote;
-    final mentionMap = useRef(<String, MentionCandidate>{});
+    final mentions = useListenableSelector(
+      controller,
+      () => controller.mentions,
+    );
     final prefillText = useRef<String?>(null);
     _useComposeDraftLifecycle(
       context: context,
       voiceNote: voiceNoteRef,
       prefillText: prefillText,
-      mentionMap: mentionMap,
       ref: ref,
       controller: controller,
       draftKey: draftKey,
@@ -192,80 +199,18 @@ class ComposeBar extends HookConsumerWidget {
           inputTool.value != null || isEmojiPickerOpen.value,
     );
     final resolvedHint = hintText ?? 'Message';
-    useEffect(
-      () {
-        final target =
-            isComposerExpanded.value && androidImeTransitionStarted.value
-            ? 1.0
-            : 0.0;
-        if (reducedMotion) {
-          composerExpansionController.value = target;
-        } else if ((composerExpansionController.value - target).abs() > 0.001) {
-          composerExpansionController.animateWith(
-            SpringSimulation(
-              SpringDescription.withDurationAndBounce(
-                duration: const Duration(milliseconds: 220),
-                bounce: 0.08,
-              ),
-              composerExpansionController.value,
-              target,
-              0,
-              snapToEnd: true,
-            ),
-          );
-        }
-        return null;
-      },
-      [
-        isComposerExpanded.value,
-        androidImeTransitionStarted.value,
-        reducedMotion,
-      ],
+    _useComposerExpansionMotion(
+      controller: composerExpansionController,
+      isExpanded: isComposerExpanded,
+      androidImeTransitionStarted: androidImeTransitionStarted,
+      reducedMotion: reducedMotion,
     );
-    useEffect(() {
-      if (defaultTargetPlatform != TargetPlatform.iOS) return null;
-
-      var disposed = false;
-      Future<void> refreshClipboardAvailability() async {
-        final hasImage = await ref
-            .read(mediaUploadServiceProvider)
-            .clipboardHasImage();
-        if (!disposed && context.mounted) {
-          clipboardHasImage.value = hasImage;
-        }
-      }
-
-      void refreshWhenFocused() {
-        if (focusNode.hasFocus) refreshClipboardAvailability();
-      }
-
-      final lifecycleListener = AppLifecycleListener(
-        onResume: refreshClipboardAvailability,
-      );
-      focusNode.addListener(refreshWhenFocused);
-      refreshClipboardAvailability();
-      return () {
-        disposed = true;
-        focusNode.removeListener(refreshWhenFocused);
-        lifecycleListener.dispose();
-      };
-    }, [focusNode]);
-
-    // Mention state --------------------------------------------------------
-    final mentionQuery = useState<String?>(null);
-    final mentionStartIdx = useState(-1);
-    // Counts chooser openings: a new `@` starts fresh rows and searches.
-    final mentionOpening = useRef(0);
-    final shownMentions = useRef<_MentionRows>((
-      rows: const [],
-      unavailable: const {},
-      searchFailed: false,
-      reserveHeight: false,
-      searching: false,
-    ));
-    // Map of displayName → selected mention candidate built as the user selects
-    // mentions. Used to pass resolved pubkeys directly to onSend and to attach
-    // selected non-member agents before the message is published.
+    _useComposerClipboardImage(
+      context: context,
+      ref: ref,
+      focusNode: focusNode,
+      clipboardHasImage: clipboardHasImage,
+    );
 
     // Channel autocomplete state ----------------------------------------------
     final channelQuery = useState<String?>(null);
@@ -292,14 +237,59 @@ class ComposeBar extends HookConsumerWidget {
     final relayAgents = ref.watch(agentDirectoryProvider).asData?.value;
     final agentOwners = ref.watch(agentOwnersProvider).asData?.value;
     final ownedAgents = ref.watch(ownedAgentDirectoryProvider).asData?.value;
-    final agentMentionLabels = _agentMentionLabels(bindings: mentionMap.value);
-    final agentMentionLabelsKey = (agentMentionLabels.toList()..sort()).join(
-      '\u0000',
+    List<MentionCandidate> memberMentionCandidates() => _typedMemberCandidates(
+      membersAsync: membersAsync,
+      sessionStatus: sessionStatus,
+      cachedMembers: cachedMembers,
+      userCache: userCache,
+      agentOwners: agentOwners,
     );
-    useEffect(() {
-      controller.setAgentMentionNames(agentMentionLabels);
-      return null;
-    }, [controller, agentMentionLabelsKey]);
+
+    final memberMentions = _useMemberMentions(memberMentionCandidates, [
+      membersAsync.asData?.value,
+      sessionStatus,
+      cachedMembers,
+      userCache,
+      agentOwners,
+    ]);
+
+    _useMentionChipQualifiers(
+      ref: ref,
+      controller: controller,
+      roster: channelMembersForAutocomplete(
+        membersAsync: membersAsync,
+        sessionStatus: sessionStatus,
+        cachedMembers: cachedMembers,
+      ),
+      userCache: userCache,
+      agentOwners: agentOwners,
+    );
+    // Bindings migrated from a label-keyed draft give way to longer member
+    // names as the roster arrives, and are ordinary once it has loaded.
+    final hasLegacyMentions = mentions.any((mention) => mention.legacy);
+    final membersLoaded = membersAsync.hasValue;
+    useEffect(
+      () {
+        if (!hasLegacyMentions) return null;
+        // After the frame: the change is saved, which a build must not do.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!context.mounted) return;
+          controller.settleLegacyMentions(
+            memberMentions,
+            complete: membersLoaded,
+          );
+        });
+        return null;
+      },
+      [
+        controller,
+        hasLegacyMentions,
+        membersLoaded,
+        membersAsync.asData?.value,
+        cachedMembers,
+        userCache,
+      ],
+    );
     useEffect(
       () {
         final memberList = channelMembersForAutocomplete(
@@ -309,9 +299,8 @@ class ComposeBar extends HookConsumerWidget {
         );
         final pubkeys = [
           ...memberList.map((m) => m.pubkey),
-          ...mentionMap.value.values
-              .where((c) => c.requiresRevalidation && c.pubkey.isNotEmpty)
-              .map((c) => c.pubkey),
+          for (final m in controller.bindings)
+            if (m.candidate.requiresRevalidation) m.candidate.pubkey,
           ...?relayAgents?.map((a) => a.pubkey),
           ...?agentOwners?.values,
         ];
@@ -335,48 +324,17 @@ class ComposeBar extends HookConsumerWidget {
     final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
 
-    List<MentionCandidate> memberMentionCandidates() => _typedMemberCandidates(
-      membersAsync: membersAsync,
-      sessionStatus: sessionStatus,
-      cachedMembers: cachedMembers,
-      userCache: userCache,
-      agentOwners: agentOwners,
+    _usePlatformUndoBindings(controller, focusNode);
+    // The `@` chooser: query, rows and chip insertion, shared with the
+    // message edit sheet.
+    final mentionChooser = _useMentionChooser(
+      ref,
+      channelId: channelId,
+      controller: controller,
+      focusNode: focusNode,
+      isModifyingText: isModifyingText,
+      viewer: currentPubkey,
     );
-
-    // Insert a selected mention into the text field.
-    void insertMention(MentionCandidate candidate) {
-      final name = selectedMentionLabel(candidate.label, candidate.pubkey, {
-        for (final entry in mentionMap.value.entries)
-          entry.key: entry.value.pubkey,
-      });
-      ref
-          .read(mentionHistoryProvider.notifier)
-          .remember(channelId, candidate.pubkey);
-
-      var start = mentionStartIdx.value.clamp(0, controller.text.length);
-      isModifyingText.value = true;
-      try {
-        start = _requalifyNamesakes(
-          controller,
-          mentionMap.value,
-          candidate,
-          start,
-          [for (final member in memberMentionCandidates()) member.label],
-        );
-        mentionMap.value[name] = candidate;
-        spliceAndMoveCursor(
-          controller,
-          focusNode,
-          start: start,
-          replacement: '@$name ',
-        );
-      } finally {
-        isModifyingText.value = false;
-      }
-      mentionQuery.value = null;
-      inputTool.value = null;
-      unawaited(SystemChannels.textInput.invokeMethod<void>('TextInput.show'));
-    }
 
     _useAgentMentionPrefill(
       ref: ref,
@@ -384,7 +342,6 @@ class ComposeBar extends HookConsumerWidget {
       scopeMessages: prefillScopeMessages,
       draftKey: draftKey,
       controller: controller,
-      mentionMap: mentionMap,
       prefillText: prefillText,
       isModifyingText: isModifyingText,
       hasAttachments: hasAttachments,
@@ -416,73 +373,21 @@ class ComposeBar extends HookConsumerWidget {
           }
         }
 
-        if (!sel.isValid || !sel.isCollapsed) {
-          mentionQuery.value = null;
+        // Channel autocomplete detection — only when no @mention is active.
+        if (mentionChooser.track(previousValue, editingValue) ||
+            !sel.isValid ||
+            !sel.isCollapsed ||
+            sel.baseOffset < 1) {
           channelQuery.value = null;
           return;
         }
         final cursor = sel.baseOffset;
-        if (cursor < 1) {
-          mentionQuery.value = null;
-          channelQuery.value = null;
-          return;
-        }
-
-        var open = findMentionQuery(text, cursor);
-        if (open != null &&
-            _insideSelectedMention(
-              text,
-              open.start,
-              cursor,
-              mentionMap.value.keys,
-            )) {
-          open = null;
-        }
-
-        // Space after an exact, unique name selects it (section 5).
-        final previousQuery = mentionQuery.value;
-        if (open != null &&
-            previousQuery != null &&
-            previousQuery.trim().isNotEmpty &&
-            open.start == mentionStartIdx.value &&
-            open.query == '$previousQuery ' &&
-            text.length == previousValue.text.length + 1) {
-          final chosen = _spaceMention(
-            ref,
-            channelId: channelId,
-            query: previousQuery,
-            opening: mentionOpening.value,
-            shown: shownMentions.value,
-            viewer: currentPubkey,
-          );
-          if (chosen != null) {
-            insertMention(chosen);
-            return;
-          }
-        }
-
-        if (open != null) {
-          if (previousQuery == null || mentionStartIdx.value != open.start) {
-            mentionOpening.value++;
-          }
-          mentionQuery.value = open.query;
-          mentionStartIdx.value = open.start;
-          channelQuery.value = null;
-        } else {
-          mentionQuery.value = null;
-        }
-
-        // Channel autocomplete detection — only when no @mention is active.
-        if (mentionQuery.value == null) {
-          final hashPos = findTrigger(text, cursor, '#');
-          if (hashPos != null) {
-            channelQuery.value = text
-                .substring(hashPos + 1, cursor)
-                .toLowerCase();
-            channelStartIdx.value = hashPos;
-          } else {
-            channelQuery.value = null;
-          }
+        final hashPos = findTrigger(text, cursor, '#');
+        if (hashPos != null) {
+          channelQuery.value = text
+              .substring(hashPos + 1, cursor)
+              .toLowerCase();
+          channelStartIdx.value = hashPos;
         } else {
           channelQuery.value = null;
         }
@@ -492,24 +397,8 @@ class ComposeBar extends HookConsumerWidget {
       return () => controller.removeListener(listener);
     }, [controller]);
 
-    // Ranked mention rows; shown rows hold still while the query stays.
-    final mentionRows = _useMentionRows(
-      ref,
-      channelId: channelId,
-      query: mentionQuery.value,
-      opening: mentionOpening.value,
-    );
-    shownMentions.value = mentionRows;
+    final mentionRows = mentionChooser.rows;
     final suggestions = mentionRows.rows;
-
-    // Resolve owner names for the visible "managed by …" subtitles.
-    useEffect(() {
-      final ownerPubkeys = [for (final s in suggestions) ?s.ownerPubkey];
-      if (ownerPubkeys.isNotEmpty) {
-        ref.read(userCacheProvider.notifier).preload(ownerPubkeys);
-      }
-      return null;
-    }, [suggestions.length, mentionQuery.value]);
 
     // Filter channels against the query.
     final channels = channelsAsync.asData?.value ?? <Channel>[];
@@ -540,6 +429,13 @@ class ComposeBar extends HookConsumerWidget {
     // Insert `#` at the cursor to manually trigger channel mode.
     void triggerChannel() => _insertTriggerAtCursor(controller, focusNode, '#');
 
+    // A picked row returns the composer to the keyboard, as a channel does.
+    void insertMention(MentionCandidate candidate) {
+      mentionChooser.insert(candidate);
+      inputTool.value = null;
+      unawaited(SystemChannels.textInput.invokeMethod<void>('TextInput.show'));
+    }
+
     void insertEmoji(String emoji) => _insertComposerEmoji(
       controller,
       focusNode,
@@ -549,10 +445,9 @@ class ComposeBar extends HookConsumerWidget {
 
     void clearComposer() {
       draftRevision.value += 1;
-      controller.clear();
+      controller.replaceDraft(TextEditingValue.empty, mentions: const []);
       attachments.value = [];
-      mentionMap.value.clear();
-      mentionQuery.value = null;
+      mentionChooser.close();
       channelQuery.value = null;
       attachmentSurface.value = _AttachmentSurface.closed;
       showFormatting.value = false;
@@ -574,7 +469,11 @@ class ComposeBar extends HookConsumerWidget {
     // Send the message.
     Future<void> send() async {
       if (!canSend()) return;
-      final text = controller.text.trim();
+      // A draft saved by an earlier Buzz yields to member names first.
+      controller.settleLegacyMentions(memberMentions, complete: false);
+      final draft = controller.text;
+      final mentions = controller.mentions;
+      final code = controller._styledCodeRanges(draft);
       final submittedOrigin = ComposerSendOrigin.capture(sendSurfaceKey);
       Future<void> sendWithOrigin(
         String content,
@@ -589,14 +488,17 @@ class ComposeBar extends HookConsumerWidget {
       // `_reportSendCancelledByCommunitySwitch`.
       final messenger = ScaffoldMessenger.maybeOf(context);
 
-      // Extract pubkeys for mentions present in the final text.
-      List<MentionCandidate> selectedMentions;
+      // The recipients: every chip, then typed names the fallback resolves.
+      final List<MentionCandidate> selectedMentions;
+      final Map<int, int> nameEnds;
       try {
-        selectedMentions = _resolveComposerMentions(
-          text,
-          mentionMap.value,
-          memberMentionCandidates(),
-          buildMentionCandidates(
+        (recipients: selectedMentions, :nameEnds) = _resolveComposerMentions(
+          draft,
+          mentions,
+          mentionsInvalid: controller.mentionsInvalid,
+          members: memberMentions(),
+          code: code,
+          restoredCandidates: buildMentionCandidates(
             members: membersAsync.asData?.value ?? const [],
             relayAgents: relayAgents ?? const [],
             sharedChannelIds: {
@@ -613,9 +515,9 @@ class ComposeBar extends HookConsumerWidget {
             // Reuse ordinary search-result classification, not membership as
             // permission. Persisted keys/flags themselves prove no role.
             searchResults: [
-              for (final c in mentionMap.value.values)
-                if (c.requiresRevalidation && userCache[c.pubkey] != null)
-                  userCache[c.pubkey]!,
+              for (final m in mentions)
+                if (m.candidate.requiresRevalidation)
+                  ?userCache[m.candidate.pubkey],
             ],
           ),
         );
@@ -626,6 +528,13 @@ class ComposeBar extends HookConsumerWidget {
         );
         return;
       }
+      // Namesakes of different keys are told apart on the wire; the
+      // composer itself never showed the key.
+      final text = _qualifiedMentionContent(
+        draft,
+        mentions,
+        nameEnds: nameEnds,
+      ).trim();
       final outgoing = _OutgoingMentions(selectedMentions);
       // Read before any await. These actions belong to this community and
       // refuse to run after a switch, so an Invite answered after a switch
@@ -701,7 +610,6 @@ class ComposeBar extends HookConsumerWidget {
           await _sendTextOnlyDraft(
             context: context,
             controller: controller,
-            mentionMap: mentionMap,
             draftRevision: draftRevision,
             submittedDraftRevision: submittedDraftRevision,
             focusNode: focusNode,
@@ -721,9 +629,8 @@ class ComposeBar extends HookConsumerWidget {
 
         final draftText = controller.value;
         final draftAttachments = List<_PendingAttachment>.of(attachments.value);
-        final draftMentions = Map<String, MentionCandidate>.of(
-          mentionMap.value,
-        );
+        final draftMentions = controller.bindings;
+        final draftMentionsInvalid = controller.mentionsInvalid;
         clearComposer();
         final clearedDraftRevision = draftRevision.value;
         uploadingCount.value += 1;
@@ -778,10 +685,11 @@ class ComposeBar extends HookConsumerWidget {
                 draftRevision.value == clearedDraftRevision) {
               attachments.value = draftAttachments;
               retainedForRetry = true;
-              mentionMap.value
-                ..clear()
-                ..addAll(draftMentions);
-              controller.value = draftText;
+              controller.replaceDraft(
+                draftText,
+                mentions: draftMentions,
+                mentionsInvalid: draftMentionsInvalid,
+              );
               focusNode.requestFocus();
             }
           } finally {
@@ -951,9 +859,16 @@ class ComposeBar extends HookConsumerWidget {
     );
 
     final readOnly = interactionLocked || (draftMembers != null && sending);
+    // The chooser belongs to the focused field (recommendation 8). It hides
+    // while the field has no focus, after the keyboard is dismissed or a tap
+    // lands elsewhere, and comes back unchanged when focus returns: the query,
+    // its rows and its search are kept, only the panel is withheld. A tap on
+    // a row is a touch outside the field, which never takes its focus.
+    final chooserOpen = useListenable(focusNode).hasFocus;
     // Matches what _composerSuggestionPanel renders, and only while the field
     // can be edited.
     final pickerVisible =
+        chooserOpen &&
         (channelSuggestions.isNotEmpty ||
             suggestions.isNotEmpty ||
             mentionRows.searchFailed) &&
@@ -963,13 +878,13 @@ class ComposeBar extends HookConsumerWidget {
     final topMention = suggestions
         .where((s) => !mentionRows.unavailable.contains(s.pubkey))
         .firstOrNull;
-    final pickerQuery = (mentionQuery.value, channelQuery.value);
+    final pickerQuery = (mentionChooser.query, channelQuery.value);
     KeyEventResult handleHardwareKey(FocusNode _, KeyEvent event) =>
         _handleComposerHardwareKey(
           event,
           controller,
           inputOwned: iosAttachmentPopover.isActive || isEmojiPickerOpen.value,
-          query: (mentionQuery.value, channelQuery.value),
+          query: (mentionChooser.liveQuery.value, channelQuery.value),
           renderedQuery: pickerQuery,
           pickerVisible: pickerVisible,
           acceptSuggestion: topChannel != null
@@ -984,15 +899,16 @@ class ComposeBar extends HookConsumerWidget {
         );
 
     final suggestionPanel = _composerSuggestionPanel(
-      channelSuggestions: channelSuggestions,
-      mentionSuggestions: suggestions,
+      channelSuggestions: chooserOpen ? channelSuggestions : const [],
+      mentionSuggestions: chooserOpen ? suggestions : const [],
       unavailableMentions: mentionRows.unavailable,
-      mentionSearchFailed: mentionRows.searchFailed,
+      mentionSearchFailed: chooserOpen && mentionRows.searchFailed,
       reserveMentionHeight: mentionRows.reserveHeight,
       mentionSearching: mentionRows.searching,
       onMentionSearchRetry: () {
-        final query = mentionQuery.value;
-        if (query != null) ref.invalidate(mentionUserSearchProvider(query));
+        if (mentionChooser.query case final query?) {
+          ref.invalidate(mentionUserSearchProvider(query));
+        }
       },
       userCache: userCache,
       currentPubkey: currentPubkey,
@@ -1055,7 +971,8 @@ class ComposeBar extends HookConsumerWidget {
         toggleAttachments();
         return;
       }
-      mentionQuery.value = channelQuery.value = null;
+      mentionChooser.close();
+      channelQuery.value = null;
       final panel = buildOverlayPanel(_AttachmentSurface.closed);
       unawaited(
         iosAttachmentPopover
@@ -1104,11 +1021,11 @@ class ComposeBar extends HookConsumerWidget {
             defaultTargetPlatform == TargetPlatform.iOS &&
             !interactionLocked &&
             !voiceNote.isRecording,
-        suggestions: mentionQuery.value != null || channelQuery.value != null
+        suggestions: mentionChooser.query != null || channelQuery.value != null
             ? suggestionPanel
             : null,
         onDismissSuggestions: () {
-          mentionQuery.value = null;
+          mentionChooser.close();
           channelQuery.value = null;
         },
         child: Column(

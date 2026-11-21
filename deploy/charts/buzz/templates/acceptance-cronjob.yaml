@@ -1,0 +1,113 @@
+{{- include "buzz.validate" . -}}
+{{- if .Values.acceptance.enabled }}
+{{- $a := .Values.acceptance }}
+{{- range $label := list "app.kubernetes.io/name" "app.kubernetes.io/instance" "app.kubernetes.io/component" }}
+{{- if hasKey ($a.podLabels | default dict) $label }}
+{{- fail (printf "acceptance.podLabels may not set chart-owned label %q" $label) }}
+{{- end }}
+{{- end }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "buzz.cronJobName" (dict "root" . "suffix" "acceptance") }}
+  labels:
+    {{- include "buzz.labels" . | nindent 4 }}
+    app.kubernetes.io/component: acceptance
+spec:
+  schedule: {{ $a.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ $a.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $a.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ $a.activeDeadlineSeconds }}
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "buzz.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: acceptance
+            {{- include "buzz.podLabelsWithVersion" (dict "root" . "labels" $a.podLabels) | nindent 12 }}
+          {{- with $a.podAnnotations }}
+          annotations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        spec:
+          restartPolicy: Never
+          {{- /* The probe needs no Kubernetes or cloud access, so it does not
+               inherit the relay's service account or its token. */}}
+          {{- with $a.serviceAccountName }}
+          serviceAccountName: {{ . }}
+          {{- end }}
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          securityContext:
+            {{- toYaml .Values.relay.securityContext | nindent 12 }}
+          {{- with .Values.image.pullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $a.extraInitContainers }}
+          initContainers:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: acceptance
+              image: {{ include "buzz.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              securityContext:
+                {{- omit .Values.relay.containerSecurityContext "readOnlyRootFilesystem" | toYaml | nindent 16 }}
+                readOnlyRootFilesystem: true
+              command: ["/usr/local/bin/buzz-acceptance"]
+              args:
+                - --stage-timeout-secs
+                - {{ $a.stageTimeoutSeconds | int64 | quote }}
+                - --metric-prefix
+                - {{ $a.metricPrefix | quote }}
+                - --tag
+                - {{ printf "probe_revision:%s" (include "buzz.imageRevision" .) | quote }}
+                # Newer options are flags, not env vars: a probe older than an
+                # option rejects the unknown flag instead of ignoring it.
+                {{- with $a.connectAddr }}
+                - --connect-addr
+                - {{ . | quote }}
+                {{- end }}
+                {{- with $a.privateKeyFile }}
+                - --private-key-file
+                - {{ . | quote }}
+                {{- end }}
+                {{- range $a.tags }}
+                - --tag
+                - {{ . | quote }}
+                {{- end }}
+              env:
+                # Listed first so later values can use $(HOST_IP).
+                - name: HOST_IP
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: status.hostIP
+                - { name: BUZZ_RELAY_URL, value: {{ default .Values.relayUrl $a.relayUrl | quote }} }
+                {{- with $a.statsdAddr }}
+                - { name: BUZZ_ACCEPTANCE_STATSD_ADDR, value: {{ . | quote }} }
+                {{- end }}
+                {{- with $a.assertionFile }}
+                - { name: BUZZ_ACCEPTANCE_ASSERTION_FILE, value: {{ . | quote }} }
+                {{- end }}
+                {{- if $a.privateKeySecret.name }}
+                - name: BUZZ_PRIVATE_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $a.privateKeySecret.name | quote }}
+                      key: {{ $a.privateKeySecret.key | quote }}
+                {{- end }}
+              {{- with $a.extraVolumeMounts }}
+              volumeMounts:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              resources:
+                {{- toYaml $a.resources | nindent 16 }}
+          {{- with $a.extraVolumes }}
+          volumes:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}
