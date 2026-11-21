@@ -215,9 +215,12 @@ rollout; a malformed or out-of-range value refuses startup.
   logins without valid evidence are refused, its NIP-11 document reports
   `requires_nip_fi: true`, and open sockets without valid evidence are closed.
   Its stored flag does not change.
-- A revocation closes open connections only in `enforce`. In staged enforce, a
-  revoked key can't sign in again, but its open connection stays until its
+- A required admission, stored Required or inside the cohort, is refused when
+  the receiving pod holds an active deny for the key. A revocation closes open
+  connections only in `enforce`; in `shadow` an open connection stays until its
   deadline. Stored-Required communities already behave this way.
+- Denies spread asynchronously and live only in each pod's memory, so a pod
+  can miss one. See [Revocation during a deploy](#revocation-during-a-deploy).
 
 Raise the percentage in steps, holding each one for normal traffic.
 
@@ -244,6 +247,25 @@ Watch the same signals, plus the rate of 503 responses on login.
   revocation behavior, not optional admission. Stored-Required communities stay
   required either way. Never roll back with `mode=off`: `off` also turns off
   stored-Required enforcement.
+
+### Revocation during a deploy
+
+Each pod keeps its denies in memory and receives new ones asynchronously.
+
+- A pod that restarts starts empty and does not recover earlier denies.
+- A revocation accepted by a `shadow` pod does not reach `enforce` pods. During
+  the switch to `enforce`, while both modes are serving, an `enforce` pod can
+  miss it.
+
+A missed revocation lets the revoked key sign in until its outstanding
+assertions expire. That is bounded by the issuer's
+`maximum_assertion_age_seconds` plus `skew_seconds`, provided the issuer stops
+issuing to that key. A connection admitted in that window can stay open until
+its connection deadline.
+
+Finishing a rollout does not restore missed denies. To keep revocation
+uninterrupted across a deploy, push the active disconnects again once the new
+pods are serving, or wait out the assertion bound.
 
 ### Alerts
 
