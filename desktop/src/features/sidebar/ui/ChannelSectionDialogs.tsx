@@ -282,6 +282,8 @@ export type LeaveChannelAlertDialogProps = {
   onOpenChange: (open: boolean) => void;
   channelName: string;
   onConfirm: () => void;
+  error?: Error | null;
+  isPending?: boolean;
 };
 
 export function LeaveChannelAlertDialog({
@@ -289,6 +291,8 @@ export function LeaveChannelAlertDialog({
   onOpenChange,
   channelName,
   onConfirm,
+  error,
+  isPending,
 }: LeaveChannelAlertDialogProps) {
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
@@ -299,13 +303,17 @@ export function LeaveChannelAlertDialog({
             {`Leave "${channelName}"? You'll stop receiving its messages and can rejoin later.`}
           </AlertDialogDescription>
         </AlertDialogHeader>
+        {error instanceof Error ? (
+          <p className="text-sm text-destructive">{error.message}</p>
+        ) : null}
         <AlertDialogFooter>
-          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogCancel disabled={isPending}>Cancel</AlertDialogCancel>
           <AlertDialogAction
             className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            disabled={isPending}
             onClick={onConfirm}
           >
-            Leave
+            {isPending ? "Leaving..." : "Leave"}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
@@ -325,14 +333,17 @@ export function useLeaveChannelDialog() {
     <LeaveChannelAlertDialog
       open={target !== null}
       onOpenChange={(open) => {
-        if (!open) setTarget(null);
+        if (!open && !leaveChannel.isPending) setTarget(null);
       }}
       channelName={target?.name ?? ""}
+      error={leaveChannel.error}
+      isPending={leaveChannel.isPending}
       onConfirm={() => {
         if (target) {
-          leaveChannel.mutate();
+          void leaveChannel.mutateAsync().then(() => {
+            setTarget(null);
+          });
         }
-        setTarget(null);
       }}
     />
   );
