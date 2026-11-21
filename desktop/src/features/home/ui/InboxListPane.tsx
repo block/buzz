@@ -506,6 +506,7 @@ export function InboxListPane({
                 <VideoReviewCommentMarkdown
                   className="inbox-preview-markdown text-inherit"
                   content={item.preview}
+                  customEmoji={item.customEmoji}
                   interactive={false}
                   mentionNames={item.mentionNames}
                   videoReviewCommentRootId={videoReviewCommentRootId}
