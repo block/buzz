@@ -178,7 +178,8 @@ snapshot loads in `off`, but every `BUZZ_NIP_FI_RESOLVER_*` and
 
 Set `BUZZ_NIP_FI_MODE=shadow`. Each pod now loads the snapshot before any
 listener binds, refreshes it every 30 s, and records what enforce would decide
-without refusing anything. Shadow labels database-source records
+without refusing anything in communities whose effective policy is optional;
+stored-Required and cohort communities still enforce. Shadow labels database-source records
 `community="bound"` or `"unmapped"`, never a host.
 
 - Go, held for at least a day of normal traffic:

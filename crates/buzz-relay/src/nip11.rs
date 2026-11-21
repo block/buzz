@@ -146,7 +146,8 @@ pub struct RelayLimitation {
     pub restricted_writes: bool,
     /// Whether the relay supports NIP-FI federated identity assertions.
     /// Advertised `true` in `Enforce` and `Shadow` mode, so clients attach
-    /// evidence; in `Shadow` the relay evaluates it without requiring it.
+    /// evidence; in `Shadow` the relay evaluates it, requiring it only for
+    /// communities stored Required or inside the enforce-percent cohort.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub federated_identity: bool,
     /// NIP-ER: how the relay delivers due reminders ("push" or "lazy").

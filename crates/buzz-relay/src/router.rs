@@ -72,8 +72,9 @@ use crate::state::AppState;
 //
 // ## Relationship to Off and Shadow
 //
-// Off skips FI policy reads and enforcement. Shadow preserves optional-community
-// admission and enforces stored requirements. Enforce requires FI everywhere.
+// Off skips FI policy reads and enforcement. Shadow preserves admission for
+// communities whose effective policy is optional and enforces those stored
+// Required or inside the enforce-percent cohort. Enforce requires FI everywhere.
 //
 // ## What this guard checks (and does NOT check)
 //
