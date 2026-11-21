@@ -34,6 +34,7 @@ fn join_policy_url(relay_url: &str) -> Result<Url, String> {
 pub async fn fetch_join_policy(relay_url: String) -> Result<Option<Value>, String> {
     let url = join_policy_url(&relay_url)?;
     let client = reqwest::Client::builder()
+        .user_agent(concat!("Buzz Desktop/", env!("CARGO_PKG_VERSION")))
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| format!("failed to build join policy client: {error}"))?;
@@ -84,7 +85,7 @@ mod tests {
     use super::*;
     use axum::{
         body::{Body, Bytes},
-        http::Response,
+        http::{HeaderMap, Response},
         response::Redirect,
         routing::get,
         Json, Router,
@@ -120,6 +121,23 @@ mod tests {
     fn rejects_non_relay_schemes_and_credentials() {
         assert!(join_policy_url("https://relay.example.com").is_err());
         assert!(join_policy_url("wss://user:secret@relay.example.com").is_err());
+    }
+
+    #[tokio::test]
+    async fn sends_versioned_user_agent() {
+        let relay_url = test_relay(Router::new().route(
+            "/api/join-policy",
+            get(|headers: HeaderMap| async move {
+                assert_eq!(
+                    headers.get(reqwest::header::USER_AGENT).unwrap(),
+                    concat!("Buzz Desktop/", env!("CARGO_PKG_VERSION"))
+                );
+                Json(serde_json::json!({ "policy": null }))
+            }),
+        ))
+        .await;
+
+        assert!(fetch_join_policy(relay_url).await.unwrap().is_none());
     }
 
     #[tokio::test]
