@@ -54,6 +54,8 @@ import 'shared/auth/auth.dart';
 import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/emoji/emoji_burst.dart';
 import 'shared/relay/relay.dart';
+import 'shared/diagnostics/diagnostic_navigation_observer.dart';
+import 'shared/diagnostics/diagnostic_reporter.dart';
 import 'shared/theme/theme.dart';
 import 'shared/widgets/buzz_loading_indicator.dart';
 import 'shared/read_state/failed_clear_notice.dart';
@@ -476,10 +478,33 @@ class App extends HookConsumerWidget {
       },
     );
     final latestHome = useRef<Widget?>(null)..value = home;
+    final screenTrail = ref.read(diagnosticScreenTrailProvider);
+    final screenObserver = useMemoized(screenTrail.observer);
+    useEffect(() => screenObserver.dispose, [screenObserver]);
+    // The root page's content changes in place as auth settles (splash, then
+    // onboarding or Home) with no navigation, so name it again.
+    final homeKind = authState.when(
+      loading: () => null,
+      error: (_, _) => false,
+      data: (state) => state.status,
+    );
+    useEffect(() {
+      screenObserver.refresh();
+      return null;
+    }, [homeKind]);
+    // The age restriction replaces the navigator rather than covering a route.
+    useEffect(() {
+      screenTrail.cover(
+        ageSignalState == AgeSignalState.restricted
+            ? DiagnosticScreen.ageRestriction
+            : null,
+      );
+      return null;
+    }, [ageSignalState]);
 
     return MaterialApp(
       navigatorKey: _mobileRootNavigatorKey,
-      navigatorObservers: [appRouteObserver],
+      navigatorObservers: [appRouteObserver, screenObserver],
       title: 'Buzz',
       debugShowCheckedModeBanner: false,
       theme: lightTheme,
