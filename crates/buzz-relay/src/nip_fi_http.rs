@@ -187,10 +187,20 @@ pub(crate) trait HttpDenyMap: sealed::Sealed {
     /// unavailable backing store returns `true` (deny).
     fn is_denied(&self, issuer: &str, pubkey: &PublicKey, now: DateTime<Utc>) -> bool;
 
-    /// Whether the deny set is complete.  While it is not (a restore is
-    /// pending), admission is refused as authorization unavailable.
-    fn is_restored(&self) -> bool {
-        true
+    /// The verdict for `(issuer, pubkey)` from one read, so a refusal keeps
+    /// its cause: unavailable while the deny set is restoring, else denied
+    /// or allowed.
+    fn deny_status(
+        &self,
+        issuer: &str,
+        pubkey: &PublicKey,
+        now: DateTime<Utc>,
+    ) -> buzz_auth::DenyStatus {
+        if self.is_denied(issuer, pubkey, now) {
+            buzz_auth::DenyStatus::Denied
+        } else {
+            buzz_auth::DenyStatus::Allowed
+        }
     }
 }
 
@@ -206,8 +216,13 @@ impl HttpDenyMap for buzz_auth::NipFiDenyMap {
         buzz_auth::NipFiDenyMap::is_denied(self, issuer, pubkey, now)
     }
 
-    fn is_restored(&self) -> bool {
-        buzz_auth::NipFiDenyMap::is_restored(self)
+    fn deny_status(
+        &self,
+        issuer: &str,
+        pubkey: &PublicKey,
+        now: DateTime<Utc>,
+    ) -> buzz_auth::DenyStatus {
+        buzz_auth::NipFiDenyMap::deny_status(self, issuer, pubkey, now)
     }
 }
 
@@ -510,7 +525,9 @@ where
             }
             let reason = match deny.stage {
                 Stage::Pairing => Some("nip_fi_http_key_mismatch"),
-                Stage::DenySet => Some("nip_fi_http_denied_pubkey"),
+                Stage::DenySet if deny.class == DenialClass::AuthorizationDenied => {
+                    Some("nip_fi_http_denied_pubkey")
+                }
                 _ => None,
             };
             if let Some(reason) = reason {

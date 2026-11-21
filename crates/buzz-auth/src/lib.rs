@@ -79,7 +79,7 @@ pub use nip_fi::{
     CanonicalCapabilities, ClaimOutcome, ClientSubjectPosture, CommandClaim, CommandError,
     CommandIssuerPolicy, CommandPolicyError, CommandReplayGuard, CommandResult, CommandVerifier,
     CommunityBinding, CommunityBindingError, ConfidentialAssertion, CrossPodMergeResult,
-    DenialClass, DenySetFull, FederatedAssertionVerifier, FederatedIdentity,
+    DenialClass, DenySetFull, DenyStatus, FederatedAssertionVerifier, FederatedIdentity,
     FederatedIdentityDiscovery, FreshnessClass, HttpJwksFetcher, IssuerCapacity, IssuerJwksConfig,
     IssuerKeySource, IssuerPolicy, IssuerPolicyError, IssuerRegistry, JwksFetchError, JwksFetcher,
     JwksSourceContract, NipFiDenyMap, NipFiMode, NipFiStartupError, ProductionJwksSource,

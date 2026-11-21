@@ -308,6 +308,18 @@ pub(crate) enum ReserveError {
     CapacityExceeded,
 }
 
+/// The deny-set verdict for one key, from [`NipFiDenyMap::deny_status`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenyStatus {
+    /// No active entry: admit.
+    Allowed,
+    /// An active entry (or a poisoned shard): refuse as revoked.
+    Denied,
+    /// A restore is pending, so the deny set is unknown: refuse as
+    /// authorization unavailable.
+    Unavailable,
+}
+
 /// Outcome of a cross-pod deny merge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CrossPodMergeResult {
@@ -411,16 +423,28 @@ impl NipFiDenyMap {
     /// Also fails closed (returns `true` for every key) while a restore is
     /// pending.
     pub fn is_denied(&self, issuer: &str, pubkey: &PublicKey, now: DateTime<Utc>) -> bool {
+        self.deny_status(issuer, pubkey, now) != DenyStatus::Allowed
+    }
+
+    /// The deny-set verdict for `(iss, pubkey)` at `now`, read once:
+    /// [`DenyStatus::Unavailable`] while a restore is pending, else
+    /// [`DenyStatus::Denied`] for an active entry or a poisoned shard (fail
+    /// closed), else [`DenyStatus::Allowed`].  [FI-TRACE-DENY-SET]
+    pub fn deny_status(&self, issuer: &str, pubkey: &PublicKey, now: DateTime<Utc>) -> DenyStatus {
         if !self.is_restored() {
-            return true;
+            return DenyStatus::Unavailable;
         }
-        let pubkey_hex = pubkey.to_hex();
-        match self.shards.get(issuer) {
+        let denied = match self.shards.get(issuer) {
             Some(shard) => shard
                 .lock()
-                .map(|guard| guard.is_denied(&pubkey_hex, now))
+                .map(|guard| guard.is_denied(&pubkey.to_hex(), now))
                 .unwrap_or(true), // poisoned shard → fail closed (deny)
             None => false,
+        };
+        if denied {
+            DenyStatus::Denied
+        } else {
+            DenyStatus::Allowed
         }
     }
 
@@ -568,6 +592,11 @@ mod tests {
         assert!(
             m.is_denied("iss", &key, Utc::now()),
             "closed while restoring"
+        );
+        assert_eq!(
+            m.deny_status("iss", &key, Utc::now()),
+            DenyStatus::Unavailable,
+            "closed as unavailable, not revoked"
         );
         // A reconnect opens a newer generation before the first finishes.
         let second = m.begin_restore();

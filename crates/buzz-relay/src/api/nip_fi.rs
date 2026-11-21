@@ -3835,11 +3835,49 @@ mod route_integration_tests {
         consumer.abort();
     }
 
-    /// A store whose first load misses `hidden`: a deny accepted while that
-    /// snapshot was being read.
+    /// A store whose first load misses `hidden` (a deny accepted while that
+    /// snapshot was being read), and which counts its loads.
     struct StaleFirstLoad {
         inner: Arc<buzz_auth::InMemoryCommandReplayGuard>,
         hidden: std::sync::Mutex<Option<nostr::PublicKey>>,
+        loads: tokio::sync::watch::Sender<usize>,
+    }
+
+    impl StaleFirstLoad {
+        fn new(
+            inner: Arc<buzz_auth::InMemoryCommandReplayGuard>,
+            hidden: Option<nostr::PublicKey>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                inner,
+                hidden: std::sync::Mutex::new(hidden),
+                loads: tokio::sync::watch::channel(0).0,
+            })
+        }
+
+        /// Waits until the consumer has started its `n`th restore load.
+        async fn loaded(&self, n: usize) {
+            let mut loads = self.loads.subscribe();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                loads.wait_for(|loads| *loads >= n),
+            )
+            .await
+            .expect("consumer progress")
+            .unwrap();
+        }
+    }
+
+    /// Waits until `pod`'s consumer has reopened admission.
+    async fn restored(pod: &AppState) {
+        let map = pod.nip_fi_deny_map.as_deref().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !map.is_restored() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("restored");
     }
 
     impl buzz_auth::CommandReplayGuard for StaleFirstLoad {
@@ -3873,6 +3911,7 @@ mod route_integration_tests {
             >,
         > {
             Box::pin(async move {
+                self.loads.send_modify(|loads| *loads += 1);
                 let hidden = self.hidden.lock().unwrap().take();
                 let mut denies = self.inner.load_denies(issuer, now).await?;
                 denies.retain(|(key, _)| Some(*key) != hidden);
@@ -3953,14 +3992,12 @@ mod route_integration_tests {
         );
         store_deny(&store, &a).await;
         let message = store_deny(&store, &b).await;
-        let source = Arc::new(StaleFirstLoad {
-            inner: Arc::clone(&store),
-            hidden: std::sync::Mutex::new(Some(b)),
-        });
-        let (pod, tx, sub_tx, consumer) = capacity_one_consumer(source).await;
+        let source = StaleFirstLoad::new(Arc::clone(&store), Some(b));
+        let (pod, tx, sub_tx, consumer) = capacity_one_consumer(source.clone()).await;
         tx.send(message).unwrap();
         go_live(&sub_tx);
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // The second load is the restore the missed deny forced.
+        source.loaded(2).await;
         assert!(
             !pod.nip_fi_deny_map.as_deref().unwrap().is_restored(),
             "a missed deny never reopens admission"
@@ -3980,12 +4017,13 @@ mod route_integration_tests {
             nostr::Keys::generate().public_key(),
         );
         store_deny(&store, &a).await;
-        let (pod, tx, sub_tx, consumer) = capacity_one_consumer(store.clone()).await;
+        let source = StaleFirstLoad::new(Arc::clone(&store), None);
+        let (pod, tx, sub_tx, consumer) = capacity_one_consumer(source.clone()).await;
         go_live(&sub_tx);
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        restored(&pod).await;
         assert!(!is_denied(&pod, &other), "open once restored");
         tx.send(store_deny(&store, &b).await).unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        source.loaded(2).await;
         assert!(
             !pod.nip_fi_deny_map.as_deref().unwrap().is_restored(),
             "closed after the miss"
