@@ -2574,7 +2574,7 @@ pub enum ModerationCmd {
     )]
     Reports {
         /// Filter by status: open | resolved | dismissed | escalated (default: all)
-        #[arg(long)]
+        #[arg(long, value_parser = ["open", "resolved", "dismissed", "escalated"])]
         status: Option<String>,
         /// Maximum number of reports to return
         #[arg(long, default_value_t = 50)]
@@ -2929,6 +2929,16 @@ mod tests {
         assert!(with(&[]).is_ok());
         assert!(with(&["--reply-to", "b"]).is_err());
         assert!(with(&["--broadcast"]).is_err());
+    }
+
+    #[test]
+    fn moderation_reports_rejects_unknown_status() {
+        assert!(
+            Cli::try_parse_from(["buzz", "moderation", "reports", "--status", "open",]).is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["buzz", "moderation", "reports", "--status", "opne",]).is_err()
+        );
     }
 
     #[test]
