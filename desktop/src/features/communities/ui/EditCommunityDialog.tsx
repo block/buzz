@@ -4,8 +4,8 @@ import { CommunityIconSettingsCard } from "@/features/communities/ui/CommunityIc
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
 import type { Community } from "@/features/communities/types";
 import {
-  expandTilde,
   normalizeRelayUrl,
+  resolveReposDirUpdate,
 } from "@/features/communities/communityStorage";
 import { validateReposDir } from "@/shared/api/tauri";
 import { Button } from "@/shared/ui/button";
@@ -94,19 +94,22 @@ export function EditCommunityDialog({
 
       // Expand `~` to an absolute path before save — the backend rejects
       // tilde paths. An empty field clears the override (REPOS reverts to a
-      // real dir). Validate the expanded value (the bytes the backend
-      // canonicalizes) before save so a bad path is caught here instead of
-      // bricking a later boot. Only emit when the resolved value actually
-      // changed so a no-op edit doesn't trigger a backend re-apply.
-      const expandedReposDir = await expandTilde(reposDir);
-      if (expandedReposDir !== community.reposDir) {
-        try {
-          await validateReposDir(expandedReposDir ?? "");
-        } catch (error) {
-          setReposDirError(String(error));
-          return;
-        }
-        updates.reposDir = expandedReposDir;
+      // real dir) and is not validated, since the backend's absolute-path
+      // check would reject `""`. A real path is validated (the bytes the
+      // backend canonicalizes) before save so a bad path is caught here
+      // instead of bricking a later boot. Only emit when the resolved value
+      // actually changed so a no-op edit doesn't trigger a backend re-apply.
+      const reposDirUpdate = await resolveReposDirUpdate(
+        reposDir,
+        community.reposDir,
+        validateReposDir,
+      );
+      if (reposDirUpdate.kind === "invalid") {
+        setReposDirError(reposDirUpdate.error);
+        return;
+      }
+      if (reposDirUpdate.kind === "changed") {
+        updates.reposDir = reposDirUpdate.value;
       }
 
       if (Object.keys(updates).length > 0) {
