@@ -72,3 +72,15 @@ identity.key
 
 # Helm dependency tarballs — regenerable from Chart.lock via `helm dependency build`
 deploy/charts/*/charts/*.tgz
+
+# Local self-host secrets (minipc). `.env*` (not just `.env`) so ad-hoc copies
+# like `.env.bak-before-tailscale` can never reach a `git add -A` — they carry
+# the same secrets as .env.
+deploy/compose/OWNER_KEY.txt
+deploy/compose/.env*
+!deploy/compose/.env.example
+
+# HQ agent system — its own PRIVATE repo (manuarraya/proximotrabajo-agents),
+# with agent private keys and DB passwords under deploy/agents/keys/. This repo
+# is PUBLIC, so a stray `git add -A` here must not be able to reach them.
+deploy/agents/
