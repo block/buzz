@@ -90,6 +90,7 @@ metrics-exporter-prometheus = { workspace = true }
 metrics-util    = { workspace = true }
 pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 async-compression = { version = "0.4.42", features = ["tokio", "gzip"] }
+unicode-normalization = "0.1.25"
 
 [features]
 dev = ["buzz-auth/dev"]

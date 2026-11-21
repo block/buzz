@@ -1,9 +1,18 @@
-//! Durable output-only NIP-FI verified profiles. Authorization never reads
-//! these tables.
+//! Durable relay-verified NIP-FI profiles. Stored profiles do not authorize
+//! admission. Workflow mentions read their name aliases for destination-channel
+//! members, including delegated agent-wake tags when the workflow's authored
+//! template names an unambiguous member and its authority checks allow it.
 //!
 //! A profile is a historical record ("verified as Alice at T"). It is never
 //! retracted: on a relay that enforces NIP-FI, a key cannot post without a
-//! fresh issuer assertion, so a stale name labels only past activity.
+//! fresh issuer assertion, regardless of its stored profile.
+//!
+//! Alias reassignment is not reconciled across keys. If an issuer gives a
+//! username or full name to a new key, workflow mentions can still resolve to
+//! the old holder when only that holder is a channel member. If both holders
+//! are members and retain that verified alias, the mention is silently dropped.
+//! Retraction or supersession of conflicting heads belongs in the profile writer,
+//! not an age bound in mention lookup, which would still leave a stale window.
 
 use crate::{AdmittedTx, Db, DbError, Result};
 use buzz_core::CommunityId;

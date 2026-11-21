@@ -10,10 +10,12 @@ use std::sync::{Arc, Weak};
 
 use buzz_core::kind::KIND_STREAM_MESSAGE;
 use buzz_core::tenant::CommunityId;
+use buzz_db::channel_members::MentionName;
 use buzz_workflow::action_sink::{ActionSink, ActionSinkError, SentMessage};
 use chrono::Utc;
 use nostr::{EventBuilder, Kind, Tag};
 use tracing::info;
+use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 use uuid::Uuid;
 
 use crate::handlers::event::dispatch_persistent_event;
@@ -30,68 +32,79 @@ use crate::state::AppState;
 ///
 /// - **Members only.** Candidates are the destination channel's members; global
 ///   users are never matched.
-/// - **Exact display name.** No substring, prefix, or fuzzy matching. Names may
-///   contain spaces/punctuation (`"Will Pfleger"`, `"Lep (Subagent)"`), so the
-///   match is anchored on `@` and terminated by a non-name boundary rather than
-///   whitespace.
+/// - **Exact profile name.** Ordinary display names and verified display names,
+///   usernames, and full names are aliases. Matching ignores case and canonical
+///   Unicode encoding differences, with no substring, prefix, or fuzzy matching.
+///   Names may contain spaces/punctuation (`"Alex Example"`, `"Lep (Subagent)"`),
+///   so the match is anchored on `@` and terminated by a non-name boundary rather
+///   than whitespace.
 /// - **Greedy-longest, non-overlapping.** Longer names are matched first and
-///   consume their span, so `@Will Pfleger` binds *Pfleger* and a bare `@Will`
-///   does not match the member `"Will Pfleger"`.
-/// - **Ambiguous names wake no one.** If two or more members share the matched
-///   display name, no `p` tag is emitted for it — arbitrary selection would
+///   consume their span, so `@Alex Example` binds *Example* and a bare `@Alex`
+///   does not match the member `"Alex Example"`.
+/// - **Verified aliases take precedence.** An ordinary name cannot suppress a
+///   verified alias. If distinct keys share a name at the highest verification
+///   level present, no `p` tag is emitted for it: arbitrary selection would
 ///   silently misroute and tagging all of them is a false-wake firehose.
 ///
 /// Returns deduplicated pubkey hexes, in first-appearance order in `text`.
-fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<String> {
-    // Name → pubkey, folding case (client matches case-insensitively). A name
-    // that maps to more than one distinct pubkey is ambiguous → wake no one.
-    let mut by_name: std::collections::HashMap<String, Option<String>> =
+fn resolve_mention_pubkeys(text: &str, members: &[MentionName]) -> Vec<String> {
+    // Resolve collisions only within the highest verification level present.
+    // Retain that level even for ambiguous names so an ordinary claim cannot
+    // revive or suppress a verified match, regardless of row order.
+    let mut by_name: std::collections::HashMap<String, (bool, Option<String>)> =
         std::collections::HashMap::new();
-    for (name, pubkey) in members {
+    for member in members {
+        let name: String = member
+            .name
+            .chars()
+            .flat_map(char::to_lowercase)
+            .nfd()
+            .collect();
         if name.trim().is_empty() {
             continue;
         }
         by_name
-            .entry(name.to_lowercase())
-            .and_modify(|slot| {
-                if slot.as_deref() != Some(pubkey.as_str()) {
+            .entry(name)
+            .and_modify(|(verified, slot)| {
+                if member.verified && !*verified {
+                    *verified = true;
+                    *slot = Some(member.pubkey.clone());
+                } else if member.verified == *verified
+                    && slot.as_deref() != Some(member.pubkey.as_str())
+                {
                     *slot = None; // ambiguous
                 }
             })
-            .or_insert_with(|| Some(pubkey.clone()));
+            .or_insert_with(|| (member.verified, Some(member.pubkey.clone())));
     }
 
     // Match longest names first so a longer name consumes its span before a
     // shorter substring name can claim part of it.
-    let mut names: Vec<&(String, String)> = members.iter().collect();
-    names.sort_by_key(|(name, _)| std::cmp::Reverse(name.chars().count()));
+    let mut names: Vec<&String> = by_name.keys().collect();
+    names.sort_by_key(|name| std::cmp::Reverse(name.chars().count()));
 
     let chars: Vec<char> = text.chars().collect();
     let mut consumed = vec![false; chars.len()];
 
-    // Case-insensitivity folds *both* sides through `char::to_lowercase`, which
-    // can change length: `İ` (U+0130) lowercases to two code points (`i` +
-    // U+0307 combining dot). Comparing a pre-lowercased copy of the whole text
-    // against a lowercased name by index silently desyncs once any earlier char
-    // expands. Instead, fold on the fly: walk the original `chars` at the
-    // candidate `@`, folding each char, and match against the folded-name char
-    // stream — tracking how many *original* chars were consumed so
-    // boundary/`consumed` accounting stays in original coordinates. `None` = no
-    // match; `Some(n)` = matched, consuming `n` original chars after the `@`.
+    // Normalize once, not a candidate-length span at every `@`. Prefix lengths
+    // map back to original boundaries without splitting an expanded character.
+    // Reordering cannot cross `@` or a valid right boundary (no combining mark).
+    let folded_chars: Vec<char> = text.chars().flat_map(char::to_lowercase).nfd().collect();
+    let folded_offsets: Vec<usize> = std::iter::once(0)
+        .chain(chars.iter().scan(0, |offset, c| {
+            *offset += c.to_lowercase().nfd().count();
+            Some(*offset)
+        }))
+        .collect();
     let match_name_len = |start: usize, folded_name: &[char]| -> Option<usize> {
-        let mut ci = start;
-        let mut ni = 0;
-        while ni < folded_name.len() {
-            let c = *chars.get(ci)?;
-            for fc in c.to_lowercase() {
-                if folded_name.get(ni) != Some(&fc) {
-                    return None;
-                }
-                ni += 1;
-            }
-            ci += 1;
+        let offset = folded_offsets[start];
+        if !folded_chars[offset..].starts_with(folded_name) {
+            return None;
         }
-        Some(ci - start)
+        folded_offsets
+            .binary_search(&(offset + folded_name.len()))
+            .ok()
+            .map(|end| end - start)
     };
 
     // A mention is anchored on `@` at a left boundary (start / whitespace / `(`)
@@ -100,41 +113,47 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
     // longest member name first, this is the whole rule: no punctuation allowlist
     // to get wrong, and it is unicode-safe (em-dash, emoji all terminate a name).
     let is_left_boundary = |i: usize| i == 0 || chars[i - 1].is_whitespace() || chars[i - 1] == '(';
-    let extends_name = |c: char| c.is_alphanumeric() || c == '_';
+    let extends_name = |c: char| c.is_alphanumeric() || c == '_' || is_combining_mark(c);
 
     let mut out: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut hits: Vec<(usize, String)> = Vec::new();
 
-    for (name, _) in &names {
-        let folded_name: Vec<char> = name.to_lowercase().chars().collect();
+    // Only an `@` at a left boundary can start a mention, so collect those
+    // positions once and try each name only there. This keeps the cost at
+    // names × mentions rather than names × text length.
+    let anchors: Vec<usize> = (0..chars.len())
+        .filter(|&at| chars[at] == '@' && is_left_boundary(at))
+        .collect();
+    if anchors.is_empty() {
+        return out;
+    }
+
+    for name in names {
+        let folded_name: Vec<char> = name.chars().collect();
         if folded_name.is_empty() {
             continue;
         }
-        let mut at = 0;
-        while at < chars.len() {
-            // Anchor on `@` at a left boundary and an unconsumed span; only then
-            // attempt the fold-match. `name_len` is measured in *original* chars,
-            // so `at + 1 + name_len` is the true position just past the name.
-            let name_len = (chars[at] == '@' && is_left_boundary(at) && !consumed[at])
-                .then(|| match_name_len(at + 1, &folded_name))
-                .flatten()
-                .filter(|&n| {
-                    chars[at + 1 + n..]
-                        .first()
-                        .is_none_or(|&c| !extends_name(c))
-                });
+        for &at in &anchors {
+            // Skip anchors inside a span an earlier (longer) match consumed.
+            // `name_len` is measured in *original* chars, so `at + 1 + name_len`
+            // is the true position just past the name.
+            if consumed[at] {
+                continue;
+            }
+            let name_len = match_name_len(at + 1, &folded_name).filter(|&n| {
+                chars[at + 1 + n..]
+                    .first()
+                    .is_none_or(|&c| !extends_name(c))
+            });
             if let Some(name_len) = name_len {
                 let span = 1 + name_len;
-                if let Some(Some(pubkey)) = by_name.get(&name.to_lowercase()) {
+                if let Some((_, Some(pubkey))) = by_name.get(name) {
                     hits.push((at, pubkey.clone()));
                 }
                 for slot in consumed.iter_mut().skip(at).take(span) {
                     *slot = true;
                 }
-                at += span;
-            } else {
-                at += 1;
             }
         }
     }
@@ -157,7 +176,7 @@ fn append_workflow_mention_tags(
     rendered_text: &str,
     authored_text: &str,
     may_direct_agents: bool,
-    members: &[(String, String)],
+    members: &[MentionName],
 ) -> Result<bool, ActionSinkError> {
     let rendered_mentions = resolve_mention_pubkeys(rendered_text, members);
     let authored_mentions: std::collections::HashSet<String> =
@@ -511,31 +530,43 @@ impl ActionSink for RelayActionSink {
             // render an `@Name` into visible output, but it cannot borrow the
             // workflow owner's authority to wake that agent. A resolution failure
             // must not drop the message, so log and proceed with the base tags.
-            let members = state
-                .db
-                .get_members_for_event_write(tenant.community(), channel_uuid)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
-            let member_pubkeys: Vec<Vec<u8>> = members.iter().map(|m| m.pubkey.clone()).collect();
-            let users = state
-                .db
-                .get_users_bulk_for_event_write(tenant.community(), &member_pubkeys)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
-            let named_members: Vec<(String, String)> = users
-                .into_iter()
-                .filter_map(|u| {
-                    let name = u.display_name?;
-                    Some((name, nostr::PublicKey::from_slice(&u.pubkey).ok()?.to_hex()))
-                })
-                .collect();
-            let agent_mentions_withheld = append_workflow_mention_tags(
-                &mut tags,
-                &text,
-                &authored_text,
-                may_direct_agents,
-                &named_members,
-            )?;
+            // Text without an `@` cannot name anyone, so it skips the member
+            // and alias reads entirely.
+            let agent_mentions_withheld = if text.contains('@') {
+                let members = state
+                    .db
+                    .get_members_for_event_write(tenant.community(), channel_uuid)
+                    .await
+                    .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+                let member_pubkeys: Vec<Vec<u8>> =
+                    members.iter().map(|m| m.pubkey.clone()).collect();
+                // Verified names count only where the community advertises
+                // them, matching profile search; leftover heads stay inert.
+                // A failed lookup fails the send like the reads around it,
+                // rather than silently dropping verified-only mentions.
+                let include_verified = crate::verified_profiles::try_discovery(&state, &tenant)
+                    .await
+                    .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                    .is_some();
+                let named_members = state
+                    .db
+                    .get_mention_names_for_event_write(
+                        tenant.community(),
+                        &member_pubkeys,
+                        include_verified,
+                    )
+                    .await
+                    .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+                append_workflow_mention_tags(
+                    &mut tags,
+                    &text,
+                    &authored_text,
+                    may_direct_agents,
+                    &named_members,
+                )?
+            } else {
+                false
+            };
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
             let event = EventBuilder::new(kind, &text)
@@ -681,8 +712,12 @@ mod tests {
         ));
     }
 
-    fn m(name: &str, pubkey: &str) -> (String, String) {
-        (name.to_string(), pubkey.to_string())
+    fn m(name: &str, pubkey: &str) -> MentionName {
+        MentionName {
+            name: name.to_string(),
+            pubkey: pubkey.to_string(),
+            verified: false,
+        }
     }
 
     // A 64-char hex pubkey built from a single repeated nibble, for readable tests.
@@ -805,13 +840,40 @@ mod tests {
 
     #[test]
     fn combining_mark_in_name_matches() {
-        // A name carrying a combining mark (`é` as `e` + U+0301) matches the same
-        // sequence in text (1:1 folding) and terminates cleanly.
-        let members = vec![m("Jos\u{0065}\u{0301}", &pk('4'))]; // "José" decomposed
-        assert_eq!(
-            resolve_mention_pubkeys("hi @Jos\u{0065}\u{0301}!", &members),
-            vec![pk('4')]
-        );
+        for (name, text, mentioned) in [
+            ("Jose\u{0301}", "@Jose\u{0301}! @Robby", true),
+            ("José", "@Jose\u{0301}! @Robby", true),
+            ("Jose\u{0301}", "@JOSÉ! @Robby", true),
+            ("a\u{0301}\u{0323}", "@a\u{0323}\u{0301}! @Robby", true),
+            ("각", "@\u{1100}\u{1161}\u{11a8}! @Robby", true),
+            ("\u{1100}", "@각! @Robby", false),
+            ("José", "İ 각 @Jose\u{0301}! @Robby", true),
+            ("José", "@Jose\u{0301}x @Robby", false),
+            ("Jose", "@Jose\u{0301} @Robby", false),
+            ("José", "@Jose\u{0301}@Robby @Robby", true),
+        ] {
+            let members = vec![m(name, &pk('4')), m("Robby", &pk('a'))];
+            let expected = if mentioned {
+                vec![pk('4'), pk('a')]
+            } else {
+                vec![pk('a')]
+            };
+            assert_eq!(
+                resolve_mention_pubkeys(text, &members),
+                expected,
+                "{name}: {text}"
+            );
+        }
+        for (other_key, expected) in [('4', vec![pk('4'), pk('a')]), ('5', vec![pk('a')])] {
+            let members = vec![
+                m("José", &pk('4')),
+                m("Jose\u{0301}", &pk(other_key)),
+                m("Robby", &pk('a')),
+            ];
+            for text in ["@José @Robby", "@Jose\u{0301} @Robby"] {
+                assert_eq!(resolve_mention_pubkeys(text, &members), expected, "{text}");
+            }
+        }
     }
 
     #[test]
@@ -859,6 +921,30 @@ mod tests {
         // Same identity listed twice (e.g. two channels) is not a conflict.
         let members = vec![m("Fizz", &pk('6')), m("Fizz", &pk('6'))];
         assert_eq!(resolve_mention_pubkeys("@Fizz go", &members), vec![pk('6')]);
+    }
+
+    #[test]
+    fn verified_aliases_win_only_over_ordinary_names() {
+        for (claims, expected) in [
+            (vec![('a', false), ('b', true)], vec![pk('b')]),
+            (vec![('a', false), ('c', false), ('b', true)], vec![pk('b')]),
+            (vec![('a', true), ('b', true), ('c', false)], vec![]),
+            (vec![('a', false), ('b', false)], vec![]),
+            (vec![('a', false), ('a', true), ('b', false)], vec![pk('a')]),
+        ] {
+            let mut members: Vec<_> = claims
+                .iter()
+                .map(|&(key, verified)| MentionName {
+                    name: if verified { "Zoë" } else { "ZOE\u{0308}" }.to_owned(),
+                    pubkey: pk(key),
+                    verified,
+                })
+                .collect();
+            for _ in 0..2 {
+                assert_eq!(resolve_mention_pubkeys("@Zoë", &members), expected);
+                members.reverse();
+            }
+        }
     }
 
     #[test]
@@ -1016,6 +1102,25 @@ mod postgres_tests {
     /// Real-PG state mirroring `handlers::event::tests::test_state_with_redis_url`.
     async fn test_state() -> Arc<AppState> {
         test_state_with_agent_mentions(buzz_workflow::AgentMentions::Any).await
+    }
+
+    /// [`test_state`] with verified profiles advertised for every host, so
+    /// workflow mentions may resolve verified names.
+    async fn advertised_test_state() -> Arc<AppState> {
+        let state = test_state().await;
+        let mut advertised = (*state).clone();
+        let mut config = (*advertised.config).clone();
+        config.relay_private_key = Some(advertised.relay_keypair.secret_key().to_secret_hex());
+        config.nip_fi.mode = buzz_auth::NipFiMode::Enforce;
+        config.nip_fi.communities =
+            crate::nip_fi_core::test_support::any_host("https://relay.example");
+        config.nip_fi.profile_policies = vec![buzz_db::verified_profiles::ProfilePolicy {
+            issuer: "https://issuer.test".to_owned(),
+            label: Some("Example".to_owned()),
+            refresh_seconds: 3600,
+        }];
+        advertised.config = Arc::new(config);
+        Arc::new(advertised)
     }
 
     async fn test_state_with_agent_mentions(
@@ -1492,7 +1597,7 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn workflow_send_message_binds_authority_to_authored_mentions() {
-        let state = test_state().await;
+        let state = advertised_test_state().await;
 
         let author = nostr::Keys::generate();
         let author_hex = author.public_key().to_hex();
@@ -1555,6 +1660,98 @@ mod postgres_tests {
             )
             .await
             .expect("add agent member");
+
+        let verified = nostr::Keys::generate().public_key();
+        let twin = nostr::Keys::generate().public_key();
+        let outsider = nostr::Keys::generate().public_key();
+        for key in [twin, outsider] {
+            state
+                .db
+                .ensure_user(community, &key.to_bytes())
+                .await
+                .expect("ensure user");
+        }
+        for key in [verified, twin] {
+            state
+                .db
+                .add_member(
+                    community,
+                    channel.id,
+                    &key.to_bytes(),
+                    MemberRole::Member,
+                    Some(&author_bytes),
+                )
+                .await
+                .expect("add member");
+        }
+        state
+            .db
+            .update_user_profile(
+                community,
+                &twin.to_bytes(),
+                Some("Alex Example"),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("ordinary name shadowing a verified alias");
+        for (key, username) in [(verified, "alex"), (outsider, "outsider")] {
+            state
+                .db
+                .publish_verified_profile(
+                    buzz_db::verified_profiles::ProfileAdmission {
+                        community,
+                        issuer: "https://identity.example.org",
+                        pubkey: &key.to_hex(),
+                        issued_at: Utc::now(),
+                        admitted_at: Utc::now(),
+                        display_name: "Alex Example (@alex)",
+                        username,
+                        full_name: Some("Alex Example"),
+                        label: "Example",
+                        refresh_seconds: 3600,
+                        membership_required: false,
+                    },
+                    &state.relay_keypair,
+                )
+                .await
+                .expect("publish verified profile");
+        }
+        let other_community = match state
+            .db
+            .create_community_with_owner(
+                &format!("other-{}.example.org", Uuid::new_v4().simple()),
+                &author_hex,
+                &nostr::Keys::generate(),
+            )
+            .await
+            .expect("other community")
+            .outcome
+        {
+            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+            other => panic!("expected fresh community: {other:?}"),
+        };
+        state
+            .db
+            .publish_verified_profile(
+                buzz_db::verified_profiles::ProfileAdmission {
+                    community: other_community,
+                    issuer: "https://identity.example.org",
+                    pubkey: &verified.to_hex(),
+                    issued_at: Utc::now(),
+                    admitted_at: Utc::now(),
+                    display_name: "Foreign Name",
+                    username: "foreign-only",
+                    full_name: None,
+                    label: "Example",
+                    refresh_seconds: 3600,
+                    membership_required: false,
+                },
+                &state.relay_keypair,
+            )
+            .await
+            .expect("foreign profile for the same key");
 
         let sink = Arc::new(RelayActionSink::new(&state));
         state.workflow_engine.set_action_sink(sink);
@@ -1622,6 +1819,207 @@ mod postgres_tests {
             ),
             "the first p tag attributes the message to its owner and is marked as attribution"
         );
+        for (name, text, trigger, mentioned, authorized) in [
+            ("verified-username", "@alex", "", true, true),
+            ("verified-username-mixed-case", "@ALEX", "", true, true),
+            (
+                "verified-display-name",
+                "@Alex Example (@alex)",
+                "",
+                true,
+                true,
+            ),
+            (
+                "verified-dedup",
+                "@alex @Alex Example (@alex) @alex",
+                "",
+                true,
+                true,
+            ),
+            (
+                "verified-over-ordinary-full-name",
+                "@Alex Example",
+                "",
+                true,
+                true,
+            ),
+            ("no-at-sign", "alex, Alex Example", "", false, false),
+            ("verified-nonmember", "@outsider", "", false, false),
+            ("foreign-profile", "@foreign-only", "", false, false),
+            (
+                "injected-verified",
+                "echo: {{trigger.text}}",
+                "@alex",
+                true,
+                false,
+            ),
+            (
+                "injected-verified-over-ordinary",
+                "echo: {{trigger.text}}",
+                "@Alex Example",
+                true,
+                false,
+            ),
+        ] {
+            let id = execute_send_message_workflow(
+                &state,
+                community,
+                channel.id,
+                &author_bytes,
+                name,
+                text,
+                trigger,
+            )
+            .await;
+            let event = load_event(&id).await;
+            let expected_mentions = if mentioned {
+                vec![verified.to_hex()]
+            } else {
+                vec![]
+            };
+            assert_eq!(
+                tag_values(&event, "p"),
+                [vec![author_hex.clone()], expected_mentions].concat(),
+                "{name}: recipient tags"
+            );
+            assert_eq!(
+                tag_values(&event, "buzz:workflow-mention"),
+                if authorized {
+                    vec![verified.to_hex()]
+                } else {
+                    vec![]
+                },
+                "{name}: delegated authority"
+            );
+        }
+        state
+            .db
+            .ensure_user(community, &verified.to_bytes())
+            .await
+            .expect("ensure ordinary profile user");
+        for (name, text, ordinary_name) in [
+            ("same-profile-name", "@Alex Example", "Alex Example"),
+            ("mixed-ordinary", "@Ally Example", "Ally Example"),
+            ("mixed-verified", "@alex", "Ally Example"),
+        ] {
+            state
+                .db
+                .update_user_profile(
+                    community,
+                    &verified.to_bytes(),
+                    Some(ordinary_name),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect("add ordinary profile alongside verified profile");
+            let id = execute_send_message_workflow(
+                &state,
+                community,
+                channel.id,
+                &author_bytes,
+                name,
+                text,
+                "",
+            )
+            .await;
+            let event = load_event(&id).await;
+            assert_eq!(
+                tag_values(&event, "p"),
+                vec![author_hex.clone(), verified.to_hex()],
+                "{name}: both profile sources remain mentionable"
+            );
+        }
+
+        state
+            .db
+            .publish_verified_profile(
+                buzz_db::verified_profiles::ProfileAdmission {
+                    community,
+                    issuer: "https://identity.example.org",
+                    pubkey: &twin.to_hex(),
+                    issued_at: Utc::now(),
+                    admitted_at: Utc::now(),
+                    display_name: "Taylór Example (@alex)",
+                    username: "alex",
+                    full_name: Some("Taylór Example"),
+                    label: "Example",
+                    refresh_seconds: 3600,
+                    membership_required: false,
+                },
+                &state.relay_keypair,
+            )
+            .await
+            .expect("publish duplicate verified username");
+        for (name, text, expected_mentions) in [
+            ("duplicate-verified-username", "@alex", vec![]),
+            ("duplicate-verified-username-mixed-case", "@ALEX", vec![]),
+            (
+                "unique-verified-display-after-collision",
+                "@Alex Example (@alex)",
+                vec![verified.to_hex()],
+            ),
+            (
+                "verified-full-name-normalized",
+                "@Taylo\u{0301}r Example",
+                vec![twin.to_hex()],
+            ),
+        ] {
+            let id = execute_send_message_workflow(
+                &state,
+                community,
+                channel.id,
+                &author_bytes,
+                name,
+                text,
+                "",
+            )
+            .await;
+            let event = load_event(&id).await;
+            assert_eq!(
+                tag_values(&event, "p"),
+                [vec![author_hex.clone()], expected_mentions.clone()].concat(),
+                "{name}: recipient tags"
+            );
+            assert_eq!(
+                tag_values(&event, "buzz:workflow-mention"),
+                expected_mentions,
+                "{name}: delegated authority"
+            );
+        }
+
+        // Without the advertisement, only ordinary names participate.
+        let unadvertised = test_state().await;
+        unadvertised
+            .workflow_engine
+            .set_action_sink(Arc::new(RelayActionSink::new(&unadvertised)));
+        for (name, text, expected) in [
+            ("unadvertised-username", "@alex", vec![]),
+            (
+                "unadvertised-ordinary",
+                "@Alex Example",
+                vec![twin.to_hex()],
+            ),
+        ] {
+            let id = execute_send_message_workflow(
+                &unadvertised,
+                community,
+                channel.id,
+                &author_bytes,
+                name,
+                text,
+                "",
+            )
+            .await;
+            let event = load_event(&id).await;
+            assert_eq!(
+                tag_values(&event, "p"),
+                [vec![author_hex.clone()], expected].concat(),
+                "{name}: verified names need the advertisement"
+            );
+        }
+
         let p_tag_targets = tag_values(&explicit, "p");
         assert!(
             p_tag_targets.contains(&author_hex),

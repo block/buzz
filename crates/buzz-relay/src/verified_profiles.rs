@@ -118,6 +118,16 @@ pub(crate) async fn discovery(
     state: &AppState,
     tenant: &TenantContext,
 ) -> Option<serde_json::Value> {
+    try_discovery(state, tenant).await.ok().flatten()
+}
+
+/// [`discovery`], but a failed binding lookup is an error rather than
+/// "not advertised", for callers that must not mistake an outage for the
+/// feature being off.
+pub(crate) async fn try_discovery(
+    state: &AppState,
+    tenant: &TenantContext,
+) -> Result<Option<serde_json::Value>, buzz_db::DbError> {
     let mut count = 0;
     for policy in enabled_policies(state) {
         let authorized = match state.config.nip_fi.source {
@@ -130,9 +140,7 @@ pub(crate) async fn discovery(
             CommunitySource::Database => state
                 .db
                 .lookup_nip_fi_binding_by_host(tenant.host())
-                .await
-                .ok()
-                .flatten()
+                .await?
                 .is_some_and(|b| b.active && b.issuers.contains(&policy.issuer)),
         };
         if authorized {
@@ -140,7 +148,7 @@ pub(crate) async fn discovery(
         }
     }
     // `searchable`: `POST /profiles/search` also matches and returns these.
-    (count > 0).then(
+    Ok((count > 0).then(
         || serde_json::json!({"kind": 30382, "multiple_issuers": count > 1, "searchable": true}),
-    )
+    ))
 }
