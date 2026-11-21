@@ -3134,6 +3134,11 @@ void main() {
         if (refreshing != null) await refreshing;
         await notifier.waitForUnreadCatchUp();
         await _settle();
+        if (catchUp && before) {
+          await _waitForIsolate(
+            () => notifier.activityFor(_channelA).at == middle.createdAt,
+          );
+        }
         final result = notifier.activityFor(_channelA);
         if (catchUp) {
           if (before) {
@@ -3152,13 +3157,15 @@ void main() {
           final pre = session.queryBatches.length;
           session.setStatus(SessionStatus.reconnecting);
           session.setStatus(SessionStatus.connected);
-          await _waitUntil(
+          // The reconnect's list read checks signatures on the real isolate
+          // before its catch-up goes out.
+          await _waitForIsolate(
             () => session.queryBatches
                 .skip(pre)
                 .any((b) => b.every((f) => f.since != null)),
           );
           await notifier.waitForUnreadCatchUp();
-          await _settle();
+          await _waitForIsolate(() => notifier.activityFor(_channelA).known);
           expect(notifier.activityFor(_channelA), (
             known: true,
             at: old.createdAt,
@@ -4648,6 +4655,15 @@ bool _isGapBatch(List<NostrFilter> batch) =>
 Future<void> _settle() async {
   for (var i = 0; i < 20; i++) {
     await Future<void>.delayed(Duration.zero);
+  }
+}
+
+/// Waits in real time for work a real isolate finishes, such as catch-up
+/// activity, which lands after unread readiness.
+Future<void> _waitForIsolate(bool Function() predicate) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 5));
+  while (!predicate() && DateTime.now().isBefore(deadline)) {
+    await Future<void>.delayed(const Duration(milliseconds: 10));
   }
 }
 
