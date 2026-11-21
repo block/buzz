@@ -73,7 +73,7 @@ import { AgentCreationPreview } from "./AgentCreationPreview";
 import { OwnerOnlyAccessField } from "./OwnerOnlyAccessField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { useRequiredCredentialState } from "./useRequiredCredentialState";
-import { RunOnSummarySection } from "./RunOnSummarySection";
+import { EditAgentRunOnSection, useRunOnEdit } from "./EditAgentRunOnSection";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import {
   MODEL_DISCOVERY_LOADING_VALUE,
@@ -123,6 +123,7 @@ export function AgentInstanceEditDialog({
   const [isSaving, setIsSaving] = React.useState(false);
   // Keep standalone-setter failures visible so the user can retry Save.
   const [setterError, setSetterError] = React.useState<Error | null>(null);
+  const runOn = useRunOnEdit(agent, open);
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
   const acpCommandsQuery = useAcpCommandsQuery({ enabled: open });
   const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
@@ -633,6 +634,7 @@ export function AgentInstanceEditDialog({
       requiredEnvKeyMissing,
     }) &&
     providerValid &&
+    runOn.valid &&
     !isSaving &&
     !isAvatarUploadPending;
 
@@ -680,6 +682,7 @@ export function AgentInstanceEditDialog({
       const submitEnvVars = inheritedSubmission.envVars;
       const input: UpdateManagedAgentInput = {
         pubkey: agent.pubkey,
+        ...runOn.submission,
         name: name.trim() !== agent.name ? name.trim() : undefined,
         // relayUrl deliberately never submitted: the legacy per-record pin is
         // ignored (#2122) and the stored value is preserved as-is.
@@ -754,10 +757,9 @@ export function AgentInstanceEditDialog({
         inheritTransition,
         choices: effortOptions,
       });
-      if (effortTouched && effortSubmission.persist) {
+      if (effortTouched && effortSubmission.persist && runOn.allowsEffort) {
         input.effortLevel = effortSubmission.level;
       }
-
       const result = await updateMutation.mutateAsync(input);
 
       // Standalone setters — sequenced after the locked update resolves so the
@@ -938,7 +940,7 @@ export function AgentInstanceEditDialog({
             <Button
               data-testid="edit-agent-dialog-submit"
               disabled={!canSubmit}
-              onClick={() => void handleSubmit()}
+              onClick={() => runOn.confirm() && void handleSubmit()}
               type="button"
             >
               {isSaving ? "Saving..." : "Save changes"}
@@ -1014,8 +1016,7 @@ export function AgentInstanceEditDialog({
               onAllowlistChange={setRespondToAllowlist}
               onModeChange={setRespondTo}
             />
-            <RunOnSummarySection backend={agent.backend} />
-
+            <EditAgentRunOnSection isPending={isSaving} runOn={runOn} />
             {/* Provider (runtime) */}
             <div className="space-y-1.5">
               <label
@@ -1112,7 +1113,7 @@ export function AgentInstanceEditDialog({
             />
 
             <EffortPickerField
-              backend={agent.backend}
+              backend={runOn.backend}
               // The inherit transition clears effort, so nothing to pick.
               choices={inheritTransition ? undefined : effortOptions}
               disabled={isSaving}

@@ -30,7 +30,6 @@ impl AgentUpdateRollback {
 
 fn copy_runtime_state(from: &ManagedAgentRecord, to: &mut ManagedAgentRecord) {
     to.runtime_pid = from.runtime_pid;
-    to.backend = from.backend.clone();
     to.backend_agent_id.clone_from(&from.backend_agent_id);
     to.provider_binary_path
         .clone_from(&from.provider_binary_path);
@@ -70,6 +69,11 @@ fn restore_agent_update(
         attempted_with_current_runtime != rollback.attempted_record
     };
     let mut restored = rollback.previous_record;
+    let previous_deployment = (
+        restored.backend_agent_id.clone(),
+        restored.provider_binary_path.clone(),
+        restored.provider_policy_pending,
+    );
     if rollback.preserve_access_policy {
         restored.respond_to = current.respond_to;
         restored
@@ -78,6 +82,13 @@ fn restore_agent_update(
         restored.updated_at.clone_from(&current.updated_at);
     }
     copy_runtime_state(current, &mut restored);
+    if restored.backend != current.backend {
+        (
+            restored.backend_agent_id,
+            restored.provider_binary_path,
+            restored.provider_policy_pending,
+        ) = previous_deployment;
+    }
     if runtime_changed {
         restored.updated_at.clone_from(&current.updated_at);
     }
@@ -227,5 +238,37 @@ mod tests {
         assert_eq!(records[0].last_exit_code, Some(1));
         assert_eq!(records[0].last_error.as_deref(), Some("harness exited"));
         assert_eq!(records[0].updated_at, "runtime-change");
+    }
+
+    #[test]
+    fn failed_profile_sync_restores_the_previous_backend_and_its_deployment() {
+        let mut previous = record("Old name", "before");
+        previous.backend = crate::managed_agents::BackendKind::Provider {
+            id: "docker".into(),
+            config: serde_json::json!({"host": "ssh://old"}),
+        };
+        previous.backend_agent_id = Some("buzz-agent-old".to_string());
+        previous.provider_binary_path = Some("/bin/buzz-backend-docker".to_string());
+        let mut attempted = previous.clone();
+        attempted.name = "New name".to_string();
+        attempted.backend = crate::managed_agents::BackendKind::Local;
+        attempted.backend_agent_id = None;
+        attempted.provider_binary_path = None;
+        attempted.updated_at = "attempt".to_string();
+        let rollback = AgentUpdateRollback::new(previous.clone(), &attempted, false);
+        let mut records = vec![attempted];
+
+        restore_agent_update(&mut records, "abcd1234", rollback).expect("rollback");
+
+        assert_eq!(records[0].name, "Old name");
+        assert_eq!(records[0].backend, previous.backend);
+        assert_eq!(
+            records[0].backend_agent_id.as_deref(),
+            Some("buzz-agent-old")
+        );
+        assert_eq!(
+            records[0].provider_binary_path.as_deref(),
+            Some("/bin/buzz-backend-docker")
+        );
     }
 }

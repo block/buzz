@@ -87,8 +87,9 @@ test("editing a kubernetes agent shows its saved run-on settings", async ({
     runOn.getByTestId("edit-agent-run-on-service_account"),
   ).toHaveCount(0);
 
-  // The section explains immutability instead of pretending to be a form.
-  await expect(runOn).toContainText("can't be changed afterwards");
+  // Summary until the user opts in to changing it.
+  await expect(runOn).toContainText("last saved with");
+  await expect(page.getByTestId("edit-agent-run-on-change")).toBeVisible();
 
   await runOn.scrollIntoViewIfNeeded();
   await waitForAnimations(page);
@@ -209,4 +210,68 @@ test("secret-shaped keys from an untrusted provider render redacted", async ({
   await page
     .getByTestId("edit-agent-dialog")
     .screenshot({ path: `${SHOTS}/redacted-run-on.png` });
+});
+
+test("a local agent can be moved to a provider after creation", async ({
+  page,
+}) => {
+  const agent = TEST_IDENTITIES.tyler;
+  await installMockBridge(page, {
+    backendProviders: [
+      { id: "kubernetes", binaryPath: "/mock/buzz-backend-kubernetes" },
+    ],
+    backendProviderProbeResult: {
+      ok: true,
+      name: "kubernetes",
+      version: "0.0.0-mock",
+      config_schema: {
+        type: "object",
+        properties: {
+          namespace: { type: "string", default: "buzz-agents-mock01" },
+        },
+        required: ["namespace"],
+      },
+    },
+    managedAgents: [
+      {
+        pubkey: agent.pubkey,
+        name: "Movable Helper",
+        status: "stopped",
+        channelNames: ["general"],
+        respondTo: "owner-only",
+        backend: { type: "local" },
+      },
+    ],
+  });
+  await openEditDialog(page, "Movable Helper");
+  const dialog = page.getByTestId("edit-agent-dialog");
+  const commands = () =>
+    page.evaluate(
+      () =>
+        (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+          .__BUZZ_E2E_COMMANDS__ ?? [],
+    );
+
+  // Opening the dialog must not run the provider binary.
+  expect(await commands()).not.toContain("probe_backend_provider");
+
+  await dialog
+    .getByRole("button", { name: "Change where this agent runs" })
+    .click();
+  const trigger = dialog.locator("#agent-run-on");
+  await trigger.press("Enter");
+  await page
+    .getByRole("menuitemradio", { exact: true, name: "kubernetes" })
+    .press("Enter");
+  await expect(dialog.locator("#provider-cfg-namespace")).toHaveValue(
+    "buzz-agents-mock01",
+  );
+
+  await dialog.getByTestId("edit-agent-dialog-submit").click();
+  await expect(dialog).toBeHidden();
+
+  await page.getByTestId("user-profile-edit-agent").click();
+  await expect(page.getByTestId("edit-agent-run-on-location")).toHaveText(
+    "kubernetes",
+  );
 });

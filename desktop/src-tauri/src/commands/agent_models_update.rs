@@ -64,6 +64,75 @@ fn apply_effort_update(
     Ok(())
 }
 
+/// Facts `apply_backend_update` needs that come from outside the record.
+pub(crate) struct BackendUpdate<'a> {
+    pub backend: &'a crate::managed_agents::BackendKind,
+    pub force: bool,
+    pub local_running: bool,
+    /// `resolve_provider_binary` result for a provider backend.
+    pub provider_binary_path: Option<String>,
+}
+
+/// Move a record to another backend, or change its provider settings.
+///
+/// - Same backend: no change.
+/// - Same provider, new settings: applied; the next deploy uses them.
+/// - Different backend or provider: refused while the local runtime is
+///   running, and refused without `force` while a provider deployment may
+///   still exist. On success the deployment bookkeeping is reset so the next
+///   start deploys fresh.
+///
+/// Returns whether the record changed.
+pub(crate) fn apply_backend_update(
+    record: &mut ManagedAgentRecord,
+    update: BackendUpdate<'_>,
+) -> Result<bool, String> {
+    use crate::managed_agents::BackendKind;
+
+    if *update.backend == record.backend {
+        return Ok(false);
+    }
+    if let BackendKind::Provider { config, .. } = update.backend {
+        crate::managed_agents::validate_provider_config(config)?;
+        if record.relay_mesh.is_some()
+            || record.provider.as_deref() == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID)
+        {
+            return Err("Buzz shared compute agents must use the local backend".to_string());
+        }
+    }
+    let same_provider = matches!(
+        (&record.backend, update.backend),
+        (BackendKind::Provider { id: current, .. }, BackendKind::Provider { id: next, .. })
+            if current == next
+    );
+    if !same_provider {
+        if record.backend == BackendKind::Local && update.local_running {
+            return Err("Stop this agent before changing where it runs.".to_string());
+        }
+        if let (BackendKind::Provider { id, .. }, Some(_)) =
+            (&record.backend, &record.backend_agent_id)
+        {
+            if !update.force {
+                return Err(format!(
+                    "This agent was deployed with the {id} provider and may still be running there. \
+                     Shut it down first, then confirm the move; the old deployment is not removed."
+                ));
+            }
+        }
+        record.backend_agent_id = None;
+        record.provider_policy_pending = false;
+    }
+    record.provider_binary_path = match update.backend {
+        BackendKind::Provider { .. } => update.provider_binary_path,
+        BackendKind::Local => None,
+    };
+    if !matches!(update.backend, BackendKind::Local) {
+        record.start_on_app_launch = false;
+    }
+    record.backend = update.backend.clone();
+    Ok(true)
+}
+
 /// Proof token returned by `apply_record_field_updates`. Zero-size and
 /// `#[must_use]`; consumed by `stamp_record_updated_at`, so removing the
 /// `apply_record_field_updates` call from `update_managed_agent` leaves
@@ -248,6 +317,34 @@ pub async fn update_managed_agent(
                 .to_string();
             record.model = Some(model_ref.clone());
             record.relay_mesh = Some(crate::managed_agents::RelayMeshConfig { model_ref });
+        }
+
+        if let Some(ref backend) = input.backend {
+            let provider_binary_path = match backend {
+                crate::managed_agents::BackendKind::Provider { id, .. }
+                    if *backend != record.backend =>
+                {
+                    Some(
+                        crate::managed_agents::resolve_provider_binary(id)?
+                            .display()
+                            .to_string(),
+                    )
+                }
+                _ => record.provider_binary_path.clone(),
+            };
+            let local_running =
+                !crate::managed_agents::managed_agent_runtime_keys(&runtimes, &record.pubkey)
+                    .is_empty()
+                    || record.runtime_pid.is_some();
+            apply_backend_update(
+                record,
+                BackendUpdate {
+                    backend,
+                    force: input.force_backend_change,
+                    local_running,
+                    provider_binary_path,
+                },
+            )?;
         }
 
         // Inbound author gate: merge patch onto current values, then validate
