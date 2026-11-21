@@ -425,6 +425,42 @@ void main() {
     expect(cache.state.keys, containsAll(['a', 'b', 'c']));
   });
 
+  test('a link joining a pending preload is retried after reconnect', () async {
+    final firstBatch = Completer<List<NostrEvent>>();
+    final session = _RecordingProfileSession(
+      results: [
+        firstBatch.future,
+        Future.value([
+          _profileEvent(id: 'a', pubkey: 'a', createdAt: 1, name: 'A'),
+        ]),
+      ],
+    );
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    final cache = container.read(userCacheProvider.notifier);
+    final preload = cache.preload(['a']);
+    await session.firstRequest.future;
+
+    // The link shares the batch on the wire instead of asking again.
+    expect(cache.needsLinkedLookup('a'), isTrue);
+    cache.requestLinked(['a']);
+    expect(cache.needsLinkedLookup('a'), isFalse);
+    expect(session.requestCount, 1);
+
+    firstBatch.completeError('offline');
+    expect(await preload, isFalse);
+    session.setStatus(SessionStatus.disconnected);
+    session.setStatus(SessionStatus.connected);
+    // The retry rides the next coalesced batch.
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+
+    expect(session.requestCount, 2);
+    expect(session.requestedFilter?.authors, ['a']);
+    expect(cache.state.keys, contains('a'));
+  });
+
   test(
     'refresh verifies real OA batch while allowing main-isolate timers',
     () async {
@@ -542,6 +578,8 @@ class _RecordingProfileSession extends RelaySessionNotifier {
     if (!firstRequest.isCompleted) firstRequest.complete();
     return _results.isEmpty ? const [] : _results.removeAt(0);
   }
+
+  void setStatus(SessionStatus status) => state = SessionState(status: status);
 }
 
 class _FailingProfileSession extends RelaySessionNotifier {
