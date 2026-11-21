@@ -2148,6 +2148,9 @@ pub async fn dispatch(
             )
             .await
         }
+        ChannelsCmd::MarkRead { channel } => {
+            crate::commands::channel_mark_read::cmd_mark_read(client, &channel).await
+        }
         ChannelsCmd::Unread { channel, limit } => {
             crate::commands::channel_unread::cmd_unread(client, &channel, limit).await
         }

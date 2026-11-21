@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod channel_mark_read;
 pub mod channel_templates;
 pub mod channel_unread;
 pub mod channels;
@@ -32,6 +33,8 @@ mod sidebar_flags;
 mod sidebar_sort;
 mod sidebar_sync;
 pub mod social;
+#[cfg(test)]
+pub(crate) mod test_relay;
 pub mod upload;
 pub mod users;
 pub(crate) mod verified_profiles;
