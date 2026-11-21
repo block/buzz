@@ -38,7 +38,6 @@ void main() {
     const channelId = 'c0ffee-secret-channel-id';
     late _RecordingReporter reporter;
     late GlobalKey<NavigatorState> root;
-    late DiagnosticNavigationObserver rootObserver;
 
     Future<void> pumpApp(
       WidgetTester tester, {
@@ -58,7 +57,6 @@ void main() {
       addTearDown(container.dispose);
       final observer = container.read(diagnosticScreenTrailProvider).observer();
       addTearDown(observer.dispose);
-      rootObserver = observer;
       await tester.pumpWidget(
         UncontrolledProviderScope(
           container: container,
@@ -122,29 +120,31 @@ void main() {
       );
     });
 
-    testWidgets('a root page whose content changes in place is named again', (
+    testWidgets('a page that leaves from under a sheet names the one shown', (
       tester,
     ) async {
-      // Like a cold start: a splash first, then onboarding in the same route.
-      final home = ValueNotifier<DiagnosticScreen?>(null);
-      addTearDown(home.dispose);
-      await pumpApp(
-        tester,
-        home: ValueListenableBuilder(
-          valueListenable: home,
-          builder: (_, screen, _) =>
-              screen == null ? const Text('splash') : _Page(screen),
+      await pumpApp(tester);
+
+      // Like an Android notification opening a channel over Home's actions
+      // sheet: Back leaves the channel, revealing the sheet over Home.
+      final sheet = showModalBottomSheet<void>(
+        context: root.currentContext!,
+        builder: (_) => const Text('actions'),
+      );
+      await tester.pumpAndSettle();
+      root.currentState!.push(
+        MaterialPageRoute<void>(
+          builder: (_) => const _Page(DiagnosticScreen.channel),
         ),
       );
-
-      home.value = DiagnosticScreen.onboarding;
-      rootObserver.refresh();
       await tester.pumpAndSettle();
-      // Unchanged content leaves nothing more.
-      rootObserver.refresh();
+      root.currentState!.pop();
+      await tester.pumpAndSettle();
+      root.currentState!.pop();
+      await sheet;
       await tester.pumpAndSettle();
 
-      expect(trail(), ['other', 'onboarding']);
+      expect(trail(), ['channelList', 'channel', 'channelList']);
     });
 
     testWidgets('a phone pane names the screen the person is on', (

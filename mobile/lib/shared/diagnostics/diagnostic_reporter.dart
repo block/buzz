@@ -162,6 +162,7 @@ enum DiagnosticScreen {
   appearance,
   profile,
   agents,
+  createAgent,
   invites,
   communitySwitcher,
   addCommunity,
