@@ -29,8 +29,9 @@ use tracing::{error, info};
 /// Git sets automatically (quarantine):
 /// - `GIT_OBJECT_DIRECTORY` — quarantine object store
 /// - `GIT_ALTERNATE_OBJECT_DIRECTORIES` — includes the real object store
-const PRE_RECEIVE_HOOK: &str = r#"#!/usr/bin/env bash
-# Buzz pre-receive hook — FAIL-CLOSED
+///
+/// The script body without its shebang line; [`render_pre_receive_hook`] adds it.
+const PRE_RECEIVE_HOOK_BODY: &str = r#"# Buzz pre-receive hook — FAIL-CLOSED
 # ANY error, timeout, or non-200 response → reject the push.
 set -eo pipefail
 
@@ -144,12 +145,84 @@ fi
 exit 0
 "#;
 
+/// Shebang interpreter used unless `BUZZ_BASH_PATH` names one.
+const DEFAULT_INTERPRETER: &str = "/usr/bin/env bash";
+
+/// Render the hook script with its shebang line.
+///
+/// `interpreter` comes from `BUZZ_BASH_PATH` (validated in config): an absolute
+/// path to bash for hosts without `/usr/bin/env`, such as minimal containers.
+/// `None` keeps the portable `#!/usr/bin/env bash`.
+fn render_pre_receive_hook(interpreter: Option<&str>) -> String {
+    format!("{}{PRE_RECEIVE_HOOK_BODY}", shebang(interpreter))
+}
+
+/// The hook's first line.
+fn shebang(interpreter: Option<&str>) -> String {
+    format!("#!{}\n", interpreter.unwrap_or(DEFAULT_INTERPRETER))
+}
+
+/// Run a one-line script with the hook's `#!` line in `dir`, the way git runs
+/// the hook, so whatever the kernel or file system refuses there (permissions,
+/// a `noexec` mount, an older kernel's shorter `#!` limit) shows up at startup.
+#[cfg(unix)]
+pub(crate) fn probe_interpreter(interpreter: &str, dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::{Command, Stdio};
+
+    // A `TempPath` holds no open handle, which exec would refuse (ETXTBSY).
+    let script = tempfile::Builder::new()
+        .prefix(".interpreter-probe")
+        .tempfile_in(dir)?
+        .into_temp_path();
+    std::fs::write(&script, format!("{}exit 0\n", shebang(Some(interpreter))))?;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+    let status = retry_while_busy(|| {
+        Command::new(&script)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+    })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "a script run with it exited with {status}"
+        )))
+    }
+}
+
+/// Hooks with a `#!` line are a Unix mechanism; there is nothing to probe.
+#[cfg(not(unix))]
+pub(crate) fn probe_interpreter(_interpreter: &str, _dir: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Exec of a just-written script fails with ETXTBSY while a fork elsewhere in
+/// the process still holds a copy of its write handle; that clears quickly.
+#[cfg(unix)]
+pub(crate) fn retry_while_busy<T>(
+    mut run: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    for _ in 0..10 {
+        match run() {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            result => return result,
+        }
+    }
+    run()
+}
+
 /// Install the pre-receive hook into a bare repository.
 ///
 /// Creates a `hooks/` directory and writes the hook script with execute permission.
 /// Called during repo creation (kind:30617 handling) and can be called to
 /// retrofit existing repos.
-pub async fn install_hook(repo_path: &Path) -> anyhow::Result<()> {
+pub async fn install_hook(repo_path: &Path, interpreter: Option<&str>) -> anyhow::Result<()> {
     let hooks_dir = repo_path.join("hooks");
     fs::create_dir_all(&hooks_dir).await.map_err(|e| {
         error!(path = %hooks_dir.display(), error = %e, "failed to create hooks dir");
@@ -157,7 +230,8 @@ pub async fn install_hook(repo_path: &Path) -> anyhow::Result<()> {
     })?;
 
     let hook_path = hooks_dir.join("pre-receive");
-    fs::write(&hook_path, PRE_RECEIVE_HOOK).await.map_err(|e| {
+    let hook = render_pre_receive_hook(interpreter);
+    fs::write(&hook_path, hook.as_bytes()).await.map_err(|e| {
         error!(path = %hook_path.display(), error = %e, "failed to write hook");
         anyhow::anyhow!("failed to write pre-receive hook: {e}")
     })?;
@@ -178,8 +252,8 @@ pub async fn install_hook(repo_path: &Path) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::PRE_RECEIVE_HOOK;
+pub(crate) mod tests {
+    use super::{render_pre_receive_hook, PRE_RECEIVE_HOOK_BODY};
 
     #[test]
     fn runtime_image_installs_pre_receive_hook_tools() {
@@ -195,7 +269,7 @@ mod tests {
 
         for tool in ["curl", "openssl"] {
             assert!(
-                PRE_RECEIVE_HOOK.contains(tool),
+                PRE_RECEIVE_HOOK_BODY.contains(tool),
                 "test setup expected the pre-receive hook to invoke {tool}"
             );
             assert!(
@@ -203,5 +277,94 @@ mod tests {
                 "relay runtime image must install {tool}; the git pre-receive hook uses it and fails closed without it"
             );
         }
+    }
+
+    #[test]
+    fn default_hook_keeps_env_shebang() {
+        let hook = render_pre_receive_hook(None);
+        assert_eq!(
+            hook,
+            format!("#!/usr/bin/env bash\n{PRE_RECEIVE_HOOK_BODY}")
+        );
+    }
+
+    /// The executable `name` the test process finds on `PATH`, as an absolute path.
+    #[cfg(unix)]
+    pub(crate) fn executable_on_path(name: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::var_os("PATH").expect("the tests find tools on PATH");
+        let found = std::env::split_paths(&path)
+            .map(|directory| directory.join(name))
+            .find(|candidate| {
+                candidate
+                    .metadata()
+                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            })
+            .unwrap_or_else(|| panic!("an executable {name} is on PATH"));
+        std::path::absolute(found).expect("an absolute path")
+    }
+
+    /// Install the hook with `interpreter` (a symlink to bash) and run it the
+    /// way git does; `Err` means the kernel could not start the interpreter.
+    #[cfg(unix)]
+    async fn run_hook_with_interpreter(
+        repo: &std::path::Path,
+        interpreter: &std::path::Path,
+    ) -> std::io::Result<std::process::Output> {
+        std::fs::create_dir_all(interpreter.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(executable_on_path("bash"), interpreter).unwrap();
+        super::install_hook(repo, Some(interpreter.to_str().unwrap()))
+            .await
+            .unwrap();
+        super::retry_while_busy(|| {
+            std::process::Command::new(repo.join("hooks/pre-receive"))
+                .env_clear()
+                .stdin(std::process::Stdio::null())
+                .output()
+        })
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_longest_accepted_interpreter_runs_the_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("i");
+        let used = base.to_str().unwrap().len() + "/bash".len() + 1;
+        let max = crate::config::MAX_GIT_HOOK_INTERPRETER_BYTES;
+        assert!(
+            used < max,
+            "temporary directory path is too long for this test"
+        );
+        let interpreter = base.join("p".repeat(max - used)).join("bash");
+        assert_eq!(interpreter.to_str().unwrap().len(), max);
+
+        let output = run_hook_with_interpreter(dir.path(), &interpreter)
+            .await
+            .expect("the kernel starts the interpreter");
+        // The hook ran: with no environment it fails closed on its first check.
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("BUZZ_REPO_ID not set"),
+            "unexpected hook output: {output:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_interpreter_path_with_a_space_cannot_run_the_hook() {
+        // Why config rejects whitespace: the kernel splits the #! line at it.
+        let dir = tempfile::tempdir().unwrap();
+        let interpreter = dir.path().join("team tools/bash");
+        let started = run_hook_with_interpreter(dir.path(), &interpreter).await;
+        // The kernel looks for an interpreter named `.../team`.
+        let error = started.expect_err("the kernel ran a #! line with a space in the path");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
+    }
+
+    #[test]
+    fn custom_interpreter_replaces_only_the_shebang() {
+        let hook = render_pre_receive_hook(Some("/nix/store/abc-bash/bin/bash"));
+        let (first, rest) = hook.split_once('\n').expect("hook has a body");
+        assert_eq!(first, "#!/nix/store/abc-bash/bin/bash");
+        assert_eq!(rest, PRE_RECEIVE_HOOK_BODY);
     }
 }

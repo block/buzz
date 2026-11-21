@@ -1065,7 +1065,7 @@ fn record_compaction(
 /// `parent_state` you pass in must be the same one the workspace was
 /// hydrated from. Concretely: `hydrate::hydrate_for_write(store, ctx, owner,
 /// repo)` returns `(HydratedRepo, ParentState)` from a single pointer
-/// observation → `install_hook(repo.path())` → run `receive-pack`
+/// observation → `install_hook(repo.path(), ..)` → run `receive-pack`
 /// against the workspace → [`snapshot_workspace`] → call this with the
 /// **same `parent_state`** and that snapshot, and only when
 /// [`push_disposition`] returned [`PushDisposition::Publish`].
