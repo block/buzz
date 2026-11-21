@@ -71,7 +71,7 @@ void main() {
     });
   });
 
-  test('a timed-out history request checks the socket', () {
+  test('a timed-out history request checks the socket, then backs off', () {
     fakeAsync((async) {
       final (:relay, :container) = connect(async);
       final session = container.read(relaySessionProvider.notifier);
@@ -85,7 +85,15 @@ void main() {
       expect(failure, isNotNull);
       expect(probes(relay), hasLength(1));
 
+      // The relay may be overloaded, so the reconnect waits out the usual
+      // backoff, at least 750 ms, instead of adding load at once.
       async.elapse(pastProbe);
+      expect(relay.sockets, hasLength(1));
+      expect(
+        container.read(relaySessionProvider).status,
+        SessionStatus.reconnecting,
+      );
+      async.elapse(const Duration(milliseconds: 1300));
       expect(relay.sockets, hasLength(2));
     });
   });

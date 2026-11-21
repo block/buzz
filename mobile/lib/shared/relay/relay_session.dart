@@ -578,7 +578,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   /// Called when the device's network changes while the app is in the
   /// foreground. See [_RelaySessionLiveness._checkConnection].
-  void onNetworkChanged() => _checkConnection(state.status, ref);
+  void onNetworkChanged() =>
+      _checkConnection(state.status, ref, networkChanged: true);
 
   Future<void> _connect(RelayConfig config, {bool renewed = false}) async {
     if (_disposed || _ageRestricted) return;

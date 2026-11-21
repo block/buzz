@@ -17,11 +17,17 @@ extension _RelaySessionLiveness on RelaySessionNotifier {
   /// Asks the relay for an immediate answer and reconnects if none arrives in
   /// [relayLivenessProbeTimeout]. Any frame proves the socket, so a busy
   /// connection passes even when the answer itself is queued behind others.
-  /// A session that isn't connected reconnects now instead of waiting out
-  /// its backoff, since the network just changed.
   ///
-  /// Runs on a network change and when a request over the socket times out.
-  void _checkConnection(SessionStatus status, Ref ref) {
+  /// Runs on a network change ([networkChanged]) and when a request over the
+  /// socket times out. After a network change the old address may be gone,
+  /// so a dead socket, or a session waiting out its backoff, reconnects at
+  /// once. After a timeout the relay may be overloaded, so a dead socket
+  /// reconnects after the usual jittered backoff.
+  void _checkConnection(
+    SessionStatus status,
+    Ref ref, {
+    bool networkChanged = false,
+  }) {
     if (_disposed || _paused || _ageRestricted) return;
     if (!_socketConnected || status != SessionStatus.connected) {
       if (status == SessionStatus.reconnecting && _connectStartedAt == null) {
@@ -61,13 +67,14 @@ extension _RelaySessionLiveness on RelaySessionNotifier {
           'Relay did not answer within $relayLivenessProbeTimeout',
         ),
       );
+      if (!networkChanged) return;
       // Reconnect now, as on resume, rather than after the backoff delay.
       _reconnectTimer?.cancel();
       _connect(ref.read(relayConfigProvider));
     });
   }
 
-  /// Whether [subId] is the probe's, which an EOSE or CLOSED answers.
+  /// Whether [subId] is the probe's, which its EOSE answers.
   bool _answerLivenessProbe(String subId) {
     if (subId != _liveness.subId) return false;
     _liveness.timer?.cancel();
