@@ -314,6 +314,9 @@ pub(crate) async fn update_persona_with<T: tauri::Runtime, R: Send + 'static>(
             let runtime = trim_optional(input.runtime);
             let model = trim_optional(input.model);
             let provider = trim_optional(input.provider);
+            if let Some(provider) = provider.as_deref() {
+                crate::managed_agents::validate_provider_value(provider)?;
+            }
 
             let _store_guard = state
                 .managed_agents_store_lock
