@@ -3,7 +3,7 @@
 //! the exact seam production spawn keys on.
 
 use crate::managed_agents::types::ManagedAgentRecord;
-use crate::managed_agents::ManagedAgentRuntimeKey;
+use crate::managed_agents::ManagedAgentRelayTarget;
 
 /// The one production derivation from a caller-bound workspace relay to the
 /// runtime-pair key `start_managed_agent_process` spawns and persists under.
@@ -11,18 +11,18 @@ use crate::managed_agents::ManagedAgentRuntimeKey;
 /// uses: a mutation that keys the spawn to anything but the bound value now
 /// fails the tests below, instead of leaving them green while a painted
 /// guard watches the door.
-pub(crate) fn bound_runtime_key(
+pub(crate) fn bound_runtime_target(
     record: &ManagedAgentRecord,
     workspace_relay: &crate::relay::ScopedWorkspaceRelay,
-) -> Result<ManagedAgentRuntimeKey, String> {
+) -> Result<ManagedAgentRelayTarget, String> {
     let relay_url =
         crate::relay::effective_agent_relay_url(&record.relay_url, workspace_relay.as_str());
-    ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)
+    ManagedAgentRelayTarget::new(record.pubkey.clone(), &relay_url)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::bound_runtime_key;
+    use super::bound_runtime_target;
     use crate::managed_agents::types::ManagedAgentRecord;
 
     fn record(pubkey: &str, relay_url: &str) -> ManagedAgentRecord {
@@ -46,9 +46,9 @@ mod tests {
     fn production_spawn_key_derives_from_the_bound_relay_not_the_post_switch_workspace() {
         // Round-8 regression: the previous test reconstructed the key
         // derivation by hand, so hard-coding a wrong tenant inside production
-        // spawn stayed green. This calls `bound_runtime_key` — the exact
-        // function `start_managed_agent_process` keys its spawn, receipt, and
-        // runtimes-map insert on — so that mutation now fails here.
+        // spawn stayed green. This calls `bound_runtime_target` — the exact
+        // function `start_managed_agent_process` uses for its child connection,
+        // receipt, and runtimes-map insert — so that mutation now fails here.
         let record = record(&"aa".repeat(32), ""); // never-pinned record
         let mut workspace = "wss://tenant-a.example".to_string();
         let bound = crate::relay::bind_expected_relay_scope(
@@ -58,11 +58,11 @@ mod tests {
         .expect("scope matches at bind time");
         workspace = "wss://tenant-b.example".to_string(); // the switch lands post-check
 
-        let key = bound_runtime_key(&record, &bound).expect("keyable record and relay");
-        assert_eq!(key.relay_url, "wss://tenant-a.example");
-        assert_eq!(key.pubkey, "aa".repeat(32));
+        let target = bound_runtime_target(&record, &bound).expect("keyable record and relay");
+        assert_eq!(target.key.relay_url, "wss://tenant-a.example");
+        assert_eq!(target.key.pubkey, "aa".repeat(32));
         assert_ne!(
-            key.relay_url, workspace,
+            target.key.relay_url, workspace,
             "the production spawn key must be unrepresentable for the post-switch tenant"
         );
     }
@@ -78,7 +78,21 @@ mod tests {
             crate::relay::bind_expected_relay_scope(None, "wss://tenant-a.example".to_string())
                 .expect("unscoped bind");
 
-        let key = bound_runtime_key(&record, &bound).expect("keyable record and relay");
-        assert_eq!(key.relay_url, "wss://tenant-a.example");
+        let target = bound_runtime_target(&record, &bound).expect("keyable record and relay");
+        assert_eq!(target.key.relay_url, "wss://tenant-a.example");
+    }
+
+    #[test]
+    fn production_spawn_target_preserves_the_bound_loopback_host_for_connection() {
+        let record = record(&"cc".repeat(32), "");
+        let bound = crate::relay::bind_expected_relay_scope(
+            Some("ws://localhost:3000"),
+            "ws://localhost:3000".to_string(),
+        )
+        .expect("scope matches at bind time");
+
+        let target = bound_runtime_target(&record, &bound).expect("valid loopback target");
+        assert_eq!(target.key.relay_url, "ws://127.0.0.1:3000");
+        assert_eq!(target.connection_url, "ws://localhost:3000");
     }
 }
