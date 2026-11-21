@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:clock/clock.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -95,6 +94,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         ref.read(relaySessionProvider).status == SessionStatus.connected,
   );
   bool _hasListeners = true;
+  ChannelOpenTimer? _openTimer;
   Timer? _liveDetachTimer;
   bool _liveDetached = false;
   late final _summaryRefreshes = ThreadSummaryRefreshQueue(
@@ -247,7 +247,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
   Future<void> _init() async {
     final initVersion = ++_initVersion;
-    final openedAt = _hasLoadedHistory ? null : clock.now();
     _initInFlight = true;
     _historyRefreshFailed = false;
     _clearSubscription();
@@ -256,6 +255,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     final ticket = cacheScope == null
         ? null
         : cache.capture(cacheScope, (channelId: channelId, rootId: ''));
+    ChannelOpenTimer? openTimer;
     try {
       final session = ref.read(relaySessionProvider.notifier);
 
@@ -315,6 +315,13 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         );
       }
 
+      // An open cut short by a reconnect keeps its clock: the wait counts.
+      final pending = _openTimer;
+      openTimer = _openTimer = _hasLoadedHistory
+          ? null
+          : pending != null && !pending.isDone
+          ? pending
+          : ChannelOpenTimer(ref);
       final historyVersion = ++_threadQuerySerial;
       final (history, wireEvents) = await _fetchNewestHistory(
         session,
@@ -348,7 +355,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       // catching up.
       _initInFlight = false;
       state = AsyncData(merged);
-      if (openedAt != null) noteChannelOpen(ref, openedAt);
+      // An open that finished after its page closed kept nobody waiting.
+      _hasListeners ? openTimer?.finish() : openTimer?.cancel();
       if (ticket != null && _hasListeners) {
         unawaited(
           saveMessagePage(
@@ -364,7 +372,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       unawaited(_fillNotices());
     } catch (e, st) {
       if (!_isCurrentInit(initVersion)) return;
-      if (openedAt != null) noteChannelOpen(ref, openedAt, error: e);
+      openTimer?.finish(error: e);
       if (isRelayChannelAccessDenied(e)) {
         _denyAccess(e, st, cache, cacheScope);
         return;
@@ -409,6 +417,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     SavedMessageScope? scope,
   ) {
     _detachLive();
+    // A refusal on the live subscription can end the first open first.
+    _openTimer?.finish(error: error);
     _lastKnownMessages = null;
     _hasLoadedHistory = false;
     _windowStore = const ChannelWindowStore.empty();

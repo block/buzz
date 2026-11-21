@@ -329,6 +329,35 @@ void main() {
     expect(s.counts.outcomes.last, (_connection, null));
   });
 
+  journey('an idle socket was alive until at most two pings before its loss', (
+    async,
+    s,
+  ) {
+    s.settle();
+    s.session.debugHandleMessage(['NOTICE', 'still here']);
+    s.settle(const Duration(minutes: 5));
+    s.counts.clear();
+    s.relay.drop();
+    s.settle(const Duration(seconds: 40));
+    final recovery = s.counts.events.singleWhere(
+      (e) => e.endpoint == _recovery,
+    );
+    expect(recovery.duration, lessThan(const Duration(seconds: 65)));
+
+    // A loss while in the background, before the pause, is not recovery.
+    s.counts.clear();
+    s.session.onAppPaused();
+    final auth = s.relay.holdAuth();
+    s.relay.drop();
+    s.settle(const Duration(seconds: 2));
+    s.session.onAppResumed();
+    s.settle(const Duration(seconds: 1));
+    auth.complete();
+    s.settle(const Duration(seconds: 40));
+    expect(s.counts.outcomes.last, (_connection, null));
+    expect(s.counts.outcomes, isNot(contains((_recovery, null))));
+  });
+
   journey('a community switch\'s first connect is not a reconnect', (async, s) {
     s.settle();
     // Nor a recovery, though the old connection was lost and not yet back.

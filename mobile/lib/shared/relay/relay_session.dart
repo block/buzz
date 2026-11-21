@@ -536,6 +536,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// Called by the app lifecycle provider when the app goes to background.
   void onAppPaused() {
     _backgroundedAt = _now();
+    _connectionLost = null;
     _backgroundGraceTimer?.cancel();
     _backgroundGraceTimer = Timer(_backgroundGraceDuration, () {
       unawaited(_pauseAfterCallbacks());
@@ -554,7 +555,6 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   void _pauseNow() {
     _paused = true;
-    _connectionLost = null;
     _socketConnected = false;
     _reconnectTimer?.cancel();
     _cancelAllHistory(Exception('App moved to background'));

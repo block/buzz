@@ -48,10 +48,17 @@ extension _RelaySessionDiagnostics on RelaySessionNotifier {
     final since = _connectStartedAt;
     if (since == null && _connectedAt == null) return;
     // Recovery runs from the last frame, since a dead socket can look open
-    // for a while. Failed attempts after the loss keep the first time.
-    if (_connectedAt != null) {
+    // for a while. Pongs never reach here, but one is due every ping
+    // interval, so a quiet socket was alive until at most two intervals
+    // before the loss. Failed attempts after the loss keep the first time.
+    if (_connectedAt != null && _backgroundedAt == null) {
+      final now = _now();
+      final provenAlive = now.subtract(RelaySocket.pingInterval * 2);
+      final inbound = _lastInboundAt;
       _connectionLost ??= (
-        at: _lastInboundAt ?? _now(),
+        at: inbound != null && inbound.isAfter(provenAlive)
+            ? inbound
+            : provenAlive,
         context: _contextGeneration,
       );
     }
