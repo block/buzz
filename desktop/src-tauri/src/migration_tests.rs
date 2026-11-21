@@ -62,6 +62,81 @@ fn copy_dir_all_preserves_nested_files_without_overwriting() {
     );
 }
 
+#[test]
+fn legacy_app_data_migration_copies_then_marks_probed() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join("xyz.block.sprout.app");
+    let current = dir.path().join("xyz.block.buzz.app");
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("identity.key"), "old-key").unwrap();
+
+    migrate_legacy_app_data_dir_at(&legacy, &current);
+
+    assert_eq!(
+        std::fs::read_to_string(current.join("identity.key")).unwrap(),
+        "old-key",
+        "legacy data must still migrate on the first run"
+    );
+    assert!(current.join(LEGACY_APP_DATA_PROBE_SENTINEL).exists());
+}
+
+/// The TCC fix: once probed, a later legacy dir is never touched again. Reading
+/// the foreign container is what triggers the macOS consent prompt, so "did not
+/// copy" here stands in for "did not prompt".
+#[test]
+fn legacy_app_data_migration_does_not_reprobe_after_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join("xyz.block.sprout.app");
+    let current = dir.path().join("xyz.block.buzz.app");
+    std::fs::create_dir_all(&current).unwrap();
+    std::fs::write(current.join(LEGACY_APP_DATA_PROBE_SENTINEL), b"").unwrap();
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("identity.key"), "old-key").unwrap();
+
+    migrate_legacy_app_data_dir_at(&legacy, &current);
+
+    assert!(
+        !current.join("identity.key").exists(),
+        "a marked install must not read the legacy container again"
+    );
+}
+
+/// The reported bug: no legacy dir at all (user never ran Sprout). The first
+/// launch marks the install so subsequent launches skip the probe entirely.
+#[test]
+fn legacy_app_data_migration_marks_even_when_legacy_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join("xyz.block.sprout.app");
+    let current = dir.path().join("xyz.block.buzz.app");
+
+    migrate_legacy_app_data_dir_at(&legacy, &current);
+
+    assert!(
+        current.join(LEGACY_APP_DATA_PROBE_SENTINEL).exists(),
+        "absent legacy dir must still mark, or the prompt repeats forever"
+    );
+}
+
+/// A reset wipes `app_data_dir` (and the legacy dir) together, clearing the
+/// marker — so a genuine post-reset migration can still run.
+#[test]
+fn legacy_app_data_migration_reruns_after_marker_wiped() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join("xyz.block.sprout.app");
+    let current = dir.path().join("xyz.block.buzz.app");
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join("identity.key"), "old-key").unwrap();
+
+    migrate_legacy_app_data_dir_at(&legacy, &current);
+    std::fs::remove_dir_all(&current).unwrap();
+    migrate_legacy_app_data_dir_at(&legacy, &current);
+
+    assert_eq!(
+        std::fs::read_to_string(current.join("identity.key")).unwrap(),
+        "old-key"
+    );
+}
+
 /// Helper: create a temp dir structure mimicking canonical + worktree layout.
 /// Packs live in a `.main` sibling (not canonical) to match real-world state.
 /// Returns `(parent_dir_handle, canonical_dir, worktree_dir)`.
