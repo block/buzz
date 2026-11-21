@@ -9,6 +9,7 @@ use crate::managed_agents::{
     HarnessSource,
 };
 mod auth_status_cache;
+mod auth_token;
 mod bounded_command;
 pub(crate) mod command_search;
 mod login_shell;
