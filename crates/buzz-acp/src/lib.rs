@@ -2372,6 +2372,9 @@ struct SteerAckEvent {
     /// and deadline extension target this, not the whole channel.
     scope: scope::SessionScope,
     event_id: String,
+    /// Message carrying the steered event's 👀: the original for an edit,
+    /// otherwise `event_id`.
+    reaction_target_id: String,
     /// `Ok` if the read loop sent any of the locked `SteerAck` variants.
     /// `Err` if the oneshot was dropped without a send — should not happen
     /// under the current read-loop drains, but if it ever does the main
@@ -4053,6 +4056,7 @@ async fn run_harness(
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    Some(&ctx.rest_client),
                 ) == LoopAction::Exit
                 {
                     break;
@@ -4081,6 +4085,7 @@ async fn run_harness(
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    Some(&ctx.rest_client),
                 );
                 if pool.live_count() == 0 && !any_respawn_in_flight(&crash_history) {
                     tracing::error!("all agents dead — exiting");
@@ -4100,6 +4105,7 @@ async fn run_harness(
                 channel_id,
                 scope,
                 event_id,
+                reaction_target_id,
                 ack,
             })) => {
                 // Mid-turn steer attempt resolved (either transport:
@@ -4213,7 +4219,15 @@ async fn run_harness(
                 );
                 if let Ok(pool::SteerAck::Success { session_id }) = &ack {
                     queue.extend_in_flight_deadline(&scope, config.max_turn_duration_secs);
-                    if !pool.record_successful_steer(&scope, event_id.clone(), session_id.clone()) {
+                    if record_successful_native_steer(
+                        &mut pool,
+                        Some(&ctx.rest_client),
+                        &scope,
+                        event_id.clone(),
+                        session_id.clone(),
+                        reaction_target_id,
+                    ) == pool::SteerRecord::Lost
+                    {
                         tracing::warn!(
                             channel = %channel_id,
                             event_id = %event_id,
@@ -4562,6 +4576,29 @@ fn signal_in_flight_task_for_scope(
     false
 }
 
+/// Record a successful native steer and own its 👀.
+///
+/// A steered event leaves the queue without joining a batch, so no
+/// `ReactionGuard` removes its reaction. While the turn that took it is in
+/// flight, the delivery is staged on that turn and its reaction is cleared
+/// when the turn returns or panics. Otherwise that turn has already ended,
+/// so the reaction is cleared now.
+fn record_successful_native_steer(
+    pool: &mut AgentPool,
+    rest_client: Option<&relay::RestClient>,
+    scope: &scope::SessionScope,
+    event_id: String,
+    session_id: String,
+    reaction_target_id: String,
+) -> pool::SteerRecord {
+    let record =
+        pool.record_successful_steer(scope, event_id, session_id, reaction_target_id.clone());
+    if record != pool::SteerRecord::InFlightTurn {
+        pool::spawn_clear_reactions(rest_client, [reaction_target_id]);
+    }
+    record
+}
+
 /// Attempt the non-cancelling (ACP) steer for a freshly-queued event.
 ///
 /// Caller invariants:
@@ -4612,6 +4649,7 @@ fn try_native_steer(
     // `<context>` still routes the reply. An edit's
     // block names its original (`Edit of:`) and the original's thread root.
     let event_id_hex = be.event.id.to_hex();
+    let reaction_target_id = be.routing_event_id();
     let body = native_steer_body(channel_id, &be);
 
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
@@ -4652,6 +4690,7 @@ fn try_native_steer(
                     channel_id,
                     scope: scope_for_watcher,
                     event_id: event_id_for_watcher,
+                    reaction_target_id,
                     ack,
                 });
             });
@@ -5295,6 +5334,12 @@ fn handle_prompt_result(
         .find(|meta| meta.agent_index == agent_index)
         .map(|meta| meta.successful_steer_deliveries.clone())
         .unwrap_or_default();
+    pool::spawn_clear_reactions(
+        rest_client,
+        successful_steer_deliveries
+            .iter()
+            .map(|delivery| delivery.reaction_target_id.clone()),
+    );
     pool.task_map_mut()
         .retain(|_, meta| meta.agent_index != agent_index);
     debug_assert_eq!(before, pool.task_map().len() + 1);
@@ -5702,6 +5747,7 @@ fn recover_panicked_agent(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    rest_client: Option<&relay::RestClient>,
 ) {
     let task_id = join_error.id();
     let Some(meta) = pool.task_map_mut().remove(&task_id) else {
@@ -5709,6 +5755,14 @@ fn recover_panicked_agent(
         return;
     };
     let i = meta.agent_index;
+    // The panicked task's `ReactionGuard` cleared its batch; events steered
+    // into the turn were never part of it.
+    pool::spawn_clear_reactions(
+        rest_client,
+        meta.successful_steer_deliveries
+            .iter()
+            .map(|delivery| delivery.reaction_target_id.clone()),
+    );
 
     // Requeue BEFORE mark_complete (same rationale as handle_prompt_result).
     if let Some(batch) = meta.recoverable_batch {
@@ -5815,6 +5869,7 @@ fn drain_ready_join_results(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    rest_client: Option<&relay::RestClient>,
 ) -> LoopAction {
     while let Some(Some(join_result)) = pool.join_set.join_next().now_or_never() {
         if let Err(join_error) = join_result {
@@ -5831,6 +5886,7 @@ fn drain_ready_join_results(
                 respawn_tx,
                 respawn_tasks,
                 observer.clone(),
+                rest_client,
             );
             if pool.live_count() == 0 && !any_respawn_in_flight(crash_history) {
                 return LoopAction::Exit;
@@ -10043,6 +10099,59 @@ mod edit_native_steer_tests {
     use super::*;
     use crate::edit_routing::test_support::{edit_event, message};
 
+    /// A steered edit's 👀 sits on its original message, so the ack that
+    /// settles the steer names the original as the reaction to clear.
+    #[tokio::test]
+    async fn steered_edit_ack_names_the_original_for_reaction_cleanup() {
+        let original = message(None);
+        let edit = edit_event(&original.id.to_hex(), &[]);
+        let steered = queue::BatchEvent {
+            event: edit.clone(),
+            prompt_tag: "@mention".into(),
+            received_at: std::time::Instant::now(),
+            edit: Some(queue::ResolvedEdit {
+                target_event_id: original.id.to_hex(),
+                target_thread_tags: queue::parse_thread_tags(&original),
+            }),
+        };
+        let scope = scope::SessionScope::Conversation {
+            channel_id: Uuid::new_v4(),
+        };
+        let mut pool = AgentPool::from_slots(vec![]);
+        let (steer_tx, mut steer_rx) = tokio::sync::mpsc::channel(1);
+        let task = pool.join_set.spawn(async {});
+        pool.task_map_mut().insert(
+            task.id(),
+            pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(scope.channel_id()),
+                scope: Some(scope.clone()),
+                turn_id: "t".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: Some(steer_tx),
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let (ack_tx, mut ack_rx) = mpsc::unbounded_channel();
+
+        assert!(try_native_steer(
+            &mut pool, &mut queue, scope, steered, &ack_tx
+        ));
+        let request = steer_rx.try_recv().expect("edit is sent as a native steer");
+        request
+            .ack_tx
+            .send(pool::SteerAck::Success {
+                session_id: "live-session".into(),
+            })
+            .unwrap();
+        let ack = ack_rx.recv().await.expect("ack reaches the main loop");
+
+        assert_eq!(ack.event_id, edit.id.to_hex());
+        assert_eq!(ack.reaction_target_id, original.id.to_hex());
+    }
+
     /// A steered edit renders its original's routing, not the edit's own
     /// bare `e` tag, so the live turn replies in the original's thread.
     #[test]
@@ -10901,6 +11010,7 @@ mod error_outcome_emission_tests {
                     crate::pool::SuccessfulSteerDelivery {
                         event_id: steer_event_id.into(),
                         session_id: "live-session".into(),
+                        reaction_target_id: steer_event_id.into(),
                     },
                 ]),
             },
@@ -10982,6 +11092,7 @@ mod error_outcome_emission_tests {
                     crate::pool::SuccessfulSteerDelivery {
                         event_id: "stale-event".into(),
                         session_id: "old-session".into(),
+                        reaction_target_id: "stale-event".into(),
                     },
                 ]),
             },
@@ -11044,11 +11155,15 @@ mod error_outcome_emission_tests {
         );
         let mut pool = AgentPool::from_slots(vec![Some(agent)]);
 
-        assert!(pool.record_successful_steer(
-            &scope::SessionScope::Conversation { channel_id },
-            steer_event_id.into(),
-            "live-session".into(),
-        ));
+        assert_eq!(
+            pool.record_successful_steer(
+                &scope::SessionScope::Conversation { channel_id },
+                steer_event_id.into(),
+                "live-session".into(),
+                steer_event_id.into(),
+            ),
+            crate::pool::SteerRecord::IdleSession
+        );
         let returned = pool.agents_mut()[0].as_ref().expect("idle returned agent");
         assert!(
             returned.state.deliveries[&scope::SessionScope::Conversation { channel_id }]
@@ -11071,11 +11186,15 @@ mod error_outcome_emission_tests {
         );
         let mut pool = AgentPool::from_slots(vec![Some(agent)]);
 
-        assert!(!pool.record_successful_steer(
-            &scope::SessionScope::Conversation { channel_id },
-            "stale-event".into(),
-            "old-session".into(),
-        ));
+        assert_eq!(
+            pool.record_successful_steer(
+                &scope::SessionScope::Conversation { channel_id },
+                "stale-event".into(),
+                "old-session".into(),
+                "stale-event".into(),
+            ),
+            crate::pool::SteerRecord::Lost
+        );
         let returned = pool.agents_mut()[0].as_ref().expect("replacement agent");
         assert!(
             returned.state.deliveries[&scope::SessionScope::Conversation { channel_id }]
@@ -11105,6 +11224,7 @@ mod error_outcome_emission_tests {
                     crate::pool::SuccessfulSteerDelivery {
                         event_id: "stale-event".into(),
                         session_id: "invalidated-session".into(),
+                        reaction_target_id: "stale-event".into(),
                     },
                 ]),
             },
@@ -11148,6 +11268,274 @@ mod error_outcome_emission_tests {
             .state
             .deliveries
             .contains_key(&scope::SessionScope::Conversation { channel_id }));
+    }
+
+    /// Stand in for the relay: answer every request with `[]` and forward
+    /// each `POST /query` body, so a test sees which reactions the harness
+    /// looks up to remove.
+    async fn reaction_query_relay() -> (relay::RestClient, mpsc::UnboundedReceiver<String>) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            keys: Keys::generate(),
+            auth_tag_json: None,
+        };
+        let (query_tx, query_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let query_tx = query_tx.clone();
+                tokio::spawn(async move {
+                    let mut reader = BufReader::new(socket);
+                    let mut request_line = String::new();
+                    reader.read_line(&mut request_line).await.ok()?;
+                    let mut content_length = 0;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).await.ok()? == 0 || line == "\r\n" {
+                            break;
+                        }
+                        if let Some((name, value)) = line.split_once(':') {
+                            if name.eq_ignore_ascii_case("content-length") {
+                                content_length = value.trim().parse().ok()?;
+                            }
+                        }
+                    }
+                    let mut body = vec![0; content_length];
+                    reader.read_exact(&mut body).await.ok()?;
+                    if request_line.starts_with("POST /query ") {
+                        let _ = query_tx.send(String::from_utf8(body).ok()?);
+                    }
+                    let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                        Content-Length: 2\r\nConnection: close\r\n\r\n[]";
+                    reader.get_mut().write_all(response.as_bytes()).await.ok()
+                });
+            }
+        });
+        (rest, query_rx)
+    }
+
+    /// Wait for the harness to look up its 👀 reaction on `event_id`, the
+    /// first step of removing it.
+    async fn expect_seen_reaction_lookup(
+        queries: &mut mpsc::UnboundedReceiver<String>,
+        event_id: &str,
+    ) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let body = queries.recv().await.expect("relay stand-in is running");
+                let filters: serde_json::Value = serde_json::from_str(&body).unwrap();
+                if filters[0]["kinds"] == serde_json::json!([7])
+                    && filters[0]["#e"] == serde_json::json!([event_id])
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("no reaction removal was started for {event_id}"));
+    }
+
+    fn steered_delivery(event_id: &str, session_id: &str) -> crate::pool::SuccessfulSteerDelivery {
+        crate::pool::SuccessfulSteerDelivery {
+            event_id: event_id.into(),
+            session_id: session_id.into(),
+            reaction_target_id: event_id.into(),
+        }
+    }
+
+    /// A message steered natively into a running turn never joins that
+    /// turn's batch, so the turn's `ReactionGuard` does not own its 👀. The
+    /// harness clears it when the turn returns (#9711).
+    #[tokio::test]
+    async fn natively_steered_message_loses_its_seen_reaction_when_the_turn_returns() {
+        let channel_id = Uuid::new_v4();
+        let steered_id = "c".repeat(64);
+        let (rest, mut queries) = reaction_query_relay().await;
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                scope: Some(scope::SessionScope::Conversation { channel_id }),
+                turn_id: "test-turn-id".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::from([steered_delivery(
+                    &steered_id,
+                    "live-session",
+                )]),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(scope::SessionScope::Conversation { channel_id }),
+            turn_id: "test-turn-id".into(),
+            outcome: PromptOutcome::Ok(crate::acp::StopReason::EndTurn),
+            batch: None,
+        };
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            Some(&rest),
+            &mut tokio::time::Instant::now(),
+        );
+
+        expect_seen_reaction_lookup(&mut queries, &steered_id).await;
+    }
+
+    /// A panicked turn's `ReactionGuard` clears only its batch; the messages
+    /// steered into it are cleared by panic recovery.
+    #[tokio::test]
+    async fn natively_steered_message_loses_its_seen_reaction_when_the_turn_panics() {
+        let channel_id = Uuid::new_v4();
+        let steered_id = "d".repeat(64);
+        let (rest, mut queries) = reaction_query_relay().await;
+        let mut pool = AgentPool::from_slots(vec![]);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let abort_handle = pool.join_set.spawn(async move {
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        pool.task_map_mut().insert(
+            abort_handle.id(),
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                scope: Some(scope::SessionScope::Conversation { channel_id }),
+                turn_id: "panic-turn-id".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::from([steered_delivery(
+                    &steered_id,
+                    "live-session",
+                )]),
+            },
+        );
+        started_rx.await.unwrap();
+        abort_handle.abort();
+        let join_error = pool.join_set.join_next().await.unwrap().unwrap_err();
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut typing_channels = HashMap::new();
+        // An open circuit keeps recovery from spawning a real agent.
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: Some(std::time::Instant::now() + Duration::from_secs(3600)),
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+
+        recover_panicked_agent(
+            &mut pool,
+            &mut queue,
+            &config,
+            join_error,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut typing_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            Some(&rest),
+        );
+
+        expect_seen_reaction_lookup(&mut queries, &steered_id).await;
+    }
+
+    /// A steer ack can arrive after its turn has returned. No turn will clear
+    /// that message's 👀 any more, so the harness clears it at once.
+    #[tokio::test]
+    async fn native_steer_ack_after_its_turn_returned_clears_the_seen_reaction() {
+        let channel_id = Uuid::new_v4();
+        let steered_id = "e".repeat(64);
+        let (rest, mut queries) = reaction_query_relay().await;
+        let mut agent = dummy_agent(0).await;
+        agent.state.sessions.insert(
+            scope::SessionScope::Conversation { channel_id },
+            "live-session".into(),
+        );
+        let mut pool = AgentPool::from_slots(vec![Some(agent)]);
+
+        let record = record_successful_native_steer(
+            &mut pool,
+            Some(&rest),
+            &scope::SessionScope::Conversation { channel_id },
+            steered_id.clone(),
+            "live-session".into(),
+            steered_id.clone(),
+        );
+
+        assert_eq!(record, crate::pool::SteerRecord::IdleSession);
+        expect_seen_reaction_lookup(&mut queries, &steered_id).await;
+    }
+
+    /// While the turn that took a steer is running, the steer's 👀 stays:
+    /// the delivery is staged on that turn, which clears it when it ends.
+    #[tokio::test]
+    async fn native_steer_ack_during_its_turn_defers_the_reaction_to_the_turn() {
+        let channel_id = Uuid::new_v4();
+        let steered_id = "f".repeat(64);
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                scope: Some(scope::SessionScope::Conversation { channel_id }),
+                turn_id: "test-turn-id".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+
+        let record = record_successful_native_steer(
+            &mut pool,
+            None,
+            &scope::SessionScope::Conversation { channel_id },
+            steered_id.clone(),
+            "live-session".into(),
+            steered_id.clone(),
+        );
+
+        assert_eq!(record, crate::pool::SteerRecord::InFlightTurn);
+        assert!(pool.task_map()[&task_id]
+            .successful_steer_deliveries
+            .contains(&steered_delivery(&steered_id, "live-session")));
     }
 
     /// Drive one error outcome through `handle_prompt_result` and return how
@@ -11285,6 +11673,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
         );
 
         let panic = observer
@@ -11377,6 +11766,7 @@ mod error_outcome_emission_tests {
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
+            None,
             None,
         );
 
