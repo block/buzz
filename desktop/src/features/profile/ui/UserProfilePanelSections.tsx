@@ -447,9 +447,14 @@ export function ProfileSummaryView({
               ? handleAgentPrimaryAction
               : undefined
           }
+          agentRestartLabel={
+            managedAgent?.backend.type === "provider"
+              ? "Deploy again"
+              : "Restart agent"
+          }
           onAgentRestart={
             isOwner === true &&
-            managedAgent?.backend.type === "local" &&
+            managedAgent &&
             (managedAgent.status === "running" ||
               managedAgent.status === "deployed")
               ? handleAgentRestart
