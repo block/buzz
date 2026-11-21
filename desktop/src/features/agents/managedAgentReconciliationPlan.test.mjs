@@ -9,12 +9,14 @@ import {
 } from "./managedAgentReconciliationPlan.ts";
 import { canonicalRelayUrl } from "./managedAgentRuntimeStatus.ts";
 
-test("reconcileRetryDelayMs walks a capped backoff then gives up", () => {
+test("reconcileRetryDelayMs walks a stepped backoff and caps at maximum delay", () => {
   assert.equal(reconcileRetryDelayMs(1), 5_000);
   assert.equal(reconcileRetryDelayMs(2), 30_000);
   assert.equal(reconcileRetryDelayMs(3), 120_000);
-  assert.equal(reconcileRetryDelayMs(4), null);
+  assert.equal(reconcileRetryDelayMs(4), 120_000);
+  assert.equal(reconcileRetryDelayMs(10), 120_000);
   assert.equal(reconcileRetryDelayMs(0), null);
+  assert.equal(reconcileRetryDelayMs(-1), null);
 });
 
 test("canonicalCommunityRelays dedupes by canonical form, keeps stored spelling", () => {
