@@ -5,6 +5,7 @@ import {
 } from "@/features/messages/lib/agentMentionRevalidation";
 import type { QueuedMediaAttachment } from "@/features/messages/lib/backgroundMediaUploadStore";
 import { enqueueBackgroundMediaUpload } from "@/features/messages/lib/backgroundMediaUploadStore";
+import { buildNip27WireBody } from "@/features/messages/lib/collectMentionPubkeys";
 import type { DraftMentionRef } from "@/features/messages/lib/useDrafts";
 import type { MessageComposerEditTarget } from "@/features/messages/ui/MessageComposer.types";
 import {
@@ -36,6 +37,7 @@ type SubmitMessageEditOptions = Omit<
     content: string,
     competingDisplayNames?: readonly string[],
   ) => string[];
+  getMentionDisplayName?: (pubkey: string) => string | null;
   getMentionRefs: (
     content: string,
     fallbackRefs: readonly DraftMentionRef[],
@@ -75,6 +77,7 @@ export async function submitMessageEdit({
   enqueueUpload = enqueueBackgroundMediaUpload,
   editTarget,
   extractMentionPubkeys,
+  getMentionDisplayName = () => null,
   getMentionRefs,
   originalContent,
   ownerPubkey,
@@ -140,8 +143,14 @@ export async function submitMessageEdit({
 
   const finishEdit = async (uploaded: ImetaMedia[], signal?: AbortSignal) => {
     // An explicit empty media tag set tells edit receivers to wipe attachments.
-    const { content: finalContent, mediaTags } = buildOutgoingMessage(
+    // Rewrite resolved @names to nostr:npub URIs before media markdown runs.
+    const wireBody = buildNip27WireBody(
       content,
+      extractMentionPubkeys(content, historicalNames),
+      getMentionDisplayName,
+    );
+    const { content: finalContent, mediaTags } = buildOutgoingMessage(
+      wireBody,
       [...draft.pendingImeta, ...uploaded],
       new Set([
         ...draft.spoileredAttachmentUrls,
