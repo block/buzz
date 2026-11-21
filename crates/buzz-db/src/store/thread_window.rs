@@ -11,7 +11,7 @@ use sqlx::{PgConnection, PgPool, QueryBuilder, Row};
 use uuid::Uuid;
 
 use crate::{
-    event::{push_auxiliary_target_match, row_to_stored_event},
+    event::{push_auxiliary_source, row_to_stored_event},
     Db, DbError, ReadSession, ReadSessionInner, Result, RouteDecision, RoutePredicate,
 };
 use buzz_datastore_tracing::datastore_span;
@@ -389,13 +389,20 @@ async fn select_aux(
 fn build_aux_sql(query: &AuxQuery<'_>) -> Result<QueryBuilder<sqlx::Postgres>> {
     // Filter on the reference index before sorting. An ORDER BY/LIMIT in the
     // inner scope can make the planner prefer walking the community time index.
+    let cursor = query.cursor.as_ref().map(cursor_key).transpose()?;
     let mut q = QueryBuilder::new(
         "WITH matching_aux AS MATERIALIZED ( \
          SELECT id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, deleted_at \
-         FROM events WHERE community_id = ",
+         FROM (",
     );
-    q.push_bind(query.community.as_uuid())
-        .push(" AND ((channel_id IS NULL AND kind IN (5, 9005)) OR channel_id = ANY(")
+    push_auxiliary_source(
+        &mut q,
+        query.community,
+        query.targets,
+        query.kinds.contains(&7),
+        cursor.as_ref().map(|(ts, _)| *ts),
+    );
+    q.push(") AS events WHERE ((channel_id IS NULL AND kind IN (5, 9005)) OR channel_id = ANY(")
         .push_bind(query.accessible)
         .push("))")
         .push(" AND kind = ANY(")
@@ -406,10 +413,8 @@ fn build_aux_sql(query: &AuxQuery<'_>) -> Result<QueryBuilder<sqlx::Postgres>> {
                 .map(|kind| *kind as i32)
                 .collect::<Vec<_>>(),
         )
-        .push(") AND ");
-    push_auxiliary_target_match(&mut q, "", query.targets);
-    if let Some(cursor) = &query.cursor {
-        let (ts, id) = cursor_key(cursor)?;
+        .push(")");
+    if let Some((ts, id)) = cursor {
         q.push(" AND created_at <= ")
             .push_bind(ts)
             .push(" AND (created_at < ")

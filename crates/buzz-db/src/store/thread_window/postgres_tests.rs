@@ -341,6 +341,19 @@ async fn thread_aux_indexes_live_references_and_skips_removed_reactions() {
         .await
         .unwrap();
 
+    let projected = make_event(&keys, channel, 7, "😄", Some(&root), ts);
+    db.insert_reaction_event_with_thread_metadata(
+        community,
+        &projected,
+        Some(channel),
+        None,
+        root.id.as_bytes(),
+        &keys.public_key().to_bytes(),
+        &projected.content,
+    )
+    .await
+    .unwrap();
+
     let targets = [root.id.to_hex()];
     let kinds = [5, 7, 9005, 40003];
     let query = AuxQuery {
@@ -358,9 +371,10 @@ async fn thread_aux_indexes_live_references_and_skips_removed_reactions() {
         .thread_window_aux(&query, &mut budget)
         .await
         .unwrap();
-    assert_eq!(page.events.len(), 1);
-    assert_eq!(page.events[0].event, live);
-    assert_eq!(budget.rows, 2);
+    let returned_ids: std::collections::BTreeSet<_> =
+        page.events.iter().map(|row| row.event.id).collect();
+    assert_eq!(returned_ids, [live.id, projected.id].into_iter().collect());
+    assert_eq!(budget.rows, 3);
     assert!(page.target_ids.contains(&edit.id.to_hex()));
     assert!(!page.target_ids.contains(&removed.id.to_hex()));
     assert!(page.next_cursor.is_none());
@@ -369,8 +383,13 @@ async fn thread_aux_indexes_live_references_and_skips_removed_reactions() {
     generic.kinds = Some(kinds.map(|kind| kind as i32).to_vec());
     generic.e_tags = Some(targets.to_vec());
     let events = db.query_events(&generic).await.unwrap();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].event, live);
+    assert_eq!(
+        events
+            .iter()
+            .map(|row| row.event.id)
+            .collect::<std::collections::BTreeSet<_>>(),
+        returned_ids
+    );
 
     // Give the planner a selective lookup among ordinary live references.
     // Avoid an execution-time threshold, which varies with CI load and cache.

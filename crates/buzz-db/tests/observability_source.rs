@@ -2014,7 +2014,7 @@ fn event_insert_hook_inventory_carries_the_insert_timestamp() {
     actual.sort();
     let mut expected = [
         "event.rs: async fn insert_event_on(",
-        "event.rs: pub(crate) async fn insert_event_with_thread_metadata_tx(",
+        "event.rs: pub(crate) async fn insert_event_with_reaction_projection_tx(",
         "replaceable.rs: async fn replace_parameterized_event_in_transaction_impl(",
         "replaceable.rs: pub(crate) async fn replace_addressable_event_under_lock(",
         "channel_members.rs: pub async fn replace_member_event(",

@@ -37,6 +37,7 @@ CREATE TABLE events (
     d_tag       TEXT,
     not_before  BIGINT,
     delivered_at BIGINT,
+    reaction_read_projected BOOLEAN NOT NULL DEFAULT FALSE,
     PRIMARY KEY (community_id, created_at, id)
 ) PARTITION BY RANGE (created_at);
 
@@ -70,11 +71,11 @@ CREATE INDEX idx_events_search_tsv ON events USING GIN (search_tsv);
 -- reads. Mirrors migrations/0004; jsonb_path_ops supports exactly @>.
 CREATE INDEX idx_events_tags_gin ON events USING GIN (tags jsonb_path_ops);
 
--- Exact auxiliary e-tag references. Exclude deleted reactions from the
--- posting lists so window reads do not walk their retained event history.
+-- Exact references for auxiliary events outside the reaction projection.
+-- Soft-deleted reactions do not belong to either source.
 CREATE INDEX idx_events_window_aux_e_tags ON events USING GIN (
     jsonb_path_query_array(tags, 'strict $[*] ? (@.type() == "array" && @[0] == "e" && @[1].type() == "string")[1]', '{}'::jsonb, true)
-) WHERE kind IN (5, 7, 9005, 40003) AND (kind <> 7 OR deleted_at IS NULL);
+) WHERE kind IN (5, 7, 9005, 40003) AND (kind <> 7 OR (deleted_at IS NULL AND NOT reaction_read_projected));
 
 -- First valid edit target, matching the relay Rust rule and indexed probes.
 CREATE INDEX idx_events_media_edit_target ON events

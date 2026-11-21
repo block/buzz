@@ -10,6 +10,7 @@ CREATE TABLE reactions (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     removed_at          TIMESTAMPTZ,
     reaction_event_id   BYTEA,
+    reaction_event_created_at TIMESTAMPTZ,
     PRIMARY KEY (community_id, event_created_at, event_id, pubkey, emoji)
 );
 

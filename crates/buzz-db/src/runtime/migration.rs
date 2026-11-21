@@ -1036,7 +1036,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 106);
+        assert_eq!(migrations.len(), 107);
         assert_eq!(migrations[104].version, 105);
         assert!(strip_sql_comments(migrations[104].sql.as_str())
             .contains("ADD COLUMN finished BOOLEAN NOT NULL DEFAULT true;"));
@@ -3501,6 +3501,7 @@ mod postgres_tests {
             "user_deletion_fences",
             "workflow_runs",
             "push_gateway_installations",
+            "reactions",
         ] {
             assert_eq!(
                 columns(&desired, table).await,
@@ -3529,6 +3530,21 @@ mod postgres_tests {
             schema_objects(&migrated).await,
             Vec::<String>::new(),
             "the migrations leave a trigger, function, rule or foreign key"
+        );
+        let declared_projection = columns(&desired, "events")
+            .await
+            .into_iter()
+            .find(|(name, ..)| name == "reaction_read_projected");
+        assert!(
+            declared_projection.is_some(),
+            "events must declare the reaction projection"
+        );
+        assert_eq!(
+            declared_projection,
+            columns(&migrated, "events")
+                .await
+                .into_iter()
+                .find(|(name, ..)| name == "reaction_read_projected")
         );
         async fn events_index(pool: &PgPool, name: &str) -> (String, String, String) {
             sqlx::query_as(
