@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { flushMentionDebounce, isPlainSpace } from "./flushMentionDebounce.ts";
+import {
+  flushMentionDebounce,
+  isMentionListStale,
+  isPlainSpace,
+} from "./flushMentionDebounce.ts";
 
 function ref(current) {
   return { current };
@@ -245,4 +249,39 @@ test("flushMentionDebounce preserves a team expansion selected with Enter", () =
   assert.equal(flushed?.suggestion.kind, "team");
   assert.deepEqual(flushed?.suggestion.teamMembers, teamMembers);
   assert.equal(flushed?.suggestion.notInChannel, false);
+});
+
+function staleOpts(overrides = {}) {
+  return {
+    debounceTimerRef: ref(null),
+    latestValueRef: ref("hi @car"),
+    latestCursorRef: ref(7),
+    searchableNamesLowerRef: ref(["carol", "alice"]),
+    renderedQuery: "car",
+    ...overrides,
+  };
+}
+
+test("isMentionListStale is false once the list matches the typed query", () => {
+  assert.equal(isMentionListStale(staleOpts()), false);
+});
+
+test("isMentionListStale is true while the debounce is pending", () => {
+  const opts = staleOpts({ debounceTimerRef: ref(setTimeout(() => {}, 1000)) });
+  assert.equal(isMentionListStale(opts), true);
+  clearTimeout(opts.debounceTimerRef.current);
+});
+
+test("isMentionListStale is true after the debounce fired but before the new list rendered", () => {
+  // The bare "@" list is still on screen while the editor already holds "@car".
+  assert.equal(isMentionListStale(staleOpts({ renderedQuery: "" })), true);
+});
+
+test("isMentionListStale is false outside an inline mention", () => {
+  const opts = staleOpts({
+    latestValueRef: ref("hello"),
+    latestCursorRef: ref(5),
+    renderedQuery: "",
+  });
+  assert.equal(isMentionListStale(opts), false);
 });
