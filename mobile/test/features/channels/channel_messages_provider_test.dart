@@ -732,6 +732,11 @@ void main() {
             ?.map((event) => event.id),
         ['z-history', 'a-history'],
       );
+      expect(
+        relaySession.historyFilters.single.limit,
+        50,
+        reason: 'the fallback asks for one window page, not 200 messages',
+      );
     },
   );
 

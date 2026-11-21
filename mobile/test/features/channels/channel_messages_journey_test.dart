@@ -63,13 +63,18 @@ void main() {
           container.read(relaySessionProvider).status,
           SessionStatus.connected,
         );
-        // History waits for the live EOSE, so a message committed before the
-        // relay admits the REQ is read, however long ago it was signed.
-        expect(relay.queries, isEmpty);
-        relay.seed([message('committed as it opened', now - 60)]);
+        // History doesn't wait for the relay to admit the live REQ. A message
+        // committed meanwhile, at or after the live filter's since, reaches
+        // the timeline through the live subscription's replay.
+        expect(
+          relay.queries,
+          hasLength(1),
+          reason: 'the channel window is read before the live EOSE',
+        );
+        relay.seed([message('committed as it opened', liveSince())]);
         admitted.complete();
         settle();
-        expect(timeline(), ['committed as it opened', 'first', 'second']);
+        expect(timeline(), ['first', 'second', 'committed as it opened']);
         expect(
           relay.queries,
           hasLength(2),

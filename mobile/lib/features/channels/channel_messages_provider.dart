@@ -26,6 +26,9 @@ const _maxCachedReplies = 2048;
 /// such as a profile pushed over the chat, returns without a catch-up fetch.
 const _liveDetachDelay = Duration(seconds: 30);
 
+/// Top-level messages per history page, from either transport.
+const _channelPageLimit = 50;
+
 const _channelLiveEventKinds = [
   ...EventKind.channelEventKinds,
   EventKind.channelThreadSummary,
@@ -256,52 +259,60 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     try {
       final session = ref.read(relaySessionProvider.notifier);
 
+      // The live REQ goes out before subscribe returns, so the history read
+      // below can start at once instead of waiting for the live EOSE: live
+      // events from here on are already covered.
+      final live = session.subscribe(
+        NostrFilter(
+          kinds: _channelLiveEventKinds,
+          tags: {
+            '#h': [channelId],
+          },
+          since: _currentUnixSeconds(),
+          limit: 200,
+        ),
+        (event) {
+          if (!_isCurrentInit(initVersion) || _accessDenial != null) return;
+          if (cacheScope != null &&
+              (event.channelId == null || event.channelId == channelId) &&
+              (event.kind == EventKind.deletion ||
+                  event.kind == EventKind.nip29DeleteEvent ||
+                  event.kind == EventKind.streamMessageEdit)) {
+            // Remove stale rows and retire a pending save of the old page.
+            final targets = {
+              for (final tag in event.tags)
+                if (tag.length > 1 && tag[0] == 'e') tag[1],
+            };
+            cache.removeChannelEvents(cacheScope, channelId, targets);
+          }
+          _handleLiveEvent(event);
+        },
+        onClosed: (message) {
+          if (!_isCurrentInit(initVersion) ||
+              !isRelayChannelAccessDenied(message)) {
+            return;
+          }
+          if (isRelayChannelSubscriptionRevoked(message)) {
+            // Auto-archive also closes live delivery. Retire this read and
+            // let a fresh history request establish whether access remains.
+            _detachLive();
+            ref.invalidateSelf();
+            return;
+          }
+          _denyAccess(
+            Exception(message),
+            StackTrace.current,
+            cache,
+            cacheScope,
+          );
+        },
+      );
+      final historyVersion = ++_threadQuerySerial;
+      final historyRead = _fetchNewestHistory(session, initVersion);
+      // Observe a failure now: the live subscription is awaited first.
+      historyRead.ignore();
       try {
-        final unsubscribe = await session.subscribe(
-          NostrFilter(
-            kinds: _channelLiveEventKinds,
-            tags: {
-              '#h': [channelId],
-            },
-            since: _currentUnixSeconds(),
-            limit: 200,
-          ),
-          (event) {
-            if (!_isCurrentInit(initVersion) || _accessDenial != null) return;
-            if (cacheScope != null &&
-                (event.channelId == null || event.channelId == channelId) &&
-                (event.kind == EventKind.deletion ||
-                    event.kind == EventKind.nip29DeleteEvent ||
-                    event.kind == EventKind.streamMessageEdit)) {
-              // Remove stale rows and retire a pending save of the old page.
-              final targets = {
-                for (final tag in event.tags)
-                  if (tag.length > 1 && tag[0] == 'e') tag[1],
-              };
-              cache.removeChannelEvents(cacheScope, channelId, targets);
-            }
-            _handleLiveEvent(event);
-          },
-          onClosed: (message) {
-            if (!_isCurrentInit(initVersion) ||
-                !isRelayChannelAccessDenied(message)) {
-              return;
-            }
-            if (isRelayChannelSubscriptionRevoked(message)) {
-              // Auto-archive also closes live delivery. Retire this read and
-              // let a fresh history request establish whether access remains.
-              _detachLive();
-              ref.invalidateSelf();
-              return;
-            }
-            _denyAccess(
-              Exception(message),
-              StackTrace.current,
-              cache,
-              cacheScope,
-            );
-          },
-        );
+        final unsubscribe = await live;
         if (!_isCurrentInit(initVersion)) {
           unsubscribe();
           return;
@@ -314,11 +325,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         );
       }
 
-      final historyVersion = ++_threadQuerySerial;
-      final (history, wireEvents) = await _fetchNewestHistory(
-        session,
-        initVersion,
-      );
+      final (history, wireEvents) = await historyRead;
       if (!_isCurrentInit(initVersion)) return;
       if (!_usingChannelWindow) {
         _legacyHistoryCursor = history.isEmpty
@@ -460,8 +467,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         '[ChannelMessagesNotifier] channel window unavailable for $channelId, falling back to WS history: $error',
       );
       _usingChannelWindow = false;
+      // The same page size as the window it stands in for.
       final history = await session.fetchHistory(
-        NostrFilters.messages(channelId),
+        NostrFilters.messages(channelId, limit: _channelPageLimit),
       );
       history.sort(compareChannelTimelineEventsChronologically);
       return (history, history.reversed.toList());
@@ -481,7 +489,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     tags: {
       '#h': [channelId],
     },
-    limit: 50,
+    limit: _channelPageLimit,
     until: cursor?.createdAt,
     extensions: {
       'top_level': true,
