@@ -1036,7 +1036,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 105);
+        assert_eq!(migrations.len(), 106);
         assert_eq!(migrations[104].version, 105);
         assert!(strip_sql_comments(migrations[104].sql.as_str())
             .contains("ADD COLUMN finished BOOLEAN NOT NULL DEFAULT true;"));
@@ -3530,14 +3530,27 @@ mod postgres_tests {
             Vec::<String>::new(),
             "the migrations leave a trigger, function, rule or foreign key"
         );
-        async fn media_edit_index(pool: &PgPool) -> (String, String, String) {
-            sqlx::query_as("SELECT pg_get_indexdef(indexrelid),indoption::text,pg_get_expr(indexprs,indrelid) FROM pg_index WHERE indexrelid='public.idx_events_media_edit_target'::regclass AND indisvalid AND indisready AND indislive")
-                .fetch_one(pool).await.expect("valid media edit index")
+        async fn events_index(pool: &PgPool, name: &str) -> (String, String, String) {
+            sqlx::query_as(
+                "SELECT pg_get_indexdef(indexrelid), indoption::text, pg_get_expr(indexprs,indrelid) \
+                 FROM pg_index WHERE indexrelid = to_regclass($1) \
+                 AND indisvalid AND indisready AND indislive",
+            )
+            .bind(name)
+            .fetch_one(pool)
+            .await
+            .unwrap_or_else(|error| panic!("expected a valid {name} index: {error}"))
         }
-        assert_eq!(
-            media_edit_index(&desired).await,
-            media_edit_index(&migrated).await
-        );
+        for name in [
+            "public.idx_events_media_edit_target",
+            "public.idx_events_window_aux_e_tags",
+        ] {
+            assert_eq!(
+                events_index(&desired, name).await,
+                events_index(&migrated, name).await,
+                "events index parity mismatch for {name}"
+            );
+        }
         // `channels` columns only: pgschema re-emits `idx_channels_id_live`
         // without its `INCLUDE (community_id)`, an index drift that predates
         // this check.

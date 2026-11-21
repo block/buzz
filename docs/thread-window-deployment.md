@@ -68,3 +68,21 @@ DROP INDEX CONCURRENTLY IF EXISTS public.idx_thread_metadata_window;
 Do not replace this with a non-concurrent build on a populated production table.
 The bounded startup failure is intentional; ingestion availability takes
 precedence over completing the rollout in one attempt.
+
+## Auxiliary reference index
+
+Migration `0106_window_aux_reference_index.sql` adds a partitioned GIN index
+for auxiliary event references. Auto-migrating relays build it under the
+migration's lock and statement deadlines. For a large relay that already uses
+out-of-band migrations, prebuild it using PostgreSQL's partitioned-index
+procedure.
+
+1. Create the parent index with `CREATE INDEX ... ON ONLY public.events`,
+   copying the index expression and predicate from the migration.
+2. On each attached `events` partition, including the default partition,
+   build the same index with `CREATE INDEX CONCURRENTLY` and a unique name.
+   Then attach it with `ALTER INDEX public.idx_events_window_aux_e_tags
+   ATTACH PARTITION public.<child_index>`. Coordinate with partition
+   maintenance so every attached partition is covered.
+3. Apply the migration. It verifies the parent definition and requires a valid
+   index before recording the migration.

@@ -70,6 +70,12 @@ CREATE INDEX idx_events_search_tsv ON events USING GIN (search_tsv);
 -- reads. Mirrors migrations/0004; jsonb_path_ops supports exactly @>.
 CREATE INDEX idx_events_tags_gin ON events USING GIN (tags jsonb_path_ops);
 
+-- Exact auxiliary e-tag references. Exclude deleted reactions from the
+-- posting lists so window reads do not walk their retained event history.
+CREATE INDEX idx_events_window_aux_e_tags ON events USING GIN (
+    jsonb_path_query_array(tags, 'strict $[*] ? (@.type() == "array" && @[0] == "e" && @[1].type() == "string")[1]', '{}'::jsonb, true)
+) WHERE kind IN (5, 7, 9005, 40003) AND (kind <> 7 OR deleted_at IS NULL);
+
 -- First valid edit target, matching the relay Rust rule and indexed probes.
 CREATE INDEX idx_events_media_edit_target ON events
     (community_id, channel_id, (decode(lower(jsonb_path_query_first(tags, 'strict $[*] ? (@[0] == "e" && @[1] like_regex "^[0-9A-Fa-f]{64}$")[1]', '{}'::jsonb, true) #>> '{}'), 'hex')), created_at DESC, id DESC)

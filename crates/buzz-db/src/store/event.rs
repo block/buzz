@@ -836,14 +836,15 @@ fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q
         }
     }
 
-    // e-tag pushdown: exact positional match with a JSONB containment
-    // prefilter, tags @> ANY('[["e","<hex>"]]', ...). Served by idx_events_tags_gin
-    // (GIN, jsonb_path_ops — migrations/0004): the channel-window aux closure
-    // fans this out once per retained row, which made unindexed containment
-    // the dominant scroll-back cost (~1.7s/page on staging).
-    if let Some(ref e_tags) = q.e_tags {
-        if !e_tags.is_empty() {
-            qb.push(" AND ");
+    if let Some(e_tags) = q.e_tags.as_deref().filter(|tags| !tags.is_empty()) {
+        qb.push(" AND ");
+        if q.kinds.as_deref().is_some_and(|kinds| {
+            kinds
+                .iter()
+                .all(|kind| matches!(kind, 5 | 7 | 9005 | 40003))
+        }) {
+            push_auxiliary_target_match(qb, col_prefix, e_tags);
+        } else {
             push_e_tag_match(qb, col_prefix, e_tags);
         }
     }
@@ -1325,6 +1326,26 @@ fn push_exact_tag_match(
     values: &[String],
 ) {
     push_tag_match(qb, col_prefix, name, values, false);
+}
+
+/// Match positional `e` references on auxiliary kinds. Keep the expression and
+/// partial predicate in sync with `idx_events_window_aux_e_tags`. Using a separate
+/// indexed expression keeps Postgres from choosing the all-event tags index,
+/// which retains a posting for every soft-deleted reaction.
+pub(crate) fn push_auxiliary_target_match(
+    qb: &mut QueryBuilder<sqlx::Postgres>,
+    col_prefix: &str,
+    targets: &[String],
+) {
+    qb.push(format!(
+        "{col_prefix}kind IN (5, 7, 9005, 40003) \
+         AND ({col_prefix}kind <> 7 OR {col_prefix}deleted_at IS NULL) \
+         AND jsonb_path_query_array({col_prefix}tags, \
+         'strict $[*] ? (@.type() == \"array\" && @[0] == \"e\" && @[1].type() == \"string\")[1]', \
+         '{{}}'::jsonb, true) ?| "
+    ))
+    .push_bind(targets)
+    .push("::text[]");
 }
 
 /// Above this many `#e` values, [`push_e_tag_match`] hides them from the
@@ -3103,7 +3124,7 @@ mod e_tag_filter_shape_tests {
     #[test]
     fn e_tag_query_filters_in_materialized_fence_before_order_limit() {
         let mut q = EventQuery::for_community(CommunityId::from_uuid(uuid::Uuid::nil()));
-        q.kinds = Some(vec![7]);
+        q.kinds = Some(vec![9]);
         q.e_tags = Some((0..188).map(|i| format!("{i:064x}")).collect());
         let qb = build_query_events_sql(&q, Range::All, page_limit(&q));
         let sql = qb.sql().as_str().to_owned();

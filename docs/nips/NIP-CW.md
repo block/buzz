@@ -299,6 +299,9 @@ For an authorized request the relay MUST:
    original signatures, deduplicate by event ID, and apply access control to
    every event. A target reference requires an `e` tag with the target ID
    in its second position; containing both strings elsewhere is insufficient.
+   Soft-deleted reactions do not participate in the closure. A deletion that
+   references only a removed reaction is available through an explicit event
+   query, subject to the usual access rules.
 5. Append one bounds event to each served page, including empty and exhausted
    pages. Refresh access for the **entire query batch** before releasing any
    events or bounds. If the reader's accessible-channel set changed while any

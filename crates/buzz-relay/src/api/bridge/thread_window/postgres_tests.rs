@@ -290,6 +290,7 @@ async fn thread_window_real_query_signed_bounds_and_sentinel_aux() {
     let reaction = f.aux(7, &replies[50], Some(f.channel)).await;
     let deletion = f.aux(5, &reaction, None).await;
     f.tombstone(&reaction).await;
+    let retained_reaction = f.aux(7, &replies[49], Some(f.channel)).await;
     let root_edit = f.aux(40003, &f.root, Some(f.channel)).await;
     let page = f.query(&filter).await;
     let rows = ids(&page, Some(9));
@@ -300,11 +301,14 @@ async fn thread_window_real_query_signed_bounds_and_sentinel_aux() {
     for (event, present) in [
         (&sentinel_aux, false),
         (&reaction, false),
-        (&deletion, true),
+        (&deletion, false),
+        (&retained_reaction, true),
         (&root_edit, true),
     ] {
         assert_eq!(all.contains(&event.id.to_hex().as_str()), present);
     }
+    let explicit_deletion = f.query(&json!({"ids":[deletion.id.to_hex()]})).await;
+    assert_eq!(ids(&explicit_deletion, Some(5)), [deletion.id.to_hex()]);
     let bounds = f.bounds(&page, &filter);
     assert_eq!(bounds["has_more"], true);
     assert_eq!(bounds["next_cursor"]["id"], replies[1].id.to_hex());
