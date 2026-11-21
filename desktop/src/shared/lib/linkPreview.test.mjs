@@ -9,12 +9,12 @@ import {
 
 test("parseSupportedLinkPreview parses GitHub pull request URLs", () => {
   assert.deepEqual(
-    parseSupportedLinkPreview("https://github.com/block/sprout/pull/1234"),
+    parseSupportedLinkPreview("https://github.com/block/buzz/pull/1234"),
     {
       kind: "github-pull-request",
-      href: "https://github.com/block/sprout/pull/1234",
+      href: "https://github.com/block/buzz/pull/1234",
       provider: "GitHub",
-      title: "block/sprout #1234",
+      title: "block/buzz #1234",
       typeLabel: "PR",
     },
   );
@@ -26,18 +26,18 @@ test("parseSupportedLinkPreview strips the fragment from the preview href", () =
   // snapshot-URL guard and drop the preview entirely.
   assert.equal(
     parseSupportedLinkPreview(
-      "https://github.com/block/sprout/pull/1234#pullrequestreview-99",
+      "https://github.com/block/buzz/pull/1234#pullrequestreview-99",
     )?.href,
-    "https://github.com/block/sprout/pull/1234",
+    "https://github.com/block/buzz/pull/1234",
   );
 });
 
 test("extractSupportedLinkPreviews collapses fragment variants of one page", () => {
   const previews = extractSupportedLinkPreviews(
     [
-      "https://github.com/block/sprout/pull/1234#pullrequestreview-99",
-      "https://github.com/block/sprout/pull/1234#issuecomment-1",
-      "https://github.com/block/sprout/pull/5678",
+      "https://github.com/block/buzz/pull/1234#pullrequestreview-99",
+      "https://github.com/block/buzz/pull/1234#issuecomment-1",
+      "https://github.com/block/buzz/pull/5678",
     ].join("\n"),
   );
   // Two anchors into the same page dedupe to one card at first occurrence; the
@@ -45,33 +45,30 @@ test("extractSupportedLinkPreviews collapses fragment variants of one page", () 
   assert.deepEqual(
     previews.map((preview) => preview.href),
     [
-      "https://github.com/block/sprout/pull/1234",
-      "https://github.com/block/sprout/pull/5678",
+      "https://github.com/block/buzz/pull/1234",
+      "https://github.com/block/buzz/pull/5678",
     ],
   );
 });
 
 test("parseSupportedLinkPreview parses GitHub repository URLs", () => {
-  assert.deepEqual(
-    parseSupportedLinkPreview("https://github.com/block/sprout"),
-    {
-      kind: "github-repository",
-      href: "https://github.com/block/sprout",
-      provider: "GitHub",
-      title: "block/sprout",
-      typeLabel: "repo",
-    },
-  );
+  assert.deepEqual(parseSupportedLinkPreview("https://github.com/block/buzz"), {
+    kind: "github-repository",
+    href: "https://github.com/block/buzz",
+    provider: "GitHub",
+    title: "block/buzz",
+    typeLabel: "repo",
+  });
 });
 
 test("parseSupportedLinkPreview trims markdown punctuation around GitHub URLs", () => {
   assert.deepEqual(
-    parseSupportedLinkPreview("https://github.com/block/sprout/pull/1234)."),
+    parseSupportedLinkPreview("https://github.com/block/buzz/pull/1234)."),
     {
       kind: "github-pull-request",
-      href: "https://github.com/block/sprout/pull/1234",
+      href: "https://github.com/block/buzz/pull/1234",
       provider: "GitHub",
-      title: "block/sprout #1234",
+      title: "block/buzz #1234",
       typeLabel: "PR",
     },
   );
@@ -79,7 +76,7 @@ test("parseSupportedLinkPreview trims markdown punctuation around GitHub URLs", 
 
 test("parseSupportedLinkPreview ignores unsupported GitHub URLs", () => {
   assert.equal(
-    parseSupportedLinkPreview("https://github.com/block/sprout/tree/main"),
+    parseSupportedLinkPreview("https://github.com/block/buzz/tree/main"),
     null,
   );
 });
@@ -312,13 +309,13 @@ test("extractSupportedLinkPreviews returns unique supported links in order", () 
   assert.deepEqual(
     extractSupportedLinkPreviews(
       [
-        "See github.com/block/sprout/pull/1",
+        "See github.com/block/buzz/pull/1",
         "and https://linear.app/buzz/issue/BUG-2/fix-preview",
-        "then https://github.com/block/sprout/pull/1 again.",
+        "then https://github.com/block/buzz/pull/1 again.",
         "plus https://docs.google.com/document/d/doc123/edit",
       ].join(" "),
     ).map((preview) => preview.title),
-    ["block/sprout #1", "BUG-2", "Document"],
+    ["block/buzz #1", "BUG-2", "Document"],
   );
 });
 
@@ -352,9 +349,9 @@ test("extractSupportedLinkPreviews excludes markdown-labeled Buzz clone URLs", (
 test("extractSupportedLinkPreviews handles markdown link serialization", () => {
   assert.deepEqual(
     extractSupportedLinkPreviews(
-      "[https://github.com/block/sprout/pull/44](https://github.com/block/sprout/pull/44)",
+      "[https://github.com/block/buzz/pull/44](https://github.com/block/buzz/pull/44)",
     ).map((preview) => preview.title),
-    ["block/sprout #44"],
+    ["block/buzz #44"],
   );
 });
 
@@ -396,14 +393,14 @@ test("extractSupportedLinkPreviews skips URLs inside inline and fenced code", ()
   assert.deepEqual(
     extractSupportedLinkPreviews(
       [
-        "`https://github.com/block/sprout/pull/1`",
+        "`https://github.com/block/buzz/pull/1`",
         "```",
         "https://linear.app/buzz/issue/BUG-2/fix-preview",
         "```",
-        "https://github.com/block/sprout/pull/3",
+        "https://github.com/block/buzz/pull/3",
       ].join("\n"),
     ).map((preview) => preview.title),
-    ["block/sprout #3"],
+    ["block/buzz #3"],
   );
 });
 
@@ -412,11 +409,11 @@ test("extractSupportedLinkPreviews skips URLs inside indented code", () => {
     extractSupportedLinkPreviews(
       [
         "    https://docs.google.com/document/d/hidden/edit",
-        "\tgithub.com/block/sprout/pull/4",
-        "https://github.com/block/sprout/pull/5",
+        "\tgithub.com/block/buzz/pull/4",
+        "https://github.com/block/buzz/pull/5",
       ].join("\n"),
     ).map((preview) => preview.title),
-    ["block/sprout #5"],
+    ["block/buzz #5"],
   );
 });
 
@@ -425,7 +422,7 @@ test("extractSupportedLinkPreviews skips markdown image link URLs", () => {
     extractSupportedLinkPreviews(
       [
         "![alt](https://docs.google.com/document/d/doc123/edit)",
-        "![alt](https://github.com/block/sprout)",
+        "![alt](https://github.com/block/buzz)",
         "[Composer attachment polish](https://docs.google.com/document/d/doc456/edit)",
       ].join("\n"),
     ).map((preview) => preview.title),
@@ -437,12 +434,12 @@ test("extractSupportedLinkPreviews treats other absolute HTTPS URLs as generic",
   assert.deepEqual(
     extractSupportedLinkPreviews(
       [
-        "https://evil-github.com/block/sprout/pull/1",
+        "https://evil-github.com/block/buzz/pull/1",
         "https://example.com/go/https://docs.google.com/document/d/doc123/edit",
-        "(https://github.com/block/sprout/pull/2)",
+        "(https://github.com/block/buzz/pull/2)",
       ].join(" "),
     ).map((preview) => preview.title),
-    ["evil-github.com", "example.com", "block/sprout #2"],
+    ["evil-github.com", "example.com", "block/buzz #2"],
   );
 });
 
@@ -452,10 +449,10 @@ test("extractSupportedLinkPreviews skips links inside inline spoilers", () => {
       [
         "Keep",
         "||[roadmap](https://docs.google.com/document/d/hidden/edit)||",
-        "hidden, but show https://github.com/block/sprout/pull/7",
+        "hidden, but show https://github.com/block/buzz/pull/7",
       ].join(" "),
     ).map((preview) => preview.title),
-    ["block/sprout #7"],
+    ["block/buzz #7"],
   );
 });
 
@@ -468,19 +465,19 @@ test("extractSupportedLinkPreviews skips links inside block spoilers", () => {
         "https://linear.app/buzz/issue/BUG-99/hidden-spoiler-link",
         "",
         "||",
-        "https://github.com/block/sprout/pull/8",
+        "https://github.com/block/buzz/pull/8",
       ].join("\n"),
     ).map((preview) => preview.title),
-    ["block/sprout #8"],
+    ["block/buzz #8"],
   );
 });
 
 test("isSupportedLinkAutolinkLabel matches normalized bare URL labels", () => {
-  const preview = parseSupportedLinkPreview("github.com/block/sprout/pull/5");
+  const preview = parseSupportedLinkPreview("github.com/block/buzz/pull/5");
   assert.ok(preview);
   assert.equal(
     isSupportedLinkAutolinkLabel(
-      "https://github.com/block/sprout/pull/5",
+      "https://github.com/block/buzz/pull/5",
       preview,
     ),
     true,
