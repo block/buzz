@@ -1,8 +1,14 @@
 //! In-memory NIP-FI deny set.
 //!
-//! Holds `(iss, pubkey) → until` entries.  No persistence — a relay restart
-//! forgets active entries (Option B, as decided).  The issuer re-push path is
-//! documented as the mitigation but is not implemented here.
+//! Holds `(iss, pubkey) → until` entries.  The map itself is RAM; the relay
+//! restores it from the shared store ([`super::CommandReplayGuard`]) at
+//! startup and after every lost subscription.  While a restore is pending,
+//! [`NipFiDenyMap::is_denied`] fails closed for every key.
+//!
+//! * **Restore fence**: [`NipFiDenyMap::begin_restore`] opens a new generation
+//!   and closes admission; [`NipFiDenyMap::finish_restore`] reopens it only
+//!   for the generation that is still current, so a restore overtaken by a
+//!   newer one can never reopen admission.
 //!
 //! ## Invariants
 //!
@@ -39,6 +45,7 @@ use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use nostr::PublicKey;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -332,6 +339,9 @@ pub struct NipFiDenyMap {
     shards: Arc<DashMap<String, Mutex<IssuerShard>>>,
     /// Default per-issuer capacity, used when no issuer-specific override exists.
     default_capacity: usize,
+    /// Current restore generation and the latest generation restored.
+    /// Admission is open only while they are equal.
+    restore: Arc<(AtomicU64, AtomicU64)>,
 }
 
 /// A per-issuer capacity override supplied at construction time.
@@ -359,7 +369,35 @@ impl NipFiDenyMap {
         Self {
             shards: Arc::new(shards),
             default_capacity,
+            restore: Arc::default(),
         }
+    }
+
+    /// Open a new restore generation and close admission until
+    /// [`Self::finish_restore`] is called with it.
+    pub fn begin_restore(&self) -> u64 {
+        self.restore.0.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Reopen admission if `generation` is still the current one.
+    pub fn finish_restore(&self, generation: u64) -> bool {
+        let current = self.restore.0.load(Ordering::SeqCst);
+        if current != generation {
+            return false;
+        }
+        self.restore.1.fetch_max(generation, Ordering::SeqCst);
+        // A newer generation may have begun meanwhile; it compares unequal.
+        true
+    }
+
+    /// True once the current restore generation has completed.
+    pub fn is_restored(&self) -> bool {
+        self.restore.1.load(Ordering::SeqCst) == self.restore.0.load(Ordering::SeqCst)
+    }
+
+    /// The issuers this map holds shards for (every configured issuer).
+    pub fn issuers(&self) -> Vec<String> {
+        self.shards.iter().map(|s| s.key().clone()).collect()
     }
 
     /// Returns `true` when `(iss, pubkey)` has an active deny entry at `now`.
@@ -369,7 +407,13 @@ impl NipFiDenyMap {
     ///
     /// Fails **closed**: a poisoned shard lock returns `true` (deny) so that a
     /// damaged shard cannot silently admit a denied pubkey.
+    ///
+    /// Also fails closed (returns `true` for every key) while a restore is
+    /// pending.
     pub fn is_denied(&self, issuer: &str, pubkey: &PublicKey, now: DateTime<Utc>) -> bool {
+        if !self.is_restored() {
+            return true;
+        }
         let pubkey_hex = pubkey.to_hex();
         match self.shards.get(issuer) {
             Some(shard) => shard
@@ -512,6 +556,29 @@ mod tests {
 
     fn map() -> NipFiDenyMap {
         NipFiDenyMap::new(100, vec![])
+    }
+
+    #[test]
+    fn pending_restore_denies_every_key_until_its_generation_finishes() {
+        let m = map();
+        let key = Keys::generate().public_key();
+        assert!(!m.is_denied("iss", &key, Utc::now()), "a new map is open");
+
+        let first = m.begin_restore();
+        assert!(
+            m.is_denied("iss", &key, Utc::now()),
+            "closed while restoring"
+        );
+        // A reconnect opens a newer generation before the first finishes.
+        let second = m.begin_restore();
+        assert!(!m.finish_restore(first), "a stale restore must not reopen");
+        assert!(m.is_denied("iss", &key, Utc::now()));
+        assert!(m.finish_restore(second));
+        assert!(!m.is_denied("iss", &key, Utc::now()));
+        // Clones share the fence.
+        let clone = m.clone();
+        m.begin_restore();
+        assert!(clone.is_denied("iss", &key, Utc::now()));
     }
 
     fn iss() -> &'static str {

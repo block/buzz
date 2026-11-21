@@ -427,13 +427,18 @@ A disconnect call causes the relay to:
    MUST NOT be subsequently admitted.  Connections
    registered under another issuer are not affected.
 
-The deny set is held **in relay memory only** — no durable storage, no schema
-changes.  A relay restart MAY forget active deny entries.  If the issuer stops
+The relay holds the deny set in memory and MAY also keep it in shared storage
+that outlives a relay process, with each entry expiring at its `until`.  A
+relay that keeps such storage MUST record an accepted command there before
+reporting success, and MUST NOT admit protected connections after a restart
+until it has restored the active entries.  A relay without such storage MAY
+forget active deny entries on restart.  In that case, if the issuer stops
 issuing assertions and re-push completes before any expired-entry reconnection
 attempt, the residual exposure after a restart is bounded by
 `max(0, min(exp, iat + maximum_assertion_age) - now)`.  If the issuer continues
 issuing or re-push does not complete in time, that formula does not apply and
-access may continue beyond it.  [FI-TRACE-DENY-SET]
+access may continue beyond it.  Neither mode covers loss of the shared storage
+itself.  [FI-TRACE-DENY-SET]
 
 The relay MUST bound the deny set size **per issuer**.  Capacity exhaustion under
 one issuer MUST NOT cause rejection of another issuer's commands; the `503`
@@ -999,7 +1004,9 @@ longest still-live assertion it has issued to ensure no unexpired assertion
 slides through the expiry boundary; this is an operational recommendation,
 not a protocol invariant.
 
-A relay restart clears the in-memory deny set.  The issuer SHOULD re-push
+A relay that holds the deny set only in memory clears it on restart; a relay
+that keeps it in shared storage restores active entries before admitting
+protected connections.  For memory-only relays, the issuer SHOULD re-push
 still-active entries on observed restart, but re-push is not required and
 carries no specified completion bound.  If the issuer stops issuing
 assertions and re-push completes before any expired-entry reconnection

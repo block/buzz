@@ -245,13 +245,167 @@ pub fn disconnect_publish_channel(mode: NipFiMode) -> &'static str {
 }
 
 /// Channels this pod receives disconnects on.  Shadow also hears enforce's
-/// real disconnects so its deny record matches.
-pub fn disconnect_subscribe_channels(mode: NipFiMode) -> &'static [&'static str] {
+/// real disconnects so its deny record matches.  An enforce pod hears shadow
+/// disconnects only with `accept_shadow` (`BUZZ_NIP_FI_ACCEPT_SHADOW_DISCONNECTS`),
+/// for the deploy that switches shadow → enforce.
+pub fn disconnect_subscribe_channels(
+    mode: NipFiMode,
+    accept_shadow: bool,
+) -> &'static [&'static str] {
     use buzz_pubsub::conn_control::{NIP_FI_DISCONNECT_CHANNEL, NIP_FI_SHADOW_DISCONNECT_CHANNEL};
-    if mode.observes_only() {
+    if mode.observes_only() || accept_shadow {
         &[NIP_FI_DISCONNECT_CHANNEL, NIP_FI_SHADOW_DISCONNECT_CHANNEL]
     } else {
         &[NIP_FI_DISCONNECT_CHANNEL]
+    }
+}
+
+/// Stores this pod restores its deny map from, matching
+/// [`disconnect_subscribe_channels`]: always the enforce store, plus the
+/// shadow store on a shadow pod or with `accept_shadow`.
+pub fn restore_sources(
+    pool: buzz_pubsub::RedisConnection,
+    mode: NipFiMode,
+    accept_shadow: bool,
+) -> Vec<Arc<dyn buzz_auth::CommandReplayGuard>> {
+    let mut sources: Vec<Arc<dyn buzz_auth::CommandReplayGuard>> = vec![Arc::new(
+        buzz_pubsub::RedisCommandReplayGuard::new(pool.clone()),
+    )];
+    if mode.observes_only() || accept_shadow {
+        sources.push(Arc::new(buzz_pubsub::RedisCommandReplayGuard::shadow(pool)));
+    }
+    sources
+}
+
+/// Load every stored deny entry from `sources` into this pod's map through
+/// [`apply_nip_fi_disconnect`].  `Ok` only when every entry was recorded; a
+/// store error or a capacity miss is `Err`, and the caller keeps admission
+/// closed.
+pub async fn restore_nip_fi_denies(
+    state: &crate::state::AppState,
+    sources: &[Arc<dyn buzz_auth::CommandReplayGuard>],
+) -> Result<(), &'static str> {
+    let Some(deny_map) = state.nip_fi_deny_map.as_deref() else {
+        return Ok(());
+    };
+    for source in sources {
+        for issuer in deny_map.issuers() {
+            let now = chrono::Utc::now();
+            let entries = source
+                .load_denies(&issuer, now)
+                .await
+                .map_err(|_| "store")?;
+            for (key, until) in entries {
+                let message = buzz_pubsub::NipFiDisconnect {
+                    issuer: issuer.clone(),
+                    pubkey_bytes: key.to_bytes().to_vec(),
+                    until_unix: until.timestamp(),
+                    until_unix_nanos: until.timestamp_subsec_nanos(),
+                };
+                if apply_nip_fi_disconnect(state, &message, now)
+                    != NipFiDisconnectApplyResult::Applied(buzz_auth::CrossPodMergeResult::Merged)
+                {
+                    return Err("capacity");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The single owner of this pod's deny map restoration and cross-pod
+/// consumer.
+///
+/// Admission (every `is_denied`) stays closed until a restore completes for
+/// the current generation.  Each loss of the Redis subscription, and each
+/// broadcast lag, opens a new generation and restores again, so a restore
+/// overtaken by a newer subscription can never reopen admission.  Order per
+/// generation: subscription confirmed → load stores → apply messages that
+/// arrived meanwhile → reopen.  Never returns while the broadcast is open.
+pub async fn run_nip_fi_disconnect_consumer(
+    state: Arc<crate::state::AppState>,
+    mut rx: tokio::sync::broadcast::Receiver<buzz_pubsub::NipFiDisconnect>,
+    mut subscription: tokio::sync::watch::Receiver<buzz_pubsub::NipFiSubscription>,
+    sources: Vec<Arc<dyn buzz_auth::CommandReplayGuard>>,
+) {
+    use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+    let mode = state.config.nip_fi.mode;
+    let Some(deny_map) = state.nip_fi_deny_map.clone() else {
+        return;
+    };
+    let retry = std::time::Duration::from_secs(1);
+    'generation: loop {
+        let generation = deny_map.begin_restore();
+        // Wait for a confirmed subscription.
+        let epoch = loop {
+            let current = *subscription.borrow_and_update();
+            if current.live {
+                break current.epoch;
+            }
+            if subscription.changed().await.is_err() {
+                return;
+            }
+        };
+        // Restore; retry while the subscription stays the same.
+        while let Err(reason) = restore_nip_fi_denies(&state, &sources).await {
+            metrics::counter!("buzz_nip_fi_deny_restore_failures_total", "reason" => reason)
+                .increment(1);
+            tracing::warn!(
+                reason,
+                "nip-fi: deny restore failed; admission stays closed"
+            );
+            tokio::time::sleep(retry).await;
+            if subscription.borrow().epoch != epoch {
+                continue 'generation;
+            }
+        }
+        // Apply what arrived during the restore.
+        loop {
+            match rx.try_recv() {
+                Ok(msg) => {
+                    apply_nip_fi_disconnect(&state, &msg, chrono::Utc::now());
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Lagged(n)) => {
+                    count_disconnect_event(
+                        mode,
+                        "buzz_nip_fi_disconnect_lag_total",
+                        "cross_pod",
+                        "lag",
+                        n,
+                    );
+                    continue 'generation;
+                }
+                Err(TryRecvError::Closed) => return,
+            }
+        }
+        if subscription.borrow().epoch != epoch || !deny_map.finish_restore(generation) {
+            continue;
+        }
+        loop {
+            tokio::select! {
+                msg = rx.recv() => match msg {
+                    Ok(msg) => {
+                        apply_nip_fi_disconnect(&state, &msg, chrono::Utc::now());
+                    }
+                    Err(RecvError::Lagged(n)) => {
+                        count_disconnect_event(mode, "buzz_nip_fi_disconnect_lag_total", "cross_pod", "lag", n);
+                        tracing::warn!("NIP-FI disconnect consumer lagged by {n} messages; restoring");
+                        continue 'generation;
+                    }
+                    Err(RecvError::Closed) => {
+                        tracing::error!("NIP-FI disconnect broadcast channel closed");
+                        return;
+                    }
+                },
+                changed = subscription.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    continue 'generation;
+                }
+            }
+        }
     }
 }
 
@@ -1928,6 +2082,7 @@ mod route_integration_tests {
         )];
         config.nip_fi = NipFiRelayConfig {
             profile_policies: Vec::new(),
+            accept_shadow_disconnects: false,
             source: Default::default(),
             mode: NipFiMode::Enforce,
             registry: registry.clone(),
@@ -3437,15 +3592,36 @@ mod route_integration_tests {
     impl buzz_auth::CommandReplayGuard for CountingReplayGuard {
         fn try_claim<'a>(
             &'a self,
-            issuer: &'a str,
-            jti: &'a str,
-            ttl_secs: u64,
+            claim: buzz_auth::CommandClaim<'a>,
         ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<bool, buzz_auth::AuthError>> + Send + 'a>,
+            Box<
+                dyn std::future::Future<
+                        Output = Result<buzz_auth::ClaimOutcome, buzz_auth::AuthError>,
+                    > + Send
+                    + 'a,
+            >,
         > {
             self.claims
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.inner.try_claim(issuer, jti, ttl_secs)
+            self.inner.try_claim(claim)
+        }
+
+        fn load_denies<'a>(
+            &'a self,
+            issuer: &'a str,
+            now: chrono::DateTime<chrono::Utc>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            Vec<(nostr::PublicKey, chrono::DateTime<chrono::Utc>)>,
+                            buzz_auth::AuthError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            self.inner.load_denies(issuer, now)
         }
     }
 
@@ -3514,27 +3690,337 @@ mod route_integration_tests {
         forged_command_leaves_shared_claim_unconsumed(guard.clone(), Some(&guard), false).await;
     }
 
-    struct FailingReplayGuard;
+    // ── Durable deny store: restore and unknown outcomes ────────────────────
+
+    /// A pod whose registry holds the test issuer (so restores apply), sharing
+    /// `store` as production pods share Redis.
+    async fn store_pod(
+        capacity: usize,
+        store: Arc<dyn buzz_auth::CommandReplayGuard>,
+    ) -> Arc<AppState> {
+        let mut config = crate::config::Config::for_test();
+        config.nip_fi.registry.insert(test_issuer_policy());
+        let mut state = build_test_app_state(capacity, config).await;
+        state.nip_fi_command_replay = store;
+        Arc::new(state)
+    }
+
+    /// Restart: a fresh pod is closed until it restores, then denies exactly
+    /// what other pods accepted.
+    #[tokio::test]
+    async fn restarted_pod_restores_denies_from_the_shared_store() {
+        let store: Arc<dyn buzz_auth::CommandReplayGuard> =
+            Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
+        let pod_a = store_pod(1000, Arc::clone(&store)).await;
+        let key = nostr::Keys::generate().public_key();
+        let token = mint_token(&key.to_hex(), 300, serde_json::json!({}));
+        assert_eq!(
+            post_command(&pod_a, &token, &key.to_hex()).await.0,
+            StatusCode::OK
+        );
+
+        let pod_b = store_pod(1000, Arc::clone(&store)).await;
+        let deny_map = pod_b.nip_fi_deny_map.as_deref().unwrap();
+        let generation = deny_map.begin_restore();
+        let other = nostr::Keys::generate().public_key();
+        assert!(is_denied(&pod_b, &other), "closed before restore");
+        restore_nip_fi_denies(&pod_b, &[store])
+            .await
+            .expect("restore");
+        assert!(deny_map.finish_restore(generation));
+        assert!(is_denied(&pod_b, &key), "restored deny");
+        assert!(!is_denied(&pod_b, &other), "only restored keys are denied");
+    }
+
+    /// Redis down at startup: the subscription never confirms, so the
+    /// consumer never restores and admission stays closed.  A store that
+    /// fails to load keeps it closed too.
+    #[tokio::test]
+    async fn unavailable_store_keeps_admission_closed() {
+        let pod = store_pod(
+            1000,
+            Arc::new(buzz_auth::InMemoryCommandReplayGuard::default()),
+        )
+        .await;
+        let key = nostr::Keys::generate().public_key();
+        pod.nip_fi_deny_map.as_deref().unwrap().begin_restore();
+        let (sub_tx, sub_rx) =
+            tokio::sync::watch::channel(buzz_pubsub::NipFiSubscription::default());
+        let consumer = tokio::spawn(run_nip_fi_disconnect_consumer(
+            Arc::clone(&pod),
+            pod.pubsub.subscribe_nip_fi_disconnect(),
+            sub_rx,
+            vec![Arc::new(FailingReplayGuard {
+                load_fails: true,
+                ..Default::default()
+            })],
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(is_denied(&pod, &key), "no subscription: closed");
+        sub_tx.send_modify(|s| {
+            s.epoch += 1;
+            s.live = true;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(is_denied(&pod, &key), "store unreadable: closed");
+        assert_eq!(
+            restore_nip_fi_denies(
+                &pod,
+                &[Arc::new(FailingReplayGuard {
+                    load_fails: true,
+                    ..Default::default()
+                })]
+            )
+            .await,
+            Err("store")
+        );
+        consumer.abort();
+    }
+
+    /// The consumer reopens admission once subscribed and restored, and
+    /// closes it again when the subscription is lost.
+    #[tokio::test]
+    async fn consumer_reopens_only_for_a_live_restored_subscription() {
+        let store: Arc<dyn buzz_auth::CommandReplayGuard> =
+            Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
+        let pod = store_pod(1000, Arc::clone(&store)).await;
+        let key = nostr::Keys::generate().public_key();
+        pod.nip_fi_deny_map.as_deref().unwrap().begin_restore();
+        let (sub_tx, sub_rx) =
+            tokio::sync::watch::channel(buzz_pubsub::NipFiSubscription::default());
+        let consumer = tokio::spawn(run_nip_fi_disconnect_consumer(
+            Arc::clone(&pod),
+            pod.pubsub.subscribe_nip_fi_disconnect(),
+            sub_rx,
+            vec![store],
+        ));
+        let set = |live| {
+            sub_tx.send_modify(|s| {
+                s.epoch += 1;
+                s.live = live;
+            })
+        };
+        let settle = || tokio::time::sleep(std::time::Duration::from_millis(50));
+        set(true);
+        settle().await;
+        assert!(!is_denied(&pod, &key), "open once restored");
+        set(false);
+        settle().await;
+        assert!(
+            is_denied(&pod, &key),
+            "closed after losing the subscription"
+        );
+        set(true);
+        settle().await;
+        assert!(!is_denied(&pod, &key), "open again after a fresh restore");
+        consumer.abort();
+    }
+
+    /// A Redis error before the script ran: 503, and the same signed command
+    /// succeeds on retry.
+    #[tokio::test]
+    async fn store_error_before_apply_returns_503_and_the_command_retries() {
+        let store = Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
+        let failing = store_pod(
+            1000,
+            Arc::new(FailingReplayGuard {
+                inner: Arc::clone(&store),
+                ..Default::default()
+            }),
+        )
+        .await;
+        let healthy = store_pod(1000, store).await;
+        let key = nostr::Keys::generate().public_key();
+        let token = mint_token(&key.to_hex(), 300, serde_json::json!({}));
+        assert_eq!(
+            post_command(&failing, &token, &key.to_hex()).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(!is_denied(&failing, &key));
+        assert_eq!(
+            post_command(&healthy, &token, &key.to_hex()).await.0,
+            StatusCode::OK
+        );
+    }
+
+    /// The script ran but its reply was lost: 503; the same command is then a
+    /// replay (403), a fresh command succeeds, and the stored deny restores.
+    #[tokio::test]
+    async fn lost_reply_returns_503_and_needs_a_fresh_command() {
+        let store = Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
+        let lossy = store_pod(
+            1000,
+            Arc::new(FailingReplayGuard {
+                inner: Arc::clone(&store),
+                applies: true,
+                ..Default::default()
+            }),
+        )
+        .await;
+        let healthy = store_pod(
+            1000,
+            Arc::clone(&store) as Arc<dyn buzz_auth::CommandReplayGuard>,
+        )
+        .await;
+        let key = nostr::Keys::generate().public_key();
+        let token = mint_token(&key.to_hex(), 300, serde_json::json!({}));
+        assert_eq!(
+            post_command(&lossy, &token, &key.to_hex()).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            post_command(&healthy, &token, &key.to_hex()).await.0,
+            StatusCode::FORBIDDEN,
+            "same jti is a replay"
+        );
+
+        let restarted = store_pod(
+            1000,
+            Arc::clone(&store) as Arc<dyn buzz_auth::CommandReplayGuard>,
+        )
+        .await;
+        restore_nip_fi_denies(&restarted, &[store.clone()])
+            .await
+            .expect("restore");
+        assert!(is_denied(&restarted, &key), "the applied deny was stored");
+
+        let fresh = mint_token(&key.to_hex(), 300, serde_json::json!({}));
+        assert_eq!(
+            post_command(&healthy, &fresh, &key.to_hex()).await.0,
+            StatusCode::OK
+        );
+    }
+
+    /// Capacity holds across pods: each pod's local map has room, but the
+    /// shared store refuses the second distinct key.
+    #[tokio::test]
+    async fn deny_set_capacity_is_enforced_across_pods() {
+        let store: Arc<dyn buzz_auth::CommandReplayGuard> =
+            Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
+        let pod_a = store_pod(1, Arc::clone(&store)).await;
+        let pod_b = store_pod(1, store).await;
+        let (a, b) = (
+            nostr::Keys::generate().public_key(),
+            nostr::Keys::generate().public_key(),
+        );
+        let token_a = mint_token(&a.to_hex(), 300, serde_json::json!({}));
+        let token_b = mint_token(&b.to_hex(), 300, serde_json::json!({}));
+        assert_eq!(
+            post_command(&pod_a, &token_a, &a.to_hex()).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            post_command(&pod_b, &token_b, &b.to_hex()).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(!is_denied(&pod_b, &b), "a full shared set records nothing");
+    }
+
+    /// A restore that does not fit the local map is a failure, never a
+    /// truncated success.
+    #[tokio::test]
+    async fn over_capacity_restore_is_not_complete() {
+        let store: Arc<dyn buzz_auth::CommandReplayGuard> =
+            Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
+        let writer = store_pod(10, Arc::clone(&store)).await;
+        for _ in 0..2 {
+            let key = nostr::Keys::generate().public_key();
+            let token = mint_token(&key.to_hex(), 300, serde_json::json!({}));
+            assert_eq!(
+                post_command(&writer, &token, &key.to_hex()).await.0,
+                StatusCode::OK
+            );
+        }
+        let small = store_pod(1, Arc::clone(&store)).await;
+        assert_eq!(
+            restore_nip_fi_denies(&small, &[store]).await,
+            Err("capacity")
+        );
+    }
+
+    #[test]
+    fn subscribe_channels_and_restore_sources_follow_mode_and_bridge() {
+        use buzz_pubsub::conn_control::{
+            NIP_FI_DISCONNECT_CHANNEL as E, NIP_FI_SHADOW_DISCONNECT_CHANNEL as S,
+        };
+        let pool = || buzz_pubsub::redis_connection("redis://127.0.0.1:6379").expect("lazy pool");
+        for (mode, bridge, channels) in [
+            (NipFiMode::Enforce, false, &[E][..]),
+            (NipFiMode::Enforce, true, &[E, S][..]),
+            (NipFiMode::Shadow, false, &[E, S][..]),
+        ] {
+            assert_eq!(
+                disconnect_subscribe_channels(mode, bridge),
+                channels,
+                "{mode:?} {bridge}"
+            );
+            assert_eq!(
+                restore_sources(pool(), mode, bridge).len(),
+                channels.len(),
+                "{mode:?} {bridge}"
+            );
+        }
+    }
+
+    /// Fails every claim.  With `applies`, the claim is applied to `inner`
+    /// first and only the reply is lost.
+    #[derive(Default)]
+    struct FailingReplayGuard {
+        inner: Arc<buzz_auth::InMemoryCommandReplayGuard>,
+        applies: bool,
+        load_fails: bool,
+    }
 
     impl buzz_auth::CommandReplayGuard for FailingReplayGuard {
         fn try_claim<'a>(
             &'a self,
-            _issuer: &'a str,
-            _jti: &'a str,
-            _ttl_secs: u64,
+            claim: buzz_auth::CommandClaim<'a>,
         ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<bool, buzz_auth::AuthError>> + Send + 'a>,
+            Box<
+                dyn std::future::Future<
+                        Output = Result<buzz_auth::ClaimOutcome, buzz_auth::AuthError>,
+                    > + Send
+                    + 'a,
+            >,
         > {
-            Box::pin(async {
+            Box::pin(async move {
+                if self.applies {
+                    self.inner.try_claim(claim).await?;
+                }
                 Err(buzz_auth::AuthError::Internal(
                     "simulated Redis outage".into(),
                 ))
             })
         }
+
+        fn load_denies<'a>(
+            &'a self,
+            issuer: &'a str,
+            now: chrono::DateTime<chrono::Utc>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            Vec<(nostr::PublicKey, chrono::DateTime<chrono::Utc>)>,
+                            buzz_auth::AuthError,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        > {
+            if self.load_fails {
+                return Box::pin(async {
+                    Err(buzz_auth::AuthError::Internal(
+                        "simulated Redis outage".into(),
+                    ))
+                });
+            }
+            self.inner.load_denies(issuer, now)
+        }
     }
 
     async fn guard_error_fails_closed_without_effect(observe_publishes: bool) {
-        let state = pod(1000, Arc::new(FailingReplayGuard)).await;
+        let state = pod(1000, Arc::new(FailingReplayGuard::default())).await;
         let key = nostr::Keys::generate().public_key();
         let sessions = IssuerSessions::register(&state, TEST_ISS, &key);
         let token = mint_token(&key.to_hex(), 300, serde_json::json!({}));
@@ -3650,6 +4136,7 @@ mod route_integration_tests {
             )];
             config.nip_fi = NipFiRelayConfig {
                 profile_policies: Vec::new(),
+                accept_shadow_disconnects: false,
                 source: Default::default(),
                 mode: NipFiMode::Shadow,
                 registry: registry.clone(),
@@ -3704,21 +4191,160 @@ mod route_integration_tests {
             assert!(verified.is_ok(), "shadow verifies commands: {verified:?}");
 
             let jti = uuid::Uuid::new_v4().to_string();
-            assert!(state
-                .nip_fi_command_replay
-                .try_claim(TEST_ISS, &jti, 60)
-                .await
-                .unwrap());
+            let claim = buzz_auth::CommandClaim {
+                issuer: TEST_ISS,
+                jti: &jti,
+                ttl_secs: 60,
+                target: &target,
+                until: chrono::Utc::now() + chrono::Duration::seconds(60),
+                capacity: 100,
+                now: chrono::Utc::now(),
+            };
+            use buzz_auth::ClaimOutcome::{Claimed, Replay};
+            assert_eq!(
+                state.nip_fi_command_replay.try_claim(claim).await.unwrap(),
+                Claimed
+            );
             let shadow = buzz_pubsub::RedisCommandReplayGuard::shadow(redis_pool.clone());
             let enforce = buzz_pubsub::RedisCommandReplayGuard::new(redis_pool);
-            assert!(
-                !shadow.try_claim(TEST_ISS, &jti, 60).await.unwrap(),
+            assert_eq!(
+                shadow.try_claim(claim).await.unwrap(),
+                Replay,
                 "claim is shadow-prefixed"
             );
-            assert!(
-                enforce.try_claim(TEST_ISS, &jti, 60).await.unwrap(),
+            assert_eq!(
+                enforce.try_claim(claim).await.unwrap(),
+                Claimed,
                 "enforce claim untouched"
             );
+        }
+
+        fn claim<'a>(
+            issuer: &'a str,
+            jti: &'a str,
+            target: &'a nostr::PublicKey,
+            until: chrono::DateTime<chrono::Utc>,
+            capacity: usize,
+        ) -> buzz_auth::CommandClaim<'a> {
+            buzz_auth::CommandClaim {
+                issuer,
+                jti,
+                ttl_secs: 60,
+                target,
+                until,
+                capacity,
+                now: chrono::Utc::now(),
+            }
+        }
+
+        /// The Redis script checks replay and shared capacity before writing,
+        /// keeps the exact maximum `until`, and records no entry for a past
+        /// `until`.
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn redis_store_checks_before_writing_and_keeps_exact_until() {
+            use buzz_auth::ClaimOutcome::{Claimed, Full, Replay};
+            let store = redis_guard();
+            let issuer = format!("https://{}.example", uuid::Uuid::new_v4());
+            let (a, b) = (
+                nostr::Keys::generate().public_key(),
+                nostr::Keys::generate().public_key(),
+            );
+            let base = chrono::Utc::now() + chrono::Duration::seconds(120);
+            // Two deadlines inside the same millisecond: the later must win.
+            let later = base + chrono::Duration::nanoseconds(900);
+            let earlier = base + chrono::Duration::nanoseconds(100);
+
+            assert_eq!(
+                store
+                    .try_claim(claim(&issuer, "j1", &a, later, 1))
+                    .await
+                    .unwrap(),
+                Claimed
+            );
+            assert_eq!(
+                store
+                    .try_claim(claim(&issuer, "j1", &a, later, 1))
+                    .await
+                    .unwrap(),
+                Replay
+            );
+            assert_eq!(
+                store
+                    .try_claim(claim(&issuer, "j2", &a, earlier, 1))
+                    .await
+                    .unwrap(),
+                Claimed,
+                "an existing key needs no new slot"
+            );
+            assert_eq!(
+                store
+                    .try_claim(claim(&issuer, "j3", &b, later, 1))
+                    .await
+                    .unwrap(),
+                Full
+            );
+            // `Full` wrote no claim: the same jti succeeds once there is room.
+            assert_eq!(
+                store
+                    .try_claim(claim(&issuer, "j3", &b, later, 2))
+                    .await
+                    .unwrap(),
+                Claimed
+            );
+            let past = chrono::Utc::now() - chrono::Duration::seconds(1);
+            let c = nostr::Keys::generate().public_key();
+            assert_eq!(
+                store
+                    .try_claim(claim(&issuer, "j4", &c, past, 2))
+                    .await
+                    .unwrap(),
+                Claimed
+            );
+            assert_eq!(
+                store
+                    .try_claim(claim(&issuer, "j4", &c, past, 2))
+                    .await
+                    .unwrap(),
+                Replay
+            );
+
+            let mut loaded = store
+                .load_denies(&issuer, chrono::Utc::now())
+                .await
+                .unwrap();
+            loaded.sort_by_key(|(k, _)| k.to_hex());
+            let mut expected = vec![(a, later), (b, later)];
+            expected.sort_by_key(|(k, _)| k.to_hex());
+            assert_eq!(
+                loaded, expected,
+                "exact maximum until; no entry for a past until"
+            );
+        }
+
+        /// The bridge: an enforce pod restores denies accepted by shadow pods
+        /// only with `BUZZ_NIP_FI_ACCEPT_SHADOW_DISCONNECTS`; without it the
+        /// shadow store is never read.
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn bridge_restores_shadow_period_denies_on_enforce_pods() {
+            let shadow = pod_in(NipFiMode::Shadow).await;
+            let key = nostr::Keys::generate().public_key();
+            let token = mint_token(&key.to_hex(), 300, serde_json::json!({}));
+            assert_eq!(
+                post_command(&shadow, &token, &key.to_hex()).await.0,
+                StatusCode::OK
+            );
+
+            for (bridge, denied) in [(false, false), (true, true)] {
+                let enforce = pod_in(NipFiMode::Enforce).await;
+                let sources =
+                    restore_sources(enforce.redis_pool.clone(), NipFiMode::Enforce, bridge);
+                restore_nip_fi_denies(&enforce, &sources)
+                    .await
+                    .expect("restore");
+                assert_eq!(is_denied(&enforce, &key), denied, "bridge={bridge}");
+            }
         }
 
         /// Run `state`'s production disconnect subscriber and apply what it
@@ -3728,7 +4354,7 @@ mod route_integration_tests {
             state: &Arc<AppState>,
         ) -> tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
             let mut rx = state.pubsub.subscribe_nip_fi_disconnect();
-            let channels = disconnect_subscribe_channels(state.config.nip_fi.mode);
+            let channels = disconnect_subscribe_channels(state.config.nip_fi.mode, false);
             tokio::spawn(Arc::clone(&state.pubsub).run_nip_fi_disconnect_subscriber(channels));
             let consumer = Arc::clone(state);
             let (seen_tx, seen) = tokio::sync::mpsc::unbounded_channel();

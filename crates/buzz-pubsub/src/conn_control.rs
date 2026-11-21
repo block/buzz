@@ -68,6 +68,25 @@ pub struct NipFiDisconnect {
     pub until_unix_nanos: u32,
 }
 
+/// State of this pod's NIP-FI disconnect subscription.  Every confirmed
+/// subscribe and every loss increments `epoch`; `live` tells which it was.
+/// A consumer that restores state on each live epoch misses no message
+/// published after Redis confirmed the subscription.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NipFiSubscription {
+    /// Increments on every change.
+    pub epoch: u64,
+    /// Redis has confirmed the subscription and it has not ended since.
+    pub live: bool,
+}
+
+fn set_subscription(tx: &tokio::sync::watch::Sender<NipFiSubscription>, live: bool) {
+    tx.send_modify(|s| {
+        s.epoch += 1;
+        s.live = live;
+    });
+}
+
 /// Encode a [`NipFiDisconnect`] message to a JSON string for publication on
 /// the Redis pub/sub channel.
 ///
@@ -234,17 +253,22 @@ async fn connect_and_subscribe(
 // ── NIP-FI disconnect subscriber ──────────────────────────────────────────────
 
 /// Subscribes to `channels` and forwards commands to the
-/// broadcast.  Mirrors [`run_conn_control_subscriber`]: reconnect loop with
+/// broadcast, reporting each confirmed subscription and loss on
+/// `subscription`.  Mirrors [`run_conn_control_subscriber`]: reconnect loop with
 /// exponential backoff.  Never returns.
 pub async fn run_nip_fi_disconnect_subscriber(
     redis_url: String,
     broadcast_tx: broadcast::Sender<NipFiDisconnect>,
+    subscription: tokio::sync::watch::Sender<NipFiSubscription>,
     channels: &'static [&'static str],
 ) {
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
 
     loop {
-        match connect_and_subscribe_nip_fi(&redis_url, &broadcast_tx, channels).await {
+        let result =
+            connect_and_subscribe_nip_fi(&redis_url, &broadcast_tx, &subscription, channels).await;
+        set_subscription(&subscription, false);
+        match result {
             Ok(()) => {
                 backoff_secs = BACKOFF_INITIAL_SECS;
                 tracing::warn!(
@@ -266,12 +290,15 @@ pub async fn run_nip_fi_disconnect_subscriber(
 async fn connect_and_subscribe_nip_fi(
     redis_url: &str,
     broadcast_tx: &broadcast::Sender<NipFiDisconnect>,
+    subscription: &tokio::sync::watch::Sender<NipFiSubscription>,
     channels: &[&str],
 ) -> Result<(), redis::RedisError> {
     let client = redis::Client::open(redis_url)?;
     let mut conn = client.get_async_pubsub().await?;
 
+    // Returns once Redis has confirmed the subscription.
     conn.subscribe(channels).await?;
+    set_subscription(subscription, true);
 
     tracing::info!("Redis NIP-FI disconnect subscriber connected — listening on {channels:?}");
 

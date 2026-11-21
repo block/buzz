@@ -2669,6 +2669,7 @@ mod tests {
         // a token-carrying request.
         config.nip_fi = NipFiRelayConfig {
             profile_policies: Vec::new(),
+            accept_shadow_disconnects: false,
             source: Default::default(),
             mode,
             registry: IssuerRegistry::new(),
@@ -4533,6 +4534,7 @@ mod tests {
 
         config.nip_fi = NipFiRelayConfig {
             profile_policies: Vec::new(),
+            accept_shadow_disconnects: false,
             source: Default::default(),
             mode: NipFiMode::Enforce,
             registry: {
