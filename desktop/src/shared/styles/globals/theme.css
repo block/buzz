@@ -832,6 +832,7 @@
 :root[data-glass-background] .group\/sidebar-wrapper,
 :root[data-glass-background] [data-testid="app-sidebar"],
 :root[data-glass-background] [data-testid="settings-sidebar"],
+:root[data-glass-background] [data-testid="community-rail"].bg-sidebar,
 :root[data-glass-background] [data-buzz-glass-inset],
 :root[data-glass-background] [data-buzz-glass-footer-wrap],
 :root[data-glass-background]
