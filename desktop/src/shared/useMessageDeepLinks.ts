@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { useOpenMessageLink } from "@/app/navigation/useOpenMessageLink";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { listenForNavigationDeepLinks } from "@/shared/deep-link";
 
@@ -13,34 +14,40 @@ import { listenForNavigationDeepLinks } from "@/shared/deep-link";
  * Mirrors the cold-start race handling of the `connect` listener in
  * `App.tsx`: late-arriving payloads from a fresh launch are picked up the
  * first time the listener mounts. Routing matches the in-app buzz://
- * handler in `markdown.tsx`: always `goChannel` with `messageId` and let
- * the channel route's existing scroll-into-view + getEventById backfill
- * resolve the target (works for both stream replies and forum threads).
+ * handler in `markdown.tsx`: resolve the target event's kind first, then
+ * route forum posts and comments to `goForumPost` and everything else to
+ * `goChannel`. `/channels/$channelId` cannot select a forum post, so
+ * routing a forum target through it lands on the post list instead.
  */
 export function useMessageDeepLinks(enabled = true) {
   const { goChannel } = useAppNavigation();
+  const openMessageLink = useOpenMessageLink();
 
   React.useEffect(() => {
     if (!enabled) return;
 
-    let cancelled = false;
+    const controller = new AbortController();
+    const { signal } = controller;
     const unlistenPromise = listenForNavigationDeepLinks(
       async (payload) => {
-        if (cancelled) return false;
-        await goChannel(payload.channelId);
-        return true;
+        if (signal.aborted) return false;
+        return goChannel(payload.channelId);
       },
       async (payload) => {
-        if (cancelled) return false;
-        return goChannel(payload.channelId, {
-          messageId: payload.messageId,
-          threadRootId: payload.threadRootId,
-        });
+        if (signal.aborted) return false;
+        return openMessageLink(
+          {
+            channelId: payload.channelId,
+            messageId: payload.messageId,
+            threadRootId: payload.threadRootId,
+          },
+          { signal, allowChannelFallback: false },
+        );
       },
     );
     return () => {
-      cancelled = true;
+      controller.abort();
       void unlistenPromise.then((unlisten) => unlisten());
     };
-  }, [enabled, goChannel]);
+  }, [enabled, goChannel, openMessageLink]);
 }
