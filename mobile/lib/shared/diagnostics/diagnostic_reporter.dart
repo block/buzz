@@ -121,6 +121,9 @@ enum DiagnosticScreen {
   mediaViewer,
   onboarding,
 
+  /// The age restriction that replaces the whole app.
+  ageRestriction,
+
   /// Any page the app does not name.
   other,
 }
