@@ -96,7 +96,7 @@ class _NotificationsSection extends ConsumerWidget {
                 // Until the relay confirms, off is not yet true.
                 subtitle: turningOff ? 'Turning off…' : null,
                 // Reserve horizontal room without letting the switch's 48dp
-                // layout height expand this single-line row.
+                // layout height expand the row.
                 trailing: const SizedBox(width: 60),
                 onTap: canToggle ? () => setEnabled(!shownEnabled) : null,
               ),
@@ -114,24 +114,37 @@ class _NotificationsSection extends ConsumerWidget {
           ),
         ),
         if (optOutFailed)
-          AppListRow(
+          Column(
             key: const ValueKey('push-opt-out-failed'),
-            title: "Couldn't turn off notifications",
-            titleColor: context.colors.error,
-            subtitle: 'They may continue.',
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextButton(onPressed: keepOn, child: const Text('Keep on')),
-                TextButton(
-                  onPressed: retryOptOut,
-                  child: const Text(
-                    'Retry',
-                    semanticsLabel: 'Retry turning off notifications',
-                  ),
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              AppListRow(
+                title: "Couldn't turn off notifications",
+                titleColor: context.colors.error,
+                subtitle: 'They may continue.',
+              ),
+              // Below the text, not trailing it, so large text sizes wrap
+              // the actions instead of covering the warning.
+              Padding(
+                padding: EdgeInsets.symmetric(
+                  horizontal: AppListInset.of(context) - Grid.xs,
                 ),
-              ],
-            ),
+                child: OverflowBar(
+                  alignment: MainAxisAlignment.end,
+                  overflowAlignment: OverflowBarAlignment.end,
+                  children: [
+                    TextButton(onPressed: keepOn, child: const Text('Keep on')),
+                    TextButton(
+                      onPressed: retryOptOut,
+                      child: const Text(
+                        'Retry',
+                        semanticsLabel: 'Retry turning off notifications',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
       ],
     );

@@ -20,12 +20,21 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../shared/community/community_storage_test.dart';
 
 void main() {
-  for (final outcome in ['loading', 'absent', 'error']) {
+  for (final outcome in ['loading', 'absent', 'error', 'large text']) {
     testWidgets('enabled community can turn push off with $outcome capability', (
       tester,
     ) async {
-      tester.view.physicalSize = const Size(430, 1800);
-      tester.view.devicePixelRatio = 1;
+      if (outcome == 'large text') {
+        // A small phone at a large text size: the failure's actions must
+        // stay reachable and leave the warning readable.
+        tester.view.physicalSize = const Size(750, 3600);
+        tester.view.devicePixelRatio = 2;
+        tester.platformDispatcher.textScaleFactorTestValue = 2;
+        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      } else {
+        tester.view.physicalSize = const Size(430, 1800);
+        tester.view.devicePixelRatio = 1;
+      }
       addTearDown(tester.view.reset);
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
