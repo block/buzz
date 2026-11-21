@@ -915,8 +915,7 @@ A relay SHOULD advertise core support in NIP-11 as:
 
 A multi-community relay MAY additionally publish a host-specific top-level
 `requires_nip_fi` boolean. This expresses mandatory admission evidence, separately
-from support for the protocol. In Buzz it is the stored community requirement OR
-global enforce; capability is advertised when global mode evaluates OR that
+from support for the protocol. Capability is advertised when global mode evaluates OR that
 requirement is true. Required hosts therefore retain both existing capability
 fields and the descriptor above. Optional shadow hosts still advertise capability.
 Root NIP-11 and `/info` MUST agree and use `Cache-Control: no-store`. An unknown or
