@@ -17,6 +17,8 @@ import {
 } from "@/shared/api/tauri";
 import { listPersonas } from "@/shared/api/tauriPersonas";
 import { startManagedAgent } from "@/shared/api/tauriManagedAgents";
+import { isManagedAgentLive } from "@/features/agents/lib/managedAgentControlActions";
+import { fetchAgentAvailability } from "@/features/agents/lib/useAgentAvailability";
 import type {
   AcpRuntime,
   AgentPersona,
@@ -202,11 +204,15 @@ export async function attachManagedAgentToChannel(
     // community's (agent, relay) pair, and `startManagedAgent` spawns that same
     // pair — so this ensures the pair the caller is attaching to, never
     // another community's.
-    const isRemote = input.agent.backend.type === "provider";
-    const needsStart = isRemote
-      ? input.agent.status !== "deployed"
-      : input.agent.status !== "running" && input.agent.status !== "deployed";
-    if (needsStart) {
+    // A provider's `deployed` receipt outlives a shut-down or reaped body, so
+    // read presence once: established offline means this attach redeploys.
+    // Every attach path (mention, add-to-channel, persona provisioning) shares
+    // this check rather than each caller threading presence in.
+    const availability =
+      input.agent.status === "deployed"
+        ? await fetchAgentAvailability(input.agent.pubkey)
+        : undefined;
+    if (!isManagedAgentLive(input.agent, availability)) {
       if (input.detachedStart) {
         input.detachedStart(input.agent);
       } else {

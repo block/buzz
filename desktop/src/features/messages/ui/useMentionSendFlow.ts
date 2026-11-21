@@ -26,6 +26,7 @@ import {
 import { useActivePreparedLinkPreviews } from "./useActivePreparedLinkPreviews";
 import { useDetachedAgentStart } from "./useDetachedAgentStart";
 import { useEnsureAgentMentionsReady } from "./useEnsureAgentMentionsReady";
+import { fetchAgentAvailability } from "@/features/agents/lib/useAgentAvailability";
 import { syncAgentsToActiveHuddle } from "@/shared/api/tauriChannels";
 import type { AcpRuntime, ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey, truncateNpub } from "@/shared/lib/pubkey";
@@ -159,6 +160,7 @@ export function useMentionSendFlow({
     getManagedAgentsByPubkey,
     getPersonas,
     memberPubkeys: mentions.memberPubkeys,
+    readAvailability: fetchAgentAvailability,
   });
   const createMentionedPersonaAgents = React.useCallback(
     async (
