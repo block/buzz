@@ -844,6 +844,23 @@ impl EventQueue {
         // Preserve any already-cancelled events from a prior cancel (double-cancel).
         entry.extend(batch.cancelled_events);
         entry.extend(batch.events);
+        // Enforce the same per-scope cap as the main queue. This side-map is
+        // only cleared when a turn *completes* (or the scope drains), so a
+        // sustained mid-turn interrupt/steer flood (every turn cancelled
+        // before it finishes) would otherwise grow both this map and the
+        // prompt `format_prompt` renders from it (see `cancelled_events`)
+        // without bound. Trim oldest (front) so the most recent "what you were
+        // working on" events survive, mirroring the queue's overflow handling.
+        if entry.len() > MAX_PENDING_PER_SCOPE {
+            let overflow = entry.len() - MAX_PENDING_PER_SCOPE;
+            entry.drain(0..overflow);
+            tracing::warn!(
+                scope = %scope.telemetry_label(),
+                limit = MAX_PENDING_PER_SCOPE,
+                dropped = overflow,
+                "cancelled-batch overflow — dropped oldest cancelled events to enforce cap"
+            );
+        }
         self.cancel_reasons.insert(scope, reason);
     }
 
@@ -5827,6 +5844,45 @@ mod tests {
             batch3.cancelled_events.len(),
             3,
             "should accumulate all 3 cancelled events"
+        );
+    }
+
+    #[test]
+    fn test_sustained_cancellation_caps_cancelled_batches() {
+        // A mid-turn interrupt/steer flood cancels every turn before it
+        // completes. Each cancel carries the accumulated cancelled events
+        // forward, so without a cap `cancelled_batches[scope]` (and the prompt
+        // rendered from it) would grow one event per cancel, without bound.
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        let iterations = MAX_PENDING_PER_SCOPE + 50;
+        for i in 0..iterations {
+            q.push(make_queued(ch, &format!("evt-{i}")));
+            let batch = q.flush_next().expect("a queued event should flush");
+            // Cancel the in-flight turn, then release the channel so the next
+            // flush can run — the real Interrupt/Steer path.
+            q.requeue_as_cancelled(batch, CancelReason::Interrupt);
+            q.mark_complete(ch);
+        }
+
+        let accumulated = q
+            .cancelled_batches
+            .get(&conv(ch))
+            .map(Vec::len)
+            .unwrap_or(0);
+        assert!(
+            accumulated <= MAX_PENDING_PER_SCOPE,
+            "cancelled_batches grew past the cap: {accumulated} > {MAX_PENDING_PER_SCOPE}",
+        );
+
+        // The cap trims the OLDEST events, so the most-recent one survives.
+        let newest = format!("evt-{}", iterations - 1);
+        assert!(
+            q.cancelled_batches
+                .get(&conv(ch))
+                .is_some_and(|evts| evts.iter().any(|be| be.event.content == newest)),
+            "the most-recent cancelled event must be retained",
         );
     }
 
