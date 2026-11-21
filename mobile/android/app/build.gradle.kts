@@ -31,6 +31,7 @@ val pushGatewayOrigins =
             ?.takeIf { it.startsWith(pushGatewayDefinePrefix) }
             ?.removePrefix(pushGatewayDefinePrefix)
     }
+// Keep this policy aligned with mobile/scripts/validate_push_gateway_origin.dart.
 fun isValidPushGatewayOrigin(value: String, requireHttps: Boolean): Boolean {
     val uri = runCatching { URI(value) }.getOrNull() ?: return false
     val scheme = uri.scheme?.lowercase()
@@ -40,7 +41,7 @@ fun isValidPushGatewayOrigin(value: String, requireHttps: Boolean): Boolean {
         (uri.rawPath.isNullOrEmpty() || uri.rawPath == "/") &&
         uri.rawQuery == null &&
         uri.rawFragment == null &&
-        (if (requireHttps) uri.port == -1 else uri.port == -1 || uri.port in 1..65535)
+        (uri.port == -1 || uri.port in 1..65535)
 }
 
 tasks.matching { it.name.startsWith("compileFlutterBuild") }.configureEach {
@@ -54,7 +55,7 @@ tasks.matching { it.name.startsWith("compileFlutterBuild") }.configureEach {
             throw GradleException(
                 "When supplied, BUZZ_PUSH_GATEWAY_URL must be an " +
                     (if (requireHttps) "HTTPS" else "HTTP(S)") +
-                    " origin without " + (if (requireHttps) "an explicit port, " else "") +
+                    " origin without " +
                     "credentials, path, query, or fragment.",
             )
         }

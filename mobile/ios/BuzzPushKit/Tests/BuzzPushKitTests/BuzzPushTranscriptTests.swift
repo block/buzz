@@ -138,7 +138,7 @@ final class BuzzPushTranscriptTests: XCTestCase {
 
     func testConfiguredTransportOriginKeepsRegisteredTranscriptAudience() throws {
         let bytes = try BuzzPushTranscript.delegate(
-            gatewayOrigin: URL(string: "https://push.example")!,
+            gatewayOrigin: URL(string: "https://push.example:8444")!,
             challengeId: Self.challengeId,
             challenge: Self.challenge,
             installationHandle: Self.installationHandle,
@@ -153,6 +153,17 @@ final class BuzzPushTranscriptTests: XCTestCase {
             String(decoding: bytes, as: UTF8.self)
                 .contains("\"audience\":\"https://push.buzz.xyz/v1/delegations\"")
         )
+    }
+
+    func testGatewayOriginPreservesExplicitHTTPSPort() throws {
+        for port in [443, 8444] {
+            let origin = "https://push.example:\(port)"
+            let gateway = try XCTUnwrap(URL(string: origin))
+            XCTAssertEqual(
+                try BuzzPushTranscript.canonicalGatewayOrigin(gateway).url.absoluteString,
+                origin
+            )
+        }
     }
 
     func testInvalidGatewayOriginRejected() {
