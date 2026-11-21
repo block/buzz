@@ -118,6 +118,8 @@ List<({int start, int end, String label})> mentionOccurrences(
 }
 
 /// Bind tagged qualifiers and ordinary aliases, never historical namesakes.
+/// Labels are keyed by [foldMentionLabel], as the text scan compares them,
+/// so two names that fold alike are ambiguous.
 Map<String, Set<String>> renderedMentionBindings(
   String content,
   Map<String, String> names, [
@@ -125,7 +127,7 @@ Map<String, Set<String>> renderedMentionBindings(
 ]) {
   final bindings = <String, Set<String>>{};
   void add(String label, String key) =>
-      (bindings[label.toLowerCase()] ??= {}).add(key.toLowerCase());
+      (bindings[foldMentionLabel(label)] ??= {}).add(key.toLowerCase());
   for (final entry in names.entries) {
     add(entry.value, entry.key);
     add(entry.value.split(RegExp(r'\s+')).first, entry.key);
@@ -136,7 +138,7 @@ Map<String, Set<String>> renderedMentionBindings(
     caseSensitive: false,
   ).allMatches(content)) {
     final key = match.group(2)!.toLowerCase();
-    final label = match.group(0)!.substring(1).toLowerCase();
+    final label = foldMentionLabel(match.group(0)!.substring(1));
     if (!mentionOccurrences(content, [
       label,
     ]).any((range) => range.start == match.start)) {
@@ -145,7 +147,7 @@ Map<String, Set<String>> renderedMentionBindings(
     // Text can deny historical aliases without a profile, never authorize keys.
     bindings[label] = keys.contains(key) ? {key} : <String>{};
     // Recipient tags/current names cannot establish the historical plain owner.
-    bindings[match.group(1)!.toLowerCase()] = <String>{};
+    bindings[foldMentionLabel(match.group(1)!)] = <String>{};
   }
   return bindings;
 }

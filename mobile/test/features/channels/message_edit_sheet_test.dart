@@ -14,7 +14,9 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:buzz/shared/utils/stylus_handwriting.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -524,6 +526,34 @@ void main() {
     }
   });
 
+  testWidgets('a name two tagged people share after folding opens as text', (
+    tester,
+  ) async {
+    // Review of #9841: `Sam` and `ſam` fold to one name, as the text scan
+    // compares them, so neither tag order may seed a chip for either key.
+    final sam = '1' * 64, longS = '2' * 64;
+    for (final tagged in [
+      [sam, longS],
+      [longS, sam],
+    ]) {
+      await _openEditSheet(
+        tester,
+        message: _message('ask @Sam', mentions: tagged),
+        members: Future.value([
+          for (final (key, name) in [(sam, 'Sam'), (longS, '\u017Fam')])
+            ChannelMember(
+              pubkey: key,
+              displayName: name,
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+        ]),
+      );
+      expect(controllerOf(tester).text, 'ask @Sam', reason: '$tagged');
+      expect(personChip, findsNothing, reason: '$tagged');
+    }
+  });
+
   testWidgets('two picked namesakes save as links and never as raw keys', (
     tester,
   ) async {
@@ -634,6 +664,66 @@ void main() {
     expect(tester.getTopLeft(field).dy, lessThan(top));
     expect(_rosterReads, before);
   });
+
+  testWidgets('iOS turns stylus handwriting off only while the edit is long', (
+    tester,
+  ) async {
+    bool handwriting() =>
+        tester.widget<TextField>(field).stylusHandwritingEnabled;
+    await _openEditSheet(
+      tester,
+      message: _message('a' * (stylusHandwritingMaxLength + 1)),
+    );
+    expect(handwriting(), isFalse);
+    // Opening never measured the message, not even on the first frame.
+    expect(
+      tester.testTextInput.log.map((call) => call.method),
+      isNot(contains('TextInput.setSelectionRects')),
+    );
+    await tester.enterText(field, 'short');
+    await tester.pump();
+    expect(handwriting(), isTrue);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+  testWidgets('iOS closes a Scribble writing gap left after losing focus', (
+    tester,
+  ) async {
+    Future<void> sendScribble(String method, [List<Object> size = const []]) =>
+        tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+          SystemChannels.textInput.name,
+          SystemChannels.textInput.codec.encodeMethodCall(
+            MethodCall('TextInputClient.$method', <Object>[-1, ...size]),
+          ),
+          (_) {},
+        );
+    bool hasWritingGap() {
+      var found = false;
+      tester
+          .state<EditableTextState>(find.byType(EditableText))
+          .renderEditable
+          .text
+          ?.visitChildren((span) {
+            found = found || span is WidgetSpan;
+            return !found;
+          });
+      return found;
+    }
+
+    await _openEditSheet(tester, message: _message('abc'));
+    await sendScribble('insertTextPlaceholder', [300, 0]);
+    await tester.pump();
+    expect(hasWritingGap(), isTrue);
+    // When iOS closes the input connection itself, Flutter keeps the gap
+    // after the field loses focus, and ignores closing it once handwriting is
+    // off. So the edit crossing the cutoff without focus must close it.
+    await sendScribble('onConnectionClosed');
+    await tester.pump();
+    expect(tester.widget<TextField>(field).focusNode!.hasPrimaryFocus, isFalse);
+    expect(hasWritingGap(), isTrue);
+    controllerOf(tester).text = 'a' * (stylusHandwritingMaxLength + 1);
+    await tester.pump();
+    expect(hasWritingGap(), isFalse);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
   testWidgets('an unchanged or emptied edit saves nothing', (tester) async {
     final actions = await _openEditSheet(

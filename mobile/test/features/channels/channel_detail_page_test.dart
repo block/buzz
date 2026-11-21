@@ -85,6 +85,9 @@ import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/features/channels/message_mention_pill.dart';
+import 'package:buzz/shared/utils/string_utils.dart';
+import 'package:buzz/shared/profile/profile_event_parser.dart';
+import 'package:buzz/shared/profile/profile_snapshot.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
@@ -528,6 +531,10 @@ Widget _buildTestable({
             entry.value,
           ),
         ),
+      // Keep profile parsing real, but off the isolate fake async can't run.
+      profileEventBatchParserProvider.overrideWithValue(
+        (events) async => events.map(parseProfileEvent).toList(),
+      ),
       // Stub the relay client provider so preloadMembers doesn't crash.
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
@@ -14902,6 +14909,189 @@ void main() {
   });
 
   group('Edits', () {
+    testWidgets('an identity link pill names the key it opens', (tester) async {
+      // An edit carries no p tag, so the row resolves the keys its links
+      // name: a label written into the link can't pass Mallory off as Wes,
+      // and two edited namesakes keep their qualifiers.
+      final wes = '1' * 64;
+      final mallory = '2' * 64;
+      final scoutA = '3' * 64;
+      final scoutB = '4' * 64;
+      final unknown = '5' * 64;
+      final taggedUnknown = '6' * 64;
+      String link(String label, String key) =>
+          '[@$label](nostr:${fullNpub(key)})';
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'linked',
+              pubkey: 'alice',
+              content: 'Draft',
+              createdAt: 1000,
+            ),
+            _edit(
+              id: 'linked-edit',
+              targetId: 'linked',
+              content:
+                  'ok ${link('Wes', mallory)} '
+                  '${link('Scout', scoutA)} ${link('Scout', scoutB)} '
+                  '${link('Previous', unknown)}',
+              createdAt: 1100,
+            ),
+            // buzz-app writes a tagged mention as a link too.
+            _textMsg(
+              id: 'tagged-link',
+              pubkey: 'alice',
+              content: 'cc ${link('Tagged', taggedUnknown)}',
+              createdAt: 1200,
+              extraTags: [
+                ['p', taggedUnknown],
+              ],
+            ),
+          ],
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            wes: UserProfile(pubkey: wes, displayName: 'Wes'),
+            mallory: UserProfile(pubkey: mallory, displayName: 'Mallory'),
+            scoutA: UserProfile(pubkey: scoutA, displayName: 'Scout'),
+            scoutB: UserProfile(pubkey: scoutB, displayName: 'Scout'),
+          },
+          members: [
+            for (final key in ['alice', wes, scoutA, scoutB])
+              ChannelMember(
+                pubkey: key,
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final pills = tester
+          .widgetList<MessageMentionPill>(find.byType(MessageMentionPill))
+          .map((pill) => pill.label)
+          .toList();
+      // The newest row, the tagged link, draws first.
+      expect(pills, hasLength(5));
+      expect(pills[1], 'Mallory');
+      expect(pills.sublist(2, 4).toSet(), hasLength(2));
+      expect(pills.sublist(2, 4), everyElement(startsWith('Scout ')));
+      // A key with no name here, tagged or not, keeps the label written
+      // into its link.
+      expect([pills.first, pills.last], ['Tagged', 'Previous']);
+    });
+
+    testWidgets('an identity link pill catches up after restart and reconnect', (
+      tester,
+    ) async {
+      // Review of #9841: an untagged link must not keep a restored former
+      // name, must recover from an offline first lookup once the relay
+      // reconnects, and must not ask again for a key that has no profile.
+      final renamed = 'a' * 64;
+      final offline = 'b' * 64;
+      final nameless = 'c' * 64;
+      String link(String label, String key) =>
+          '[@$label](nostr:${fullNpub(key)})';
+      final config = _LinkedProfileConfig();
+      final storage = ProfileSnapshotStorage(_testPrefs);
+      final me = pubkeyFromNsec(config.build().nsec)!;
+      await storage.write(storage.capture(me, config.build().baseUrl), [
+        (
+          profile: UserProfile(pubkey: renamed, displayName: 'Old'),
+          createdAt: 1,
+          eventId: 'old',
+        ),
+      ]);
+      addTearDown(() => storage.remove(me, config.build().baseUrl));
+      final session = _LinkedProfileSession({renamed: 'New', offline: 'Back'})
+        ..offline = true;
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'links',
+              pubkey: 'alice',
+              content:
+                  'cc ${link('Renamed', renamed)} ${link('Written', offline)} '
+                  '${link('Nobody', nameless)}',
+              createdAt: 1000,
+            ),
+          ],
+          relayConfigNotifier: config,
+          relaySessionNotifier: session,
+          userCacheNotifier: UserCacheNotifier(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      List<String> labels() => tester
+          .widgetList<MessageMentionPill>(find.byType(MessageMentionPill))
+          .map((pill) => pill.label)
+          .toList();
+      // Offline: the restored name and the written labels.
+      expect(labels(), ['Old', 'Written', 'Nobody']);
+      expect(session.requested, containsAll([renamed, offline, nameless]));
+
+      // The relay comes back: one retry resolves every link.
+      session
+        ..offline = false
+        ..requested.clear()
+        ..setConnectionStatus(SessionStatus.reconnecting);
+      await tester.pump();
+      session.setConnectionStatus(SessionStatus.connected);
+      await tester.pumpAndSettle();
+      expect(labels(), ['New', 'Back', 'Nobody']);
+      expect(session.requested, unorderedEquals([renamed, offline, nameless]));
+
+      // A key with no profile is not asked for again when a pill rebuilds
+      // or remounts, while a key that failed would be.
+      session.requested.clear();
+      final cache = ProviderScope.containerOf(
+        tester.element(find.byType(MessageMentionPill).first),
+      ).read(userCacheProvider.notifier);
+      expect(cache.needsLinkedLookup(nameless), isFalse);
+      cache.requestLinked([nameless, renamed]);
+      await tester.pumpAndSettle();
+      expect(session.requested, isEmpty);
+    });
+
+    testWidgets('a row loads only the identity links it draws as pills', (
+      tester,
+    ) async {
+      final drawn = '7' * 64;
+      final quoted = '8' * 64;
+      final commented = '9' * 64;
+      String link(String key) => '[@Name](nostr:${fullNpub(key)})';
+      final preloaded = <String>{};
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'links',
+              pubkey: 'alice',
+              content:
+                  'see ${link(drawn)}\n\n> ~~~\n> ${link(quoted)}\n> ~~~\n\n'
+                  '<!-- ${link(commented)} -->',
+              createdAt: 1000,
+            ),
+          ],
+          userCacheNotifier: _FakeUserCacheNotifier(
+            const {},
+            preload: (pubkeys) async {
+              preloaded.addAll(pubkeys);
+              return true;
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(MessageMentionPill), findsOneWidget);
+      expect(preloaded, contains(drawn));
+      expect(preloaded, isNot(anyOf(contains(quoted), contains(commented))));
+    });
+
     testWidgets('edited messages show updated content and (edited) label', (
       tester,
     ) async {
@@ -22495,6 +22685,50 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
   }
 }
 
+/// Serves kind:0 profiles for identity-link lookups, or fails them while
+/// [offline], recording each requested key.
+class _LinkedProfileSession extends _IdentityUpdateRelaySession {
+  _LinkedProfileSession(this.names);
+
+  final Map<String, String> names;
+  bool offline = false;
+  final List<String> requested = [];
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (filter.kinds.length != 1 || filter.kinds.single != 0) {
+      return super.fetchHistory(filter, timeout: timeout);
+    }
+    final authors = filter.authors ?? const <String>[];
+    requested.addAll(authors);
+    if (offline) throw StateError('offline');
+    return [
+      for (final key in authors)
+        if (names[key] case final name?)
+          NostrEvent(
+            id: 'profile-$key',
+            pubkey: key,
+            createdAt: 2,
+            kind: 0,
+            tags: const [],
+            content: jsonEncode({'name': name}),
+            sig: 'sig',
+          ),
+    ];
+  }
+}
+
+class _LinkedProfileConfig extends RelayConfigNotifier {
+  @override
+  RelayConfig build() => RelayConfig(
+    baseUrl: 'https://relay.example',
+    nsec: nostr.Nip19.encode(prefix: nostr.Nip19Prefix.nsec, data: '1' * 64),
+  );
+}
+
 class _IdentityUpdateRelaySession extends RelaySessionNotifier {
   _IdentityUpdateRelaySession({this.profileRefresh});
 
@@ -22957,6 +23191,9 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 
   @override
   Future<bool> refresh(List<String> pubkeys) => preload(pubkeys);
+
+  @override
+  void requestLinked(Iterable<String> pubkeys) => preload(pubkeys.toList());
 
   void replace(UserProfile profile) {
     state = {...state, profile.pubkey.toLowerCase(): profile};

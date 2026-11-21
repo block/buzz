@@ -52,6 +52,11 @@ class CommunityStorage {
       .where((c) => _visible(c) && !c.accountSyncRemoved)
       .toList();
 
+  /// Whether the community [id] is still saved on this device, whether or not
+  /// this build shows it.
+  Future<bool> keeps(String id) async =>
+      (await _loadStored()).any((c) => c.id == id && !c.accountSyncRemoved);
+
   /// Device records and credential-free removal intents for account sync.
   Future<List<Community>> loadForAccountSync() async =>
       (await _loadStored()).where(_visible).toList();

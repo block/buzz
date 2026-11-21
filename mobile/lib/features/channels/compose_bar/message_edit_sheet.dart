@@ -40,6 +40,11 @@ class _MessageEditSheet extends HookConsumerWidget {
     );
     useEffect(() => controller.dispose, [controller]);
     final focusNode = useFocusNode();
+    final stylusHandwriting = useMemoized(
+      () => StylusHandwritingCutoff(controller, focusNode),
+      [controller, focusNode],
+    );
+    useEffect(() => stylusHandwriting.dispose, [stylusHandwriting]);
     final isModifyingText = useRef(false);
     final lastObservedEditingValue = useRef(controller.value);
 
@@ -136,6 +141,9 @@ class _MessageEditSheet extends HookConsumerWidget {
       seeded.value = (text: seed.text, bound: seedBound);
       return null;
     }, [controller, seedBound.join(',')]);
+    // Read after seeding, so a long message opens with handwriting already off
+    // and the first frame never measures it.
+    final stylusHandwritingEnabled = useValueListenable(stylusHandwriting);
 
     _usePlatformUndoBindings(controller, focusNode);
     final chooser = _useMentionChooser(
@@ -262,6 +270,7 @@ class _MessageEditSheet extends HookConsumerWidget {
                   autofocus: true,
                   minLines: 1,
                   maxLines: 5,
+                  stylusHandwritingEnabled: stylusHandwritingEnabled,
                   inputFormatters: [_ComposerChipEditingFormatter(controller)],
                   decoration: const InputDecoration(hintText: 'Edit message'),
                 ),
@@ -435,13 +444,15 @@ String _editedMentionContent(
 
   final keysByLabel = <String, Set<String>>{};
   for (final MapEntry(key: pubkey, value: name) in names.entries) {
-    (keysByLabel[name.toLowerCase()] ??= {}).add(pubkey);
-    keysByLabel['${name.toLowerCase()} ($pubkey)'] = {pubkey};
+    // Folded as the scan compares names, so `Sam` and `ſam` share one entry
+    // and an ambiguous historical label binds no key.
+    (keysByLabel[foldMentionLabel(name)] ??= {}).add(pubkey);
+    keysByLabel[foldMentionLabel('$name ($pubkey)')] = {pubkey};
   }
   final linked = [...mentions];
   for (final range in mentionOccurrences(draft, keysByLabel.keys)) {
     if (linked.any((m) => m.start < range.end && range.start < m.end)) continue;
-    if (keysByLabel[range.label.toLowerCase()] case final keys?
+    if (keysByLabel[foldMentionLabel(range.label)] case final keys?
         when keys.length == 1) {
       mentions.add(
         chip(range.start, range.end, keys.single, names[keys.single]),
