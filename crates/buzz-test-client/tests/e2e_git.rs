@@ -19,7 +19,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use buzz_media::S3AddressingStyle;
 use nostr::{EventBuilder, Keys, Kind, Tag};
@@ -81,6 +81,20 @@ async fn create_test_channel(keys: &Keys) -> String {
         .unwrap();
     post_event(&event).await;
     channel_uuid
+}
+
+/// Add a test identity to a channel so the read gate remains independent from
+/// the explicit push-grant decision exercised below.
+async fn add_test_channel_member(owner: &Keys, channel: &str, member: &Keys) {
+    let event = EventBuilder::new(Kind::Custom(9000), "")
+        .tags(vec![
+            Tag::parse(["h", channel]).unwrap(),
+            Tag::parse(["p", &member.public_key().to_hex()]).unwrap(),
+            Tag::parse(["role", "member"]).unwrap(),
+        ])
+        .sign_with_keys(owner)
+        .unwrap();
+    post_event(&event).await;
 }
 
 /// Run `git` with the Buzz credential helper and isolated config.
@@ -406,6 +420,187 @@ async fn git_clone_push_fetch_force_roundtrip() {
     );
     let tags = git(&["tag"], &tmp.path().join("clone4"), &owner_nsec);
     assert!(tags.contains("v1.0"), "tag v1.0 cloned back: {tags}");
+}
+
+#[tokio::test]
+#[ignore = "requires live relay + MinIO + git"]
+async fn explicit_push_grants_enforce_actor_ref_and_expiry_over_smart_http() {
+    use nostr::ToBech32;
+
+    let owner = Keys::generate();
+    let actor_a = Keys::generate();
+    let actor_b = Keys::generate();
+    let owner_hex = owner.public_key().to_hex();
+    let owner_nsec = owner.secret_key().to_bech32().unwrap();
+    let actor_a_hex = actor_a.public_key().to_hex();
+    let actor_a_nsec = actor_a.secret_key().to_bech32().unwrap();
+    let actor_b_hex = actor_b.public_key().to_hex();
+    let actor_b_nsec = actor_b.secret_key().to_bech32().unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let repo = format!("e2e-git-capability-{}", std::process::id());
+
+    let channel = create_test_channel(&owner).await;
+    add_test_channel_member(&owner, &channel, &actor_a).await;
+    add_test_channel_member(&owner, &channel, &actor_b).await;
+
+    let announce = EventBuilder::new(Kind::from(30617), "")
+        .tags(vec![
+            Tag::parse(["d", &repo]).unwrap(),
+            Tag::parse(["name", "explicit grant git e2e"]).unwrap(),
+            Tag::parse(["buzz-channel", &channel]).unwrap(),
+            // Older relays fail closed because neither actor is an owner.
+            Tag::parse(["buzz-protect", "refs/**", "push:owner"]).unwrap(),
+            Tag::parse(["buzz-git-policy", "explicit-grants-v1"]).unwrap(),
+            Tag::parse([
+                "buzz-git-grant",
+                &actor_a_hex,
+                "refs/heads/agent/a/**",
+                "push",
+                &(now + 3_600).to_string(),
+            ])
+            .unwrap(),
+            Tag::parse([
+                "buzz-git-grant",
+                &actor_b_hex,
+                "refs/heads/agent/b/**",
+                "push",
+                &(now + 3_600).to_string(),
+            ])
+            .unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .unwrap();
+    post_event(&announce).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let tmp = tempdir_named("buzz-e2e-git-capability");
+    let url = format!("{}/git/{}/{}", relay_http_url(), owner_hex, repo);
+    git(
+        &["clone", "--quiet", &url, "actor-a"],
+        tmp.path(),
+        &actor_a_nsec,
+    );
+    let worktree = tmp.path().join("actor-a");
+    std::fs::write(worktree.join("README.md"), "explicit capability canary\n").unwrap();
+    git(&["add", "."], &worktree, &actor_a_nsec);
+    git(
+        &["commit", "--quiet", "-m", "capability canary"],
+        &worktree,
+        &actor_a_nsec,
+    );
+    let commit = git(&["rev-parse", "HEAD"], &worktree, &actor_a_nsec)
+        .trim()
+        .to_string();
+
+    git(
+        &[
+            "push",
+            "--quiet",
+            "origin",
+            "HEAD:refs/heads/agent/a/task-1",
+        ],
+        &worktree,
+        &actor_a_nsec,
+    );
+    git(
+        &[
+            "push",
+            "--quiet",
+            "origin",
+            "HEAD:refs/heads/agent/b/task-1",
+        ],
+        &worktree,
+        &actor_b_nsec,
+    );
+
+    for (label, actor_nsec, refspec) in [
+        ("main", &actor_a_nsec, "HEAD:refs/heads/main"),
+        (
+            "other actor prefix",
+            &actor_a_nsec,
+            "HEAD:refs/heads/agent/b/actor-a-cross-prefix",
+        ),
+        (
+            "foreign actor",
+            &actor_b_nsec,
+            "HEAD:refs/heads/agent/a/actor-b-foreign",
+        ),
+    ] {
+        let output = git_status(&["push", "origin", refspec], &worktree, actor_nsec);
+        assert!(
+            !output.status.success(),
+            "{label} push unexpectedly succeeded:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let refs = git(&["ls-remote", &url], tmp.path(), &owner_nsec);
+    assert!(
+        refs.contains(&format!("{commit}\trefs/heads/agent/a/task-1")),
+        "actor A branch missing: {refs}"
+    );
+    assert!(
+        refs.contains(&format!("{commit}\trefs/heads/agent/b/task-1")),
+        "actor B branch missing: {refs}"
+    );
+    assert!(
+        !refs.contains("refs/heads/main"),
+        "main was created: {refs}"
+    );
+    assert!(
+        !refs.contains("cross-prefix") && !refs.contains("foreign"),
+        "a denied ref was created: {refs}"
+    );
+
+    let expired_repo = format!("{repo}-expired");
+    let expired_announce = EventBuilder::new(Kind::from(30617), "")
+        .tags(vec![
+            Tag::parse(["d", &expired_repo]).unwrap(),
+            Tag::parse(["name", "expired explicit grant git e2e"]).unwrap(),
+            Tag::parse(["buzz-channel", &channel]).unwrap(),
+            Tag::parse(["buzz-protect", "refs/**", "push:owner"]).unwrap(),
+            Tag::parse(["buzz-git-policy", "explicit-grants-v1"]).unwrap(),
+            Tag::parse([
+                "buzz-git-grant",
+                &actor_a_hex,
+                "refs/heads/agent/a/**",
+                "push",
+                &(now - 60).to_string(),
+            ])
+            .unwrap(),
+        ])
+        .custom_created_at(nostr::Timestamp::from(now - 120))
+        .sign_with_keys(&owner)
+        .unwrap();
+    post_event(&expired_announce).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let expired_url = format!(
+        "{}/git/{}/{}",
+        relay_http_url(),
+        owner.public_key().to_hex(),
+        expired_repo
+    );
+    let output = git_status(
+        &["push", &expired_url, "HEAD:refs/heads/agent/a/expired"],
+        &worktree,
+        &actor_a_nsec,
+    );
+    assert!(
+        !output.status.success(),
+        "expired grant unexpectedly pushed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expired_refs = git(&["ls-remote", &expired_url], tmp.path(), &owner_nsec);
+    assert!(
+        expired_refs.trim().is_empty(),
+        "expired push created a ref: {expired_refs}"
+    );
 }
 
 #[tokio::test]
