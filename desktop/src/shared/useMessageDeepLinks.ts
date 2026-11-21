@@ -35,6 +35,7 @@ export function useMessageDeepLinks(enabled = true) {
         return goChannel(payload.channelId, {
           messageId: payload.messageId,
           threadRootId: payload.threadRootId,
+          thread: payload.threadRootId ?? undefined,
         });
       },
     );
