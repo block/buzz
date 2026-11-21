@@ -146,6 +146,9 @@ const NIP_FI_EXEMPT_PREFIXES: &[&str] = &[
     "/favicon.svg",
     // Invite landing page (SPA) — subtree
     "/invite/",
+    // The conversation link landing page is exempt by its exact path shape in
+    // `nip_fi_guard_exempts`, not by a `/channel/` subtree, so a later route
+    // under `/channel/` stays guarded.
     // Git web GUI (SPA) — exact + subtree
     "/repos",
     // Internal HMAC/localhost control-plane endpoint for the pre-receive hook.
@@ -399,6 +402,12 @@ fn nip_fi_guard_exempts(state: &AppState, request: &Request<Body>) -> bool {
     });
 
     if exempt {
+        return true;
+    }
+
+    // Conversation link landing page (SPA): hands off to `buzz://` and reads
+    // no relay data. Only `/channel/<channel>[/<event>]`, as the SPA serves it.
+    if is_conversation_link_path(path) {
         return true;
     }
 
@@ -749,8 +758,22 @@ fn is_invite_landing_path(path: &str) -> bool {
         .is_some_and(|code| !code.is_empty() && !code.contains('/'))
 }
 
+/// `/channel/<channel>` or `/channel/<channel>/<event>`: a shareable https
+/// form of a `buzz://` conversation link. The page validates the ids; the
+/// relay only bounds the shape.
+fn is_conversation_link_path(path: &str) -> bool {
+    path.strip_prefix("/channel/").is_some_and(|rest| {
+        let mut segments = rest.split('/');
+        let channel = segments.next().is_some_and(|channel| !channel.is_empty());
+        let event = segments.next().is_none_or(|event| !event.is_empty());
+        channel && event && segments.next().is_none()
+    })
+}
+
 fn should_serve_spa(path: &str, serve_git_web_gui: bool) -> bool {
-    is_invite_landing_path(path) || (serve_git_web_gui && is_git_web_gui_path(path))
+    is_invite_landing_path(path)
+        || is_conversation_link_path(path)
+        || (serve_git_web_gui && is_git_web_gui_path(path))
 }
 
 fn is_git_web_gui_path(path: &str) -> bool {
@@ -1390,6 +1413,18 @@ mod tests {
     }
 
     #[test]
+    fn conversation_link_path_is_a_channel_and_an_optional_event() {
+        assert!(is_conversation_link_path("/channel/general"));
+        assert!(is_conversation_link_path("/channel/general/abc123"));
+        assert!(!is_conversation_link_path("/channel/"));
+        assert!(!is_conversation_link_path("/channel//abc123"));
+        assert!(!is_conversation_link_path("/channel/general/"));
+        assert!(!is_conversation_link_path("/channel/general/abc123/extra"));
+        assert!(!is_conversation_link_path("/channel"));
+        assert!(!is_conversation_link_path("/channels/general"));
+    }
+
+    #[test]
     fn git_web_gui_paths_are_explicit() {
         assert!(is_git_web_gui_path("/"));
         assert!(is_git_web_gui_path("/repos"));
@@ -1403,6 +1438,8 @@ mod tests {
     fn invite_is_always_served_but_git_gui_requires_opt_in() {
         assert!(should_serve_spa("/invite/payload.mac", false));
         assert!(should_serve_spa("/invite/payload.mac", true));
+        assert!(should_serve_spa("/channel/general", false));
+        assert!(should_serve_spa("/channel/general/abc123", false));
         assert!(!should_serve_spa("/", false));
         assert!(!should_serve_spa("/repos/example", false));
         assert!(should_serve_spa("/", true));
@@ -3822,24 +3859,26 @@ mod tests {
     //
     // This is the mechanism the tests below exercise at the unit level.
 
-    /// Returns true when `path` is exempt per `NIP_FI_EXEMPT_PREFIXES`.
-    /// Mirrors the matching logic in `nip_fi_assertion_guard`.
+    /// Returns true when `path` is exempt per `NIP_FI_EXEMPT_PREFIXES` or the
+    /// conversation link shape. Mirrors the matching logic in
+    /// `nip_fi_guard_exempts`, apart from its host-qualified admin SPA paths.
     fn is_exempt(path: &str) -> bool {
-        NIP_FI_EXEMPT_PREFIXES.iter().any(|pattern| {
-            if *pattern == "/" {
-                return path == "/";
-            }
-            if pattern.ends_with('/') {
-                return path.starts_with(pattern);
-            }
-            if path == *pattern {
-                return true;
-            }
-            if let Some(rest) = path.strip_prefix(pattern) {
-                return rest.starts_with('/') || rest.starts_with('?') || rest.starts_with('#');
-            }
-            false
-        })
+        is_conversation_link_path(path)
+            || NIP_FI_EXEMPT_PREFIXES.iter().any(|pattern| {
+                if *pattern == "/" {
+                    return path == "/";
+                }
+                if pattern.ends_with('/') {
+                    return path.starts_with(pattern);
+                }
+                if path == *pattern {
+                    return true;
+                }
+                if let Some(rest) = path.strip_prefix(pattern) {
+                    return rest.starts_with('/') || rest.starts_with('?') || rest.starts_with('#');
+                }
+                false
+            })
     }
 
     // Exempt paths — guard must pass these through in Enforce mode.
@@ -3854,6 +3893,13 @@ mod tests {
             "/info-extra must NOT match /info"
         );
         assert!(!is_exempt("/healthz"), "/healthz must NOT match /health");
+
+        // Conversation link landing page: its exact shape, not a subtree
+        assert!(is_exempt("/channel/general"));
+        assert!(is_exempt("/channel/general/abc123"));
+        assert!(!is_exempt("/channel/"));
+        assert!(!is_exempt("/channel/general/abc123/extra"));
+        assert!(!is_exempt("/channel/general/"));
 
         // Probes
         assert!(is_exempt("/health"));
