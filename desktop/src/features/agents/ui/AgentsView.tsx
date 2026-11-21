@@ -20,6 +20,7 @@ import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
 import { TeamsSection } from "./TeamsSection";
 import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
+import { WorkspaceAgentsSection } from "./WorkspaceAgentsSection";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
@@ -276,6 +277,20 @@ export function AgentsView() {
                 void personas.handleSetActive(persona, false, "library");
               }}
               onDeletePersona={personas.openDelete}
+            />
+
+            <WorkspaceAgentsSection
+              error={
+                agents.relayAgentsQuery.error instanceof Error
+                  ? agents.relayAgentsQuery.error
+                  : null
+              }
+              isLoading={agents.managedAgentsQuery.isLoading}
+              managedAgents={agents.managedAgents}
+              relayAgents={agents.relayAgentsQuery.data}
+              onOpenAgentProfile={(pubkey) => {
+                openProfilePanel?.(pubkey);
+              }}
             />
 
             <TeamsSection
