@@ -149,6 +149,7 @@ void main() {
     Set<String> knownAgentPubkeys = const {},
     List<Override> overrides = const [],
     UserCacheNotifier Function()? userCache,
+    _FakeChannelsNotifier? channelsNotifier,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -159,7 +160,9 @@ void main() {
           activityNotifier ?? () => _FakeActivityNotifier(feed ?? testFeed),
         ),
         channelsProvider.overrideWith(
-          () => _FakeChannelsNotifier(channels ?? testChannels),
+          () =>
+              channelsNotifier ??
+              _FakeChannelsNotifier(channels ?? testChannels),
         ),
         userCacheProvider.overrideWith(
           userCache ?? () => _FakeUserCacheNotifier(users ?? testUsers),
@@ -1229,6 +1232,90 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  FeedItem outsideMention(String id, String channelId) => FeedItem(
+    id: id,
+    kind: 9,
+    pubkey: 'a11ce00000000000000000000000000000000000000000000000000000000000',
+    content: 'Have a look',
+    createdAt: now - 30,
+    channelId: channelId,
+    channelName: '',
+    tags: const [],
+    category: 'mention',
+  );
+
+  testWidgets(
+    'a mention from a public channel the viewer has not joined is named and opens without joining',
+    (tester) async {
+      final lobby = Channel(
+        id: 'lobby',
+        name: 'lobby',
+        channelType: 'stream',
+        visibility: 'open',
+        description: '',
+        createdBy: 'x',
+        createdAt: DateTime(2025),
+        memberCount: 9,
+        isMember: false,
+      );
+      final channels = _FakeChannelsNotifier(testChannels, {'lobby': lobby});
+      await tester.pumpWidget(
+        await buildTestable(
+          channelsNotifier: channels,
+          feed: HomeFeedResponse(
+            mentions: [
+              testMention,
+              outsideMention('o1', 'lobby'),
+              outsideMention('o2', 'lobby'),
+            ],
+            needsAction: const [],
+            activity: const [],
+            agentActivity: const [],
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('#lobby'), findsWidgets);
+      // Both rows share one metadata read; a listed channel needs none.
+      expect(channels.openReads, ['lobby']);
+
+      await tester.tap(find.byKey(const ValueKey('inbox-row-o1')));
+      await tester.pumpAndSettle();
+      final page = tester.widget<ChannelDetailPage>(
+        find.byType(ChannelDetailPage),
+      );
+      expect(page.channel.id, 'lobby');
+      expect(page.channel.isMember, isFalse);
+      expect(page.initialMessageId, 'o1');
+    },
+  );
+
+  testWidgets(
+    'a mention from a channel the viewer cannot read says it is not found',
+    (tester) async {
+      final channels = _FakeChannelsNotifier(testChannels);
+      await tester.pumpWidget(
+        await buildTestable(
+          channelsNotifier: channels,
+          feed: HomeFeedResponse(
+            mentions: [outsideMention('p1', 'vault')],
+            needsAction: const [],
+            activity: const [],
+            agentActivity: const [],
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('#vault'), findsNothing);
+
+      await tester.tap(find.byKey(const ValueKey('inbox-row-p1')));
+      await tester.pumpAndSettle();
+      expect(find.byType(ChannelDetailPage), findsNothing);
+      expect(find.text('Channel not found here'), findsOneWidget);
+    },
+  );
+
   testWidgets('opens a thread reply at the referenced message', (tester) async {
     final dmChannel = Channel(
       id: 'dm1',
@@ -1852,10 +1939,18 @@ class _ErrorActivityNotifier extends ActivityNotifier {
 
 class _FakeChannelsNotifier extends ChannelsNotifier {
   final List<Channel> _channels;
-  _FakeChannelsNotifier(this._channels);
+  final Map<String, Channel> _open;
+  final openReads = <String>[];
+  _FakeChannelsNotifier(this._channels, [this._open = const {}]);
 
   @override
   Future<List<Channel>> build() async => _channels;
+
+  @override
+  Future<Channel?> fetchOpenChannel(String channelId) async {
+    openReads.add(channelId);
+    return _open[channelId];
+  }
 }
 
 class _FakeUserCacheNotifier extends UserCacheNotifier {
