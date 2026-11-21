@@ -53,6 +53,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             provider,
             model,
             respond_to,
+            respond_to_allowlist,
         } => {
             let owner = require_owner(client)?;
             let built = build_update(
@@ -67,6 +68,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
                     provider,
                     model,
                     respond_to: respond_to.map(RespondToArg::to_wire),
+                    respond_to_allowlist,
                 },
             )
             .await?;

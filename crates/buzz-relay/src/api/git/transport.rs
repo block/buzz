@@ -21,6 +21,7 @@ use axum::{
     body::Body,
     extract::{Path as AxumPath, Query, State},
     http::{header, StatusCode},
+    middleware::{from_fn, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Router,
@@ -712,10 +713,13 @@ fn acquire_git_permit(
 /// via `Ok(None)` from [`hydrate_for_read`] and never reaches this fn.
 fn hydrate_error_to_response(owner: &str, repo: &str, err: HydrateError) -> Response {
     error!(error = %err, owner = %owner, repo = %repo, "hydrate failed");
-    if matches!(err, HydrateError::ResourceLimit(_)) {
+    if let HydrateError::ResourceLimit(detail) = &err {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            "repository exceeds relay resource limits",
+            format!(
+                "repository exceeds relay resource limits ({detail}; \
+                 self-hosted relays: raise BUZZ_GIT_MAX_PACK_BYTES / BUZZ_GIT_MAX_REPO_BYTES)"
+            ),
         )
             .into_response();
     }
@@ -2339,14 +2343,71 @@ async fn finalize_push_inner(
 /// Mounted at `/git/{owner}/{repo}/...` with a configurable max pack size.
 pub fn git_router(state: Arc<AppState>) -> Router {
     let body_limit = state.config.git_max_pack_bytes as usize;
+    let max_bytes = state.config.git_max_pack_bytes;
 
     Router::new()
         .route("/git/{owner}/{repo}/info/refs", get(info_refs))
         .route("/git/{owner}/{repo}/git-upload-pack", post(upload_pack))
         .route("/git/{owner}/{repo}/git-receive-pack", post(receive_pack))
         .merge(super::settings::router())
+        .layer(from_fn(move |req, next| {
+            rewrite_git_body_limit_413(req, next, max_bytes)
+        }))
         .layer(RequestBodyLimitLayer::new(body_limit))
         .with_state(state)
+}
+
+/// `RequestBodyLimitLayer` returns a bare 413; rewrite the body so operators
+/// see which env var to raise (and so proxies don't look like TLS aborts).
+async fn rewrite_git_body_limit_413(
+    req: axum::extract::Request,
+    next: Next,
+    max_bytes: u64,
+) -> Response {
+    let response = next.run(req).await;
+    if response.status() != StatusCode::PAYLOAD_TOO_LARGE {
+        return response;
+    }
+    // The body-limit layer answers with an empty 413. A handler 413 (resource
+    // limits, for example) already has its own message; leave that body alone.
+    let (parts, body) = response.into_parts();
+    let bytes = axum::body::to_bytes(body, 64 * 1024)
+        .await
+        .unwrap_or_default();
+    if !git_413_is_body_limit(&bytes) {
+        return Response::from_parts(parts, Body::from(bytes));
+    }
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        git_body_limit_message(max_bytes),
+    )
+        .into_response()
+}
+
+/// The limit layer's 413 has no body. A handler that chose 413 already wrote one.
+fn git_413_is_body_limit(body: &[u8]) -> bool {
+    body.is_empty()
+}
+
+fn git_body_limit_message(max_bytes: u64) -> String {
+    format!(
+        "git pack body exceeds relay limit ({max_bytes} bytes; \
+         self-hosted relays: BUZZ_GIT_MAX_PACK_BYTES)"
+    )
+}
+
+#[cfg(test)]
+mod git_413_tests {
+    use super::{git_413_is_body_limit, git_body_limit_message};
+
+    #[test]
+    fn only_an_empty_413_is_rewritten() {
+        assert!(git_413_is_body_limit(b""));
+        assert!(!git_413_is_body_limit(b"resource limit"));
+        let message = git_body_limit_message(32);
+        assert!(message.contains("32"));
+        assert!(message.contains("BUZZ_GIT_MAX_PACK_BYTES"));
+    }
 }
 
 #[cfg(test)]
@@ -3459,6 +3520,13 @@ mod track_c_tests {
         let decoded = decode_git_request_body(&headers, Body::from(gzipped), u64::MAX);
         let bytes = axum::body::to_bytes(decoded, usize::MAX).await.unwrap();
         assert_eq!(bytes.as_ref(), plaintext);
+    }
+
+    #[test]
+    fn git_body_limit_message_names_env_var() {
+        let msg = git_body_limit_message(5_242_880);
+        assert!(msg.contains("5242880"));
+        assert!(msg.contains("BUZZ_GIT_MAX_PACK_BYTES"));
     }
 
     /// Without a gzip `Content-Encoding`, the body is passed through byte
