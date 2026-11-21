@@ -286,6 +286,15 @@ fn parse_channel_deep_link(url: &Url) -> Option<serde_json::Value> {
 pub(crate) fn install_deep_link_handlers(app: &mut tauri::App) {
     use tauri_plugin_deep_link::DeepLinkExt;
 
+    // Windows and Linux do not get their schemes from a bundled manifest the way
+    // macOS does, so the configured schemes have to be registered with the OS at
+    // startup. Do this before attaching the runtime listener, otherwise a URL
+    // that arrives during launch has nowhere to land.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    if let Err(error) = app.deep_link().register_all() {
+        eprintln!("buzz-desktop: failed to register deep-link schemes: {error}");
+    }
+
     let dl_handle = app.handle().clone();
     app.deep_link().on_open_url(move |event| {
         for url in event.urls() {
@@ -724,3 +733,7 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
 #[cfg(test)]
 #[path = "deep_link_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "deep_link_startup_tests.rs"]
+mod startup_tests;
