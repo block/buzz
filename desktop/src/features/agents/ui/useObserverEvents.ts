@@ -6,6 +6,7 @@ import {
   getAgentTranscript,
   getArchivedChannelEvents,
   ingestArchivedObserverEvents,
+  retainArchivedChannel,
   subscribeAgentObserverStore,
 } from "@/features/agents/observerRelayStore";
 import {
@@ -70,6 +71,8 @@ export function useAgentTranscript(
  * Subscribes to `subscribeAgentObserverStore` so it re-renders whenever
  * `ingestArchivedObserverEvents` writes new pages to the archive window — the
  * same subscription used by the live event snapshot, keeping both in sync.
+ * While mounted it registers as a viewer of the channel, so the archive cap
+ * never evicts a channel that is on screen.
  *
  * UI consumers merge these events with the live event window and call
  * `buildTranscriptState()` once over the combined sorted/deduplicated set,
@@ -83,6 +86,13 @@ export function useArchivedChannelEvents(
 ): ObserverEvent[] {
   const getSnapshot = React.useCallback(
     () => getArchivedChannelEvents(agentPubkey, channelId),
+    [agentPubkey, channelId],
+  );
+  React.useEffect(
+    () =>
+      agentPubkey && channelId
+        ? retainArchivedChannel(agentPubkey, channelId)
+        : undefined,
     [agentPubkey, channelId],
   );
 
