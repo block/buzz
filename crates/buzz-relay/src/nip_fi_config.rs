@@ -675,7 +675,7 @@ impl NipFiRelayConfig {
 }
 
 /// Stable configured mode name for operator diagnostics and status.
-pub(crate) fn mode_name(mode: NipFiMode) -> &'static str {
+pub fn mode_name(mode: NipFiMode) -> &'static str {
     match mode {
         NipFiMode::Enforce => "enforce",
         NipFiMode::Shadow => "shadow",
