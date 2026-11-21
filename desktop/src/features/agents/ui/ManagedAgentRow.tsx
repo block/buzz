@@ -84,11 +84,15 @@ export function ManagedAgentRow({
   // log tail (Max's seam in `managed_agents/storage.rs`), promote it to
   // user-visible copy below the process detail. Specifically renders the
   // friendly "Community access denied this agent — check its community membership."
-  // for auth failures so the user knows it's a membership thing, not a
-  // crash. Generic exits stay verbatim so we don't lie about other failures.
+  // for auth failures when the agent is a Buzz shared-compute (relay-mesh)
+  // agent; for non-mesh agents, the raw llm-auth message is preserved so a
+  // llama.cpp / OpenAI / Databricks 401 isn't mislabeled as a community
+  // membership problem (see #4205). Generic exits stay verbatim so we don't
+  // lie about other failures.
   const friendlyError = friendlyAgentLastError(
     agent.lastError,
     agent.lastErrorCode,
+    agent.provider,
   );
 
   return (
