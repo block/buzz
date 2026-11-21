@@ -42,7 +42,7 @@ pub struct DmParticipant {
     pub pubkey: Vec<u8>,
     /// Optional display name from the users table.
     pub display_name: Option<String>,
-    /// Member role string (always "member" for DMs).
+    /// Member role string ("owner" for the DM creator, "member" for others).
     pub role: String,
 }
 
@@ -409,12 +409,15 @@ async fn find_or_create_dm(
         }
     }
 
-    // Add all participants as members with role='member'.
+    // Bootstrap the creator as owner (as `create_channel` does), all other
+    // participants as members. DELETE_GROUP (kind 9008) authorizes on
+    // `channel_members.role`, so without an owner a DM cannot be deleted.
     for pk in participants {
+        let role = if *pk == created_by { "owner" } else { "member" };
         sqlx::query(
             r#"
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by)
-            VALUES ($1, $2, $3, 'member', $4)
+            VALUES ($1, $2, $3, $4::member_role, $5)
             ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
                 sync_modified_at = CASE WHEN channel_members.removed_at IS NOT NULL THEN clock_timestamp() ELSE channel_members.sync_modified_at END,
                 removed_at = NULL,
@@ -425,6 +428,7 @@ async fn find_or_create_dm(
         .bind(community_id.as_uuid())
         .bind(id)
         .bind(*pk)
+        .bind(role)
         .bind(created_by)
         .execute(&mut *conn)
         .await?;
