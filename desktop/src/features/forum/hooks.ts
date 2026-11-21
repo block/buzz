@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 
 import { getForumPosts, getForumThread } from "@/shared/api/forum";
 import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
@@ -33,6 +38,9 @@ export function forumThreadQueryKey(channelId: string, eventId: string) {
   return ["forum-thread", channelId, eventId] as const;
 }
 
+/** Posts requested per page; also the "is this the last page" test below. */
+export const FORUM_POSTS_PAGE_SIZE = 50;
+
 export function useForumPostsQuery(channel: Channel | null) {
   const refetchInterval = useFocusedRefetchInterval(
     FORUM_POSTS_REFETCH_INTERVAL_MS,
@@ -42,10 +50,35 @@ export function useForumPostsQuery(channel: Channel | null) {
   const enabled = channel !== null && channel.channelType === "forum";
   const relaySelfPubkey = useRelaySelfQuery(enabled).data;
 
-  return useQuery<ForumPostsResponse>({
+  // Paged rather than a single 50-post read: a forum past 50 posts had no way
+  // to reach the rest, because the response cursor was parsed and dropped.
+  // Polling refetches every loaded page, so a forum the user has paged deep
+  // into stays current.
+  return useInfiniteQuery<
+    ForumPostsResponse,
+    Error,
+    ForumPostsResponse[],
+    readonly unknown[],
+    number | undefined
+  >({
     enabled,
     queryKey: [...forumPostsQueryKey(channelId), relaySelfPubkey ?? null],
-    queryFn: () => getForumPosts(channelId, 50, undefined, relaySelfPubkey),
+    queryFn: ({ pageParam }) =>
+      getForumPosts(
+        channelId,
+        FORUM_POSTS_PAGE_SIZE,
+        pageParam,
+        relaySelfPubkey,
+      ),
+    initialPageParam: undefined,
+    // A short page is the end of the forum. The relay hands back a cursor
+    // whenever it served any rows, not only when more remain, so the cursor
+    // alone would offer "load older" on a forum holding a single post.
+    getNextPageParam: (lastPage) =>
+      lastPage.posts.length < FORUM_POSTS_PAGE_SIZE
+        ? undefined
+        : (lastPage.nextCursor ?? undefined),
+    select: (data) => data.pages,
     refetchInterval,
     ...forumFocusRefetchPolicy,
   });
