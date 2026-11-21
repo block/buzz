@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  deriveProfileChannels,
   parseProfilePanelTab,
   parseProfilePanelView,
   personaManagedAgentUpdate,
@@ -242,5 +243,33 @@ test("profile target identity stays stable while a requested pubkey is canonical
   assert.equal(
     profilePanelTargetKey(undefined, "requested-persona"),
     "persona:requested-persona",
+  );
+});
+
+test("deriveProfileChannels names an unmanaged agent's channels from their ids", () => {
+  const agentPubkey = "ab".repeat(32);
+  const relayAgent = {
+    pubkey: agentPubkey,
+    ownerPubkey: "cd".repeat(32),
+    name: "Remote bot",
+    agentType: "agent",
+    channels: [],
+    channelIds: ["channel-b", "channel-a", "channel-hidden"],
+    capabilities: [],
+    status: "unknown",
+    respondTo: "anyone",
+    respondToAllowlist: [],
+  };
+  const channels = [
+    { id: "channel-a", name: "alpha", memberPubkeys: [] },
+    { id: "channel-b", name: "beta", memberPubkeys: [] },
+  ];
+
+  assert.deepEqual(
+    deriveProfileChannels(agentPubkey, relayAgent, undefined, channels),
+    [
+      { id: "channel-a", name: "alpha" },
+      { id: "channel-b", name: "beta" },
+    ],
   );
 });
