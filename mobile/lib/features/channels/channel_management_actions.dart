@@ -14,6 +14,10 @@ List<List<String>> buildDeleteChannelTags(String channelId) => [
   ['h', channelId],
 ];
 
+/// Why the relay refuses a history tag from an agent signer.
+const _onlyPeopleShareHistory =
+    "forbidden: only people can share a DM's history";
+
 /// Re-read schedule while confirming a join, matching desktop's.
 const _joinConfirmationDelays = [
   Duration.zero,
@@ -184,9 +188,7 @@ class ChannelActions {
     try {
       result = await submit(includeHistory: includeHistory);
     } catch (error) {
-      if (!includeHistory ||
-          relayErrorText(error) !=
-              "forbidden: only people can share a DM's history") {
+      if (!includeHistory || relayErrorText(error) != _onlyPeopleShareHistory) {
         rethrow;
       }
       _ensureCommunityValid();
@@ -272,25 +274,37 @@ class ChannelActions {
   /// person, they start a new DM of its people and them. [DmHistory.ask]
   /// throws [DmNeedsHistoryChoice] when a person would join a DM of two or
   /// more people. When that other DM cannot be confirmed yet, throws
-  /// [DmAddUnconfirmed] with its id.
+  /// [DmAddUnconfirmed] with its id. The relay lets only people share a DM's
+  /// history, so when it refuses the history tag to a signed-in agent, the add
+  /// is resent as [DmHistory.startNew].
   Future<Channel> addToDm({
     required String channelId,
     required List<String> pubkeys,
     required DmHistory history,
   }) async {
     _ensureCommunityValid();
-    final NostrEvent result;
+    Future<NostrEvent> submit(DmHistory history) => _signedEventRelay.submit(
+      kind: 41011,
+      content: '',
+      tags: [
+        ['h', channelId],
+        for (final pubkey in pubkeys) ['p', pubkey],
+        if (history != DmHistory.startNew)
+          ['history', history == DmHistory.ask ? 'ask' : 'include'],
+      ],
+    );
+    NostrEvent result;
     try {
-      result = await _signedEventRelay.submit(
-        kind: 41011,
-        content: '',
-        tags: [
-          ['h', channelId],
-          for (final pubkey in pubkeys) ['p', pubkey],
-          if (history != DmHistory.startNew)
-            ['history', history == DmHistory.ask ? 'ask' : 'include'],
-        ],
-      );
+      try {
+        result = await submit(history);
+      } catch (error) {
+        if (history == DmHistory.startNew ||
+            relayErrorText(error) != _onlyPeopleShareHistory) {
+          rethrow;
+        }
+        _ensureCommunityValid();
+        result = await submit(DmHistory.startNew);
+      }
     } on StateError {
       rethrow;
     } catch (error) {

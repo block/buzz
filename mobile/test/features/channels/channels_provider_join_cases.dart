@@ -408,6 +408,67 @@ void _confirmedJoinCases() {
       },
     );
 
+    test(
+      'an agent whose history tag is refused adds again without it',
+      () async {
+        final keys = nostr.Keys.generate();
+        final session =
+            _WriterReplicaRelaySession(
+                memberships: const [],
+                metadata: [
+                  _meta(id: _otherJoinedChannel, name: 'dm', channelType: 'dm'),
+                  _meta(id: _joinedChannel, name: 'new dm', channelType: 'dm'),
+                ],
+              )
+              ..dmAddResponse = 'response:{"channel_id":"$_joinedChannel"}'
+              ..writerMemberships = [_membership(_joinedChannel, 'me')];
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        final actions = container.read(
+          Provider<ChannelActions>(
+            (ref) => ChannelActions(
+              ref: ref,
+              session: session,
+              signedEventRelay: SignedEventRelay(
+                session: session,
+                nsec: keys.nsec,
+              ),
+              currentPubkey: 'me',
+            ),
+          ),
+        );
+        await container.read(channelsProvider.future);
+
+        for (final history in [DmHistory.ask, DmHistory.include]) {
+          session.dmAddRefusals.add(
+            "forbidden: only people can share a DM's history",
+          );
+          final dm = await actions.addToDm(
+            channelId: _otherJoinedChannel,
+            pubkeys: const ['robin'],
+            history: history,
+          );
+          expect(dm.id, _joinedChannel);
+        }
+        expect(
+          session.published.map(
+            (event) =>
+                event.tags.where((tag) => tag.first == 'history').toList(),
+          ),
+          [
+            [
+              ['history', 'ask'],
+            ],
+            <List<String>>[],
+            [
+              ['history', 'include'],
+            ],
+            <List<String>>[],
+          ],
+        );
+      },
+    );
+
     test('a list rebuild during the join still shows the membership', () async {
       final session = _WriterReplicaRelaySession(
         memberships: const [],
