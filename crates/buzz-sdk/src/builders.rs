@@ -3094,7 +3094,7 @@ mod tests {
         let cid = uuid();
         let a = "aa".repeat(32);
         let b = "bb".repeat(32);
-        let ev = sign(build_message(cid, "hi @a @b", None, &[&a, &b], false, &[]).unwrap());
+        let ev = sign(build_message(cid, "hi @a @b", None, &[&a, &b], false, &[], &[]).unwrap());
         assert_eq!(tag_values(&ev, "p"), vec![a.clone(), b.clone()]);
         assert_eq!(tag_values(&ev, "mention"), vec![a, b]);
     }
