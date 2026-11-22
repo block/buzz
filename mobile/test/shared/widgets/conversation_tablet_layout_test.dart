@@ -334,6 +334,9 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Thread content'), findsOneWidget);
     expect(list, findsNothing);
+    // Screen readers still reach the conversation beside the thread.
+    expect(find.semantics.byLabel('First conversation'), findsOne);
+    expect(find.semantics.byLabel('Thread content'), findsOne);
     expect(
       tester.getTopLeft(find.text('Thread content')).dx,
       greaterThan(tester.getTopRight(find.text('First conversation')).dx),

@@ -29,28 +29,35 @@ class ConversationThreadPane extends HookWidget {
   Widget build(BuildContext context) {
     final routeObserver = useMemoized(appRouteObserver.createNestedObserver);
     final builder = controller.threadBuilder;
+    // The thread's page routes block screen readers from everything painted
+    // before them in their container. Their own container keeps that block
+    // inside the pane, so the conversation beside it stays reachable.
     return ConversationThreadScope(
-      child: Navigator(
-        key: navigatorKey,
-        observers: [routeObserver],
-        pages: [
-          MaterialPage<void>(
-            key: const ValueKey('conversation-thread-placeholder'),
-            // Beside the conversation, the pane owns its own surface. Over
-            // it, the conversation shows through while the thread moves.
-            child: covering
-                ? const SizedBox.shrink()
-                : ColoredBox(color: context.colors.surface),
-          ),
-          if (builder != null)
+      child: Semantics(
+        container: true,
+        explicitChildNodes: true,
+        child: Navigator(
+          key: navigatorKey,
+          observers: [routeObserver],
+          pages: [
             MaterialPage<void>(
-              key: controller.threadKey,
-              child: Builder(builder: builder),
+              key: const ValueKey('conversation-thread-placeholder'),
+              // Beside the conversation, the pane owns its own surface. Over
+              // it, the conversation shows through while the thread moves.
+              child: covering
+                  ? const SizedBox.shrink()
+                  : ColoredBox(color: context.colors.surface),
             ),
-        ],
-        onDidRemovePage: (page) {
-          if (page.key == controller.threadKey) controller.closeThread();
-        },
+            if (builder != null)
+              MaterialPage<void>(
+                key: controller.threadKey,
+                child: Builder(builder: builder),
+              ),
+          ],
+          onDidRemovePage: (page) {
+            if (page.key == controller.threadKey) controller.closeThread();
+          },
+        ),
       ),
     );
   }
