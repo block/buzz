@@ -32,7 +32,7 @@ pub async fn cmd_me(
     client: &BuzzClient,
     _format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
-    let pk = client.keys().public_key();
+    let pk = client.public_key();
     let hex = pk.to_hex();
     let npub = pk
         .to_bech32()
