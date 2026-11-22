@@ -147,6 +147,16 @@ final knownAgentPubkeysProvider = Provider<Set<String>>((ref) {
   });
 });
 
+/// Profile pictures published in agent directory events, keyed by identity.
+final agentDirectoryPicturesProvider = Provider<Map<String, String>>((ref) {
+  final agents = ref.watch(agentDirectoryProvider).asData?.value;
+  return {
+    for (final agent in agents ?? const <AgentDirectoryEntry>[])
+      if (agent.avatarUrl case final picture? when picture.isNotEmpty)
+        agent.pubkey.toLowerCase(): picture,
+  };
+});
+
 /// Directory display names keyed by agent pubkey for mention presentation.
 final agentDirectoryDisplayNamesProvider = Provider<Map<String, String>>((ref) {
   final agents =

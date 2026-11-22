@@ -33,7 +33,15 @@ void mentionChipTests() {
         uploadService: _testUploadService(signer.nsec),
         currentPubkey: signer.public,
         members: members,
-        relayAgents: [_testAgent(agent)],
+        relayAgents: [
+          AgentDirectoryEntry(
+            pubkey: agent,
+            displayName: 'Helper Bot',
+            respondTo: 'anyone',
+            channelIds: const ['shared-channel'],
+            avatarUrl: 'https://example.org/agent.png',
+          ),
+        ],
         channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
         searchPeople: (_) async => const [],
         onSend: onSend,
@@ -130,6 +138,11 @@ void mentionChipTests() {
       await tester.pumpAndSettle();
       expect(controller.text, 'hi @Helper Bot ');
       expect(agentChip, findsOneWidget);
+      final portrait = tester.widget<AvatarImage>(
+        find.descendant(of: agentChip, matching: find.byType(AvatarImage)),
+      );
+      expect(portrait.imageUrl, 'https://example.org/agent.png');
+      expect(portrait.isAgent, isTrue);
       backspace(tester, controller);
       await tester.pump();
       expect(controller.text, 'hi @Helper Bot');

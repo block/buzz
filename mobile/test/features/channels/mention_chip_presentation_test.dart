@@ -1,17 +1,28 @@
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/message_mention_pill.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
+import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+class _Profiles extends UserCacheNotifier {
+  @override
+  Map<String, UserProfile> build() => const {
+    'bob': UserProfile(pubkey: 'bob', avatarUrl: 'https://example.org/bob.png'),
+  };
+}
+
 void main() {
   testWidgets(
     'mentions follow identity, bubble, and appearance while staying tappable',
     (tester) async {
+      final profiles = userCacheProvider.overrideWith(_Profiles.new);
       final container = ProviderContainer(
-        overrides: [myPubkeyProvider.overrideWithValue('alice')],
+        overrides: [myPubkeyProvider.overrideWithValue('alice'), profiles],
       );
       addTearDown(container.dispose);
       String? tapped;
@@ -72,6 +83,9 @@ void main() {
                       ? Colors.white.withValues(alpha: .16)
                       : Colors.black.withValues(alpha: .10)),
           );
+          final portrait = tester.widget<AvatarImage>(find.byType(AvatarImage));
+          expect(portrait.imageUrl, 'https://example.org/bob.png');
+          expect(portrait.isAgent, isFalse);
           tapped = null;
           await tester.tap(find.text('Bob'));
           expect(tapped, 'bob');
@@ -79,6 +93,7 @@ void main() {
 
           // Switching identity updates already-parsed spans, without new content.
           container.updateOverrides([
+            profiles,
             myPubkeyProvider.overrideWithValue('bob'),
           ]);
           await tester.pump();
@@ -87,6 +102,7 @@ void main() {
             expect(fill('Alice'), isNot(chat.outgoing));
           }
           container.updateOverrides([
+            profiles,
             myPubkeyProvider.overrideWithValue('alice'),
           ]);
           await tester.pump();

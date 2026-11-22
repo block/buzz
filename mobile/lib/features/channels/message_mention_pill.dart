@@ -3,11 +3,14 @@ import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_identity_links.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/relay/relay_provider.dart';
 import '../../shared/widgets/buzz_agent_icon.dart';
+import '../../shared/widgets/avatar_image.dart';
 
+import '../../shared/theme/buzz_icons.dart';
 import '../../shared/theme/theme.dart';
 import 'channel_identity_names_provider.dart';
 
@@ -28,6 +31,12 @@ class MessageMentionPill extends ConsumerWidget {
   /// Whether the chip sits inside the viewer’s colored message bubble.
   final bool ownBubble;
 
+  /// Picture supplied by the mention picker before the profile cache resolves.
+  final String? candidateAvatar;
+
+  /// Render on the editable composer surface.
+  final bool composer;
+
   /// Typography inherited from the surrounding message.
   final TextStyle? textStyle;
 
@@ -40,6 +49,8 @@ class MessageMentionPill extends ConsumerWidget {
     this.textStyle,
     this.pubkey,
     this.ownBubble = false,
+    this.candidateAvatar,
+    this.composer = false,
   });
 
   @override
@@ -48,10 +59,14 @@ class MessageMentionPill extends ConsumerWidget {
     final isSelf =
         viewer != null && pubkey?.toLowerCase() == viewer.toLowerCase();
     final chat = ChatColors.of(context);
-    final ink = ownBubble || isSelf
+    final ink = composer
+        ? context.colors.primary
+        : ownBubble || isSelf
         ? chat.foreground
         : context.colors.onSurface;
-    final fill = ownBubble
+    final fill = composer
+        ? context.colors.primary.withValues(alpha: 0.16)
+        : ownBubble
         ? chatCodeTint(chat.foreground, 0.18)
         : isSelf
         ? chat.outgoing
@@ -67,28 +82,61 @@ class MessageMentionPill extends ConsumerWidget {
         TextStyle(color: ink, fontWeight: FontWeight.w500, height: 1);
     final fontSize = style.fontSize ?? 16;
 
+    final key = pubkey?.toLowerCase();
+    final picture = key == null
+        ? null
+        : ref.watch(
+                userCacheProvider.select((cache) => cache[key]?.avatarUrl),
+              ) ??
+              (isAgent
+                  ? ref.watch(
+                      agentDirectoryPicturesProvider.select(
+                        (pictures) => pictures[key],
+                      ),
+                    )
+                  : null) ??
+              candidateAvatar;
+    final hasPicture = picture != null && picture.isNotEmpty;
+    final size = MediaQuery.textScalerOf(context).scale(fontSize);
+    final icon = !isAgent
+        ? Text('@', style: style)
+        : composer
+        ? Icon(BuzzIcons.bot, size: size, color: ink)
+        : BuzzAgentIcon(size: size, color: ink);
+
     return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: Grid.quarter * 1.5,
-        vertical: Grid.quarter,
+      padding: EdgeInsetsDirectional.fromSTEB(
+        hasPicture ? Grid.quarter : Grid.quarter * 1.5,
+        Grid.quarter,
+        Grid.quarter * 3,
+        Grid.quarter,
       ),
       decoration: BoxDecoration(
         color: fill,
-        borderRadius: BorderRadius.circular(Radii.full),
+        borderRadius: BorderRadius.circular(isAgent ? Radii.sm : Radii.full),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          if (isAgent)
-            BuzzAgentIcon(size: fontSize, color: ink)
-          else
-            Transform.translate(
-              offset: const Offset(0, -Grid.quarter),
-              child: Text('@', style: style),
+          if (hasPicture) ...[
+            ExcludeSemantics(
+              child: AvatarImage(
+                imageUrl: picture,
+                radius: size / 2,
+                backgroundColor: Colors.transparent,
+                fallback: icon,
+                isAgent: isAgent,
+              ),
             ),
+            const SizedBox(width: Grid.quarter),
+          ] else if (isAgent || !composer)
+            icon,
           Flexible(
-            child: Text(label, style: style, semanticsLabel: semanticsLabel),
+            child: Text(
+              composer && !isAgent && !hasPicture ? '@$label' : label,
+              style: style,
+              semanticsLabel: semanticsLabel,
+            ),
           ),
         ],
       ),
