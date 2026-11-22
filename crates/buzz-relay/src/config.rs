@@ -5,7 +5,7 @@ use std::{collections::HashMap, net::SocketAddr};
 
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 /// Default maximum inbound WebSocket frame size in bytes.
 ///
@@ -196,9 +196,10 @@ pub struct Config {
     /// Example: "tauri://localhost,http://tauri.localhost,https://tauri.localhost,http://localhost:3000"
     ///
     /// First-party Desktop origins (`tauri://localhost`, `http://tauri.localhost`,
-    /// `https://tauri.localhost`) are always merged in when this list is
-    /// non-empty — Windows WebView2 uses `http://tauri.localhost`, and omitting
-    /// it produces a silent "Failed to fetch" on Join community.
+    /// `https://tauri.localhost`) are merged in when this list is non-empty,
+    /// unless `BUZZ_CORS_SKIP_DESKTOP_ORIGINS` is set. Windows WebView2 uses
+    /// `http://tauri.localhost`, and omitting it produces a silent
+    /// "Failed to fetch" on Join community.
     pub cors_origins: Vec<String>,
     /// Optional hex-encoded private key for the relay's signing keypair.
     /// If absent, a fresh keypair is generated at startup.
@@ -430,14 +431,17 @@ pub struct Config {
     pub nip_fi_resolver_bounds: crate::nip_fi_resolver::ResolverBounds,
 }
 
-/// Lockdown mode (non-empty CORS list) must still admit the fixed Desktop
-/// WebView origins. Windows WebView2 speaks `http://tauri.localhost`;
+/// Lockdown mode (non-empty CORS list) still admits the fixed Desktop
+/// WebView origins unless `BUZZ_CORS_SKIP_DESKTOP_ORIGINS` is `1`, `true`,
+/// `yes`, or `on`. Windows WebView2 speaks `http://tauri.localhost`;
 /// macOS/Linux use `tauri://localhost`. An empty list stays empty so
-/// permissive CORS (dev mode) is unchanged.
-fn merge_desktop_cors_origins(cors_origins: &mut Vec<String>) {
-    if cors_origins.is_empty() {
+/// permissive CORS (dev mode) is unchanged. An explicit list that omits
+/// Desktop can stay that way by setting the skip flag.
+fn merge_desktop_cors_origins(cors_origins: &mut Vec<String>, skip_desktop: bool) {
+    if cors_origins.is_empty() || skip_desktop {
         return;
     }
+    let before = cors_origins.len();
     for origin in [
         "tauri://localhost",
         "http://tauri.localhost",
@@ -447,6 +451,22 @@ fn merge_desktop_cors_origins(cors_origins: &mut Vec<String>) {
             cors_origins.push(origin.to_string());
         }
     }
+    if cors_origins.len() != before {
+        info!(
+            "merged Desktop WebView CORS origins into BUZZ_CORS_ORIGINS; set BUZZ_CORS_SKIP_DESKTOP_ORIGINS=1 to keep the operator list as written"
+        );
+    }
+}
+
+fn desktop_cors_origins_skipped() -> bool {
+    skips_desktop_cors(std::env::var("BUZZ_CORS_SKIP_DESKTOP_ORIGINS").ok().as_deref())
+}
+
+fn skips_desktop_cors(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
 }
 
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
@@ -1019,7 +1039,7 @@ impl Config {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        merge_desktop_cors_origins(&mut cors_origins);
+        merge_desktop_cors_origins(&mut cors_origins, desktop_cors_origins_skipped());
 
         let relay_private_key = std::env::var("BUZZ_RELAY_PRIVATE_KEY").ok();
 
@@ -3035,7 +3055,7 @@ mod tests {
     #[test]
     fn merge_desktop_cors_origins_fills_windows_webview_origin() {
         let mut origins = vec!["https://buzz.example.com".to_string()];
-        merge_desktop_cors_origins(&mut origins);
+        merge_desktop_cors_origins(&mut origins, false);
         assert!(origins.contains(&"https://buzz.example.com".to_string()));
         assert!(origins.contains(&"tauri://localhost".to_string()));
         assert!(origins.contains(&"http://tauri.localhost".to_string()));
@@ -3045,8 +3065,19 @@ mod tests {
     #[test]
     fn merge_desktop_cors_origins_leaves_empty_list_for_permissive_mode() {
         let mut origins = Vec::new();
-        merge_desktop_cors_origins(&mut origins);
+        merge_desktop_cors_origins(&mut origins, false);
         assert!(origins.is_empty());
+    }
+
+    #[test]
+    fn merge_desktop_cors_origins_honors_operator_opt_out() {
+        let mut origins = vec!["https://buzz.example.com".to_string()];
+        merge_desktop_cors_origins(&mut origins, true);
+        assert_eq!(origins, vec!["https://buzz.example.com".to_string()]);
+        assert!(skips_desktop_cors(Some("1")));
+        assert!(skips_desktop_cors(Some(" TRUE ")));
+        assert!(!skips_desktop_cors(Some("0")));
+        assert!(!skips_desktop_cors(None));
     }
 
     #[test]
