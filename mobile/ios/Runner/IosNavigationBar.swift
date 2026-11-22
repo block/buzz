@@ -162,6 +162,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private var offset: CGFloat = 0
   private var controlBackground = UIColor.secondarySystemBackground
   private var foldRefresh: DispatchWorkItem?
+  private var reportedLaptopDivision: LaptopDivisionReport?
+  /// The fold the keyboard was last refreshed for, shared by every bar.
+  private static var keyboardDivision: LaptopDivisionReport?
   private var standaloneControl = false
   private var standaloneLargeTitle = false
   private var standaloneSurface: UIView?
@@ -243,7 +246,8 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     }
     configure(args as? [String: Any] ?? [:])
     #if canImport(UIKit, _version: 9127.0.85)
-    if #available(iOS 27.1, *), standaloneControl || floatingTitle != nil || backdropOnly {
+    // Every bar reports a laptop fold, so every bar follows the hinge.
+    if #available(iOS 27.1, *) {
       container.addInteraction(UIHingeInteraction { [weak self] _, _ in
         guard let self else { return }
         self.container.setNeedsLayout()
@@ -260,6 +264,11 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   func view() -> UIView { container }
 
   private func layout() {
+    #if canImport(UIKit, _version: 9127.0.85)
+    if #available(iOS 27.1, *), let window = container.window {
+      reportLaptopDivision(in: window)
+    }
+    #endif
     let portraitHeader = floatingTitle == nil && !backdropOnly ? nil : duoPortraitHeader(in: container.window)
 
     if standaloneLargeTitle, let scroll = standaloneSurface as? UIScrollView,
@@ -471,6 +480,42 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     }
     #endif
   }
+
+  #if canImport(UIKit, _version: 9127.0.85)
+  /// Publishes a fold that runs across the window, as when the device is half
+  /// open like a laptop, so conversations can keep their composer below it.
+  /// Every bar reports it, since a portrait window has no strip control.
+  @available(iOS 27.1, *)
+  private func reportLaptopDivision(in window: UIWindow) {
+    let division = window.reservedRegions(kind: .division)
+      .first { $0.isActive && $0.frame.width >= window.bounds.width - 1
+        && $0.frame.minY > 0 && $0.frame.maxY < window.bounds.height }
+    let report = LaptopDivisionReport(frame: division?.frame, windowSize: window.bounds.size)
+    guard report != reportedLaptopDivision else { return }
+    reportedLaptopDivision = report
+    let fold: Any = report.frame.map { frame -> Any in
+      [frame.minX, frame.minY, frame.width, frame.height]
+    } ?? NSNull()
+    let values: [String: Any] = ["division": fold,
+                                 "windowWidth": report.windowSize.width,
+                                 "windowHeight": report.windowSize.height]
+    DispatchQueue.main.async { [weak self] in
+      self?.channel.invokeMethod("laptopGeometry", arguments: values)
+    }
+    // When the hinge moves under an open keyboard, iOS keeps the keyboard
+    // frame it reported for the old pose, so Flutter's keyboard inset goes
+    // stale. Reloading the input views makes iOS report the frame again.
+    let previous = Self.keyboardDivision
+    Self.keyboardDivision = report
+    if let previous, previous.windowSize == report.windowSize,
+       previous.frame != report.frame {
+      DispatchQueue.main.async {
+        UIApplication.shared.sendAction(
+          #selector(UIResponder.reloadInputViews), to: nil, from: nil, for: nil)
+      }
+    }
+  }
+  #endif
 
   private func reportAvatarBounds() {
     guard let avatar = trackedAvatar, avatar.window != nil, avatar.bounds.width > 0 else { return }
@@ -1086,4 +1131,10 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     navigation.view.removeFromSuperview()
     navigation.removeFromParent()
   }
+}
+
+/// The last laptop fold a navigation bar published, to skip repeats.
+private struct LaptopDivisionReport: Equatable {
+  let frame: CGRect?
+  let windowSize: CGSize
 }

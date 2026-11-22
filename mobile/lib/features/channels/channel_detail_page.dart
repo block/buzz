@@ -93,7 +93,7 @@ import 'channel_ids_by_name_provider.dart';
 import 'channels_provider.dart';
 import 'unread_badge/observed_unread_event.dart';
 import 'compose_bar.dart';
-import 'composer_dock_size_reporter.dart';
+import 'conversation_composer_dock.dart';
 import 'date_formatters.dart';
 import 'day_divider.dart';
 import 'dm_channel_labels.dart';
@@ -974,85 +974,80 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           ),
           if (showsComposer)
             AndroidImeLift(
-              child: Align(
-                alignment: Alignment.bottomCenter,
-                child: ComposerDockSizeReporter(
-                  key: const ValueKey('channel-composer-dock'),
-                  onHeightChanged: (height) {
-                    if ((composerDockHeight.value - height).abs() < 0.5) return;
-                    composerDockHeight.value = height;
-                  },
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      ?refreshNotice,
-                      BestieTranscriptionStatus(channelId: channel.id),
-                      ?assistant.pendingNotice,
-                      ComposeBar(
-                        channelId: channel.id,
-                        focusNode: composerFocusNode,
-                        prefillScopeMessages:
-                            personalChat || resolvedChannel.isDm
-                            ? null
-                            : [
-                                for (final entry in timelineEntries)
-                                  entry.message,
-                              ],
-                        onFocusRestorerChanged: (restoreFocus) =>
-                            restoreComposerFocus.value = restoreFocus,
-                        channelName: resolvedChannel.isDm
-                            ? ''
-                            : resolvedChannel.name,
-                        onSend:
-                            (
-                              content,
-                              mentionPubkeys, {
-                              mediaTags = const <List<String>>[],
-                            }) async {
-                              if (!placementKnown) {
-                                ref.invalidate(meGroupsProvider);
+              child: ConversationComposerDock(
+                composerKey: const ValueKey('channel-composer-dock'),
+                onHeightChanged: (height) {
+                  if ((composerDockHeight.value - height).abs() < 0.5) return;
+                  composerDockHeight.value = height;
+                },
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ?refreshNotice,
+                    BestieTranscriptionStatus(channelId: channel.id),
+                    ?assistant.pendingNotice,
+                    ComposeBar(
+                      channelId: channel.id,
+                      focusNode: composerFocusNode,
+                      prefillScopeMessages: personalChat || resolvedChannel.isDm
+                          ? null
+                          : [
+                              for (final entry in timelineEntries)
+                                entry.message,
+                            ],
+                      onFocusRestorerChanged: (restoreFocus) =>
+                          restoreComposerFocus.value = restoreFocus,
+                      channelName: resolvedChannel.isDm
+                          ? ''
+                          : resolvedChannel.name,
+                      onSend:
+                          (
+                            content,
+                            mentionPubkeys, {
+                            mediaTags = const <List<String>>[],
+                          }) async {
+                            if (!placementKnown) {
+                              ref.invalidate(meGroupsProvider);
+                              throw StateError(
+                                'Reconnect to verify this chat before sending.',
+                              );
+                            }
+                            var recipients = mentionPubkeys;
+                            if (personalChat) {
+                              if (!resolvedChannel.isPersonalChat(
+                                ref.read(myPubkeyProvider),
+                                mePlacement?.asData?.value.channels ?? const [],
+                              )) {
                                 throw StateError(
-                                  'Reconnect to verify this chat before sending.',
+                                  'Refresh Solo before sending to this chat.',
                                 );
                               }
-                              var recipients = mentionPubkeys;
-                              if (personalChat) {
-                                if (!resolvedChannel.isPersonalChat(
-                                  ref.read(myPubkeyProvider),
-                                  mePlacement?.asData?.value.channels ??
-                                      const [],
-                                )) {
-                                  throw StateError(
-                                    'Refresh Solo before sending to this chat.',
-                                  );
-                                }
-                                recipients = await meRecipients(
-                                  ref,
-                                  channel.id,
-                                  assistant.selected,
-                                  mentionPubkeys,
-                                );
-                              }
-                              final donate = activeShareSuggestionDonor(ref);
-                              final displayName = resolvedChannel.displayLabel(
-                                currentPubkey: ref.read(myPubkeyProvider),
+                              recipients = await meRecipients(
+                                ref,
+                                channel.id,
+                                assistant.selected,
+                                mentionPubkeys,
                               );
-                              await sendMessage.call(
-                                channelId: channel.id,
-                                content: content,
-                                mentionPubkeys: recipients,
-                                channel: resolvedChannel,
-                                mediaTags: mediaTags,
-                              );
-                              donate(
-                                channelId: channel.id,
-                                displayName: displayName,
-                                recipientCount: resolvedChannel.memberCount - 1,
-                              );
-                            },
-                      ),
-                    ],
-                  ),
+                            }
+                            final donate = activeShareSuggestionDonor(ref);
+                            final displayName = resolvedChannel.displayLabel(
+                              currentPubkey: ref.read(myPubkeyProvider),
+                            );
+                            await sendMessage.call(
+                              channelId: channel.id,
+                              content: content,
+                              mentionPubkeys: recipients,
+                              channel: resolvedChannel,
+                              mediaTags: mediaTags,
+                            );
+                            donate(
+                              channelId: channel.id,
+                              displayName: displayName,
+                              recipientCount: resolvedChannel.memberCount - 1,
+                            );
+                          },
+                    ),
+                  ],
                 ),
               ),
             ),

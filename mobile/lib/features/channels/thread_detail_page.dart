@@ -43,7 +43,7 @@ import 'thread_replies_provider.dart';
 import 'channel_ids_by_name_provider.dart';
 import 'channels_provider.dart';
 import 'compose_bar.dart';
-import 'composer_dock_size_reporter.dart';
+import 'conversation_composer_dock.dart';
 import 'date_formatters.dart';
 import 'dm_channel_labels.dart';
 import 'day_divider.dart';
@@ -1089,46 +1089,40 @@ class ThreadDetailPage extends HookConsumerWidget {
           ),
           if (canReply)
             AndroidImeLift(
-              child: Align(
-                alignment: Alignment.bottomCenter,
-                child: ComposerDockSizeReporter(
-                  key: const ValueKey('thread-composer-dock'),
-                  onHeightChanged: updateComposerDockHeight,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      ComposeBar(
-                        channelId: channelId,
-                        focusNode: composerFocusNode,
-                        onFocusRestorerChanged: (restoreFocus) =>
-                            restoreComposerFocus.value = restoreFocus,
-                        hintText: 'Reply in thread\u2026',
-                        threadHeadId: threadHead.id,
-                        rootId: effectiveRootId,
-                        prefillScopeMessages: channel?.isDm ?? true
-                            ? null
-                            : [
-                                if (!liveDeletionHidesHead) liveHead,
-                                ...replies,
-                              ],
-                        onFocusRequested: followThreadTailFromComposer,
-                        onSend:
-                            (
-                              content,
-                              mentionPubkeys, {
-                              mediaTags = const <List<String>>[],
-                            }) => sendMessage.call(
-                              channelId: channelId,
-                              content: content,
-                              mentionPubkeys: mentionPubkeys,
-                              channel: channel,
-                              parentEventId: threadHead.id,
-                              rootEventId: effectiveRootId,
-                              mediaTags: mediaTags,
-                            ),
-                      ),
-                    ],
-                  ),
+              child: ConversationComposerDock(
+                composerKey: const ValueKey('thread-composer-dock'),
+                onHeightChanged: updateComposerDockHeight,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ComposeBar(
+                      channelId: channelId,
+                      focusNode: composerFocusNode,
+                      onFocusRestorerChanged: (restoreFocus) =>
+                          restoreComposerFocus.value = restoreFocus,
+                      hintText: 'Reply in thread\u2026',
+                      threadHeadId: threadHead.id,
+                      rootId: effectiveRootId,
+                      prefillScopeMessages: channel?.isDm ?? true
+                          ? null
+                          : [if (!liveDeletionHidesHead) liveHead, ...replies],
+                      onFocusRequested: followThreadTailFromComposer,
+                      onSend:
+                          (
+                            content,
+                            mentionPubkeys, {
+                            mediaTags = const <List<String>>[],
+                          }) => sendMessage.call(
+                            channelId: channelId,
+                            content: content,
+                            mentionPubkeys: mentionPubkeys,
+                            channel: channel,
+                            parentEventId: threadHead.id,
+                            rootEventId: effectiveRootId,
+                            mediaTags: mediaTags,
+                          ),
+                    ),
+                  ],
                 ),
               ),
             ),

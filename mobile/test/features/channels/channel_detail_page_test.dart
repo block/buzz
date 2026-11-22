@@ -1,4 +1,5 @@
 import 'package:duo_kit/duo_kit.dart';
+import 'package:duo_kit/testing.dart';
 import 'package:buzz/shared/widgets/duo_toolbar.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/features/activity/activity_page.dart';
@@ -16208,6 +16209,89 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Message'), findsOneWidget);
+    });
+
+    testWidgets('keeps messages above a laptop fold and writes below it', (
+      tester,
+    ) async {
+      final pose = FoldTestPose.duoHalfOpenedPortrait.data;
+      final fold = pose.displayFeatures
+          .firstWhere((feature) => feature.type == ui.DisplayFeatureType.fold)
+          .bounds;
+      tester.view
+        ..devicePixelRatio = 1
+        ..physicalSize = pose.size
+        ..padding = FakeViewPadding(
+          top: pose.padding.top,
+          bottom: pose.padding.bottom,
+        )
+        ..displayFeatures = pose.displayFeatures;
+      addTearDown(tester.view.reset);
+      final composer = find.byKey(const ValueKey('channel-composer-dock'));
+      final latest = find.byKey(const ValueKey('channel-message-group-m19'));
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            for (var i = 0; i < 20; i++)
+              _textMsg(
+                id: 'm$i',
+                pubkey: 'alice',
+                content: 'Message $i',
+                createdAt: 1000 + i,
+              ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Half open like a laptop: reading above the fold, writing below it.
+      expect(tester.getBottomLeft(latest).dy, lessThanOrEqualTo(fold.top));
+      expect(tester.getTopLeft(composer).dy, closeTo(fold.bottom, 0.5));
+      expect(
+        tester
+            .getTopLeft(find.byKey(const ValueKey('conversation-laptop-panel')))
+            .dy,
+        lessThanOrEqualTo(fold.top),
+      );
+
+      // A draft survives the hinge opening flat, where the composer returns
+      // to the bottom and the timeline reaches down to it.
+      await tester.tap(find.text('Message'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'Across the hinge');
+      tester.view.displayFeatures = [
+        for (final feature in pose.displayFeatures)
+          if (feature.type != ui.DisplayFeatureType.fold) feature,
+      ];
+      await tester.pumpAndSettle();
+      expect(tester.getTopLeft(composer).dy, greaterThan(fold.bottom + 200));
+      expect(tester.getBottomLeft(latest).dy, greaterThan(fold.bottom));
+      expect(find.text('Across the hinge'), findsOneWidget);
+
+      // Folded again with the keyboard up, the keyboard opens under the
+      // composer, which stays right below the fold with its draft.
+      tester.view
+        ..displayFeatures = pose.displayFeatures
+        ..viewInsets = const FakeViewPadding(bottom: 300);
+      await tester.pumpAndSettle();
+      expect(tester.getTopLeft(composer).dy, closeTo(fold.bottom, 0.5));
+      expect(tester.getBottomLeft(latest).dy, lessThanOrEqualTo(fold.top));
+      expect(find.text('Across the hinge'), findsOneWidget);
+
+      // A keyboard that fills the lower half, as the Duo's does, moves the
+      // composer right above the fold, with the messages above it.
+      tester.view.viewInsets = FakeViewPadding(
+        bottom: pose.size.height - fold.bottom - 12,
+      );
+      await tester.pumpAndSettle();
+      expect(tester.getBottomLeft(composer).dy, closeTo(fold.top, 0.5));
+      expect(
+        tester.getBottomLeft(latest).dy,
+        lessThanOrEqualTo(tester.getTopLeft(composer).dy),
+      );
+      expect(find.text('Across the hinge'), findsOneWidget);
+      expect(tester.takeException(), isNull);
     });
   });
 
