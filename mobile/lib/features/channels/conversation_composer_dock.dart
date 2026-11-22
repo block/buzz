@@ -66,9 +66,18 @@ class ConversationComposerDock extends HookWidget {
         final height = composerHeight.value;
         double? foldTop;
         double? foldBottom;
-        if (fold != null) {
+        if (fold == null) {
+          // Forget where the dock sat, so a fold that comes back after the
+          // dock moved is never placed against the old position.
+          if (origin.value != null) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (context.mounted) origin.value = null;
+            });
+          }
+        } else {
           // The fold is in window coordinates; measure where the dock sits.
           WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!context.mounted) return;
             final box = dockKey.currentContext?.findRenderObject();
             if (box is! RenderBox || !box.hasSize) return;
             final measured = box.localToGlobal(Offset.zero);

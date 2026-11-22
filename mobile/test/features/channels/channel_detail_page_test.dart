@@ -16232,6 +16232,11 @@ void main() {
 
       await tester.pumpWidget(
         _buildTestable(
+          // The app shares native navigation metrics, the iOS fold among
+          // them, from above its routes.
+          home: IosNavigationMetricsHost(
+            child: ChannelDetailPage(channel: _testChannel),
+          ),
           messages: [
             for (var i = 0; i < 20; i++)
               _textMsg(
@@ -16291,6 +16296,87 @@ void main() {
         lessThanOrEqualTo(tester.getTopLeft(composer).dy),
       );
       expect(find.text('Across the hinge'), findsOneWidget);
+
+      // On iOS the fold comes from the native navigation bar instead. Only a
+      // fold measured for this window and crossing all of it splits the
+      // conversation.
+      tester.view
+        ..displayFeatures = [
+          for (final feature in pose.displayFeatures)
+            if (feature.type != ui.DisplayFeatureType.fold) feature,
+        ]
+        ..viewInsets = FakeViewPadding.zero;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      await tester.pumpAndSettle();
+      const nativeId = 9865;
+      final nativeChannel = const MethodChannel(
+        'buzz/ios_navigation_bar/$nativeId',
+      );
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        nativeChannel,
+        (_) async => null,
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          nativeChannel,
+          null,
+        ),
+      );
+      tester
+          .widget<UiKitView>(
+            find
+                .byWidgetPredicate(
+                  (widget) =>
+                      widget is UiKitView &&
+                      widget.viewType == 'buzz/ios_navigation_bar',
+                )
+                .first,
+          )
+          .onPlatformViewCreated!(nativeId);
+      await tester.pump();
+      final crossing = [fold.left, fold.top, fold.width, fold.height];
+      for (final row in [
+        (division: crossing, window: pose.size, split: true),
+        // Measured for another window size, as during a rotation.
+        (
+          division: crossing,
+          window: Size(pose.size.width, pose.size.height + 1),
+          split: false,
+        ),
+        (division: crossing, window: pose.size, split: true),
+        // Not across the whole window.
+        (
+          division: [fold.left, fold.top, fold.width / 2, fold.height],
+          window: pose.size,
+          split: false,
+        ),
+        (division: crossing, window: pose.size, split: true),
+        // Flat: no fold.
+        (division: null, window: pose.size, split: false),
+      ]) {
+        await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+          nativeChannel.name,
+          const StandardMethodCodec().encodeMethodCall(
+            MethodCall('laptopGeometry', {
+              'division': row.division,
+              'windowWidth': row.window.width,
+              'windowHeight': row.window.height,
+            }),
+          ),
+          (_) {},
+        );
+        await tester.pumpAndSettle();
+        expect(
+          tester.getTopLeft(composer).dy,
+          row.split
+              ? closeTo(fold.bottom, 0.5)
+              : greaterThan(fold.bottom + 200),
+          reason: '$row',
+        );
+      }
+      expect(find.text('Across the hinge'), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
       expect(tester.takeException(), isNull);
     });
   });

@@ -165,6 +165,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
   private var reportedLaptopDivision: LaptopDivisionReport?
   /// The fold the keyboard was last refreshed for, shared by every bar.
   private static var keyboardDivision: LaptopDivisionReport?
+  /// The newest fold any bar measured, and the pending keyboard refresh for it.
+  private static var latestDivision: LaptopDivisionReport?
+  private static var keyboardRefresh: DispatchWorkItem?
   private var standaloneControl = false
   private var standaloneLargeTitle = false
   private var standaloneSurface: UIView?
@@ -502,18 +505,39 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     DispatchQueue.main.async { [weak self] in
       self?.channel.invokeMethod("laptopGeometry", arguments: values)
     }
-    // When the hinge moves under an open keyboard, iOS keeps the keyboard
-    // frame it reported for the old pose, so Flutter's keyboard inset goes
-    // stale. Reloading the input views makes iOS report the frame again.
-    let previous = Self.keyboardDivision
-    Self.keyboardDivision = report
-    if let previous, previous.windowSize == report.windowSize,
-       previous.frame != report.frame {
-      DispatchQueue.main.async {
-        UIApplication.shared.sendAction(
-          #selector(UIResponder.reloadInputViews), to: nil, from: nil, for: nil)
-      }
+    Self.latestDivision = report
+    guard let previous = Self.keyboardDivision, previous.windowSize == report.windowSize else {
+      // The first fold, or a new window size, which iOS reports a keyboard
+      // frame for on its own.
+      Self.keyboardDivision = report
+      return
     }
+    // The division can flip several times while the hinge moves, so wait for
+    // it to settle before refreshing the keyboard.
+    Self.keyboardRefresh?.cancel()
+    let refresh = DispatchWorkItem { Self.refreshKeyboard(attempt: 0) }
+    Self.keyboardRefresh = refresh
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: refresh)
+  }
+
+  /// When the hinge moves under an open keyboard, iOS keeps the keyboard frame
+  /// it reported for the old pose, so Flutter's keyboard inset goes stale.
+  /// Reloading the input views makes iOS report the frame again. A reload
+  /// would end a composition in progress, so it waits until the text has no
+  /// marked range, for at most a few seconds.
+  @available(iOS 27.1, *)
+  private static func refreshKeyboard(attempt: Int) {
+    guard let latest = latestDivision, latest != keyboardDivision else { return }
+    let responder = FirstResponder.current()
+    if let input = responder as? UITextInput, input.markedTextRange != nil, attempt < 10 {
+      let retry = DispatchWorkItem { refreshKeyboard(attempt: attempt + 1) }
+      keyboardRefresh = retry
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: retry)
+      return
+    }
+    keyboardDivision = latest
+    if let input = responder as? UITextInput, input.markedTextRange != nil { return }
+    responder?.reloadInputViews()
   }
   #endif
 
@@ -1131,6 +1155,24 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     navigation.view.removeFromSuperview()
     navigation.removeFromParent()
   }
+}
+
+/// Finds the first responder, which UIKit offers no direct accessor for.
+private enum FirstResponder {
+  private static weak var found: UIResponder?
+
+  static func current() -> UIResponder? {
+    found = nil
+    UIApplication.shared.sendAction(#selector(UIResponder.buzzReportFirstResponder),
+                                    to: nil, from: nil, for: nil)
+    return found
+  }
+
+  fileprivate static func report(_ responder: UIResponder) { found = responder }
+}
+
+private extension UIResponder {
+  @objc func buzzReportFirstResponder() { FirstResponder.report(self) }
 }
 
 /// The last laptop fold a navigation bar published, to skip repeats.
