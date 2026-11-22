@@ -44,6 +44,7 @@ class ConversationThreadDivider extends HookWidget {
     this.label = 'Thread width',
     this.minWidth = conversationThreadPaneMinWidth,
     this.leading = false,
+    this.lineAlignment = Alignment.center,
     super.key,
   });
 
@@ -71,6 +72,9 @@ class ConversationThreadDivider extends HookWidget {
   /// Whether the pane sits before the divider, so dragging toward the end
   /// widens it. A thread pane sits after it, at the window's end.
   final bool leading;
+
+  /// Where the visible line sits within the handle's touch area.
+  final Alignment lineAlignment;
 
   double _clamp(double value) =>
       value.clamp(minWidth, maxWidth < minWidth ? minWidth : maxWidth);
@@ -114,7 +118,8 @@ class ConversationThreadDivider extends HookWidget {
             dragStart.value = null;
             onDragEnd();
           },
-          child: Center(
+          child: Align(
+            alignment: lineAlignment,
             child: Stack(
               alignment: Alignment.center,
               children: [

@@ -9,6 +9,7 @@ import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scaffold.dart';
 import 'package:duo_kit/duo_kit.dart';
 import 'package:duo_kit/testing.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -576,6 +577,39 @@ void main() {
     await tester.tap(find.byTooltip('Show beside conversation'));
     await tester.pumpAndSettle();
     expect(find.semantics.byLabel('First chat'), findsOne);
+
+    // Control-Command-F expands and collapses the thread from the keyboard.
+    final thread = find.byKey(const ValueKey('conversation-thread'));
+    final besideRect = tester.getRect(thread);
+    Future<void> fullScreenShortcut() async {
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyF);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pumpAndSettle();
+    }
+
+    await fullScreenShortcut();
+    expect(tester.getRect(thread), Offset.zero & const Size(1376, 1032));
+    await fullScreenShortcut();
+    expect(tester.getRect(thread), besideRect);
+
+    // On iOS the toggle is a native header action; toggling rebuilds the
+    // thread's header in the new platform.
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    await fullScreenShortcut();
+    final nativeLabels = [
+      for (final view in tester.widgetList<UiKitView>(find.byType(UiKitView)))
+        if (view.viewType == 'buzz/ios_navigation_bar')
+          for (final action
+              in ((view.creationParams! as Map)['actions'] as List))
+            (action as Map)['label'],
+    ];
+    expect(nativeLabels, contains('Show beside conversation'));
+    debugDefaultTargetPlatformOverride = null;
+    await fullScreenShortcut();
     expect(tester.takeException(), isNull);
   });
 
@@ -605,28 +639,27 @@ void main() {
     final window = FoldTestPose.duoInnerLandscape.data.size;
     final stripWidth = FoldTestPose.duoInnerLandscape.data.padding.right;
     expect(stripWidth, greaterThan(0));
-    await tester.pumpWidget(
-      ProviderScope(
-        child: MaterialApp(
-          theme: AppTheme.light(),
-          home: Builder(
-            // Read above the Scaffold, which removes the strip's padding.
-            builder: (context) => Scaffold(
-              body: AdaptiveConversationPane(
-                controller: controller,
-                // duo_kit detects the strip on iOS alone by default; the
-                // Material header keeps the toggle in reach of the test.
-                strip: FoldGeometry.of(context, detectStrip: true).strip,
-                preferredListWidth: 375,
-                list: Builder(
-                  builder: (context) => TextButton(
-                    onPressed: () => openConversationPane(
-                      context,
-                      'First',
-                      (_) => const _TabletConversation('First'),
-                    ),
-                    child: const Text('First chat'),
+    Widget app(Key screen) => ProviderScope(
+      child: MaterialApp(
+        theme: AppTheme.light(),
+        home: Builder(
+          // Read above the Scaffold, which removes the strip's padding.
+          builder: (context) => Scaffold(
+            body: AdaptiveConversationPane(
+              key: screen,
+              controller: controller,
+              // duo_kit detects the strip on iOS alone by default; the
+              // Material header keeps the toggle in reach of the test.
+              strip: FoldGeometry.of(context, detectStrip: true).strip,
+              preferredListWidth: 375,
+              list: Builder(
+                builder: (context) => TextButton(
+                  onPressed: () => openConversationPane(
+                    context,
+                    'First',
+                    (_) => const _TabletConversation('First'),
                   ),
+                  child: const Text('First chat'),
                 ),
               ),
             ),
@@ -634,6 +667,7 @@ void main() {
         ),
       ),
     );
+    await tester.pumpWidget(app(const ValueKey('messages')));
     final list = find.text('First chat');
     final detail = find.byKey(const ValueKey('conversation-detail'));
     final threadPane = find.byKey(const ValueKey('conversation-thread'));
@@ -755,6 +789,16 @@ void main() {
     await tester.pumpAndSettle();
     expect(tester.getSize(threadPane).width, besideWidth);
 
+    // Held like a book the thread returns to its pane, and laid flat again it
+    // sits beside the conversation rather than expanding by surprise.
+    await tester.tap(find.byTooltip('Expand thread'));
+    await tester.pumpAndSettle();
+    pose(FoldTestPose.duoHalfOpenedLandscape);
+    await tester.pumpAndSettle();
+    pose(FoldTestPose.duoInnerLandscape);
+    await tester.pumpAndSettle();
+    expect(tester.getSize(threadPane).width, besideWidth);
+
     // Held like a book, the list and conversation keep the hinge-bound
     // screens, with no toggle.
     pose(FoldTestPose.duoHalfOpenedLandscape);
@@ -763,6 +807,16 @@ void main() {
     expect(find.byTooltip('Hide sidebar'), findsNothing);
     expect(find.byTooltip('Show sidebar'), findsNothing);
     expect(find.text('Keep my draft'), findsOneWidget);
+
+    // The dragged width belongs to this screen: another screen keeps its own.
+    pose(FoldTestPose.duoInnerLandscape);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Back').last);
+    await tester.pumpAndSettle();
+    expect(tester.getSize(listPane).width, conversationSidebarMinWidth);
+    await tester.pumpWidget(app(const ValueKey('agents')));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(listPane).width, 375);
     expect(tester.takeException(), isNull);
   });
 }

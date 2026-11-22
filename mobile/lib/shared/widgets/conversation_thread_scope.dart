@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../theme/buzz_icons.dart';
+import 'conversation_pane_controller.dart';
 import 'ios_navigation_bar.dart';
 
 /// Marks routes inside a thread pane, whose nested threads push in place.
@@ -25,7 +26,7 @@ mixin KeepsConversationThread<T> on PageRoute<T> {}
 class ConversationThreadExpansion extends InheritedWidget {
   const ConversationThreadExpansion({
     required this.expanded,
-    required this.onToggle,
+    required this.controller,
     required super.child,
     super.key,
   });
@@ -33,20 +34,20 @@ class ConversationThreadExpansion extends InheritedWidget {
   /// Whether the thread fills the window.
   final bool expanded;
 
-  /// Expands or collapses the thread.
-  final VoidCallback onToggle;
+  /// The pane that owns the thread.
+  final ConversationPaneController controller;
 
   /// Offers [child]'s pages the toggle where the thread can fill the window
   /// or already does.
   static Widget offer({
     required bool available,
     required bool expanded,
-    required VoidCallback onToggle,
+    required ConversationPaneController controller,
     required Widget child,
   }) => available
       ? ConversationThreadExpansion(
           expanded: expanded,
-          onToggle: onToggle,
+          controller: controller,
           child: child,
         )
       : child;
@@ -54,6 +55,9 @@ class ConversationThreadExpansion extends InheritedWidget {
   /// The nearest thread pane that can expand, or null.
   static ConversationThreadExpansion? maybeOf(BuildContext context) =>
       context.dependOnInheritedWidgetOfExactType<ConversationThreadExpansion>();
+
+  /// Expands or collapses the thread.
+  void toggle() => controller.setThreadExpanded(!expanded);
 
   /// The toggle's tooltip and screen-reader label.
   String get label => expanded ? 'Show beside conversation' : 'Expand thread';
@@ -63,17 +67,19 @@ class ConversationThreadExpansion extends InheritedWidget {
 
   /// Native header action for the toggle.
   IosNavigationAction get action =>
-      IosNavigationAction(label: label, icon: _icon, onPressed: onToggle);
+      IosNavigationAction(label: label, icon: _icon, onPressed: toggle);
 
   /// Material header button for the toggle.
   Widget get button => IconButton(
     key: const ValueKey('conversation-thread-expand'),
     tooltip: label,
     icon: Icon(_icon),
-    onPressed: onToggle,
+    onPressed: toggle,
   );
 
+  // Rebuilt with the pane on every animation frame; headers only need to
+  // change with the state.
   @override
   bool updateShouldNotify(ConversationThreadExpansion oldWidget) =>
-      expanded != oldWidget.expanded || onToggle != oldWidget.onToggle;
+      expanded != oldWidget.expanded || controller != oldWidget.controller;
 }

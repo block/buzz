@@ -218,7 +218,8 @@ class AdaptiveConversationPane extends HookConsumerWidget {
     ]);
     final sidebarHidden = ref.watch(conversationSidebarHiddenProvider);
     final threadWidth = ref.watch(conversationThreadWidthProvider);
-    final sidebarWidth = ref.watch(conversationSidebarWidthProvider);
+    // The sidebar width dragged on this screen, which keeps its own sizing.
+    final sidebarWidth = useState<double?>(null);
     // While the thread divider is dragged: whether the sidebar was docked.
     final resizeHold = useState<bool?>(null);
     // Whether the sidebar divider is being dragged.
@@ -288,9 +289,9 @@ class AdaptiveConversationPane extends HookConsumerWidget {
             // the standard Grid.xs window margins.
             final listWidth = book != null
                 ? book.center.dx - leftInset
-                : tablet && sidebarWidth != null
+                : tablet && sidebarWidth.value != null
                 // A dragged sidebar keeps at most half the window.
-                ? sidebarWidth.clamp(
+                ? sidebarWidth.value!.clamp(
                     conversationSidebarMinWidth,
                     (contentWidth - 1) / 2 < conversationSidebarMinWidth
                         ? conversationSidebarMinWidth
@@ -343,6 +344,15 @@ class AdaptiveConversationPane extends HookConsumerWidget {
             if (docked && controller.sidebarOverlay) {
               WidgetsBinding.instance.addPostFrameCallback(
                 (_) => controller.hideSidebarOverlay(),
+              );
+            }
+            // Likewise an expanded thread collapses once its layout is gone,
+            // say held like a book, rather than returning expanded later.
+            if (controller.threadExpanded &&
+                (layout == null ||
+                    layout.thread == ConversationThreadMode.none)) {
+              WidgetsBinding.instance.addPostFrameCallback(
+                (_) => controller.setThreadExpanded(false),
               );
             }
             final detailLeft = layout != null
@@ -687,23 +697,24 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                         !threadExpanded)
                       Positioned(
                         key: const ValueKey('conversation-sidebar-divider'),
+                        // Mostly over the conversation's margin, so taps on
+                        // the list's trailing controls still reach them.
                         left:
                             detailLeft -
                             1 -
-                            (conversationThreadHandleWidth - 1) / 2,
+                            (conversationThreadHandleWidth - 1) * 0.2,
                         top: 0,
                         bottom: 0,
                         width: conversationThreadHandleWidth,
                         child: ConversationThreadDivider(
+                          lineAlignment: const Alignment(-0.6, 0),
                           label: 'Sidebar width',
                           leading: true,
                           minWidth: conversationSidebarMinWidth,
                           width: listWidth,
                           maxWidth: sidebarMaxWidth,
                           onDragStart: () => sidebarDrag.value = true,
-                          onResize: ref
-                              .read(conversationSidebarWidthProvider.notifier)
-                              .set,
+                          onResize: (width) => sidebarWidth.value = width,
                           onDragEnd: () => sidebarDrag.value = false,
                         ),
                       ),
@@ -740,9 +751,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                                       layout?.thread ==
                                           ConversationThreadMode.beside,
                                   expanded: threadExpanded,
-                                  onToggle: () => controller.setThreadExpanded(
-                                    !threadExpanded,
-                                  ),
+                                  controller: controller,
                                   child: ConversationThreadPane(
                                     controller: controller,
                                     navigatorKey: threadNavigator,
@@ -823,6 +832,16 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                   if (layout.sidebar == ConversationSidebarMode.overlay)
                     const SingleActivator(LogicalKeyboardKey.escape):
                         controller.hideSidebarOverlay,
+                  // Control-Command-F, as for full screen, expands a thread.
+                  if (threadExpanded ||
+                      layout.thread == ConversationThreadMode.beside)
+                    const SingleActivator(
+                      LogicalKeyboardKey.keyF,
+                      control: true,
+                      meta: true,
+                      includeRepeats: false,
+                    ): () =>
+                        controller.setThreadExpanded(!threadExpanded),
                 },
               },
               child: pane,
