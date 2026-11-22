@@ -5636,7 +5636,7 @@ fn handle_prompt_result(
                 reason,
                 "agent_returned (local project context indeterminate — pipe intact)"
             );
-            emit_turn_error(&reason, None);
+            emit_turn_error(&reason, None, outcome_label);
             pool.return_agent(result.agent);
         }
         PromptOutcome::Error(ref e) => {
@@ -11244,10 +11244,12 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                scope: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
+                successful_steer_deliveries: std::collections::HashSet::new(),
             },
         );
         let mut queue = EventQueue::new(config::DedupMode::Queue);
@@ -11264,7 +11266,9 @@ mod error_outcome_emission_tests {
         let observer = ObserverHandle::in_process();
         let result = PromptResult {
             agent,
-            source: PromptSource::Channel(Uuid::new_v4()),
+            source: PromptSource::Channel(scope::SessionScope::Conversation {
+                channel_id: Uuid::new_v4(),
+            }),
             turn_id: "test-turn-id".to_string(),
             outcome,
             batch: None,
@@ -11281,6 +11285,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
+            &mut tokio::time::Instant::now(),
         );
         observer
             .snapshot()
