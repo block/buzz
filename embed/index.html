@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-WaeXIg0MklXhGjJJmHNaC2VroFU3W33l/05l2S6naY4='; style-src 'unsafe-inline'; frame-src https:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-HMoFaQe5M9Vr2eGJ4swZml5ZFK2xrdI3Hev//d0phWo='; style-src 'unsafe-inline'; frame-src https:">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Embedded content</title>
 <style>
@@ -11,9 +11,9 @@
 </head>
 <body>
 <script>
-  const parents = new Set(['tauri://localhost', 'http://tauri.localhost', 'https://tauri.localhost']);
+  const PARENTS = new Set(['tauri://localhost', 'http://tauri.localhost', 'https://tauri.localhost']);
 
-  function destination(src) {
+  function destination(src, selfOrigin) {
     if (typeof src !== 'string') return null;
     let url;
     try {
@@ -22,24 +22,36 @@
       return null;
     }
     if (!/^https:\/\/[a-z0-9.-]+(?::[0-9]{1,5})?$/i.test(url.origin) ||
-        url.protocol !== 'https:' || url.username || url.password || url.origin === location.origin ||
+        url.protocol !== 'https:' || url.username || url.password || url.origin === selfOrigin ||
         url.hostname.endsWith('.') || url.hostname === 'localhost' || url.hostname.endsWith('.localhost') ||
         url.hostname.startsWith('127.') || url.hostname === '0.0.0.0') return null;
     return url;
   }
 
-  function mount(event) {
-    if (event.source !== parent || event.data?.type !== 'buzz-embed:mount') return;
-    removeEventListener('message', mount);
-    const url = parents.has(event.origin) && destination(event.data.src);
-    if (!url) {
+  function transition(state, message, selfOrigin) {
+    if (state !== 'waiting' || !message.fromParent || message.type !== 'buzz-embed:mount') {
+      return { state, action: 'ignore' };
+    }
+    const url = PARENTS.has(message.origin) ? destination(message.src, selfOrigin) : null;
+    return url
+      ? { state: 'mounted', action: 'mount', href: url.href, frameSrc: url.origin }
+      : { state: 'refused', action: 'refuse' };
+  }
+
+  let state = 'inactive';
+
+  function apply(result) {
+    state = result.state;
+    if (result.action === 'ignore') return;
+    removeEventListener('message', onMessage);
+    if (result.action === 'refuse') {
       parent.postMessage({ type: 'buzz-embed:refused' }, '*');
       return;
     }
 
     const policy = document.createElement('meta');
     policy.httpEquiv = 'Content-Security-Policy';
-    policy.content = 'frame-src ' + url.origin;
+    policy.content = 'frame-src ' + result.frameSrc;
     document.head.append(policy);
 
     const frame = document.createElement('iframe');
@@ -48,13 +60,23 @@
     frame.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen';
     frame.allowFullscreen = true;
     frame.referrerPolicy = 'strict-origin-when-cross-origin';
-    frame.src = url.href;
+    frame.src = result.href;
     document.body.append(frame);
     parent.postMessage({ type: 'buzz-embed:mounted' }, '*');
   }
 
+  function onMessage(event) {
+    apply(transition(state, {
+      fromParent: event.source === parent,
+      origin: event.origin,
+      type: event.data?.type,
+      src: event.data?.src,
+    }, location.origin));
+  }
+
   if (self !== parent && self.origin === location.origin) {
-    addEventListener('message', mount);
+    state = 'waiting';
+    addEventListener('message', onMessage);
     parent.postMessage({ type: 'buzz-embed:ready' }, '*');
   }
 </script>
