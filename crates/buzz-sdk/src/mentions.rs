@@ -23,8 +23,8 @@
 //! handle multi-word display names.
 //!
 //! Mention boundaries reject ASCII alphanumerics before `@` (so emails stay
-//! inert) but allow whitespace, punctuation, and non-ASCII script characters
-//! so CJK handoffs like `交给@Scout处理` still emit `p` tags (#3904).
+//! inert) and open after whitespace or a CJK character, so `交给@Scout处理`
+//! still emits `p` tags (#3904). A slash or a second `@` does not.
 //!
 //! [`extract_nostr_uris`] handles NIP-27 inline `nostr:npub1…` references,
 //! skipping those inside code blocks/spans via [`strip_code_regions`].
@@ -56,10 +56,11 @@ pub struct MentionProfile<'a> {
 
 /// Whether `@` at byte offset `at_index` may start a mention.
 ///
-/// Mentions open at start-of-string, after whitespace/punctuation, or after a
-/// non-ASCII character (CJK and other scripts often omit spaces — see #3904).
-/// An ASCII letter or digit immediately before `@` keeps email-like text
-/// (`user@host`) from becoming a mention.
+/// Mentions open at start-of-string, after ASCII whitespace, or after a CJK
+/// character (those scripts often omit spaces — see #3904). Punctuation such
+/// as `/` or a second `@` does not open one, so `https://host/@name` and
+/// `@@name` stay plain text. An ASCII letter or digit immediately before `@`
+/// keeps email-like text (`user@host`) from becoming a mention.
 fn is_mention_at_boundary(content: &str, at_index: usize) -> bool {
     if at_index == 0 {
         return true;
@@ -67,7 +68,18 @@ fn is_mention_at_boundary(content: &str, at_index: usize) -> bool {
     let Some(prev) = content[..at_index].chars().next_back() else {
         return true;
     };
-    !prev.is_ascii_alphanumeric()
+    prev.is_ascii_whitespace() || is_cjk(prev)
+}
+
+/// Han, Hiragana, Katakana, and Hangul. Used only as the character before `@`.
+fn is_cjk(c: char) -> bool {
+    matches!(
+        c,
+        '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{3040}'..='\u{30FF}'
+            | '\u{AC00}'..='\u{D7AF}'
+    )
 }
 
 /// Extract single-word `@mention` names from message content.
@@ -458,6 +470,9 @@ mod tests {
         assert_eq!(extract_at_names("你好@Scout"), vec!["scout"]);
         // ASCII letter/digit before @ stays email-safe.
         assert!(extract_at_names("user@Scout").is_empty());
+        // A slash or a second @ is not a CJK boundary.
+        assert!(extract_at_names("https://host/@name").is_empty());
+        assert!(extract_at_names("@@name").is_empty());
     }
 
     #[test]
