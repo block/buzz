@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:buzz/shared/auth/auth_provider.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/relay/read_state_snapshot.dart';
@@ -263,12 +264,18 @@ void main() {
         envelope(events: [event()..['content'] = 'x' * _maxBytes]),
   };
   for (final entry in invalidEnvelopes.entries) {
-    test('rejects ${entry.key} atomically', () async {
-      final h = harness(responseClient(entry.value()));
+    test('rejects ${entry.key} atomically and reports it', () async {
+      final reporter = _RecordingDiagnostics();
+      final h = _Harness(
+        keys.nsec,
+        responseClient(entry.value()),
+        diagnostics: reporter,
+      );
       await expectLater(
         h.session.fetchReadStateSnapshot(),
         throwsFormatException,
       );
+      expect(reporter.operations, [DiagnosticOperation.relayQuery]);
     });
   }
 
@@ -507,20 +514,34 @@ void main() {
 class _Harness {
   final RelaySessionNotifier session;
   final _Config config;
-  _Harness(String nsec, http.Client client)
+  _Harness(String nsec, http.Client client, {DiagnosticReporter? diagnostics})
     : session = RelaySessionNotifier(httpClient: client),
       config = _Config(nsec) {
-    _container(session, config);
+    _container(session, config, diagnostics: diagnostics);
   }
+}
+
+class _RecordingDiagnostics extends NoopDiagnosticReporter {
+  final operations = <DiagnosticOperation>[];
+
+  @override
+  void reportError(
+    Object error,
+    StackTrace? stackTrace, {
+    required DiagnosticOperation operation,
+  }) => operations.add(operation);
 }
 
 void _container(
   RelaySessionNotifier session,
   _Config config, {
   HostedRelayAuth? auth,
+  DiagnosticReporter? diagnostics,
 }) {
   final container = ProviderContainer(
     overrides: [
+      if (diagnostics != null)
+        diagnosticReporterProvider.overrideWithValue(diagnostics),
       authProvider.overrideWith(_PendingAuth.new),
       if (auth != null) hostedRelayAuthProvider.overrideWithValue(auth),
       relayConfigProvider.overrideWith(() => config),

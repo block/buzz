@@ -99,7 +99,8 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
 
   private let loadSession: () -> BuzzOrganizationSession?
   private let loadHostedSession: () -> BuzzOrganizationSession?
-  private let session: URLSession
+  /// Cookieless: the issuer refuses any request that carries a cookie, and its hosts set one.
+  private let configuration: URLSessionConfiguration
   private let now: () -> Date
   /// Monotonic seconds, for local deadlines a wall-clock change cannot move.
   private let uptime: () -> TimeInterval
@@ -114,6 +115,14 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
   private var bound: Set<String> = []
   /// Hosted relays that have challenged for NIP-FI evidence in this process.
   private var challengedRelays: Set<String> = []
+  /// The network transfer; tests substitute it to observe each request and its configuration.
+  var startDownload:
+    (URLRequest, URLSessionConfiguration, Int, @escaping (Result<Data, Error>) -> Void) -> Void =
+      { request, configuration, maximumBytes, completion in
+        BuzzNotificationDownload.start(
+          request: request, configuration: configuration, maximumBytes: maximumBytes,
+          completion: completion)
+      }
 
   public init(
     session: URLSession,
@@ -122,7 +131,10 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
     now: @escaping () -> Date = Date.init,
     uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
   ) {
-    self.session = session
+    let configuration = session.configuration
+    configuration.httpCookieStorage = nil
+    configuration.httpShouldSetCookies = false
+    self.configuration = configuration
     self.loadSession = loadSession
     self.loadHostedSession = loadHostedSession
     self.now = now
@@ -267,10 +279,7 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue(organization.origin, forHTTPHeaderField: "Origin")
     request.setValue(organization.credential, forHTTPHeaderField: "X-BB-Session-Credential")
-    BuzzNotificationDownload.start(
-      request: request, configuration: session.configuration,
-      maximumBytes: Self.maximumResponseBytes
-    ) { [self] result in
+    startDownload(request, configuration, Self.maximumResponseBytes) { [self] result in
       guard case .success(let data) = result,
         let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
         value["error"] == nil || value["error"] is NSNull
@@ -324,10 +333,7 @@ public final class BuzzRelayAssertionIssuer: @unchecked Sendable {
     request.setValue(auth, forHTTPHeaderField: "Authorization")
     // Sampled before the request, so time in flight counts against the token's life.
     let requestStart = uptime()
-    BuzzNotificationDownload.start(
-      request: request, configuration: session.configuration,
-      maximumBytes: Self.maximumResponseBytes
-    ) { [self] result in
+    startDownload(request, configuration, Self.maximumResponseBytes) { [self] result in
       guard case .success(let data) = result,
         let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
         let token = value["assertion"] as? String, !token.isEmpty,

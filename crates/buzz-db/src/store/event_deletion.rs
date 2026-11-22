@@ -1,6 +1,9 @@
 //! Atomic event deletion, retention-free purging, and thread accounting.
 
-use buzz_core::{kind::KIND_CANVAS, CommunityId};
+use buzz_core::{
+    kind::{KIND_CANVAS, KIND_CHANNEL_PINS, PINNABLE_KINDS},
+    CommunityId,
+};
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -11,12 +14,16 @@ use crate::{
 };
 
 /// SQL predicate over an `events` row for a conforming NIP-RS read-state
-/// coordinate: kind 30078, a `read-state:<32 lowercase hex>` d-tag carried by
-/// exactly one `d` tag, and exactly one `["t", "read-state"]` tag.
+/// coordinate: kind 30078, a `read-state:<32 lowercase hex>` (read positions),
+/// `read-state-unread-v2:<32 lowercase hex>` (unread record) or
+/// `thread-follows:<32 lowercase hex>` (thread follows) d-tag carried by
+/// exactly one `d` tag, and exactly one tag naming that same namespace
+/// (`["t", "read-state"]`, `["t", "read-state-unread-v2"]` or
+/// `["t", "thread-follows"]`).
 macro_rules! nip_rs_event_predicate {
     () => {
         "(kind = 30078 \
-          AND d_tag ~ '^read-state:[0-9a-f]{32}$' \
+          AND d_tag ~ '^(read-state(-unread-v2)?|thread-follows):[0-9a-f]{32}$' \
           AND (SELECT count(*) \
                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
                WHERE jsonb_typeof(tag) = 'array' AND tag->0 = '\"d\"'::jsonb) = 1 \
@@ -26,7 +33,7 @@ macro_rules! nip_rs_event_predicate {
                  AND jsonb_typeof(tag->1) = 'string' AND tag->>0 = 'd' AND tag->>1 = d_tag) \
           AND (SELECT count(*) \
                FROM jsonb_array_elements(CASE WHEN jsonb_typeof(tags) = 'array' THEN tags ELSE '[]'::jsonb END) tag \
-               WHERE tag = '[\"t\", \"read-state\"]'::jsonb) = 1)"
+               WHERE tag = jsonb_build_array('t', split_part(d_tag, ':', 1))) = 1)"
     };
 }
 
@@ -380,7 +387,7 @@ pub async fn soft_delete_event_and_update_thread(
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    let deleted = soft_delete_event_and_update_thread_in_tx(
+    let (deleted, _) = soft_delete_event_and_update_thread_in_tx(
         &mut tx,
         event_id,
         None,
@@ -397,13 +404,18 @@ pub async fn soft_delete_event_and_update_thread(
 /// Callers that must fence the delete with their own writes (e.g. the admin
 /// action lease/marker) run this inside their transaction; the caller commits.
 /// `None` discovers the target timestamp once; `Some` never falls back to ID-only.
+///
+/// Returns whether this call deleted the event, and the channel of a target
+/// that is a message. That channel's NIP-PM pin list may hold the message: the
+/// caller passes it to [`crate::pins::unpin_deleted_messages`] once it has
+/// deleted every target.
 pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
     tx: &mut AdmittedTx,
     event_id: &[u8],
     created_at: Option<DateTime<Utc>>,
     parent_event_id: Option<&[u8]>,
     root_event_id: Option<&[u8]>,
-) -> Result<bool> {
+) -> Result<(bool, Option<Uuid>)> {
     let community_id = tx.community();
     use crate::store::replaceable::event_replacement_lock_key;
 
@@ -433,13 +445,20 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
         }
     };
     let Some((kind, channel_id, created_at)) = target else {
-        return Ok(false);
+        return Ok((false, None));
     };
 
     // Relay-signed move removals are the source channel's only replay record.
     if kind == 45011 {
         return Err(DbError::InvalidData(
             "artifact removal markers cannot be deleted".into(),
+        ));
+    }
+    // A deleted pin list would clear a channel's pins with no new list for
+    // subscribers to replace their copy with.
+    if kind == KIND_CHANNEL_PINS as i32 {
+        return Err(DbError::InvalidData(
+            "the pin list cannot be deleted".into(),
         ));
     }
 
@@ -508,7 +527,9 @@ pub(crate) async fn soft_delete_event_and_update_thread_in_tx(
         }
     }
 
-    Ok(deleted)
+    let message_channel =
+        channel_id.filter(|_| PINNABLE_KINDS.map(|kind| kind as i32).contains(&kind));
+    Ok((deleted, message_channel))
 }
 
 #[cfg(test)]

@@ -13,6 +13,8 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../auth/auth_provider.dart';
 import '../channels/channel_list_snapshot.dart';
+import '../channels/saved_message_store.dart';
+import '../diagnostics/diagnostic_reporter.dart';
 import '../hosted/community_entry_requirements.dart';
 import '../profile/profile_snapshot.dart';
 import '../push/dev_push_lease.dart';
@@ -86,7 +88,7 @@ final communityTransitionProvider = Provider<CommunityTransitionCoordinator>(
 );
 
 final communityStorageProvider = Provider<CommunityStorage>((ref) {
-  return CommunityStorage();
+  return CommunityStorage(diagnostics: ref.read(diagnosticReporterProvider));
 });
 
 typedef CommunitySnapshotWriter =
@@ -112,6 +114,7 @@ final communityPushLeaseDeactivatorProvider =
         community,
         generation: generation,
         relayAuth: ref.read(hostedRelayAuthProvider),
+        diagnostics: ref.read(diagnosticReporterProvider),
       );
     });
 
@@ -134,6 +137,7 @@ Future<void> _deactivateCommunityPushLease(
   Community community, {
   int? generation,
   required HostedRelayAuth relayAuth,
+  required DiagnosticReporter diagnostics,
 }) async {
   final state = community.pushSubscriptionState;
   final acceptedGeneration = state.acceptedGeneration;
@@ -196,6 +200,7 @@ Future<void> _deactivateCommunityPushLease(
               content: content,
               tags: tags,
               createdAt: createdAt,
+              diagnostics: diagnostics,
             ),
   );
   pushLeaseCleanupError.value = null;
@@ -385,8 +390,8 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       ref.read(knownCommunitySyncProvider)?.trigger();
 
       final updatedList = current.where((w) => w.id != id).toList();
-      await _removeOrphanChannelListSnapshots(updatedList);
       state = AsyncData(updatedList);
+      await _removeOrphanChannelListSnapshots(updatedList);
       await syncCommunitySnapshot(ref, updatedList);
 
       // If we removed the active community, switch to another or sign out.
@@ -394,11 +399,13 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         final remaining = state.value ?? [];
         if (remaining.isNotEmpty) {
           await storage.saveActiveId(remaining.first.id);
+          _reportAs(remaining.first);
           // Reassign list state so activeCommunityProvider picks up the new ID.
           state = AsyncData([...remaining]);
           ref.invalidate(authProvider);
         } else {
           await storage.clearActiveId();
+          _reportAs(null);
           // Invalidate auth so it re-evaluates against the now-empty storage
           // and transitions to unauthenticated.
           ref.invalidate(authProvider);
@@ -434,6 +441,10 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       await Future.wait([
         ?snapshots?.remove(pubkey, community.relayUrl),
         ?profiles?.remove(pubkey, community.relayUrl),
+        ref.read(savedMessageStoreProvider).removeScope((
+          communityId: community.id,
+          pubkey: pubkey,
+        )),
       ]);
     } catch (error, stackTrace) {
       developer.log(
@@ -463,6 +474,11 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       ?profiles?.removeOrphans({
         for (final scope in scopes)
           ProfileSnapshotStorage.key(scope.pubkey, scope.relay),
+      }),
+      ref.read(savedMessageStoreProvider).removeOrphans({
+        for (final community in communities)
+          if (_channelSnapshotPubkey(community) case final pubkey?)
+            (communityId: community.id, pubkey: pubkey),
       }),
     ]);
   }
@@ -509,13 +525,27 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     }
   }
 
+  /// Names [community]'s member on reports from now on. The providers that
+  /// derive the member from the active community settle a frame later, and a
+  /// report raised in between would name the previous member.
+  void _reportAs(Community? community) => ref
+      .read(diagnosticReporterProvider)
+      .setMember(pubkeyFromNsec(community?.nsec));
+
   Future<void> switchCommunity(String id) {
     return ref.read(communityTransitionProvider).runExclusive(() async {
       final storage = ref.read(communityStorageProvider);
       final activeId = await storage.loadActiveId();
       if (activeId == id) return;
+      // From storage: while the list reloads (after sign-in, say), state can
+      // still hold the previous list. Read before anything changes, so a
+      // failed read leaves the switch to retry.
+      final target = (await storage.loadAll())
+          .where((c) => c.id == id)
+          .firstOrNull;
       await ref.read(communityTransitionProvider).run();
       await storage.saveActiveId(id);
+      _reportAs(target);
       // Reassign list state to trigger activeCommunityProvider (which watches
       // communityListProvider.future) to rebuild and pick up the new active ID.
       // We can't use ref.invalidate(activeCommunityProvider) here because that

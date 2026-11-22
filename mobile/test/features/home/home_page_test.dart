@@ -22,7 +22,6 @@ import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/shortcuts/home_screen_shortcuts.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/features/home/home_page.dart';
-import 'package:buzz/features/home/messages_filters.dart';
 import 'package:buzz/features/home/messages_navigation_bar.dart';
 import 'package:buzz/shared/widgets/ios_message_create_button.dart';
 import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
@@ -35,18 +34,20 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-// Production iOS capsules fit the semibold label plus 16 points on each side.
-double nativeFilterWidth(String label) =>
-    (TextPainter(
-      text: TextSpan(
-        text: label,
-        style: filterChipTextStyle.copyWith(fontWeight: FontWeight.w600),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout()).width +
-    32;
-
 void main() {
+  final binding = TestWidgetsFlutterBinding.ensureInitialized();
+  setUp(() {
+    binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform_views,
+      (_) async => null,
+    );
+  });
+  tearDown(() {
+    binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform_views,
+      null,
+    );
+  });
   Future<Widget> buildHome({
     bool longSolo = false,
     bool inboxUnread = false,
@@ -276,16 +277,10 @@ void main() {
         frostedAppBarHeight(tester.element(bar)) / 2,
       );
       final originalHeaderRect = tester.getRect(bar);
-      final originalFiltersRect = tester.getRect(find.byType(MessagesFilters));
-      expect(
-        originalFiltersRect.top - tester.getRect(menu).bottom,
-        lessThanOrEqualTo(12),
-      );
       final scrollable = find.byType(Scrollable).first;
       await tester.drag(scrollable, const Offset(0, -250));
       await tester.pumpAndSettle();
       expect(tester.getRect(bar), originalHeaderRect);
-      expect(tester.getRect(find.byType(MessagesFilters)), originalFiltersRect);
       expect(
         tester.getCenter(find.text('Messages')).dy,
         tester.getCenter(menu).dy,
@@ -298,7 +293,6 @@ void main() {
         ),
         findsOneWidget,
       );
-      expect(find.byType(MessagesFilters), findsOneWidget);
       tester.view.physicalSize = const Size(466, 678);
       await tester.pumpAndSettle();
       expect(tester.widget<FrostedAppBar>(bar).nativeLargeTitle, isFalse);
@@ -312,15 +306,9 @@ void main() {
       expect(tester.getRect(scrollable).right, lessThanOrEqualTo(390));
       expect(tester.getRect(menu).right, lessThanOrEqualTo(466 - 76));
 
-      final closedFiltersRect = tester.getRect(find.byType(MessagesFilters));
-      expect(
-        closedFiltersRect.top - tester.getRect(menu).bottom,
-        lessThanOrEqualTo(12),
-      );
       await tester.drag(scrollable, const Offset(0, -200));
       await tester.pumpAndSettle();
       expect(tester.getRect(bar), closedHeaderRect);
-      expect(tester.getRect(find.byType(MessagesFilters)), closedFiltersRect);
       tester.view.physicalSize = const Size(951, 669);
       tester.view.viewPadding = const FakeViewPadding(left: 76);
       tester.view.padding = const FakeViewPadding(left: 76);
@@ -367,44 +355,30 @@ void main() {
     await tester.pumpAndSettle();
     expect(
       tester
-          .widget<IgnorePointer>(
-            find
-                .ancestor(
-                  of: find.byTooltip('Search'),
-                  matching: find.byType(IgnorePointer),
-                )
-                .first,
+          .widgetList<IgnorePointer>(
+            find.ancestor(
+              of: find.byTooltip('Search'),
+              matching: find.byType(IgnorePointer),
+            ),
           )
-          .ignoring,
+          .any((widget) => widget.ignoring),
       isTrue,
     );
     create.onMenuVisibilityChanged!(false);
     await tester.pumpAndSettle();
     expect(
       tester
-          .widget<IgnorePointer>(
-            find
-                .ancestor(
-                  of: find.byTooltip('Search'),
-                  matching: find.byType(IgnorePointer),
-                )
-                .first,
+          .widgetList<IgnorePointer>(
+            find.ancestor(
+              of: find.byTooltip('Search'),
+              matching: find.byType(IgnorePointer),
+            ),
           )
-          .ignoring,
+          .any((widget) => widget.ignoring),
       isFalse,
     );
 
-    // Dispatch the native control callback; widget tests do not run UIKit.
-    tester
-        .widget<IosGlassNavigationButton>(
-          find.byWidgetPredicate(
-            (w) => w is IosGlassNavigationButton && w.label == 'Solo',
-          ),
-        )
-        .onPressed!();
-    await tester.pumpAndSettle();
     expect(find.text('Personal workspace'), findsOneWidget);
-    expect(find.text('General'), findsNothing);
     final pane = ConversationPaneScope.maybeOf(
       tester.element(find.text('Personal workspace')),
     )!;
@@ -459,7 +433,7 @@ void main() {
     tester.view.physicalSize = const Size(951, 669);
     await tester.pumpAndSettle();
     expect(tester.getSize(find.byType(SearchPage)).width, 375);
-    expect(tester.getRect(searchField).top, Grid.half);
+    expect(tester.getRect(searchField).top, Grid.twelve);
     Navigator.of(tester.element(find.byType(SearchPage))).pop();
     await tester.pumpAndSettle();
     tester.view.physicalSize = const Size(669, 951);
@@ -482,7 +456,6 @@ void main() {
     await tester.binding.handlePopRoute();
     await tester.pumpAndSettle();
     expect(find.text('Personal workspace'), findsOneWidget);
-    expect(find.text('General'), findsNothing);
     expect(find.byType(MessagesNavigationBar), findsOneWidget);
     tester.view.physicalSize = const Size(390, 844);
     tester.view.viewPadding = const FakeViewPadding(bottom: 34);
@@ -499,10 +472,25 @@ void main() {
   });
 
   testWidgets(
-    'Messages filters its inventory and opens Search and Settings above it',
+    'Messages lists its inventory and opens Search and Settings above it',
     (tester) async {
       await tester.pumpWidget(await buildHome());
       await tester.pumpAndSettle();
+      final navigation = find.byType(MessagesNavigationBar);
+      final mountedNavigation = tester.element(navigation);
+      final focus = find.byKey(const ValueKey('voice-recording-focus'));
+      expect(tester.widget<ImageFiltered>(focus).enabled, isFalse);
+      tester.widget<MessagesNavigationBar>(navigation).onRecordingChanged!(
+        true,
+      );
+      await tester.pump();
+      expect(tester.widget<ImageFiltered>(focus).enabled, isTrue);
+      expect(tester.element(navigation), same(mountedNavigation));
+      tester.widget<MessagesNavigationBar>(navigation).onRecordingChanged!(
+        false,
+      );
+      await tester.pump();
+      expect(tester.widget<ImageFiltered>(focus).enabled, isFalse);
       expect(find.byTooltip('Messages'), findsNothing);
       expect(find.byTooltip('Solo'), findsNothing);
       expect(find.text('Personal workspace'), findsOneWidget);
@@ -514,60 +502,17 @@ void main() {
       expect(header.titleStyle?.fontSize, 22);
       expect(header.centerTitle, isFalse);
 
-      for (final label in ['All', 'Solo', 'Team']) {
-        final chip = find.ancestor(
-          of: find.descendant(
-            of: find.byType(MessagesFilters),
-            matching: find.text(label),
-          ),
-          matching: find.byType(FilterChip),
-        );
-        expect(tester.getSize(chip).height, 48);
-        final paintedChip = find.descendant(
-          of: chip,
-          matching: find.byType(Material),
-        );
-        expect(tester.getSize(paintedChip).height, 48);
-        expect(tester.getSize(paintedChip).width, nativeFilterWidth(label));
-      }
-
-      await tester.tap(
-        find.descendant(
-          of: find.byType(MessagesFilters),
-          matching: find.text('Solo'),
-        ),
+      final teamSection = find.descendant(
+        of: find.byType(CustomScrollView),
+        matching: find.text('Team'),
       );
-      await tester.pumpAndSettle();
-      expect(find.text('Personal workspace'), findsOneWidget);
-      expect(find.text('General'), findsNothing);
-      await tester.tap(
-        find.descendant(
-          of: find.byType(MessagesFilters),
-          matching: find.text('Team'),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('Personal workspace'), findsNothing);
-      expect(find.text('General'), findsOneWidget);
-      await tester.tap(find.text('All'));
-      await tester.pumpAndSettle();
-      expect(find.text('Personal workspace'), findsOneWidget);
       await tester.tap(find.text('Chats'));
-      await tester.tap(find.text('Channels'));
+      await tester.tap(teamSection);
       await tester.pumpAndSettle();
-      for (final filter in ['Solo', 'Team', 'All']) {
-        await tester.tap(
-          find.descendant(
-            of: find.byType(MessagesFilters),
-            matching: find.text(filter),
-          ),
-        );
-        await tester.pumpAndSettle();
-        expect(find.text('Personal workspace').hitTestable(), findsNothing);
-        expect(find.text('General').hitTestable(), findsNothing);
-      }
+      expect(find.text('Personal workspace').hitTestable(), findsNothing);
+      expect(find.text('General').hitTestable(), findsNothing);
       await tester.tap(find.text('Chats'));
-      await tester.tap(find.text('Channels'));
+      await tester.tap(teamSection);
       await tester.pumpAndSettle();
       expect(find.text('Personal workspace').hitTestable(), findsOneWidget);
       expect(find.text('General').hitTestable(), findsOneWidget);
@@ -598,63 +543,6 @@ void main() {
       expect(find.text('General'), findsOneWidget);
       await tester.pumpWidget(await buildHome(longSolo: true));
       await tester.pumpAndSettle();
-      await tester.tap(
-        find.descendant(
-          of: find.byType(MessagesFilters),
-          matching: find.text('Solo'),
-        ),
-      );
-      await tester.pumpAndSettle();
-      final title = find.text('Messages');
-      final titleTop = tester.getTopLeft(title).dy;
-      final scroll = tester
-          .widget<CustomScrollView>(find.byType(CustomScrollView).first)
-          .controller!;
-      final expandedHeader = tester.widget<FrostedAppBar>(
-        find.byType(FrostedAppBar),
-      );
-      BorderSide filterOutline() => tester
-          .widget<FilterChip>(
-            find
-                .descendant(
-                  of: find.byType(MessagesFilters),
-                  matching: find.byType(FilterChip),
-                )
-                .first,
-          )
-          .side!;
-      expect(filterOutline(), BorderSide.none);
-      scroll.jumpTo(expandedHeader.bottomHeight / 4);
-      await tester.pump();
-      expect(
-        tester.getTopLeft(title).dy,
-        titleTop - expandedHeader.bottomHeight / 4,
-      );
-      expect(
-        tester
-            .widget<Opacity>(
-              find.ancestor(of: title, matching: find.byType(Opacity)).first,
-            )
-            .opacity,
-        closeTo(0.75, 0.01),
-      );
-      expect(filterOutline(), BorderSide.none);
-      scroll.jumpTo(expandedHeader.bottomHeight);
-      await tester.pump();
-      expect(
-        tester
-            .widget<Opacity>(
-              find.ancestor(of: title, matching: find.byType(Opacity)).first,
-            )
-            .opacity,
-        0,
-      );
-      expect(filterOutline().width, 1);
-      expect(filterOutline().color.a, closeTo(0.02, 0.001));
-      scroll.jumpTo(0);
-      await tester.pump();
-      expect(tester.getTopLeft(title).dy, titleTop);
-      expect(filterOutline(), BorderSide.none);
       await tester.drag(
         find.byType(CustomScrollView).first,
         const Offset(0, -2000),
@@ -1097,8 +985,6 @@ void main() {
       expect(find.text('Messages'), findsOneWidget);
       expect(bar.nativeActions, isEmpty);
       expect(bar.leading, isNull);
-      expect(find.byType(MessagesFilters), findsOneWidget);
-      expect(bar.bottomHeight, greaterThan(0));
       expect(
         tester
             .widget<IosMessageCreateButton>(
@@ -1148,18 +1034,6 @@ void main() {
       final inboxButton = tester.widget<IosGlassNavigationButton>(inbox);
       expect(inboxButton.icon, IosGlassNavigationIcon.bell);
 
-      for (final label in ['All', 'Solo', 'Team']) {
-        final chip = tester.widget<IosGlassNavigationButton>(
-          find.descendant(
-            of: find.byType(MessagesFilters),
-            matching: find.byWidgetPredicate(
-              (w) => w is IosGlassNavigationButton && w.label == label,
-            ),
-          ),
-        );
-        expect(chip.controlSize, inboxButton.controlSize);
-        expect(chip.width, nativeFilterWidth(label));
-      }
       expect(tester.getSize(inbox), const Size(44, 44));
       final communityTrigger = find.byWidgetPredicate(
         (w) =>
@@ -1178,7 +1052,7 @@ void main() {
           (w) => w is IosGlassNavigationButton && w.semanticLabel == 'Activity',
           skipOffstage: false,
         ),
-        findsNothing,
+        findsOneWidget,
       );
       Navigator.of(tester.element(find.byType(ActivityPage))).pop();
       await tester.pumpAndSettle();

@@ -121,13 +121,70 @@ final class NativeMessageImageLoaderDecodeTests: XCTestCase {
     // Browsers and the Flutter timeline show 0 and 1 cs frames for 100 ms;
     // longer frames keep their own delay.
     let image = try XCTUnwrap(NativeMessageImageLoader.decode(gif([0, 1, 2, 5])))
-    XCTAssertEqual(image.images?.count, 4)
+    XCTAssertEqual(holds(image), [10, 10, 2, 5])
     XCTAssertEqual(image.duration, 0.1 + 0.1 + 0.02 + 0.05, accuracy: 0.001)
+  }
+
+  func testUnevenDelaysKeepEachFramesShare() throws {
+    // UIKit spaces frames evenly, so a held frame repeats for its share.
+    let image = try XCTUnwrap(NativeMessageImageLoader.decode(gif([10, 10, 300])))
+    XCTAssertEqual(holds(image), [1, 1, 30])
+    XCTAssertEqual(image.duration, 3.2, accuracy: 0.001)
+  }
+
+  func testCancelledDecodeReturnsNil() {
+    XCTAssertNil(NativeMessageImageLoader.decode(gif([5, 5]), isCancelled: { true }))
   }
 
   func testStillImageIsNotAnimated() throws {
     let image = try XCTUnwrap(NativeMessageImageLoader.decode(gif([5])))
     XCTAssertNil(image.images)
+  }
+
+  /// How many consecutive entries each decoded frame fills.
+  private func holds(_ image: UIImage) -> [Int] {
+    var runs: [(frame: UIImage, count: Int)] = []
+    for frame in image.images ?? [] {
+      if let last = runs.last, last.frame === frame {
+        runs[runs.count - 1].count += 1
+      } else {
+        runs.append((frame, 1))
+      }
+    }
+    return runs.map(\.count)
+  }
+}
+
+@MainActor
+final class NativeEmojiDecodeGateTests: XCTestCase {
+  func testAdmitsFourAndHandsSlotsOnInOrder() async throws {
+    for _ in 0..<NativeEmojiDecodeGate.limit { try await NativeEmojiDecodeGate.acquire() }
+    var admitted: [Int] = []
+    // Let each waiter queue before the next one starts.
+    func waiter(_ number: Int) async -> Task<Void, Error> {
+      let task = Task { try await NativeEmojiDecodeGate.acquire(); admitted.append(number) }
+      for _ in 0..<10 { await Task.yield() }
+      return task
+    }
+    let fifth = await waiter(5)
+    let sixth = await waiter(6)
+    let seventh = await waiter(7)
+    XCTAssertEqual(admitted, [])
+
+    // A waiter whose cell left gives up its place.
+    sixth.cancel()
+    do {
+      try await sixth.value
+      XCTFail("a cancelled waiter must not be admitted")
+    } catch is CancellationError {}
+
+    NativeEmojiDecodeGate.release()
+    try await fifth.value
+    NativeEmojiDecodeGate.release()
+    try await seventh.value
+    XCTAssertEqual(admitted, [5, 7])
+
+    for _ in 0..<NativeEmojiDecodeGate.limit { NativeEmojiDecodeGate.release() }
   }
 }
 

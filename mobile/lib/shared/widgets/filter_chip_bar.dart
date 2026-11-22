@@ -48,9 +48,6 @@ class FilterChipBar<T> extends StatelessWidget {
   /// Uses native glass capsules on iOS for navigation-style filters.
   final bool useNativeGlass;
 
-  /// Uses the native iOS label widths for Material capsules too.
-  final bool matchNativeWidths;
-
   /// Optional outline for Material capsules.
   final BorderSide side;
 
@@ -79,7 +76,6 @@ class FilterChipBar<T> extends StatelessWidget {
     required this.onSelected,
     this.expandItems = false,
     this.useNativeGlass = false,
-    this.matchNativeWidths = false,
     this.side = BorderSide.none,
     this.labelOffset = Offset.zero,
     this.minControlHeight = 0,
@@ -91,21 +87,21 @@ class FilterChipBar<T> extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final widths = [
-      for (final item in items)
-        (TextPainter(
-              text: TextSpan(
-                text: item.label,
-                style: filterChipTextStyle.copyWith(
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              textScaler: MediaQuery.textScalerOf(context),
-              textDirection: Directionality.of(context),
-            )..layout()).width +
-            32,
-    ];
     if (useNativeGlass && defaultTargetPlatform == TargetPlatform.iOS) {
+      final widths = [
+        for (final item in items)
+          (TextPainter(
+                text: TextSpan(
+                  text: item.label,
+                  style: filterChipTextStyle.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                textScaler: MediaQuery.textScalerOf(context),
+                textDirection: Directionality.of(context),
+              )..layout()).width +
+              32,
+      ];
       final height = math.max(
         MediaQuery.textScalerOf(context).scale(16) * 1.4 + 16,
         math.max(48.0, minControlHeight),
@@ -163,11 +159,6 @@ class FilterChipBar<T> extends StatelessWidget {
         if (index > 0) const SizedBox(width: Grid.xxs),
         if (expandItems)
           Expanded(child: _chip(context, items[index], fillWidth: true))
-        else if (matchNativeWidths)
-          SizedBox(
-            width: widths[index],
-            child: _chip(context, items[index], fillWidth: true),
-          )
         else
           _chip(context, items[index]),
       ],

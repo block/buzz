@@ -50,6 +50,64 @@ final class BuzzRelayAssertionLifetimeTests: XCTestCase {
     XCTAssertEqual(mints, 2, "an assertion that expired during sleep must be replaced")
   }
 
+  /// The issuer refuses any request with a cookie, and its hosts set Cloudflare's `__cf_bm` on
+  /// every response, so a cookie set on the identity check must never reach the mint.
+  func testIssuerRequestsCarryNoCookieAfterAResponseSetsOne() throws {
+    let wall = 1_800_000_000
+    let issuer = BuzzRelayAssertionIssuer(
+      session: URLSession(configuration: .ephemeral), loadSession: { nil },
+      loadHostedSession: {
+        BuzzOrganizationSession(
+          origin: "https://app.example", credential: "hosted-credential", relayHosts: [],
+          relayDomains: ["communities.example"], communityDomain: "communities.example")
+      },
+      now: { Date(timeIntervalSince1970: TimeInterval(wall)) })
+    // A stand-in for the loading system's cookie handling: it stores each response's cookies
+    // and sends them back, unless the configuration turns cookies off.
+    let jar = HTTPCookieStorage.sharedCookieStorage(forGroupContainerIdentifier: UUID().uuidString)
+    var sent: [URLRequest] = []
+    issuer.startDownload = { request, configuration, _, completion in
+      var request = request
+      if configuration.httpCookieStorage != nil, configuration.httpShouldSetCookies {
+        let cookies = jar.cookies(for: request.url!) ?? []
+        HTTPCookie.requestHeaderFields(with: cookies).forEach {
+          request.setValue($0.value, forHTTPHeaderField: $0.key)
+        }
+      }
+      sent.append(request)
+      if configuration.httpCookieStorage != nil {
+        jar.setCookies(
+          HTTPCookie.cookies(
+            withResponseHeaderFields: [
+              "Set-Cookie": "__cf_bm=token; Domain=app.example; Path=/; Secure; HttpOnly"
+            ], for: request.url!),
+          for: request.url!, mainDocumentURL: nil)
+      }
+      let identity = ["identity": ["pubkey_hex": BuzzPushNotificationResolverTests.ownPubkey]]
+      let assertion: [String: Any] = [
+        "assertion": "e30.eyJpYXQiOjE4MDAwMDAwMDB9.c2ln",
+        "nostr_pubkey": BuzzPushNotificationResolverTests.ownPubkey, "expires_at": wall + 300,
+      ]
+      let isIdentityCheck = request.url?.path == "/api/goose/v1/buzz/nostr-identities/current"
+      completion(Result {
+        try JSONSerialization.data(withJSONObject: isIdentityCheck ? identity : assertion)
+      })
+    }
+    let done = expectation(description: "assertion")
+    issuer.header(
+      relayURL: URL(string: "https://team.communities.example")!,
+      privateKeyHex: BuzzPushNotificationResolverTests.privateKey, challenged: true
+    ) { result in
+      XCTAssertNotNil(result)
+      done.fulfill()
+    }
+    wait(for: [done], timeout: 3)
+    XCTAssertEqual(sent.map(\.url?.path), [
+      "/api/goose/v1/buzz/nostr-identities/current", "/api/goose/v1/buzz/identity/assertions",
+    ])
+    XCTAssertEqual(sent.map { $0.value(forHTTPHeaderField: "Cookie") }, [nil, nil])
+  }
+
   func testDeadlineWithPhoneClock120SecondsSlowOrFast() {
     // Issuer: iat 10_000, exp 10_180. Request sent at uptime 1_000, answered at once.
     func deadline(wall: Int) -> TimeInterval {

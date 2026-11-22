@@ -35,6 +35,10 @@ pub fn install() -> Result<PrometheusHandle, BuildError> {
             Matcher::Full("push_gateway_apns_delivery_seconds".to_owned()),
             &APNS_LATENCY_BUCKETS_S,
         )?
+        .set_buckets_for_metric(
+            Matcher::Full("push_gateway_fcm_delivery_seconds".to_owned()),
+            &APNS_LATENCY_BUCKETS_S,
+        )?
         .install_recorder()?;
     Ok(handle)
 }
@@ -66,6 +70,18 @@ pub fn record_apns_delivery(outcome: DeliveryOutcome, seconds: f64) {
     metrics::histogram!("push_gateway_apns_delivery_seconds").record(seconds);
 }
 
+/// Record entry into the concrete FCM HTTP send seam.
+pub fn record_fcm_send_attempt() {
+    metrics::counter!("push_gateway_fcm_send_attempts_total").increment(1);
+}
+
+/// Record the terminal FCM outcome and its send round-trip latency.
+pub fn record_fcm_delivery(outcome: DeliveryOutcome, seconds: f64) {
+    metrics::counter!("push_gateway_fcm_deliveries_total", "outcome" => outcome_label(outcome))
+        .increment(1);
+    metrics::histogram!("push_gateway_fcm_delivery_seconds").record(seconds);
+}
+
 /// Delivery-admission result at the `authorize_delivery` seam.
 #[derive(Debug, Clone, Copy)]
 pub enum Admission {
@@ -75,6 +91,8 @@ pub enum Admission {
     Rejected,
     /// The authority store was transiently unavailable.
     Unavailable,
+    /// An earlier attempt of the same request id is still being delivered.
+    InFlight,
 }
 
 /// Record the outcome of a delivery-admission attempt.
@@ -83,6 +101,7 @@ pub fn record_admission(result: Admission) {
         Admission::Admitted => "admitted",
         Admission::Rejected => "rejected",
         Admission::Unavailable => "unavailable",
+        Admission::InFlight => "in_flight",
     };
     metrics::counter!("push_gateway_admissions_total", "result" => label).increment(1);
 }

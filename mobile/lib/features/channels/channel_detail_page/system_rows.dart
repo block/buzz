@@ -98,18 +98,31 @@ class _SystemMessageRow extends HookConsumerWidget {
         ),
       );
       if (reactedMessages.isEmpty) {
-        actions.addReaction(message.id, emoji, targetAuthor: message.pubkey);
+        reportReactionFailure(
+          context,
+          actions.addReaction(message.id, emoji, targetAuthor: message.pubkey),
+          adding: true,
+        );
         return;
       }
-      for (final source in reactedMessages) {
-        final reaction = source.reactions.firstWhere(
-          (candidate) =>
-              candidate.emoji == emoji &&
-              candidate.reactedByCurrentUser &&
-              candidate.currentUserReactionId != null,
-        );
-        actions.removeReaction(reaction.currentUserReactionId!, emoji);
-      }
+      reportReactionFailure(
+        context,
+        Future.wait([
+          for (final source in reactedMessages)
+            actions.removeReaction(
+              source.reactions
+                  .firstWhere(
+                    (candidate) =>
+                        candidate.emoji == emoji &&
+                        candidate.reactedByCurrentUser &&
+                        candidate.currentUserReactionId != null,
+                  )
+                  .currentUserReactionId!,
+              emoji,
+            ),
+        ]),
+        adding: false,
+      );
     }
 
     void openReactionPopover(MessageLongPressDetails details) {
@@ -278,7 +291,7 @@ class _SystemMessageRow extends HookConsumerWidget {
                               channelId: channelId,
                               reactions: reactions,
                               onToggle: (emoji) =>
-                                  toggleReaction(ref, message, emoji),
+                                  toggleReaction(context, ref, message, emoji),
                               showAddButton: isMember && !isArchived,
                               onAddReaction: () => showAddReactionPicker(
                                 context: context,
@@ -292,6 +305,7 @@ class _SystemMessageRow extends HookConsumerWidget {
                     RepaintBoundary(
                       key: spotlightKey,
                       child: _HuddleJoinSurface(
+                        isOwn: ownHuddle,
                         message: message,
                         allMessages: allMessages ?? const [],
                         parentChannelId: channelId,
@@ -308,7 +322,8 @@ class _SystemMessageRow extends HookConsumerWidget {
                     channelId: channelId,
                     reactions: reactions,
                     onToggle: groupedMessages == null
-                        ? (emoji) => toggleReaction(ref, message, emoji)
+                        ? (emoji) =>
+                              toggleReaction(context, ref, message, emoji)
                         : toggleGroupedReaction,
                   ),
                 ),

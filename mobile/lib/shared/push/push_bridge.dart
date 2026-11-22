@@ -6,10 +6,15 @@ import 'package:flutter/services.dart';
 
 import '../community/community.dart';
 import '../deeplink/deep_link.dart';
+import '../diagnostics/diagnostic_reporter.dart';
 import '../relay/relay_provider.dart';
 import 'push_snapshot.dart';
 
 const _channel = MethodChannel('buzz/push');
+
+/// The code native enrollment fails with when the push gateway's reply does
+/// not match its protocol.
+const _gatewayResponseInvalid = 'gateway_response_invalid';
 
 /// Latest APNs registration state, including callbacks replayed by iOS after
 /// the Flutter method channel attaches.
@@ -47,6 +52,187 @@ MessageDeepLink? _pushNotificationLink(Object? arguments) {
     messageId: eventId,
     threadRootId: threadRootId as String?,
   );
+}
+
+/// A reply typed into an iOS notification, waiting to be sent.
+@immutable
+class BuzzNotificationReply {
+  const BuzzNotificationReply({
+    required this.id,
+    required this.text,
+    required this.link,
+    required this.senderPubkey,
+    required this.messageCreatedAt,
+    required this.deadline,
+    this.replyRootId,
+    this.recipientPubkey,
+    this.inSolo = false,
+    this.recovered = false,
+    this.mayHavePublished = false,
+  });
+
+  final String id;
+  final String text;
+
+  /// The notified message, and where tapping its notification opens.
+  final MessageDeepLink link;
+
+  /// Author of the notified message, whom the reply mentions.
+  final String senderPubkey;
+
+  /// NIP-10 thread root of the notified message; null when it is top-level.
+  final String? replyRootId;
+
+  /// The account the notification was for, which the reply must go out as,
+  /// guarding against a community's credentials being replaced in place. Null
+  /// for a notification an earlier build posted.
+  final String? recipientPubkey;
+
+  /// When the notified message was created, in Unix seconds.
+  final int messageCreatedAt;
+
+  /// When iOS stops waiting for the reply and reports it as not sent.
+  final DateTime deadline;
+
+  /// Whether the notification knew the message is in a Solo chat, which
+  /// takes no thread replies.
+  final bool inSolo;
+
+  /// Whether an earlier launch was given this reply and never finished it.
+  /// It is never sent again.
+  final bool recovered;
+
+  /// Whether that earlier launch may have published it.
+  final bool mayHavePublished;
+
+  static BuzzNotificationReply? fromArguments(Object? arguments) {
+    if (arguments is! Map) return null;
+    final link = _pushNotificationLink({
+      for (final key in const [
+        'eventId',
+        'communityId',
+        'channelId',
+        'threadRootId',
+      ])
+        if (arguments.containsKey(key)) key: arguments[key],
+    });
+    final id = arguments['id'];
+    final text = arguments['text'];
+    final sender = arguments['senderPubkey'];
+    final root = arguments['replyRootId'];
+    final recipient = arguments['recipientPubkey'];
+    final createdAt = switch (arguments['messageCreatedAt']) {
+      final String value => int.tryParse(value),
+      _ => null,
+    };
+    final deadline = switch (arguments['deadline']) {
+      final String value => int.tryParse(value),
+      _ => null,
+    };
+    if (link == null ||
+        id is! String ||
+        id.isEmpty ||
+        text is! String ||
+        text.trim().isEmpty ||
+        sender is! String ||
+        sender.isEmpty ||
+        createdAt == null ||
+        createdAt <= 0 ||
+        deadline == null ||
+        (root != null && (root is! String || root.isEmpty)) ||
+        (recipient != null && (recipient is! String || recipient.isEmpty))) {
+      return null;
+    }
+    return BuzzNotificationReply(
+      id: id,
+      text: text,
+      link: link,
+      senderPubkey: sender,
+      messageCreatedAt: createdAt,
+      deadline: DateTime.fromMillisecondsSinceEpoch(deadline),
+      replyRootId: root as String?,
+      recipientPubkey: recipient as String?,
+      inSolo: arguments['inSolo'] == 'true',
+      recovered: arguments['recovered'] == 'true',
+      mayHavePublished: arguments['publishing'] == 'true',
+    );
+  }
+}
+
+/// Bumped when iOS hands the app a notification reply to send.
+final notificationReplyAvailable = ValueNotifier<int>(0);
+
+/// Takes notification replies native iOS is holding for the app.
+Future<List<BuzzNotificationReply>> takePendingBuzzNotificationReplies() async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return const [];
+  try {
+    final raw = await _channel.invokeListMethod<dynamic>(
+      'takePendingNotificationReplies',
+    );
+    return [
+      for (final value in raw ?? const [])
+        ?BuzzNotificationReply.fromArguments(value),
+    ];
+  } on MissingPluginException {
+    return const [];
+  }
+}
+
+/// Tells iOS that a notification reply may be published from now on, so a
+/// relaunch never drafts or resends it. Returns once that is saved, false
+/// when iOS has already ended the reply, which then must not be published.
+Future<bool> markBuzzNotificationReplyPublishing(String id) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return true;
+  try {
+    return await _channel.invokeMethod<bool>(
+          'markNotificationReplyPublishing',
+          id,
+        ) ??
+        true;
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+    return true;
+  }
+}
+
+/// Reports whether a notification reply was sent, so iOS clears the
+/// conversation's notifications or shows that it wasn't. [unknown] means it
+/// may have gone out; [draftThreadRootId] is the thread holding its draft,
+/// which the "Reply not sent" notification opens. Without [draftKept], iOS
+/// shows the unsent text in a notification even for a reply an earlier
+/// launch was given.
+Future<void> completeBuzzNotificationReply(
+  String id, {
+  required bool sent,
+  bool unknown = false,
+  String? draftThreadRootId,
+  bool draftKept = true,
+}) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    await _channel.invokeMethod<void>('completeNotificationReply', {
+      'id': id,
+      'sent': sent,
+      if (unknown) 'unknown': true,
+      'draftThreadRootId': ?draftThreadRootId,
+      if (!draftKept) 'noDraft': true,
+    });
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
+}
+
+/// Tells the iOS notification extension which community is selected; only
+/// its notifications offer Reply.
+Future<void> shareSelectedCommunityWithNotifications(
+  String? communityId,
+) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  try {
+    await _channel.invokeMethod<void>('setSelectedCommunity', communityId);
+  } on MissingPluginException {
+    // Flutter tests and non-Runner embeddings do not install the native bridge.
+  }
 }
 
 /// Pulls a notification response that arrived before the Flutter method
@@ -145,11 +331,27 @@ Future<BuzzPushEndpointGrant> enrollBuzzPush(
   String relayUrl,
   String gatewayUrl, {
   List<Community>? communitiesForSnapshotRefresh,
+  DiagnosticReporter diagnostics = const NoopDiagnosticReporter(),
 }) async {
-  final raw = await _channel.invokeMapMethod<dynamic, dynamic>('enrollPush', {
-    'relayUrl': relayUrl,
-    'gatewayUrl': gatewayUrl,
-  });
+  final Map<dynamic, dynamic>? raw;
+  try {
+    raw = await _channel.invokeMapMethod<dynamic, dynamic>('enrollPush', {
+      'relayUrl': relayUrl,
+      'gatewayUrl': gatewayUrl,
+    });
+  } on PlatformException catch (error, stackTrace) {
+    // The gateway is called from native code. It has its own code for a reply
+    // the app cannot read; every other failure (offline, refused, expired,
+    // server errors) is routine and not reported.
+    if (error.code == _gatewayResponseInvalid) {
+      diagnostics.reportError(
+        error,
+        stackTrace,
+        operation: DiagnosticOperation.pushGatewayResponse,
+      );
+    }
+    rethrow;
+  }
   if (raw == null) {
     throw StateError('Native push enrollment returned no grant.');
   }
@@ -306,6 +508,9 @@ void installBuzzPushMethodHandler() {
             ? message
             : 'APNs registration failed';
         debugPrint('APNs registration failed: ${apnsRegistrationError.value}');
+        return null;
+      case 'notificationReplyAvailable':
+        notificationReplyAvailable.value++;
         return null;
       case 'notificationOpened':
         final link = _pushNotificationLink(call.arguments);

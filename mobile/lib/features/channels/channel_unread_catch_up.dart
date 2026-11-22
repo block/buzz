@@ -113,13 +113,16 @@ extension _UnreadCatchUp on ChannelsNotifier {
         }
       }
 
+      var threadInterestChanged = false;
       for (final event in events) {
         if (batchDeletedIds.contains(event.id)) continue;
         if (EventKind.channelMessageEventKinds.contains(event.kind) &&
-            event.pubkey.toLowerCase() == myPk.toLowerCase()) {
-          _recordSelfThreadInterest(event, myPk);
+            event.pubkey.toLowerCase() == myPk.toLowerCase() &&
+            _addSelfThreadInterest(event)) {
+          threadInterestChanged = true;
         }
       }
+      if (threadInterestChanged) _writeThreadInterestStores(myPk);
 
       final recordedAtByChannel = <String, int>{};
       final windowSizeByChannel = <String, int>{};
@@ -137,6 +140,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
           continue;
         }
         final readAt = readAtByChannel[channelId];
+        _noteThreadChannel(event, channelId);
         if (event.pubkey.toLowerCase() == myPk.toLowerCase()) continue;
         if (readAt != null && event.createdAt <= readAt) continue;
         if (!shouldNotifyForEvent(
@@ -145,6 +149,7 @@ extension _UnreadCatchUp on ChannelsNotifier {
           participatedRootIds: _participatedRootIds,
           followedRootIds: _followedRootIds(),
           authoredRootIds: _authoredRootIds,
+          mutedRootIds: _unfollowedRootIds(channel),
           mutedChannelIds: mutedChannelIds,
           channelId: channel.id,
         )) {

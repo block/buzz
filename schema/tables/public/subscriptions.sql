@@ -2,7 +2,7 @@
 -- Conformance: "Mesh, agents, ACP/MCP, and CLI" (persisted subscriptions).
 
 CREATE TABLE subscriptions (
-    community_id        UUID NOT NULL REFERENCES communities(id),
+    community_id        UUID NOT NULL,
     id                  VARCHAR(255) NOT NULL,
     owner_pubkey        BYTEA NOT NULL,
     filter_kinds        JSONB,
@@ -18,6 +18,5 @@ CREATE TABLE subscriptions (
     error_count         BIGINT NOT NULL DEFAULT 0,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (community_id, id),
-    FOREIGN KEY (community_id, owner_pubkey) REFERENCES users (community_id, pubkey)
+    PRIMARY KEY (community_id, id)
 );

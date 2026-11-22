@@ -12,6 +12,7 @@ class _HuddleCallAvatar extends HookConsumerWidget {
     required this.preparingResponse,
     required this.onTap,
     this.contextualLabel,
+    this.isHuddleAgent = false,
     this.isSelf = false,
     this.frameSize = _huddleAvatarFrameSize,
   });
@@ -22,6 +23,9 @@ class _HuddleCallAvatar extends HookConsumerWidget {
 
   /// The huddle-scoped identity label, when resolved.
   final String? contextualLabel;
+
+  /// Whether the Huddle roster counts this participant as an agent.
+  final bool isHuddleAgent;
   final bool active;
   final double speakerLevel;
   final bool preparingResponse;
@@ -93,7 +97,7 @@ class _HuddleCallAvatar extends HookConsumerWidget {
     final speakingRingSize = _huddleSpeakingRingSize * scale;
     final fallbackIconSize = 44 * scale;
     final normalizedSpeakerLevel = speakerLevel.clamp(0.0, 1.0).toDouble();
-    final haloLevel = active ? 0.08 + normalizedSpeakerLevel * 0.92 : 0.0;
+    final haloLevel = active ? normalizedSpeakerLevel.clamp(0.0, 0.6) : 0.0;
     final haloController = useAnimationController(
       initialValue: reducedMotion ? haloLevel : 0,
     );
@@ -113,6 +117,19 @@ class _HuddleCallAvatar extends HookConsumerWidget {
       );
       return null;
     }, [haloController, haloLevel, reducedMotion]);
+    final seed = pubkey.codeUnits.fold<int>(
+      0,
+      (hash, char) => (hash * 31 + char) & 0xffffffff,
+    );
+    final restingTilt = (seed % 2001) / 100 - 10;
+    final tilt =
+        (restingTilt +
+                (reducedMotion
+                    ? 0
+                    : animatedHaloLevel * 1.5 * (seed.isOdd ? 1 : -1)))
+            .clamp(-10.0, 10.0) *
+        pi /
+        180;
     final originKey = useMemoized(
       () => GlobalKey(debugLabel: 'huddle-reaction-origin-$pubkey'),
       [pubkey],
@@ -129,7 +146,8 @@ class _HuddleCallAvatar extends HookConsumerWidget {
       contextualLabel: contextualLabel,
       isSelf: isSelf,
     );
-    final isAgent = profile?.isAgent == true || fallbackLabel != null;
+    final isAgent =
+        isHuddleAgent || profile?.isAgent == true || fallbackLabel != null;
 
     final semanticStates = [
       label,
@@ -174,69 +192,102 @@ class _HuddleCallAvatar extends HookConsumerWidget {
                         key: ValueKey('huddle-speaking-halo-opacity-$pubkey'),
                         duration: reducedMotion
                             ? Duration.zero
-                            : Duration(milliseconds: active ? 140 : 220),
+                            : const Duration(milliseconds: 280),
                         curve: active
                             ? Curves.easeOutCubic
                             : Curves.easeInOutCubic,
-                        opacity: active ? 1 : 0,
-                        child: Transform.scale(
-                          key: ValueKey('huddle-speaking-halo-scale-$pubkey'),
-                          scale: reducedMotion
-                              ? (active ? 1.15 : 1)
-                              : 1 + animatedHaloLevel * 1.55,
+                        opacity: active ? 0.5 : 0,
+                        child: ClipPath(
+                          clipper: _HuddleSpeakingRingClipper(
+                            isAgent: isAgent,
+                            strokeWidth: 4 * scale,
+                          ),
                           child: Container(
                             key: ValueKey('huddle-speaking-halo-$pubkey'),
                             width: speakingRingSize,
                             height: speakingRingSize,
-                            decoration: ShapeDecoration(
-                              shape: avatarShape(isAgent: isAgent),
-                              color: context.colors.primary.withValues(
-                                alpha: 0.07,
-                              ),
-                            ),
+                            alignment: Alignment.center,
+                            color: context.colors.primary,
+                            child: profile?.avatarUrl == null
+                                ? null
+                                : ImageFiltered(
+                                    imageFilter: ImageFilter.blur(
+                                      sigmaX: 8 * scale,
+                                      sigmaY: 8 * scale,
+                                    ),
+                                    // Lay the ring's image out at the
+                                    // portrait's size so both resolve the
+                                    // same source, then enlarge it at paint.
+                                    child: Transform.scale(
+                                      scale:
+                                          1.5 *
+                                          speakingRingSize /
+                                          (avatarRadius * 2),
+                                      child: AvatarImage(
+                                        imageUrl: profile?.avatarUrl,
+                                        radius: avatarRadius,
+                                        fallback: const SizedBox.shrink(),
+                                        isAgent: isAgent,
+                                      ),
+                                    ),
+                                  ),
                           ),
                         ),
                       ),
-                      AnimatedSwitcher(
-                        duration: reducedMotion
-                            ? Duration.zero
-                            : const Duration(milliseconds: 180),
-                        switchInCurve: Curves.easeOutCubic,
-                        switchOutCurve: Curves.easeInCubic,
-                        transitionBuilder: (child, animation) =>
-                            FadeTransition(opacity: animation, child: child),
-                        child: showPreparingResponse
-                            ? Container(
-                                key: ValueKey(
-                                  'huddle-agent-preparing-response-$pubkey',
+                      Transform.scale(
+                        key: ValueKey('huddle-speaking-avatar-scale-$pubkey'),
+                        scale: reducedMotion || showPreparingResponse
+                            ? 1
+                            : 1 + animatedHaloLevel * 0.06,
+                        child: Transform.rotate(
+                          angle: showPreparingResponse ? 0 : tilt,
+                          child: AnimatedSwitcher(
+                            duration: reducedMotion
+                                ? Duration.zero
+                                : const Duration(milliseconds: 180),
+                            switchInCurve: Curves.easeOutCubic,
+                            switchOutCurve: Curves.easeInCubic,
+                            transitionBuilder: (child, animation) =>
+                                FadeTransition(
+                                  opacity: animation,
+                                  child: child,
                                 ),
-                                width: avatarRadius * 2,
-                                height: avatarRadius * 2,
-                                decoration: ShapeDecoration(
-                                  shape: avatarShape(isAgent: isAgent),
-                                  color: context.controlSurface,
-                                ),
-                                alignment: Alignment.center,
-                                child: BouncingDotsIndicator(
-                                  color: context.colors.onPrimaryContainer,
-                                  dotSize: 6 * scale,
-                                  gap: 4 * scale,
-                                  semanticLabel:
-                                      '$label is preparing a response',
-                                ),
-                              )
-                            : AvatarImage(
-                                key: ValueKey('huddle-avatar-image-$pubkey'),
-                                imageUrl: profile?.avatarUrl,
-                                radius: avatarRadius,
-                                backgroundColor: context.controlSurface,
-                                fallback: Icon(
-                                  BuzzIcons.userRound,
-                                  size: fallbackIconSize,
-                                  color: context.colors.onPrimaryContainer,
-                                ),
-                                isAgent: isAgent,
-                              ),
+                            child: showPreparingResponse
+                                ? Container(
+                                    key: ValueKey(
+                                      'huddle-agent-preparing-response-$pubkey',
+                                    ),
+                                    width: avatarRadius * 2,
+                                    height: avatarRadius * 2,
+                                    decoration: ShapeDecoration(
+                                      shape: avatarShape(isAgent: isAgent),
+                                      color: context.controlSurface,
+                                    ),
+                                    alignment: Alignment.center,
+                                    child: BouncingDotsIndicator(
+                                      color: context.colors.onPrimaryContainer,
+                                      dotSize: 6 * scale,
+                                      gap: 4 * scale,
+                                      semanticLabel:
+                                          '$label is preparing a response',
+                                    ),
+                                  )
+                                : AvatarImage(
+                                    key: ValueKey(
+                                      'huddle-avatar-image-$pubkey',
+                                    ),
+                                    imageUrl: profile?.avatarUrl,
+                                    radius: avatarRadius,
+                                    backgroundColor: context.controlSurface,
+                                    fallback: Icon(
+                                      BuzzIcons.userRound,
+                                      size: fallbackIconSize,
+                                      color: context.colors.onPrimaryContainer,
+                                    ),
+                                    isAgent: isAgent,
+                                  ),
+                          ),
+                        ),
                       ),
                     ],
                   ),
@@ -264,4 +315,27 @@ String _huddleParticipantLabel({
   return (profileName?.isNotEmpty == true ? profileName : null) ??
       (directoryName?.isNotEmpty == true ? directoryName : null) ??
       (pubkey.isEmpty ? 'Participant' : shortPubkey(pubkey));
+}
+
+class _HuddleSpeakingRingClipper extends CustomClipper<Path> {
+  const _HuddleSpeakingRingClipper({
+    required this.isAgent,
+    required this.strokeWidth,
+  });
+  final bool isAgent;
+  final double strokeWidth;
+
+  @override
+  Path getClip(Size size) {
+    final rect = Offset.zero & size;
+    return Path.combine(
+      PathOperation.difference,
+      avatarPath(rect, isAgent: isAgent),
+      avatarPath(rect.deflate(strokeWidth), isAgent: isAgent),
+    );
+  }
+
+  @override
+  bool shouldReclip(_HuddleSpeakingRingClipper oldClipper) =>
+      oldClipper.isAgent != isAgent || oldClipper.strokeWidth != strokeWidth;
 }

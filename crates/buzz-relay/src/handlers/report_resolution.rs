@@ -846,7 +846,7 @@ async fn run_atomic_mutation(
                 .map_err(|e| anyhow::anyhow!("thread metadata lookup failed: {e}"))?;
             let parent_id = meta.as_ref().and_then(|m| m.parent_event_id.clone());
             let root_id = meta.as_ref().and_then(|m| m.root_event_id.clone());
-            let committed = state
+            let (committed, pin_list) = state
                 .db
                 .execute_delete_with_marker(
                     action_id,
@@ -855,9 +855,13 @@ async fn run_atomic_mutation(
                     target,
                     parent_id.as_deref(),
                     root_id.as_deref(),
+                    &state.relay_keypair,
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("delete failed: {e}"))?;
+            if let Some(list) = &pin_list {
+                crate::handlers::pins::dispatch_list(tenant, state, list).await;
+            }
             // Same post-commit refresh as NIP-29 DELETE_EVENT: push a fresh
             // 39005 so live badge counts also count down.
             if let (true, Some(meta), Some(root_id)) = (committed, meta, root_id) {

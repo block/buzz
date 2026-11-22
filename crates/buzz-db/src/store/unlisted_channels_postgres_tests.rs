@@ -79,6 +79,7 @@ impl Fixture {
                     unlisted: Some(unlisted),
                     ..Default::default()
                 },
+                &self.owner.public_key().to_bytes(),
             )
             .await
             .expect("set unlisted")
@@ -311,6 +312,7 @@ async fn unlisted_private_channel_stays_private_and_opens_unlisted() {
                 visibility: Some("open".into()),
                 ..Default::default()
             },
+            &f.owner.public_key().to_bytes(),
         )
         .await
         .expect("open the channel");
@@ -419,4 +421,103 @@ async fn channel_created_unlisted_is_never_listed() {
             .contains(&(chat, "stream".to_owned())));
         assert!(f.implicit(&f.owner).await.contains(&chat));
     }
+}
+
+/// The relay caches the member and listed-open channel sets and serves a
+/// request's named-only channels from them when it names nothing else. Their
+/// named-only halves together must equal the uncached read with no names,
+/// and their implicit halves the accessible set, for a member and a non-member.
+/// Mutation: restrict `get_member_channels_read_at` or
+/// `get_listed_open_channels_read_at` to legacy types, or drop `NOT unlisted`
+/// from the latter → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn cached_channel_sets_match_the_uncached_named_only_read() {
+    let f = Fixture::new().await;
+    let system_private = f
+        .typed_channel(
+            "system-private",
+            ChannelType::System,
+            ChannelVisibility::Private,
+        )
+        .await;
+    let system_listed = f
+        .typed_channel(
+            "system-listed",
+            ChannelType::System,
+            ChannelVisibility::Open,
+        )
+        .await;
+    let system_unlisted = f
+        .typed_channel(
+            "system-unlisted",
+            ChannelType::System,
+            ChannelVisibility::Open,
+        )
+        .await;
+    f.set_unlisted(system_unlisted, true).await;
+    let stream_listed = f.channel("stream-listed", ChannelVisibility::Open).await;
+    let stream_unlisted = f.channel("stream-unlisted", ChannelVisibility::Open).await;
+    f.set_unlisted(stream_unlisted, true).await;
+    let stream_private = f
+        .channel("stream-private", ChannelVisibility::Private)
+        .await;
+
+    let sorted = |mut ids: Vec<Uuid>| {
+        ids.sort_unstable();
+        ids
+    };
+    let open =
+        f.db.get_listed_open_channels_read_at(f.community)
+            .await
+            .expect("listed open channels")
+            .value;
+    assert_eq!(open.implicit, [stream_listed]);
+    assert_eq!(open.named_only, [(system_listed, "system".to_owned())]);
+
+    for (reader, member_named_only) in [
+        (
+            &f.owner,
+            sorted(vec![system_private, system_listed, system_unlisted]),
+        ),
+        (&f.outsider, Vec::new()),
+    ] {
+        let member =
+            f.db.get_member_channels_read_at(f.community, &reader.public_key().to_bytes())
+                .await
+                .expect("member channels")
+                .value;
+        assert_eq!(
+            sorted(member.named_only.iter().map(|(id, _)| *id).collect()),
+            member_named_only
+        );
+        let mut cached: Vec<(Uuid, String)> = member.named_only.clone();
+        cached.extend(
+            open.named_only
+                .iter()
+                .filter(|(id, _)| !member.named_only.iter().any(|(have, _)| have == id))
+                .cloned(),
+        );
+        cached.sort_unstable();
+        let mut uncached = f.named_only(reader, &[]).await;
+        uncached.sort_unstable();
+        assert_eq!(
+            cached, uncached,
+            "named-only halves match the uncached read"
+        );
+
+        let mut implicit = member.implicit.clone();
+        crate::channel_members::merge_channel_ids(&mut implicit, &open.implicit);
+        assert_eq!(sorted(implicit), sorted(f.implicit(reader).await));
+    }
+    // The owner is a member of every stream channel, listed or not.
+    let owner =
+        f.db.get_member_channels_read_at(f.community, &f.owner.public_key().to_bytes())
+            .await
+            .expect("owner member channels")
+            .value;
+    assert_eq!(
+        sorted(owner.implicit),
+        sorted(vec![stream_listed, stream_unlisted, stream_private])
+    );
 }

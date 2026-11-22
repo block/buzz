@@ -122,6 +122,9 @@ Future<Channel> _createMeChat(
                 secretKey: sync.privateHex,
               ).toMap(),
             );
+  // Desktop's unified record can arrive mid-creation and owns filings then.
+  String? filing() =>
+      ref.read(channelSectionsProvider).editable ? project : null;
   final intent = MeChatCreation(
     channelId,
     name,
@@ -143,7 +146,7 @@ Future<Channel> _createMeChat(
   }
   final head = preflight[1] as NostrEvent?;
   (head == null ? const MeGroups() : sync.decode(head))
-      .place(channelId, group: project)
+      .place(channelId, group: filing())
       .encode(sync.community);
   return intent.complete<Channel>(
     sync,
@@ -167,10 +170,25 @@ Future<Channel> _createMeChat(
       final latest = await sync.head();
       if (latest == null) return false;
       final groups = sync.decode(latest);
+      final group = filing();
       return groups.channels.contains(channelId) &&
-          (project == null || groups.assignments[channelId] == project);
+          (group == null || groups.assignments[channelId] == group);
     },
-    place: () =>
-        sync.update((current) => current.place(channelId, group: project)),
+    // The chat is still created; only a filing desktop now owns is dropped.
+    place: () async {
+      bool mayFile() => ref.read(channelSectionsProvider).editable;
+      try {
+        await sync.update(
+          mayFile: mayFile,
+          (current) => current.place(channelId, group: filing()),
+        );
+      } on MeFilingClosed {
+        // The lock landed mid-send. Place the chat without the filing.
+        await sync.update(
+          mayFile: mayFile,
+          (current) => current.place(channelId, group: filing()),
+        );
+      }
+    },
   );
 }

@@ -28,9 +28,13 @@
 /// discard: one per member for every kind:39002 roster republish. `$1` must
 /// bind the community.
 ///
-/// The three replacement paths that index mentions (NIP-33 parameterized,
-/// addressable, and the relay's member snapshot) go through this, so a head
-/// and its mention rows leave together on those paths.
+/// The addressable path, the relay's member snapshot, and the kind:13534
+/// list writer (whose `member` tags index no mentions) supersede through
+/// this, so a head and its mention rows leave together when a newer head
+/// replaces it. NIP-33 parameterized replacement drops its superseded rows'
+/// mentions itself (`remove_coordinate_versions_in_tx`). Channel deletion
+/// (`soft_delete_discovery_events`) retires live heads without a
+/// replacement and does not go through this.
 macro_rules! superseded_with_mentions_sql {
     ($retire:expr) => {
         concat!(
@@ -93,9 +97,10 @@ pub use store::{
     admin_moderation, allowlist, api_token, archived_identities, artifact, artifact_sync, channel,
     channel_members, community, community_auth, deletion, dm, entity_deletion, event, feed,
     git_repo, leader_lock, media, membership_snapshot, moderation, nip_fi_binding,
-    operator_listener, partition, personal_read, product_feedback, push, reaction, read_state,
-    relay_admin_actions, relay_invite, relay_members, relay_operators, reminder, replaceable,
-    storage_accounting, thread, thread_window, user, user_deletion, user_deletion_fences, workflow,
+    operator_listener, partition, personal_read, pins, product_feedback, push, reaction,
+    read_state, relay_admin_actions, relay_invite, relay_members, relay_operators, reminder,
+    replaceable, storage_accounting, thread, thread_window, user, user_deletion,
+    user_deletion_fences, workflow,
 };
 
 pub use allowlist::AllowlistEntry;

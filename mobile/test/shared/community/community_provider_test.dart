@@ -8,6 +8,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:buzz/shared/channels/channel_list_snapshot.dart';
+import 'package:buzz/shared/channels/saved_message_store.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
+import 'package:buzz/shared/relay/nostr_models.dart';
 import 'package:buzz/shared/channels/open_channel_directory_storage.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -17,6 +20,7 @@ import 'package:buzz/shared/relay/relay_provider.dart' show RelayConfig;
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -476,11 +480,28 @@ void main() {
           snapshots.capture(keys.public, otherScope.relayUrl),
           snapshot,
         );
+        final savedRoot = await Directory.systemTemp.createTemp('saved_root');
+        addTearDown(() => savedRoot.delete(recursive: true));
         container = createContainer(
-          overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            savedMessageRootProvider.overrideWith((ref) async => savedRoot),
+          ],
         );
         final notifier = container.read(communityListProvider.notifier);
         await container.read(communityListProvider.future);
+        // Saved messages are scoped by the key the nsec signs with, not the
+        // declared pubkey.
+        final saved = container.read(savedMessageStoreProvider);
+        final savedScope = (communityId: community.id, pubkey: keys.public);
+        final otherSavedScope = (
+          communityId: otherScope.id,
+          pubkey: keys.public,
+        );
+        await _saveMessage(saved, savedScope, keys.secret);
+        await _saveMessage(saved, otherSavedScope, keys.secret);
+        final inFlightSave = saved.capture(savedScope, _savedPage);
+        expect(await _readSaved(saved, savedScope), hasLength(1));
 
         await notifier.removeCommunity(community.id);
 
@@ -488,6 +509,11 @@ void main() {
         expect(await snapshots.write(inFlight, snapshot), isFalse);
         expect(snapshots.read(keys.public, writerRelay), isNull);
         expect(snapshots.read(keys.public, otherScope.relayUrl), isNotNull);
+        await saved.save(inFlightSave, [
+          _savedMessage(keys.secret),
+        ], relayAuthor: null);
+        expect(await _readSaved(saved, savedScope), isNull);
+        expect(await _readSaved(saved, otherSavedScope), hasLength(1));
       },
     );
 
@@ -620,10 +646,9 @@ void main() {
       expect(await cache.write(newToken, snapshot), isFalse);
       expect(await eventuallyExists(newMedia), isFalse);
       expect(
-        await MediaDiskCache.communityDirectory(
-          mediaRoot,
-          community.id,
-        ).exists(),
+        await eventuallyExists(
+          MediaDiskCache.communityDirectory(mediaRoot, community.id),
+        ),
         isFalse,
       );
 
@@ -638,6 +663,101 @@ void main() {
       );
       await container.read(communityListProvider.future);
       expect(prefs.getKeys(), {'unrelated'});
+    });
+
+    test('startup, identity replacement and removal purge saved messages '
+        'from disk', () async {
+      final root = await Directory.systemTemp.createTemp('saved_root');
+      addTearDown(() => root.delete(recursive: true));
+      final storage = _ObservedSaveStorage(fakeSecure);
+      communityStorage = storage;
+      final oldKeys = nostr.Keys.generate();
+      final midKeys = nostr.Keys.generate();
+      final newKeys = nostr.Keys.generate();
+      final community = Community.create(
+        name: 'Stored',
+        relayUrl: 'wss://cached.example.com:443',
+        nsec: oldKeys.nsec,
+      );
+      await communityStorage.save(community);
+      final oldSaved = (communityId: community.id, pubkey: oldKeys.public);
+      final midSaved = (communityId: community.id, pubkey: midKeys.public);
+      final newSaved = (communityId: community.id, pubkey: newKeys.public);
+      final orphanSaved = (communityId: 'restored', pubkey: oldKeys.public);
+      // A previous launch saved this account's messages and those of a
+      // community removed while the app was not running.
+      final launch = SavedMessageStore(
+        root: () async => root,
+        diagnostics: const NoopDiagnosticReporter(),
+      );
+      await _saveMessage(launch, oldSaved, oldKeys.secret);
+      await _saveMessage(launch, orphanSaved, oldKeys.secret);
+      late SavedMessageTicket removalInFlight;
+      container = createContainer(
+        overrides: [savedMessageRootProvider.overrideWith((ref) async => root)],
+        enqueueRevocation: (_) async {
+          // The active account is still published during revocation journaling.
+          removalInFlight = container
+              .read(savedMessageStoreProvider)
+              .capture(newSaved, _savedPage);
+          return true;
+        },
+      );
+      await container.read(communityListProvider.future);
+      final saved = container.read(savedMessageStoreProvider);
+      // The store's queue runs the startup sweep before these reads.
+      expect(await _readSaved(saved, orphanSaved), isNull);
+      expect(await _readSaved(saved, oldSaved), hasLength(1));
+
+      final notifier = container.read(communityListProvider.notifier);
+      await container.read(activeCommunityProvider.future);
+      expect(container.read(savedMessageScopeProvider), oldSaved);
+      final finishActiveRefresh = Completer<void>();
+      storage.activeReadGate = finishActiveRefresh.future;
+      addTearDown(() {
+        if (!finishActiveRefresh.isCompleted) finishActiveRefresh.complete();
+      });
+      // Re-adding the same account keeps its messages.
+      await notifier.addCommunity(community);
+      expect(container.read(activeCommunityProvider).isLoading, isTrue);
+      expect(container.read(savedMessageScopeProvider), oldSaved);
+      expect(await _readSaved(saved, oldSaved), hasLength(1));
+      // Retire refreshes from before cleanup and while the replacement is
+      // being persisted but the previous identity is still published.
+      final oldInFlight = saved.capture(oldSaved, _savedPage);
+      late SavedMessageTicket replacementInFlight;
+      storage.onSave = () {
+        replacementInFlight = saved.capture(oldSaved, _savedPage);
+      };
+      await notifier.addCommunity(community.copyWith(nsec: midKeys.nsec));
+      storage.onSave = null;
+      expect(container.read(activeCommunityProvider).isLoading, isTrue);
+      expect(container.read(savedMessageScopeProvider), isNull);
+      finishActiveRefresh.complete();
+      await container.read(activeCommunityProvider.future);
+      expect(container.read(savedMessageScopeProvider), midSaved);
+      await saved.save(replacementInFlight, [
+        _savedMessage(oldKeys.secret),
+      ], relayAuthor: null);
+      expect(await _readSaved(saved, oldSaved), isNull);
+      await _saveMessage(saved, midSaved, midKeys.secret);
+      // The next replacement keeps the database the new account wrote first.
+      await _saveMessage(saved, newSaved, newKeys.secret);
+      await notifier.addCommunity(community.copyWith(nsec: newKeys.nsec));
+      await saved.save(oldInFlight, [
+        _savedMessage(oldKeys.secret),
+      ], relayAuthor: null);
+      expect(await _readSaved(saved, oldSaved), isNull);
+      expect(await _readSaved(saved, midSaved), isNull);
+      expect(await _readSaved(saved, newSaved), hasLength(1));
+
+      await notifier.removeCommunity(community.id);
+      await saved.save(removalInFlight, [
+        _savedMessage(newKeys.secret),
+      ], relayAuthor: null);
+      expect(await _readSaved(saved, newSaved), isNull);
+      // No database or journal survives.
+      expect(Directory('${root.path}/saved_messages').listSync(), isEmpty);
     });
 
     for (final failure in ['false', 'throw']) {
@@ -906,6 +1026,90 @@ void main() {
     });
   });
 
+  test('switching and removing name the new member at once', () async {
+    final reporter = _MemberRecorder();
+    container = createContainer(
+      overrides: [diagnosticReporterProvider.overrideWithValue(reporter)],
+    );
+    await container.read(communityListProvider.future);
+    final one = nostr.Keys.generate();
+    final two = nostr.Keys.generate();
+    final ws1 = Community.create(
+      name: 'One',
+      relayUrl: 'https://one.example.com',
+      nsec: one.nsec,
+    );
+    final ws2 = Community.create(
+      name: 'Two',
+      relayUrl: 'https://two.example.com',
+      nsec: two.nsec,
+    );
+    final notifier = container.read(communityListProvider.notifier);
+    await notifier.addCommunity(ws1);
+    await notifier.addCommunity(ws2);
+
+    await notifier.switchCommunity(ws1.id);
+    expect(reporter.member, one.public);
+    await notifier.switchCommunity(ws2.id);
+    expect(reporter.member, two.public);
+    await notifier.removeCommunity(ws2.id);
+    expect(reporter.member, one.public);
+    await notifier.removeCommunity(ws1.id);
+    expect(reporter.member, isNull);
+  });
+
+  test('switching names the member from storage, not a stale list', () async {
+    final reporter = _MemberRecorder();
+    container = createContainer(
+      overrides: [diagnosticReporterProvider.overrideWithValue(reporter)],
+    );
+    await container.read(communityListProvider.future);
+    final keys = nostr.Keys.generate();
+    final saved = Community.create(
+      name: 'Saved',
+      relayUrl: 'https://saved.example.com',
+      nsec: keys.nsec,
+    );
+    // Saved, but not yet in the provider's list, as while it reloads after
+    // sign-in.
+    await communityStorage.save(saved);
+
+    await container
+        .read(communityListProvider.notifier)
+        .switchCommunity(saved.id);
+
+    expect(reporter.member, keys.public);
+  });
+
+  test('a switch whose read fails changes nothing and can retry', () async {
+    final storage = _FailingLoadStorage(fakeSecure);
+    communityStorage = storage;
+    container = createContainer();
+    final notifier = container.read(communityListProvider.notifier);
+    final a = Community.create(
+      name: 'A',
+      relayUrl: 'https://a.example.com',
+      nsec: nostr.Keys.generate().nsec,
+    );
+    final b = Community.create(
+      name: 'B',
+      relayUrl: 'https://b.example.com',
+      nsec: nostr.Keys.generate().nsec,
+    );
+    await container.read(communityListProvider.future);
+    await notifier.addCommunity(a);
+    await notifier.addCommunity(b);
+    await notifier.switchCommunity(a.id);
+
+    storage.failNextLoad = true;
+    await expectLater(notifier.switchCommunity(b.id), throwsStateError);
+    expect(await storage.loadActiveId(), a.id);
+
+    await notifier.switchCommunity(b.id);
+    expect(await storage.loadActiveId(), b.id);
+    expect((await container.read(activeCommunityProvider.future))?.id, b.id);
+  });
+
   group('activeCommunityProvider', () {
     test('returns null when no communities', () async {
       container = createContainer();
@@ -981,5 +1185,75 @@ class _SnapshotStore extends InMemorySharedPreferencesStore {
     final removed = super.remove(key);
     await removeGate?.future;
     return removed;
+  }
+}
+
+const _savedPage = (channelId: 'saved-channel', rootId: '');
+
+NostrEvent _savedMessage(String secret) => NostrEvent.fromJson(
+  signNostrEvent(
+    kind: EventKind.streamMessage,
+    content: 'saved message',
+    secretKey: secret,
+    createdAt: 1700000000,
+    tags: [
+      ['h', _savedPage.channelId],
+    ],
+  ).toMap(),
+);
+
+Future<void> _saveMessage(
+  SavedMessageStore store,
+  SavedMessageScope scope,
+  String secret,
+) => store.save(store.capture(scope, _savedPage), [
+  _savedMessage(secret),
+], relayAuthor: null);
+
+/// A fresh ticket reads the database itself, not a retired epoch.
+Future<List<NostrEvent>?> _readSaved(
+  SavedMessageStore store,
+  SavedMessageScope scope,
+) => store.read(store.capture(scope, _savedPage));
+
+class _MemberRecorder extends NoopDiagnosticReporter {
+  @override
+  String? member = 'unset';
+
+  @override
+  void setMember(String? pubkey) => member = pubkey;
+}
+
+class _FailingLoadStorage extends CommunityStorage {
+  _FailingLoadStorage(FlutterSecureStorage secure) : super(secure: secure);
+
+  bool failNextLoad = false;
+
+  @override
+  Future<List<Community>> loadAll() {
+    if (failNextLoad) {
+      failNextLoad = false;
+      throw StateError('keychain read failed');
+    }
+    return super.loadAll();
+  }
+}
+
+class _ObservedSaveStorage extends CommunityStorage {
+  _ObservedSaveStorage(FlutterSecureStorage secure) : super(secure: secure);
+
+  void Function()? onSave;
+  Future<void>? activeReadGate;
+
+  @override
+  Future<String?> loadActiveId() async {
+    await activeReadGate;
+    return super.loadActiveId();
+  }
+
+  @override
+  Future<void> save(Community community) {
+    onSave?.call();
+    return super.save(community);
   }
 }

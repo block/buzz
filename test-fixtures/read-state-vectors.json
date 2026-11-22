@@ -5,7 +5,7 @@
   "floor": 1797408000,
   "notes": [
     "Evaluation uses messageAt > max(floor, merged key and named parent frontiers).",
-    "Packing inputs are already retention-filtered, locally-owned frontier maps; overrides stay on the primary. Neither client writes msg: keys; legacy msg: keys remain readable.",
+    "Packing inputs are already retention-filtered, locally-owned frontier maps; override groups never enter read-position slots; they live on the version-2 unread record. Clients write msg: frontier keys only for an explicit per-message Mark read; msg: and thread: override groups stay device-local and never sync; legacy msg: keys remain readable.",
     "Initial allocation packs keys in ascending order into empty slots. Subsequent edits preserve persisted key-to-slot placement; keys are sorted only within each slot. Envelope uses compact JSON and raw UTF-8.",
     "Overrides remain outside the age floor; full-state snapshot retrieval must not use since.",
     "Lifecycle traces are obligations for suite-local persistence/relay tests, not a substitute implementation."
@@ -413,5 +413,227 @@
         "msg:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
       ]
     }
-  ]
+  ],
+  "unreadV2": {
+    "notes": [
+      "Version-2 unread record: d=read-state-unread-v2:<32 lowercase hex>, t=read-state-unread-v2, plaintext {\"v\":2,\"client_id\",\"contexts\"}. Each group travels with its channel frontier.",
+      "Stamps are uint32 Unix seconds. Lifetime 2592000 s; discard guard 600 s; receive defers a group more than 660 s ahead; allocation is refused more than 60 s ahead or past uint32.",
+      "Clock checks inspect max(S,C), never B or created_at. Version-1 override keys are never imported."
+    ],
+    "liveness": [
+      {
+        "id": "live-at-lifetime-edge",
+        "register": {
+          "s": 1797408000,
+          "c": 0,
+          "b": 10
+        },
+        "frontier": 10,
+        "expectedActive": true,
+        "expectedExpired": false,
+        "expectedDiscardable": false,
+        "expectedCanonical": {
+          "ov_s:room": 1797408000,
+          "ov_c:room": 0,
+          "ov_b:room": 10
+        }
+      },
+      {
+        "id": "unread-expires-one-second-past",
+        "register": {
+          "s": 1797407999,
+          "c": 0,
+          "b": 10
+        },
+        "frontier": 10,
+        "expectedActive": false,
+        "expectedExpired": true,
+        "expectedDiscardable": false,
+        "expectedCanonical": {
+          "ov_c:room": 1797407999
+        }
+      },
+      {
+        "id": "zero-baseline-excludes-retention-floor",
+        "register": {
+          "s": 1799999990,
+          "c": 0,
+          "b": 0
+        },
+        "frontier": 0,
+        "expectedActive": true,
+        "expectedExpired": false,
+        "expectedDiscardable": false,
+        "expectedCanonical": {
+          "ov_s:room": 1799999990,
+          "ov_c:room": 0,
+          "ov_b:room": 0
+        }
+      },
+      {
+        "id": "read-past-baseline-is-dead",
+        "register": {
+          "s": 1799999990,
+          "c": 0,
+          "b": 10
+        },
+        "frontier": 11,
+        "expectedActive": false,
+        "expectedExpired": false,
+        "expectedDiscardable": false,
+        "expectedCanonical": {
+          "ov_c:room": 1799999990
+        }
+      },
+      {
+        "id": "same-stamp-clear-wins",
+        "register": {
+          "s": 1799999990,
+          "c": 1799999990,
+          "b": 10
+        },
+        "frontier": 10,
+        "expectedActive": false,
+        "expectedExpired": false,
+        "expectedDiscardable": false,
+        "expectedCanonical": {
+          "ov_c:room": 1799999990
+        }
+      },
+      {
+        "id": "tombstone-retained-at-discard-boundary",
+        "register": {
+          "s": 0,
+          "c": 1797407400,
+          "b": 0
+        },
+        "frontier": 0,
+        "expectedActive": false,
+        "expectedExpired": true,
+        "expectedDiscardable": false,
+        "expectedCanonical": {
+          "ov_c:room": 1797407400
+        }
+      },
+      {
+        "id": "tombstone-discardable-one-second-past",
+        "register": {
+          "s": 0,
+          "c": 1797407399,
+          "b": 0
+        },
+        "frontier": 0,
+        "expectedActive": false,
+        "expectedExpired": true,
+        "expectedDiscardable": true,
+        "expectedCanonical": {
+          "ov_c:room": 1797407399
+        }
+      }
+    ],
+    "allocation": [
+      {
+        "id": "fresh-group-stamps-now",
+        "register": {
+          "s": 0,
+          "c": 0,
+          "b": 0
+        },
+        "now": 1800000000,
+        "expectedStamp": 1800000000
+      },
+      {
+        "id": "same-second-action-advances",
+        "register": {
+          "s": 1800000000,
+          "c": 0,
+          "b": 5
+        },
+        "now": 1800000000,
+        "expectedStamp": 1800000001
+      },
+      {
+        "id": "peer-ahead-within-60s",
+        "register": {
+          "s": 0,
+          "c": 1800000059,
+          "b": 0
+        },
+        "now": 1800000000,
+        "expectedStamp": 1800000060
+      },
+      {
+        "id": "peer-ahead-refused",
+        "register": {
+          "s": 0,
+          "c": 1800000060,
+          "b": 0
+        },
+        "now": 1800000000,
+        "expectedStamp": null
+      },
+      {
+        "id": "uint32-exhausted-refused",
+        "register": {
+          "s": 4294967295,
+          "c": 0,
+          "b": 0
+        },
+        "now": 4294967295,
+        "expectedStamp": null
+      }
+    ],
+    "receive": [
+      {
+        "id": "older-than-lifetime-dropped",
+        "register": {
+          "s": 1797407999,
+          "c": 0,
+          "b": 10
+        },
+        "now": 1800000000,
+        "expected": "drop"
+      },
+      {
+        "id": "at-lifetime-merged",
+        "register": {
+          "s": 0,
+          "c": 1797408000,
+          "b": 0
+        },
+        "now": 1800000000,
+        "expected": "merge"
+      },
+      {
+        "id": "660s-ahead-merged",
+        "register": {
+          "s": 1800000660,
+          "c": 0,
+          "b": 10
+        },
+        "now": 1800000000,
+        "expected": "merge"
+      },
+      {
+        "id": "661s-ahead-deferred",
+        "register": {
+          "s": 0,
+          "c": 1800000661,
+          "b": 0
+        },
+        "now": 1800000000,
+        "expected": "defer"
+      },
+      {
+        "id": "baseline-not-clock-checked",
+        "register": {
+          "s": 1800000000,
+          "c": 0,
+          "b": 1800100000
+        },
+        "now": 1800000000,
+        "expected": "merge"
+      }
+    ]
+  }
 }

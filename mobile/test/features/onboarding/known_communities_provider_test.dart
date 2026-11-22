@@ -39,6 +39,7 @@ class _Account extends BuilderlabAccountClient {
     String path,
     Map<String, dynamic> body, {
     String? expectedSubject,
+    String? signer,
   }) async {
     requested.add(path);
     if (subject.value == 'first') return firstResponse.future;

@@ -10,6 +10,7 @@ import 'package:just_audio/just_audio.dart' as audio;
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 
+import '../../shared/http/app_http_client.dart';
 import '../../shared/relay/media_image.dart';
 import '../../shared/widgets/app_route_observer.dart';
 
@@ -114,9 +115,21 @@ class DeviceVoiceNoteRecorder implements VoiceNoteRecorder {
   DeviceVoiceNoteRecorder({
     VoiceNoteRecorderBackend? backend,
     Future<Directory> Function()? temporaryDirectory,
+    this.recordConfig = const RecordConfig(
+      encoder: AudioEncoder.aacLc,
+      bitRate: 96000,
+      sampleRate: 44100,
+      numChannels: 1,
+      autoGain: true,
+      echoCancel: true,
+      noiseSuppress: true,
+    ),
+    this.fileExtension = 'm4a',
   }) : _recorder = backend ?? _DeviceVoiceNoteRecorderBackend(),
        _temporaryDirectory = temporaryDirectory ?? getTemporaryDirectory;
 
+  final RecordConfig recordConfig;
+  final String fileExtension;
   final VoiceNoteRecorderBackend _recorder;
   final Future<Directory> Function() _temporaryDirectory;
   final StreamController<double> _levels = StreamController.broadcast();
@@ -166,19 +179,8 @@ class DeviceVoiceNoteRecorder implements VoiceNoteRecorder {
     _ensureStartupActive(generation);
     final path =
         '${directory.path}${Platform.pathSeparator}'
-        'voice-note-${DateTime.now().millisecondsSinceEpoch}.m4a';
-    await _recorder.start(
-      const RecordConfig(
-        encoder: AudioEncoder.aacLc,
-        bitRate: 96000,
-        sampleRate: 44100,
-        numChannels: 1,
-        autoGain: true,
-        echoCancel: true,
-        noiseSuppress: true,
-      ),
-      path: path,
-    );
+        'voice-note-${DateTime.now().microsecondsSinceEpoch}.$fileExtension';
+    await _recorder.start(recordConfig, path: path);
     _nativeStarted = true;
     _ensureStartupActive(generation);
     _path = path;
@@ -618,6 +620,7 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
           .timeout(
             _downloadTimeout,
             onTimeout: () {
+              noteHttpDeadline(request);
               if (!requestAbort.isCompleted) requestAbort.complete();
               throw TimeoutException('Voice note download timed out');
             },

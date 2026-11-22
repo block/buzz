@@ -7,6 +7,9 @@ use tokio::process::Command;
 use url::Url;
 use uuid::Uuid;
 
+mod user_inventory_support;
+use user_inventory_support::{real_workflow_stops_at_gate, workflow_cli};
+
 fn admin_binary() -> std::ffi::OsString {
     // Nextest relocates binaries when extracting an archive. Cargo's build-time
     // path remains the fallback for local cargo test runs.
@@ -193,45 +196,9 @@ fn invalid_inventory_key_fails_before_database_connection() {
         .contains("expected a 64-character hex public key or an npub"));
 }
 
-async fn workflow_cli(url: &str, args: &[&str], success: bool) -> Value {
-    workflow_cli_at(url, args, success, "http://127.0.0.1:1").await
-}
-
-async fn workflow_cli_at(url: &str, args: &[&str], success: bool, endpoint: &str) -> Value {
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        Command::new(admin_binary())
-            .arg("user-deletions")
-            .args(args)
-            .env("DATABASE_URL", url)
-            .env("BUZZ_DB_POOL_SIZE", "1")
-            .env("BUZZ_S3_ENDPOINT", endpoint)
-            .env("BUZZ_S3_BUCKET", "test")
-            .env("BUZZ_S3_ACCESS_KEY", "test")
-            .env("BUZZ_S3_SECRET_KEY", "test")
-            .env("BUZZ_S3_ADDRESSING_STYLE", "path")
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(
-        output.status.success(),
-        success,
-        "{args:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    if success {
-        serde_json::from_slice(&output.stdout).unwrap()
-    } else {
-        Value::String(String::from_utf8(output.stderr).unwrap())
-    }
-}
-
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn inventory_submission_routes_all_targets_through_gate_then_real_media() {
+async fn inventory_submission_completes_demo_but_refuses_unfinished_real_workflow() {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap();
     let pool = PgPool::connect(&url).await.unwrap();
     let key = "ab".repeat(32);
@@ -301,60 +268,22 @@ async fn inventory_submission_routes_all_targets_through_gate_then_real_media() 
         )
         .await;
         assert!(approved["stage_history"].as_array().unwrap().is_empty());
-        let stepped = workflow_cli(&url, &["run", id, "--next-step"], true).await;
-        assert_eq!(stepped["stage_history"][0]["stage"], "gate_user");
-        assert_eq!(stepped["stage_history"][0]["status"], "completed");
-        assert_eq!(
-            stepped["stage_history"][0]["metadata_json"]["result"]["dummy"],
-            true
-        );
-        assert_eq!(stepped["stage_history"][1]["stage"], "purge_media");
-        assert_eq!(stepped["stage_history"][1]["status"], "pending");
-        let gate = stepped["stage_history"][0].clone();
-        let error = workflow_cli(&url, &["run", id], false).await;
-        assert!(error
-            .as_str()
-            .unwrap()
-            .contains("media deletion requires --delete"));
         let done = if subject == "demo" {
-            let error = workflow_cli(&url, &["run", id, "--delete"], false).await;
-            assert!(
-                error
-                    .as_str()
-                    .unwrap()
-                    .contains("expected a 64-character hex public key or an npub"),
-                "{error}"
-            );
-            let blocked = workflow_cli(&url, &["inspect", id], true).await;
-            assert_eq!(blocked["status"], "retry_wait");
-            assert_eq!(blocked["stage_history"].as_array().unwrap().len(), 2);
-            assert_eq!(blocked["stage_history"][1]["status"], "failed");
-            blocked
-        } else {
-            let storage = EmptyStorage::start().await;
-            let done =
-                workflow_cli_at(&url, &["run", id, "--delete"], true, &storage.endpoint).await;
+            let stepped = workflow_cli(&url, &["run", id, "--next-step"], true).await;
+            assert_eq!(stepped["stage_history"][0]["status"], "completed");
+            let first_id = stepped["stage_history"][0]["id"].clone();
+            let done = workflow_cli(&url, &["run", id], true).await;
             assert_eq!(done["status"], "completed");
+            assert_eq!(done["stage_history"][0]["id"], first_id);
             let stages = done["stage_history"].as_array().unwrap();
-            assert_eq!(stages.len(), 4);
-            assert_eq!(stages[1]["metadata_json"]["result"]["deleted_versions"], 0);
-            assert_eq!(
-                stages[1]["metadata_json"]["result"]["account_erasure_complete"],
-                false
-            );
+            assert_eq!(stages.len(), 6);
             assert!(stages
                 .iter()
                 .all(|s| s["status"] == "completed" && s["is_current"] == false));
-            let repeated =
-                workflow_cli_at(&url, &["run", id, "--delete"], true, &storage.endpoint).await;
-            assert_eq!(repeated, done);
-            assert_eq!(
-                storage.requests.load(std::sync::atomic::Ordering::SeqCst),
-                1 // Empty discovery needs no subsequent version listings.
-            );
             done
+        } else {
+            real_workflow_stops_at_gate(&url, id).await
         };
-        assert_eq!(done["stage_history"][0], gate);
         let inspected = workflow_cli(&url, &["inspect", id], true).await;
         assert_eq!(inspected, done);
         // Hex and npub converge on the same saved request without rediscovery.
@@ -386,7 +315,7 @@ async fn inventory_submission_routes_all_targets_through_gate_then_real_media() 
         )
         .await;
     }
-    // Community handlers remain placeholders; real membership is unchanged.
+    // Demo completion and refusal of the real workflow both preserve membership.
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM channel_members WHERE community_id = $1 AND pubkey = decode($2, 'hex')")
         .bind(community).bind(&key).fetch_one(&pool).await.unwrap();
     assert_eq!(count, 1);
@@ -432,77 +361,11 @@ async fn inventory_approval_and_resume_use_saved_account_identity_without_resolu
         true,
     )
     .await;
-    let stepped = workflow_cli(&url, &["run", id, "--next-step"], true).await;
-    let gate = stepped["stage_history"][0].clone();
-    assert_eq!(gate["status"], "completed");
-    assert_eq!(stepped["stage_history"][1]["stage"], "purge_media");
-    let error = workflow_cli(&url, &["run", id, "--delete"], false).await;
-    assert!(
-        error
-            .as_str()
-            .unwrap()
-            .contains("expected a 64-character hex public key or an npub"),
-        "{error}"
-    );
-    let blocked = workflow_cli(&url, &["inspect", id], true).await;
-    assert_eq!(blocked["target"], account);
-    assert_eq!(blocked["inventory_manifest"], saved["inventory_manifest"]);
-    assert_eq!(blocked["status"], "retry_wait");
-    assert_eq!(blocked["stage_history"][0], gate);
-    assert_eq!(blocked["stage_history"].as_array().unwrap().len(), 2);
-    assert_eq!(blocked["stage_history"][1]["status"], "failed");
-    for stage in blocked["stage_history"].as_array().unwrap() {
+    let stopped = real_workflow_stops_at_gate(&url, id).await;
+    assert_eq!(stopped["target"], account);
+    assert_eq!(stopped["inventory_manifest"], saved["inventory_manifest"]);
+    for stage in stopped["stage_history"].as_array().unwrap() {
         assert_eq!(stage["metadata_json"]["inputs"]["target"], account);
-    }
-}
-
-struct EmptyStorage {
-    endpoint: String,
-    requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    server: tokio::task::JoinHandle<()>,
-}
-impl Drop for EmptyStorage {
-    fn drop(&mut self) {
-        self.server.abort();
-    }
-}
-impl EmptyStorage {
-    async fn start() -> Self {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("http://{}", listener.local_addr().unwrap());
-        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let calls = requests.clone();
-        let server = tokio::spawn(async move {
-            loop {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                    let mut request = Vec::new();
-                    while !request.windows(4).any(|b| b == b"\r\n\r\n") {
-                        let mut chunk = [0; 4096];
-                        let n = socket.read(&mut chunk).await.unwrap();
-                        assert_ne!(n, 0);
-                        request.extend_from_slice(&chunk[..n]);
-                        assert!(request.len() < 65536);
-                    }
-                    assert!(request.starts_with(b"GET "));
-                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let body =
-                        "<ListVersionsResult><IsTruncated>false</IsTruncated></ListVersionsResult>";
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    socket.write_all(response.as_bytes()).await.unwrap();
-                })
-                .await
-                .unwrap();
-            }
-        });
-        Self {
-            endpoint,
-            requests,
-            server,
-        }
+        assert_eq!(stage["status"], "pending");
     }
 }

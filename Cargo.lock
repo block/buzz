@@ -1412,7 +1412,9 @@ dependencies = [
  "nostr 0.44.7",
  "openssl",
  "p256",
+ "percent-encoding",
  "proptest",
+ "quick-xml 0.38.4",
  "rand 0.10.1",
  "reqwest 0.13.4",
  "rustls-pki-types",
@@ -12288,6 +12290,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d43b0f71ce057da06bc0851b23ee24f3f86190b07203dd8f567d0b706a185202"
 dependencies = [
  "asn1-rs",
+ "aws-lc-rs",
  "data-encoding",
  "der-parser",
  "lazy_static",

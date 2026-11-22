@@ -15,6 +15,7 @@ import 'hosted_communities.dart';
 import 'hosted_join_policy.dart';
 import 'hosted_relay_auth.dart';
 import '../relay/relay_provider.dart';
+import '../diagnostics/diagnostic_reporter.dart';
 
 /// Builds a community only after scoped backup evidence and current binding.
 /// The caller persists it through the existing community transition owner.
@@ -26,10 +27,12 @@ class HostedAdmission {
     required this.relayAuth,
     Future<bool> Function(HostedJoinPolicy)? confirmPolicy,
     Future<void> Function(Community)? probe,
+    this.diagnostics = const NoopDiagnosticReporter(),
   }) : _confirmPolicy = confirmPolicy ?? ((_) async => false),
        _http = client ?? newAppHttpClient(),
        _probe = probe;
   final HostedRelayAuth relayAuth;
+  final DiagnosticReporter diagnostics;
   final BuilderlabAccountClient account;
   final AccountIdentityStore store;
   final http.Client _http;
@@ -164,6 +167,11 @@ class HostedAdmission {
       socket.headers = await relayAuth.headers(
         RelayConfig(baseUrl: community.relayUrl, nsec: community.nsec),
         fresh: true,
+      );
+      // Until the joining identity is active, reports name another member.
+      socket.diagnostics = SignerDiagnosticReporter(
+        diagnostics,
+        signer: pubkeyFromNsec(community.nsec),
       );
       await socket.connect().timeout(const Duration(seconds: 30));
       if (socket.state != SocketState.connected) throw AccountFailure.denied;

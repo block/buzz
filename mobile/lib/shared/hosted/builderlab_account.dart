@@ -9,6 +9,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import 'package:buzz/shared/http/app_http_client.dart';
 
+import '../diagnostics/diagnostic_reporter.dart';
 import '../storage/secure_storage.dart';
 
 import 'hosted_environment.dart';
@@ -64,11 +65,16 @@ class BuilderlabAccountClient {
     FlutterSecureStorage? storage,
     Uri? accountOrigin,
     this.onSessionChanged,
+    DiagnosticReporter diagnostics = const NoopDiagnosticReporter(),
     DateTime Function() now = DateTime.now,
   }) : _now = now,
+       _diagnostics = diagnostics,
        _http = httpClient ?? newAppHttpClient(),
        _storage = storage ?? defaultStorage,
        accountOrigin = accountOrigin ?? origin;
+
+  /// Where a response body this client can't understand is reported.
+  final DiagnosticReporter _diagnostics;
 
   /// Device-only: the session never syncs or restores onto another device.
   @visibleForTesting
@@ -89,6 +95,11 @@ class BuilderlabAccountClient {
   /// Remote-agent registry routes, shared with desktop.
   /// Safe request diagnostics: no headers, credentials, bodies or user data.
   ({String path, int status})? lastRejectedRequest;
+
+  /// Why the last request failed as [AccountFailure.unavailable]: a transport
+  /// failure (`unreachable`, `insecure`, `timedOut`, `network`) or an
+  /// unexpected status such as `http302`. Safe to show; callers clear it.
+  String? lastUnavailableCause;
 
   /// Runs [operation], giving it the clock hint of the last refusal (403) that
   /// its own requests to any account client received: how many minutes the
@@ -243,7 +254,7 @@ class BuilderlabAccountClient {
       if (credential is! String ||
           credential.isEmpty ||
           credential.length > 512) {
-        throw AccountFailure.invalidResponse;
+        _invalidResponse('exchange response has no usable credential');
       }
       final verified = await _verify(credential);
       if (DateTime.tryParse(
@@ -252,7 +263,7 @@ class BuilderlabAccountClient {
                 : '',
           ) !=
           verified.expiresAt) {
-        throw AccountFailure.invalidResponse;
+        _invalidResponse('exchange and session expiry differ');
       }
       if (stored != null && stored.subject != verified.subject) {
         throw AccountFailure.differentAccount;
@@ -362,7 +373,7 @@ class BuilderlabAccountClient {
     final expiry = result['expires_at'];
     final parsed = expiry is String ? DateTime.tryParse(expiry) : null;
     if (subject is! String || subject.isEmpty || parsed == null) {
-      throw AccountFailure.invalidResponse;
+      _invalidResponse('session response lacks a subject or expiry');
     }
     if (!parsed.isAfter(DateTime.now().toUtc())) throw AccountFailure.signedOut;
     final needsSetup =
@@ -377,8 +388,11 @@ class BuilderlabAccountClient {
 
   /// Public identity metadata only. Private-key recovery belongs to the identity
   /// storage owner, which must derive and verify the key before any persistence.
-  Future<Map<String, dynamic>> currentIdentity() =>
-      post('/v1/buzz/nostr-identities/current', {});
+  ///
+  /// [signer] is the key a community is asking for, when that may not be the
+  /// active member's: a bad reply is then reported only while reports name it.
+  Future<Map<String, dynamic>> currentIdentity({String? signer}) =>
+      post('/v1/buzz/nostr-identities/current', {}, signer: signer);
 
   /// Saves a successfully admitted destination to the same account, even if
   /// another session operation was queued before this request runs.
@@ -414,12 +428,14 @@ class BuilderlabAccountClient {
     String path,
     Map<String, dynamic> body, {
     String? expectedSubject,
-  }) => _post(path, body, expectedSubject: expectedSubject);
+    String? signer,
+  }) => _post(path, body, expectedSubject: expectedSubject, signer: signer);
 
   Future<Map<String, dynamic>> _post(
     String path,
     Map<String, dynamic> body, {
     String? signingKey,
+    String? signer,
     String? expectedSubject,
   }) {
     if (!RegExp(r'^/v1/buzz(/[a-z0-9_-]+)+$').hasMatch(path) &&
@@ -444,6 +460,7 @@ class BuilderlabAccountClient {
           credential: credential,
           body: body,
           signingKey: signingKey,
+          signer: signer,
         );
       } on AccountFailure catch (failure) {
         if (failure == AccountFailure.denied &&
@@ -492,10 +509,12 @@ class BuilderlabAccountClient {
         }
         final pubkey = AccountIdentityStore.publicKeyForNsec(nsec);
         // Never creates a binding: the key must already belong to the account.
+        // Gated on [pubkey]: the community may be removed, not the active one.
         final current = await _request(
           '/v1/buzz/nostr-identities/current',
           credential: signedOut.credential,
           body: {},
+          signer: pubkey,
         );
         final identity = current['identity'];
         if (identity is! Map || identity['pubkey_hex'] != pubkey) {
@@ -585,12 +604,22 @@ class BuilderlabAccountClient {
     }
   }
 
+  /// [signer], or the key behind [signingKey], is the identity the request
+  /// is made for. Its reports go out only while that identity, or no one, is
+  /// the member reports name: the outbox may ask for a removed community.
   Future<Map<String, dynamic>> _request(
     String path, {
     String? credential,
     Map<String, dynamic>? body,
     String? signingKey,
+    String? signer,
   }) async {
+    signer ??= signingKey == null
+        ? null
+        : AccountIdentityStore.publicKeyForNsec(signingKey);
+    final diagnostics = signer == null
+        ? _diagnostics
+        : SignerDiagnosticReporter(_diagnostics, signer: signer);
     try {
       final request =
           http.Request(
@@ -615,16 +644,16 @@ class BuilderlabAccountClient {
           );
         }
       }
-      var refused = false;
-      final http.Response response;
-      try {
-        response = await boundedHttpResponse(
-          _http,
-          request,
-          maxBytes: _responseLimit(path),
-          onHeaders: (headers) {
-            if (headers.statusCode != 403) return;
-            refused = true;
+      // Classified from the headers, so a lost, slow or oversized error body
+      // never hides the status.
+      final response = await boundedHttpResponse(
+        _http,
+        request,
+        maxBytes: _responseLimit(path),
+        onHeaders: (headers) {
+          final status = headers.statusCode;
+          if (status >= 200 && status < 300) return;
+          if (status == 403) {
             final evidence = Zone.current[_RefusalEvidence];
             if (evidence is _RefusalEvidence) {
               evidence.clockHint = clockHintMinutes(
@@ -632,37 +661,64 @@ class BuilderlabAccountClient {
                 _now(),
               );
             }
-          },
+          }
+          if (const {401, 403, 400, 404, 409, 422}.contains(status) &&
+              kDebugMode) {
+            debugPrint(
+              'Builderlab ${accountOrigin.host} ${request.method} $path: HTTP $status contentType=${headers.headers['content-type']?.split(';').first}',
+            );
+          }
+          if (status == 401) throw AccountFailure.signedOut;
+          if (status == 403) throw AccountFailure.denied;
+          if (const {400, 404, 409, 422}.contains(status)) {
+            lastRejectedRequest = (path: path, status: status);
+            throw AccountFailure.rejected;
+          }
+          _unavailable(path, 'http$status');
+        },
+      );
+      final Object? value;
+      try {
+        value = jsonDecode(utf8.decode(response.bodyBytes));
+        if (value is! Map<String, dynamic>) {
+          // Not const: Sentry drops a repeat of the last error object.
+          throw FormatException('account response is not an object');
+        }
+      } on FormatException catch (error, stackTrace) {
+        diagnostics.reportError(
+          error,
+          stackTrace,
+          operation: DiagnosticOperation.accountResponse,
         );
-      } catch (_) {
-        // The status is the answer; a lost or oversized body does not change it.
-        if (refused) throw AccountFailure.denied;
-        rethrow;
+        throw AccountFailure.invalidResponse;
       }
-      if (kDebugMode && response.statusCode >= 400) {
-        debugPrint(
-          'Builderlab ${accountOrigin.host} ${request.method} $path: HTTP ${response.statusCode} contentType=${response.headers['content-type']?.split(';').first}',
-        );
-      }
-      if (response.statusCode == 401) throw AccountFailure.signedOut;
-      if (response.statusCode == 403) throw AccountFailure.denied;
-      if (const {400, 404, 409, 422}.contains(response.statusCode)) {
-        lastRejectedRequest = (path: path, status: response.statusCode);
-        throw AccountFailure.rejected;
-      }
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        throw AccountFailure.unavailable;
-      }
-      final value = jsonDecode(utf8.decode(response.bodyBytes));
-      if (value is! Map<String, dynamic>) throw AccountFailure.invalidResponse;
       return value;
     } on AccountFailure {
       rethrow;
     } on FormatException {
       throw AccountFailure.invalidResponse;
-    } catch (_) {
-      throw AccountFailure.unavailable;
+    } on TimeoutException {
+      _unavailable(path, 'timedOut');
+    } catch (error) {
+      _unavailable(path, transportFailure(error)?.name ?? 'network');
     }
+  }
+
+  /// A 2xx response whose required fields are missing or unreadable: the
+  /// caller sees an invalid response, and it is reported.
+  Never _invalidResponse(String what) {
+    _diagnostics.reportError(
+      FormatException(what),
+      StackTrace.current,
+      operation: DiagnosticOperation.accountResponse,
+    );
+    throw AccountFailure.invalidResponse;
+  }
+
+  Never _unavailable(String path, String cause) {
+    lastUnavailableCause = cause;
+    debugPrint('Builderlab ${accountOrigin.host} $path: unavailable ($cause)');
+    throw AccountFailure.unavailable;
   }
 
   void dispose() {
