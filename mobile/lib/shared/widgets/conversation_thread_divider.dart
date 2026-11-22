@@ -28,9 +28,11 @@ const double conversationThreadResizeStep = 40;
 /// Touch width of the handle between a conversation and its thread pane.
 const double conversationThreadHandleWidth = Grid.xs;
 
-/// The draggable divider between a conversation and the thread beside it.
+/// The draggable divider beside a resizable tablet pane: between a
+/// conversation and the thread beside it, or between the sidebar and the
+/// conversation.
 ///
-/// Dragging moves the divider and resizes the thread pane within
+/// Dragging moves the divider and resizes the pane within
 /// [minWidth]..[maxWidth]. Screen readers adjust it as a slider.
 class ConversationThreadDivider extends HookWidget {
   const ConversationThreadDivider({
@@ -39,6 +41,9 @@ class ConversationThreadDivider extends HookWidget {
     required this.onDragStart,
     required this.onResize,
     required this.onDragEnd,
+    this.label = 'Thread width',
+    this.minWidth = conversationThreadPaneMinWidth,
+    this.leading = false,
     super.key,
   });
 
@@ -58,7 +63,14 @@ class ConversationThreadDivider extends HookWidget {
   final VoidCallback onDragEnd;
 
   /// The narrowest the pane may be dragged to.
-  double get minWidth => conversationThreadPaneMinWidth;
+  final double minWidth;
+
+  /// The slider's screen-reader label.
+  final String label;
+
+  /// Whether the pane sits before the divider, so dragging toward the end
+  /// widens it. A thread pane sits after it, at the window's end.
+  final bool leading;
 
   double _clamp(double value) =>
       value.clamp(minWidth, maxWidth < minWidth ? minWidth : maxWidth);
@@ -73,9 +85,8 @@ class ConversationThreadDivider extends HookWidget {
     final larger = _clamp(width + conversationThreadResizeStep);
     final smaller = _clamp(width - conversationThreadResizeStep);
     return Semantics(
-      key: const ValueKey('conversation-thread-resize'),
       slider: true,
-      label: 'Thread width',
+      label: label,
       value: describe(width),
       increasedValue: describe(larger),
       decreasedValue: describe(smaller),
@@ -89,13 +100,11 @@ class ConversationThreadDivider extends HookWidget {
             dragStart.value = (width: width, dx: details.globalPosition.dx);
             onDragStart();
           },
-          // The pane is anchored to the right edge: dragging left widens it.
           onHorizontalDragUpdate: (details) {
             final start = dragStart.value;
             if (start == null) return;
-            onResize(
-              _clamp(start.width - (details.globalPosition.dx - start.dx)),
-            );
+            final moved = details.globalPosition.dx - start.dx;
+            onResize(_clamp(start.width + (leading ? moved : -moved)));
           },
           onHorizontalDragEnd: (_) {
             dragStart.value = null;

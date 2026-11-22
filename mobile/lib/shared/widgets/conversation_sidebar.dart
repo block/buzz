@@ -23,6 +23,23 @@ class ConversationSidebarHidden extends Notifier<bool> {
   void set(bool hidden) => state = hidden;
 }
 
+/// The width the user dragged the tablet sidebar to, or null for the default.
+/// Kept for the app session, across communities and rotations.
+final conversationSidebarWidthProvider =
+    NotifierProvider<ConversationSidebarWidth, double?>(
+      ConversationSidebarWidth.new,
+    );
+
+/// Holds the dragged sidebar width; null restores the default.
+class ConversationSidebarWidth extends Notifier<double?> {
+  @override
+  double? build() => null;
+
+  // A setter would read as field assignment at call sites; keep it a method.
+  // ignore: use_setters_to_change_properties
+  void set(double? width) => state = width;
+}
+
 /// Exposes the tablet sidebar's state to the conversation column's header.
 class ConversationSidebarScope extends InheritedWidget {
   const ConversationSidebarScope({

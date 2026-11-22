@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
@@ -6,10 +8,15 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:duo_kit/duo_kit.dart';
 
+export 'conversation_pane_controller.dart';
+export 'media_query_override.dart';
+
 import 'duo_toolbar.dart';
 import 'app_route_observer.dart';
 import 'conversation_layout.dart';
+import 'conversation_pane_controller.dart';
 import 'conversation_pane_modals.dart';
+import 'media_query_override.dart';
 import 'conversation_sidebar.dart';
 import 'conversation_thread_divider.dart';
 import 'conversation_thread_pane.dart';
@@ -75,86 +82,6 @@ bool popCompactConversationDestination(Route<dynamic> route) {
   return cleared;
 }
 
-/// Selection belongs to the workspace, rather than to a particular display pose.
-class ConversationPaneController extends ChangeNotifier {
-  final _nativeHeaderKey = GlobalKey();
-  String? selectedId;
-  WidgetBuilder? detailBuilder;
-  bool animateSelection = true;
-  int _request = 0;
-  // Deep-link requests may target the same item after its nested route popped.
-  // A fresh page identity reruns initialization without clearing the selection
-  // when Navigator removes the previous page.
-  LocalKey get selectionKey => ValueKey((selectedId, _request));
-
-  /// The thread a tablet pane shows beside, or over, the selected conversation.
-  WidgetBuilder? threadBuilder;
-  int _threadRequest = 0;
-
-  /// A fresh page identity for each opened thread.
-  LocalKey get threadKey => ValueKey(('thread', _threadRequest));
-
-  /// Whether a hidden tablet sidebar is drawn over the conversation.
-  bool sidebarOverlay = false;
-
-  void open(
-    String id,
-    WidgetBuilder builder, {
-    bool animate = true,
-    bool reopen = false,
-  }) {
-    if (id == selectedId && !reopen) {
-      hideSidebarOverlay();
-      return;
-    }
-    if (reopen) _request++;
-    selectedId = id;
-    detailBuilder = builder;
-    animateSelection = animate;
-    threadBuilder = null;
-    sidebarOverlay = false;
-    notifyListeners();
-  }
-
-  void clear() {
-    if (selectedId == null) return;
-    selectedId = null;
-    detailBuilder = null;
-    threadBuilder = null;
-    sidebarOverlay = false;
-    notifyListeners();
-  }
-
-  /// Shows [builder] in the thread pane, replacing any thread already there.
-  void openThread(WidgetBuilder builder) {
-    _threadRequest++;
-    threadBuilder = builder;
-    sidebarOverlay = false;
-    notifyListeners();
-  }
-
-  /// Closes the thread pane.
-  void closeThread() {
-    if (threadBuilder == null) return;
-    threadBuilder = null;
-    notifyListeners();
-  }
-
-  /// Draws a hidden tablet sidebar over the selected conversation.
-  void showSidebarOverlay() {
-    if (sidebarOverlay || selectedId == null) return;
-    sidebarOverlay = true;
-    notifyListeners();
-  }
-
-  /// Dismisses a sidebar drawn over the conversation.
-  void hideSidebarOverlay() {
-    if (!sidebarOverlay) return;
-    sidebarOverlay = false;
-    notifyListeners();
-  }
-}
-
 class ConversationPaneScope
     extends InheritedNotifier<ConversationPaneController> {
   ConversationPaneScope({
@@ -182,7 +109,7 @@ class ConversationPaneScope
   static GlobalKey? nativeHeaderKeyOf(BuildContext context) {
     final controller = maybeOf(context);
     if (!isBaseRouteOf(context) || !_isWide(context)) return null;
-    return controller?._nativeHeaderKey;
+    return controller?.nativeHeaderKey;
   }
 
   /// A replaced zero-duration page can remain mounted until frame cleanup.
@@ -291,8 +218,11 @@ class AdaptiveConversationPane extends HookConsumerWidget {
     ]);
     final sidebarHidden = ref.watch(conversationSidebarHiddenProvider);
     final threadWidth = ref.watch(conversationThreadWidthProvider);
+    final sidebarWidth = ref.watch(conversationSidebarWidthProvider);
     // While the thread divider is dragged: whether the sidebar was docked.
     final resizeHold = useState<bool?>(null);
+    // Whether the sidebar divider is being dragged.
+    final sidebarDrag = useState(false);
     // The overlay is modal: focus moves into the sidebar while it is open,
     // so Escape reaches the pane, and returns to where it was afterwards.
     final listFocus = useFocusNode(debugLabel: 'conversation-list');
@@ -358,6 +288,14 @@ class AdaptiveConversationPane extends HookConsumerWidget {
             // the standard Grid.xs window margins.
             final listWidth = book != null
                 ? book.center.dx - leftInset
+                : tablet && sidebarWidth != null
+                // A dragged sidebar keeps at most half the window.
+                ? sidebarWidth.clamp(
+                    conversationSidebarMinWidth,
+                    (contentWidth - 1) / 2 < conversationSidebarMinWidth
+                        ? conversationSidebarMinWidth
+                        : (contentWidth - 1) / 2,
+                  )
                 : wide
                 ? listWidthFraction == null
                       ? preferredListWidth?.clamp(
@@ -413,13 +351,36 @@ class AdaptiveConversationPane extends HookConsumerWidget {
             final detailWidth = layout != null
                 ? paneRight(layout.detailLeft, layout.detailWidth) - detailLeft
                 : constraints.maxWidth - detailLeft;
-            final threadPaneLeft = layout != null
+            // An expanded thread fills the window, over the list and the
+            // conversation; a new thread or a compact window ends it.
+            final threadExpanded =
+                layout != null &&
+                layout.thread != ConversationThreadMode.none &&
+                controller.threadExpanded;
+            final threadPaneLeft = threadExpanded
+                ? 0.0
+                : layout != null
                 ? paneLeft(layout.threadLeft)
                 : detailLeft;
-            final threadPaneWidth = layout != null
+            final threadPaneWidth = threadExpanded
+                ? constraints.maxWidth
+                : layout != null
                 ? paneRight(layout.threadLeft, layout.threadWidth) -
                       threadPaneLeft
                 : detailWidth;
+            // The widest the sidebar can be dragged while it stays docked and
+            // the conversation keeps its minimum width.
+            final sidebarMaxWidth = layout == null
+                ? listWidth
+                : math.min(
+                    (contentWidth - 1) / 2,
+                    listWidth +
+                        layout.detailWidth -
+                        (layout.thread == ConversationThreadMode.beside ||
+                                strip != null
+                            ? conversationBesideThreadMinWidth
+                            : conversationDockedMinWidth),
+                  );
             // Keeps a pane's content clear of the side strip and the hinge.
             EdgeInsets paneInsets(double left, double width) => EdgeInsets.only(
               left: book != null
@@ -458,6 +419,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
               duration:
                   wide &&
                       resizeHold.value == null &&
+                      !sidebarDrag.value &&
                       !MediaQuery.disableAnimationsOf(context)
                   ? const Duration(milliseconds: 240)
                   : Duration.zero,
@@ -481,6 +443,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                         geometry.listLeft > -listWidth - leftInset) &&
                     detailLeft <= 0.5;
                 final threadCovers =
+                    threadExpanded ||
                     layout?.thread == ConversationThreadMode.covering ||
                     (layout == null && threadOpen);
                 final listPane = Positioned(
@@ -520,6 +483,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                             covered:
                                 (!wide && selected != null) ||
                                 sidebarAway ||
+                                threadExpanded ||
                                 detailModals.active ||
                                 threadModals.active,
                             child: MediaQueryOverride(
@@ -715,6 +679,34 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                           ),
                         ),
                       ),
+                    // The sidebar's edge resizes it while it is docked beside
+                    // an open conversation.
+                    if (layout != null &&
+                        layout.sidebar == ConversationSidebarMode.docked &&
+                        selected != null &&
+                        !threadExpanded)
+                      Positioned(
+                        key: const ValueKey('conversation-sidebar-divider'),
+                        left:
+                            detailLeft -
+                            1 -
+                            (conversationThreadHandleWidth - 1) / 2,
+                        top: 0,
+                        bottom: 0,
+                        width: conversationThreadHandleWidth,
+                        child: ConversationThreadDivider(
+                          label: 'Sidebar width',
+                          leading: true,
+                          minWidth: conversationSidebarMinWidth,
+                          width: listWidth,
+                          maxWidth: sidebarMaxWidth,
+                          onDragStart: () => sidebarDrag.value = true,
+                          onResize: ref
+                              .read(conversationSidebarWidthProvider.notifier)
+                              .set,
+                          onDragEnd: () => sidebarDrag.value = false,
+                        ),
+                      ),
                     if (threadOpen) ...[
                       Positioned(
                         key: const ValueKey('conversation-thread'),
@@ -742,11 +734,21 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                               excluding: overlayOpen,
                               child: ExcludeSemantics(
                                 excluding: overlaid || detailModals.active,
-                                child: ConversationThreadPane(
-                                  modalRoutes: threadModals,
-                                  controller: controller,
-                                  navigatorKey: threadNavigator,
-                                  covering: threadCovers,
+                                child: ConversationThreadExpansion.offer(
+                                  available:
+                                      threadExpanded ||
+                                      layout?.thread ==
+                                          ConversationThreadMode.beside,
+                                  expanded: threadExpanded,
+                                  onToggle: () => controller.setThreadExpanded(
+                                    !threadExpanded,
+                                  ),
+                                  child: ConversationThreadPane(
+                                    controller: controller,
+                                    navigatorKey: threadNavigator,
+                                    covering: threadCovers,
+                                    modalRoutes: threadModals,
+                                  ),
                                 ),
                               ),
                             ),
@@ -917,23 +919,6 @@ class _CoveredList extends StatelessWidget {
       ),
     ),
   );
-}
-
-/// Derives [child]'s [MediaQuery] in a leaf, so the caller's build does not
-/// depend on every field (keyboard insets change on each animation frame).
-class MediaQueryOverride extends StatelessWidget {
-  const MediaQueryOverride({
-    required this.transform,
-    required this.child,
-    super.key,
-  });
-
-  final MediaQueryData Function(MediaQueryData) transform;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) =>
-      MediaQuery(data: transform(MediaQuery.of(context)), child: child);
 }
 
 /// Reports its route as [covering] once the route fully covers the compact

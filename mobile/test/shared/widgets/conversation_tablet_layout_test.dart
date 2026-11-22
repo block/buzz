@@ -553,6 +553,29 @@ void main() {
     expect(find.text('Linked page'), findsNothing);
     expect(find.text('Second conversation'), findsOneWidget);
     expect(find.text('Thread content'), findsNothing);
+
+    // On a 13" iPad the list stays docked beside a thread. Expanded, the
+    // thread covers it, and input, focus and screen readers leave it.
+    tester.view.physicalSize = const Size(1376, 1032);
+    await tester.pumpAndSettle();
+    if (find.byTooltip('Show sidebar').evaluate().isNotEmpty) {
+      await tester.tap(find.byTooltip('Show sidebar'));
+      await tester.pumpAndSettle();
+    }
+    await tester.tap(find.text('Reply in thread'));
+    await tester.pumpAndSettle();
+    expect(find.semantics.byLabel('First chat'), findsOne);
+    await tester.tap(find.byTooltip('Expand thread'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getRect(find.byKey(const ValueKey('conversation-thread'))),
+      Offset.zero & const Size(1376, 1032),
+    );
+    expect(find.semantics.byLabel('First chat'), findsNothing);
+    expect(find.semantics.byLabel('Second conversation'), findsNothing);
+    await tester.tap(find.byTooltip('Show beside conversation'));
+    await tester.pumpAndSettle();
+    expect(find.semantics.byLabel('First chat'), findsOne);
     expect(tester.takeException(), isNull);
   });
 
@@ -643,6 +666,37 @@ void main() {
     await tester.pumpAndSettle();
     expect(list, findsOneWidget);
 
+    // The list's edge drags to make it narrower, down to Home's bar, and
+    // wider only while the conversation keeps 480 pt. Screen readers
+    // adjust it as a slider.
+    final listPane = find.byKey(const ValueKey('conversation-list'));
+    final sidebarDivider = find.byKey(
+      const ValueKey('conversation-sidebar-divider'),
+    );
+    await tester.drag(sidebarDivider, const Offset(-60, 0));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(listPane).width, 315);
+    expect(tester.getTopLeft(detail).dx, 316);
+    await tester.drag(sidebarDivider, const Offset(-200, 0));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(listPane).width, conversationSidebarMinWidth);
+    expect(
+      tester.getSemantics(find.bySemanticsLabel('Sidebar width')).value,
+      '288 points',
+    );
+    tester.semantics.increase(find.semantics.byLabel('Sidebar width'));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(listPane).width, 328);
+    await tester.drag(sidebarDivider, const Offset(400, 0));
+    await tester.pumpAndSettle();
+    expect(
+      window.width - stripWidth - tester.getTopLeft(detail).dx,
+      conversationBesideThreadMinWidth,
+    );
+    expect(find.text('Keep my draft'), findsOneWidget);
+    await tester.drag(sidebarDivider, const Offset(-200, 0));
+    await tester.pumpAndSettle();
+
     // A thread opens beside the conversation, and the list makes room. The
     // thread reaches under the strip, and both keep their minimum widths
     // clear of it.
@@ -662,6 +716,44 @@ void main() {
     // Only the thread reaches the strip, so only it keeps clear of it.
     expect(insetsOf('Thread content'), EdgeInsets.only(right: stripWidth));
     expect(insetsOf('First conversation'), EdgeInsets.zero);
+
+    // The thread expands over the list and the conversation, keeping its
+    // draft and its clearance from the strip, and returns beside them.
+    final besideWidth = tester.getSize(threadPane).width;
+    await tester.enterText(
+      find.byKey(const ValueKey('thread-field')),
+      'Thread draft',
+    );
+    await tester.tap(find.byTooltip('Expand thread'));
+    await tester.pumpAndSettle();
+    expect(tester.getRect(threadPane), Offset.zero & window);
+    expect(insetsOf('Thread content'), EdgeInsets.only(right: stripWidth));
+    expect(find.text('Reply in thread').hitTestable(), findsNothing);
+    expect(find.semantics.byLabel('Reply in thread'), findsNothing);
+    expect(find.semantics.byLabel('First chat'), findsNothing);
+    expect(
+      find.byKey(const ValueKey('conversation-thread-divider')),
+      findsNothing,
+    );
+    expect(sidebarDivider, findsNothing);
+    expect(find.text('Thread draft'), findsOneWidget);
+    await tester.tap(find.byTooltip('Show beside conversation'));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(threadPane).width, besideWidth);
+    expect(find.semantics.byLabel('Reply in thread'), findsOne);
+    expect(find.text('Reply in thread').hitTestable(), findsOneWidget);
+    expect(find.text('Thread draft'), findsOneWidget);
+
+    // A thread that is closed and opened again starts beside its
+    // conversation.
+    await tester.tap(find.byTooltip('Expand thread'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Back').last);
+    await tester.pumpAndSettle();
+    expect(threadPane, findsNothing);
+    await tester.tap(find.text('Reply in thread'));
+    await tester.pumpAndSettle();
+    expect(tester.getSize(threadPane).width, besideWidth);
 
     // Held like a book, the list and conversation keep the hinge-bound
     // screens, with no toggle.

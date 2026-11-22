@@ -33,6 +33,10 @@ const double conversationBesideThreadMinWidth = 480;
 double conversationThreadPaneWidth(double contentWidth) =>
     (contentWidth * 0.4).clamp(360.0, 440.0);
 
+/// Narrowest sidebar the user can drag to: Home's 256 pt navigation bar
+/// inside 16 pt window margins.
+const double conversationSidebarMinWidth = 288;
+
 /// Narrowest thread pane the user can drag to.
 const double conversationThreadPaneMinWidth = 320;
 

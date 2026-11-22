@@ -12,6 +12,15 @@ abstract final class BuzzIcons {
 
   /// Tabler `layout-sidebar`.
   static const layoutSidebar = IconData(0xeada, fontFamily: 'BuzzTabler');
+
+  /// Tabler `arrows-diagonal`.
+  static const arrowsDiagonal = IconData(0xea27, fontFamily: 'BuzzTabler');
+
+  /// Tabler `arrows-diagonal-minimize-2`.
+  static const arrowsDiagonalMinimize = IconData(
+    0xef38,
+    fontFamily: 'BuzzTabler',
+  );
   static const droplet = IconData(0xea97, fontFamily: 'BuzzTabler');
 
   static const edit = IconData(0xea98, fontFamily: 'BuzzTabler');

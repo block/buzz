@@ -12,6 +12,7 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 import '../theme/theme.dart';
 import 'buzz_navigation_metrics.dart';
 import 'conversation_sidebar.dart';
+import 'conversation_thread_scope.dart';
 import 'directional_transition_scope.dart';
 import 'frosted_scroll_under_scope.dart';
 import 'ios_glass_navigation_button.dart';
@@ -281,6 +282,7 @@ class FrostedAppBar extends StatelessWidget {
 
   Widget _build(BuildContext context, bool nativeSuppressed) {
     final railInsets = duoContentInsetsOf(context);
+    final threadExpansion = ConversationThreadExpansion.maybeOf(context);
     if (useNativeNavigation &&
         defaultTargetPlatform == TargetPlatform.iOS &&
         !nativeSuppressed) {
@@ -306,9 +308,11 @@ class FrostedAppBar extends StatelessWidget {
           nativeLeading ??
           _nativeAction(leading) ??
           (sidebar == null ? null : conversationSidebarAction(sidebar));
-      final trailingActions =
-          nativeActions ??
-          actions.map(_nativeAction).whereType<IosNavigationAction>().toList();
+      final trailingActions = <IosNavigationAction>[
+        ...nativeActions ??
+            actions.map(_nativeAction).whereType<IosNavigationAction>(),
+        ?threadExpansion?.action,
+      ];
       final stripActions = <IosNavigationAction>[
         if (leadingAction != null && !leadingAction.keepInHeaderOnDuo)
           leadingAction
@@ -448,6 +452,7 @@ class FrostedAppBar extends StatelessWidget {
               builder: (context, value, child) => buildNative(value),
             );
     }
+    final barActions = [...actions, ?threadExpansion?.button];
     final portraitHeader =
         alignWithStatusRegion && defaultTargetPlatform == TargetPlatform.iOS
         ? IosNavigationMetrics.of(context).portraitHeaderFor(
@@ -543,7 +548,7 @@ class FrostedAppBar extends StatelessWidget {
                                   ? Grid.gutter - horizontalInset
                                   : 0,
                               right:
-                                  actions.isEmpty &&
+                                  barActions.isEmpty &&
                                       horizontalInset < Grid.gutter
                                   ? Grid.gutter - horizontalInset
                                   : 0,
@@ -551,9 +556,9 @@ class FrostedAppBar extends StatelessWidget {
                             child: title!,
                           ),
                   ),
-            actions: actions.isEmpty
+            actions: barActions.isEmpty
                 ? null
-                : Row(mainAxisSize: MainAxisSize.min, children: actions),
+                : Row(mainAxisSize: MainAxisSize.min, children: barActions),
             centered: centerTitle,
           ),
         ),
