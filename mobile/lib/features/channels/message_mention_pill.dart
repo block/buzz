@@ -40,6 +40,11 @@ class MessageMentionPill extends ConsumerWidget {
   /// Typography inherited from the surrounding message.
   final TextStyle? textStyle;
 
+  /// Whether to show the identity's picture. Previews pass false: their
+  /// ellipsis lays out cut-off chips too, which would fetch pictures that
+  /// never show.
+  final bool showPortrait;
+
   /// Creates a chat mention with an agent icon or human @ prefix.
   const MessageMentionPill({
     super.key,
@@ -51,6 +56,7 @@ class MessageMentionPill extends ConsumerWidget {
     this.ownBubble = false,
     this.candidateAvatar,
     this.composer = false,
+    this.showPortrait = true,
   });
 
   @override
@@ -83,7 +89,7 @@ class MessageMentionPill extends ConsumerWidget {
     final fontSize = style.fontSize ?? 16;
 
     final key = pubkey?.toLowerCase();
-    final picture = key == null
+    final picture = key == null || !showPortrait
         ? null
         : ref.watch(
                 userCacheProvider.select((cache) => cache[key]?.avatarUrl),
@@ -97,7 +103,8 @@ class MessageMentionPill extends ConsumerWidget {
                   : null) ??
               candidateAvatar;
     final hasPicture = picture != null && picture.isNotEmpty;
-    final size = MediaQuery.textScalerOf(context).scale(fontSize);
+    // The enclosing span already scales the chip.
+    final size = fontSize;
     final icon = !isAgent
         ? Text('@', style: style)
         : composer
@@ -121,6 +128,7 @@ class MessageMentionPill extends ConsumerWidget {
           if (hasPicture) ...[
             ExcludeSemantics(
               child: AvatarImage(
+                key: ValueKey(key),
                 imageUrl: picture,
                 radius: size / 2,
                 backgroundColor: Colors.transparent,
