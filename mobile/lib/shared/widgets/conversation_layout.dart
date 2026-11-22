@@ -85,6 +85,10 @@ class ConversationLayout {
   /// [threadWidth] is the width the user dragged the thread pane to, if any;
   /// it is clamped so the conversation keeps its minimum width.
   ///
+  /// [dockedMinWidth] replaces [conversationDockedMinWidth] for windows that
+  /// keep their sidebar docked beside a narrower conversation, such as an
+  /// iPhone Duo lying open in landscape.
+  ///
   /// [holdDocked] is set only while the thread divider is being dragged, to
   /// whether the sidebar was docked when the drag began: true keeps it docked
   /// (and caps the thread so it still fits), false keeps it hidden. Dragging
@@ -98,6 +102,7 @@ class ConversationLayout {
     required bool overlayOpen,
     double? threadWidth,
     bool? holdDocked,
+    double dockedMinWidth = conversationDockedMinWidth,
   }) {
     final soloMax = width - 1 - conversationBesideThreadMinWidth;
     final dockedMax = soloMax - listWidth - 1;
@@ -123,9 +128,7 @@ class ConversationLayout {
     final conversationWithSidebar = width - listWidth - 1 - reservedForThread;
     final canDock =
         conversationWithSidebar >=
-        (threadBeside
-            ? conversationBesideThreadMinWidth
-            : conversationDockedMinWidth);
+        (threadBeside ? conversationBesideThreadMinWidth : dockedMinWidth);
     final docked =
         !selected ||
         (threadBeside && holdDocked != null

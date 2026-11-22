@@ -6,6 +6,8 @@ import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:buzz/shared/widgets/conversation_layout.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scaffold.dart';
+import 'package:duo_kit/duo_kit.dart';
+import 'package:duo_kit/testing.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -503,6 +505,118 @@ void main() {
     expect(find.text('Linked page'), findsNothing);
     expect(find.text('Second conversation'), findsOneWidget);
     expect(find.text('Thread content'), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('a Duo lying open in landscape hides its list on request', (
+    tester,
+  ) async {
+    final controller = ConversationPaneController();
+    addTearDown(controller.dispose);
+    void pose(FoldTestPose pose) {
+      final data = pose.data;
+      tester.view
+        ..devicePixelRatio = 1
+        ..physicalSize = data.size
+        ..padding = FakeViewPadding(
+          right: data.padding.right,
+          bottom: data.padding.bottom,
+        )
+        ..viewPadding = FakeViewPadding(
+          right: data.viewPadding.right,
+          bottom: data.viewPadding.bottom,
+        )
+        ..displayFeatures = data.displayFeatures;
+    }
+
+    pose(FoldTestPose.duoInnerLandscape);
+    addTearDown(tester.view.reset);
+    final window = FoldTestPose.duoInnerLandscape.data.size;
+    final stripWidth = FoldTestPose.duoInnerLandscape.data.padding.right;
+    expect(stripWidth, greaterThan(0));
+    await tester.pumpWidget(
+      ProviderScope(
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Builder(
+            // Read above the Scaffold, which removes the strip's padding.
+            builder: (context) => Scaffold(
+              body: AdaptiveConversationPane(
+                controller: controller,
+                // duo_kit detects the strip on iOS alone by default; the
+                // Material header keeps the toggle in reach of the test.
+                strip: FoldGeometry.of(context, detectStrip: true).strip,
+                preferredListWidth: 375,
+                list: Builder(
+                  builder: (context) => TextButton(
+                    onPressed: () => openConversationPane(
+                      context,
+                      'First',
+                      (_) => const _TabletConversation('First'),
+                    ),
+                    child: const Text('First chat'),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    final list = find.text('First chat');
+    final detail = find.byKey(const ValueKey('conversation-detail'));
+    final threadPane = find.byKey(const ValueKey('conversation-thread'));
+    double right(Finder finder) => tester.getTopRight(finder).dx;
+
+    // Flat, the list docks beside the conversation, which reaches under the
+    // side strip as before.
+    await tester.tap(list);
+    await tester.pumpAndSettle();
+    expect(list, findsOneWidget);
+    expect(tester.getTopLeft(detail).dx, 376);
+    expect(right(detail), window.width);
+    await tester.enterText(
+      find.byKey(const ValueKey('conversation-field')),
+      'Keep my draft',
+    );
+
+    // The header hides the list, leaving the conversation the whole display,
+    // and shows it again.
+    await tester.tap(find.byTooltip('Hide sidebar'));
+    await tester.pumpAndSettle();
+    expect(list, findsNothing);
+    expect(tester.getTopLeft(detail).dx, 0);
+    expect(right(detail), window.width);
+    expect(find.text('Keep my draft'), findsOneWidget);
+    await tester.tap(find.byTooltip('Show sidebar'));
+    await tester.pumpAndSettle();
+    expect(list, findsOneWidget);
+
+    // A thread opens beside the conversation, and the list makes room. The
+    // thread reaches under the strip, and both keep their minimum widths
+    // clear of it.
+    await tester.tap(find.text('Reply in thread'));
+    await tester.pumpAndSettle();
+    expect(list, findsNothing);
+    expect(right(threadPane), window.width);
+    expect(
+      tester.getSize(threadPane).width - stripWidth,
+      greaterThanOrEqualTo(conversationThreadPaneMinWidth),
+    );
+    expect(
+      tester.getSize(detail).width,
+      greaterThanOrEqualTo(conversationBesideThreadMinWidth),
+    );
+    expect(right(detail), lessThan(tester.getTopLeft(threadPane).dx));
+
+    // Held like a book, the list and conversation keep the hinge-bound
+    // screens, with no toggle.
+    pose(FoldTestPose.duoHalfOpenedLandscape);
+    await tester.pumpAndSettle();
+    expect(list, findsOneWidget);
+    expect(find.byTooltip('Hide sidebar'), findsNothing);
+    expect(find.byTooltip('Show sidebar'), findsNothing);
+    expect(find.text('Keep my draft'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }

@@ -343,11 +343,11 @@ class AdaptiveConversationPane extends HookConsumerWidget {
               _compactPaneNavigators[ownerRoute] =
                   active && !wide && selected != null ? navigator : null;
             }
-            // An unfolded tablet window can hide its sidebar and show a thread
-            // beside the conversation. Duo keeps its hinge-bound panes, and a
+            // An unfolded tablet window, or a Duo lying open in landscape,
+            // can hide its sidebar and show a thread beside the conversation.
+            // A Duo held like a book keeps its hinge-bound panes, and a
             // persistent selection (Settings) keeps its list as navigation.
-            final tablet =
-                wide && book == null && strip == null && !persistentSelection;
+            final tablet = wide && book == null && !persistentSelection;
             // Pane surfaces meet at the fold so their header backdrops remain
             // continuous. Content insets below keep controls out of its bounds.
             // The default sidebar fits Home's 256 pt navigation bar inside
@@ -366,9 +366,12 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                             )
                       : (contentWidth - 1) * listWidthFraction!
                 : constraints.maxWidth;
+            // The tablet layout is resolved beside the Duo's side strip, then
+            // the panes at either edge reach under the strip, as in the other
+            // layouts, with content insets that keep their controls clear.
             final layout = tablet
                 ? ConversationLayout.resolve(
-                    width: constraints.maxWidth,
+                    width: contentWidth,
                     listWidth: listWidth,
                     selected: selected != null,
                     threadOpen: threadOpen,
@@ -376,8 +379,19 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                     overlayOpen: controller.sidebarOverlay,
                     threadWidth: threadWidth,
                     holdDocked: resizeHold.value,
+                    // A Duo keeps its list docked until the user hides it or
+                    // a thread needs the room, as its two screens always did.
+                    dockedMinWidth: strip == null
+                        ? conversationDockedMinWidth
+                        : 0,
                   )
                 : null;
+            // Tablet geometry in pane coordinates, reaching the window edges.
+            double paneLeft(double left) => left <= 0 ? 0 : left + leftInset;
+            double paneRight(double left, double width) =>
+                left + width >= contentWidth - 0.5
+                ? constraints.maxWidth
+                : left + width + leftInset;
             final docked =
                 layout == null ||
                 layout.sidebar == ConversationSidebarMode.docked;
@@ -389,12 +403,28 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                 (_) => controller.hideSidebarOverlay(),
               );
             }
-            final detailLeft =
-                layout?.detailLeft ??
-                book?.center.dx ??
-                (wide ? listWidth + leftInset + 1 : 0.0);
-            final detailWidth =
-                layout?.detailWidth ?? constraints.maxWidth - detailLeft;
+            final detailLeft = layout != null
+                ? paneLeft(layout.detailLeft)
+                : book?.center.dx ?? (wide ? listWidth + leftInset + 1 : 0.0);
+            final detailWidth = layout != null
+                ? paneRight(layout.detailLeft, layout.detailWidth) - detailLeft
+                : constraints.maxWidth - detailLeft;
+            final threadPaneLeft = layout != null
+                ? paneLeft(layout.threadLeft)
+                : detailLeft;
+            final threadPaneWidth = layout != null
+                ? paneRight(layout.threadLeft, layout.threadWidth) -
+                      threadPaneLeft
+                : detailWidth;
+            // Keeps a pane's content clear of the side strip and the hinge.
+            EdgeInsets paneInsets(double left, double width) => EdgeInsets.only(
+              left: book != null
+                  ? book.width / 2
+                  : (leftInset - left).clamp(0.0, leftInset),
+              right: left + width >= constraints.maxWidth - 0.5
+                  ? rightInset
+                  : 0,
+            );
             // The overlay owns focus from the frame it opens until the frame
             // it starts closing, whatever the slide animation shows. Back
             // stays with it until the slide ends; see the PopScope below.
@@ -413,12 +443,12 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                       docked ||
                           layout.sidebar == ConversationSidebarMode.overlay
                       ? 0
-                      : -listWidth - 1,
+                      : -listWidth - leftInset - 1,
                   listWidth: listWidth,
                   detailLeft: detailLeft,
                   detailWidth: detailWidth,
-                  threadLeft: layout?.threadLeft ?? detailLeft,
-                  threadWidth: layout?.threadWidth ?? detailWidth,
+                  threadLeft: threadPaneLeft,
+                  threadWidth: threadPaneWidth,
                 ),
               ),
               duration:
@@ -439,12 +469,12 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                     layout != null &&
                     layout.sidebar == ConversationSidebarMode.hidden;
                 final sidebarGone =
-                    sidebarAway && geometry.listLeft <= -listWidth;
+                    sidebarAway && geometry.listLeft <= -listWidth - leftInset;
                 final overlaid =
                     layout != null &&
                     !docked &&
                     (layout.sidebar == ConversationSidebarMode.overlay ||
-                        geometry.listLeft > -listWidth) &&
+                        geometry.listLeft > -listWidth - leftInset) &&
                     detailLeft <= 0.5;
                 final threadCovers =
                     layout?.thread == ConversationThreadMode.covering ||
@@ -595,10 +625,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                       child: DuoToolbarScope(
                         strip: strip,
                         leadingSlots: wide ? listToolbarSlots : 0,
-                        contentInsets: EdgeInsets.only(
-                          left: wide ? (book?.width ?? 0) / 2 : leftInset,
-                          right: rightInset,
-                        ),
+                        contentInsets: paneInsets(detailLeft, detailWidth),
                         active:
                             active &&
                             selected != null &&
@@ -693,6 +720,10 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                           ),
                           child: DuoToolbarScope(
                             strip: strip,
+                            contentInsets: paneInsets(
+                              geometry.threadLeft,
+                              geometry.threadWidth,
+                            ),
                             active:
                                 active &&
                                 (ModalRoute.isCurrentOf(context) ?? true),
@@ -749,8 +780,11 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                               color: context.colors.scrim.withValues(
                                 alpha:
                                     0.25 *
-                                    ((geometry.listLeft + listWidth + 1) /
-                                            (listWidth + 1))
+                                    ((geometry.listLeft +
+                                                listWidth +
+                                                leftInset +
+                                                1) /
+                                            (listWidth + leftInset + 1))
                                         .clamp(0.0, 1.0),
                               ),
                             ),
