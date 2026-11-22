@@ -4,6 +4,7 @@ import 'package:buzz/features/channels/media_viewer_page.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:buzz/shared/widgets/conversation_layout.dart';
+import 'package:buzz/shared/widgets/duo_toolbar.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scaffold.dart';
 import 'package:duo_kit/duo_kit.dart';
@@ -237,6 +238,35 @@ void main() {
         expect(
           layout.threadWidth,
           lessThanOrEqualTo(layout.threadMaxWidth),
+          reason: '$row',
+        );
+      }
+    }
+  });
+
+  test('a Duo docks its list until a thread needs the room', () {
+    // Content widths beside the strip of a Duo lying open in landscape.
+    for (final row in [
+      (w: 867.0, thread: false, sidebar: ConversationSidebarMode.docked),
+      (w: 848.0, thread: false, sidebar: ConversationSidebarMode.docked),
+      (w: 867.0, thread: true, sidebar: ConversationSidebarMode.hidden),
+      (w: 848.0, thread: true, sidebar: ConversationSidebarMode.hidden),
+    ]) {
+      final layout = ConversationLayout.resolve(
+        width: row.w,
+        listWidth: 375,
+        selected: true,
+        threadOpen: row.thread,
+        userHidden: false,
+        overlayOpen: false,
+        dockedMinWidth: 0,
+      );
+      expect(layout.sidebar, row.sidebar, reason: '$row');
+      if (row.thread) {
+        expect(layout.thread, ConversationThreadMode.beside, reason: '$row');
+        expect(
+          layout.detailWidth,
+          greaterThanOrEqualTo(conversationBesideThreadMinWidth),
           reason: '$row',
         );
       }
@@ -587,6 +617,9 @@ void main() {
     expect(list, findsNothing);
     expect(tester.getTopLeft(detail).dx, 0);
     expect(right(detail), window.width);
+    EdgeInsets insetsOf(String text) =>
+        duoContentInsetsOf(tester.element(find.text(text)));
+    expect(insetsOf('First conversation'), EdgeInsets.only(right: stripWidth));
     expect(find.text('Keep my draft'), findsOneWidget);
     await tester.tap(find.byTooltip('Show sidebar'));
     await tester.pumpAndSettle();
@@ -608,6 +641,9 @@ void main() {
       greaterThanOrEqualTo(conversationBesideThreadMinWidth),
     );
     expect(right(detail), lessThan(tester.getTopLeft(threadPane).dx));
+    // Only the thread reaches the strip, so only it keeps clear of it.
+    expect(insetsOf('Thread content'), EdgeInsets.only(right: stripWidth));
+    expect(insetsOf('First conversation'), EdgeInsets.zero);
 
     // Held like a book, the list and conversation keep the hinge-bound
     // screens, with no toggle.
