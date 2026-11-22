@@ -218,7 +218,7 @@ class ChannelActions {
           ],
         );
       } catch (error) {
-        failures[pubkey] = _relayErrorMessage(error);
+        failures[pubkey] = relayErrorText(error);
       }
     }
     _ensureCommunityValid();
