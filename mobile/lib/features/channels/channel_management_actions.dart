@@ -162,21 +162,36 @@ class ChannelActions {
   /// With [includeHistory], as New Message opens, the relay picks the DM
   /// these people already share, and named agents it lacks join it with its
   /// history; the returned channel is that DM. A relay from before history
-  /// ignores the tag and opens the DM of exactly these members.
+  /// ignores the tag and opens the DM of exactly these members. The relay
+  /// lets only people share a DM's history, so when it refuses the tag to a
+  /// signed-in agent, the open is resent without it and opens that DM too.
   Future<Channel> openDm({
     required List<String> pubkeys,
     bool waitForChannelList = true,
     bool includeHistory = false,
   }) async {
     _ensureCommunityValid();
-    final result = await _signedEventRelay.submit(
-      kind: 41010,
-      content: '',
-      tags: [
-        for (final pk in pubkeys) ['p', pk],
-        if (includeHistory) ['history', 'include'],
-      ],
-    );
+    Future<NostrEvent> submit({required bool includeHistory}) =>
+        _signedEventRelay.submit(
+          kind: 41010,
+          content: '',
+          tags: [
+            for (final pk in pubkeys) ['p', pk],
+            if (includeHistory) ['history', 'include'],
+          ],
+        );
+    NostrEvent result;
+    try {
+      result = await submit(includeHistory: includeHistory);
+    } catch (error) {
+      if (!includeHistory ||
+          _relayErrorMessage(error) !=
+              "forbidden: only people can share a DM's history") {
+        rethrow;
+      }
+      _ensureCommunityValid();
+      result = await submit(includeHistory: false);
+    }
     _ensureCommunityValid();
     final response = parseCommandResponse(result.content);
     final channelId = response?['channel_id'] as String?;
