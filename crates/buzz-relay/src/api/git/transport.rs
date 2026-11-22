@@ -2414,8 +2414,9 @@ async fn rewrite_git_body_limit_413(
     if response.status() != StatusCode::PAYLOAD_TOO_LARGE {
         return response;
     }
-    // The body-limit layer answers with an empty 413. A handler 413 (resource
-    // limits, for example) already has its own message; leave that body alone.
+    // `RequestBodyLimitLayer` answers 413 with the body `length limit exceeded`.
+    // A handler 413 (resource limits, for example) already has its own message;
+    // leave that body alone.
     let (parts, body) = response.into_parts();
     let bytes = axum::body::to_bytes(body, 64 * 1024)
         .await
@@ -2430,9 +2431,10 @@ async fn rewrite_git_body_limit_413(
         .into_response()
 }
 
-/// The limit layer's 413 has no body. A handler that chose 413 already wrote one.
+/// The limit layer's 413 body is `length limit exceeded` (older axum builds
+/// sent an empty body). A handler that chose 413 already wrote its own text.
 fn git_413_is_body_limit(body: &[u8]) -> bool {
-    body.is_empty()
+    body.is_empty() || body == b"length limit exceeded"
 }
 
 fn git_body_limit_message(max_bytes: u64) -> String {
@@ -2447,8 +2449,9 @@ mod git_413_tests {
     use super::{git_413_is_body_limit, git_body_limit_message};
 
     #[test]
-    fn only_an_empty_413_is_rewritten() {
+    fn only_the_body_limit_413_is_rewritten() {
         assert!(git_413_is_body_limit(b""));
+        assert!(git_413_is_body_limit(b"length limit exceeded"));
         assert!(!git_413_is_body_limit(b"resource limit"));
         let message = git_body_limit_message(32);
         assert!(message.contains("32"));
