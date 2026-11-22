@@ -337,6 +337,21 @@ void main() {
     // Screen readers still reach the conversation beside the thread.
     expect(find.semantics.byLabel('First conversation'), findsOne);
     expect(find.semantics.byLabel('Thread content'), findsOne);
+
+    // A sheet over either pane is modal for screen readers: the other pane
+    // leaves the tree until it closes.
+    for (final (open, sheet, other) in [
+      ('Open thread sheet', 'Thread sheet', 'First conversation'),
+      ('Open conversation sheet', 'Conversation sheet', 'Thread content'),
+    ]) {
+      await tester.tap(find.text(open));
+      await tester.pumpAndSettle();
+      expect(find.semantics.byLabel(sheet), findsOne);
+      expect(find.semantics.byLabel(other), findsNothing);
+      Navigator.of(tester.element(find.text(sheet))).pop();
+      await tester.pumpAndSettle();
+      expect(find.semantics.byLabel(other), findsOne);
+    }
     expect(
       tester.getTopLeft(find.text('Thread content')).dx,
       greaterThan(tester.getTopRight(find.text('First conversation')).dx),
@@ -679,10 +694,19 @@ class _TabletConversation extends StatelessWidget {
             context,
             (_) => FrostedScaffold(
               appBar: const FrostedAppBar(title: Text('Thread')),
-              body: const Column(
+              body: Column(
                 children: [
-                  Text('Thread content'),
-                  TextField(key: ValueKey('thread-field')),
+                  const Text('Thread content'),
+                  const TextField(key: ValueKey('thread-field')),
+                  Builder(
+                    builder: (context) => TextButton(
+                      onPressed: () => showModalBottomSheet<void>(
+                        context: context,
+                        builder: (_) => const Text('Thread sheet'),
+                      ),
+                      child: const Text('Open thread sheet'),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -694,6 +718,13 @@ class _TabletConversation extends StatelessWidget {
             context,
           ).push(MaterialPageRoute<void>(builder: (_) => const _LinkedPage())),
           child: const Text('Open linked page'),
+        ),
+        TextButton(
+          onPressed: () => showModalBottomSheet<void>(
+            context: context,
+            builder: (_) => const Text('Conversation sheet'),
+          ),
+          child: const Text('Open conversation sheet'),
         ),
         TextButton(
           onPressed: () => openImageViewer(

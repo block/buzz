@@ -4,6 +4,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import '../theme/theme.dart';
 import 'adaptive_conversation_pane.dart';
 import 'app_route_observer.dart';
+import 'conversation_pane_modals.dart';
 import 'conversation_thread_scope.dart';
 
 /// A tablet pane's thread, beside its conversation or over it.
@@ -16,6 +17,7 @@ class ConversationThreadPane extends HookWidget {
     required this.controller,
     required this.navigatorKey,
     required this.covering,
+    required this.modalRoutes,
     super.key,
   });
 
@@ -25,20 +27,24 @@ class ConversationThreadPane extends HookWidget {
   /// Whether the thread covers the conversation rather than sitting beside it.
   final bool covering;
 
+  /// Tracks pop-up routes over the thread, which hide its neighbours.
+  final PaneModalRoutes modalRoutes;
+
   @override
   Widget build(BuildContext context) {
     final routeObserver = useMemoized(appRouteObserver.createNestedObserver);
     final builder = controller.threadBuilder;
-    // The thread's page routes block screen readers from everything painted
-    // before them in their container. Their own container keeps that block
-    // inside the pane, so the conversation beside it stays reachable.
+    // The thread's routes block screen readers from everything painted before
+    // them in their container. Their own container keeps that block inside
+    // the pane, so the conversation beside it stays reachable; the pane hides
+    // its neighbours itself while a sheet is open over the thread.
     return ConversationThreadScope(
       child: Semantics(
         container: true,
         explicitChildNodes: true,
         child: Navigator(
           key: navigatorKey,
-          observers: [routeObserver],
+          observers: [routeObserver, modalRoutes],
           pages: [
             MaterialPage<void>(
               key: const ValueKey('conversation-thread-placeholder'),

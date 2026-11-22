@@ -9,6 +9,7 @@ import 'package:duo_kit/duo_kit.dart';
 import 'duo_toolbar.dart';
 import 'app_route_observer.dart';
 import 'conversation_layout.dart';
+import 'conversation_pane_modals.dart';
 import 'conversation_sidebar.dart';
 import 'conversation_thread_divider.dart';
 import 'conversation_thread_pane.dart';
@@ -282,6 +283,9 @@ class AdaptiveConversationPane extends HookConsumerWidget {
     // it (a channel link, a profile) closes the thread, which would otherwise
     // stay beside a page it does not belong to. Anything pushed above it,
     // the media viewer included, takes Back before the thread.
+    // A sheet over one pane hides the other panes from screen readers.
+    final detailModals = usePaneModalRoutes();
+    final threadModals = usePaneModalRoutes();
     final detailRoutes = useMemoized(() => _DetailRoutes(controller), [
       controller,
     ]);
@@ -513,7 +517,11 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                             child: list,
                           ),
                           child: _CoveredList(
-                            covered: (!wide && selected != null) || sidebarAway,
+                            covered:
+                                (!wide && selected != null) ||
+                                sidebarAway ||
+                                detailModals.active ||
+                                threadModals.active,
                             child: MediaQueryOverride(
                               transform: (media) => media.copyWith(
                                 size: Size(listWidth, constraints.maxHeight),
@@ -545,7 +553,7 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                 Widget detail = Navigator(
                   requestFocus: selected != null,
                   key: navigator,
-                  observers: [routeObserver, detailRoutes],
+                  observers: [routeObserver, detailRoutes, detailModals],
                   pages: [
                     if (!(wide && persistentSelection && selected != null))
                       MaterialPage<void>(
@@ -664,7 +672,10 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                                   threadCovers ||
                                   overlayOpen,
                               child: ExcludeSemantics(
-                                excluding: threadCovers || overlaid,
+                                excluding:
+                                    threadCovers ||
+                                    overlaid ||
+                                    threadModals.active,
                                 child: NavigatorPopHandler<Object?>(
                                   enabled: wide && persistentSelection,
                                   // A disabled handler is still told about
@@ -730,8 +741,9 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                             child: ExcludeFocus(
                               excluding: overlayOpen,
                               child: ExcludeSemantics(
-                                excluding: overlaid,
+                                excluding: overlaid || detailModals.active,
                                 child: ConversationThreadPane(
+                                  modalRoutes: threadModals,
                                   controller: controller,
                                   navigatorKey: threadNavigator,
                                   covering: threadCovers,
