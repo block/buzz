@@ -317,9 +317,9 @@ private final class IosNavigationBarView: NSObject, FlutterPlatformView {
     navigation.view.setNeedsLayout()
     navigation.view.layoutIfNeeded()
     if floatingTitle != nil || backdropOnly, let window = container.window {
-      let values = [window.bounds.width, window.bounds.height,
-                    portraitHeader?.minX ?? 0, portraitHeader?.minY ?? 0,
-                    portraitHeader?.width ?? 0, portraitHeader?.height ?? 0]
+      let values: [CGFloat] = [window.bounds.width, window.bounds.height,
+                              portraitHeader?.minX ?? 0, portraitHeader?.minY ?? 0,
+                              portraitHeader?.width ?? 0, portraitHeader?.height ?? 0]
       if reportedPortraitHeader != values {
         reportedPortraitHeader = values
         DispatchQueue.main.async { [weak self] in
