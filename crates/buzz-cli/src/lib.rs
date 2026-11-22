@@ -362,6 +362,24 @@ enum Cmd {
     /// Escape hatch: run any Nostr filter or publish any event with the CLI's own credentials
     #[command(subcommand)]
     Raw(RawCmd),
+    /// Stream channel events as newline-delimited JSON (external agents, #2663)
+    Listen {
+        /// Channel UUID. Repeatable.
+        #[arg(long = "channel")]
+        channels: Vec<String>,
+        /// Also subscribe to events that mention this CLI identity.
+        #[arg(long)]
+        mentions_of_me: bool,
+        /// Comma-separated kinds. Defaults to the channel message kinds.
+        #[arg(long)]
+        kinds: Option<String>,
+        /// POST each event body to this URL.
+        #[arg(long)]
+        webhook: Option<String>,
+        /// Exit when the socket drops instead of reconnecting.
+        #[arg(long)]
+        no_reconnect: bool,
+    },
 }
 
 /// `buzz raw` subcommands: query or publish any Nostr event with the CLI's
@@ -666,6 +684,19 @@ Examples:\n  \
 buzz agents archived"
     )]
     Archived,
+    /// Publish a managed-agent directory record (kind 30177) for a headless agent.
+    ///
+    /// External agents cannot use the desktop create form. This signs the
+    /// validated body as the CLI identity. Refs #2663.
+    #[command(name = "publish")]
+    Publish {
+        /// Agent pubkey (64-char hex) stored as the addressable `d` tag.
+        #[arg(long)]
+        agent_pubkey: String,
+        /// Managed-agent JSON. Use `-` to read from stdin.
+        #[arg(long)]
+        content: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2788,6 +2819,23 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
         Cmd::Raw(sub) => commands::raw::dispatch(sub, &client).await,
+        Cmd::Listen {
+            channels,
+            mentions_of_me,
+            kinds,
+            webhook,
+            no_reconnect,
+        } => {
+            commands::listen::cmd_listen(
+                &client,
+                channels,
+                mentions_of_me,
+                kinds,
+                webhook,
+                !no_reconnect,
+            )
+            .await
+        }
         Cmd::Pack(_) | Cmd::Auth(_) => unreachable!("handled above"),
     }
 }

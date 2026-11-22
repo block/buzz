@@ -110,7 +110,7 @@ pub async fn cmd_listen(
     reconnect: bool,
 ) -> Result<(), CliError> {
     let kinds = parse_kinds(kinds_raw.as_deref())?;
-    let my_pk = client.keys().public_key().to_hex();
+    let my_pk = client.public_key().to_hex();
     let filters = build_listen_filters(&channels, mentions_of_me, &my_pk, &kinds)?;
     let ws_url = http_to_ws(client.relay_url());
     let http = reqwest::Client::new();
@@ -184,7 +184,11 @@ async fn listen_session(
     use buzz_ws_client::{NostrWsConnection, RelayMessage};
 
     let mut conn =
-        NostrWsConnection::connect_authenticated(ws_url, client.keys(), client.auth_tag())
+        NostrWsConnection::connect_authenticated(
+            ws_url,
+            &crate::credentials::CapturingSigner::new(client.credentials()),
+            client.auth_tag(),
+        )
             .await
             .map_err(|e| CliError::Other(format!("websocket: {e}")))?;
 

@@ -614,7 +614,7 @@ impl BuzzClient {
 
     /// NIP-OA auth tag for WebSocket AUTH / EVENT signing, if configured.
     pub fn auth_tag(&self) -> Option<&nostr::Tag> {
-        self.auth_tag.as_ref()
+        self.credentials.auth_tag().map(|t| &t.tag)
     }
 
     /// Return the owner pubkey carried by the NIP-OA auth tag, if any.

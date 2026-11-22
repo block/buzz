@@ -29,7 +29,7 @@ pub(crate) fn me_identity_json(pubkey_hex: &str, npub_bech32: &str) -> serde_jso
 ///
 /// No relay I/O — agents can resolve "who am I?" before connecting. Refs #2663.
 pub async fn cmd_me(client: &BuzzClient, _format: &crate::OutputFormat) -> Result<(), CliError> {
-    let pk = client.keys().public_key();
+    let pk = client.public_key();
     let hex = pk.to_hex();
     let npub = pk
         .to_bech32()

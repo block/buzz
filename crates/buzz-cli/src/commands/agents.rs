@@ -173,7 +173,7 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
             let body = crate::managed_agent_publish::validate_managed_agent_content(&raw)?;
             let builder =
                 crate::managed_agent_publish::build_managed_agent_event(&agent_pubkey, &body)?;
-            let event = client.sign_event(builder)?;
+            let event = client.sign_event(builder).await?;
             let event_id = event.id.to_hex();
             client.submit_event(event).await?;
             println!(
