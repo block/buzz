@@ -54,6 +54,8 @@ import 'shared/auth/auth.dart';
 import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/emoji/emoji_burst.dart';
 import 'shared/relay/relay.dart';
+import 'shared/diagnostics/diagnostic_navigation_observer.dart';
+import 'shared/diagnostics/diagnostic_reporter.dart';
 import 'shared/theme/theme.dart';
 import 'shared/widgets/buzz_loading_indicator.dart';
 import 'shared/read_state/failed_clear_notice.dart';
@@ -360,10 +362,13 @@ class App extends HookConsumerWidget {
         ref.read(pairingProvider.notifier).reset();
       }
     });
-    final communityTheme = ageSignalState != AgeSignalState.restricted
-        ? ref.watch(communityThemeProvider)
-        : defaultCommunityTheme;
-    final themeMode = communityTheme.mode;
+    final restricted = ageSignalState == AgeSignalState.restricted;
+    final communityTheme = restricted
+        ? defaultCommunityTheme
+        : ref.watch(communityThemeProvider);
+    final themeMode = restricted
+        ? defaultCommunityTheme.mode
+        : ref.watch(appearanceModeProvider);
     // The app rebuilds on every lifecycle change. A new ThemeData never
     // equals the last one, so MaterialApp would animate between identical
     // themes, and each frame of that makes every message re-parse its
@@ -476,10 +481,34 @@ class App extends HookConsumerWidget {
       },
     );
     final latestHome = useRef<Widget?>(null)..value = home;
+    final screenTrail = ref.read(diagnosticScreenTrailProvider);
+    final screenObserver = useMemoized(screenTrail.observer);
+    useEffect(() => screenObserver.dispose, [screenObserver]);
+    // The root page's content changes in place as auth settles (splash, then
+    // onboarding or Home) with no navigation, so name it again.
+    final homeKind = authState.when(
+      loading: () => null,
+      error: (_, _) => false,
+      data: (state) => state.status,
+    );
+    useEffect(() {
+      screenObserver.refresh();
+      return null;
+    }, [homeKind]);
+    // The age restriction replaces the navigator rather than covering a route.
+    // It is named only as `other`: its own name would reveal an age signal.
+    useEffect(() {
+      screenTrail.cover(
+        ageSignalState == AgeSignalState.restricted
+            ? DiagnosticScreen.other
+            : null,
+      );
+      return null;
+    }, [ageSignalState]);
 
     return MaterialApp(
       navigatorKey: _mobileRootNavigatorKey,
-      navigatorObservers: [appRouteObserver],
+      navigatorObservers: [appRouteObserver, screenObserver],
       title: 'Buzz',
       debugShowCheckedModeBanner: false,
       theme: lightTheme,

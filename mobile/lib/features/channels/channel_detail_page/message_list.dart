@@ -102,7 +102,6 @@ class _MessageList extends HookConsumerWidget {
     final latestEntryId = entries.isEmpty ? null : entries.last.message.id;
     final previousLatestEntryId = useRef<String?>(null);
     final observedLocalSendIds = useRef(localSendAnimations.keys.toSet());
-    final didOpenInitialThread = useRef(false);
     final didJumpToInitialMessage = useRef(false);
     final isUnreadNavigationDismissed = useState(false);
     final detachedWhileUnreadShown = useRef(false);
@@ -729,40 +728,7 @@ class _MessageList extends HookConsumerWidget {
       };
     }, [appView, itemScrollController]);
 
-    useEffect(() {
-      if (initialThreadRootId == null || didOpenInitialThread.value) {
-        return null;
-      }
-      final threadHead = allMessages
-          .where((message) => message.id == initialThreadRootId)
-          .firstOrNull;
-      if (threadHead == null) return null;
-      didOpenInitialThread.value = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!context.mounted || ModalRoute.of(context)?.isCurrent != true) {
-          return;
-        }
-        final route = MaterialPageRoute<void>(
-          builder: (_) => ThreadDetailPage(
-            threadHead: threadHead,
-            allMessages: allMessages,
-            channelId: channelId,
-            currentPubkey: currentPubkey,
-            isMember: isMember,
-            isArchived: isArchived,
-            initialMessageId: initialMessageId,
-          ),
-        );
-        final navigator = Navigator.of(context);
-        switch (initialThreadRouteBehavior) {
-          case InitialThreadRouteBehavior.push:
-            navigator.push(route);
-          case InitialThreadRouteBehavior.replaceCurrentRoute:
-            navigator.pushReplacement(route);
-        }
-      });
-      return null;
-    }, [initialThreadRootId, allMessages, initialThreadRouteBehavior]);
+    _useInitialThreadRoute(context, ref);
 
     useEffect(() {
       final targetIndex = reversedIndexOf(initialMessageId);

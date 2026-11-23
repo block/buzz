@@ -105,6 +105,9 @@ enum NativeTabler {
     "doc": 0xeaa4, // file
     "plus": 0xeb0b, // plus
     "building.2.crop.circle": 0xebf6, // building-community
+    "message.circle": 0xeaed, // message-circle
+    "person.circle": 0xef68, // user-circle
+    "folder": 0xeaad, // folder
     "workspace": 0xecd7, // cube-3d-sphere
     "folder.badge.plus": 0xeaab, // folder-plus
     "headphones": 0xeabd, // headphones

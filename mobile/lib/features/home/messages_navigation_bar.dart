@@ -13,6 +13,11 @@ import '../../shared/widgets/navigation_button_surface.dart';
 import '../../shared/widgets/android_expanding_menu_button.dart';
 import '../../shared/widgets/ios_message_create_button.dart';
 
+bool _reduceShortcutMotion(BuildContext context) =>
+    MediaQuery.disableAnimationsOf(context) ||
+    (defaultTargetPlatform == TargetPlatform.iOS &&
+        View.of(context).platformDispatcher.accessibilityFeatures.reduceMotion);
+
 /// Separate glass shortcuts for search and creation.
 class MessagesNavigationBar extends HookWidget {
   const MessagesNavigationBar({
@@ -34,10 +39,9 @@ class MessagesNavigationBar extends HookWidget {
   Widget build(BuildContext context) {
     final menuOpen = useState(false);
     final menuMoving = useState(false);
-    final disableAnimations = MediaQuery.disableAnimationsOf(context);
     void menuVisibilityChanged(bool visible) {
       if (menuOpen.value == visible) return;
-      menuMoving.value = !disableAnimations;
+      menuMoving.value = !_reduceShortcutMotion(context);
       menuOpen.value = visible;
     }
 
@@ -76,8 +80,7 @@ class MessagesNavigationBar extends HookWidget {
                         navigationAxis: Axis.vertical,
                         onMenuVisibilityChanged: menuVisibilityChanged,
                         actions: creationActions,
-                        dividerBefore: const {2},
-                        sectionTitles: const {0: 'Solo', 2: 'Team'},
+                        dividerBefore: const {3},
                         accessibilityLabel: 'New',
                         width: 56,
                         height: 168 + Grid.xs * 2,
@@ -143,8 +146,7 @@ class MessagesNavigationBar extends HookWidget {
                       mergingNavigation: true,
                       onMenuVisibilityChanged: menuVisibilityChanged,
                       actions: creationActions,
-                      dividerBefore: const {2},
-                      sectionTitles: const {0: 'Solo', 2: 'Team'},
+                      dividerBefore: const {3},
                       label: 'New',
                       showIconWithLabel: true,
                       accessibilityLabel: 'New',
@@ -212,8 +214,7 @@ class MessagesNavigationBar extends HookWidget {
                         AndroidExpandingMenuButton(
                           expansionBoundsContext: controlsContext,
                           actions: creationActions,
-                          dividerBefore: const {2},
-                          sectionTitles: const {0: 'Solo', 2: 'Team'},
+                          dividerBefore: const {3},
                         ),
                         const SizedBox(width: Grid.xs),
                         const SizedBox.square(dimension: 56),
@@ -262,7 +263,7 @@ class _MenuNudge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final duration = MediaQuery.disableAnimationsOf(context)
+    final duration = _reduceShortcutMotion(context)
         ? Duration.zero
         : const Duration(milliseconds: 180);
     final scale = menuOpen ? .9 : 1.0;
@@ -280,7 +281,12 @@ class _MenuNudge extends StatelessWidget {
             axis == Axis.vertical ? offset : 0,
             0,
           )..scaleByDouble(scale, scale, 1, 1),
-          child: child,
+          child: AnimatedOpacity(
+            duration: duration,
+            curve: Curves.easeOutCubic,
+            opacity: menuOpen ? 0 : 1,
+            child: child,
+          ),
         ),
       ),
     );

@@ -101,7 +101,7 @@ extension ChannelsNotifierJoins on ChannelsNotifier {
             cache.removeChannel(scope, channelId),
         ];
         for (final channelId in removed) {
-          _lifecycleRef.invalidate(savedChannelPreviewProvider(channelId));
+          invalidateSavedMessagePreviews(_lifecycleRef, channelId);
         }
         // Keep the old membership on disk until its cache purge runs.
         await _fenced(fence, Future.wait(purges));

@@ -39,6 +39,7 @@ class _MessageBubble extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final container = ProviderScope.containerOf(context, listen: false);
     final startsThreads = ref.watch(
       channelStartsThreadsProvider(currentChannelId),
     );
@@ -220,17 +221,15 @@ class _MessageBubble extends HookConsumerWidget {
                                       reactions: message.reactions,
                                       onToggle: (emoji) => toggleReaction(
                                         context,
-                                        ref,
+                                        container,
                                         message,
                                         emoji,
                                       ),
                                       showAddButton: isMember && !isArchived,
-                                      onAddReaction: () =>
-                                          showAddReactionPicker(
-                                            context: context,
-                                            ref: ref,
-                                            message: message,
-                                          ),
+                                      onAddReaction: addReactionPickerFor(
+                                        context: context,
+                                        message: message,
+                                      ),
                                     ),
                                   ),
                                 ),

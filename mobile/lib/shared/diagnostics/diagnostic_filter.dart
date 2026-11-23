@@ -1,5 +1,7 @@
 import 'package:sentry_flutter/sentry_flutter.dart';
 
+import 'diagnostic_reporter.dart';
+
 /// The one filter every Dart report, breadcrumb and count passes through
 /// before it leaves the device. Reports the native SDKs capture themselves
 /// (native crashes, app hangs) do not pass through it.
@@ -11,6 +13,12 @@ import 'package:sentry_flutter/sentry_flutter.dart';
 abstract final class DiagnosticFilter {
   /// Breadcrumb category the app writes for networking events.
   static const networkCategory = 'network';
+
+  /// Breadcrumb category the app writes for the screen the person moved to.
+  static const navigationCategory = 'navigation';
+
+  /// The one data key of a navigation breadcrumb: a `DiagnosticScreen` name.
+  static const screenKey = 'screen';
 
   /// Breadcrumb category of the SDK's foreground/background entries.
   static const lifecycleCategory = 'app.lifecycle';
@@ -29,7 +37,11 @@ abstract final class DiagnosticFilter {
   /// Fixed wording that replaces an error's own text.
   static const removedText = 'Error text removed before sending.';
 
-  static const _breadcrumbCategories = {networkCategory, lifecycleCategory};
+  static const _breadcrumbCategories = {
+    networkCategory,
+    navigationCategory,
+    lifecycleCategory,
+  };
 
   /// Device fields that may leave: the hardware and its state, never the
   /// name a person gave it or its locale and timezone.
@@ -188,6 +200,7 @@ abstract final class DiagnosticFilter {
     if (crumb == null || !_breadcrumbCategories.contains(crumb.category)) {
       return null;
     }
+    if (crumb.category == navigationCategory) return _screenCrumb(crumb);
     crumb.message = switch (crumb.message) {
       final message? => stripUrlTails(message),
       null => null,
@@ -195,6 +208,18 @@ abstract final class DiagnosticFilter {
     if (crumb.category == networkCategory) {
       crumb.data?.removeWhere((key, _) => !appAttributes.contains(key));
     }
+    return crumb;
+  }
+
+  /// A navigation breadcrumb leaves as its screen name and nothing else, and
+  /// only when that name is on the app's list.
+  static Breadcrumb? _screenCrumb(Breadcrumb crumb) {
+    final screen = crumb.data?[screenKey];
+    if (!DiagnosticScreen.values.any((value) => value.name == screen)) {
+      return null;
+    }
+    crumb.message = null;
+    crumb.data = {screenKey: screen};
     return crumb;
   }
 

@@ -320,15 +320,6 @@ import os.log
       )
     }
 
-    if let skinToneRegistrar = engineBridge.pluginRegistry.registrar(
-      forPlugin: "BuzzNativeSkinToneControl"
-    ) {
-      skinToneRegistrar.register(
-        NativeSkinToneControlFactory(messenger: messenger),
-        withId: "buzz/native_skin_tone_control"
-      )
-    }
-
     if let toolStripRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzComposerToolStripGlass"
     ) {

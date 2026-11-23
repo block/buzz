@@ -13,17 +13,19 @@ import 'package:buzz/features/channels/channel_identity_names_provider.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/features/channels/message_long_press_region.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
+import 'package:buzz/shared/emoji/emoji_picker.dart';
+import 'package:buzz/shared/theme/theme_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/native_media_headers.dart';
 import 'package:buzz/shared/relay/relay.dart';
-import 'package:buzz/shared/theme/theme_provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'dart:convert';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/emoji/emoji_burst.dart';
+import 'package:buzz/shared/emoji/recent_emoji_provider.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
 import 'package:buzz/shared/emoji/emoji_data_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
@@ -231,7 +233,12 @@ void main() {
         ],
         child: Consumer(
           builder: (context, ref, _) {
-            toggle = () => toggleReaction(context, ref, message, _fire);
+            toggle = () => toggleReaction(
+              context,
+              ProviderScope.containerOf(context, listen: false),
+              message,
+              _fire,
+            );
             return const SizedBox();
           },
         ),
@@ -306,7 +313,12 @@ void main() {
           ],
           child: Consumer(
             builder: (context, ref, _) => TextButton(
-              onPressed: () => toggleReaction(context, ref, message, _fire),
+              onPressed: () => toggleReaction(
+                context,
+                ProviderScope.containerOf(context, listen: false),
+                message,
+                _fire,
+              ),
               child: const Text('Toggle'),
             ),
           ),
@@ -366,7 +378,7 @@ void main() {
           builder: (context, ref, _) => TextButton(
             onPressed: () => toggleReaction(
               context,
-              ref,
+              ProviderScope.containerOf(context, listen: false),
               TimelineMessage(
                 id: 'message',
                 pubkey: _alice,
