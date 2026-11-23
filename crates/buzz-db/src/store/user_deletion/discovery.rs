@@ -140,25 +140,31 @@ pub(super) async fn generate_inventory_on(
     }))
 }
 
-// Rehearsals inspect every stored community, just like account-scope. Membership
-// alone misses historical content, residual access records and agent-only data.
-// Handlers still discover current, community-scoped agent ownership themselves.
+// Select communities with cleanup candidates, including residue after leaving.
+// Agent ownership is community-local: an owned users row is itself a candidate,
+// so there is no need to expand those keys into other communities here.
+// Handlers still validate attribution and discover their exact current rows.
 pub(super) async fn generate_rehearsal_inventory_on(
     conn: &mut sqlx::PgConnection,
     subject: &str,
+    relay_pubkey: Option<&str>,
 ) -> Result<Value> {
     sqlx::query("SET LOCAL statement_timeout='30s'")
         .execute(&mut *conn)
         .await?;
-    let rows = sqlx::query_as::<_, Membership>(
-        "SELECT c.id AS community_id, c.host, m.role FROM communities c
-         LEFT JOIN relay_members m ON m.community_id=c.id AND m.pubkey=$1
-         ORDER BY c.id LIMIT $2",
-    )
-    .bind(subject)
-    .bind((MAX_COMMUNITIES + 1) as i64)
-    .fetch_all(conn)
-    .await?;
+    // Closed SQL fragments only; all operator input stays bound. Reusing the
+    // planner predicate keeps legacy actor/p and private-state ownership aligned.
+    let attributed = include_str!("content_batches/authored.sql")
+        .replace("$1", "c.id")
+        .replace("$2", "ARRAY[decode($1, 'hex')]");
+    let query =
+        include_str!("rehearsal_discovery.sql").replace("/* ATTRIBUTED_CONTENT */", &attributed);
+    let rows = sqlx::query_as::<_, Membership>(sqlx::AssertSqlSafe(query))
+        .bind(subject)
+        .bind((MAX_COMMUNITIES + 1) as i64)
+        .bind(relay_pubkey)
+        .fetch_all(conn)
+        .await?;
     if rows.len() > MAX_COMMUNITIES {
         return Err(DbError::DeletionSafety(
             "rehearsal community limit exceeded; no partial inventory".into(),
@@ -173,7 +179,7 @@ pub(super) async fn generate_rehearsal_inventory_on(
         };
         Ok(json!({"community_id":row.community_id,"label":row.host,"relationship":relationship}))
     }).collect::<Result<Vec<_>>>()?;
-    Ok(json!({"communities":rows,"scope":"all_stored_communities"}))
+    Ok(json!({"communities":rows,"scope":"affected_communities"}))
 }
 
 #[cfg(test)]

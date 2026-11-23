@@ -43,6 +43,13 @@ pub(super) async fn run(
     }
     if !request.target.starts_with("demo:") {
         validate_mode(&request, options.delete, options.read_only)?;
+        anyhow::ensure!(
+            super::inventory::rehearsal_relay_key(
+                request.inventory_manifest.as_ref(),
+                options.relay_pubkey.as_deref()
+            )? == options.relay_pubkey,
+            "worker relay key must match the saved discovery key"
+        );
         if options.db.is_none() {
             bail!("real workflow requires a source database");
         }

@@ -50,6 +50,9 @@ mod postgres_tests;
 #[cfg(test)]
 mod discovery_postgres_tests;
 
+#[cfg(test)]
+mod rehearsal_discovery_postgres_tests;
+
 impl UserDeletionStore {
     /// Configure the deployment's existing relay key for atomic account roster repair.
     /// Never generate an ephemeral key: readers trust the serving relay's identity.

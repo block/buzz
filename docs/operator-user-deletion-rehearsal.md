@@ -20,7 +20,7 @@ support version listing. No Redis or running relay is needed by the worker.
 
 ```sh
 buzz-admin user-deletions submit --pubkey <human-key> --read-only \
-  --requested-by <operator> --run-id <new-uuid>
+  --requested-by <operator> --run-id <new-uuid> --relay-pubkey <trusted-relay-key>
 buzz-admin user-deletions inspect <request-id>
 buzz-admin user-deletions approve <request-id> --approved-by <operator> \
   --inventory-digest <digest-from-inspect>
@@ -29,9 +29,15 @@ buzz-admin user-deletions run <request-id> --read-only
 
 Omit `--run-id` to generate one, printed to stderr before submission. If the
 response is lost, retry submission with that ID, the same subject, operator and
-reason. It returns the existing request with its original inventory. A different
+reason and discovery relay key. It returns the existing request with its original inventory. A different
 run ID starts a fresh rehearsal. `run` and `run --next-step` always use the
 **request ID returned by submission**, not the run ID.
+
+Supply a verified `--relay-pubkey` at submission to include historical
+relay-attributed content. Execution reuses the saved key; an explicit override
+must match it. Without a submission key, discovery uses direct records
+and profile candidates; ordinary messages mentioning the target do not select
+their communities. The supplied discovery key is saved in the inventory.
 
 The request target is `rehearsal:<run-uuid>:<canonical-pubkey>`, preserving the
 existing database uniqueness constraint without a migration. Approval binds its
@@ -54,11 +60,16 @@ that has completed.
 5. `remaining_cleanup`: print and save the report, then atomically finish the
    request through the existing transition function.
 
-The last community automatically transitions to global cleanup. With no stored
+The last community automatically transitions to global cleanup. With no matched
 communities, media transitions directly to global cleanup. Rehearsal discovery
-inspects **every stored community**, matching `account-scope`, so former
-memberships, residual records and agent-only scopes cannot disappear merely
-because the human left. An unrelated empty community produces empty plans.
+saves only communities with target-linked cleanup candidates: memberships,
+owned agents (including inactive ones), or residual content, account, media or
+profile records. It includes former-member residue and excludes unrelated
+communities. Agent ownership is scoped to each community. Historical relay
+attribution and profile subjects remain candidates until the handlers validate
+them; inventory inclusion does not authorize deleting their rows. The community
+limit applies after filtering. Existing requests keep their saved inventory;
+a new run discovers the current scope. Standalone `account-scope` is unchanged.
 Unavailable or non-active communities and unresolvable ownership still fail
 visibly; this milestone does not invent a disposition for those cases.
 

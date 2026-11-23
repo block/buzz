@@ -41,6 +41,9 @@ pub enum Command {
         /// Reuse this UUID when retrying submission; otherwise generate a fresh one.
         #[arg(long, requires = "read_only")]
         run_id: Option<Uuid>,
+        /// Trusted relay public key for historical content attribution in the inventory.
+        #[arg(long, requires = "read_only")]
+        relay_pubkey: Option<String>,
         /// Optional demo request label, for example demo:alice. Conflicts with --pubkey.
         #[arg(long, conflicts_with = "pubkey")]
         target: Option<String>,
@@ -199,6 +202,7 @@ pub async fn run(command: Command) -> Result<i32> {
         Command::Submit {
             read_only,
             run_id,
+            relay_pubkey,
             target,
             pubkey,
             requested_by,
@@ -214,7 +218,13 @@ pub async fn run(command: Command) -> Result<i32> {
                 // Print before the first write so a lost response can be retried.
                 eprintln!("rehearsal run ID: {run_id}");
                 users
-                    .submit_rehearsal(&target, &requested_by, reason.as_deref(), run_id)
+                    .submit_rehearsal_with_relay(
+                        &target,
+                        &requested_by,
+                        reason.as_deref(),
+                        run_id,
+                        relay_pubkey.as_deref(),
+                    )
                     .await?
             } else {
                 users
@@ -250,6 +260,10 @@ pub async fn run(command: Command) -> Result<i32> {
             demo_no_agents_in,
         } => {
             let request = store.get(id).await?;
+            let relay_pubkey = inventory::rehearsal_relay_key(
+                request.inventory_manifest.as_ref(),
+                relay_pubkey.as_deref(),
+            )?;
             let real = !request.target.starts_with("demo:");
             if real {
                 anyhow::ensure!(
@@ -355,6 +369,13 @@ mod rehearsal_cli_tests {
             Cli::try_parse_from(submit.into_iter().chain(["--read-only", "--run-id", id])).is_ok()
         );
         assert!(Cli::try_parse_from(submit.into_iter().chain(["--run-id", id])).is_err());
+        assert!(Cli::try_parse_from(submit.into_iter().chain([
+            "--read-only",
+            "--relay-pubkey",
+            key
+        ]))
+        .is_ok());
+        assert!(Cli::try_parse_from(submit.into_iter().chain(["--relay-pubkey", key])).is_err());
         let run = ["user-deletions", "run", id];
         for mode in ["--read-only", "--print-only", "--delete"] {
             assert!(Cli::try_parse_from(run.into_iter().chain([mode, "--next-step"])).is_ok());

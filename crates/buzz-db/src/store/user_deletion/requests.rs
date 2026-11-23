@@ -18,11 +18,13 @@ impl UserDeletionStore {
         requested_by: &str,
         reason: Option<&str>,
     ) -> Result<EntityRequest> {
-        self.submit_mode(target, requested_by, reason, None).await
+        self.submit_mode(target, requested_by, reason, None, None)
+            .await
     }
 
     /// Start an independent rehearsal, or retry submission with the same run ID.
     /// The ID is generated once by the caller, never by a worker invocation.
+    /// Without a trusted relay key, discover directly attributed records only.
     pub async fn submit_rehearsal(
         &self,
         target: &str,
@@ -30,9 +32,37 @@ impl UserDeletionStore {
         reason: Option<&str>,
         run_id: uuid::Uuid,
     ) -> Result<EntityRequest> {
-        super::normalize_user_deletion_pubkey(target)?;
-        self.submit_mode(target, requested_by, reason, Some(run_id))
+        self.submit_rehearsal_with_relay(target, requested_by, reason, run_id, None)
             .await
+    }
+
+    /// Include historical content attributed by this explicitly trusted relay.
+    /// The attribution key is frozen with the inventory and must match on retry.
+    pub async fn submit_rehearsal_with_relay(
+        &self,
+        target: &str,
+        requested_by: &str,
+        reason: Option<&str>,
+        run_id: uuid::Uuid,
+        relay_pubkey: Option<&str>,
+    ) -> Result<EntityRequest> {
+        let subject = super::normalize_user_deletion_pubkey(target)?;
+        let relay_pubkey = relay_pubkey
+            .map(super::normalize_user_deletion_pubkey)
+            .transpose()?;
+        if relay_pubkey.as_deref() == Some(&subject) {
+            return Err(DbError::DeletionSafety(
+                "the human and trusted relay public keys must differ".into(),
+            ));
+        }
+        self.submit_mode(
+            target,
+            requested_by,
+            reason,
+            Some(run_id),
+            relay_pubkey.as_deref(),
+        )
+        .await
     }
 
     async fn submit_mode(
@@ -41,6 +71,7 @@ impl UserDeletionStore {
         requested_by: &str,
         reason: Option<&str>,
         run_id: Option<uuid::Uuid>,
+        relay_pubkey: Option<&str>,
     ) -> Result<EntityRequest> {
         let subject = normalize_target(subject)?;
         let target = match run_id {
@@ -76,7 +107,8 @@ impl UserDeletionStore {
         }
         if request.status == "submitted" {
             let mut inventory = if run_id.is_some() {
-                super::discovery::generate_rehearsal_inventory_on(&mut tx, &subject).await?
+                super::discovery::generate_rehearsal_inventory_on(&mut tx, &subject, relay_pubkey)
+                    .await?
             } else {
                 super::discovery::generate_inventory_on(&mut tx, &subject).await?
             };
@@ -84,6 +116,9 @@ impl UserDeletionStore {
                 inventory["execution_mode"] = "rehearsal".into();
                 inventory["run_id"] = id.to_string().into();
                 inventory["workflow_version"] = 2.into();
+                if let Some(key) = relay_pubkey {
+                    inventory["discovery_relay_pubkey"] = key.into();
+                }
             }
             let digest = inventory_digest(&inventory)?;
             request = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -101,6 +136,18 @@ impl UserDeletionStore {
             // Use the approval validator before committing either the request
             // or inventory, so unsupported scopes leave no new request behind.
             super::UserDeletionInventory::read(&request)?;
+        }
+        if run_id.is_some()
+            && request
+                .inventory_manifest
+                .as_ref()
+                .and_then(|m| m.get("discovery_relay_pubkey"))
+                .and_then(serde_json::Value::as_str)
+                != relay_pubkey
+        {
+            return Err(DbError::DeletionSafety(
+                "rehearsal discovery relay differs from saved inventory; use a new run ID".into(),
+            ));
         }
         tx.commit().await?;
         Ok(request)
