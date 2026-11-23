@@ -5,7 +5,6 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/identity_names/identity_names.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
-import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/app_list_card.dart';
@@ -41,18 +40,6 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
         channel;
     final target = pubkey.toLowerCase();
     final isDm = currentChannel.isDm;
-    // DM removal needs the target's verified owner; load its profile so the
-    // action appears once it arrives, whether or not the directory lists it.
-    useEffect(() {
-      if (isDm) {
-        ref
-            .read(userCacheProvider.notifier)
-            .resolve([target])
-            .then<void>((_) {})
-            .catchError((Object _) {});
-      }
-      return null;
-    }, [target, isDm]);
 
     // A DM has no admins: its owner may only remove their own agent.
     ChannelMember? manageableMember(

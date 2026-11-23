@@ -366,7 +366,8 @@ class ChannelActions {
   /// add-policy refusal of a DM. The agent and its verified owner are named
   /// as the app's identity labels do, compared against [context] (the DM's
   /// people, as its own label compares them) and this account, so namesakes
-  /// stay distinguishable. A failed name read still refuses, without the name.
+  /// stay distinguishable, using whichever of them are cached. A failed name
+  /// read still refuses, without the name.
   Future<void> _throwIfAgentRefused(
     String reason, {
     required bool adding,
@@ -384,10 +385,12 @@ class ChannelActions {
       for (final key in [...context, ?_currentPubkey])
         if (isHexPubkey(key.toLowerCase())) key.toLowerCase(),
     };
-    await load(keys);
+    // Wait only for names the sentence uses: the agent's, and its owner's
+    // when the refusal names who may add it. Other keys label from cache.
+    await load([refusal.agent]);
     var sources = _ref.read(identityNameSourcesProvider);
     final owner = sources.factFor(refusal.agent)?.ownerPubkey;
-    if (owner != null) {
+    if (refusal.ownerOnly && owner != null) {
       await load([owner]);
       sources = _ref.read(identityNameSourcesProvider);
     }
