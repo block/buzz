@@ -639,3 +639,55 @@ async fn torn_deletions_still_cancel_live_targets_in_both_windows() {
         }
     }
 }
+
+/// Both thread aux hops read from one day before the root (always a target;
+/// the rows are replies): a reaction and a delete-of-reaction inside that
+/// bound come back, ones dated more than a day before it do not. The only
+/// reply is two days newer than the root, so anchoring on the replies alone
+/// drops the in-bound events. Mutation: drop `since: aux_since` → the
+/// out-of-bound events return → RED; drop the root from the bound → the
+/// in-bound events vanish → RED.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn thread_window_aux_hops_read_from_a_day_before_the_root() {
+    let f = Fixture::new().await;
+    let day = 86_400;
+    let reply = f.reply(2 * day as usize).await;
+    let root_at = f.root.created_at.as_secs();
+    // Ingest's clock check and the store's channel-event floor refuse
+    // backdated events, so write them as data that reached the store
+    // another way would be.
+    let backdated = |kind: u16, target: &Event, at: u64| {
+        event(&f.keys, f.channel, kind, "aux", Some(target), at)
+    };
+    let reaction_in = backdated(7, &f.root, root_at - day + 60);
+    let reaction_out = backdated(7, &reply, root_at - day - 60);
+    let delete_in = backdated(5, &reaction_in, root_at - day + 120);
+    let delete_out = backdated(5, &reaction_in, root_at - day - 120);
+    for aux in [&reaction_in, &reaction_out, &delete_in, &delete_out] {
+        sqlx::query(
+            "INSERT INTO events (community_id,id,pubkey,created_at,kind,tags,content,sig,received_at,channel_id) \
+             VALUES ($1,$2,$3,to_timestamp($4),$5,$6,$7,$8,now(),$9)",
+        )
+        .bind(f.community.as_uuid())
+        .bind(aux.id.to_bytes().to_vec())
+        .bind(aux.pubkey.to_bytes().to_vec())
+        .bind(aux.created_at.as_secs() as f64)
+        .bind(aux.kind.as_u16() as i32)
+        .bind(serde_json::to_value(&aux.tags).unwrap())
+        .bind(&aux.content)
+        .bind(aux.sig.serialize().to_vec())
+        .bind(f.channel)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    }
+    let page = f.query(&f.filter()).await;
+    let all = ids(&page, None);
+    let has = |event: &Event| all.contains(&event.id.to_hex().as_str());
+    assert!(has(&reply), "window row: {page}");
+    assert!(has(&reaction_in), "hop 1 inside the bound: {page}");
+    assert!(has(&delete_in), "hop 2 inside the bound: {page}");
+    assert!(!has(&reaction_out), "hop 1 past the bound: {page}");
+    assert!(!has(&delete_out), "hop 2 past the bound: {page}");
+}

@@ -945,22 +945,21 @@ const AUX_MAX_PAGES: usize = 64;
 /// community's whole history.
 const WINDOW_AUX_SINCE_MARGIN_SECS: i64 = 24 * 60 * 60;
 
-/// Lower `created_at` bound for both window aux hops: the oldest retained
-/// row minus [`WINDOW_AUX_SINCE_MARGIN_SECS`]. A hop-2 deletion postdates the
-/// aux event it deletes, so the same bound covers both hops. `None` for an
-/// empty window (no hops run).
+/// Lower `created_at` bound for both window aux hops: the oldest aux target
+/// (Unix seconds) minus [`WINDOW_AUX_SINCE_MARGIN_SECS`]. A hop-2 deletion
+/// postdates the aux event it deletes, so the same bound covers both hops.
+/// `None` when there are no targets (no hops run).
 fn window_aux_since(
-    rows: &[buzz_db::thread::ChannelWindowRow],
+    target_created_at: impl IntoIterator<Item = i64>,
 ) -> Option<chrono::DateTime<chrono::Utc>> {
-    let oldest = rows
-        .iter()
-        .map(|row| row.stored_event.event.created_at.as_secs())
-        .min()?;
-    let since = i64::try_from(oldest)
-        .ok()?
-        .saturating_sub(WINDOW_AUX_SINCE_MARGIN_SECS)
-        .max(0);
+    let oldest = target_created_at.into_iter().min()?;
+    let since = oldest.saturating_sub(WINDOW_AUX_SINCE_MARGIN_SECS).max(0);
     chrono::DateTime::from_timestamp(since, 0)
+}
+
+/// Unix seconds of a stored event, for [`window_aux_since`].
+fn stored_event_secs(event: &buzz_core::StoredEvent) -> i64 {
+    i64::try_from(event.event.created_at.as_secs()).unwrap_or(i64::MAX)
 }
 
 fn build_aux_query(
@@ -1136,7 +1135,12 @@ async fn handle_channel_window_filter(
         let mut seen_aux: std::collections::HashSet<nostr::EventId> =
             std::collections::HashSet::new();
         let mut hop_ids = row_ids_hex.clone();
-        let aux_since = window_aux_since(&window.rows);
+        let aux_since = window_aux_since(
+            window
+                .rows
+                .iter()
+                .map(|row| stored_event_secs(&row.stored_event)),
+        );
         for hop_kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
             let mut aux_query =
                 build_aux_query(tenant.community(), std::mem::take(&mut hop_ids), hop_kinds);
