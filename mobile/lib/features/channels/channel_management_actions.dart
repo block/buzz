@@ -470,6 +470,40 @@ class ChannelActions {
     await _refreshChannelState(channelId);
   }
 
+  Future<void> convertSolo(
+    String channelId, {
+    required bool personalChat,
+  }) async {
+    _ensureCommunityValid();
+    final channel = await findJoinedChannel(channelId);
+    if (channel == null || !channel.isSolo || channel.isArchived) {
+      throw StateError('This Solo is no longer available for conversion.');
+    }
+    // Remove legacy placement first while the relay label still identifies the
+    // conversation as Solo. Retrying after a rejected metadata write is safe.
+    if (personalChat) {
+      final sync = _ref.read(meSyncProvider);
+      final head = await sync.head();
+      if (head != null && sync.decode(head).channels.contains(channelId)) {
+        await sync.update(
+          (groups) => MeGroups(
+            groups: groups.groups,
+            channels: groups.channels.where((id) => id != channelId).toList(),
+            assignments: groups.assignments,
+          ),
+        );
+      }
+    }
+    _ensureCommunityValid();
+    await _signedEventRelay.submit(
+      kind: 9002,
+      content: '',
+      tags: buildSoloConversionTags(channelId, channel.labels),
+    );
+    _ensureCommunityValid();
+    await _refreshChannelState(channelId);
+  }
+
   /// Archives the channel and refreshes its cached state.
   Future<void> archiveChannel(String channelId) =>
       _setChannelArchived(channelId, archived: true);

@@ -21,6 +21,57 @@ class SoloChatTile extends ConsumerWidget {
   const SoloChatTile({super.key, required this.channel});
   final Channel channel;
 
+  static Future<bool?> openDetails(
+    BuildContext context,
+    Channel channel,
+    String? viewer, {
+    required bool personal,
+  }) => showChannelDetailsSheet(
+    context: context,
+    channel: channel,
+    currentPubkey: viewer,
+    personalChat: personal,
+    onMemberTap: (context, pubkey) => showUserProfileSheet(
+      context,
+      pubkey,
+      names: channelIdentityNamesProvider(channel.id),
+      contextualActions: (_) =>
+          ChannelMemberProfileActions(channel: channel, pubkey: pubkey),
+    ),
+    soloSettings: personal
+        ? (renameRow, render) => HookConsumer(
+            builder: (context, ref, _) {
+              final workspace = useMeWorkspace(
+                context,
+                ref,
+                enabled: true,
+                channelId: channel.id,
+              );
+              final assistant = useMeChatAssistant(
+                context,
+                ref,
+                enabled: true,
+                channelId: channel.id,
+                initial: null,
+                messages:
+                    ref.watch(meMessagesProvider(channel.id)).value ?? const [],
+              );
+              return render(
+                MeChatSettings(
+                  renameRow: renameRow,
+                  agentName: assistant.name,
+                  agentAvatarUrl: assistant.nativeAction.imageUrl,
+                  agentInitial: assistant.nativeAction.avatarInitial ?? '?',
+                  hasAgent: assistant.selected != null,
+                  workspaceName: workspace.name,
+                  onAgentTap: assistant.openPicker,
+                  onWorkspaceTap: workspace.openPicker,
+                ),
+              );
+            },
+          )
+        : null,
+  );
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final viewer = ref.watch(myPubkeyProvider);
@@ -43,18 +94,11 @@ class SoloChatTile extends ConsumerWidget {
           channelId: channel.id,
           name: channel.name,
           isUnread: isUnread,
-          onLongPress: () => showChannelDetailsSheet(
-            context: context,
-            channel: channel,
-            currentPubkey: viewer,
-            onMemberTap: (context, pubkey) => showUserProfileSheet(
-              context,
-              pubkey,
-              names: channelIdentityNamesProvider(channel.id),
-              contextualActions: (_) =>
-                  ChannelMemberProfileActions(channel: channel, pubkey: pubkey),
-            ),
-            personalChat: true,
+          onLongPress: () => openDetails(
+            context,
+            channel,
+            viewer,
+            personal: channel.isPersonalChat(viewer, legacyChannels),
           ),
           onTap: () => openConversationPane(
             context,

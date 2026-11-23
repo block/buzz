@@ -1,3 +1,4 @@
+import 'package:buzz/features/channels/me/me_chat_settings.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -116,6 +117,16 @@ Widget _modalApp({
                   currentPubkey: _currentPubkey,
                   onMemberTap: (_, _) {},
                   personalChat: soloDetails,
+                  soloSettings: soloDetails
+                      ? (rename, render) => render(
+                          MeChatSettings(
+                            renameRow: rename,
+                            agentName: 'Terp',
+                            workspaceName: 'No workspace',
+                            onAgentTap: () {},
+                          ),
+                        )
+                      : null,
                 )
               : showChannelActionsSheet(
                   context: context,
@@ -238,7 +249,7 @@ void main() {
         expect(find.byType(BottomSheet), findsNothing);
         expect(
           calls.last.arguments.toString(),
-          isNot(contains('Delete channel')),
+          isNot(contains(soloDetails ? 'Delete chat' : 'Delete channel')),
         );
         members.complete([
           ChannelMember(
@@ -248,7 +259,10 @@ void main() {
           ),
         ]);
         await tester.pumpAndSettle();
-        expect(calls.last.arguments.toString(), contains('Delete channel'));
+        expect(
+          calls.last.arguments.toString(),
+          contains(soloDetails ? 'Delete chat' : 'Delete channel'),
+        );
         final displayModel = Map<String, dynamic>.from(
           calls
                   .lastWhere(
@@ -281,7 +295,7 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        expect(find.byType(BuzzActionTile), findsNWidgets(soloDetails ? 3 : 2));
+        expect(find.byType(BuzzActionTile), findsNWidgets(2));
         expect(find.byType(AppListCard), findsWidgets);
         if (soloDetails) {
           expect(
@@ -289,7 +303,13 @@ void main() {
             findsOneWidget,
           );
           expect(find.text('general'), findsOneWidget);
+          expect(find.text('Mark as unread'), findsOneWidget);
+          expect(find.text('Terp'), findsOneWidget);
+          expect(find.text('No workspace'), findsOneWidget);
+          await tester.tap(find.text('Agent'));
+          expect(selected.removeLast(), 'Agent');
         }
+        await tester.ensureVisible(find.text('Star'));
         await tester.tap(find.text('Star'));
         expect(selected, ['Star']);
         await tester.pumpWidget(const SizedBox());

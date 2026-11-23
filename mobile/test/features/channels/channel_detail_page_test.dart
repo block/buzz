@@ -1,11 +1,13 @@
 import 'package:duo_kit/duo_kit.dart';
 import 'package:buzz/shared/widgets/duo_toolbar.dart';
+import 'package:buzz/shared/widgets/buzz_action_tile.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/features/activity/activity_page.dart';
 import 'package:buzz/shared/drafts/compose_drafts_provider.dart';
 import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:buzz/features/forum/forum_posts_view.dart';
+import 'package:buzz/features/channels/me/me_assistant_picker_sheet.dart';
 import 'package:buzz/features/channels/me/me_chat_settings.dart';
 import 'package:buzz/shared/widgets/dm_header_portrait.dart';
 import 'package:buzz/features/channels/dm_voice_agent_provider.dart';
@@ -925,21 +927,30 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  testWidgets('Solo ellipsis opens agent and workspace settings directly', (
+  testWidgets('Solo title opens aligned agent, workspace and member rows', (
     tester,
   ) async {
+    await tester.binding.setSurfaceSize(const Size(402, 1120));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
     await _loadPresenceFonts(tester);
-    if (Platform.environment['PRESENCE_SCREENSHOTS'] != null) {
-      await (FontLoader(
-        'BuzzTabler',
-      )..addFont(rootBundle.load('assets/fonts/TablerIcons.ttf'))).load();
-    }
-    final avatarBytes = await rootBundle.load('assets/images/buzz-icon.png');
-    final avatarUrl =
-        'data:image/png;base64,${base64Encode(avatarBytes.buffer.asUint8List())}';
+    await (FontLoader(
+      'BuzzTabler',
+    )..addFont(rootBundle.load('assets/fonts/TablerIcons.ttf'))).load();
     await tester.pumpWidget(
       RepaintBoundary(
         child: _buildTestable(
+          channel: Channel(
+            id: _channelId,
+            name: 'Review Solo settings',
+            description: '',
+            channelType: 'stream',
+            labels: const ['buzz.solo'],
+            visibility: 'private',
+            createdBy: 'self',
+            createdAt: DateTime(2025),
+            memberCount: 2,
+            isMember: true,
+          ),
           personalChat: true,
           messages: const [],
           soloAgents: const [
@@ -957,140 +968,145 @@ void main() {
               joinedAt: DateTime(2025),
             ),
           ],
-          users: {
-            'agent': UserProfile(
-              pubkey: 'agent',
-              displayName: 'Terp',
-              avatarUrl: avatarUrl,
-            ),
+          users: const {
+            'agent': UserProfile(pubkey: 'agent', displayName: 'Terp'),
           },
-          organization: Stream.value(
-            const MeGroups(
-              channels: [_channelId],
-              groups: [
-                {'id': 'buzz', 'name': 'Buzz', 'defaultTemplateId': ''},
-              ],
-              assignments: {_channelId: 'buzz'},
-            ),
-          ),
         ),
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.byKey(const ValueKey('dm-header-avatar')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('dm-header-avatar')));
+    await tester.pumpAndSettle();
+    final quick = find.byKey(const ValueKey('channel-details-actions'));
     expect(
-      find.byKey(const ValueKey('channel-header-member-count')),
+      find.descendant(of: quick, matching: find.byType(BuzzActionTile)),
+      findsNWidgets(2),
+    );
+    expect(
+      find.descendant(of: quick, matching: find.text('Mark as unread')),
+      findsOneWidget,
+    );
+    expect(find.text('Rename'), findsOneWidget);
+    expect(find.text('No workspace'), findsOneWidget);
+    expect(find.text('Start a huddle'), findsOneWidget);
+    final settings = find.byType(MeChatSettings);
+    final agentCard = find
+        .ancestor(of: find.text('Agent'), matching: find.byType(AppListCard))
+        .first;
+    expect(
+      find.descendant(of: agentCard, matching: find.text('No workspace')),
       findsNothing,
     );
-    await _capturePresence(tester, 'solo-header-after');
-    await tester.tap(find.byKey(const ValueKey('me-chat-settings-button')));
-    await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('Chat settings'));
-    await tester.pumpAndSettle();
-    expect(find.text('Chat settings'), findsOneWidget);
-    expect(find.text('Workspace'), findsOneWidget);
-    expect(find.text('Buzz'), findsOneWidget);
-    expect(find.byType(ChannelDetailsPage), findsNothing);
-    final settingsAvatar = find.descendant(
-      of: find.byType(MeChatSettings),
-      matching: find.byWidgetPredicate(
-        (widget) =>
-            widget is AvatarImage &&
-            widget.imageUrl == avatarUrl &&
-            widget.isAgent,
-      ),
-    );
-    expect(settingsAvatar, findsOneWidget);
-    final avatarImage = find.descendant(
-      of: settingsAvatar,
-      matching: find.byType(Image),
-    );
-    await tester.runAsync(
-      () => precacheImage(
-        tester.widget<Image>(avatarImage).image,
-        tester.element(avatarImage),
-      ),
-    );
-    await tester.pump();
-    await _capturePresence(tester, 'solo-settings-after');
-    final settingsRoute = ModalRoute.of(
-      tester.element(find.text('Chat settings')),
-    )!;
-    final barrier = tester.element(find.byType(ModalBarrier).last);
-    Future<void> expectStableMask() async {
-      final sheet = find.byType(BottomSheet);
-      final before = tester.getSize(sheet).height;
-      await tester.pump();
-      expect(tester.getSize(sheet).height, closeTo(before, 0.01));
-      await tester.pump(const Duration(milliseconds: 100));
-      final middle = tester.getSize(sheet).height;
-      expect(barrier.mounted, isTrue);
-      expect(settingsRoute.isCurrent, isTrue);
-      expect(settingsRoute.animation!.value, 1);
-      await tester.pump(const Duration(milliseconds: 250));
-      final after = tester.getSize(sheet).height;
-      expect(middle, greaterThan(before < after ? before : after));
-      expect(middle, lessThan(before > after ? before : after));
-      expect(barrier.mounted, isTrue);
-      expect(settingsRoute.isCurrent, isTrue);
-      expect(settingsRoute.animation!.value, 1);
-    }
-
-    await tester.ensureVisible(find.text('Workspace'));
-    await tester.tap(find.text('Workspace'));
-    await expectStableMask();
-    await tester.pumpAndSettle();
-    expect(find.text('No Workspace'), findsOneWidget);
-    expect(find.text('Buzz'), findsOneWidget);
     expect(
-      find.ancestor(
-        of: find.text('No Workspace'),
-        matching: find.byType(AppListCard),
+      tester.getTopLeft(agentCard).dy,
+      greaterThanOrEqualTo(tester.getBottomLeft(quick).dy),
+    );
+    expect(
+      tester.getBottomLeft(agentCard).dy,
+      lessThan(tester.getTopLeft(find.text('Rename')).dy),
+    );
+
+    final members = find.byKey(const ValueKey('channel-details-members-card'));
+    expect(tester.widget<AppListCard>(members).label, isNull);
+    expect(
+      tester.getTopLeft(settings).dy,
+      lessThan(tester.getTopLeft(members).dy),
+    );
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('channel-details-avatar')),
+        matching: find.byIcon(BuzzIcons.messageCircle),
       ),
       findsOneWidget,
     );
-    await _capturePresence(tester, 'solo-workspace-section');
-    await tester.tap(find.byTooltip('Close sheet'));
-    await expectStableMask();
+    expect(
+      tester.getTopLeft(find.text('Copy channel name')).dy,
+      lessThan(tester.getTopLeft(members).dy),
+    );
+    final copy = find.byIcon(BuzzIcons.copy);
+    final center = tester.getCenter(copy).dx;
+    final portraits = find.descendant(
+      of: members,
+      matching: find.byType(AvatarImage),
+    );
+    expect(portraits, findsNWidgets(2));
+    for (final leading in [
+      find.descendant(of: settings, matching: find.byType(AvatarImage)),
+      find.byIcon(BuzzIcons.folder),
+      find.byIcon(BuzzIcons.plus).first,
+      portraits.first,
+      portraits.last,
+      find.descendant(
+        of: find.byKey(const ValueKey('channel-details-channel-card')),
+        matching: find.byIcon(BuzzIcons.hash),
+      ),
+    ]) {
+      expect(tester.getCenter(leading).dx, center);
+    }
+    await _capturePresence(tester, 'solo-details-alignment');
+    await tester.scrollUntilVisible(
+      find.text('Delete chat'),
+      300,
+      scrollable: find
+          .descendant(
+            of: find.byType(ChannelDetailsPage),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
     await tester.pumpAndSettle();
-    expect(find.text('Chat settings'), findsOneWidget);
+    await _capturePresence(tester, 'solo-details-management');
+    expect(find.text('Leave chat'), findsNothing);
+    expect(find.text('Leave channel'), findsNothing);
+    await Scrollable.ensureVisible(
+      tester.element(find.text('Agent')),
+      alignment: 0.5,
+    );
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Agent'));
-    await expectStableMask();
     await tester.pumpAndSettle();
-    expect(find.text('Chat settings'), findsNothing);
-    await tester.tap(find.byTooltip('Close sheet'));
-    await expectStableMask();
-    await tester.pumpAndSettle();
-    expect(find.text('Chat settings'), findsOneWidget);
-    expect(find.text('Workspace'), findsOneWidget);
-    await tester.tap(find.byTooltip('Close sheet'));
-    await tester.pumpAndSettle();
-    expect(find.text('Chat settings'), findsNothing);
-    await tester.pumpWidget(const SizedBox.shrink());
+    expect(find.byType(MeAssistantPickerSheet), findsOneWidget);
+  });
+
+  testWidgets('a member can leave a shared Solo', (tester) async {
+    final channel = Channel(
+      id: _channelId,
+      name: 'Shared Solo',
+      channelType: 'stream',
+      labels: const ['buzz.solo'],
+      visibility: 'private',
+      description: '',
+      createdBy: 'other',
+      createdAt: DateTime(2025),
+      memberCount: 2,
+      isMember: true,
+    );
     await tester.pumpWidget(
       _buildTestable(
-        personalChat: true,
-        disableAnimations: true,
         messages: const [],
-        organization: Stream.value(const MeGroups(channels: [_channelId])),
+        channel: channel,
+        members: [
+          ChannelMember(
+            pubkey: 'self',
+            role: 'member',
+            joinedAt: DateTime(2025),
+          ),
+        ],
+        home: ChannelDetailsPage(
+          channel: channel,
+          currentPubkey: 'self',
+          onMemberTap: (_, _) {},
+        ),
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('me-chat-settings-button')));
-    await tester.pumpAndSettle();
-    final settingsHeight = tester.getSize(find.byType(BottomSheet)).height;
-    await tester.tap(find.text('Workspace'));
-    await tester.pump();
-    await tester.pump();
-    final reducedHeight = tester.getSize(find.byType(BottomSheet)).height;
-    expect(reducedHeight, isNot(settingsHeight));
-    await tester.pump(const Duration(milliseconds: 100));
-    expect(tester.getSize(find.byType(BottomSheet)).height, reducedHeight);
-    await tester.tap(find.byTooltip('Close sheet'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Close sheet'));
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
+    await tester.scrollUntilVisible(
+      find.text('Leave chat'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.text('Leave chat'), findsOneWidget);
+    expect(find.text('Delete chat'), findsNothing);
   });
 
   for (final fromLauncher in [false, true]) {
@@ -15484,10 +15500,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(
-      find.byKey(const ValueKey('me-chat-settings-button')),
-      findsOneWidget,
-    );
+    expect(find.byKey(const ValueKey('me-chat-settings-button')), findsNothing);
     await expectLater(
       tester
           .widget<ComposeBar>(find.byType(ComposeBar))
@@ -15754,7 +15767,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('me-chat-settings-button')),
-        findsOneWidget,
+        findsNothing,
       );
       expect(findRichText('Agent answer'), findsOneWidget);
       expect(find.byType(ThreadDetailPage), findsNothing);

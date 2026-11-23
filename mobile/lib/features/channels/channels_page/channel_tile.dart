@@ -215,6 +215,15 @@ class _ChannelTile extends ConsumerWidget {
   }
 
   void _showChannelActions(BuildContext context, WidgetRef ref) {
+    if (channel.isSolo) {
+      SoloChatTile.openDetails(
+        context,
+        channel,
+        currentPubkey,
+        personal: channel.isPersonalChat(currentPubkey, const []),
+      );
+      return;
+    }
     showChannelActionsSheet(
       context: context,
       channel: channel,

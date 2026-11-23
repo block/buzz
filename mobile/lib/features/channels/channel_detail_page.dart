@@ -1,4 +1,6 @@
+import '../../shared/widgets/app_list.dart';
 import 'package:duo_kit/duo_kit.dart';
+
 import '../../shared/widgets/ios_navigation_bar.dart';
 import 'bestie_transcription_status.dart';
 import '../../shared/widgets/duo_toolbar.dart';
@@ -44,7 +46,6 @@ import '../../shared/me/me_search_placement.dart';
 import 'me/me_assistant_picker.dart';
 import 'me/me_chat_assistant.dart';
 import 'me/me_chat_settings.dart';
-import 'me/me_settings_sheet.dart';
 import 'me/me_workspace_picker.dart';
 import 'me/me_messages_provider.dart';
 import '../../shared/huddle/huddle.dart';
@@ -629,6 +630,41 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       soloMembers: headerMembers,
       personalChat: personalChat,
     );
+    // Picker changes rebuild the conversation while its modal route is open.
+    // Read the latest controls whenever returning to settings.
+    final chatSettingsControls = useRef((
+      assistant: assistant,
+      workspace: workspace,
+    ));
+    chatSettingsControls.value = (assistant: assistant, workspace: workspace);
+    Widget chatSettings(VoidCallback refresh, Widget renameRow) {
+      final controls = chatSettingsControls.value;
+      Future<void> open(bool agent) async {
+        if (agent) {
+          await controls.assistant.openPicker?.call();
+        } else {
+          await controls.workspace.openPicker?.call();
+        }
+        await WidgetsBinding.instance.endOfFrame;
+        refresh();
+      }
+
+      return MeChatSettings(
+        renameRow: renameRow,
+        agentName: controls.assistant.name,
+        agentAvatarUrl: controls.assistant.nativeAction.imageUrl,
+        agentInitial: controls.assistant.nativeAction.avatarInitial ?? '?',
+        hasAgent: controls.assistant.selected != null,
+        workspaceName: controls.workspace.name,
+        onAgentTap: controls.assistant.openPicker == null
+            ? null
+            : () => open(true),
+        onWorkspaceTap: controls.workspace.openPicker == null
+            ? null
+            : () => open(false),
+      );
+    }
+
     Future<void> openChannelDetails() async {
       final shouldClose = await showChannelDetailsPage(
         context: context,
@@ -648,56 +684,17 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
             .store
             .assignments[resolvedChannel.id],
         personalChat: personalChat,
+        soloSettings: personalChat
+            ? (renameRow) => StatefulBuilder(
+                builder: (context, rebuild) => chatSettings(() {
+                  if (context.mounted) rebuild(() {});
+                }, renameRow),
+              )
+            : null,
       );
       if (shouldClose == true && context.mounted) {
         Navigator.of(context).pop();
       }
-    }
-
-    // Picker changes rebuild the conversation while its modal route is open.
-    // Read the latest controls whenever returning to settings.
-    final chatSettingsControls = useRef((
-      assistant: assistant,
-      workspace: workspace,
-    ));
-    chatSettingsControls.value = (assistant: assistant, workspace: workspace);
-    Future<void> openChatSettings() async {
-      await showBuzzModalBottomSheet<void>(
-        context: context,
-        showCloseButton: false,
-        isScrollControlled: true,
-        builder: (_) => MeSettingsSheet(
-          builder: (present, refresh) {
-            final controls = chatSettingsControls.value;
-            Future<void> open(bool agent) async {
-              if (agent) {
-                await controls.assistant.openPicker?.call(present: present);
-              } else {
-                await controls.workspace.openPicker?.call(present: present);
-              }
-              await WidgetsBinding.instance.endOfFrame;
-              refresh();
-            }
-
-            return SafeArea(
-              child: MeChatSettings(
-                agentName: controls.assistant.name,
-                agentAvatarUrl: controls.assistant.nativeAction.imageUrl,
-                agentInitial:
-                    controls.assistant.nativeAction.avatarInitial ?? '?',
-                hasAgent: controls.assistant.selected != null,
-                workspaceName: controls.workspace.name,
-                onAgentTap: controls.assistant.openPicker == null
-                    ? null
-                    : () => open(true),
-                onWorkspaceTap: controls.workspace.openPicker == null
-                    ? null
-                    : () => open(false),
-              ),
-            );
-          },
-        ),
-      );
     }
 
     final retention = ephemeralChannelDisplay(resolvedChannel);
@@ -785,13 +782,8 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                   messagesNotifier.isCatchingUp,
         onNativeTitlePressed: openChannelDetails,
         nativeActions: [
-          if (personalChat)
-            IosNavigationAction(
-              label: 'Chat settings',
-              icon: BuzzIcons.ellipsis,
-              onPressed: openChatSettings,
-            )
-          else if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
+          if (!personalChat &&
+              (resolvedChannel.isDm ? showsHuddleAction : showsComposer))
             _huddleNavigationAction(context, ref, resolvedChannel, [
               ...messagesState.value ?? const [],
               ...huddleLifecycle,
@@ -810,14 +802,8 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           onTap: openChannelDetails,
         ),
         actions: [
-          if (personalChat)
-            IconButton(
-              key: const ValueKey('me-chat-settings-button'),
-              tooltip: 'Chat settings',
-              icon: const Icon(BuzzIcons.ellipsis),
-              onPressed: openChatSettings,
-            )
-          else if (resolvedChannel.isDm ? showsHuddleAction : showsComposer)
+          if (!personalChat &&
+              (resolvedChannel.isDm ? showsHuddleAction : showsComposer))
             _HuddleButton(
               voiceAgent: voiceAgent,
               channel: resolvedChannel,

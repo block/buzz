@@ -21,6 +21,7 @@ import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/app_list.dart';
+import '../../shared/widgets/text_editor.dart';
 import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_action_tile.dart';
@@ -32,6 +33,7 @@ import '../../shared/widgets/tabler_star_icon.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/duo_toolbar.dart';
 import 'channel.dart';
+import 'me/me_chat_settings.dart';
 import 'channel_detail_page.dart';
 import 'add_members_sheet.dart';
 import 'channel_identity_names_provider.dart';
@@ -52,6 +54,7 @@ import '../../shared/relay/relay_author_provider.dart';
 import '../../shared/widgets/covered_route_keyboard_insets.dart';
 
 part 'channel_details_page.dart';
+part 'channel_details_rows.dart';
 part 'native_channel_actions.dart';
 part 'native_channel_sheet_app.dart';
 
@@ -212,6 +215,14 @@ class ChannelActionsSheet extends HookConsumerWidget {
     final canDelete =
         !channel.isArchived &&
         (currentMember?.isOwner == true || ownsOwnerAgent);
+    final canLeave =
+        channel.isMember &&
+        !channel.isArchived &&
+        (!channel.isSolo ||
+            (currentMember != null &&
+                !currentMember.isOwner &&
+                !ownsOwnerAgent &&
+                agentOwnersAsync.hasValue));
     final lifecycleCapabilitiesLoading =
         membersAsync.isLoading || agentOwnersAsync.isLoading;
     final lifecycleCapabilitiesUnavailable =
@@ -335,10 +346,10 @@ class ChannelActionsSheet extends HookConsumerWidget {
       if (!channel.isDm)
         SheetActionSection(
           children: [
-            if (channel.isMember && !channel.isArchived)
+            if (canLeave)
               _ActionTile(
                 icon: BuzzIcons.logOut,
-                label: 'Leave channel',
+                label: channel.isSolo ? 'Leave Solo' : 'Leave channel',
                 destructive: true,
                 onTap: () => _confirmAndRun(
                   context,

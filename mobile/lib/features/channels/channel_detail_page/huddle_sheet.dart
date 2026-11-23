@@ -183,6 +183,35 @@ class _HuddleInvite {
   });
 }
 
+class SoloHuddleRow extends ConsumerWidget {
+  const SoloHuddleRow({super.key, required this.channel});
+
+  final Channel channel;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) =>
+      soloHuddleActionRow(context, ref, channel);
+}
+
+AppListRow soloHuddleActionRow(
+  BuildContext context,
+  WidgetRef ref,
+  Channel channel,
+) {
+  final events = ref.watch(huddleLifecycleProvider(channel.id));
+  final action = _huddleNavigationAction(
+    context,
+    ref,
+    channel,
+    events.value ?? const [],
+  );
+  return AppListRow(
+    icon: BuzzIcons.headphones,
+    title: action.label == 'Start Huddle' ? 'Start a huddle' : action.label,
+    onTap: events.hasValue ? action.onPressed : null,
+  );
+}
+
 class _HuddleButton extends ConsumerWidget {
   const _HuddleButton({
     required this.channel,

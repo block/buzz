@@ -259,12 +259,25 @@ void main() {
     expect(find.text('A place to work with your agents'), findsNothing);
   });
 
-  testWidgets('long-pressing a chat opens its details as a sheet', (
+  testWidgets('long-pressing a chat opens Solo details in a modal', (
     tester,
   ) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          meSyncProvider.overrideWithValue(
+            MeSync(
+              _UnavailableRelay(),
+              RelayConfig(
+                baseUrl: 'https://relay.test',
+                nsec: nostr.Keys.generate().nsec,
+              ),
+              prefs: prefs,
+            ),
+          ),
+          savedPrefsProvider.overrideWithValue(prefs),
           defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
           myPubkeyProvider.overrideWithValue('owner'),
           currentPubkeyProvider.overrideWith((ref) => 'owner'),
@@ -293,28 +306,31 @@ void main() {
     await tester.longPress(find.text('Unfiled labeled chat'));
     await tester.pumpAndSettle();
 
-    expect(find.byType(BottomSheet), findsOneWidget);
     expect(
       find.descendant(
         of: find.byType(BottomSheet),
-        matching: find.byKey(const ValueKey('channel-details-page-list')),
+        matching: find.text('Agent'),
       ),
       findsOneWidget,
     );
     expect(
-      find.descendant(
-        of: find.byType(BottomSheet),
-        matching: find.text('Unfiled labeled chat'),
-      ),
-      findsOneWidget,
-    );
-
-    await tester.drag(
       find.byKey(const ValueKey('channel-details-page-list')),
-      const Offset(0, -600),
+      findsOneWidget,
+    );
+    expect(find.text('Agent'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.text('Delete chat'),
+      250,
+      scrollable: find
+          .descendant(
+            of: find.byType(BottomSheet),
+            matching: find.byType(Scrollable),
+          )
+          .last,
     );
     await tester.pumpAndSettle();
-    expect(find.text('Leave channel'), findsOneWidget);
+    expect(find.text('Leave chat'), findsNothing);
+    expect(find.text('Delete chat'), findsOneWidget);
     // Solo chats move between Solo workspaces, not channel sections.
     expect(find.text('Move to section…'), findsNothing);
   });
