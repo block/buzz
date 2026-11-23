@@ -1,9 +1,9 @@
 //! Postgres-backed store: migrations, runtime-role grants, readiness, and
 //! retention for the gateway's own tables.
 use crate::store::{
-    transition, AppliedOperation, ApplyOutcome, DeliveryPage, DeliveryState, DeliverySummary,
-    InsertOutcome, Integration, IntegrationSecret, IntegrationView, Mutation, NewDelivery,
-    Operation, Provider, Store, StoreError,
+    transition, AppliedOperation, ApplyOutcome, ClaimedDelivery, DeliveryPage, DeliveryState,
+    DeliverySummary, ForwardOutcome, InsertOutcome, Integration, IntegrationSecret,
+    IntegrationView, Mutation, NewDelivery, Operation, Provider, Store, StoreError,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -393,6 +393,118 @@ impl Store for PostgresStore {
             })
         })
         .collect()
+    }
+
+    async fn claim_due(
+        &self,
+        now: DateTime<Utc>,
+        lease: Duration,
+        limit: usize,
+    ) -> Result<Vec<ClaimedDelivery>, StoreError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        sqlx::query(
+            "WITH due AS (
+                 SELECT integration_id, delivery_id
+                 FROM ingress_gateway_deliveries
+                 WHERE state = 'queued' AND next_attempt_at <= $1
+                 ORDER BY next_attempt_at
+                 LIMIT $3
+                 FOR UPDATE SKIP LOCKED
+             ), claimed AS (
+                 UPDATE ingress_gateway_deliveries d
+                 SET attempts = d.attempts + 1, next_attempt_at = $2
+                 FROM due
+                 WHERE d.integration_id = due.integration_id
+                   AND d.delivery_id = due.delivery_id
+                 RETURNING d.integration_id, d.delivery_id, d.event_type, d.body,
+                           d.received_at, d.attempts, d.event_id
+             )
+             SELECT c.integration_id, c.delivery_id, c.event_type, c.body, c.received_at,
+                    c.attempts, c.event_id, i.community_host, i.provider
+             FROM claimed c
+             JOIN ingress_gateway_integrations i ON i.id = c.integration_id",
+        )
+        .bind(now)
+        .bind(now + lease)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|row| {
+            let provider: String = row.try_get("provider")?;
+            Ok(ClaimedDelivery {
+                integration_id: row.try_get("integration_id")?,
+                delivery_id: row.try_get("delivery_id")?,
+                community_host: row.try_get("community_host")?,
+                provider: Provider::parse(&provider)
+                    .ok_or(StoreError::Invalid("unknown provider stored"))?,
+                event_type: row.try_get("event_type")?,
+                body: row.try_get("body")?,
+                received_at: row.try_get("received_at")?,
+                attempts: row.try_get("attempts")?,
+                event_id: row.try_get("event_id")?,
+            })
+        })
+        .collect()
+    }
+
+    async fn complete_forward(
+        &self,
+        integration_id: Uuid,
+        delivery_id: &str,
+        outcome: ForwardOutcome,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        match outcome {
+            ForwardOutcome::Accepted { event_id } => {
+                sqlx::query(
+                    "UPDATE ingress_gateway_deliveries
+                     SET state = 'accepted', event_id = $3, completed_at = $4,
+                         next_attempt_at = NULL, last_error = NULL, body = ''::bytea
+                     WHERE integration_id = $1 AND delivery_id = $2 AND state = 'queued'",
+                )
+                .bind(integration_id)
+                .bind(delivery_id)
+                .bind(event_id)
+                .bind(now)
+                .execute(&self.pool)
+                .await?;
+            }
+            ForwardOutcome::Failed { event_id, error } => {
+                sqlx::query(
+                    "UPDATE ingress_gateway_deliveries
+                     SET state = 'failed', event_id = COALESCE($3, event_id), completed_at = $4,
+                         next_attempt_at = NULL, last_error = $5
+                     WHERE integration_id = $1 AND delivery_id = $2 AND state = 'queued'",
+                )
+                .bind(integration_id)
+                .bind(delivery_id)
+                .bind(event_id)
+                .bind(now)
+                .bind(error)
+                .execute(&self.pool)
+                .await?;
+            }
+            ForwardOutcome::Retry {
+                event_id,
+                error,
+                next_attempt_at,
+            } => {
+                sqlx::query(
+                    "UPDATE ingress_gateway_deliveries
+                     SET event_id = COALESCE($3, event_id), next_attempt_at = $4, last_error = $5
+                     WHERE integration_id = $1 AND delivery_id = $2 AND state = 'queued'",
+                )
+                .bind(integration_id)
+                .bind(delivery_id)
+                .bind(event_id)
+                .bind(next_attempt_at)
+                .bind(error)
+                .execute(&self.pool)
+                .await?;
+            }
+        }
+        Ok(())
     }
 }
 

@@ -5,14 +5,49 @@
 //! is ever used as a label, so cardinality is bounded regardless of traffic.
 //! Rendering is served from the private health router, never the public port.
 
-use metrics_exporter_prometheus::{BuildError, PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, PrometheusHandle};
 
 /// Install the global metrics recorder and return the render handle.
 ///
 /// Installs no HTTP listener: the private health router serves `GET /metrics`.
 /// Must be called at most once per process, from within a Tokio runtime.
 pub fn install() -> Result<PrometheusHandle, BuildError> {
-    PrometheusBuilder::new().install_recorder()
+    PrometheusBuilder::new()
+        .set_buckets_for_metric(
+            Matcher::Full("ingress_gateway_forward_seconds".to_owned()),
+            &FORWARD_LATENCY_BUCKETS_S,
+        )?
+        .install_recorder()
+}
+
+const FORWARD_LATENCY_BUCKETS_S: [f64; 10] =
+    [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
+
+/// How one forward attempt ended.
+#[derive(Debug, Clone, Copy)]
+pub enum ForwardResult {
+    Accepted,
+    Failed,
+    Retry,
+}
+
+/// Record one forward attempt and, when the relay was contacted, its
+/// round-trip latency.
+pub fn record_forward(result: ForwardResult, seconds: Option<f64>) {
+    let label = match result {
+        ForwardResult::Accepted => "accepted",
+        ForwardResult::Failed => "failed",
+        ForwardResult::Retry => "retry",
+    };
+    metrics::counter!("ingress_gateway_forward_total", "outcome" => label).increment(1);
+    if let Some(seconds) = seconds {
+        metrics::histogram!("ingress_gateway_forward_seconds").record(seconds);
+    }
+}
+
+/// Record a forwarder poll that could not reach the store.
+pub fn record_forwarder_failure() {
+    metrics::counter!("ingress_gateway_forwarder_failures_total").increment(1);
 }
 
 /// Why a readiness probe reported not-ready.
@@ -82,11 +117,20 @@ mod tests {
         record_reaper_failure();
         record_intake(IntakeOutcome::Queued);
         record_intake(IntakeOutcome::Unauthorized);
+        record_forward(ForwardResult::Accepted, Some(0.05));
+        record_forward(ForwardResult::Retry, Some(2.0));
+        record_forward(ForwardResult::Failed, None);
+        record_forwarder_failure();
         let rendered = handle.render();
         for needle in [
             "ingress_gateway_readiness_failures_total",
             "ingress_gateway_reaper_failures_total",
             "ingress_gateway_intake_total",
+            "ingress_gateway_forward_total",
+            "ingress_gateway_forward_seconds",
+            "ingress_gateway_forwarder_failures_total",
+            "outcome=\"accepted\"",
+            "outcome=\"retry\"",
             "cause=\"not_accepting\"",
             "cause=\"store\"",
             "outcome=\"queued\"",

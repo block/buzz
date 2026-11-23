@@ -1,6 +1,7 @@
 use buzz_ingress_gateway::{
-    config::Config, http::IntakeLimits, intake::RateLimiter, postgres::PostgresStore,
-    router_with_metrics, secrets::SecretKeyring, AppState,
+    config::Config, forwarder::Forwarder, http::IntakeLimits, intake::RateLimiter,
+    postgres::PostgresStore, relay_client::HttpRelayClient, router_with_metrics,
+    secrets::SecretKeyring, AppState,
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -58,6 +59,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
+    let forwarder = tokio::spawn(
+        Forwarder {
+            store: Arc::clone(&store) as Arc<dyn buzz_ingress_gateway::store::Store>,
+            client: Arc::new(HttpRelayClient::new(c.signing_keys.clone())?),
+            keys: c.signing_keys.clone(),
+            scheme: c.relay_scheme,
+            concurrency: c.forward_concurrency,
+            retry_max_age: chrono::Duration::seconds(c.retry_max_age_seconds),
+            now: chrono::Utc::now,
+        }
+        .run(),
+    );
     let accepting = Arc::new(AtomicBool::new(true));
     let (public, private) = router_with_metrics(
         AppState {
@@ -100,6 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(30), p).await;
     let _ = htx.send(true);
     let _ = h.await;
+    forwarder.abort();
     reaper.abort();
     Ok(())
 }

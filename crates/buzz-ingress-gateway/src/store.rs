@@ -325,6 +325,22 @@ pub trait Store: Send + Sync {
         integration_id: Uuid,
         page: DeliveryPage,
     ) -> Result<Vec<DeliverySummary>, StoreError>;
+    /// Lease up to `limit` queued deliveries due at `now`, pushing their
+    /// `next_attempt_at` to `now + lease` so a crashed worker's claims return.
+    async fn claim_due(
+        &self,
+        now: DateTime<Utc>,
+        lease: Duration,
+        limit: usize,
+    ) -> Result<Vec<ClaimedDelivery>, StoreError>;
+    /// Record the result of a forward attempt for a claimed delivery.
+    async fn complete_forward(
+        &self,
+        integration_id: Uuid,
+        delivery_id: &str,
+        outcome: ForwardOutcome,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError>;
 }
 
 /// Pure in-process transition shared by the memory store and the Postgres
@@ -400,6 +416,39 @@ pub fn transition(
     next.revision = operation.revision;
     next.updated_at = now;
     Ok(next)
+}
+
+/// A queued delivery the forwarder has leased, joined with the routing
+/// fields it needs. `attempts` already counts this attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimedDelivery {
+    pub integration_id: Uuid,
+    pub delivery_id: String,
+    pub community_host: String,
+    pub provider: Provider,
+    pub event_type: String,
+    pub body: Vec<u8>,
+    pub received_at: DateTime<Utc>,
+    pub attempts: i32,
+    pub event_id: Option<String>,
+}
+
+/// Terminal or deferred result of one forward attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForwardOutcome {
+    /// The relay stored the event; the payload is dropped.
+    Accepted { event_id: String },
+    /// The relay refused the event or the retry budget is spent.
+    Failed {
+        event_id: Option<String>,
+        error: String,
+    },
+    /// Transient failure; the row stays queued until `next_attempt_at`.
+    Retry {
+        event_id: Option<String>,
+        error: String,
+        next_attempt_at: DateTime<Utc>,
+    },
 }
 
 /// A delivery row as the memory store holds it; exposed for tests only.
@@ -573,6 +622,93 @@ impl Store for MemoryStore {
         rows.truncate(page.limit);
         Ok(rows)
     }
+
+    async fn claim_due(
+        &self,
+        now: DateTime<Utc>,
+        lease: Duration,
+        limit: usize,
+    ) -> Result<Vec<ClaimedDelivery>, StoreError> {
+        let mut s = self.0.lock().map_err(|_| StoreError::Unavailable(None))?;
+        let mut due: Vec<(Uuid, String)> = s
+            .deliveries
+            .iter()
+            .filter(|(_, d)| d.state == DeliveryState::Queued)
+            .filter(|(_, d)| d.next_attempt_at.is_some_and(|at| at <= now))
+            .map(|(key, _)| key.clone())
+            .collect();
+        due.sort_by(|a, b| {
+            let at = |key: &(Uuid, String)| s.deliveries[key].next_attempt_at;
+            at(a).cmp(&at(b)).then_with(|| a.cmp(b))
+        });
+        due.truncate(limit);
+        let mut claimed = Vec::with_capacity(due.len());
+        for key in due {
+            let Some(integration) = s.integrations.get(&key.0).cloned() else {
+                continue;
+            };
+            let Some(row) = s.deliveries.get_mut(&key) else {
+                continue;
+            };
+            row.attempts += 1;
+            row.next_attempt_at = Some(now + lease);
+            claimed.push(ClaimedDelivery {
+                integration_id: key.0,
+                delivery_id: key.1.clone(),
+                community_host: integration.community_host,
+                provider: integration.provider,
+                event_type: row.delivery.event_type.clone(),
+                body: row.delivery.body.clone(),
+                received_at: row.delivery.received_at,
+                attempts: row.attempts,
+                event_id: row.event_id.clone(),
+            });
+        }
+        Ok(claimed)
+    }
+
+    async fn complete_forward(
+        &self,
+        integration_id: Uuid,
+        delivery_id: &str,
+        outcome: ForwardOutcome,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        let mut s = self.0.lock().map_err(|_| StoreError::Unavailable(None))?;
+        let Some(row) = s
+            .deliveries
+            .get_mut(&(integration_id, delivery_id.to_owned()))
+        else {
+            return Ok(());
+        };
+        match outcome {
+            ForwardOutcome::Accepted { event_id } => {
+                row.state = DeliveryState::Accepted;
+                row.event_id = Some(event_id);
+                row.completed_at = Some(now);
+                row.next_attempt_at = None;
+                row.last_error = None;
+                row.delivery.body.clear();
+            }
+            ForwardOutcome::Failed { event_id, error } => {
+                row.state = DeliveryState::Failed;
+                row.event_id = event_id.or(row.event_id.take());
+                row.completed_at = Some(now);
+                row.next_attempt_at = None;
+                row.last_error = Some(error);
+            }
+            ForwardOutcome::Retry {
+                event_id,
+                error,
+                next_attempt_at,
+            } => {
+                row.event_id = event_id.or(row.event_id.take());
+                row.next_attempt_at = Some(next_attempt_at);
+                row.last_error = Some(error);
+            }
+        }
+        Ok(())
+    }
 }
 
 impl MemoryStore {
@@ -687,6 +823,78 @@ mod tests {
         };
         assert_eq!(revoked.response["rotating_until"], serde_json::Value::Null);
         assert_eq!(store.verifying_secrets(id, at(90)).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn claims_lease_due_rows_oldest_first_and_hide_them_until_the_lease_ends() {
+        let store = MemoryStore::default();
+        let integration_id = Uuid::new_v4();
+        store
+            .apply(
+                Operation {
+                    operation_id: Uuid::new_v4(),
+                    integration_id,
+                    revision: 1,
+                    mutation: Mutation::PutIntegration {
+                        community_host: "acme.communities.example.org".into(),
+                        provider: Provider::Github,
+                    },
+                },
+                at(0),
+            )
+            .await
+            .unwrap();
+        for (id, secs) in [("late", 20), ("early", 10)] {
+            store
+                .insert_delivery(NewDelivery {
+                    integration_id,
+                    delivery_id: id.into(),
+                    event_type: "ping".into(),
+                    provider_timestamp: None,
+                    headers: serde_json::json!({}),
+                    body: b"{}".to_vec(),
+                    received_at: at(secs),
+                })
+                .await
+                .unwrap();
+        }
+        let lease = Duration::seconds(60);
+        let first = store.claim_due(at(30), lease, 1).await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].delivery_id, "early");
+        assert_eq!(first[0].attempts, 1);
+        assert_eq!(first[0].community_host, "acme.communities.example.org");
+        let second = store.claim_due(at(31), lease, 10).await.unwrap();
+        assert_eq!(second.len(), 1, "the leased row is hidden");
+        assert_eq!(second[0].delivery_id, "late");
+        assert!(store.claim_due(at(32), lease, 10).await.unwrap().is_empty());
+        let reclaimed = store.claim_due(at(91), lease, 10).await.unwrap();
+        assert_eq!(
+            reclaimed.len(),
+            2,
+            "leases expired without completion return"
+        );
+        assert!(reclaimed.iter().all(|d| d.attempts == 2));
+        store
+            .complete_forward(
+                integration_id,
+                "early",
+                ForwardOutcome::Accepted {
+                    event_id: "ab".repeat(32),
+                },
+                at(92),
+            )
+            .await
+            .unwrap();
+        assert!(store
+            .delivery(integration_id, "early")
+            .unwrap()
+            .delivery
+            .body
+            .is_empty());
+        let still_due = store.claim_due(at(200), lease, 10).await.unwrap();
+        assert_eq!(still_due.len(), 1);
+        assert_eq!(still_due[0].delivery_id, "late");
     }
 
     #[tokio::test]
