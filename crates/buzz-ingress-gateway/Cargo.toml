@@ -21,11 +21,14 @@ async-trait = "0.1"
 axum = { workspace = true }
 base64 = "0.22"
 chrono = { workspace = true }
+hex = { workspace = true }
+hmac = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 nostr = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -35,6 +38,4 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-sha2 = { workspace = true }
-hex = { workspace = true }
 tower = { workspace = true }

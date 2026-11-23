@@ -1285,6 +1285,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "hex",
+ "hmac 0.13.0",
  "metrics",
  "metrics-exporter-prometheus",
  "nostr 0.44.7",
