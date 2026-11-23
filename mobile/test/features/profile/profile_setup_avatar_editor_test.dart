@@ -1,7 +1,6 @@
 import 'package:buzz/features/profile/profile_setup_avatar_editor.dart';
 import 'package:buzz/features/profile/profile_setup_empty_avatar.dart';
 import 'package:buzz/features/profile/profile_avatar_draft.dart';
-import 'package:buzz/shared/emoji/emoji_avatar.dart';
 import 'package:buzz/features/profile/profile_avatar_editor.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -50,7 +49,6 @@ void main() {
       );
       expect(openingEditor.mode, ProfileAvatarMode.image);
       expect(openingEditor.draft, isNull);
-      expect(find.text('Emoji'), findsNothing);
       expect(find.byType(ProfileSetupEmptyAvatar), findsOneWidget);
       expect(
         tester
@@ -99,7 +97,7 @@ void main() {
   testWidgets('discarding a new avatar crossfades to the empty circle', (
     tester,
   ) async {
-    for (final mode in [ProfileAvatarMode.image, ProfileAvatarMode.animated]) {
+    for (final mode in ProfileAvatarMode.values) {
       await tester.pumpWidget(
         ProviderScope(
           child: MaterialApp(
@@ -121,7 +119,12 @@ void main() {
       await send('reveal');
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 200));
-      await tester.tap(find.text(mode.label).first);
+      await tester.tap(
+        find.text(switch (mode) {
+          ProfileAvatarMode.image => 'Image',
+          ProfileAvatarMode.animated => 'Animated',
+        }).first,
+      );
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 200));
       if (mode == ProfileAvatarMode.image) {
@@ -184,9 +187,6 @@ void main() {
               onPreviewReady: (rect) async {
                 previewRect = rect;
               },
-              initialDraft: ProfileUrlAvatarDraft(
-                emojiAvatarDataUrl('🐝', 0xFFFFE75C),
-              ),
             ),
           ),
         ),
@@ -218,9 +218,7 @@ void main() {
           (_) {},
         );
         await tester.pump();
-        final visibleAvatar = find.byKey(
-          const ValueKey('avatar-editor-fixed-preview'),
-        );
+        final visibleAvatar = find.byType(ProfileSetupEmptyAvatar);
         expect(tester.getTopLeft(visibleAvatar).dy, 220);
         expect(tester.getSize(visibleAvatar), const Size.square(220));
         await tester.pump(const Duration(milliseconds: 100));
@@ -377,10 +375,7 @@ void main() {
           (_) {},
         );
         await tester.pump();
-        expect(
-          accepted,
-          isNull,
-        ); // Switching modes discarded the opening draft.
+        expect(accepted, isNull);
         await tester.tap(find.text('Animated'));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 200));

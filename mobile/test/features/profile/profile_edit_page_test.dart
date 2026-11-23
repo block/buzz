@@ -8,13 +8,10 @@ import 'package:buzz/features/profile/profile_avatar_crop_page.dart';
 import 'package:buzz/features/profile/avatar_background_grid.dart';
 import 'package:buzz/features/profile/avatar_editor_option_button.dart';
 import 'package:buzz/features/profile/animated_avatar_capture.dart';
-import 'package:buzz/shared/widgets/emoji_avatar_tile.dart';
 import 'package:buzz/features/profile/image_avatar_capture.dart';
 import 'package:buzz/shared/widgets/immediate_page_route.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
-import 'package:buzz/shared/emoji/emoji_data.dart';
-import 'package:buzz/shared/emoji/emoji_data_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -235,27 +232,9 @@ void main() {
     tester,
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-    const emoji = EmojiEntry(
-      id: 'smile',
-      name: 'Smile',
-      keywords: [],
-      native: '😊',
-      categoryId: 'people',
-    );
-    const dataset = EmojiDataset(
-      categories: [
-        EmojiCategory(id: 'people', emoji: [emoji]),
-      ],
-      all: [emoji],
-      nativeToShortcode: {'😊': ':smile:'},
-    );
-
     await tester.pumpWidget(
       WidgetHelpers.testable(
-        overrides: [
-          profileProvider.overrideWith(_FakeProfileNotifier.new),
-          emojiDatasetOrEmptyProvider.overrideWithValue(dataset),
-        ],
+        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
         child: const ProfileEditPage(),
       ),
     );
@@ -272,10 +251,7 @@ void main() {
     addTearDown(tester.view.reset);
     await tester.pumpWidget(
       WidgetHelpers.testable(
-        overrides: [
-          profileProvider.overrideWith(_FakeProfileNotifier.new),
-          emojiDatasetOrEmptyProvider.overrideWithValue(dataset),
-        ],
+        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
         child: SettingsPage(
           profileHeader: const SizedBox(),
           identityRecoveryPageBuilder: (_) => const SizedBox(),
@@ -582,7 +558,6 @@ void main() {
     expect(find.text('Image'), findsOneWidget);
     expect(find.text('Camera'), findsOneWidget);
     expect(find.text('Photo Library'), findsOneWidget);
-    expect(find.text('Emoji'), findsNothing);
     expect(find.text('Animated'), findsOneWidget);
     expect(find.text('Photo'), findsNothing);
     final modeControl = find.byKey(const ValueKey('avatar-mode-control'));
