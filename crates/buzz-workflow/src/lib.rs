@@ -31,6 +31,7 @@
 //! ```
 
 pub mod action_sink;
+pub mod approver;
 pub mod error;
 pub mod executor;
 pub mod schema;
@@ -212,6 +213,7 @@ impl WorkflowEngine {
     /// Follow-up: emit a kind-46010 approval event so mobile/desktop feeds
     /// surface the gate. That needs a design for engine-authored event
     /// signing first — there is deliberately no system key plumbed here yet.
+    #[allow(clippy::too_many_arguments)] // one call site; each argument is a gate column
     async fn persist_approval_gate(
         &self,
         community_id: CommunityId,
@@ -228,7 +230,8 @@ impl WorkflowEngine {
             .get_workflow_run(community_id, run_id)
             .await
             .map_err(|e| format!("read run for gate persist: {e}"))?;
-        let expires_at = Utc::now() + Duration::seconds(expires_in_secs.min(7 * 86_400) as i64);
+        let expires_at = Utc::now()
+            + Duration::seconds(expires_in_secs.min(schema::MAX_APPROVAL_TIMEOUT_SECS) as i64);
         self.db
             .create_approval(buzz_db::workflow::CreateApprovalParams {
                 community_id,
@@ -288,18 +291,27 @@ impl WorkflowEngine {
                         step_index = result.step_index,
                         "Workflow suspended at approval gate — persisting gate state"
                     );
-                    let gate_result = self
-                        .persist_approval_gate(
-                            community_id,
-                            run_id,
-                            &token,
-                            &result.approval_step_id.unwrap_or_default(),
-                            step_count,
-                            &result.approver_spec.unwrap_or_default(),
-                            result.approval_expires_in_secs.unwrap_or(86_400),
-                            &trace_json,
-                        )
-                        .await;
+                    // Never default the approver: an empty or missing spec must
+                    // not reach storage, where it would be read back at decision
+                    // time. Fail the run instead.
+                    let gate_result = match (result.approval_step_id, result.approver_spec) {
+                        (Some(step_id), Some(approver_spec)) => {
+                            self.persist_approval_gate(
+                                community_id,
+                                run_id,
+                                &token,
+                                &step_id,
+                                step_count,
+                                &approver_spec,
+                                result.approval_expires_in_secs.unwrap_or(86_400),
+                                &trace_json,
+                            )
+                            .await
+                        }
+                        _ => {
+                            Err("suspended step is missing its gate step id or approver".to_owned())
+                        }
+                    };
                     if let Err(message) = gate_result {
                         tracing::error!(
                             run_id = %run_id,

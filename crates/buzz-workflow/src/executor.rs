@@ -458,11 +458,28 @@ pub fn resolve_step_templates(
             from,
             message,
             timeout,
-        } => Ok(RequestApproval {
-            from: t(from)?,
-            message: t(message)?,
-            timeout: timeout.clone(),
-        }),
+        } => {
+            // The resolved approver is what the gate persists and what every
+            // decision path authorizes against, so pin it here: a templated
+            // `from` must resolve to a pubkey and a concrete one must be a
+            // supported spec. Fails the run instead of parking a gate that is
+            // either undecidable or decidable by the wrong people.
+            let resolved = t(from)?;
+            let from =
+                crate::approver::resolve_gate_approver(from, &resolved).map_err(|e| match e {
+                    crate::approver::ApproverSpecError::TemplateNotPubkey => {
+                        WorkflowError::TemplateError(format!("step '{}': {e}", step.id))
+                    }
+                    other => {
+                        WorkflowError::InvalidDefinition(format!("step '{}': {other}", step.id))
+                    }
+                })?;
+            Ok(RequestApproval {
+                from,
+                message: t(message)?,
+                timeout: timeout.clone(),
+            })
+        }
         Delay { duration } => Ok(Delay {
             duration: duration.clone(),
         }),
@@ -801,43 +818,35 @@ fn generate_approval_token(_run_id: Uuid, _step_id: &str) -> String {
 
 /// Parse a duration string like "5m", "1h", "7d", "30s" into seconds.
 ///
+/// Grammar: optional surrounding whitespace, ASCII digits, optional unit
+/// suffix `s`, `m`, `h`, or `d` (no suffix means seconds). Signs, decimals,
+/// and other units are rejected; a value that overflows `u64` seconds is an
+/// error rather than a wrap. Range policy (zero, maxima) is enforced by the
+/// caller (`WorkflowDef::validate`).
+///
 /// Exposed as `pub(crate)` so `schema.rs` can use it for interval validation.
 pub(crate) fn parse_duration_secs(duration: &str) -> Result<u64, WorkflowError> {
     let duration = duration.trim();
-    if let Some(n) = duration.strip_suffix('d') {
-        let days: u64 = n.trim().parse().map_err(|_| {
-            WorkflowError::InvalidDefinition(format!("invalid duration: {duration}"))
-        })?;
-        return days.checked_mul(86_400).ok_or_else(|| {
-            WorkflowError::InvalidDefinition(format!("duration overflow: {duration}"))
-        });
+    let invalid = || WorkflowError::InvalidDefinition(format!("invalid duration: {duration}"));
+    let (number, multiplier) = if let Some(n) = duration.strip_suffix('d') {
+        (n, 86_400)
+    } else if let Some(n) = duration.strip_suffix('h') {
+        (n, 3_600)
+    } else if let Some(n) = duration.strip_suffix('m') {
+        (n, 60)
+    } else if let Some(n) = duration.strip_suffix('s') {
+        (n, 1)
+    } else {
+        (duration, 1)
+    };
+    let number = number.trim();
+    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid());
     }
-    if let Some(n) = duration.strip_suffix('h') {
-        let hours: u64 = n.trim().parse().map_err(|_| {
-            WorkflowError::InvalidDefinition(format!("invalid duration: {duration}"))
-        })?;
-        return hours.checked_mul(3600).ok_or_else(|| {
-            WorkflowError::InvalidDefinition(format!("duration overflow: {duration}"))
-        });
-    }
-    if let Some(n) = duration.strip_suffix('m') {
-        let mins: u64 = n.trim().parse().map_err(|_| {
-            WorkflowError::InvalidDefinition(format!("invalid duration: {duration}"))
-        })?;
-        return mins.checked_mul(60).ok_or_else(|| {
-            WorkflowError::InvalidDefinition(format!("duration overflow: {duration}"))
-        });
-    }
-    if let Some(n) = duration.strip_suffix('s') {
-        let secs: u64 = n.trim().parse().map_err(|_| {
-            WorkflowError::InvalidDefinition(format!("invalid duration: {duration}"))
-        })?;
-        return Ok(secs);
-    }
-    // Plain number — assume seconds.
-    duration
-        .parse()
-        .map_err(|_| WorkflowError::InvalidDefinition(format!("invalid duration: {duration}")))
+    let value: u64 = number.parse().map_err(|_| invalid())?;
+    value
+        .checked_mul(multiplier)
+        .ok_or_else(|| WorkflowError::InvalidDefinition(format!("duration overflow: {duration}")))
 }
 
 // is_private_ip is provided by buzz_core::network::is_private_ip
@@ -1524,6 +1533,79 @@ mod tests {
         }
     }
 
+    fn approval_step(from: &str) -> Step {
+        Step {
+            id: "gate".to_owned(),
+            name: None,
+            if_expr: None,
+            timeout_secs: None,
+            action: ActionDef::RequestApproval {
+                from: from.to_owned(),
+                message: "Approve?".to_owned(),
+                timeout: None,
+            },
+        }
+    }
+
+    fn resolved_approver(step: &Step, ctx: &TriggerContext) -> Result<String, WorkflowError> {
+        match resolve_step_templates(step, ctx, &HashMap::new())? {
+            ActionDef::RequestApproval { from, .. } => Ok(from),
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    /// The gate persists the resolved approver, so resolution is where a
+    /// templated `from` is pinned to a pubkey. Attacker-influenced template
+    /// input (message text, webhook fields) must never widen the gate.
+    #[test]
+    fn templated_approver_resolves_only_to_a_pubkey() {
+        let author = nostr::Keys::generate().public_key().to_hex();
+        let mut ctx = make_trigger();
+        ctx.author = author.to_uppercase();
+        assert_eq!(
+            resolved_approver(&approval_step("{{trigger.author}}"), &ctx).unwrap(),
+            author,
+            "canonical lowercase pubkey is persisted"
+        );
+
+        for text in ["any", "", "@manager", "not-a-key"] {
+            ctx.text = text.to_owned();
+            let err = resolved_approver(&approval_step("{{trigger.text}}"), &ctx).unwrap_err();
+            assert!(
+                matches!(err, WorkflowError::TemplateError(_)),
+                "{text:?}: {err}"
+            );
+            assert!(err.to_string().contains("step 'gate'"), "{err}");
+            if !text.is_empty() {
+                assert!(
+                    !err.to_string().contains(text),
+                    "untrusted value echoed: {err}"
+                );
+            }
+        }
+        // An unknown variable stays literal and therefore fails closed too.
+        let err = resolved_approver(&approval_step("{{trigger.nope}}"), &ctx).unwrap_err();
+        assert!(matches!(err, WorkflowError::TemplateError(_)), "{err}");
+    }
+
+    /// A definition stored before definition-time validation (e.g. with
+    /// `from: '@manager'`) fails the run instead of parking a gate.
+    #[test]
+    fn legacy_unsupported_approver_fails_at_gate_creation() {
+        let ctx = make_trigger();
+        for from in ["@manager", "", "manager"] {
+            let err = resolved_approver(&approval_step(from), &ctx).unwrap_err();
+            assert!(
+                matches!(err, WorkflowError::InvalidDefinition(_)),
+                "{from:?}: {err}"
+            );
+        }
+        assert_eq!(
+            resolved_approver(&approval_step(" any "), &ctx).unwrap(),
+            "any"
+        );
+    }
+
     #[tokio::test]
     async fn condition_or_expression() {
         let ctx = make_trigger(); // text contains "P1"
@@ -1630,6 +1712,39 @@ mod tests {
         assert!(parse_duration_secs("h").is_err());
         assert!(parse_duration_secs("1x").is_err());
         assert!(parse_duration_secs("1.5h").is_err());
+        assert!(parse_duration_secs("+5m").is_err());
+        assert!(parse_duration_secs("-5m").is_err());
+        assert!(parse_duration_secs("5ms").is_err());
+        assert!(parse_duration_secs("5H").is_err());
+        assert!(parse_duration_secs("1d1h").is_err());
+    }
+
+    #[test]
+    fn parse_duration_units_and_boundaries() {
+        assert_eq!(parse_duration_secs("0").unwrap(), 0);
+        assert_eq!(parse_duration_secs("90s").unwrap(), 90);
+        assert_eq!(parse_duration_secs("2m").unwrap(), 120);
+        assert_eq!(parse_duration_secs("3h").unwrap(), 10_800);
+        assert_eq!(parse_duration_secs("7d").unwrap(), 604_800);
+        assert_eq!(parse_duration_secs(" 5 m ").unwrap(), 300);
+        assert_eq!(
+            parse_duration_secs(&u64::MAX.to_string()).unwrap(),
+            u64::MAX
+        );
+        assert_eq!(
+            parse_duration_secs(&format!("{}s", u64::MAX)).unwrap(),
+            u64::MAX
+        );
+        // Largest day count that fits, and the first that does not.
+        let max_days = u64::MAX / 86_400;
+        assert_eq!(
+            parse_duration_secs(&format!("{max_days}d")).unwrap(),
+            max_days * 86_400
+        );
+        let err = parse_duration_secs(&format!("{}d", max_days + 1)).unwrap_err();
+        assert!(err.to_string().contains("duration overflow"), "{err}");
+        let err = parse_duration_secs("18446744073709551616").unwrap_err();
+        assert!(err.to_string().contains("invalid duration"), "{err}");
     }
 
     #[test]

@@ -9,6 +9,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::WorkflowError;
 
+/// Longest approval window a `request_approval` step may ask for (7 days).
+///
+/// Enforced at definition time; gate persistence also clamps to it so a
+/// definition stored before this check cannot outlive the cap.
+pub const MAX_APPROVAL_TIMEOUT_SECS: u64 = 7 * 86_400;
+
 /// Top-level workflow definition, authored in YAML and stored as canonical JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowDef {
@@ -274,14 +280,17 @@ impl WorkflowDef {
             }
         }
 
-        // Fail fast on invalid step durations rather than failing (delay) or
-        // silently falling back (approval timeout) at run time.
+        // Fail fast on invalid approvers and step durations rather than
+        // failing (delay), silently clamping (approval timeout), or parking an
+        // undecidable gate at run time.
         const MAX_DELAY_SECS: u64 = 270;
         for step in &self.steps {
             match &step.action {
-                ActionDef::RequestApproval {
-                    timeout: Some(t), ..
-                } => {
+                ActionDef::RequestApproval { from, timeout, .. } => {
+                    crate::approver::validate_definition_spec(from).map_err(|e| {
+                        WorkflowError::InvalidDefinition(format!("step '{}': {e}", step.id))
+                    })?;
+                    let Some(t) = timeout else { continue };
                     let secs = crate::executor::parse_duration_secs(t).map_err(|_| {
                         WorkflowError::InvalidDefinition(format!(
                             "step '{}': invalid timeout '{t}': expected a duration like '24h', '7d', or '30m'",
@@ -291,6 +300,12 @@ impl WorkflowDef {
                     if secs == 0 {
                         return Err(WorkflowError::InvalidDefinition(format!(
                             "step '{}': timeout must be greater than 0",
+                            step.id
+                        )));
+                    }
+                    if secs > MAX_APPROVAL_TIMEOUT_SECS {
+                        return Err(WorkflowError::InvalidDefinition(format!(
+                            "step '{}': timeout exceeds maximum of 7d ({MAX_APPROVAL_TIMEOUT_SECS} seconds; got {secs}s)",
                             step.id
                         )));
                     }
@@ -440,7 +455,7 @@ mod tests {
             "  - id: topic\n    action: set_channel_topic\n    topic: Status active\n",
             "  - id: react\n    action: add_reaction\n    emoji: white_check_mark\n",
             "  - id: hook\n    action: call_webhook\n    url: https://hooks.example.com/notify\n    method: POST\n",
-            "  - id: approve\n    action: request_approval\n    from: '@manager'\n    message: Approve?\n    timeout: 4h\n",
+            "  - id: approve\n    action: request_approval\n    from: 'e5ebc6cdb579be112e336cc319b5989b4bb6af11786ea90dbe52b5f08d741b34'\n    message: Approve?\n    timeout: 4h\n",
             "  - id: wait\n    action: delay\n    duration: 4m\n",
         );
         let (def, _) = parse_yaml(yaml).expect("parse failed");
@@ -476,7 +491,7 @@ mod tests {
             "name: Deploy Approval\n",
             "trigger:\n  on: webhook\n",
             "steps:\n",
-            "  - id: request\n    action: request_approval\n    from: '@engineering-lead'\n",
+            "  - id: request\n    action: request_approval\n    from: '{{trigger.author}}'\n",
             "    message: Approve deploy?\n    timeout: 4h\n",
             "  - id: notify_approved\n    if: 'steps_request_output_approved == true'\n",
             "    action: send_message\n    text: Deploy approved\n",
@@ -539,7 +554,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_invalid_approval_timeout() {
-        let yaml = "name: Bad Timeout\ntrigger:\n  on: webhook\nsteps:\n  - id: gate\n    action: request_approval\n    from: '@manager'\n    message: Approve?\n    timeout: 24x\n";
+        let yaml = "name: Bad Timeout\ntrigger:\n  on: webhook\nsteps:\n  - id: gate\n    action: request_approval\n    from: any\n    message: Approve?\n    timeout: 24x\n";
         let err = parse_yaml(yaml).unwrap_err();
         match &err {
             WorkflowError::InvalidDefinition(msg) => {
@@ -552,15 +567,144 @@ mod tests {
 
     #[test]
     fn validate_rejects_zero_approval_timeout() {
-        let yaml = "name: Zero Timeout\ntrigger:\n  on: webhook\nsteps:\n  - id: gate\n    action: request_approval\n    from: '@manager'\n    message: Approve?\n    timeout: 0s\n";
+        let yaml = "name: Zero Timeout\ntrigger:\n  on: webhook\nsteps:\n  - id: gate\n    action: request_approval\n    from: any\n    message: Approve?\n    timeout: 0s\n";
         let err = parse_yaml(yaml).unwrap_err();
         assert!(matches!(err, WorkflowError::InvalidDefinition(_)));
     }
 
     #[test]
     fn validate_accepts_day_approval_timeout() {
-        let yaml = "name: Day Timeout\ntrigger:\n  on: webhook\nsteps:\n  - id: gate\n    action: request_approval\n    from: '@manager'\n    message: Approve?\n    timeout: 7d\n";
+        let yaml = "name: Day Timeout\ntrigger:\n  on: webhook\nsteps:\n  - id: gate\n    action: request_approval\n    from: any\n    message: Approve?\n    timeout: 7d\n";
         parse_yaml(yaml).expect("7d approval timeout should be valid");
+    }
+
+    fn approval_yaml(from: &str, timeout: Option<&str>) -> String {
+        let mut yaml = format!(
+            "name: Gate\ntrigger:\n  on: webhook\nsteps:\n  - id: gate\n    action: request_approval\n    from: \"{from}\"\n    message: Approve?\n"
+        );
+        if let Some(t) = timeout {
+            yaml.push_str(&format!("    timeout: \"{t}\"\n"));
+        }
+        yaml
+    }
+
+    fn definition_error(yaml: &str) -> String {
+        match parse_yaml(yaml).unwrap_err() {
+            WorkflowError::InvalidDefinition(msg) => msg,
+            other => panic!("expected InvalidDefinition, got: {other}"),
+        }
+    }
+
+    /// Roles have no trusted resolver, so a definition naming one is refused
+    /// up front instead of producing a gate nobody (or everybody) can decide.
+    #[test]
+    fn validate_rejects_unsupported_approvers_at_definition_time() {
+        for from in [
+            "@manager",
+            "@release-manager",
+            "",
+            "  ",
+            "manager",
+            "@e5ebc6cdb579be112e336cc319b5989b4bb6af11786ea90dbe52b5f08d741b34",
+            "abc123",
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        ] {
+            let msg = definition_error(&approval_yaml(from, None));
+            assert!(msg.contains("step 'gate'"), "{from:?}: {msg}");
+            assert!(msg.contains("64-character hex pubkey"), "{from:?}: {msg}");
+        }
+        assert!(definition_error(&approval_yaml("@manager", None)).contains("not supported"));
+    }
+
+    #[test]
+    fn validate_accepts_supported_approvers() {
+        for from in [
+            "e5ebc6cdb579be112e336cc319b5989b4bb6af11786ea90dbe52b5f08d741b34",
+            "E5EBC6CDB579BE112E336CC319B5989B4BB6AF11786EA90DBE52B5F08D741B34",
+            "any",
+            "{{trigger.author}}",
+        ] {
+            parse_yaml(&approval_yaml(from, None))
+                .unwrap_or_else(|e| panic!("{from:?} should be accepted: {e}"));
+        }
+    }
+
+    /// Duration policy for approval timeouts: 1s ..= 7d, every existing unit
+    /// plus `d`, invalid or out-of-range values refused at definition time.
+    #[test]
+    fn approval_timeout_boundaries() {
+        for ok in [
+            "1", "1s", "1m", "1h", "1d", "24h", "7d", "168h", "10080m", "604800s", "604800", " 2d ",
+        ] {
+            parse_yaml(&approval_yaml("any", Some(ok)))
+                .unwrap_or_else(|e| panic!("{ok:?} should be accepted: {e}"));
+        }
+        for (bad, needle) in [
+            ("604801s", "exceeds maximum of 7d"),
+            ("8d", "exceeds maximum of 7d"),
+            ("169h", "exceeds maximum of 7d"),
+            ("0", "greater than 0"),
+            ("0d", "greater than 0"),
+            ("-1h", "invalid timeout"),
+            ("1.5h", "invalid timeout"),
+            ("1w", "invalid timeout"),
+            ("d", "invalid timeout"),
+            ("", "invalid timeout"),
+            ("99999999999999999999d", "invalid timeout"),
+            ("18446744073709551615d", "invalid timeout"),
+        ] {
+            let msg = definition_error(&approval_yaml("any", Some(bad)));
+            assert!(msg.contains("step 'gate'"), "{bad:?}: {msg}");
+            assert!(
+                msg.contains(needle),
+                "{bad:?}: expected {needle:?} in {msg}"
+            );
+            // Deterministic: the same input yields the same message.
+            assert_eq!(msg, definition_error(&approval_yaml("any", Some(bad))));
+        }
+    }
+
+    #[test]
+    fn delay_duration_boundaries() {
+        let delay = |d: &str| {
+            format!("name: Delay\ntrigger:\n  on: webhook\nsteps:\n  - id: wait\n    action: delay\n    duration: \"{d}\"\n")
+        };
+        for ok in ["1s", "270s", "270", "4m", "1m"] {
+            parse_yaml(&delay(ok)).unwrap_or_else(|e| panic!("{ok:?} should be accepted: {e}"));
+        }
+        for (bad, needle) in [
+            ("271s", "exceeds maximum of 270"),
+            ("5m", "exceeds maximum of 270"),
+            ("1h", "exceeds maximum of 270"),
+            ("1d", "exceeds maximum of 270"),
+            ("0s", "greater than 0"),
+            ("-5s", "invalid duration"),
+            ("soon", "invalid duration"),
+            ("99999999999999999999d", "invalid duration"),
+        ] {
+            let msg = definition_error(&delay(bad));
+            assert!(msg.contains("step 'wait'"), "{bad:?}: {msg}");
+            assert!(
+                msg.contains(needle),
+                "{bad:?}: expected {needle:?} in {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn interval_accepts_day_suffix_and_rejects_invalid() {
+        let interval = |d: &str| {
+            format!("name: Tick\ntrigger:\n  on: schedule\n  interval: \"{d}\"\nsteps:\n  - id: s\n    action: send_message\n    text: hi\n")
+        };
+        for ok in ["1d", "60s", "1m", "2h"] {
+            parse_yaml(&interval(ok)).unwrap_or_else(|e| panic!("{ok:?} should be accepted: {e}"));
+        }
+        for bad in ["59s", "0d", "1x", "99999999999999999999d"] {
+            assert!(
+                parse_yaml(&interval(bad)).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
     }
 
     #[test]
