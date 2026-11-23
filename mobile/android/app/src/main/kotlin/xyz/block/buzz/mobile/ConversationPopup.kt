@@ -105,6 +105,7 @@ internal class ConversationPopup(private val activity: Activity, messenger: Bina
                                     "Mark read", "Mark unread" -> R.drawable.menu_mail
                                     "Rename" -> R.drawable.menu_rename
                                     "Archive", "Unarchive" -> R.drawable.menu_archive
+                                    "Move to section…" -> R.drawable.menu_folder_input
                                     else -> R.drawable.menu_folder
                                 }
                                 setCompoundDrawablesRelativeWithIntrinsicBounds(icon, 0, 0, 0)

@@ -50,13 +50,13 @@ private final class ConversationMenuRow: NSObject, FlutterPlatformView,
   @objc private func tapped() { if !active { bridge.invokeMethod("tap", arguments: nil) } }
 
   private func actions(_ labels: [String]) -> [UIAction] {
-    let symbols = [
-      "Rename": "pencil", "Archive": "archivebox", "Unarchive": "arrow.up.bin",
-      "Mark read": "envelope.open", "Mark unread": "envelope.badge",
-      "Change workspace": "folder", "Move to section…": "folder",
+    let icons = [
+      "Rename": "tabler-pencil", "Archive": "archive", "Unarchive": "archive",
+      "Mark read": "mail", "Mark unread": "mail",
+      "Change workspace": "folder", "Move to section…": "folder-input",
     ]
     return labels.map { label in
-      UIAction(title: label, image: symbols[label].flatMap { UIImage(systemName: $0) }) {
+      UIAction(title: label, image: icons[label].flatMap { NativeTabler.image($0, size: 24) }) {
         [weak self] _ in
         self?.selection = label
       }
