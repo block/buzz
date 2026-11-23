@@ -5,9 +5,8 @@ const _version = 3;
 // page plus its record headers, even if the process exits during a write.
 const _maxDatabasePages = 11520; // 45 MiB at 4 KiB per page.
 const _maxWindowBytes = 2 * 1024 * 1024;
-const _maxWindowEvents = 2101; // 50 rows, their summaries and two aux hops.
 
-enum _DiskAction { read, touch, save, removeChannel }
+enum _DiskAction { read, inspect, touch, save, removeChannel }
 
 final class _DiskRequest {
   const _DiskRequest({
@@ -19,6 +18,7 @@ final class _DiskRequest {
     this.relayAuthor,
     this.payloadBudget = 0,
     this.targets,
+    this.requiredEdits = const {},
   });
 
   final String path;
@@ -28,13 +28,20 @@ final class _DiskRequest {
   final List<NostrEvent> events;
   final String? relayAuthor;
   final int payloadBudget;
-  final Set<String>? targets;
+  final Map<String, bool>? targets;
+  final Set<String> requiredEdits;
 }
 
 final class _DiskResult {
-  const _DiskResult({this.events, this.reset = false, this.recencyFailure});
+  const _DiskResult({
+    this.events,
+    this.pruned = const {},
+    this.reset = false,
+    this.recencyFailure,
+  });
 
   final List<NostrEvent>? events;
+  final Map<String, bool> pruned;
   final bool reset;
   final StackTrace? recencyFailure;
 }
@@ -58,21 +65,35 @@ _DiskResult _accessDatabase(_DiskRequest request) {
     }
     final candidates =
         request.action == _DiskAction.save &&
-            request.events.length <= _maxWindowEvents
+            request.events.length <= SavedMessageStore.maxPageEvents
         ? _cacheCandidates(request.events, request.page).toList()
         : const <NostrEvent>[];
     var knownWires = const <String, String>{};
+    var pruned = const <String, bool>{};
+    final requiredEdits = request.requiredEdits.toSet();
     if (existed && candidates.isNotEmpty) {
       // Recover any hot rollback journal before reading verified copies.
       db = sqlite3.open(request.path, mode: OpenMode.readWrite);
       _checkSchema(db);
       knownWires = _knownWires(db, candidates);
+      if (request.page.rootId.isNotEmpty) {
+        requiredEdits.addAll(_savedEditTargets(db, request.page));
+        pruned = _prunedEvents(db, request.page);
+        requiredEdits.addAll(pruned.keys.where((id) => pruned[id]!));
+      }
       db.close();
       db = null;
     }
 
     // Signature verification runs with no SQLite connection open.
-    final (wires, byteSize) = _verifiedWires(request, candidates, knownWires);
+    final verified = _verifiedWires(
+      request,
+      candidates.where((event) => pruned[event.id] != false),
+      knownWires,
+      requiredEdits,
+    );
+    if (verified == null) return const _DiskResult();
+    final (wires, byteSize) = verified;
     if (!existed) file.parent.createSync(recursive: true);
     db = sqlite3.open(request.path);
     db.execute('PRAGMA foreign_keys = ON');
@@ -84,13 +105,10 @@ _DiskResult _accessDatabase(_DiskRequest request) {
     db.execute('PRAGMA cache_spill = OFF');
     return switch (request.action) {
       _DiskAction.read => _readPage(db, request.page),
+      _DiskAction.inspect => _readPage(db, request.page, includePruned: true),
       _DiskAction.touch => _touchPage(db, request.page),
       _DiskAction.save => _saveWithEviction(db, request, wires, byteSize),
-      _DiskAction.removeChannel => _removeChannel(
-        db,
-        request.page.channelId,
-        request.targets,
-      ),
+      _DiskAction.removeChannel => _removeChannel(db, request),
     };
   } on SqliteException catch (error) {
     if (!_isInvalidDatabase(error)) rethrow;
@@ -158,13 +176,55 @@ void _checkSchema(Database db) {
   if (version != _version) throw const FormatException('cache format');
 }
 
-_DiskResult _readPage(Database db, SavedMessagePage page) {
+void _ensurePrunedEvents(Database db) => db.execute('''
+  CREATE TABLE IF NOT EXISTS pruned_thread_events (
+    channel_id TEXT NOT NULL,
+    root_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    edited INTEGER NOT NULL,
+    PRIMARY KEY (channel_id, root_id, event_id),
+    FOREIGN KEY (channel_id, root_id)
+      REFERENCES pages(channel_id, root_id) ON DELETE CASCADE
+  )
+''');
+
+bool _hasPrunedEventsTable(Database db) => db.select('''
+    SELECT 1 FROM sqlite_schema
+    WHERE type = 'table' AND name = 'pruned_thread_events'
+  ''').isNotEmpty;
+
+Map<String, bool> _prunedEvents(Database db, SavedMessagePage page) {
+  if (!_hasPrunedEventsTable(db)) return const {};
+  return {
+    for (final row in db.select(
+      '''
+      SELECT event_id, edited FROM pruned_thread_events
+      WHERE channel_id = ? AND root_id = ? ORDER BY rowid
+      ''',
+      [page.channelId, page.rootId],
+    ))
+      row['event_id'] as String: row['edited'] == 1,
+  };
+}
+
+_DiskResult _readPage(
+  Database db,
+  SavedMessagePage page, {
+  bool includePruned = false,
+}) {
   final key = [page.channelId, page.rootId];
+  final pruned = includePruned
+      ? _prunedEvents(db, page)
+      : const <String, bool>{};
   final rows = db.select('''
     SELECT wire FROM page_events JOIN events ON events.id = page_events.event_id
     WHERE channel_id = ? AND root_id = ? ORDER BY position
   ''', key);
-  if (rows.isEmpty) return const _DiskResult();
+  if (rows.isEmpty) {
+    return pruned.isEmpty
+        ? const _DiskResult()
+        : _DiskResult(events: const [], pruned: pruned);
+  }
   final events = <NostrEvent>[];
   try {
     for (final row in rows) {
@@ -181,9 +241,13 @@ _DiskResult _readPage(Database db, SavedMessagePage page) {
     _touchPage(db, page);
   } on SqliteException catch (error, stackTrace) {
     if (_isInvalidDatabase(error)) rethrow;
-    return _DiskResult(events: events, recencyFailure: stackTrace);
+    return _DiskResult(
+      events: events,
+      pruned: pruned,
+      recencyFailure: stackTrace,
+    );
   }
-  return _DiskResult(events: events);
+  return _DiskResult(events: events, pruned: pruned);
 }
 
 _DiskResult _touchPage(Database db, SavedMessagePage page) {
@@ -207,14 +271,37 @@ Map<String, String> _knownWires(Database db, List<NostrEvent> candidates) {
   };
 }
 
-(Map<String, String>, int) _verifiedWires(
+Iterable<String> _savedEditTargets(Database db, SavedMessagePage page) sync* {
+  for (final row in db.select(
+    r'''
+    SELECT wire FROM page_events JOIN events ON events.id = page_events.event_id
+    WHERE channel_id = ? AND root_id = ? AND json_extract(wire, '$.kind') = ?
+  ''',
+    [page.channelId, page.rootId, EventKind.streamMessageEdit],
+  )) {
+    final event = NostrEvent.fromJson(
+      jsonDecode(row['wire'] as String) as Map<String, dynamic>,
+    );
+    final target = _savedEditTarget(event);
+    if (target != null) yield target;
+  }
+}
+
+String? _savedEditTarget(NostrEvent event) => event.tags.reversed
+    .where((tag) => tag.length > 1 && tag[0] == 'e')
+    .firstOrNull?[1];
+
+(Map<String, String>, int)? _verifiedWires(
   _DiskRequest request,
-  List<NostrEvent> candidates,
+  Iterable<NostrEvent> candidates,
   Map<String, String> knownWires,
+  Set<String> requiredEdits,
 ) {
   final page = request.page;
   final selected = <String, String>{};
   final rootIds = <String>{};
+  final edits = <String, String>{};
+  final deleted = <String>{};
   var byteSize = 0;
   for (final event in candidates) {
     if (selected.containsKey(event.id)) continue;
@@ -238,6 +325,14 @@ Map<String, String> _knownWires(Database db, List<NostrEvent> candidates) {
     final length = utf8.encode(wire).length;
     if (knownWires[event.id] != wire &&
         !verifySavedMessageEvent(event, relayAuthor: request.relayAuthor)) {
+      // Keep the previous thread page when we cannot verify a mutation.
+      // Dropping it alone could restore the text it edits or deletes.
+      if (page.rootId.isNotEmpty &&
+          (event.kind == EventKind.streamMessageEdit ||
+              event.kind == EventKind.deletion ||
+              event.kind == EventKind.nip29DeleteEvent)) {
+        return null;
+      }
       continue;
     }
     // A truncated response can expose originals whose edits or deletions
@@ -246,8 +341,29 @@ Map<String, String> _knownWires(Database db, List<NostrEvent> candidates) {
     selected[event.id] = wire;
     if (EventKind.channelTimelineContentKinds.contains(event.kind)) {
       rootIds.add(event.id);
+    } else if (requiredEdits.isNotEmpty &&
+        event.kind == EventKind.streamMessageEdit) {
+      final target = _savedEditTarget(event);
+      if (target != null) edits[event.id] = target;
+    } else if (requiredEdits.isNotEmpty &&
+        (event.kind == EventKind.deletion ||
+            event.kind == EventKind.nip29DeleteEvent)) {
+      deleted.addAll(
+        event.tags
+            .where((tag) => tag.length > 1 && tag[0] == 'e')
+            .map((tag) => tag[1]),
+      );
     }
     byteSize += length;
+  }
+  // Never write original text for an observed edit without verified proof.
+  final confirmed = edits.entries
+      .where((edit) => !deleted.contains(edit.key))
+      .map((edit) => edit.value)
+      .toSet();
+  for (final id in requiredEdits.difference(confirmed)) {
+    final removed = selected.remove(id);
+    if (removed != null) byteSize -= utf8.encode(removed).length;
   }
   return (selected, byteSize);
 }
@@ -289,6 +405,9 @@ _DiskResult _savePage(
       oldAuthor != null &&
       request.relayAuthor != null &&
       oldAuthor != request.relayAuthor;
+  final pruned = !rotated && page.rootId.isNotEmpty && request.events.isNotEmpty
+      ? _prunedEvents(db, page)
+      : const <String, bool>{};
   db.execute('BEGIN IMMEDIATE');
   try {
     if (rotated) {
@@ -300,7 +419,8 @@ _DiskResult _savePage(
       db.execute('INSERT INTO relay_author VALUES (?)', [request.relayAuthor]);
     }
     _deletePage(db, page.channelId, page.rootId);
-    if (selected.isNotEmpty && byteSize <= request.payloadBudget) {
+    if ((selected.isNotEmpty || pruned.isNotEmpty) &&
+        byteSize <= request.payloadBudget) {
       _evictPages(db, request.payloadBudget - byteSize, databasePageBudget);
       final insertedAt = DateTime.now().microsecondsSinceEpoch;
       db.execute('INSERT INTO pages VALUES (?, ?, ?, ?)', [
@@ -309,6 +429,15 @@ _DiskResult _savePage(
         insertedAt,
         byteSize,
       ]);
+      if (pruned.isNotEmpty) {
+        db.execute(
+          '''
+          INSERT INTO pruned_thread_events
+          SELECT ?, ?, key, value FROM json_each(?)
+        ''',
+          [page.channelId, page.rootId, jsonEncode(pruned)],
+        );
+      }
       final insertEvent = db.prepare(
         'INSERT OR IGNORE INTO events VALUES (?, ?)',
       );
@@ -391,37 +520,110 @@ Iterable<NostrEvent> _cacheCandidates(
   );
 }
 
-_DiskResult _removeChannel(Database db, String channel, Set<String>? targets) {
+_DiskResult _removeChannel(
+  Database db,
+  _DiskRequest request, {
+  bool evict = false,
+}) {
+  final channel = request.page.channelId;
+  final targets = request.targets;
   db.execute('BEGIN IMMEDIATE');
   try {
     if (targets == null) {
       _deletePage(db, channel, null);
-    } else if (_deleteEventReferences(
-      db,
-      'channel_id = ? AND event_id IN (SELECT value FROM json_each(?))',
-      [channel, jsonEncode(targets.toList())],
-    )) {
-      db.execute(
-        '''
-        UPDATE pages SET byte_size = (
-          SELECT COALESCE(SUM(length(CAST(wire AS BLOB))), 0)
-          FROM page_events JOIN events ON events.id = page_events.event_id
-          WHERE page_events.channel_id = pages.channel_id
-            AND page_events.root_id = pages.root_id
-        ) WHERE channel_id = ?;
-      ''',
-        [channel],
-      );
-      db.execute('DELETE FROM pages WHERE channel_id = ? AND byte_size = 0', [
-        channel,
-      ]);
+    } else {
+      if (evict) {
+        _evictPages(
+          db,
+          request.payloadBudget,
+          request.databasePageLimit * 3 ~/ 4,
+        );
+      }
+      final mutations = jsonEncode(targets);
+      final hasPrunedEvents = _recordPrunedEvents(db, channel, mutations);
+      if (_deleteEventReferences(
+        db,
+        'channel_id = ? AND event_id IN (SELECT key FROM json_each(?))',
+        [channel, mutations],
+      )) {
+        db.execute(
+          '''
+          UPDATE pages SET byte_size = (
+            SELECT COALESCE(SUM(length(CAST(wire AS BLOB))), 0)
+            FROM page_events JOIN events ON events.id = page_events.event_id
+            WHERE page_events.channel_id = pages.channel_id
+              AND page_events.root_id = pages.root_id
+          ) WHERE channel_id = ?;
+        ''',
+          [channel],
+        );
+        final keepPrunedPages = hasPrunedEvents
+            ? '''
+             AND NOT EXISTS (
+               SELECT 1 FROM pruned_thread_events
+               WHERE channel_id = pages.channel_id AND root_id = pages.root_id
+             )'''
+            : '';
+        db.execute(
+          'DELETE FROM pages WHERE channel_id = ? AND byte_size = 0 $keepPrunedPages',
+          [channel],
+        );
+      }
     }
     db.execute('COMMIT');
-  } catch (_) {
+  } catch (error) {
     if (!db.autocommit) db.execute('ROLLBACK');
+    if (!evict &&
+        targets != null &&
+        error is SqliteException &&
+        error.resultCode == SqlError.SQLITE_FULL) {
+      return _removeChannel(db, request, evict: true);
+    }
     rethrow;
   }
   return const _DiskResult();
+}
+
+bool _recordPrunedEvents(Database db, String channel, String mutations) {
+  if (!_hasPrunedEventsTable(db)) {
+    final threadRows = db.select(
+      '''
+      SELECT 1 FROM page_events pe JOIN json_each(?) t ON t.key = pe.event_id
+      WHERE pe.channel_id = ? AND pe.root_id <> '' LIMIT 1
+    ''',
+      [mutations, channel],
+    );
+    if (threadRows.isEmpty) return false;
+    _ensurePrunedEvents(db);
+  }
+  db.execute(
+    '''
+        INSERT OR REPLACE INTO pruned_thread_events
+        SELECT channel_id, root_id, event_id, MIN(edited)
+        FROM (
+          SELECT pe.channel_id, pe.root_id, pe.event_id, t.value AS edited
+          FROM page_events pe JOIN json_each(?) t ON t.key = pe.event_id
+          WHERE pe.channel_id = ? AND pe.root_id <> ''
+          UNION ALL
+          SELECT pe.channel_id, pe.root_id, pe.event_id, MIN(pe.edited, t.value)
+          FROM pruned_thread_events pe JOIN json_each(?) t ON t.key = pe.event_id
+          WHERE pe.channel_id = ?
+        ) GROUP BY channel_id, root_id, event_id
+      ''',
+    [mutations, channel, mutations, channel],
+  );
+  db.execute(
+    '''
+        DELETE FROM pruned_thread_events WHERE rowid IN (
+          SELECT rowid FROM (
+            SELECT rowid, ROW_NUMBER() OVER (PARTITION BY root_id ORDER BY rowid DESC) AS newest
+            FROM pruned_thread_events WHERE channel_id = ?
+          ) WHERE newest > ?
+        )
+      ''',
+    [channel, SavedMessageStore.maxPageEvents],
+  );
+  return true;
 }
 
 void _deletePage(Database db, String channel, String? root) {
