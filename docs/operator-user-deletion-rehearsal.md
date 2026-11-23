@@ -74,6 +74,17 @@ The kind counts break down the events already counted under `by_table.events`.
 `excluded_event_kinds` lists events outside the selection. Older completed
 stages retain their original summary.
 
+After a completed `purge_account` preview, the same inspection shows
+`metadata_json.result.account`. The `delete` group counts proposed row deletions
+by table and groups the selected events by kind. The `clear_attribution` group
+counts proposed field clears by table and column. In both groups,
+`by_subject.user` and `by_subject.owned_agents` identify whose data or
+attribution triggered the action. A clear can affect another person's row.
+Two field clears can refer to one row, and different read-only stages can
+select the same row because the rehearsal leaves source data intact.
+Detailed batch keys still stream during the run. For events they also carry
+the event kind. Earlier completed rows keep their saved totals.
+
 The last community automatically transitions to global cleanup. With no matched
 communities, media transitions directly to global cleanup. The shared inventory method
 used by `inventory`, ordinary `submit`, and `submit --read-only` saves only communities with target-linked cleanup candidates: memberships,

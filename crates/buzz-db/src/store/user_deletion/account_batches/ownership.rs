@@ -37,6 +37,7 @@ impl UserDeletionStore {
         )?;
         let mut total = AccountBatchSummary {
             record: "account_handler_summary",
+            account: (mode == ExecutionMode::ReadOnly).then(AccountPreview::default),
             read_only: mode == ExecutionMode::ReadOnly,
             items: 0,
             batches: 0,
@@ -51,7 +52,14 @@ impl UserDeletionStore {
             current.pubkey = key;
             current.max_items = options.max_items - total.items;
             let result = self
-                .run_batches(&current, OPERATIONS, mode, writer, stage)
+                .run_batches(
+                    &current,
+                    OPERATIONS,
+                    mode,
+                    writer,
+                    stage,
+                    total.account.as_mut(),
+                )
                 .await?;
             total.items += result.items;
             total.batches += result.batches;

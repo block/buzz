@@ -149,6 +149,7 @@ impl UserDeletionStore {
         }
         let mut total = AccountBatchSummary {
             record: "account_scope_summary",
+            account: None,
             read_only: mode == ExecutionMode::ReadOnly,
             items: 0,
             batches: 0,

@@ -127,7 +127,7 @@ pub(super) const OPERATIONS: &[Operation] = &[
     delete("push_wake_outbox", personal_event_copy!(), ID_KEY, ID_MATCH),
     delete("operator_listener_outbox", personal_event_copy!(), ID_KEY, ID_MATCH),
     delete("events", personal_events!(),
-        "jsonb_build_object('created_at',created_at,'id',encode(id,'hex'))",
+        "jsonb_build_object('created_at',created_at,'id',encode(id,'hex'),'kind',kind)",
         "created_at=($3->>'created_at')::timestamptz AND id=decode($3->>'id','hex')"),
 ];
 

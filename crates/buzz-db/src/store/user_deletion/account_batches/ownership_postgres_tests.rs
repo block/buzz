@@ -19,7 +19,11 @@ async fn ownership_changes_stop_batches_and_retry_fetches_current_agents() {
         // Preview invokes discovery too and leaves every table untouched.
         let before = f.snapshot().await;
         let mut preview = Vec::new();
-        f.run(ExecutionMode::ReadOnly, &mut preview).await.unwrap();
+        let summary = f.run(ExecutionMode::ReadOnly, &mut preview).await.unwrap();
+        let owned_rows = json!(summary)["account"]["delete"]["by_subject"]["owned_agents"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(owned_rows > 0, initial == Some(TARGET));
         assert_eq!(f.snapshot().await, before);
         let targets = records(&preview)
             .into_iter()
