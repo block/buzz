@@ -180,6 +180,25 @@ void main() {
     },
   );
 
+  test('a community that opted out enrolls nothing', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    final methods = <String>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          methods.add(call.method);
+          return null;
+        });
+
+    final grant = await enrollBuzzPush(
+      'wss://relay.example/',
+      'https://gateway.example/',
+      stillWanted: () => false,
+    );
+
+    expect(grant, isNull);
+    expect(methods, isEmpty);
+  });
+
   test('a gateway reply the app cannot read is reported and still fails '
       'enrollment', () async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;

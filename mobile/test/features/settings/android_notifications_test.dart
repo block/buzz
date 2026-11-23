@@ -387,6 +387,69 @@ void main() {
     await unmount(tester);
   });
 
+  testWidgets('turning push off while it delegates ends the attempt quietly', (
+    tester,
+  ) async {
+    fcmDeviceToken.value = 'test-fcm-token';
+    addTearDown(() => fcmDeviceToken.value = null);
+    final failures = <String>[];
+    final print = debugPrint;
+    debugPrint = (message, {wrapWidth}) {
+      if (message != null && message.contains('bootstrap failed')) {
+        failures.add(message);
+      }
+    };
+    final gateway = FakePushGateway(
+      nowSeconds: () => DateTime.now().millisecondsSinceEpoch ~/ 1000,
+    );
+    final delegated = Completer<void>();
+    gateway.holdResponseFor['/v1/delegations'] = delegated.future;
+    final session = _Connected();
+    final descriptorGate = Completer<void>();
+    await pumpBootstrap(
+      tester,
+      platform: TargetPlatform.android,
+      relayUrl: 'https://relay.example',
+      enabled: true,
+      session: session,
+      gateway: gateway,
+      descriptorGate: descriptorGate.future,
+      subscriptions: [
+        BuzzPushSubscription(
+          filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+          notificationClass: 'default',
+        ),
+      ],
+    );
+    descriptorGate.complete();
+    await tester.pump();
+    await tester.pump();
+    expect(gateway.bodiesFor('/v1/delegations'), hasLength(1));
+
+    // The gateway accepted the delegation; the opt-out lands before the phone
+    // hears back.
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(BuzzPushBootstrap)),
+    );
+    await container
+        .read(communityListProvider.notifier)
+        .setPushNotificationsEnabled(
+          container.read(communityListProvider).value!.single.id,
+          false,
+        );
+    delegated.complete();
+    await tester.pumpAndSettle();
+
+    // No lease is published, the new delegation is revoked, and the attempt
+    // ends as cancelled rather than failing into a retry.
+    expect(session.leases.where((lease) => lease['active'] == true), isEmpty);
+    expect(gateway.installations.values.single.revokedDelegations, isNotEmpty);
+    // Foundation checks its debug variables before teardowns run.
+    debugPrint = print;
+    expect(failures, isEmpty);
+    await unmount(tester);
+  });
+
   testWidgets('resuming while the relay reconnects refreshes the FCM token', (
     tester,
   ) async {
