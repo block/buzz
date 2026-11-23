@@ -1,7 +1,11 @@
 part of '../channels_page_test.dart';
 
 void _filterFeedbackTests(
-  Widget Function({required List<Override> overrides, bool realHome})
+  Widget Function({
+    required List<Override> overrides,
+    bool realHome,
+    SharedPreferences? prefs,
+  })
   buildTestable,
 ) {
   testWidgets(
@@ -25,6 +29,7 @@ void _filterFeedbackTests(
       final manager = _filterTestManager(onPublish: () => publications++);
       await tester.pumpWidget(
         buildTestable(
+          prefs: prefs,
           overrides: [
             channelsProvider.overrideWith(
               () => _FakeNotifier([
@@ -51,7 +56,6 @@ void _filterFeedbackTests(
                 initialStatus: SessionStatus.disconnected,
               ),
             ),
-            savedPrefsProvider.overrideWithValue(prefs),
             channelFilterProvider.overrideWithValue(manager),
           ],
         ),
@@ -200,6 +204,7 @@ void _filterFeedbackTests(
       final relay = _FilterJourneyRelay();
       await tester.pumpWidget(
         buildTestable(
+          prefs: prefs,
           overrides: [
             channelsProvider.overrideWith(
               () => _FakeNotifier([
@@ -228,7 +233,6 @@ void _filterFeedbackTests(
             ),
             communityStorageProvider.overrideWithValue(storage),
             communitySnapshotWriterProvider.overrideWithValue((_) async {}),
-            savedPrefsProvider.overrideWithValue(prefs),
             relaySessionProvider.overrideWith(() => relay),
           ],
         ),
