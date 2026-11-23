@@ -4,7 +4,9 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/channels/saved_message_store.dart';
+import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/relay/relay_author_provider.dart';
 import 'channel_event_order.dart';
 import 'channel_open_timing.dart';
 import 'pending_local_messages_provider.dart';
@@ -36,7 +38,8 @@ const _channelLiveEventKinds = [
 /// subscription first, then syncs history via the server-assembled channel
 /// window fast path, falling back to the legacy websocket history path when the
 /// relay does not return a valid NIP-CW bounds overlay.
-class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
+class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>>
+    with _SummaryEditAuthority {
   final String channelId;
   final bool flatTimeline;
   void Function()? _unsubscribe;

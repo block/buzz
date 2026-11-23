@@ -1,5 +1,15 @@
 part of '../channel_messages_provider.dart';
 
+/// Edit authority for thread summaries, read when a summary refreshes.
+mixin _SummaryEditAuthority on Notifier<AsyncValue<List<NostrEvent>>> {
+  Map<String, String> get _summaryAgentOwners =>
+      ref.read(agentOwnersProvider).asData?.value ?? const {};
+  String? get _summaryRelayAuthor => ref
+      .read(relayAuthorProvider(ref.read(relayConfigProvider).baseUrl))
+      .asData
+      ?.value;
+}
+
 extension _ThreadSummaryState on ChannelMessagesNotifier {
   void _reconcilePageSummaries(ChannelWindowPage page, int pageVersion) {
     // Nothing below changes the cached replies, so index them once per page.
@@ -153,11 +163,15 @@ extension _ThreadSummaryState on ChannelMessagesNotifier {
     final rows = _visibleNestedRows(root).toList();
     if (rows.isEmpty) return;
     final entries = buildMainTimelineEntries(
-      formatTimeline([
-        ...{
-          for (final event in [...rows, ...replies]) event.id: event,
-        }.values,
-      ]),
+      formatTimeline(
+        [
+          ...{
+            for (final event in [...rows, ...replies]) event.id: event,
+          }.values,
+        ],
+        agentOwners: _summaryAgentOwners,
+        relayPubkey: _summaryRelayAuthor,
+      ),
     );
     for (final row in rows) {
       if ((_threadQueryVersions[row.id] ?? 0) > version) continue;

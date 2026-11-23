@@ -200,6 +200,12 @@ _watchThreadMessages(
   required bool headFromSavedPage,
   required String? initialMessageId,
 }) {
+  final agentOwners =
+      ref.watch(agentOwnersProvider).asData?.value ?? const <String, String>{};
+  final relayPubkey = ref
+      .watch(relayAuthorProvider(ref.watch(relayConfigProvider).baseUrl))
+      .asData
+      ?.value;
   final relayReplyState = ref.watch(threadRepliesProvider(args));
   final replyEvents = ref.watch(threadRepliesWithLocalProvider(args)).value;
   final channelState = ref.watch(channelMessagesProvider(args.channelId));
@@ -221,7 +227,12 @@ _watchThreadMessages(
       : mergeThreadEvents([...?savedReplies, ...?replyEvents], live);
   final observed = accessDenied
       ? const <TimelineMessage>[]
-      : formatTimeline(events, currentPubkey: currentPubkey);
+      : formatTimeline(
+          events,
+          currentPubkey: currentPubkey,
+          agentOwners: agentOwners,
+          relayPubkey: relayPubkey,
+        );
   final headDeleted = _isDeletedBy(events, threadHead.id);
   final allMsgs = accessDenied
       ? const <TimelineMessage>[]
@@ -257,6 +268,8 @@ _watchThreadMessages(
               events,
             ),
             currentPubkey: currentPubkey,
+            agentOwners: agentOwners,
+            relayPubkey: relayPubkey,
           ).where((message) => message.id == threadHead.id).firstOrNull
         : null,
     savedOnlyIds: savedReplies == null

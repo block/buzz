@@ -135,6 +135,7 @@ import '../../helpers/thread_ids.dart';
 import '../../helpers/widget_helpers.dart';
 
 part 'thread_reply_refresh_cases.dart';
+part 'channel_detail_page_test/edit_authorization_tests.dart';
 part 'thread_title_capsule_cases.dart';
 part 'channel_detail_page_test/loading_review_tests.dart';
 part 'channel_detail_page_test/presence_tests.dart';
@@ -267,9 +268,10 @@ NostrEvent _edit({
   required String targetId,
   required String content,
   int createdAt = 2000,
+  String pubkey = 'alice',
 }) => NostrEvent(
   id: id,
-  pubkey: 'abc123',
+  pubkey: pubkey,
   createdAt: createdAt,
   kind: EventKind.streamMessageEdit,
   tags: [
@@ -286,6 +288,7 @@ Widget _buildTestable({
   List<AgentDirectoryEntry> soloAgents = const [],
   String? bestie,
   bool useRealChannelProviders = false,
+  bool useRealEditProviders = false,
   ProfileNotifier? profileNotifier,
   String? signingPubkey,
   bool darkTheme = false,
@@ -406,11 +409,12 @@ Widget _buildTestable({
         meMessagesProvider(_channelId).overrideWith(() => fakeMessagesNotifier),
         meAssistantsProvider.overrideWith((ref) async => soloAgents),
       ],
-      channelMessagesProvider(_channelId).overrideWith(
-        () => personalChat
-            ? channelMessagesNotifier ?? _FakeMessagesNotifier(messages)
-            : fakeMessagesNotifier,
-      ),
+      if (!useRealEditProviders)
+        channelMessagesProvider(_channelId).overrideWith(
+          () => personalChat
+              ? channelMessagesNotifier ?? _FakeMessagesNotifier(messages)
+              : fakeMessagesNotifier,
+        ),
       if (savedPreview != null)
         savedChannelPreviewProvider(
           _channelId,
@@ -493,12 +497,14 @@ Widget _buildTestable({
             if (member.isBot) member.pubkey.toLowerCase(),
         },
       ),
-      agentOwnersProvider.overrideWith(
-        (ref) async => loadAgentOwners?.call() ?? const <String, String>{},
-      ),
-      agentDirectoryProvider.overrideWith(
-        (ref) async => loadAgentDirectory?.call() ?? const [],
-      ),
+      if (!useRealEditProviders)
+        agentOwnersProvider.overrideWith(
+          (ref) async => loadAgentOwners?.call() ?? const <String, String>{},
+        ),
+      if (!useRealEditProviders)
+        agentDirectoryProvider.overrideWith(
+          (ref) async => loadAgentDirectory?.call() ?? const [],
+        ),
       if (knownAgentPubkeys != null)
         knownAgentPubkeysProvider.overrideWithValue(knownAgentPubkeys),
       meAgentInventoryReadProvider.overrideWithValue(
@@ -1497,6 +1503,7 @@ void main() {
 
   _loadingReviewTests();
   threadReplyRefreshTests();
+  _editAuthorizationTests();
   threadTitleCapsuleTests();
   presenceTests();
   actionRowTests();
@@ -15216,14 +15223,14 @@ void main() {
         _buildTestable(
           messages: [
             _textMsg(
-              id: 'linked',
+              id: threadIdA,
               pubkey: 'alice',
               content: 'Draft',
               createdAt: 1000,
             ),
             _edit(
               id: 'linked-edit',
-              targetId: 'linked',
+              targetId: threadIdA,
               content:
                   'ok ${link('Wes', mallory)} '
                   '${link('Scout', scoutA)} ${link('Scout', scoutB)} '
@@ -15396,7 +15403,7 @@ void main() {
         // A grouped follow-up draws no author header, so the marker must
         // follow the body, not the header.
         _textMsg(
-          id: 'msg2',
+          id: threadIdMid,
           pubkey: 'alice',
           content: 'Draft',
           createdAt: 1010,
@@ -15413,9 +15420,14 @@ void main() {
           content: 'Edited text',
           createdAt: 1100,
         ),
-        _edit(id: 'edit2', targetId: 'msg2', content: 'Final', createdAt: 1110),
+        _edit(
+          id: 'edit2',
+          targetId: threadIdMid,
+          content: 'Final',
+          createdAt: 1110,
+        ),
         _textMsg(
-          id: 'reply1',
+          id: threadIdR1,
           pubkey: 'bob',
           content: 'Typo',
           createdAt: 1030,
@@ -15425,7 +15437,8 @@ void main() {
         ),
         _edit(
           id: 'edit3',
-          targetId: 'reply1',
+          pubkey: 'bob',
+          targetId: threadIdR1,
           content: 'Fixed',
           createdAt: 1120,
         ),
@@ -15485,9 +15498,14 @@ void main() {
 
     testWidgets('latest edit wins when multiple edits exist', (tester) async {
       final messages = [
-        _textMsg(id: 'msg1', pubkey: 'alice', content: 'V1', createdAt: 1000),
-        _edit(id: 'e1', targetId: 'msg1', content: 'V2', createdAt: 1100),
-        _edit(id: 'e2', targetId: 'msg1', content: 'V3', createdAt: 1200),
+        _textMsg(
+          id: threadIdA,
+          pubkey: 'alice',
+          content: 'V1',
+          createdAt: 1000,
+        ),
+        _edit(id: 'e1', targetId: threadIdA, content: 'V2', createdAt: 1100),
+        _edit(id: 'e2', targetId: threadIdA, content: 'V3', createdAt: 1200),
       ];
 
       await tester.pumpWidget(

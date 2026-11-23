@@ -108,6 +108,14 @@ class _HuddleHistoryMessages extends HookConsumerWidget {
     final provider = channelMessagesProvider(channelId);
     final messages = ref.watch(provider);
     final currentPubkey = ref.watch(currentPubkeyProvider);
+    final editOwners =
+        ref.watch(agentOwnersProvider).asData?.value ??
+        const <String, String>{};
+    final relayUrl = ref.watch(relayConfigProvider).baseUrl;
+    final editRelayAuthor = ref
+        .watch(relayAuthorProvider(relayUrl))
+        .asData
+        ?.value;
     final dateScrollActivity = useDateHeaderScrollActivity(channelId);
     final stickyDateHeaderState = useValueNotifier(
       StickyDateHeaderState.hidden,
@@ -126,6 +134,8 @@ class _HuddleHistoryMessages extends HookConsumerWidget {
         final timeline = formatTimeline(
           events,
           currentPubkey: currentPubkey,
+          agentOwners: editOwners,
+          relayPubkey: editRelayAuthor,
         ).where((message) => !message.isSystem).toList();
         if (timeline.isEmpty) {
           return const Center(child: Text('No messages in this Huddle.'));

@@ -344,9 +344,13 @@ VoidCallback? debugOnFormatTimeline;
 ///
 /// Mirrors the desktop's `formatTimelineMessages` logic.
 /// [currentPubkey] is used to determine if the current user has reacted.
+/// [agentOwners] contains only verified agent-to-owner pubkeys. [relayPubkey]
+/// is the relay's signing identity, used to recognize attributed authors.
 List<TimelineMessage> formatTimeline(
   List<NostrEvent> events, {
   String? currentPubkey,
+  Map<String, String> agentOwners = const {},
+  String? relayPubkey,
 }) {
   assert(() {
     debugOnFormatTimeline?.call();
@@ -368,13 +372,19 @@ List<TimelineMessage> formatTimeline(
   }
 
   // 2. Build edit map: targetId → latest edit content.
+  final targets = {for (final event in events) event.id.toLowerCase(): event};
   final edits = <String, _Edit>{};
   for (final event in events) {
     if (event.kind != EventKind.streamMessageEdit) continue;
     if (deletedIds.contains(event.id)) continue;
 
-    final targetId = _lastETag(event.tags);
+    final targetId = _firstEditTarget(event.tags);
     if (targetId == null || deletedIds.contains(targetId)) continue;
+    final target = targets[targetId];
+    if (target == null ||
+        !_mayEditMessage(event, target, agentOwners, relayPubkey)) {
+      continue;
+    }
 
     // Greatest (created_at, id) wins, as the relay resolves effective edits
     // (docs/effective-message-edits.md), whatever order [events] is in.
@@ -497,7 +507,7 @@ List<TimelineMessage> formatTimeline(
     if (event.kind == EventKind.streamMessage ||
         event.kind == EventKind.streamMessageV2 ||
         event.kind == EventKind.streamMessageDiff) {
-      final edit = edits[event.id];
+      final edit = edits[event.id.toLowerCase()];
       final effectiveTags = edit?.tags ?? event.tags;
       // Include both notify (`p`) and reference-only (`mention`) tags —
       // mirrors desktop's resolveMentionNames, so names in messages sent
@@ -760,7 +770,50 @@ class _Edit {
   });
 }
 
-/// Get the last `e` tag value (reaction/edit target convention).
+final _editHex = RegExp(r'^[0-9a-fA-F]{64}$');
+
+bool _isEditHex(String? value) =>
+    value != null && value.length == 64 && _editHex.hasMatch(value);
+
+String? _firstEditTarget(List<List<String>> tags) {
+  for (final tag in tags) {
+    if (tag.length >= 2 && tag[0] == 'e' && _isEditHex(tag[1])) {
+      return tag[1].toLowerCase();
+    }
+  }
+  return null;
+}
+
+bool _mayEditMessage(
+  NostrEvent edit,
+  NostrEvent target,
+  Map<String, String> agentOwners,
+  String? relayPubkey,
+) {
+  final signer = edit.pubkey.toLowerCase();
+  final author = _effectiveEditAuthor(target, relayPubkey);
+  if (signer == target.pubkey.toLowerCase() || signer == author) return true;
+  return (target.kind == EventKind.streamMessage ||
+          target.kind == EventKind.streamMessageV2) &&
+      edit.channelId != null &&
+      edit.channelId == target.channelId &&
+      signer == agentOwners[author]?.toLowerCase();
+}
+
+String _effectiveEditAuthor(NostrEvent target, String? relayPubkey) {
+  final signer = target.pubkey.toLowerCase();
+  if (signer != relayPubkey?.toLowerCase()) return signer;
+  final actor = target.getTagValue('actor');
+  if (_isEditHex(actor)) return actor!.toLowerCase();
+  for (final tag in target.tags) {
+    if (tag.length >= 2 && tag[0] == 'p' && _isEditHex(tag[1])) {
+      return tag[1].toLowerCase();
+    }
+  }
+  return signer;
+}
+
+/// Get the last `e` tag value (reaction target convention).
 String? _lastETag(List<List<String>> tags) {
   for (var i = tags.length - 1; i >= 0; i--) {
     final tag = tags[i];

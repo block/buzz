@@ -1,5 +1,7 @@
 part of '../thread_detail_page.dart';
 
+const _landingHighlightOpacity = 0.12;
+
 class _ThreadMessage extends HookConsumerWidget {
   final TimelineMessage message;
   final Map<String, String> channelNames;

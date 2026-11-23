@@ -703,14 +703,32 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     final retention = ephemeralChannelDisplay(resolvedChannel);
 
     // The page also rebuilds for read state, presence, roster and layout
-    // changes. Format only when the events themselves change: the notifier
-    // publishes a new list for every event change.
+    // changes. Reformat only when events, reaction identity, or trusted edit
+    // authorship changes; the notifier publishes a new list for event changes.
     final events = messagesState.value ?? const <NostrEvent>[];
+    final editOwners =
+        agentOwnersState.asData?.value ?? const <String, String>{};
+    final relayUrl = ref.watch(relayConfigProvider).baseUrl;
+    final editRelayAuthor = ref
+        .watch(relayAuthorProvider(relayUrl))
+        .asData
+        ?.value;
     final timelineMessages = useMemoized(
       () => resolvedChannel.isForum
           ? <TimelineMessage>[]
-          : formatTimeline(events, currentPubkey: currentPubkey),
-      [events, currentPubkey, resolvedChannel.isForum],
+          : formatTimeline(
+              events,
+              currentPubkey: currentPubkey,
+              agentOwners: editOwners,
+              relayPubkey: editRelayAuthor,
+            ),
+      [
+        events,
+        currentPubkey,
+        resolvedChannel.isForum,
+        editOwners,
+        editRelayAuthor,
+      ],
     );
     final timelineEntries = buildMainTimelineEntries(
       // End events still update the original card through allMessages.
