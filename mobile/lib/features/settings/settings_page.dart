@@ -22,6 +22,7 @@ import '../../shared/diagnostics/diagnostic_reporter.dart';
 import '../../shared/widgets/confirmation_dialog.dart';
 import '../../shared/hosted/hosted_environment.dart';
 import '../../shared/hosted/sign_out.dart';
+import '../../shared/push/push_bridge.dart';
 import '../../shared/push/push_relay_capability_provider.dart';
 import '../../shared/push/push_bootstrap.dart';
 import '../../shared/relay/relay.dart';

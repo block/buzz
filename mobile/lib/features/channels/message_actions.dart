@@ -74,6 +74,7 @@ Future<void> showMessageActions({
   required String channelId,
   required bool canManageMessage,
   List<TimelineMessage>? allMessages,
+  VoidCallback? onReply,
   List<TimelineReaction>? reactions,
   ValueChanged<String>? onToggleReaction,
   String? currentPubkey,
@@ -88,6 +89,11 @@ Future<void> showMessageActions({
   EdgeInsets popoverSpotlightPadding = const EdgeInsets.all(Grid.xxs),
 }) async {
   if (!context.mounted) return;
+  // A new message can rebuild the long-pressed row away while the sheet is
+  // up, so reactions go through the page rather than the row.
+  final pageContainer = ProviderScope.containerOf(context, listen: false);
+  final pickerContext = Navigator.of(context).context;
+  final stillCurrent = captureReactionCommunity(pageContainer);
   unawaited(HapticFeedback.mediumImpact());
   final restoreFocusOnCancel = composerFocusNode?.hasFocus ?? false;
   composerFocusNode?.unfocus();
@@ -125,8 +131,9 @@ Future<void> showMessageActions({
                     reactions: reactions ?? message.reactions,
                     onToggleReaction: onToggleReaction,
                     sheetContext: sheetContext,
-                    pageContext: context,
-                    pageRef: ref,
+                    pickerContext: pickerContext,
+                    pageContainer: pageContainer,
+                    stillCurrent: stillCurrent,
                   ),
                   SizedBox(height: message.isSystem ? Grid.xxs : Grid.xs),
                   if (!message.isSystem) ...[
@@ -135,6 +142,7 @@ Future<void> showMessageActions({
                       message: message,
                       channelId: channelId,
                       allMessages: allMessages,
+                      onReply: onReply,
                       currentPubkey: currentPubkey,
                       isMember: isMember,
                       isArchived: isArchived,
@@ -703,6 +711,9 @@ class _MessageQuickActionsRow extends ConsumerWidget {
   final TimelineMessage message;
   final String channelId;
   final List<TimelineMessage>? allMessages;
+
+  /// Replies without opening [message]'s thread, for a page that already is it.
+  final VoidCallback? onReply;
   final String? currentPubkey;
   final bool isMember;
   final bool isArchived;
@@ -715,6 +726,7 @@ class _MessageQuickActionsRow extends ConsumerWidget {
     required this.message,
     required this.channelId,
     required this.allMessages,
+    required this.onReply,
     required this.currentPubkey,
     required this.isMember,
     required this.isArchived,
@@ -734,6 +746,10 @@ class _MessageQuickActionsRow extends ConsumerWidget {
           label: 'Reply',
           onTap: () {
             if (!_selectMessageAction(context)) return;
+            if (onReply != null) {
+              onReply!();
+              return;
+            }
             Navigator.of(pageContext).push(
               MaterialPageRoute<void>(
                 builder: (_) => ThreadDetailPage(

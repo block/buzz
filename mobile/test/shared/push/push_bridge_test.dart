@@ -142,8 +142,8 @@ void main() {
         ],
       );
 
-      expect(firstGrant.endpointGrant, 'new-grant');
-      expect(secondGrant.endpointGrant, 'new-grant');
+      expect(firstGrant!.endpointGrant, 'new-grant');
+      expect(secondGrant!.endpointGrant, 'new-grant');
       expect(enrollmentArguments, [
         {
           'relayUrl': 'wss://relay.example/',
