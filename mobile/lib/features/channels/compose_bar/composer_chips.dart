@@ -56,6 +56,7 @@ class _ComposerMentionChip extends StatelessWidget {
   final String label;
   final bool isAgent;
   final TextStyle textStyle;
+  final bool showPortrait;
 
   const _ComposerMentionChip({
     required this.pubkey,
@@ -63,6 +64,7 @@ class _ComposerMentionChip extends StatelessWidget {
     required this.label,
     required this.isAgent,
     required this.textStyle,
+    this.showPortrait = true,
   });
 
   @override
@@ -82,8 +84,126 @@ class _ComposerMentionChip extends StatelessWidget {
         label: label,
         isAgent: isAgent,
         textStyle: textStyle,
+        showPortrait: showPortrait,
       ),
     );
+  }
+}
+
+/// The closed composer's one-line draft: [controller]'s text, trimmed and
+/// with each run of whitespace read as one space, and each live mention
+/// drawn as its chip. It builds its own span, so the open field's cached
+/// span and chip ranges are untouched.
+TextSpan _collapsedDraftSpan(
+  _MarkdownEditingController controller,
+  TextStyle style,
+) {
+  final text = controller.text;
+  final end = text.trimRight().length;
+  var offset = text.length - text.trimLeft().length;
+  final children = <InlineSpan>[];
+  void addText(int until) {
+    if (until <= offset) return;
+    children.add(
+      TextSpan(
+        text: text.substring(offset, until).replaceAll(RegExp(r'\s+'), ' '),
+      ),
+    );
+  }
+
+  for (final mention in controller.mentions) {
+    addText(mention.start);
+    children.add(
+      WidgetSpan(
+        alignment: PlaceholderAlignment.baseline,
+        baseline: TextBaseline.alphabetic,
+        child: _CollapsedMentionChip(
+          pubkey: mention.pubkey,
+          avatar: mention.candidate.avatarUrl,
+          label:
+              controller._mentionQualifiers[mention.pubkey] ??
+              mention.candidate.label,
+          isAgent: mention.candidate.isAgent,
+          textStyle: style,
+        ),
+      ),
+    );
+    offset = mention.end;
+  }
+  addText(end);
+  return TextSpan(style: style, children: children);
+}
+
+/// A closed composer chip. The one-line bar's ellipsis lays out the chips
+/// past its cut without painting them, so the portrait waits for the chip's
+/// first paint and a cut-off chip downloads nothing. The bar's text span
+/// already scales the chip as a whole for large text, so the chip's own text
+/// doesn't scale again and the chip stays within the bar's line.
+class _CollapsedMentionChip extends HookWidget {
+  final String pubkey;
+  final String? avatar;
+  final String label;
+  final bool isAgent;
+  final TextStyle textStyle;
+
+  const _CollapsedMentionChip({
+    required this.pubkey,
+    required this.avatar,
+    required this.label,
+    required this.isAgent,
+    required this.textStyle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final painted = useState(false);
+    return MediaQuery.withNoTextScaling(
+      child: _FirstPaintListener(
+        onFirstPaint: () {
+          if (context.mounted) painted.value = true;
+        },
+        child: _ComposerMentionChip(
+          pubkey: pubkey,
+          avatar: avatar,
+          label: label,
+          isAgent: isAgent,
+          textStyle: textStyle,
+          showPortrait: painted.value,
+        ),
+      ),
+    );
+  }
+}
+
+/// Calls [onFirstPaint] after the frame in which its child first paints.
+class _FirstPaintListener extends SingleChildRenderObjectWidget {
+  final VoidCallback onFirstPaint;
+
+  const _FirstPaintListener({required this.onFirstPaint, required super.child});
+
+  @override
+  _RenderFirstPaintListener createRenderObject(BuildContext context) =>
+      _RenderFirstPaintListener(onFirstPaint);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _RenderFirstPaintListener renderObject,
+  ) => renderObject.onFirstPaint = onFirstPaint;
+}
+
+class _RenderFirstPaintListener extends RenderProxyBox {
+  VoidCallback onFirstPaint;
+  bool _painted = false;
+
+  _RenderFirstPaintListener(this.onFirstPaint);
+
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    super.paint(context, offset);
+    if (_painted) return;
+    _painted = true;
+    SchedulerBinding.instance.addPostFrameCallback((_) => onFirstPaint());
   }
 }
 

@@ -100,8 +100,134 @@ void mentionChipTests() {
     FocusManager.instance.primaryFocus?.unfocus();
     await tester.pumpAndSettle();
     expect(field, findsNothing);
-    expect(find.text('Hey @Bob there'), findsOneWidget);
+    expect(personChip, findsOneWidget);
+    expect(find.text('Hey \uFFFC there', findRichText: true), findsOneWidget);
   });
+
+  testWidgets(
+    'adjacent picked mentions keep their chips when the keyboard closes',
+    (tester) async {
+      final controller = await mount(
+        tester,
+        onSend: (_, _, {mediaTags = const []}) async {},
+      );
+      final field = find.byType(TextField);
+      await tester.enterText(field, '@bo');
+      await tester.pumpAndSettle();
+      await tester.tap(row('Bob'));
+      await tester.pumpAndSettle();
+      await tester.enterText(field, '${controller.text}@help');
+      await tester.pumpAndSettle();
+      await tester.tap(row('Helper Bot'));
+      await tester.pumpAndSettle();
+      void checkChips() {
+        expect(personChip, findsOneWidget);
+        expect(agentChip, findsOneWidget);
+        final person = tester.getRect(personChip);
+        final agent = tester.getRect(agentChip);
+        expect(person.overlaps(agent), isFalse);
+      }
+
+      checkChips();
+      FocusManager.instance.primaryFocus?.unfocus();
+      await tester.pumpAndSettle();
+      expect(field, findsNothing);
+      checkChips();
+    },
+  );
+
+  /// Mounts the closed composer over a saved draft of [text] in which each
+  /// `@Bob` and `@Alice` is picked. Both have pictures; [requests] records
+  /// every image download.
+  Future<void> mountClosedDraft(
+    WidgetTester tester,
+    String text, {
+    List<String>? requests,
+    bool picked = true,
+  }) async {
+    final signer = nostr.Keys.generate();
+    await _testPrefs.setString(
+      'compose_drafts_v1:https://relay.example:${signer.public}',
+      jsonEncode([
+        {
+          'key': 'channel-1',
+          'channel_id': 'channel-1',
+          'text': text,
+          'mentions': [
+            if (picked)
+              for (final (name, key) in [('Bob', bob), ('Alice', alice)])
+                for (final match in '@$name'.allMatches(text))
+                  {'start': match.start, 'end': match.end, 'pubkey': key},
+          ],
+          'updated_at': 1700000000,
+        },
+      ]),
+    );
+    await tester.pumpWidget(
+      _buildComposeBar(
+        uploadService: _testUploadService(signer.nsec),
+        currentPubkey: signer.public,
+        members: members,
+        relayConfig: () => _SwitchableRelayConfigNotifier(
+          RelayConfig(baseUrl: 'https://relay.example', nsec: signer.nsec),
+        ),
+        channels: [_makeCurrentChannel()],
+        overrides: [
+          userCacheProvider.overrideWith(_PicturedMentionProfiles.new),
+          mediaDiskCacheProvider.overrideWithValue(null),
+          mediaHttpClientProvider.overrideWithValue(
+            http_testing.MockClient((request) async {
+              requests?.add(request.url.toString());
+              return http.Response('', 404);
+            }),
+          ),
+        ],
+        onSend: (_, _, {mediaTags = const []}) async {},
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(TextField), findsNothing);
+  }
+
+  testWidgets('a closed draft downloads only the portraits it shows', (
+    tester,
+  ) async {
+    final requests = <String>[];
+    await mountClosedDraft(
+      tester,
+      '@Bob ${'and then some more words ' * 20}@Alice',
+      requests: requests,
+    );
+    expect(personChip, findsNWidgets(2));
+    // Bob's chip is on screen with his portrait; Alice's is past the
+    // ellipsis and never paints, so hers is never requested.
+    expect(
+      find.descendant(of: personChip.first, matching: find.byType(AvatarImage)),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: personChip.last, matching: find.byType(AvatarImage)),
+      findsNothing,
+    );
+    expect(requests, isNotEmpty);
+    expect(requests.where((url) => url.contains('alice')), isEmpty);
+  });
+
+  for (final scale in [1.0, 2.0]) {
+    testWidgets('chips keep the closed composer at its plain height at '
+        '${scale}x text', (tester) async {
+      tester.platformDispatcher.textScaleFactorTestValue = scale;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      const text = 'Hey @Bob and @Alice';
+      await mountClosedDraft(tester, text, picked: false);
+      final plain = tester.getSize(_collapsedInput).height;
+      // A fresh tree, so the composer reads the second draft.
+      await tester.pumpWidget(const SizedBox());
+      await mountClosedDraft(tester, text);
+      expect(personChip, findsNWidgets(2));
+      expect(tester.getSize(_collapsedInput).height, plain);
+    });
+  }
 
   testWidgets('chips keep the field at the plain line height', (tester) async {
     final controller = await mount(
@@ -1206,4 +1332,16 @@ void mentionChipTests() {
     expect(sentText?.trim(), '@Bob #current');
     expect(sent, [bob]);
   });
+}
+
+class _PicturedMentionProfiles extends UserCacheNotifier {
+  @override
+  Map<String, UserProfile> build() => {
+    for (final (key, name) in [('b' * 64, 'Bob'), ('a' * 64, 'Alice')])
+      key: UserProfile(
+        pubkey: key,
+        displayName: name,
+        avatarUrl: 'https://example.org/${name.toLowerCase()}.png',
+      ),
+  };
 }

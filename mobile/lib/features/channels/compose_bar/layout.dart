@@ -185,16 +185,29 @@ class _ComposeBarLayout extends HookWidget {
                         ),
                         child: Align(
                           alignment: Alignment.centerLeft,
-                          child: Text(
-                            collapsedText,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: context.textTheme.bodyLarge?.copyWith(
-                              color: trimmedDraft.isEmpty
-                                  ? context.colors.onSurfaceVariant
-                                  : context.colors.onSurface,
-                            ),
-                          ),
+                          child:
+                              trimmedDraft.isEmpty ||
+                                  controller.mentions.isEmpty
+                              ? Text(
+                                  collapsedText,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: context.textTheme.bodyLarge?.copyWith(
+                                    color: trimmedDraft.isEmpty
+                                        ? context.colors.onSurfaceVariant
+                                        : context.colors.onSurface,
+                                  ),
+                                )
+                              : Text.rich(
+                                  _collapsedDraftSpan(
+                                    controller,
+                                    context.textTheme.bodyLarge!.copyWith(
+                                      color: context.colors.onSurface,
+                                    ),
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
                         ),
                       ),
                     ),
