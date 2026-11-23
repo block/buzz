@@ -6,6 +6,7 @@ import 'bestie_transcription_status.dart';
 import '../../shared/widgets/duo_toolbar.dart';
 import 'composer_geometry.dart';
 import 'message_author_visibility.dart';
+import 'action_message_body.dart';
 
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 

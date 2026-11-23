@@ -297,7 +297,9 @@ class _ThreadMessageList extends HookWidget {
                               reply.createdAt,
                             );
                         final showAuthor =
+                            reply.action != null ||
                             reply.hasAttachments ||
+                            previousReply?.action != null ||
                             previousReply?.hasAttachments == true ||
                             previousReply == null ||
                             showDayDivider ||
@@ -310,7 +312,9 @@ class _ThreadMessageList extends HookWidget {
                             ? replies[chronologicalIndex + 1]
                             : null;
                         final showAvatar =
+                            reply.action != null ||
                             reply.hasAttachments ||
+                            nextReply?.action != null ||
                             nextReply?.hasAttachments == true ||
                             nextReply == null ||
                             !isSameDay(reply.createdAt, nextReply.createdAt) ||

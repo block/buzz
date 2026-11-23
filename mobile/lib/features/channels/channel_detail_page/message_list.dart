@@ -986,7 +986,9 @@ class _MessageList extends HookConsumerWidget {
 
                 final showAuthor =
                     !message.isSystem &&
-                    (message.hasAttachments ||
+                    (message.action != null ||
+                        message.hasAttachments ||
+                        prevMessage?.action != null ||
                         prevMessage?.hasAttachments == true ||
                         prevMessage == null ||
                         prevMessage.isSystem ||
@@ -999,9 +1001,11 @@ class _MessageList extends HookConsumerWidget {
                     ? displayEntries[chronIdx + 1].first.message
                     : null;
                 final showAvatar =
+                    message.action != null ||
                     message.hasAttachments ||
                     nextMessage == null ||
                     nextMessage.isSystem ||
+                    nextMessage.action != null ||
                     nextMessage.hasAttachments ||
                     !isSameDay(message.createdAt, nextMessage.createdAt) ||
                     nextMessage.pubkey.toLowerCase() !=

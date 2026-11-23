@@ -2,6 +2,123 @@ part of '../channel_detail_page_test.dart';
 
 void bubbleLayoutTests() {
   messageAuthorVisibilityTests();
+  for (final scale in [1.0, 2.0]) {
+    testWidgets('narrated actions keep identity and replies at scale $scale', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(390, 1100);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final semantics = tester.ensureSemantics();
+      try {
+        await tester.pumpWidget(
+          _buildTestable(
+            signingPubkey: 'self',
+            textScaler: TextScaler.linear(scale),
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'self': UserProfile(
+                pubkey: 'self',
+                displayName: 'Alex *literal*',
+              ),
+            },
+            messages: [
+              _textMsg(id: 'before', pubkey: 'alice', content: 'Before'),
+              _textMsg(
+                id: threadIdRoot,
+                pubkey: 'alice',
+                content: '/me goes off to fix that bug right now',
+              ),
+              _reaction(id: 'root-action-reaction', targetId: threadIdRoot),
+              _reaction(id: 'own-action-reaction', targetId: 'own-action'),
+              _reaction(id: 'reply-action-reaction', targetId: threadIdR1),
+              _textMsg(id: 'after', pubkey: 'alice', content: 'After'),
+              _textMsg(
+                id: 'own-action',
+                pubkey: 'self',
+                content: '/me eats a drumstick',
+              ),
+              _textMsg(
+                id: threadIdR1,
+                pubkey: 'alice',
+                content: '/me grabs a blowtorch',
+                extraTags: [
+                  ['e', threadIdRoot, '', 'reply'],
+                ],
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+        Finder within(String id, Finder target) => find.descendant(
+          of: find.byKey(ValueKey('message-row-$id')),
+          matching: target,
+        );
+        expect(
+          findRichText('Alice goes off to fix that bug right now'),
+          findsOneWidget,
+        );
+        expect(findRichText('Alex *literal* eats a drumstick'), findsOneWidget);
+        expect(
+          within(threadIdRoot, find.byType(LocalSendBubbleSurface)),
+          findsNothing,
+        );
+        expect(
+          within('own-action', find.byType(LocalSendBubbleSurface)),
+          findsNothing,
+        );
+        expect(
+          within('after', find.byType(LocalSendBubbleSurface)),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('message-author-after')),
+          findsOneWidget,
+        );
+        final body = tester.widget<MessageContent>(
+          within(threadIdRoot, find.byType(MessageContent)),
+        );
+        expect(body.baseStyle?.fontStyle, FontStyle.italic);
+        void expectReactionBelowTimestamp(String rowKey) {
+          final row = find.byKey(ValueKey(rowKey));
+          final timestamp = find.descendant(
+            of: row,
+            matching: find.text(formatMessageTime(1000)),
+          );
+          final reactions = find.descendant(
+            of: row,
+            matching: find.byType(ReactionRow),
+          );
+          expect(
+            tester.getTopLeft(reactions).dy,
+            greaterThanOrEqualTo(tester.getBottomLeft(timestamp).dy),
+          );
+        }
+
+        expectReactionBelowTimestamp('message-row-$threadIdRoot');
+        expectReactionBelowTimestamp('message-row-own-action');
+        expect(
+          find.bySemanticsLabel('Open Alex *literal* profile'),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull);
+
+        await tester.tap(
+          findRichText('Alice goes off to fix that bug right now'),
+        );
+        await tester.pumpAndSettle();
+        expect(findRichText('Alice grabs a blowtorch'), findsOneWidget);
+        expectReactionBelowTimestamp('thread-message-row-$threadIdR1');
+        expect(
+          find.byKey(ValueKey('thread-message-row-$threadIdR1')),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull);
+      } finally {
+        semantics.dispose();
+      }
+    });
+  }
   testWidgets('reply footer does not add reaction padding inside the bubble', (
     tester,
   ) async {

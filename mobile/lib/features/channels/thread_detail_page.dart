@@ -1,4 +1,5 @@
 import 'message_author_visibility.dart';
+import 'action_message_body.dart';
 
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 
