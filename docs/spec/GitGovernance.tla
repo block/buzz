@@ -72,7 +72,13 @@
 (* commits landed since it records them, and it computes what a push      *)
 (* brings from the tips in force, not from everything ever shown: a       *)
 (* commit landed before then that becomes unreachable and is pushed again *)
-(* is credited to that push.  That only adds authors.                     *)
+(* is credited to that push.  That only adds authors.  Resource limits:    *)
+(* the relay refuses, before any decision, a push that makes more than     *)
+(* 100,000 commits visible; and a ref change bringing more than 10,000     *)
+(* commits, with an approval that could count for it, refuses the whole    *)
+(* push.  That refusal's receipt counts no approval for the ref, where     *)
+(* IsReceiptOf expects the eligible ones; its checks are still those       *)
+(* selected.                                                               *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 

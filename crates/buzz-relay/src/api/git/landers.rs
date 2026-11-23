@@ -3,13 +3,16 @@
 //! approvers (`docs/spec/GitGovernance.tla`, `pushed` and `Authors`).
 //!
 //! ```text
-//!   rev-list <new tips> ^<tips in force>     ─► incoming: recorded after the swap
-//!   rev-list --max-count=N+1 <new> ^<old>    ─► each ref's brings: its authors
+//!   rev-list --max-count=M+1 <new tips> ^<tips in force> ─► incoming: recorded after the swap
+//!   rev-list --max-count=N+1 <new> ^<old>                ─► each ref's brings: its authors
 //! ```
 //!
-//! Incoming is the scan's set, commits only. A ref's brings are bounded: past
-//! [`MAX_BRINGS`] the land cannot tell who did the work, so it refuses the ref
-//! if an approval of it could count, and lands it otherwise.
+//! Incoming is the scan's set, commits only, and Git stops listing it past
+//! [`MAX_INCOMING`]: a push that makes more commits visible is refused before
+//! the land, so no record is ever partial. A ref's brings are bounded too:
+//! past [`MAX_BRINGS`] the land cannot tell who did the work, so it refuses
+//! the push, naming the ref, if an approval of it could count, and lands it
+//! otherwise.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -25,26 +28,33 @@ const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 /// Commits a ref change may bring and still have its authors found.
 pub(super) const MAX_BRINGS: usize = 10_000;
 
+/// Commits one push may make visible. Each is a row the land writes and
+/// about 100 bytes here, so this bounds both.
+pub(super) const MAX_INCOMING: usize = 100_000;
+
 /// Bounded like the scan.
 const TIMEOUT: Duration = Duration::from_secs(300);
 
 /// What a push brings, as the land needs it.
 #[derive(Debug, Default)]
 pub(super) struct Brought {
-    /// Commits the new tips reach that no tip in force does.
-    pub incoming: Vec<String>,
+    /// Commits the new tips reach that no tip in force does, or `None`
+    /// past [`MAX_INCOMING`].
+    pub incoming: Option<Vec<String>>,
     /// Per update, in order: the commits its new tip reaches that its old
     /// one does not, or `None` past [`MAX_BRINGS`].
     pub brings: Vec<Option<Vec<String>>>,
 }
 
-/// Read what the push from `before` to `after` brings. Runs in `repo_path`,
+/// Read what the push from `before` to `after` brings, listing at most
+/// `max_incoming` (in production [`MAX_INCOMING`]). Runs in `repo_path`,
 /// which holds both. An error means the land cannot know, and must not run.
 pub(super) async fn read(
     repo_path: &Path,
     before: &BTreeMap<String, String>,
     after: &BTreeMap<String, String>,
     updates: &[RefUpdate],
+    max_incoming: usize,
 ) -> std::io::Result<Brought> {
     let read = async {
         let mut revs = String::new();
@@ -55,9 +65,11 @@ pub(super) async fn read(
             revs.push_str(&format!("^{oid}\n"));
         }
         let incoming = if after.values().any(|o| o != ZERO_OID) {
-            rev_list(repo_path, &[], &revs).await?
+            let max = format!("--max-count={}", max_incoming + 1);
+            let i = rev_list(repo_path, &[&max], &revs).await?;
+            (i.len() <= max_incoming).then_some(i)
         } else {
-            Vec::new()
+            Some(Vec::new())
         };
         let mut brings = Vec::with_capacity(updates.len());
         for u in updates {

@@ -2150,6 +2150,9 @@ struct FinalizePushHooks {
     /// heartbeat renewal would, while the durable lease stays valid.
     #[cfg(test)]
     lose_lease_signal_after_cas: bool,
+    /// Stand-in for `landers::MAX_INCOMING`, so a test can pass it.
+    #[cfg(test)]
+    max_incoming: Option<usize>,
 }
 
 #[cfg(test)]
@@ -2184,6 +2187,11 @@ async fn observe_push(
     let disposition = push_disposition(pack.exited_ok, &parent_state.parent.refs, &workspace.refs);
     Ok((disposition, workspace))
 }
+
+/// Why a push is refused that makes more commits visible than the land
+/// records (`super::landers::MAX_INCOMING`).
+const TOO_MANY_INCOMING: &str =
+    "the push makes too many new commits visible to attribute; push the history in parts";
 
 /// The response for a publication that failed before the land: nothing was
 /// committed.
@@ -2368,11 +2376,15 @@ async fn finalize_push_inner(
     .await;
     // Who did the work, read before the land for the same reason. A push
     // whose commits cannot be listed is never judged.
+    let max_incoming = super::landers::MAX_INCOMING;
+    #[cfg(test)]
+    let max_incoming = hooks.max_incoming.unwrap_or(max_incoming);
     let brought = match super::landers::read(
         ctx.repo_handle.path(),
         &ctx.parent_state.parent.refs,
         &workspace.refs,
         &updates,
+        max_incoming,
     )
     .await
     {
@@ -2381,6 +2393,10 @@ async fn finalize_push_inner(
             warn!(owner = %ctx.owner, repo = %ctx.repo, %error, "push refused: could not list the commits it brings");
             return (StatusCode::SERVICE_UNAVAILABLE, "authorization unavailable").into_response();
         }
+    };
+    let Some(incoming) = brought.incoming.as_deref() else {
+        warn!(owner = %ctx.owner, repo = %ctx.repo, "push refused: it makes too many commits visible to attribute");
+        return (StatusCode::PAYLOAD_TOO_LARGE, TOO_MANY_INCOMING).into_response();
     };
     let pusher = ctx.pusher.to_bytes();
     let verdict = super::land::land(
@@ -2394,7 +2410,7 @@ async fn finalize_push_inner(
             seen: ctx.parent_state.parent_digest.as_deref(),
             new: prepared.digest(),
             updates: &updates,
-            incoming: &brought.incoming,
+            incoming,
         },
         async |tx, authority| {
             super::gate::push(
@@ -3642,6 +3658,7 @@ mod track_c_tests {
             post_cas_gate: Some(Arc::clone(&gate)),
             fail_ref_state_insert: false,
             lose_lease_signal_after_cas: false,
+            max_incoming: None,
         };
         let finalize_state = Arc::clone(&state);
         let finalize =
@@ -3735,6 +3752,7 @@ mod track_c_tests {
             post_cas_gate: None,
             fail_ref_state_insert: true,
             lose_lease_signal_after_cas: false,
+            max_incoming: None,
         };
 
         let response = finalize_push_inner(&state, ctx, &hooks).await;
@@ -3778,6 +3796,7 @@ mod track_c_tests {
             post_cas_gate: None,
             fail_ref_state_insert: false,
             lose_lease_signal_after_cas: true,
+            max_incoming: None,
         };
 
         let response = finalize_push_inner(&state, ctx, &hooks).await;
@@ -3874,6 +3893,79 @@ mod track_c_tests {
         pool.close().await;
     }
 
+    /// A push that makes more commits visible than the land can record is
+    /// refused before the land: no pointer, no kind:30618, no lander row. At
+    /// the bound it lands and records each one.
+    async fn finalize_push_refuses_a_push_too_large_to_attribute() {
+        let (state, pool) = finalize_test_state().await;
+        let host = format!(
+            "git-finalize-incoming-{}.example",
+            uuid::Uuid::new_v4().simple()
+        );
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create test community")
+            .id;
+        let pusher = Keys::generate();
+        let (owner, repo) = governed_repo(&state, community, &pusher).await;
+        let landers = || {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM git_commit_landers WHERE community_id = $1 AND repo_id = $2",
+            )
+            .bind(community.as_uuid())
+            .bind(&repo)
+            .fetch_one(&pool)
+        };
+        let pointer = crate::api::git::manifest::pointer_key(community, &owner, &repo);
+        for (max, status, recorded) in [
+            (0, StatusCode::PAYLOAD_TOO_LARGE, 0),
+            (1, StatusCode::OK, 1),
+        ] {
+            let scratch = TempDir::new().expect("scratch");
+            let ctx = pushed_context(
+                &state,
+                community,
+                &host,
+                owner.clone(),
+                repo.clone(),
+                pusher.public_key(),
+                scratch.path(),
+            )
+            .await;
+            let hooks = FinalizePushHooks {
+                max_incoming: Some(max),
+                ..Default::default()
+            };
+            let response = finalize_push_inner(&state, ctx, &hooks).await;
+            assert_eq!(response.status(), status, "bound {max}");
+            assert_eq!(
+                state
+                    .git_store
+                    .get_pointer(&pointer)
+                    .await
+                    .expect("read pointer")
+                    .is_some(),
+                recorded == 1,
+                "bound {max}: the pointer moves only when the push lands"
+            );
+            assert_eq!(
+                landers().await.expect("count landers"),
+                recorded,
+                "bound {max}"
+            );
+            assert!(state
+                .db
+                .deletion_store()
+                .serving_writes_drained(community)
+                .await
+                .expect("serving lease released"));
+        }
+        drop(state);
+        pool.close().await;
+    }
+
     mod external_infra_minio_tests {
         #[tokio::test]
         #[ignore = "requires Postgres and MinIO"]
@@ -3903,6 +3995,12 @@ mod track_c_tests {
         #[ignore = "requires Postgres and MinIO"]
         async fn finalize_push_publishes_nothing_when_receive_pack_changed_no_ref() {
             super::finalize_push_publishes_nothing_when_receive_pack_changed_no_ref().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres and MinIO"]
+        async fn finalize_push_refuses_a_push_too_large_to_attribute() {
+            super::finalize_push_refuses_a_push_too_large_to_attribute().await;
         }
     }
 

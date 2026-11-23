@@ -1784,6 +1784,7 @@ mod external_infra {
                 &parent.parent.refs,
                 &workspace.refs,
                 &updates,
+                super::super::super::landers::MAX_INCOMING,
             )
             .await
             .unwrap();
@@ -1810,7 +1811,7 @@ mod external_infra {
                     seen: parent.parent_digest.as_deref(),
                     new: prepared.digest(),
                     updates: &updates,
-                    incoming: &brought.incoming,
+                    incoming: brought.incoming.as_deref().expect("within the bound"),
                 },
                 async |tx, authority| {
                     super::super::super::gate::push(
@@ -3761,8 +3762,8 @@ mod external_infra {
     /// count, an agent's commits are its owner's, refused lands record no
     /// lander, a commit with no lander row (landed before the relay recorded
     /// them) that comes back is credited to the push that brings it back, and
-    /// a change too large to attribute is refused only where an approval of it
-    /// could count.
+    /// a change too large to attribute refuses the push only when an approval
+    /// of it could count.
     #[tokio::test]
     #[ignore = "requires isolated Postgres, Redis and MinIO"]
     async fn a_commits_first_lander_cannot_approve_the_change_that_brings_it() {
@@ -4011,7 +4012,8 @@ mod external_infra {
 
         // Past MAX_BRINGS the land cannot tell who did the work. Unapproved,
         // or on an unprotected ref, that changes nothing; approved, it
-        // refuses the ref, counting nothing. 10,000 is still attributed.
+        // refuses the whole push, naming the ref and counting no approval.
+        // 10,000 is still attributed.
         for (n, approved, protected, landed) in [
             (10_000, true, true, true),
             (10_001, false, false, true),
@@ -4050,6 +4052,9 @@ mod external_infra {
             };
             git(push.path(), &["update-ref", "-d", "refs/heads/big"]).await;
             git(push.path(), &["update-ref", target, &big]).await;
+            // Another ref in the same push, which needs no approval.
+            let other = format!("refs/heads/other-{n}-{approved}");
+            git(push.path(), &["update-ref", &other, &old]).await;
             let expected = if approved {
                 Some(approve(&f.member, &big, &old).await)
             } else {
@@ -4067,6 +4072,9 @@ mod external_infra {
                     "{n} commits: {v:?}"
                 );
                 assert!(counted("git_refused").await.is_empty(), "nothing counted");
+                let (after, _) = hydrate().await;
+                let other = git(after.path(), &["for-each-ref", &other]).await;
+                assert!(other.is_empty(), "the other ref is refused with the push");
             }
         }
     }

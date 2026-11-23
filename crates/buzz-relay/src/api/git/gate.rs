@@ -357,7 +357,7 @@ fn assemble(
             // the pusher never approves its own push.
             brings: u.new_oid != ZERO_OID,
             // The approvers who first landed a commit it brings. Unknown
-            // ones are refused below, never left out.
+            // ones refuse the push below, never left out.
             authors: authors.iter().flatten().map(|k| ids.key(k)).collect(),
             // Not resolved yet: a codeowners requirement denies instead.
             owners: Vec::new(),

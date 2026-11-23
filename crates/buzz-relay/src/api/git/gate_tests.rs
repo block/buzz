@@ -569,12 +569,12 @@ fn an_approver_who_landed_a_brought_commit_does_not_count() {
     );
 }
 
-/// Authors past the attribution limit refuse that ref, saying why, even
-/// with no rule, and count nothing; the push's other refs are judged as
-/// usual. (Only a ref with an approval reaches here unknown: see
-/// `gate::authors`.)
+/// Authors past the attribution limit refuse the push, naming that ref and
+/// why, even with no rule, and count no approval for it; the other refs add
+/// no denial of their own. (Only a ref with an approval reaches here
+/// unknown: see `gate::authors`.)
 #[test]
-fn a_ref_whose_authors_are_unknown_refuses_only_where_approvals_could_count() {
+fn a_ref_whose_authors_are_unknown_refuses_the_push_naming_it() {
     let mut c = Case::new(policy(vec![], vec![]));
     c.updates.push(RefUpdate {
         ref_name: "refs/heads/release".into(),
