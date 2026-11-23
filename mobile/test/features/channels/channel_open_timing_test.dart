@@ -250,6 +250,41 @@ void main() {
     });
   });
 
+  for (final away in [false, true]) {
+    test(
+      'a refusal that arrives before the history asks '
+      '${away ? 'after a move to the background is not counted' : 'in the foreground counts'}',
+      () {
+        fakeAsync((async) {
+          final (:relay, :counts, :container, :opens) = _start(async);
+          final req = relay.holdReq();
+          container.listen(channelMessagesProvider(_channel), (_, _) {});
+          async.elapse(const Duration(milliseconds: 50));
+          expect(relay.reqs, isNotEmpty);
+          if (away) {
+            container.read(relaySessionProvider.notifier).onAppPaused();
+          }
+          relay.refuseReq(
+            (filter) => filter.containsKey('#h'),
+            'restricted: not a channel member',
+          );
+          req.complete();
+          async.elapse(const Duration(seconds: 1));
+          expect(relay.queries, isEmpty, reason: 'refused before the history');
+          if (away) {
+            expect(
+              opens(),
+              isEmpty,
+              reason: 'it spanned a move to the background',
+            );
+          } else {
+            expect(opens().single.failure, NetworkFailure.relayRefused);
+          }
+        });
+      },
+    );
+  }
+
   test('a relay that runs out of time on the history fails the open', () {
     fakeAsync((async) {
       final (:relay, :counts, :container, :opens) = _start(async);

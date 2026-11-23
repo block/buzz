@@ -15,17 +15,18 @@ import '../../shared/relay/relay.dart';
 /// else, and one that spanned a move to the background measured the time
 /// away, so neither is counted. Nor is one started in the background.
 class ChannelOpenTimer {
-  factory ChannelOpenTimer(Ref ref) {
+  factory ChannelOpenTimer(Ref ref, {bool timed = true}) {
     final config = ref.read(relayConfigProvider);
     final reporter = ref.read(diagnosticReporterProvider);
     return ChannelOpenTimer._(
       SignerDiagnosticReporter(reporter, signer: pubkeyFromNsec(config.nsec)),
       Uri.tryParse(config.baseUrl)?.host,
       ref.read(relaySessionProvider.notifier),
+      timed,
     );
   }
 
-  ChannelOpenTimer._(this._reporter, this._host, this._session)
+  ChannelOpenTimer._(this._reporter, this._host, this._session, this._timed)
     : _memberChanges = _reporter.memberChanges,
       _pauses = _session.pauses,
       _startedAt = clock.now(),
@@ -36,17 +37,13 @@ class ChannelOpenTimer {
   static ChannelOpenTimer resume(ChannelOpenTimer? pending, Ref ref) =>
       pending != null && !pending.isDone ? pending : ChannelOpenTimer(ref);
 
-  /// Ends [timer] with the relay's refusal. A first open refused before its
-  /// history was asked for has no timer and counts with no duration.
-  static void refused(
-    Ref ref,
-    ChannelOpenTimer? timer,
-    Object error, {
-    required bool loaded,
-  }) {
-    if (timer != null) return timer.finish(error: error);
-    if (!loaded) ChannelOpenTimer(ref)._count(error, timed: false);
-  }
+  /// An untimed open for a load's refusal, which can end a first open before
+  /// its history was asked for and then counts with no duration. It is fixed
+  /// when the load starts, so a refusal that arrives after a move to the
+  /// background or another member is not counted. Null once the channel
+  /// has loaded, since a later refusal is not an open.
+  static ChannelOpenTimer? refusal(Ref ref, {required bool loaded}) =>
+      loaded ? null : ChannelOpenTimer(ref, timed: false);
 
   final DiagnosticReporter _reporter;
   final String? _host;
@@ -54,6 +51,7 @@ class ChannelOpenTimer {
   final int _memberChanges;
   final int _pauses;
   final DateTime _startedAt;
+  final bool _timed;
   bool _done;
 
   /// Whether the open was already counted or dropped, or spanned a move to
@@ -71,7 +69,7 @@ class ChannelOpenTimer {
     _count(error);
   }
 
-  void _count(Object? error, {bool timed = true}) {
+  void _count(Object? error) {
     final host = _host;
     if (host == null || host.isEmpty) return;
     if (_reporter.memberChanges != _memberChanges) return;
@@ -84,7 +82,7 @@ class ChannelOpenTimer {
             ? NetworkOutcome.success
             : NetworkOutcome.failure,
         failure: failure,
-        duration: timed ? clock.now().difference(_startedAt) : null,
+        duration: _timed ? clock.now().difference(_startedAt) : null,
       ),
     );
   }

@@ -200,13 +200,13 @@ class FakeRelay {
         }
         reqs.add(message);
         final filters = message.skip(2).cast<Map<String, dynamic>>().toList();
-        final refusal = _refusals.indexWhere((r) => filters.any(r.match));
-        if (refusal >= 0) {
-          final reason = _refusals.removeAt(refusal).message;
-          scheduleMicrotask(() => socket._reply(['CLOSED', subId, reason]));
-          return;
-        }
         void admit() {
+          final refusal = _refusals.indexWhere((r) => filters.any(r.match));
+          if (refusal >= 0) {
+            final reason = _refusals.removeAt(refusal).message;
+            scheduleMicrotask(() => socket._reply(['CLOSED', subId, reason]));
+            return;
+          }
           if (!socket._authenticated) return;
           final history = _query(filters);
           if (history == null) return;

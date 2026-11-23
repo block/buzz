@@ -257,6 +257,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         ? null
         : cache.capture(cacheScope, (channelId: channelId, rootId: ''));
     ChannelOpenTimer? openTimer;
+    final refusal = ChannelOpenTimer.refusal(ref, loaded: _hasLoadedHistory);
     try {
       final session = ref.read(relaySessionProvider.notifier);
 
@@ -301,7 +302,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
               StackTrace.current,
               cache,
               cacheScope,
-              openTimer ?? _openTimer?.running,
+              openTimer ?? _openTimer?.running ?? refusal,
             );
           },
         );
@@ -374,7 +375,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     } catch (e, st) {
       if (!_isCurrentInit(initVersion)) return;
       if (isRelayChannelAccessDenied(e)) {
-        _denyAccess(e, st, cache, cacheScope, openTimer);
+        _denyAccess(e, st, cache, cacheScope, openTimer ?? refusal);
         return;
       }
       openTimer?.finish(error: e);
@@ -420,9 +421,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     ChannelOpenTimer? openTimer,
   ]) {
     _detachLive();
-    // A live refusal can end the first open, even before its request.
     _openTimer = null;
-    ChannelOpenTimer.refused(ref, openTimer, error, loaded: _hasLoadedHistory);
+    openTimer?.finish(error: error);
     _lastKnownMessages = null;
     _hasLoadedHistory = false;
     _windowStore = const ChannelWindowStore.empty();
