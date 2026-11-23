@@ -386,7 +386,19 @@ class ChannelActions {
       ...added,
     };
     final rosters = <NostrEvent>[];
+    final String? relayAuthor;
     try {
+      // Only the relay signs rosters; anyone can publish a lookalike.
+      final author = _ref.listen(
+        relayAuthorProvider(_ref.read(relayConfigProvider).baseUrl).future,
+        (_, _) {},
+      );
+      try {
+        relayAuthor = await author.read();
+      } finally {
+        author.close();
+      }
+      if (relayAuthor == null) return null;
       // Whichever DM it landed in holds the first of them.
       for (final tags in [
         {
@@ -400,6 +412,7 @@ class ChannelActions {
           await _session.queryRelay([
             NostrFilter(
               kinds: const [39002],
+              authors: [relayAuthor],
               tags: tags,
               limit: 100,
               extensions: const {'consistency': 'strong'},
@@ -414,7 +427,7 @@ class ChannelActions {
     _ensureCommunityValid();
     final ids = <String>{
       for (final event in rosters)
-        if (event.kind == 39002)
+        if (event.kind == 39002 && event.pubkey == relayAuthor)
           if (event.getTagValue('d') case final id?)
             if (_holds(event, id == channelId ? added : required) &&
                 (id == channelId || !known.contains(id)))

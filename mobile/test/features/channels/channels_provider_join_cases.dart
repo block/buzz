@@ -556,9 +556,14 @@ void _confirmedJoinCases() {
     });
 
     group('an add whose answer was lost', () {
-      NostrEvent roster(String id, List<String> members) => NostrEvent(
-        id: 'roster-$id-${members.length}',
-        pubkey: 'creator',
+      const relay = 'relay';
+      NostrEvent roster(
+        String id,
+        List<String> members, {
+        String signer = relay,
+      }) => NostrEvent(
+        id: 'roster-$id-${members.length}-$signer',
+        pubkey: signer,
         createdAt: 2,
         kind: 39002,
         tags: [
@@ -586,7 +591,12 @@ void _confirmedJoinCases() {
               ..writerMemberships = [
                 roster(_otherJoinedChannel, const ['me', 'alice']),
               ];
-        final container = _buildContainer(session: session);
+        final container = _buildContainer(
+          session: session,
+          overrides: [
+            relayAuthorProvider.overrideWith((ref, url) async => relay),
+          ],
+        );
         addTearDown(container.dispose);
         final actions = container.read(
           Provider<ChannelActions>(
@@ -641,6 +651,32 @@ void _confirmedJoinCases() {
           );
         },
       );
+
+      test('trusts only rosters the relay signed', () async {
+        final (actions, session) = await setUpAdd();
+        session.dmAddsLost.add([
+          roster(_otherJoinedChannel, const ['me', 'alice']),
+          roster(_joinedChannel, const [
+            'me',
+            'alice',
+            'robin',
+          ], signer: 'mallory'),
+        ]);
+        await expectLater(
+          add(actions),
+          throwsA(
+            isA<Exception>().having(
+              (error) => error.toString(),
+              'message',
+              'Exception: Couldn’t add them. Try again.',
+            ),
+          ),
+        );
+        expect(
+          session.strongRosterFilters.map((filter) => filter.authors),
+          everyElement([relay]),
+        );
+      });
 
       test(
         'fails when the roster shows it did not land, and only then adds again',
@@ -705,6 +741,7 @@ class _WriterReplicaRelaySession extends _FakeRelaySession {
 
   List<NostrEvent> writerMemberships = const [];
   int strongMembershipReads = 0;
+  final strongRosterFilters = <NostrFilter>[];
   int rosterFailures = 0;
   final published = <NostrEvent>[];
 
@@ -764,6 +801,7 @@ class _WriterReplicaRelaySession extends _FakeRelaySession {
         when filter.kinds.length == 1 &&
             filter.kinds.single == 39002 &&
             filter.extensions['consistency'] == 'strong') {
+      strongRosterFilters.add(filter);
       final channelIds = filter.tags['#d']?.toSet();
       if (channelIds != null) {
         if (rosterFailures > 0) {

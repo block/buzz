@@ -13,6 +13,7 @@ import '../../shared/crypto/nip_oa.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/relay/relay_author_provider.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/verified_profiles/verified_profile.dart';
 import '../../shared/verified_profiles/verified_profile_directory.dart';
