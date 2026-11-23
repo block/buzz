@@ -344,7 +344,14 @@ Widget _composerSuggestionPanel({
     ? KeyedSubtree(
         key: const ValueKey('channel-suggestions'),
         child: TextFieldTapRegion(
-          child: _ChannelSuggestions(
+          child: _ComposerSearchSuggestions<Channel>(
+            surfaceKey: const ValueKey('channel-suggestions-popover'),
+            leading: (context, _) => Icon(
+              BuzzIcons.hash,
+              size: 20,
+              color: context.colors.onSurfaceVariant,
+            ),
+            label: (channel) => channel.name,
             suggestions: channelSuggestions,
             onSelect: onChannelSelect,
           ),
@@ -548,7 +555,7 @@ enum _NonMemberMentionChoice { invite, sendWithoutInviting }
 /// User-facing text for a failed add or send.
 String _composeSendErrorMessage(Object error) {
   if (error is AddMembersException) return error.message;
-  return error.toString().replaceFirst('Exception: ', '');
+  return relayErrorText(error);
 }
 
 /// Describes why a text send failed. A community switch is reported

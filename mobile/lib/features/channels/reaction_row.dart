@@ -55,16 +55,18 @@ const _pillGlyphSize = 16.0;
 /// [emoji], removes the reaction; otherwise adds it.
 ///
 /// Used by channel detail, thread detail, and system message rows to avoid
-/// duplicating the toggle wiring.
+/// duplicating the toggle wiring. Takes the page's [ProviderContainer] rather
+/// than a row's ref, so a toggle from a sheet still lands after a new message
+/// rebuilds the row away.
 void toggleReaction(
   BuildContext context,
-  WidgetRef ref,
+  ProviderContainer container,
   TimelineMessage message,
   String emoji,
 ) {
   final reaction = message.reactions.where((r) => r.emoji == emoji).firstOrNull;
   if (reaction == null) return;
-  final actions = ref.read(channelActionsProvider);
+  final actions = container.read(channelActionsProvider);
   if (reaction.reactedByCurrentUser && reaction.currentUserReactionId != null) {
     reportReactionFailure(
       context,
@@ -74,7 +76,7 @@ void toggleReaction(
   } else {
     // Only adding counts as a use — removing a reaction shouldn't promote the
     // emoji in the frequently-used ranking.
-    ref.read(recentEmojiProvider.notifier).record(emoji);
+    container.read(recentEmojiProvider.notifier).record(emoji);
     reportReactionFailure(
       context,
       actions.addReaction(message.id, emoji, targetAuthor: message.pubkey),
@@ -152,38 +154,63 @@ String? _reactionFailureMessage(Object error, {required bool adding}) {
 /// Pill taps don't go through here: they burst immediately, because the pill is
 /// already on screen. Adding a reaction you already have is a no-op on the
 /// relay, so it shouldn't celebrate either.
-void armReactionBurst(WidgetRef ref, TimelineMessage message, String emoji) {
+void armReactionBurst(
+  ProviderContainer container,
+  TimelineMessage message,
+  String emoji,
+) {
   final alreadyReacted = message.reactions.any(
     (reaction) => reaction.emoji == emoji && reaction.reactedByCurrentUser,
   );
   if (alreadyReacted) return;
-  ref.read(pendingReactionBurstProvider.notifier).arm(message.id, emoji);
+  container.read(pendingReactionBurstProvider.notifier).arm(message.id, emoji);
 }
 
-/// Open the emoji picker and add whatever the user chooses as a reaction to
-/// [message].
+/// Returns a check that a reaction picked later still belongs to the community
+/// that was active now.
+///
+/// A notification can switch the active community while a picker is open. The
+/// picked reaction targets a message from the old one, so it is dropped rather
+/// than signed by the new account.
+bool Function() captureReactionCommunity(ProviderContainer container) {
+  final opened = container.read(relayConfigProvider);
+  return () => container.read(relayConfigProvider).isSameCommunity(opened);
+}
+
+/// Returns the callback for a row's `+` that opens the emoji picker and adds
+/// whatever the user chooses as a reaction to [message].
 ///
 /// Shared by the `+` pill in the channel timeline and in the thread view so the
 /// recency bookkeeping and burst arming can't drift apart between them.
-void showAddReactionPicker({
+///
+/// Call it while the row builds. A new message can rebuild the row away before
+/// the callback runs or while the picker is open, so it holds the page's
+/// container and navigator rather than the row's context.
+VoidCallback addReactionPickerFor({
   required BuildContext context,
-  required WidgetRef ref,
   required TimelineMessage message,
 }) {
-  showEmojiPicker(
-    context: context,
-    onSelect: (emoji) {
-      ref.read(recentEmojiProvider.notifier).record(emoji);
-      armReactionBurst(ref, message, emoji);
-      reportReactionFailure(
-        context,
-        ref
-            .read(channelActionsProvider)
-            .addReaction(message.id, emoji, targetAuthor: message.pubkey),
-        adding: true,
-      );
-    },
-  );
+  final container = ProviderScope.containerOf(context, listen: false);
+  final navigator = Navigator.of(context);
+  return () {
+    if (!navigator.mounted) return;
+    final stillCurrent = captureReactionCommunity(container);
+    showEmojiPicker(
+      context: navigator.context,
+      onSelect: (emoji) {
+        if (!stillCurrent()) return;
+        container.read(recentEmojiProvider.notifier).record(emoji);
+        armReactionBurst(container, message, emoji);
+        reportReactionFailure(
+          navigator.context,
+          container
+              .read(channelActionsProvider)
+              .addReaction(message.id, emoji, targetAuthor: message.pubkey),
+          adding: true,
+        );
+      },
+    );
+  };
 }
 
 class ReactionRow extends HookWidget {
@@ -585,12 +612,27 @@ Future<void> showReactionDetailSheet({
   VoidCallback? onAddReaction,
 }) async {
   if (reactions.value.isEmpty) return;
+  // A notification can switch community while the sheet is up (or while the
+  // native tray dismisses); nothing picked here may go out as the new account.
+  final stillCurrent = captureReactionCommunity(
+    ProviderScope.containerOf(context, listen: false),
+  );
+  void guardedToggle(String emoji) {
+    if (stillCurrent()) onToggle(emoji);
+  }
+
+  final add = onAddReaction;
+  final guardedAdd = add == null
+      ? null
+      : () {
+          if (stillCurrent()) add();
+        };
   if (await _showNativeReactionDetails(
     context,
     channelId,
     reactions,
-    onToggle,
-    onAddReaction,
+    guardedToggle,
+    guardedAdd,
   )) {
     return;
   }
@@ -615,8 +657,8 @@ Future<void> showReactionDetailSheet({
         return _ReactionDetailSheet(
           channelId: channelId,
           reactions: value,
-          onToggle: onToggle,
-          onAddReaction: onAddReaction,
+          onToggle: guardedToggle,
+          onAddReaction: guardedAdd,
         );
       },
     ),
@@ -1027,6 +1069,8 @@ Future<bool> _showNativeReactionDetails(
       paletteSubscription.close();
     }
   });
-  if (addRequested && context.mounted) onAddReaction?.call();
+  // The row may be gone after the native tray's dismissal animation; the
+  // callback holds what it needs, so an Add the user tapped still opens.
+  if (addRequested) onAddReaction?.call();
   return handled;
 }

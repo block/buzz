@@ -241,12 +241,14 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
     search.searchBar.isUserInteractionEnabled = !busy
     applySnapshot()
     let error = state["error"] as? String ?? ""
-    if error.isEmpty {
+    // A notice says what to do next; it is not a failure.
+    let message = error.isEmpty ? state["notice"] as? String ?? "" : error
+    if message.isEmpty {
       tableView.tableFooterView = nil
     } else {
       let label = UILabel()
-      label.text = error
-      label.textColor = Self.errorColor
+      label.text = message
+      label.textColor = error.isEmpty ? .secondaryLabel : Self.errorColor
       label.font = .preferredFont(forTextStyle: .footnote)
       label.adjustsFontForContentSizeCategory = true
       label.numberOfLines = 0
@@ -254,7 +256,7 @@ final class NativeAddMembersViewController: UITableViewController, UISearchResul
       label.frame = CGRect(x: 20, y: 0, width: max(1, tableView.bounds.width - 40), height: 0)
       label.sizeToFit()
       tableView.tableFooterView = label
-      UIAccessibility.post(notification: .announcement, argument: error)
+      UIAccessibility.post(notification: .announcement, argument: message)
     }
   }
 

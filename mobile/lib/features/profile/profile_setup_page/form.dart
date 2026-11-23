@@ -86,11 +86,6 @@ class _ProfileSetupForm extends HookWidget {
                             radius: 110,
                             backgroundImage: MemoryImage(poster),
                           ),
-                        ProfileUrlAvatarDraft(:final url) => PlayingAvatarImage(
-                          imageUrl: url,
-                          radius: 110,
-                          fallback: const ProfileSetupEmptyAvatar(),
-                        ),
                         null => const ProfileSetupEmptyAvatar(),
                       },
                     ),

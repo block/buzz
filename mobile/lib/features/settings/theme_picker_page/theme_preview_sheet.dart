@@ -11,7 +11,7 @@ class _ThemePreviewExperience extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final inRail = DuoToolbarScope.maybeOf(context)?.strip != null;
     final stored = ref.read(communityThemeProvider);
-    final draftMode = useState(stored.mode);
+    final draftMode = useState(ref.read(appearanceModeProvider));
     final draftAccent = useState(chatColorIndex(stored.accent));
     final platformBrightness = MediaQuery.platformBrightnessOf(context);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
@@ -42,15 +42,17 @@ class _ThemePreviewExperience extends HookConsumerWidget {
 
     void applySelection() {
       unawaited(HapticFeedback.mediumImpact());
+      ref.read(appearanceModeProvider.notifier).setMode(draftMode.value);
+      // Only the chat color syncs. The synced theme and followSystem stay as
+      // they are, so this device's mode never changes other devices.
+      final current = ref.read(communityThemeProvider);
       ref
           .read(communityThemeProvider.notifier)
           .setPreference(
             CommunityThemePreference(
-              theme: draftMode.value == ThemeMode.dark
-                  ? buzzDarkThemeName
-                  : buzzThemeName,
+              theme: current.theme,
               accent: chatColorChoices[draftAccent.value].wireValue,
-              followSystem: draftMode.value == ThemeMode.system,
+              followSystem: current.followSystem,
             ),
           );
       Navigator.of(context).pop();

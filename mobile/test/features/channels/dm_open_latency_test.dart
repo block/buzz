@@ -66,6 +66,38 @@ void main() {
       expect(session.listLoads, 2);
       session.stalledList = Completer();
 
+      // New Message asks the relay for the DM these people share, which
+      // named agents join with its history, and opens the DM it returns.
+      expect(
+        (await actions.openDm(
+          pubkeys: [_peer],
+          waitForChannelList: false,
+          includeHistory: true,
+        )).id,
+        _dmId,
+      );
+      expect(session.published.last.kind, 41010);
+      expect(session.published.last.tags, [
+        ['p', _peer],
+        ['history', 'include'],
+      ]);
+
+      // The relay lets only people share a DM's history, so an agent signed
+      // in here has the tagged open refused and opens the DM without it.
+      session.refusal = "forbidden: only people can share a DM's history";
+      expect(
+        (await actions.openDm(
+          pubkeys: [_peer],
+          waitForChannelList: false,
+          includeHistory: true,
+        )).id,
+        _dmId,
+      );
+      expect(session.published.last.kind, 41010);
+      expect(session.published.last.tags, [
+        ['p', _peer],
+      ]);
+
       // A DM the relay confirms but the caller cannot read fails visibly.
       session.member = false;
       await expectLater(
@@ -127,6 +159,7 @@ class _DmSession extends RelaySessionNotifier {
   int visibilityReads = 0;
   void Function()? onRead;
   final published = <NostrEvent>[];
+  String? refusal;
   Completer<List<NostrEvent>> stalledList = Completer();
   final listStarted = Completer<void>();
   int listLoads = 0;
@@ -155,6 +188,11 @@ class _DmSession extends RelaySessionNotifier {
     Future<bool> Function()? mayPublish,
   }) async {
     published.add(event);
+    final refused = refusal;
+    if (refused != null && event.tags.any((tag) => tag[0] == 'history')) {
+      refusal = null;
+      throw Exception(refused);
+    }
     return NostrEvent(
       id: event.id,
       pubkey: event.pubkey,
