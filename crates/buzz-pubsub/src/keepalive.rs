@@ -95,12 +95,8 @@ pub(crate) mod fake_redis {
         pub(crate) push: mpsc::UnboundedSender<Vec<u8>>,
         /// Notified for every PING received.
         pub(crate) pinged: Arc<Notify>,
-        /// Notified for every SUBSCRIBE/PSUBSCRIBE received.
-        pub(crate) subscribed: Arc<Notify>,
         /// Notified when a client connection closes.
         pub(crate) closed: Arc<Notify>,
-        /// Number of accepted connections.
-        pub(crate) accepted: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     pub(crate) fn message(channel: &str, payload: &str) -> Vec<u8> {
@@ -126,28 +122,23 @@ pub(crate) mod fake_redis {
                 hold_subscribe: Arc::default(),
                 push,
                 pinged: Arc::default(),
-                subscribed: Arc::default(),
                 closed: Arc::default(),
-                accepted: Arc::default(),
             };
             let state = (
                 fake.hold_pong.clone(),
                 fake.hold_subscribe.clone(),
                 fake.pinged.clone(),
-                fake.subscribed.clone(),
                 fake.closed.clone(),
-                fake.accepted.clone(),
             );
             tokio::spawn(async move {
                 let push_rx = Arc::new(tokio::sync::Mutex::new(push_rx));
                 loop {
                     let (sock, _) = listener.accept().await.unwrap();
-                    state.5.fetch_add(1, Ordering::SeqCst);
                     let state = state.clone();
                     let push_rx = push_rx.clone();
                     tokio::spawn(async move {
-                        serve(sock, state.0, state.1, state.2, state.3, push_rx).await;
-                        state.4.notify_one();
+                        serve(sock, state.0, state.1, state.2, push_rx).await;
+                        state.3.notify_one();
                     });
                 }
             });
@@ -160,7 +151,6 @@ pub(crate) mod fake_redis {
         hold_pong: Arc<AtomicBool>,
         hold_subscribe: Arc<AtomicBool>,
         pinged: Arc<Notify>,
-        subscribed: Arc<Notify>,
         push_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Vec<u8>>>>,
     ) {
         let (mut rd, mut wr) = sock.into_split();
@@ -193,7 +183,6 @@ pub(crate) mod fake_redis {
                         (!hold_pong.load(Ordering::SeqCst)).then(|| resp(&["pong", ""]))
                     }
                     "SUBSCRIBE" | "PSUBSCRIBE" => {
-                        subscribed.notify_one();
                         (!hold_subscribe.load(Ordering::SeqCst)).then(|| {
                             let kind = name.to_ascii_lowercase();
                             let mut out = Vec::new();
