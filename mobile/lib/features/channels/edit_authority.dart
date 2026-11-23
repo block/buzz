@@ -69,13 +69,12 @@ EditAuthority readEditAuthority(Ref ref, List<NostrEvent> events) {
   );
 }
 
-/// Whether [viewer] may edit and delete [author]'s messages: their own, or
-/// an agent whose signed profile verifies [viewer] as its owner. Rendering
-/// applies owner edits from the same verified owner, so the menu offers
-/// exactly the edits that will show.
-///
-/// Read when actions open, from the profile held then, so building a row
-/// verifies nothing.
+/// Checks ownership for the Edit and Delete actions.
+/// Returns true if [viewer] is [author], or if [author]'s signed profile
+/// verifies [viewer] as its owner.
+/// If a restored profile names [viewer] as owner and lacks a signed copy,
+/// requests the profile again and returns false.
+/// Call when actions open so the check reads the latest cached profile.
 bool readCanManageMessage(WidgetRef ref, String author, String? viewer) {
   final key = author.toLowerCase();
   final me = viewer?.toLowerCase();

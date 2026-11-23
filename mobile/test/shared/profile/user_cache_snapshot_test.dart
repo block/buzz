@@ -155,7 +155,7 @@ void main() {
     launch1.listen(verifiedProfileOwnerProvider(agent), (_, next) {
       if (next == owner && !backfilled.isCompleted) backfilled.complete();
     });
-    await backfilled.future;
+    await backfilled.future.timeout(const Duration(seconds: 10));
     expect(upgrade.requests, 1);
     expect(verifiedOwner(launch1), owner);
     launch1.dispose();
@@ -224,6 +224,29 @@ void main() {
       );
     }
     expect(storage.read(me, _relay).single.profile.ownerEvidence, isNull);
+
+    // So is an entry stored as its signed event alone: a copy with altered
+    // content or a bad signature restores no owner.
+    final badSignature = NostrEvent.fromJson({
+      ...attested.toJson(),
+      'sig': '0' * 128,
+    });
+    for (final signed in [tampered, badSignature]) {
+      await prefs.setString(
+        key,
+        jsonEncode({
+          'v': 1,
+          'profiles': [
+            {'owner': owner, 'signed': signed.toJson()},
+          ],
+        }),
+      );
+      final restore = cacheScope(_ProfileSession([], fail: true));
+      expect(restore.read(userCacheProvider)[agent]?.ownerPubkey, owner);
+      expect(verifiedOwner(restore), isNull);
+      restore.dispose();
+      await pumpEventQueue();
+    }
 
     // An attested profile is stored once, as its signed event, so one
     // whose fields and event together would pass the bound keeps both.

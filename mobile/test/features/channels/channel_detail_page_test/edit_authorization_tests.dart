@@ -354,6 +354,26 @@ void _editAuthorizationTests() {
     await _expectEditMenu(tester, 'Agent reply', isFalse);
   });
 
+  testWidgets('a restored owner hint without a signed profile is asked for '
+      'again when actions open', (tester) async {
+    final fixture = _EditFixture();
+    final cache = _RecordingUserCache({
+      fixture.restored.public: fixture.restoredWithoutEvidence.profile,
+    });
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [fixture.restoredMessage],
+        userCacheNotifier: cache,
+        signingPubkey: fixture.owner.public,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(cache.requested, isEmpty);
+
+    await _expectEditMenu(tester, 'Restored agent message', isFalse);
+    expect(cache.requested, [fixture.restored.public]);
+  });
+
   testWidgets('image actions read Edit permission when they open', (
     tester,
   ) async {
@@ -544,6 +564,19 @@ Future<void> _expectEditMenu(
   await tester.tapAt(const Offset(8, 8));
   await tester.pumpAndSettle();
   expect(find.text('Edit message'), findsNothing);
+}
+
+/// Records the profiles asked for with [get].
+class _RecordingUserCache extends _FakeUserCacheNotifier {
+  _RecordingUserCache(super.users);
+
+  final requested = <String>[];
+
+  @override
+  UserProfile? get(String pubkey) {
+    requested.add(pubkey.toLowerCase());
+    return super.get(pubkey);
+  }
 }
 
 /// The viewer owns an agent outside the agent directory; a human posts too.

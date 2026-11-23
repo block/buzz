@@ -221,16 +221,20 @@ _watchThreadMessages(
       : mergeThreadEvents([...?savedReplies, ...?replyEvents], live);
   // A head outside relay history comes from the saved page. These events
   // include [events], so one authority covers both lists formatted here.
-  final savedHeadEvents = relayRepliesAvailable && saved != null
-      ? mergeThreadEvents(
-          saved.where(
-            (event) =>
-                event.id == threadHead.id ||
-                EventKind.channelAuxEventKinds.contains(event.kind),
-          ),
-          events,
-        )
-      : null;
+  // Memoized on its inputs so the edit authority's own memo holds.
+  final savedHeadEvents = useMemoized(
+    () => relayRepliesAvailable && saved != null
+        ? mergeThreadEvents(
+            saved.where(
+              (event) =>
+                  event.id == threadHead.id ||
+                  EventKind.channelAuxEventKinds.contains(event.kind),
+            ),
+            events,
+          )
+        : null,
+    [relayRepliesAvailable, saved, replyEvents, live, threadHead.id],
+  );
   final (owners: agentOwners, relayKey: relayPubkey) = useEditAuthority(
     ref,
     savedHeadEvents ?? events,
