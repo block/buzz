@@ -220,7 +220,7 @@ class _ChannelTile extends ConsumerWidget {
         context,
         channel,
         currentPubkey,
-        isUnread: !channel.isSolo && (isUnread || hasAttention),
+        isUnread: isUnread || hasAttention,
         sectionId: sectionId,
         personal:
             channel.isSolo && channel.isPersonalChat(currentPubkey, const []),

@@ -301,7 +301,7 @@ void main() {
     expect(find.text('A place to work with your agents'), findsNothing);
   });
 
-  testWidgets('long-pressing a chat opens Solo details in a modal', (
+  testWidgets('long-pressing a Solo offers its actions in a popover', (
     tester,
   ) async {
     SharedPreferences.setMockInitialValues({});
@@ -358,32 +358,11 @@ void main() {
     await tester.longPress(find.text('Unfiled labeled chat'));
     await tester.pumpAndSettle();
 
-    expect(
-      find.descendant(
-        of: find.byType(BottomSheet),
-        matching: find.text('Agent'),
-      ),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(const ValueKey('channel-details-page-list')),
-      findsOneWidget,
-    );
-    expect(find.text('Agent'), findsOneWidget);
-    await tester.scrollUntilVisible(
-      find.text('Delete chat'),
-      250,
-      scrollable: find
-          .descendant(
-            of: find.byType(BottomSheet),
-            matching: find.byType(Scrollable),
-          )
-          .last,
-    );
-    await tester.pumpAndSettle();
-    expect(find.text('Leave chat'), findsNothing);
-    expect(find.text('Delete chat'), findsOneWidget);
-    // Solo chats move between Solo workspaces, not channel sections.
+    expect(find.byType(BottomSheet), findsNothing);
+    expect(find.text('Rename'), findsOneWidget);
+    expect(find.text('Archive'), findsOneWidget);
+    expect(find.text('Change workspace'), findsOneWidget);
+    expect(find.text('Share'), findsNothing);
     expect(find.text('Move to section…'), findsNothing);
     final container = ProviderScope.containerOf(
       tester.element(find.byType(MePage)),
@@ -391,21 +370,16 @@ void main() {
     );
     expect(container.exists(meMessagesProvider('loose')), isFalse);
     expect(container.exists(huddleLifecycleProvider('loose')), isFalse);
-    await tester.ensureVisible(find.text('Convert to channel'));
-    await tester.tap(find.text('Convert to channel'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Convert'));
-    await tester.pumpAndSettle();
-    expect(actions, ['convert loose']);
-    expect(pane.selectedId, isNull);
-    pane.open('loose', (_) => const SizedBox());
-    await tester.pumpAndSettle();
-    await tester.longPress(find.text('Unfiled labeled chat'));
-    await tester.pumpAndSettle();
     await tester.tap(find.text('Mark unread'));
     await tester.pumpAndSettle();
     expect(actions.last, 'unread loose');
     expect(pane.selectedId, isNull);
+
+    await tester.longPress(find.text('Open shared Solo'));
+    await tester.pumpAndSettle();
+    expect(find.text('Move to section…'), findsOneWidget);
+    expect(find.text('Change workspace'), findsNothing);
+    expect(find.text('Archive'), findsNothing);
   });
 
   testWidgets('empty workspace stays centered behind the New chat keyboard', (

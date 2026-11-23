@@ -34,6 +34,8 @@ import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/duo_toolbar.dart';
 import 'channel.dart';
 import 'me/me_chat_settings.dart';
+import 'me/me_workspace_picker.dart';
+import '../../shared/widgets/anchored_popover_menu.dart';
 import 'channel_detail_page.dart';
 import 'add_members_sheet.dart';
 import 'channel_identity_names_provider.dart';
@@ -53,6 +55,7 @@ import '../../shared/community/community_provider.dart';
 import '../../shared/relay/relay_author_provider.dart';
 import '../../shared/widgets/covered_route_keyboard_insets.dart';
 
+part 'conversation_popover.dart';
 part 'channel_details_page.dart';
 part 'channel_details_rows.dart';
 part 'native_channel_actions.dart';

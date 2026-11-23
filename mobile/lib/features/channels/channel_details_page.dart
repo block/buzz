@@ -417,33 +417,12 @@ class ChannelDetailsPage extends HookConsumerWidget {
       title: 'Rename',
       onTap: !canEdit
           ? null
-          : () => showTextEditor(
-              context: context,
-              title: 'Rename',
-              hintText: 'Name',
-              initialValue: resolvedChannel.name,
-              requireNonEmpty: true,
-              onSave: (name) async {
-                final trimmed = name
-                    .trim()
-                    .replaceFirst(RegExp(r'^#+'), '')
-                    .trim();
-                if (trimmed.isEmpty) {
-                  throw const FormatException('Channel name is required.');
-                }
-                if (trimmed == resolvedChannel.name) return;
-                await ref
-                    .read(channelActionsProvider)
-                    .updateChannel(
-                      channelId: resolvedChannel.id,
-                      name: trimmed,
-                    );
-                if (context.mounted) {
-                  displayedChannel.value = resolvedChannel.copyWith(
-                    name: trimmed,
-                  );
-                }
-              },
+          : () => _renameConversation(
+              context,
+              ref,
+              resolvedChannel,
+              onRenamed: (name) =>
+                  displayedChannel.value = resolvedChannel.copyWith(name: name),
             ),
     );
     final moveRow = AppListRow(
