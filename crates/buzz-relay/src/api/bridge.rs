@@ -5646,6 +5646,109 @@ pub(crate) mod postgres_tests {
         );
     }
 
+    /// The channel-window aux closure reads both hops from one day before the
+    /// oldest retained row: a reaction and a delete-of-reaction inside that
+    /// bound still come back, and ones dated more than a day before the
+    /// oldest row are not read. Mutation: drop `aux_query.since`, or widen
+    /// the margin by more than a minute, and the out-of-bound events return
+    /// → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn channel_window_aux_hops_read_from_a_day_before_the_oldest_row() {
+        use buzz_core::kind::{KIND_DELETION, KIND_REACTION};
+        use buzz_db::channel::{ChannelType, ChannelVisibility};
+
+        let state = bridge_handler_test_state()
+            .await
+            .expect("local Postgres and Redis");
+        let host = format!("window-aux-bound-{}.local", uuid::Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("ensure community");
+        let author = Keys::generate();
+        let (channel, _) = state
+            .db
+            .create_channel_with_id(
+                community.id,
+                uuid::Uuid::new_v4(),
+                &format!("window-aux-bound-{}", uuid::Uuid::new_v4().simple()),
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                author.public_key().to_bytes().as_slice(),
+                None,
+            )
+            .await
+            .expect("create channel");
+        let ch = channel.id.to_string();
+
+        // Ingest's ±900 s clock check and the store's channel-event floor
+        // both refuse backdated events, so the backdated aux events are
+        // stored channel-less, as a NIP-09 deletion may be; the aux hops are
+        // community-wide `#e` lookups and still find them.
+        let now = chrono::Utc::now().timestamp() as u64;
+        let store = |kind: u32, at: u64, target: &nostr::EventId, channel_id| {
+            let event = EventBuilder::new(Kind::Custom(kind as u16), "+")
+                .tag(Tag::parse(["h", ch.as_str()]).expect("h"))
+                .tag(Tag::parse(["e", &target.to_hex()]).expect("e"))
+                .custom_created_at(nostr::Timestamp::from(at))
+                .sign_with_keys(&author)
+                .expect("sign");
+            let state = state.clone();
+            async move {
+                state
+                    .db
+                    .insert_event(community.id, &event, channel_id)
+                    .await
+                    .expect("insert");
+                event.id
+            }
+        };
+        let row_event = EventBuilder::new(Kind::Custom(9), "row")
+            .tag(Tag::parse(["h", ch.as_str()]).expect("h"))
+            .custom_created_at(nostr::Timestamp::from(now))
+            .sign_with_keys(&author)
+            .expect("sign row");
+        state
+            .db
+            .insert_event(community.id, &row_event, Some(channel.id))
+            .await
+            .expect("insert row");
+        let row = row_event.id;
+        let day = 86_400;
+        let reaction_in = store(KIND_REACTION, now - day + 60, &row, None).await;
+        let reaction_out = store(KIND_REACTION, now - day - 60, &row, None).await;
+        let delete_in = store(KIND_DELETION, now - day + 120, &reaction_in, None).await;
+        let delete_out = store(KIND_DELETION, now - day - 120, &reaction_in, None).await;
+
+        let body = serde_json::to_vec(&[serde_json::json!({
+            "kinds": [9], "#h": [&ch], "top_level": true, "include_aux": true,
+        })])
+        .expect("json");
+        let (status, bytes) =
+            post_query(state.clone(), &host, &author.public_key().to_hex(), &body).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let events: Vec<Value> = serde_json::from_slice(&bytes).expect("event array");
+        let returned: std::collections::HashSet<String> = events
+            .iter()
+            .filter_map(|e| e["id"].as_str().map(str::to_owned))
+            .collect();
+        let has = |id: &nostr::EventId| returned.contains(&id.to_hex());
+
+        assert!(has(&row), "window row: {events:?}");
+        assert!(has(&reaction_in), "hop 1 inside the bound: {events:?}");
+        assert!(has(&delete_in), "hop 2 inside the bound: {events:?}");
+        assert!(!has(&reaction_out), "hop 1 past the bound: {events:?}");
+        assert!(!has(&delete_out), "hop 2 past the bound: {events:?}");
+    }
+
     // ──────────────────────────────────────────────────────────────────────────
     // Log-capture helpers and attribution-invariant tests
     //
