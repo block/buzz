@@ -1,10 +1,13 @@
 import Foundation
-import UIKit
+import ImageIO
 import UniformTypeIdentifiers
 
-/// Readies a shared photo for upload the way the app's composer does: the
-/// same native re-encode (HEIC to JPEG, sRGB) and metadata scrub as the
-/// `sanitizeImageForUpload` and `transcodeImageToJpeg` calls in AppDelegate.
+/// Readies a shared photo for upload with the same result as the app's
+/// composer (`_prepareUploadImage` in media_upload.dart and MediaSanitizer):
+/// HEIC and other formats become JPEG, WebP becomes PNG, orientation is
+/// applied to the pixels, colors are sRGB and metadata is scrubbed. The pixels
+/// go through ShareImageEncoder, a band at a time, to stay within the share
+/// extension's memory limit.
 enum ShareImage {
   static func prepare(_ provider: NSItemProvider) async throws -> SharedContent.Image {
     let offered = provider.registeredTypeIdentifiers.compactMap(UTType.init)
@@ -14,39 +17,57 @@ enum ShareImage {
       ?? offered.first { $0.conforms(to: .image) }
       ?? .image
     let source = try await loadFile(provider, type: type)
-    defer { try? FileManager.default.removeItem(at: source) }
-    let bytes = try Data(contentsOf: source)
-    let (encoded, mime, ext) = try sanitize(bytes)
-    guard encoded.count <= SharedContent.maximumImageBytes else {
-      throw ShareError.message("This photo is too large to send (over 50 MB).")
-    }
-    let output = FileManager.default.temporaryDirectory
-      .appendingPathComponent(UUID().uuidString)
-      .appendingPathExtension(ext)
-    try encoded.write(to: output)
-    return SharedContent.Image(url: output, mime: mime, size: encoded.count)
-  }
-
-  /// Mirrors `_prepareUploadImage` in the app's media_upload.dart.
-  private static func sanitize(_ bytes: Data) throws -> (Data, String, String) {
-    func fail() -> Error { ShareError.message("We couldn't prepare this image for upload.") }
-    let mime = detectMime(bytes)
+    var temporary = [source]
+    defer { temporary.forEach { try? FileManager.default.removeItem(at: $0) } }
+    let handle = try FileHandle(forReadingFrom: source)
+    let head = try handle.read(upToCount: 16) ?? Data()
+    try? handle.close()
+    let mime = detectMime(head)
     if mime == "image/gif" {
       // The app sanitizes animated images in Dart; not wired up here yet.
       throw ShareError.message("GIFs can't be shared from here yet.")
     }
-    guard let image = UIImage(data: bytes) else { throw fail() }
-    let output: Data?
-    switch mime {
-    case "image/jpeg", "image/png", "image/webp":
-      output = try MediaSanitizer.sanitizeImage(image, mimeType: mime!)
-    default:
-      // HEIC and anything else UIKit can decode goes to JPEG, as the app does.
-      output = try MediaSanitizer.encodeJpeg(image)
+    let png = mime == "image/png" || mime == "image/webp"
+    var input = source
+    if mime != "image/jpeg" && !png {
+      // HEIC and the rest: transcode to JPEG first, which ImageIO streams,
+      // so the banded pass below decodes a format it can read piecemeal.
+      input = try transcodeToJpeg(source)
+      temporary.append(input)
     }
-    guard let output, !output.isEmpty else { throw fail() }
-    return output.starts(with: [0x89, 0x50, 0x4E, 0x47])
-      ? (output, "image/png", "png") : (output, "image/jpeg", "jpg")
+    let output = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString)
+      .appendingPathExtension(png ? "png" : "jpg")
+    do {
+      try ShareImageEncoder.encode(source: input, to: output, as: png ? .png : .jpeg)
+      let encoded = try Data(contentsOf: output)
+      let scrubbed = png ? try MediaSanitizer.scrubPng(encoded) : try MediaSanitizer.scrubJpeg(encoded)
+      try scrubbed.write(to: output)
+    } catch {
+      NSLog("[BuzzShare] preparing photo failed: %@", String(describing: error))
+      throw ShareError.message("We couldn't prepare this image for upload.")
+    }
+    let size = (try? output.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+    guard size <= SharedContent.maximumImageBytes else {
+      try? FileManager.default.removeItem(at: output)
+      throw ShareError.message("This photo is too large to send (over 50 MB).")
+    }
+    return SharedContent.Image(url: output, mime: png ? "image/png" : "image/jpeg", size: size)
+  }
+
+  private static func transcodeToJpeg(_ source: URL) throws -> URL {
+    let output = FileManager.default.temporaryDirectory
+      .appendingPathComponent("transcoded-\(UUID().uuidString)").appendingPathExtension("jpg")
+    guard
+      let image = CGImageSourceCreateWithURL(source as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+      let destination = CGImageDestinationCreateWithURL(output as CFURL, UTType.jpeg.identifier as CFString, 1, nil)
+    else { throw ShareError.message("We couldn't prepare this image for upload.") }
+    CGImageDestinationAddImageFromSource(
+      destination, image, 0, [kCGImageDestinationLossyCompressionQuality: 1.0] as CFDictionary)
+    guard CGImageDestinationFinalize(destination) else {
+      throw ShareError.message("We couldn't prepare this image for upload.")
+    }
+    return output
   }
 
   private static func detectMime(_ bytes: Data) -> String? {
