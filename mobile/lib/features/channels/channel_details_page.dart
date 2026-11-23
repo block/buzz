@@ -195,7 +195,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
     final canLeave =
         resolvedChannel.isMember &&
         !resolvedChannel.isArchived &&
-        (!solo ||
+        ((!solo && resolvedChannel.isDm) ||
             (currentMember != null &&
                 !currentMember.isOwner &&
                 !ownsOwnerAgent &&
@@ -670,7 +670,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
             title: isJoining.value ? 'Joining channel…' : 'Join channel',
             onTap: isJoining.value ? null : joinChannel,
           ),
-        if (canLeave && !solo) leaveRow,
+        if (canLeave && resolvedChannel.isDm && !solo) leaveRow,
         if (lifecycleCapabilitiesLoading)
           const AppListRow(
             icon: BuzzIcons.loaderCircle,
@@ -734,7 +734,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
               ),
             ),
         ],
-        if (canLeave && solo) leaveRow,
+        if (canLeave && (solo || regularChannel)) leaveRow,
       ],
     );
     final readLabel = isUnread ? 'Mark as read' : 'Mark as unread';

@@ -6181,6 +6181,13 @@ void main() {
       await tester.pumpWidget(
         _buildTestable(
           messages: const [],
+          members: [
+            ChannelMember(
+              pubkey: 'self',
+              role: 'admin',
+              joinedAt: DateTime(2025),
+            ),
+          ],
           createChannelActions: (ref) => _FakeChannelActions(ref),
         ),
       );
@@ -6191,6 +6198,11 @@ void main() {
       );
       await tester.pumpAndSettle();
       await _scrollDetailsTo(tester, find.text('Leave channel'));
+      final card = tester.widget<AppListCard>(
+        find.byKey(const ValueKey('channel-details-lifecycle-card')),
+      );
+      expect((card.children.last as AppListRow).title, 'Leave channel');
+      expect(find.text('Delete channel'), findsNothing);
       await tester.tap(find.text('Leave channel').last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('Leave'));
@@ -6228,6 +6240,13 @@ void main() {
         await tester.pumpWidget(
           _buildTestable(
             messages: const [],
+            members: [
+              ChannelMember(
+                pubkey: 'self',
+                role: 'admin',
+                joinedAt: DateTime(2025),
+              ),
+            ],
             createChannelActions: (ref) => _FakeChannelActions(
               ref,
               onLeaveChannel: (id) async => leftChannel = id,
@@ -6386,6 +6405,12 @@ void main() {
       expect(updatedDescription, 'A new description');
       expect(find.text('renamed'), findsOneWidget);
       expect(find.text('A new description'), findsOneWidget);
+      await _scrollDetailsTo(tester, find.text('Delete channel'));
+      final lifecycle = tester.widget<AppListCard>(
+        find.byKey(const ValueKey('channel-details-lifecycle-card')),
+      );
+      expect((lifecycle.children.last as AppListRow).title, 'Delete channel');
+      expect(find.text('Leave channel'), findsNothing);
     });
 
     testWidgets('shows empty state when no messages', (tester) async {
