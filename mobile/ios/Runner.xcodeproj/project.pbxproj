@@ -10,6 +10,7 @@
 		ACAF00000000000000000001 /* ToastLayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACAF00000000000000000002 /* ToastLayer.swift */; };
 		BC0010000000000000000003 /* BrowserAuthBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC0010000000000000000004 /* BrowserAuthBridgeTests.swift */; };
 		BC0010000000000000000001 /* BuzzBrowserAuthBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC0010000000000000000002 /* BuzzBrowserAuthBridge.swift */; };
+		DAAC00000000000000000005 /* HomeScreenShortcutsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAAC00000000000000000006 /* HomeScreenShortcutsTests.swift */; };
 		F84380010000000000000001 /* ProfileSetupRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F84380010000000000000002 /* ProfileSetupRecoveryTests.swift */; };
 		BBAA00000000000000000011 /* IdentityFilePlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBAA00000000000000000012 /* IdentityFilePlugin.swift */; };
 		BBAA00000000000000000021 /* PhotoLibrarySaver.swift in Sources */ = {isa = PBXBuildFile; fileRef = BBAA00000000000000000022 /* PhotoLibrarySaver.swift */; };
@@ -115,6 +116,7 @@
 		ACAF00000000000000000002 /* ToastLayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToastLayer.swift; sourceTree = "<group>"; };
 		BC0010000000000000000004 /* BrowserAuthBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserAuthBridgeTests.swift; sourceTree = "<group>"; };
 		BC0010000000000000000002 /* BuzzBrowserAuthBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuzzBrowserAuthBridge.swift; sourceTree = "<group>"; };
+		DAAC00000000000000000006 /* HomeScreenShortcutsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeScreenShortcutsTests.swift; sourceTree = "<group>"; };
 		F84380010000000000000002 /* ProfileSetupRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileSetupRecoveryTests.swift; sourceTree = "<group>"; };
 		BBAA00000000000000000012 /* IdentityFilePlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityFilePlugin.swift; sourceTree = "<group>"; };
 		BBAA00000000000000000022 /* PhotoLibrarySaver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoLibrarySaver.swift; sourceTree = "<group>"; };
@@ -232,6 +234,7 @@
 			children = (
 				331C807B294A618700263BE5 /* RunnerTests.swift */,
 				BC0010000000000000000004 /* BrowserAuthBridgeTests.swift */,
+				DAAC00000000000000000006 /* HomeScreenShortcutsTests.swift */,
 				F84380010000000000000002 /* ProfileSetupRecoveryTests.swift */,
 				AB1200132F40400100A17E01 /* NativeMessageImageLoaderTests.swift */,
 				AB1200132F40400100A17E09 /* IdentityFilePluginTests.swift */,
@@ -655,6 +658,7 @@
 			files = (
 				331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */,
 				BC0010000000000000000003 /* BrowserAuthBridgeTests.swift in Sources */,
+				DAAC00000000000000000005 /* HomeScreenShortcutsTests.swift in Sources */,
 				F84380010000000000000001 /* ProfileSetupRecoveryTests.swift in Sources */,
 				AB1200032F40400100A17E01 /* NativeMessageImageLoaderTests.swift in Sources */,
 				AB1200032F40400100A17E09 /* IdentityFilePluginTests.swift in Sources */,
