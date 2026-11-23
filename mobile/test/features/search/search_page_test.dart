@@ -1103,10 +1103,142 @@ void main() {
         );
         expect(page.channel.id, 'treasury');
         expect(page.channel.isMember, isFalse);
+        expect(page.initialMessageId, 'message-1');
       } else {
         expect(find.byType(ChannelDetailPage), findsNothing);
         expect(find.text(toast), findsOneWidget);
       }
+    });
+  }
+
+  // A message hit opens at that message, and a thread reply in its thread.
+  // A reply also sent to the channel stays in the channel, and forum
+  // channels keep opening as before.
+  for (final (name, kind, channelType, tags, messageId, threadRootId) in [
+    (
+      'a channel message at that message',
+      9,
+      'stream',
+      <List<String>>[],
+      'hit-1',
+      null,
+    ),
+    (
+      'a thread reply in its thread',
+      9,
+      'stream',
+      [
+        [
+          'e',
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          '',
+          'root',
+        ],
+        [
+          'e',
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          '',
+          'reply',
+        ],
+      ],
+      'hit-1',
+      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    ),
+    (
+      'a reply sent to the channel in the channel',
+      9,
+      'stream',
+      [
+        [
+          'e',
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          '',
+          'root',
+        ],
+        [
+          'e',
+          'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          '',
+          'reply',
+        ],
+        ['broadcast', '1'],
+      ],
+      'hit-1',
+      null,
+    ),
+    (
+      'a forum comment in its forum',
+      45003,
+      'forum',
+      <List<String>>[],
+      null,
+      null,
+    ),
+  ]) {
+    testWidgets('opens $name', (tester) async {
+      final channel = Channel(
+        id: 'ops',
+        name: 'ops',
+        channelType: channelType,
+        visibility: 'open',
+        description: '',
+        createdBy: 'test',
+        createdAt: DateTime(2025),
+        memberCount: 1,
+        isMember: true,
+      );
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          overrides: [
+            searchProvider.overrideWith(
+              () => _FakeSearchNotifier(
+                SearchState(
+                  query: 'deploy',
+                  messageResults: [
+                    SearchHit(
+                      eventId: 'hit-1',
+                      content: 'Deploy is done',
+                      kind: kind,
+                      pubkey: 'alice',
+                      channelId: 'ops',
+                      channelName: 'ops',
+                      createdAt: 1,
+                      score: 1,
+                      tags: tags,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            recentSearchesProvider.overrideWith(
+              () => _FakeRecentSearchesNotifier(const []),
+            ),
+            profileProvider.overrideWith(() => _FakeProfileNotifier()),
+            channelsProvider.overrideWith(
+              () => _FakeChannelsNotifier([channel]),
+            ),
+            relaySessionProvider.overrideWith(
+              () => _ChannelMetadataRelaySession(const {}),
+            ),
+            savedPrefsProvider.overrideWithValue(prefs),
+            meGroupsProvider.overrideWith((ref) => const Stream.empty()),
+          ],
+          child: const SearchPage(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('search-message-row-hit-1')));
+      await tester.pump();
+      await tester.pump();
+
+      final page = tester.widget<ChannelDetailPage>(
+        find.byType(ChannelDetailPage),
+      );
+      expect(page.channel.id, 'ops');
+      expect(page.initialMessageId, messageId);
+      expect(page.initialThreadRootId, threadRootId);
     });
   }
 
