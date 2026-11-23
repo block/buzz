@@ -158,6 +158,7 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   private let pageContainer = UIView()
   private let reply = UIButton(type: .system)
   private let more = UIButton(type: .system)
+  private let share = UIButton(type: .system)
   private let labels: [String]
   private let videoIndices: Set<Int>
   private var videoPath: (Int, String)?
@@ -170,6 +171,10 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   private var action = "closed"
   private var finishing = false
   private lazy var downwardDismiss = UIPanGestureRecognizer(target: self, action: #selector(dragToDismiss(_:)))
+  // Video pages hide the overlaid actions on tap, like AVKit's own controls.
+  private lazy var chromeTap = UITapGestureRecognizer(target: self, action: #selector(toggleChrome))
+  private var chromeHidden = false
+  private var chromeTimer: Timer?
   var selectionFeedback = UISelectionFeedbackGenerator()
   private var paging = false
   private var acting = false
@@ -195,6 +200,9 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     downwardDismiss.delegate = self
     downwardDismiss.maximumNumberOfTouches = 1
     view.addGestureRecognizer(downwardDismiss)
+    chromeTap.delegate = self
+    chromeTap.cancelsTouchesInView = false
+    view.addGestureRecognizer(chromeTap)
     pager.dataSource = self; pager.delegate = self
     addChild(pager); view.addSubview(pager.view); pager.didMove(toParent: self)
     pager.setViewControllers([page(index)], direction: .forward, animated: false)
@@ -202,7 +210,8 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     configure(close, symbol: "xmark", label: videoIndices.isEmpty ? "Close photo" : "Close media", selector: #selector(closePhoto))
     configure(reply, symbol: "arrowshape.turn.up.left", label: "Reply in thread", selector: #selector(replyToMessage))
     configure(more, symbol: "ellipsis", label: "More image actions", selector: nil)
-    reply.isEnabled = canReply; updateMore()
+    configure(share, symbol: "square.and.arrow.up", label: "Share video", selector: #selector(shareVideo))
+    reply.isEnabled = canReply; updateChrome()
     more.showsMenuAsPrimaryAction = true
     var menu = [UIAction(title: "Save image", image: UIImage(systemName: "square.and.arrow.down")) { [weak self] _ in self?.perform("save") },
       UIAction(title: "Share image", image: UIImage(systemName: "square.and.arrow.up")) { [weak self] _ in self?.perform("share") },
@@ -248,7 +257,7 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     ])
     // Keep all controls in one hierarchy while the window folds or rotates.
     // The photo surface can extend behind the rail without moving its pages.
-    for control in [close, reply, more, pageContainer] { view.addSubview(control) }
+    for control in [close, reply, more, share, pageContainer] { view.addSubview(control) }
     pager.view.clipsToBounds = true
   }
   override func viewDidLayoutSubviews() {
@@ -304,12 +313,26 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
       close.frame = CGRect(x: centerX - 24, y: top + 6, width: 48, height: 48)
       reply.frame = CGRect(x: centerX - 24, y: railBottom - 108, width: 48, height: 48)
       more.frame = CGRect(x: centerX - 24, y: railBottom - 48, width: 48, height: 48)
+    } else if videoIndices.contains(index) {
+      // Video fills the screen; the actions float over it and hide on tap.
+      pager.view.frame = bounds
     } else {
       pager.view.frame = CGRect(x: safe.minX, y: safe.minY + 56,
                                 width: safe.width, height: max(0, bottom - 16 - safe.minY - 56))
+    }
+    share.frame = more.frame
+    if !inRail {
       let centerY = safe.minY + navigationSizingBar.sizeThatFits(bounds.size).height / 2
       close.frame = CGRect(x: safe.maxX - 60, y: centerY - 22, width: 44, height: 44)
-      reply.frame = CGRect(x: safe.minX + 16, y: bottom, width: 44, height: 44)
+      if videoIndices.contains(index) {
+        // AVKit owns the bottom of the screen, so every action moves to the top row.
+        reply.frame = CGRect(x: safe.minX + 16, y: centerY - 22, width: 44, height: 44)
+        share.frame = CGRect(x: safe.maxX - 112, y: centerY - 22, width: 44, height: 44)
+        pageContainer.frame = CGRect(x: safe.minX + 68, y: centerY - 22,
+                                     width: max(0, safe.width - 188), height: 44)
+      } else {
+        reply.frame = CGRect(x: safe.minX + 16, y: bottom, width: 44, height: 44)
+      }
       more.frame = CGRect(x: safe.maxX - 60, y: bottom, width: 44, height: 44)
     }
   }
@@ -319,12 +342,51 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
       && ((pager.viewControllers?.first as? NativePhotoPage)?.isAtRestingZoom ?? false)
   }
   func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+    if gestureRecognizer === chromeTap {
+      return !finishing && videoIndices.contains(index) && !UIAccessibility.isVoiceOverRunning
+    }
     guard gestureRecognizer === downwardDismiss else { return true }
     let velocity = downwardDismiss.velocity(in: view)
     return shouldBeginDismissal(location: downwardDismiss.location(in: view), velocity: CGVector(dx: velocity.x, dy: velocity.y))
   }
   func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
-    gestureRecognizer === downwardDismiss || otherGestureRecognizer === downwardDismiss
+    [downwardDismiss, chromeTap].contains { $0 === gestureRecognizer || $0 === otherGestureRecognizer }
+  }
+  func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+    guard gestureRecognizer === chromeTap else { return true }
+    // Only the bare video toggles the actions: never our buttons, Retry or AVKit's controls.
+    var touched = touch.view
+    while let current = touched, current !== view {
+      if current is UIControl || current === pageContainer { return false }
+      touched = current.superview
+    }
+    return true
+  }
+  @objc private func toggleChrome() { setChrome(hidden: !chromeHidden) }
+  func setChrome(hidden: Bool) {
+    chromeTimer?.invalidate(); chromeTimer = nil
+    chromeHidden = hidden
+    let animations = { self.updateChrome() }
+    if UIAccessibility.isReduceMotionEnabled { animations() }
+    else { UIView.animate(withDuration: 0.2, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction], animations: animations) }
+    if !hidden { scheduleChromeHide() }
+  }
+  // Match AVKit, which fades its playback controls about 3s into playback.
+  private func scheduleChromeHide() {
+    chromeTimer?.invalidate(); chromeTimer = nil
+    guard !chromeHidden, !finishing, videoIndices.contains(index), !UIAccessibility.isVoiceOverRunning,
+      (pager.viewControllers?.first as? NativePhotoPage)?.isPlaying == true else { return }
+    chromeTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in
+      guard let self, self.presentedViewController == nil,
+        (self.pager.viewControllers?.first as? NativePhotoPage)?.isPlaying == true else { return }
+      self.setChrome(hidden: true)
+    }
+  }
+  @objc private func shareVideo() {
+    guard !finishing, presentedViewController == nil, let (value, path) = videoPath, value == index else { return }
+    let sheet = UIActivityViewController(activityItems: [URL(fileURLWithPath: path)], applicationActivities: nil)
+    sheet.popoverPresentationController?.sourceView = share
+    present(sheet, animated: true)
   }
   @objc private func dragToDismiss(_ gesture: UIPanGestureRecognizer) {
     // Nested paging/zoom scroll views can consume UIKit's content-dismiss drag.
@@ -411,7 +473,12 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   }
   private func page(_ value: Int) -> NativePhotoPage {
     let page = NativePhotoPage(index: value, label: labels[value], image: images[value] ?? previews[value], isVideo: videoIndices.contains(value))
-    page.onRetry = { [weak self] in self?.videoPath = nil; self?.loadVideo() }
+    page.onRetry = { [weak self] in self?.videoPath = nil; self?.updateChrome(); self?.loadVideo() }
+    page.onPlayback = { [weak self, weak page] playing in
+      guard let self, let page, self.pager.viewControllers?.first === page else { return }
+      // AVKit shows its controls again on pause and at the end; keep ours in step.
+      if playing { self.scheduleChromeHide() } else { self.setChrome(hidden: false) }
+    }
     if page.isVideo {
       if let (loaded, path) = videoPath, loaded == value { page.setVideo(path, autoplay: appeared) }
     } else { load("image", value) }
@@ -429,6 +496,7 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
       self.pending.removeValue(forKey: key)
       let path = result as? String
       if let path { self.videoPath = (value, path) }
+      self.updateChrome()
       for page in self.pager.children.compactMap({ $0 as? NativePhotoPage }) where page.index == value {
         page.setVideo(path, autoplay: self.appeared)
       }
@@ -438,6 +506,7 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     for page in pager.children.compactMap({ $0 as? NativePhotoPage }) { page.stopVideo() }
     videoPath = nil
     pending = pending.filter { !$0.key.hasPrefix("video:") }
+    chromeTimer?.invalidate(); chromeTimer = nil
   }
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated); appeared = true
@@ -469,17 +538,30 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     }
     else if appeared { (pager.viewControllers?.first as? NativePhotoPage)?.playVideo() }
   }
-  private func updateMore() {
+  private func updateChrome() {
     let video = videoIndices.contains(index)
-    more.isEnabled = canMore && !video
+    let hidden = video && chromeHidden
+    more.isEnabled = canMore && !video && !acting
     more.alpha = video ? 0 : 1
     more.accessibilityElementsHidden = video
+    share.isEnabled = video && videoPath?.0 == index
+    share.alpha = video && !hidden ? 1 : 0
+    share.accessibilityElementsHidden = !video || hidden
+    for control in [close, reply, pageContainer] {
+      control.alpha = hidden ? 0 : 1
+      control.isUserInteractionEnabled = !hidden
+      control.accessibilityElementsHidden = hidden
+    }
+    // A single page has no indicator, so its strip must not swallow touches.
+    pageContainer.isUserInteractionEnabled = !hidden && labels.count > 1
+    share.isUserInteractionEnabled = video && !hidden
   }
   private func selected(_ value: Int) {
     guard value != index else { return }
     stopVideos()
     index = value; indicator.currentPage = value
-    updateMore()
+    chromeHidden = false; updateChrome()
+    view.setNeedsLayout()
     trimWindow()
     // Move Dart's request window before asking for newly adjacent images.
     syncSelection { [weak self] in self?.loadWindow() }
@@ -552,15 +634,18 @@ private final class NativePhotoPage: UIViewController, UIScrollViewDelegate {
   let index: Int
   let isVideo: Bool
   var onRetry: (() -> Void)?
+  var onPlayback: ((Bool) -> Void)?
   private lazy var video = AVPlayerViewController()
   private let retry = UIButton(type: .system)
   private var observation: NSKeyValueObservation?
+  private var playbackObservation: NSKeyValueObservation?
   private let imageView = UIImageView()
   private let scroll = UIScrollView()
   private let status = UILabel()
   private let loading = NativeGalleryLoadingIndicator()
   private var previousSize = CGSize.zero
   var image: UIImage? { imageView.image }
+  var isPlaying: Bool { isVideo && (video.player.map { $0.timeControlStatus != .paused } ?? false) }
   var isAtRestingZoom: Bool { isVideo || scroll.zoomScale <= scroll.minimumZoomScale + 0.01 }
   func photoFrame(in target: UIView) -> CGRect? {
     if isVideo, video.player != nil, !video.videoBounds.isEmpty { return video.view.convert(video.videoBounds, to: target) }
@@ -621,13 +706,19 @@ private final class NativePhotoPage: UIViewController, UIScrollViewDelegate {
         else if item.status == .readyToPlay { self.loading.setLoading(false); self.status.text = nil; self.video.view.isHidden = false; self.scroll.isHidden = true }
       }
     }
+    playbackObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+      DispatchQueue.main.async {
+        guard let self, self.video.player === player else { return }
+        self.onPlayback?(player.timeControlStatus != .paused)
+      }
+    }
     if autoplay { player.play() }
   }
   func playVideo() { if isVideo { video.player?.play() } }
   func pauseVideo() { if isVideo { video.player?.pause() } }
   func stopVideo() {
     guard isVideo else { return }
-    observation = nil
+    observation = nil; playbackObservation = nil
     loading.setLoading(false)
     video.player?.pause(); video.player?.replaceCurrentItem(with: nil); video.player = nil
     if isViewLoaded { video.view.isHidden = true; scroll.isHidden = false }

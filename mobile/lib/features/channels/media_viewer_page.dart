@@ -163,7 +163,9 @@ void openVideoViewer(
   String? posterUrl,
   VoidCallback? onReply,
 }) {
-  Navigator.of(context).push(
+  // The root navigator covers the whole window, so on a tablet or an unfolded
+  // foldable the video is full screen rather than inside the detail pane.
+  Navigator.of(context, rootNavigator: true).push(
     PageRouteBuilder<void>(
       transitionDuration: MediaQuery.disableAnimationsOf(context)
           ? Duration.zero

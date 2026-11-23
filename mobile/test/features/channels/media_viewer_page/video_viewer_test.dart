@@ -926,4 +926,59 @@ void main() {
       );
     },
   );
+
+  testWidgets('video opens over the whole window, not inside a nested pane', (
+    tester,
+  ) async {
+    VideoPlayerPlatform.instance = _FakeVideoPlayerPlatform();
+    final client = _FinalizingFakeClient(
+      responseBuilder: () =>
+          http.StreamedResponse(const Stream<List<int>>.empty(), 404),
+    );
+    addTearDown(client.close);
+    final pane = GlobalKey<NavigatorState>();
+
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        disableAnimations: true,
+        overrides: [
+          mediaGetAuthServiceProvider.overrideWithValue(_noopAuth()),
+          mediaHttpClientProvider.overrideWithValue(client),
+        ],
+        // A split view keeps the open chat in its own nested navigator.
+        child: Row(
+          children: [
+            const SizedBox(width: 200),
+            Expanded(
+              child: Navigator(
+                key: pane,
+                onGenerateRoute: (_) => MaterialPageRoute<void>(
+                  builder: (context) => TextButton(
+                    onPressed: () => openVideoViewer(
+                      context,
+                      videoUrl: 'https://relay.test/media/abc.mp4',
+                    ),
+                    child: const Text('Play'),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    await tester.tap(find.text('Play'));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 50)),
+    );
+    await tester.pump();
+
+    expect(pane.currentState!.canPop(), isFalse);
+    final viewer = find.byType(MediaVideoViewerPage);
+    expect(viewer, findsOneWidget);
+    expect(
+      tester.getRect(viewer),
+      Offset.zero & tester.view.physicalSize / tester.view.devicePixelRatio,
+    );
+  });
 }

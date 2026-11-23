@@ -109,6 +109,7 @@ struct NativePhotoZoomTests {
     viewer.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
     viewer.layoutGallery(insets: UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0))
     precondition(buttons[0].frame.maxY < buttons[1].frame.minY, "Ordinary phones retain top Close and bottom actions")
+    precondition(pager.view.frame.minY == 59 + 56 && pager.view.frame.maxY < buttons[1].frame.minY, "Photos keep clear of the actions")
     precondition(pager.viewControllers!.first === page, "Folding must retain the selected native page")
     print("PASS: native gallery rail sides, full viewport, targets and compact transition")
   }
@@ -156,6 +157,33 @@ struct NativePhotoZoomTests {
     precondition(item.status == .readyToPlay, "Real MP4 fixture must become playable")
     precondition(firstSpinner.isHidden, "Playable video removes the loader")
     precondition(requested == [0], "Only the selected video may download")
+    let videoButtons = ["Close media", "Share video", "Reply in thread"].map { label in
+      descendants(viewer.view).compactMap { $0 as? UIButton }.first { $0.accessibilityLabel == label }!
+    }
+    for (size, insets) in [(CGSize(width: 390, height: 844), UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0)),
+                           (CGSize(width: 844, height: 390), UIEdgeInsets(top: 0, left: 59, bottom: 21, right: 59))] {
+      viewer.view.frame = CGRect(origin: .zero, size: size)
+      viewer.layoutGallery(insets: insets)
+      precondition(pager.view.frame == viewer.view.bounds, "Video fills the screen in portrait and landscape")
+      for button in videoButtons {
+        precondition(viewer.view.bounds.inset(by: insets).contains(button.frame), "Overlaid video actions stay in the safe area")
+        precondition(button.frame.maxY < viewer.view.bounds.midY, "Video actions sit in the top row, clear of AVKit's transport bar")
+      }
+      for (slot, button) in videoButtons.enumerated() where slot > 0 {
+        precondition(!button.frame.intersects(videoButtons[slot - 1].frame), "Video actions must not overlap")
+      }
+    }
+    viewer.view.frame = CGRect(x: 0, y: 0, width: 951, height: 669)
+    viewer.layoutGallery(insets: UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 76))
+    precondition(pager.view.frame == viewer.view.bounds, "Video spans the full Duo window beside the rail")
+    precondition(videoButtons.allSatisfy { $0.center.x >= 875 }, "Duo video actions stay in the rail")
+    viewer.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+    viewer.layoutGallery(insets: .zero)
+    precondition(videoButtons[1].isEnabled && videoButtons[1].alpha == 1, "A downloaded video can be shared")
+    viewer.setChrome(hidden: true)
+    precondition(videoButtons.allSatisfy { $0.alpha == 0 && !$0.isUserInteractionEnabled && $0.accessibilityElementsHidden }, "Tapping the video hides its actions")
+    viewer.setChrome(hidden: false)
+    precondition(videoButtons.allSatisfy { $0.alpha == 1 && $0.isUserInteractionEnabled }, "Tapping again restores them")
     precondition(feedback.clicks == 0, "Opening must not trigger selection haptics")
     viewer.pageViewController(pager, willTransitionTo: [first])
     precondition(feedback.clicks == 1, "Swipe feedback fires before the page changes")
