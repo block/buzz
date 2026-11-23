@@ -26,52 +26,66 @@ class SoloChatTile extends ConsumerWidget {
     Channel channel,
     String? viewer, {
     required bool personal,
-  }) => showChannelDetailsSheet(
-    context: context,
-    channel: channel,
-    currentPubkey: viewer,
-    personalChat: personal,
-    onMemberTap: (context, pubkey) => showUserProfileSheet(
-      context,
-      pubkey,
-      names: channelIdentityNamesProvider(channel.id),
-      contextualActions: (_) =>
-          ChannelMemberProfileActions(channel: channel, pubkey: pubkey),
-    ),
-    soloSettings: personal
-        ? (renameRow, render) => HookConsumer(
-            builder: (context, ref, _) {
-              final workspace = useMeWorkspace(
-                context,
-                ref,
-                enabled: true,
-                channelId: channel.id,
-              );
-              final assistant = useMeChatAssistant(
-                context,
-                ref,
-                enabled: true,
-                channelId: channel.id,
-                initial: null,
-                messages:
-                    ref.watch(meMessagesProvider(channel.id)).value ?? const [],
-              );
-              return render(
-                MeChatSettings(
-                  renameRow: renameRow,
-                  agentName: assistant.name,
-                  agentAvatarUrl: assistant.nativeAction.imageUrl,
-                  agentInitial: assistant.nativeAction.avatarInitial ?? '?',
-                  hasAgent: assistant.selected != null,
-                  workspaceName: workspace.name,
-                  onAgentTap: assistant.openPicker,
-                  onWorkspaceTap: workspace.openPicker,
-                ),
-              );
-            },
-          )
-        : null,
-  );
+  }) async {
+    final pane = ConversationPaneScope.maybeOf(context);
+    final result = await showChannelDetailsSheet(
+      context: context,
+      channel: channel,
+      currentPubkey: viewer,
+      personalChat: personal,
+      onMemberTap: (context, pubkey) => showUserProfileSheet(
+        context,
+        pubkey,
+        names: channelIdentityNamesProvider(channel.id),
+        contextualActions: (_) =>
+            ChannelMemberProfileActions(channel: channel, pubkey: pubkey),
+      ),
+      soloSettings: personal
+          ? (renameRow, render) => HookConsumer(
+              builder: (context, ref, _) {
+                final workspace = useMeWorkspace(
+                  context,
+                  ref,
+                  enabled: true,
+                  channelId: channel.id,
+                );
+                final assistant = useMeChatAssistant(
+                  context,
+                  ref,
+                  enabled: true,
+                  channelId: channel.id,
+                  initial: null,
+                  messages:
+                      ProviderScope.containerOf(
+                        context,
+                        listen: false,
+                      ).exists(meMessagesProvider(channel.id))
+                      ? ref.read(meMessagesProvider(channel.id)).value ??
+                            const []
+                      : const [],
+                );
+                return render(
+                  MeChatSettings(
+                    renameRow: renameRow,
+                    agentName: assistant.name,
+                    agentAvatarUrl: assistant.nativeAction.imageUrl,
+                    agentInitial: assistant.nativeAction.avatarInitial ?? '?',
+                    hasAgent: assistant.selected != null,
+                    workspaceName: workspace.name,
+                    onAgentTap: assistant.openPicker,
+                    onWorkspaceTap: workspace.openPicker,
+                  ),
+                );
+              },
+            )
+          : null,
+    );
+    if (result == true && context.mounted && pane?.selectedId == channel.id) {
+      pane!.clear();
+    }
+    return result;
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final viewer = ref.watch(myPubkeyProvider);

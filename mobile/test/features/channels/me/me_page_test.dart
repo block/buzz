@@ -1,3 +1,7 @@
+import 'package:buzz/features/channels/huddle_lifecycle_provider.dart';
+import 'package:buzz/features/channels/me/me_messages_provider.dart';
+import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_activity.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_manager.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_provider.dart';
@@ -38,6 +42,44 @@ import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/app_list.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
+
+class _MenuReadState extends ReadStateNotifier {
+  _MenuReadState(this.actions);
+  final List<String> actions;
+  @override
+  ReadStateState build() => const ReadStateState.inert();
+  @override
+  bool markContextUnread(
+    String contextId, {
+    required String channelId,
+    String? threadRootId,
+    bool channelCatchUp = false,
+  }) {
+    actions.add('unread $channelId');
+    return true;
+  }
+}
+
+class _MenuChannelActions extends ChannelActions {
+  _MenuChannelActions(Ref ref, this.actions)
+    : super(
+        ref: ref,
+        session: ref.read(relaySessionProvider.notifier),
+        currentPubkey: 'owner',
+        signedEventRelay: SignedEventRelay(
+          session: ref.read(relaySessionProvider.notifier),
+          nsec: null,
+        ),
+      );
+  final List<String> actions;
+  @override
+  Future<void> convertSolo(
+    String channelId, {
+    required bool personalChat,
+  }) async {
+    actions.add('convert $channelId');
+  }
+}
 
 class _CachedProfiles extends UserCacheNotifier {
   _CachedProfiles(this.profiles);
@@ -264,6 +306,9 @@ void main() {
   ) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
+    final pane = ConversationPaneController()
+      ..open('loose', (_) => const SizedBox());
+    final actions = <String>[];
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -278,6 +323,10 @@ void main() {
             ),
           ),
           savedPrefsProvider.overrideWithValue(prefs),
+          readStateProvider.overrideWith(() => _MenuReadState(actions)),
+          channelActionsProvider.overrideWith(
+            (ref) => _MenuChannelActions(ref, actions),
+          ),
           defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
           myPubkeyProvider.overrideWithValue('owner'),
           currentPubkeyProvider.overrideWith((ref) => 'owner'),
@@ -298,7 +347,10 @@ void main() {
             (ref) => Stream.value(const MeGroups(groups: [], assignments: {})),
           ),
         ],
-        child: MaterialApp(theme: AppTheme.light(), home: const MePage()),
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: ConversationPaneScope(controller: pane, child: const MePage()),
+        ),
       ),
     );
     await tester.pumpAndSettle();
@@ -333,6 +385,27 @@ void main() {
     expect(find.text('Delete chat'), findsOneWidget);
     // Solo chats move between Solo workspaces, not channel sections.
     expect(find.text('Move to section…'), findsNothing);
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(MePage)),
+      listen: false,
+    );
+    expect(container.exists(meMessagesProvider('loose')), isFalse);
+    expect(container.exists(huddleLifecycleProvider('loose')), isFalse);
+    await tester.ensureVisible(find.text('Convert to channel'));
+    await tester.tap(find.text('Convert to channel'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Convert'));
+    await tester.pumpAndSettle();
+    expect(actions, ['convert loose']);
+    expect(pane.selectedId, isNull);
+    pane.open('loose', (_) => const SizedBox());
+    await tester.pumpAndSettle();
+    await tester.longPress(find.text('Unfiled labeled chat'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Mark as unread'));
+    await tester.pumpAndSettle();
+    expect(actions.last, 'unread loose');
+    expect(pane.selectedId, isNull);
   });
 
   testWidgets('empty workspace stays centered behind the New chat keyboard', (

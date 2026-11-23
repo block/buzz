@@ -20,6 +20,7 @@ import '../../shared/verified_profiles/verified_profile_directory.dart';
 import '../profile/profile_provider.dart';
 import 'channel.dart';
 import 'channel_metadata_updates.dart';
+import 'channel_sections/channel_sections_provider.dart';
 import 'channels_provider.dart';
 import 'saved_channel_page.dart';
 

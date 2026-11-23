@@ -174,7 +174,11 @@ class _NativeChannelActions extends HookConsumerWidget {
                 row.title,
                 row.onTap,
                 icon: row.icon,
-                id: isWorkspace ? 'workspace' : row.title,
+                id: isWorkspace
+                    ? 'workspace'
+                    : row.icon == BuzzIcons.headphones
+                    ? 'huddle'
+                    : row.title,
                 destructive: row.titleColor == colors.error,
               ),
               if (row.subtitle != null) 'subtitle': row.subtitle!,
@@ -278,8 +282,8 @@ class _NativeChannelActions extends HookConsumerWidget {
             );
           }
         } finally {
-          if (!disposed && context.mounted && (route?.isCurrent ?? false)) {
-            Navigator.of(context).pop();
+          if (!disposed && context.mounted && route != null && route.isActive) {
+            route.navigator!.removeRoute(route);
           }
         }
       });

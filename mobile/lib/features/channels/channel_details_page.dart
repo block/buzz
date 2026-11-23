@@ -628,6 +628,12 @@ class ChannelDetailsPage extends HookConsumerWidget {
             title: isStarred ? 'Unstar' : 'Star',
             onTap: toggleStar,
           ),
+        if (solo && canEdit)
+          AppListRow(
+            icon: BuzzIcons.pencil,
+            title: 'Edit details',
+            onTap: openManageChannel,
+          ),
         if (canFile)
           AppListRow(
             icon: BuzzIcons.folderInput,

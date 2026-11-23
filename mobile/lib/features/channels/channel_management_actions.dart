@@ -491,6 +491,7 @@ class ChannelActions {
             channels: groups.channels.where((id) => id != channelId).toList(),
             assignments: groups.assignments,
           ),
+          mayFile: () => _ref.read(channelSectionsProvider).editable,
         );
       }
     }

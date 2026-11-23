@@ -1,3 +1,5 @@
+import 'package:buzz/shared/huddle/huddle_session.dart';
+import 'package:buzz/features/channels/huddle_lifecycle_provider.dart';
 import 'package:buzz/features/channels/me/me_chat_settings.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -186,7 +188,10 @@ void main() {
           SystemChannels.platform_views,
           (call) async {
             if (call.method == 'create') {
-              expect((call.arguments as Map)['viewType'], 'buzz/toast_layer');
+              expect(
+                (call.arguments as Map)['viewType'],
+                isIn(['buzz/toast_layer', 'buzz/navigation_glass']),
+              );
             }
             return null;
           },
@@ -212,7 +217,8 @@ void main() {
             null,
           ),
         );
-        final result = Completer<String?>();
+        var result = Completer<String?>();
+        var session = HuddleSessionState.idle;
         final members = Completer<List<ChannelMember>>();
         final calls = <MethodCall>[];
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
@@ -231,6 +237,14 @@ void main() {
           _modalApp(
             channel: _channel(),
             soloDetails: soloDetails,
+            sectionOverrides: [
+              huddleLifecycleProvider(
+                'channel-id',
+              ).overrideWith((ref) => Stream.value([])),
+              huddleSessionProvider.overrideWithBuild(
+                (ref, notifier) => session,
+              ),
+            ],
             loadMembers: () => members.future,
             createChannelActions: (ref) => _FakeChannelActions(ref),
           ),
@@ -272,6 +286,29 @@ void main() {
                   .arguments
               as Map,
         );
+        if (soloDetails) {
+          final container = ProviderScope.containerOf(
+            tester.element(find.text('Open actions', skipOffstage: false)),
+            listen: false,
+          );
+          session = const HuddleSessionState(
+            phase: HuddleSessionPhase.connected,
+            parentChannelId: 'channel-id',
+            ephemeralChannelId: 'call',
+          );
+          container.invalidate(huddleSessionProvider);
+          await tester.pumpAndSettle();
+          expect(calls.last.arguments.toString(), contains('Open Huddle'));
+          result.complete('huddle');
+          await tester.pumpAndSettle();
+          expect(find.byTooltip('Minimize'), findsWidgets);
+          Navigator.of(tester.element(find.byTooltip('Minimize').first)).pop();
+          await tester.pumpAndSettle();
+          result = Completer<String?>();
+          await tester.tap(find.text('Open actions'));
+          await tester.pumpAndSettle();
+          expect(calls.where((call) => call.method == 'present'), hasLength(2));
+        }
         result.complete('Copy channel ID');
         await tester.pumpAndSettle();
         expect(clipboard, ['channel-id']);

@@ -198,17 +198,45 @@ AppListRow soloHuddleActionRow(
   WidgetRef ref,
   Channel channel,
 ) {
-  final events = ref.watch(huddleLifecycleProvider(channel.id));
+  final provider = huddleLifecycleProvider(channel.id);
+  final container = ProviderScope.containerOf(context, listen: false);
+  final events = container.exists(provider) ? ref.watch(provider).value : null;
   final action = _huddleNavigationAction(
     context,
     ref,
     channel,
-    events.value ?? const [],
+    events ?? const [],
   );
   return AppListRow(
     icon: BuzzIcons.headphones,
     title: action.label == 'Start Huddle' ? 'Start a huddle' : action.label,
-    onTap: events.hasValue ? action.onPressed : null,
+    onTap: action.onPressed == null
+        ? null
+        : () async {
+            final subscription = container.listen(provider.future, (_, _) {});
+            try {
+              final current = await subscription.read();
+              if (!context.mounted) return;
+              final latest = _huddleNavigationAction(
+                context,
+                ref,
+                channel,
+                current,
+                sessionSnapshot: ref.read(huddleSessionProvider),
+              );
+              if (latest.onPressed != null)
+                await Future<void>.sync(latest.onPressed!);
+            } catch (error) {
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showFeedbackSnackBar(
+                  SnackBar(content: Text(_huddleActionError(error))),
+                  kind: ToastKind.error,
+                );
+              }
+            } finally {
+              subscription.close();
+            }
+          },
   );
 }
 
@@ -248,8 +276,10 @@ IosNavigationAction _huddleNavigationAction(
   Channel channel,
   List<NostrEvent> events, {
   String? voiceAgent,
+  HuddleSessionState? sessionSnapshot,
 }) {
-  final session = ref.watch(huddleSessionProvider);
+  final session =
+      sessionSnapshot ?? ref.watch<HuddleSessionState>(huddleSessionProvider);
   final latestStart = _activeHuddleStart(events);
   final unavailableFailure =
       session.phase == HuddleSessionPhase.failed &&
@@ -288,7 +318,7 @@ IosNavigationAction _huddleNavigationAction(
               return;
             }
             if (activeStart != null) {
-              _openMobileHuddle(
+              await _openMobileHuddle(
                 context: context,
                 ref: ref,
                 invite: activeStart,
