@@ -67,10 +67,27 @@ class SignedEventRelay {
   }
 }
 
+/// The EVENT went out on the socket but the relay's OK never came back, so the
+/// relay may or may not have stored it.
+class SignedEventUnacknowledged implements Exception {
+  const SignedEventUnacknowledged(this.cause);
+
+  /// Why no OK arrived: a timeout or a dropped connection.
+  final Object cause;
+
+  @override
+  String toString() => 'Relay did not acknowledge the event: $cause';
+}
+
 /// Publishes one signed event over a short-lived authenticated NIP-42 socket.
 ///
 /// This is used for community-removal tombstones because the community being
 /// removed is not necessarily the app's active relay session.
+///
+/// The attempt ends at [timeout] after the call, or at [deadline] when that
+/// comes first. At that point the socket closes, and an EVENT not yet sent
+/// never is. A failure after the EVENT went out, other than the relay's
+/// refusal, is a [SignedEventUnacknowledged].
 Future<NostrEvent> submitSignedEventOnce({
   required String wsUrl,
   required String nsec,
@@ -79,6 +96,7 @@ Future<NostrEvent> submitSignedEventOnce({
   required List<List<String>> tags,
   int? createdAt,
   Duration timeout = const Duration(seconds: 12),
+  DateTime? deadline,
   Map<String, String> headers = const {},
   DiagnosticReporter diagnostics = const NoopDiagnosticReporter(),
 }) async {
@@ -96,6 +114,16 @@ Future<NostrEvent> submitSignedEventOnce({
   // push tombstone; its reports must not name the active member.
   final reporter = SignerDiagnosticReporter(diagnostics, signer: event.pubkey);
   final result = Completer<NostrEvent>();
+  var sent = false;
+  var expired = false;
+  void fail(Object error, [StackTrace? stackTrace]) {
+    if (result.isCompleted) return;
+    result.completeError(
+      sent ? SignedEventUnacknowledged(error) : error,
+      stackTrace,
+    );
+  }
+
   late final RelaySocket socket;
   socket = RelaySocket(
     wsUrl: wsUrl,
@@ -107,7 +135,7 @@ Future<NostrEvent> submitSignedEventOnce({
         final bool accepted,
         final String detail,
         ...,
-      ] when eventId == event.id) {
+      ] when eventId == event.id && !result.isCompleted) {
         if (accepted) {
           result.complete(
             NostrEvent(
@@ -132,20 +160,30 @@ Future<NostrEvent> submitSignedEventOnce({
         }
       }
     },
-    onConnected: () => socket.send(['EVENT', event.toJson()]),
-    onDisconnected: (error) {
-      if (!result.isCompleted) {
-        result.completeError(error ?? Exception('Relay disconnected'));
-      }
+    onConnected: () {
+      if (expired || result.isCompleted) return;
+      sent = true;
+      socket.send(['EVENT', event.toJson()]);
     },
+    onDisconnected: (error) => fail(error ?? Exception('Relay disconnected')),
   );
   socket.headers = headers;
   socket.diagnostics = reporter;
-  final resultFuture = result.future.timeout(timeout);
+  var limit = timeout;
+  if (deadline != null) {
+    final remaining = deadline.difference(DateTime.now());
+    if (remaining < limit) limit = remaining;
+  }
+  final timer = Timer(limit.isNegative ? Duration.zero : limit, () {
+    expired = true;
+    fail(TimeoutException('The relay did not answer in time', limit));
+    unawaited(socket.disconnect());
+  });
   try {
-    await socket.connect();
-    return await resultFuture;
+    unawaited(socket.connect().catchError(fail));
+    return await result.future;
   } finally {
+    timer.cancel();
     await socket.disconnect();
   }
 }

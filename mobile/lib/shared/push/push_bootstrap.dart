@@ -447,6 +447,35 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
       ],
     );
 
+    // An unconfirmed opt-out (its acknowledgment was lost, or an earlier run
+    // left it) is settled by reading the relay's lease once the session is up,
+    // and again on each later connect until a read answers. Nothing publishes
+    // here: the read only shows the setting the relay actually holds.
+    final optOutStatus = ref.watch(pushOptOutStatusProvider)[community?.id];
+    final unconfirmedOptOutId =
+        community != null &&
+            !community.pushNotificationsEnabled &&
+            community.pushSubscriptionState.pendingTombstoneGeneration !=
+                null &&
+            optOutStatus != PushOptOutStatus.turningOff
+        ? community.id
+        : null;
+    useEffect(() {
+      final id = unconfirmedOptOutId;
+      if (session.status != SessionStatus.connected || id == null) {
+        return null;
+      }
+      unawaited(
+        ref
+            .read(communityListProvider.notifier)
+            .reconcilePushOptOut(id)
+            .catchError((Object error, StackTrace stack) {
+              debugPrint('Push opt-out lease read failed: $error');
+            }),
+      );
+      return null;
+    }, [session.status, unconfirmedOptOutId, optOutStatus]);
+
     final token = apnsDeviceToken.value ?? fcmDeviceToken.value;
     useEffect(
       () {

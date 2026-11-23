@@ -32,7 +32,17 @@ class _NotificationsSection extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     if (!_notificationsVisible(ref)) return const SizedBox.shrink();
-    final community = ref.watch(activeCommunityProvider).value!;
+    final active = ref.watch(activeCommunityProvider).value!;
+    // The list changes in the same frame as each opt-out step, while the
+    // active projection trails it by a storage read. Reading the list keeps a
+    // finished opt-out from showing as failed for a frame.
+    final community =
+        ref
+            .watch(communityListProvider)
+            .value
+            ?.where((candidate) => candidate.id == active.id)
+            .firstOrNull ??
+        active;
     final setup = ref.watch(buzzPushSetupStatusProvider);
     final capability = ref.watch(currentRelayPushDescriptorProvider);
     final hasCapability =
@@ -40,26 +50,31 @@ class _NotificationsSection extends ConsumerWidget {
         !capability.hasError &&
         capability.value != null;
 
-    final pendingOff =
-        !community.pushNotificationsEnabled &&
-        community.pushSubscriptionState.pendingTombstoneGeneration != null;
-    final turningOff =
-        pendingOff &&
-        ref.watch(pushOptOutAttemptsProvider).contains(community.id);
-    // A failed opt-out shows the last confirmed setting: the relay may still
-    // hold the lease, so notifications may continue.
-    final optOutFailed = pendingOff && !turningOff;
-    final shownEnabled = community.pushNotificationsEnabled || optOutFailed;
-    final canToggle = hasCapability || shownEnabled;
+    final status = ref.watch(pushOptOutStatusProvider)[community.id];
+    final turningOff = status == PushOptOutStatus.turningOff;
+    // An opt-out the relay hasn't confirmed: one that failed in this run, or
+    // one an earlier run left pending.
+    final optOutFailed =
+        !turningOff &&
+        (status == PushOptOutStatus.failed ||
+            (!community.pushNotificationsEnabled &&
+                community.pushSubscriptionState.pendingTombstoneGeneration !=
+                    null));
+    // While unconfirmed, the switch shows the relay's last confirmed setting.
+    final shownEnabled =
+        !turningOff &&
+        (community.pushNotificationsEnabled ||
+            (optOutFailed && community.pushSubscriptionState.accepted != null));
+    // Disabled while turning off, so a second tap can't start another opt-out
+    // before this one ends.
+    final canToggle =
+        !turningOff && (hasCapability || shownEnabled || optOutFailed);
     final communities = ref.read(communityListProvider.notifier);
 
     void retryOptOut() => unawaited(communities.retryPushOptOut(community.id));
 
-    void keepOn() =>
-        unawaited(communities.setPushNotificationsEnabled(community.id, true));
-
     void setEnabled(bool enabled) {
-      if (optOutFailed) return retryOptOut();
+      if (optOutFailed && !enabled) return retryOptOut();
       unawaited(communities.setPushNotificationsEnabled(community.id, enabled));
     }
 
@@ -114,37 +129,36 @@ class _NotificationsSection extends ConsumerWidget {
           ),
         ),
         if (optOutFailed)
-          Column(
+          // Announced when it appears; it sits outside the switch's merged
+          // semantics. The wording is the spec's (rule 29): a timeout doesn't
+          // prove the opt-out failed.
+          Semantics(
             key: const ValueKey('push-opt-out-failed'),
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              AppListRow(
-                title: "Couldn't turn off notifications",
-                titleColor: context.colors.error,
-                subtitle: 'They may continue.',
-              ),
-              // Below the text, not trailing it, so large text sizes wrap
-              // the actions instead of covering the warning.
-              Padding(
-                padding: EdgeInsets.symmetric(
-                  horizontal: AppListInset.of(context) - Grid.xs,
+            container: true,
+            liveRegion: true,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                AppListRow(
+                  title:
+                      'Could not confirm that notifications were turned off.',
+                  titleColor: context.colors.error,
+                  subtitle: 'Notifications may continue.',
                 ),
-                child: OverflowBar(
-                  alignment: MainAxisAlignment.end,
-                  overflowAlignment: OverflowBarAlignment.end,
-                  children: [
-                    TextButton(onPressed: keepOn, child: const Text('Keep on')),
-                    TextButton(
-                      onPressed: retryOptOut,
-                      child: const Text(
-                        'Retry',
-                        semanticsLabel: 'Retry turning off notifications',
-                      ),
+                // Below the text, not trailing it, so large text sizes keep
+                // the warning readable.
+                Align(
+                  alignment: AlignmentDirectional.centerEnd,
+                  child: TextButton(
+                    onPressed: retryOptOut,
+                    child: const Text(
+                      'Retry',
+                      semanticsLabel: 'Retry turning off notifications',
                     ),
-                  ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
       ],
     );

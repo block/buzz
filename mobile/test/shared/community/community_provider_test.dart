@@ -56,7 +56,7 @@ void main() {
     revocationTrigger = () async {
       revocationTriggers += 1;
     };
-    deactivator = (community, {generation}) async {
+    deactivator = (community, {generation, deadline}) async {
       deactivatedCommunityIds.add(community.id);
       deactivationGenerations.add(generation);
     };
@@ -375,10 +375,10 @@ void main() {
     });
 
     test(
-      'failed opt-out tombstone retries after restart at a newer generation',
+      'a refused opt-out restores push, and Retry after restart uses a newer generation',
       () async {
         var failTombstone = true;
-        deactivator = (community, {generation}) async {
+        deactivator = (community, {generation, deadline}) async {
           deactivatedCommunityIds.add(community.id);
           deactivationGenerations.add(generation);
           if (failTombstone) {
@@ -409,10 +409,13 @@ void main() {
             .read(communityListProvider.notifier)
             .setPushNotificationsEnabled(community.id, false);
 
+        // The relay never stored it, so the confirmed lease is restored and
+        // the spent generation stays burned.
         var stored = (await communityStorage.loadAll()).single;
-        expect(stored.pushNotificationsEnabled, isFalse);
+        expect(stored.pushNotificationsEnabled, isTrue);
         expect(stored.pushSubscriptionState.acceptedGeneration, 7);
-        expect(stored.pushSubscriptionState.pendingTombstoneGeneration, 8);
+        expect(stored.pushSubscriptionState.generationCursor, 8);
+        expect(stored.pushSubscriptionState.pendingTombstoneGeneration, isNull);
         expect(deactivationGenerations, [8]);
 
         container.dispose();
@@ -421,10 +424,7 @@ void main() {
         await container.read(communityListProvider.future);
         await container
             .read(communityListProvider.notifier)
-            .retryPendingPushLeaseTombstone(
-              community.id,
-              advanceGeneration: true,
-            );
+            .retryPushOptOut(community.id);
 
         stored = (await communityStorage.loadAll()).single;
         expect(stored.pushNotificationsEnabled, isFalse);
@@ -432,6 +432,51 @@ void main() {
         expect(stored.pushSubscriptionState.generationCursor, 9);
         expect(stored.pushSubscriptionState.pendingTombstoneGeneration, isNull);
         expect(deactivationGenerations, [8, 9]);
+      },
+    );
+
+    test(
+      'a refused opt-out with no confirmed lease stays off and guarded',
+      () async {
+        deactivator = (community, {generation, deadline}) async {
+          deactivationGenerations.add(generation);
+          throw StateError('injected refusal');
+        };
+        container = createContainer();
+        await container.read(communityListProvider.future);
+        final subscription = BuzzPushSubscription(
+          filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+          notificationClass: 'default',
+        );
+        // Turned back on after an earlier opt-out, but the relay never
+        // confirmed the new lease: the confirmed setting is off.
+        final community =
+            Community.create(
+              name: 'Test',
+              relayUrl: 'https://test.example.com',
+            ).copyWith(
+              pushNotificationsEnabled: true,
+              pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+                desired: [subscription],
+                generationCursor: 8,
+              ),
+            );
+        await container
+            .read(communityListProvider.notifier)
+            .addCommunity(community);
+
+        await container
+            .read(communityListProvider.notifier)
+            .setPushNotificationsEnabled(community.id, false);
+
+        final stored = (await communityStorage.loadAll()).single;
+        expect(stored.pushNotificationsEnabled, isFalse);
+        expect(stored.pushSubscriptionState.pendingTombstoneGeneration, 9);
+        expect(deactivationGenerations, [9]);
+        expect(
+          container.read(pushOptOutStatusProvider)[community.id],
+          PushOptOutStatus.failed,
+        );
       },
     );
 
@@ -535,7 +580,6 @@ void main() {
         await notifier.addCommunity(community);
 
         await notifier.setPushNotificationsEnabled(community.id, false);
-        await notifier.retryPendingPushLeaseTombstone(community.id);
 
         final stored = (await communityStorage.loadAll()).single;
         expect(stored.pushSubscriptionState.pendingTombstoneGeneration, isNull);

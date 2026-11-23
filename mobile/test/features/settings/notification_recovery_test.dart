@@ -21,12 +21,14 @@ import '../../shared/community/community_storage_test.dart';
 
 void main() {
   for (final outcome in ['loading', 'absent', 'error', 'large text']) {
-    testWidgets('enabled community can turn push off with $outcome capability', (
-      tester,
-    ) async {
+    final setup = outcome == 'large text'
+        ? 'at a large text size'
+        : 'with $outcome capability';
+    testWidgets('opt-out failures recover $setup', (tester) async {
+      final semantics = tester.ensureSemantics();
       if (outcome == 'large text') {
-        // A small phone at a large text size: the failure's actions must
-        // stay reachable and leave the warning readable.
+        // A small phone at a large text size: Retry must stay reachable and
+        // leave the warning readable.
         tester.view.physicalSize = const Size(750, 3600);
         tester.view.devicePixelRatio = 2;
         tester.platformDispatcher.textScaleFactorTestValue = 2;
@@ -87,6 +89,7 @@ void main() {
             communityPushLeaseDeactivatorProvider.overrideWithValue((
               community, {
               generation,
+              deadline,
             }) async {
               tombstones.add(generation);
               if (hung != null) await hung.future;
@@ -120,73 +123,96 @@ void main() {
             '${container.read(activeCommunityProvider)} / ${container.read(communityListProvider)}',
       );
       expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
-      await tester.tap(find.byType(Switch));
-      await tester.pumpAndSettle();
-      final stored = (await storage.loadAll()).single;
-      expect(stored.pushNotificationsEnabled, isFalse);
-      expect(stored.pushSubscriptionState.pendingTombstoneGeneration, 8);
-      expect(tombstones, [8]);
-      expect(snapshots.last.single.pushNotificationsEnabled, isFalse);
-      // A rejected opt-out ends in a failure, not an endless "Turning off":
-      // the switch shows the last confirmed setting, with a Retry.
-      void expectFailedOptOut() {
-        final shownSwitch = tester.widget<Switch>(find.byType(Switch));
-        expect(shownSwitch.value, isTrue);
-        expect(shownSwitch.onChanged, isNotNull);
-        expect(find.text("Couldn't turn off notifications"), findsOneWidget);
-        expect(find.text('They may continue.'), findsOneWidget);
-        expect(find.widgetWithText(TextButton, 'Retry'), findsOneWidget);
-        expect(find.widgetWithText(TextButton, 'Keep on'), findsOneWidget);
+      const warning = 'Could not confirm that notifications were turned off.';
+      void expectWarning({required bool shown}) {
+        expect(find.text(warning), shown ? findsOneWidget : findsNothing);
+        expect(
+          find.text('Notifications may continue.'),
+          shown ? findsOneWidget : findsNothing,
+        );
+        expect(
+          find.widgetWithText(TextButton, 'Retry'),
+          shown ? findsOneWidget : findsNothing,
+        );
+        if (!shown) return;
+        expect(
+          tester.getSemantics(
+            find.byKey(const ValueKey('push-opt-out-failed')),
+          ),
+          isSemantics(isLiveRegion: true),
+        );
       }
 
-      expectFailedOptOut();
-      // A restart keeps the failure and makes no attempt of its own.
+      void expectSwitch({required bool on}) {
+        final shownSwitch = tester.widget<Switch>(find.byType(Switch));
+        expect(shownSwitch.value, on);
+        expect(shownSwitch.onChanged, isNotNull);
+      }
+
+      // The relay refused the tombstone, so it never took effect: the switch
+      // goes back to the confirmed On, with the warning and a Retry.
+      await tester.tap(find.byType(Switch));
+      await tester.pumpAndSettle();
+      var stored = (await storage.loadAll()).single;
+      expect(stored.pushNotificationsEnabled, isTrue);
+      expect(stored.pushSubscriptionState.pendingTombstoneGeneration, isNull);
+      expect(tombstones, [8]);
+      expect(snapshots.last.single.pushNotificationsEnabled, isTrue);
+      expectSwitch(on: true);
+      expectWarning(shown: true);
+      // A restart shows the saved On without the warning, and makes no
+      // attempt of its own.
       await tester.pumpWidget(const SizedBox());
       await launch();
       await tester.pumpAndSettle();
-      expectFailedOptOut();
+      expectSwitch(on: true);
+      expectWarning(shown: false);
       expect(tombstones, [8]);
-      // Keep on abandons the opt-out and turns push back on.
-      await tester.tap(find.widgetWithText(TextButton, 'Keep on'));
-      await tester.pumpAndSettle();
-      expect((await storage.loadAll()).single.pushNotificationsEnabled, isTrue);
-      expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
-      expect(find.text("Couldn't turn off notifications"), findsNothing);
-      expect(tombstones, [8]);
-      // An attempt that never answers is bounded: it shows as pending, then
-      // as a failure, and is not retried.
+      // An attempt that never answers is bounded: it shows as pending, with
+      // the switch held, then fails at the deadline and is not retried.
       hung = Completer<void>();
       await tester.tap(find.byType(Switch));
       // Let the attempt start, then rebuild once more. No settle: the
-      // timeout timer is still running.
+      // deadline timer is still running.
       for (var i = 0; i < 5 && tombstones.length < 2; i++) {
         await tester.pump();
       }
       await tester.pump();
       expect(find.text('Turning off…'), findsOneWidget);
-      expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
-      final attempted = List.of(tombstones);
-      expect(attempted, hasLength(2));
-      await tester.pump(pushOptOutTimeout);
+      final heldSwitch = tester.widget<Switch>(find.byType(Switch));
+      expect(heldSwitch.value, isFalse);
+      expect(heldSwitch.onChanged, isNull);
+      expect(tombstones, [8, 9]);
+      await tester.pump(pushOptOutTimeout + const Duration(seconds: 1));
       await tester.pumpAndSettle();
-      expectFailedOptOut();
       expect(find.text('Turning off…'), findsNothing);
-      expect(tombstones, attempted);
+      expect(tombstones, [8, 9]);
+      // The relay may have stored it, so the opt-out stays saved as a guard,
+      // while the switch shows the confirmed On and the warning.
+      stored = (await storage.loadAll()).single;
+      expect(stored.pushNotificationsEnabled, isFalse);
+      expect(stored.pushSubscriptionState.pendingTombstoneGeneration, 9);
+      expectSwitch(on: true);
+      expectWarning(shown: true);
+      // That warning survives a restart, which makes no attempt.
+      await tester.pumpWidget(const SizedBox());
+      await launch();
+      await tester.pumpAndSettle();
+      expectSwitch(on: true);
+      expectWarning(shown: true);
+      expect(tombstones, [8, 9]);
       hung = null;
       // Retry makes one explicit attempt at a new generation.
       relayAvailable = true;
       await tester.tap(find.widgetWithText(TextButton, 'Retry'));
       await tester.pumpAndSettle();
-      expect(tombstones, [...attempted, attempted.last! + 1]);
-      expect(
-        (await storage.loadAll())
-            .single
-            .pushSubscriptionState
-            .pendingTombstoneGeneration,
-        isNull,
-      );
+      expect(tombstones, [8, 9, 10]);
+      stored = (await storage.loadAll()).single;
+      expect(stored.pushNotificationsEnabled, isFalse);
+      expect(stored.pushSubscriptionState.pendingTombstoneGeneration, isNull);
       expect(find.text('Notifications'), findsNothing);
       expect(tester.takeException(), isNull);
+      semantics.dispose();
       debugDefaultTargetPlatformOverride = null;
     });
   }
