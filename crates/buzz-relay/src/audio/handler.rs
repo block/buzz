@@ -4914,6 +4914,33 @@ mod tests {
         );
     }
 
+    /// While the deny map restores, audio AUTH refuses as
+    /// `authorization unavailable` with a bare close, for a revoked key and
+    /// an unknown one, never `authorization denied`.
+    #[tokio::test]
+    async fn audio_restoring_deny_map_emits_authorization_unavailable() {
+        use tokio_tungstenite::tungstenite::Message;
+        let deadline = chrono::Utc::now() + chrono::Duration::hours(1);
+        let denied = nostr::Keys::generate();
+        for (state_key, signer) in [(Some(denied.public_key()), &denied), (None, &denied)] {
+            let state = audio_deny_state(state_key.as_ref()).await;
+            state
+                .nip_fi_deny_map
+                .as_deref()
+                .expect("deny map")
+                .begin_restore();
+            let assertion =
+                buzz_auth::VerifiedAssertion::for_test(Some(signer.public_key()), vec![deadline]);
+            let (wire, _) = run_audio_auth_wire(state, Some(assertion), signer, true).await;
+            assert_eq!(
+                wire.first(),
+                Some(&Message::Text(
+                    audio_denial(buzz_auth::DenialClass::AuthorizationUnavailable).into()
+                ))
+            );
+        }
+    }
+
     /// Records every frame the denial writer emits for a registered audio
     /// control, then lets a registry scan race it in `scan_first` order.
     async fn audio_denial_with_concurrent_scan(

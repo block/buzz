@@ -4837,6 +4837,53 @@ mod tests {
         /// Carl's coverage gap: a matching-key FI connection whose pubkey is
         /// banned gets the terminal `authorization denied` NOTICE and the
         /// socket closes; off mode keeps `OK false` on ctrl, then closes.
+        /// While the deny map restores, root AUTH refuses with the
+        /// `authorization unavailable` terminal frame and a bare close, never
+        /// `authorization denied`.
+        #[tokio::test]
+        #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
+        async fn fi_restoring_deny_map_emits_terminal_authorization_unavailable() {
+            let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+                .await
+                .expect("PostgreSQL must be available");
+            let mut state = (*state_with_pool(pool, |_| {}).await).clone();
+            let deny_map = std::sync::Arc::new(buzz_auth::NipFiDenyMap::new(
+                16,
+                vec![buzz_auth::IssuerCapacity {
+                    issuer: "test-issuer".to_owned(),
+                    capacity: 16,
+                }],
+            ));
+            deny_map.begin_restore();
+            state.nip_fi_deny_map = Some(deny_map);
+            let state = std::sync::Arc::new(state);
+            let mut harness = AuthHarness::new(true);
+            let community = *harness.conn.tenant.community().as_uuid();
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community)
+                .bind(format!("fi-restoring-{}.example", community.simple()))
+                .execute(state.db.pool())
+                .await
+                .expect("insert community");
+            harness.run(harness.auth_event(), state).await;
+            assert_eq!(
+                harness
+                    .terminal_rx
+                    .try_recv()
+                    .expect("terminal denial frame"),
+                crate::nip_fi_session::denial_frame(
+                    crate::nip_fi_session::NipFiWsRoute::Root,
+                    buzz_auth::DenialClass::AuthorizationUnavailable,
+                ),
+            );
+            assert!(harness.conn.cancel.is_cancelled());
+            assert_eq!(
+                *harness.conn.community_control.disconnect_reason().borrow(),
+                None,
+                "a bare close, never the 1008 of a revocation"
+            );
+        }
+
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn fi_ban_denial_emits_terminal_authorization_denied() {

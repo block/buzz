@@ -230,7 +230,7 @@ impl IssuerShard {
         pubkey_hex: &str,
         until: DateTime<Utc>,
         now: DateTime<Utc>,
-    ) -> Result<(), CapacityExceeded> {
+    ) -> Result<bool, CapacityExceeded> {
         // Overwriting an existing (active or expired) entry never grows the
         // map, and a pending key already holds the slot this entry fills.
         if !self.entries.contains_key(pubkey_hex)
@@ -240,12 +240,14 @@ impl IssuerShard {
             return Err(CapacityExceeded);
         }
 
-        let effective_until = match self.entries.get(pubkey_hex) {
-            Some(&existing) => existing.max(until),
-            None => until,
-        };
-        self.entries.insert(pubkey_hex.to_owned(), effective_until);
-        Ok(())
+        // Changed when the entry is new or `until` extends it.
+        match self.entries.get(pubkey_hex) {
+            Some(&existing) if existing >= until => Ok(false),
+            _ => {
+                self.entries.insert(pubkey_hex.to_owned(), until);
+                Ok(true)
+            }
+        }
     }
 }
 
@@ -323,8 +325,11 @@ pub enum DenyStatus {
 /// Outcome of a cross-pod deny merge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CrossPodMergeResult {
-    /// Entry was inserted or updated (max-merge applied).
+    /// Entry was inserted or its `until` extended.
     Merged,
+    /// An entry with an equal or later `until` was already held; the map is
+    /// unchanged.
+    Unchanged,
     /// Issuer is not locally configured; message rejected.
     UnknownIssuer,
     /// Per-issuer capacity ceiling reached; the missed entry was not recorded.
@@ -532,7 +537,8 @@ impl NipFiDenyMap {
                     CrossPodMergeResult::ShardPoisoned
                 }
                 Ok(mut guard) => match guard.merge_entry(&pubkey_hex, until, now) {
-                    Ok(()) => CrossPodMergeResult::Merged,
+                    Ok(true) => CrossPodMergeResult::Merged,
+                    Ok(false) => CrossPodMergeResult::Unchanged,
                     Err(CapacityExceeded) => {
                         // Cannot record the deny entry — return the outcome so
                         // the caller can close the delivered target's sessions
@@ -982,7 +988,7 @@ mod tests {
         // Second merge: shorter — must not shorten.
         assert_eq!(
             m.merge_cross_pod_deny(iss(), &k, shorter, now),
-            CrossPodMergeResult::Merged
+            CrossPodMergeResult::Unchanged
         );
         // At 400s: still denied (longer wins).
         assert!(
@@ -1012,7 +1018,7 @@ mod tests {
         );
         assert_eq!(
             m.merge_cross_pod_deny(iss(), &k, until, now),
-            CrossPodMergeResult::Merged
+            CrossPodMergeResult::Unchanged
         );
         // Still denied at 200s (no spurious second-insert count growth).
         assert!(

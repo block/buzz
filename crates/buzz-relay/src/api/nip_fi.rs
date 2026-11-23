@@ -277,10 +277,14 @@ pub fn restore_sources(
     sources
 }
 
-/// Load every stored deny entry from `sources` into this pod's map through
-/// [`apply_nip_fi_disconnect`].  `Ok` only when every entry was recorded; a
-/// store error or a capacity miss is `Err`, and the caller keeps admission
-/// closed.
+/// Load every stored deny entry from `sources` into this pod's map.  `Ok`
+/// only when every entry was recorded; a store error or a capacity miss is
+/// `Err`, and the caller keeps admission closed.
+///
+/// Entries are merged first; sessions are closed afterwards, only for targets
+/// the merge added or extended, on every exit, so a retry that finds an entry
+/// unchanged never hides a close.  A capacity or poison miss gets the same
+/// failsafe close as live delivery.
 pub async fn restore_nip_fi_denies(
     state: &crate::state::AppState,
     sources: &[Arc<dyn buzz_auth::CommandReplayGuard>],
@@ -288,6 +292,21 @@ pub async fn restore_nip_fi_denies(
     let Some(deny_map) = state.nip_fi_deny_map.as_deref() else {
         return Ok(());
     };
+    let mut changed = Vec::new();
+    let result = merge_stored_denies(state, deny_map, sources, &mut changed).await;
+    for message in &changed {
+        close_nip_fi_sessions(state, message, "restored");
+    }
+    result
+}
+
+async fn merge_stored_denies(
+    state: &crate::state::AppState,
+    deny_map: &buzz_auth::NipFiDenyMap,
+    sources: &[Arc<dyn buzz_auth::CommandReplayGuard>],
+    changed: &mut Vec<buzz_pubsub::NipFiDisconnect>,
+) -> Result<(), &'static str> {
+    use buzz_auth::CrossPodMergeResult;
     for source in sources {
         for issuer in deny_map.issuers() {
             let now = chrono::Utc::now();
@@ -302,10 +321,18 @@ pub async fn restore_nip_fi_denies(
                     until_unix: until.timestamp(),
                     until_unix_nanos: until.timestamp_subsec_nanos(),
                 };
-                if apply_nip_fi_disconnect(state, &message, now)
-                    != NipFiDisconnectApplyResult::Applied(buzz_auth::CrossPodMergeResult::Merged)
-                {
-                    return Err("capacity");
+                match merge_nip_fi_disconnect(state, &message, now) {
+                    NipFiDisconnectApplyResult::Applied(CrossPodMergeResult::Merged) => {
+                        changed.push(message)
+                    }
+                    NipFiDisconnectApplyResult::Applied(CrossPodMergeResult::Unchanged) => {}
+                    NipFiDisconnectApplyResult::Applied(merge) => {
+                        close_after_merge(state, &message, merge);
+                        return Err("capacity");
+                    }
+                    NipFiDisconnectApplyResult::Disabled | NipFiDisconnectApplyResult::Rejected => {
+                        return Err("capacity")
+                    }
                 }
             }
         }
@@ -508,6 +535,19 @@ pub fn apply_nip_fi_disconnect(
     message: &buzz_pubsub::NipFiDisconnect,
     now: chrono::DateTime<chrono::Utc>,
 ) -> NipFiDisconnectApplyResult {
+    let result = merge_nip_fi_disconnect(state, message, now);
+    if let NipFiDisconnectApplyResult::Applied(merge) = result {
+        close_after_merge(state, message, merge);
+    }
+    result
+}
+
+/// Validate, clamp and merge one disconnect into the deny map; closes nothing.
+fn merge_nip_fi_disconnect(
+    state: &crate::state::AppState,
+    message: &buzz_pubsub::NipFiDisconnect,
+    now: chrono::DateTime<chrono::Utc>,
+) -> NipFiDisconnectApplyResult {
     let deny_map = match state.nip_fi_deny_map.as_deref() {
         Some(m) => m,
         None => return NipFiDisconnectApplyResult::Disabled,
@@ -562,27 +602,44 @@ pub fn apply_nip_fi_disconnect(
         until = until.min(ceiling);
     }
 
-    // Merge the deny entry.
+    NipFiDisconnectApplyResult::Applied(deny_map.merge_cross_pod_deny(
+        &message.issuer,
+        &pubkey,
+        until,
+        now,
+    ))
+}
+
+/// Close (or, in shadow, record would-close for) every session of the
+/// message's target.
+fn close_nip_fi_sessions(
+    state: &crate::state::AppState,
+    message: &buzz_pubsub::NipFiDisconnect,
+    reason: &str,
+) {
+    if state.config.nip_fi.mode.observes_only() {
+        let sessions = &state.nip_fi_shadow_sessions;
+        return sessions.would_close(&message.issuer, &message.pubkey_bytes);
+    }
+    let closed = state
+        .conn_manager
+        .disconnect_nip_fi(&message.issuer, &message.pubkey_bytes)
+        + state
+            .community_connections
+            .disconnect_nip_fi(&message.issuer, &message.pubkey_bytes);
+    if closed > 0 {
+        tracing::debug!(closed, reason = reason, "nip-fi cross-pod: closed sessions");
+    }
+}
+
+/// Close the target's sessions for every merge outcome except
+/// `UnknownIssuer`, and log/metric the failsafe outcomes.
+fn close_after_merge(
+    state: &crate::state::AppState,
+    message: &buzz_pubsub::NipFiDisconnect,
+    merge_result: buzz_auth::CrossPodMergeResult,
+) {
     use buzz_auth::CrossPodMergeResult;
-    let merge_result = deny_map.merge_cross_pod_deny(&message.issuer, &pubkey, until, now);
-
-    // Close sessions for all merge outcomes except UnknownIssuer, never in shadow.
-    let close_sessions = |reason: &str| {
-        if state.config.nip_fi.mode.observes_only() {
-            let sessions = &state.nip_fi_shadow_sessions;
-            return sessions.would_close(&message.issuer, &message.pubkey_bytes);
-        }
-        let closed = state
-            .conn_manager
-            .disconnect_nip_fi(&message.issuer, &message.pubkey_bytes)
-            + state
-                .community_connections
-                .disconnect_nip_fi(&message.issuer, &message.pubkey_bytes);
-        if closed > 0 {
-            tracing::debug!(closed, reason = reason, "nip-fi cross-pod: closed sessions");
-        }
-    };
-
     let mode = state.config.nip_fi.mode;
     // What a capacity or poison failsafe does to targeted sessions here.
     let action = if mode.observes_only() {
@@ -590,9 +647,9 @@ pub fn apply_nip_fi_disconnect(
     } else {
         "targeted sessions closed"
     };
-    match &merge_result {
-        CrossPodMergeResult::Merged => {
-            close_sessions("merged");
+    match merge_result {
+        CrossPodMergeResult::Merged | CrossPodMergeResult::Unchanged => {
+            close_nip_fi_sessions(state, message, "merged");
         }
         CrossPodMergeResult::UnknownIssuer => {
             tracing::warn!("nip-fi cross-pod: merge returned UnknownIssuer — rejected");
@@ -602,7 +659,7 @@ pub fn apply_nip_fi_disconnect(
                 action,
                 "nip-fi cross-pod: deny set full for issuer — no map entry (capacity miss; issuer re-push is the recovery path)"
             );
-            close_sessions("capacity-exceeded");
+            close_nip_fi_sessions(state, message, "capacity-exceeded");
             let real = "buzz_nip_fi_cross_pod_capacity_exceeded_total";
             count_disconnect_event(mode, real, "cross_pod", "capacity", 1);
         }
@@ -611,13 +668,11 @@ pub fn apply_nip_fi_disconnect(
                 action,
                 "nip-fi cross-pod: issuer shard is poisoned (fail-closed)"
             );
-            close_sessions("poisoned shard failsafe");
+            close_nip_fi_sessions(state, message, "poisoned shard failsafe");
             let real = "buzz_nip_fi_cross_pod_shard_poison_total";
             count_disconnect_event(mode, real, "cross_pod", "poison", 1);
         }
     }
-
-    NipFiDisconnectApplyResult::Applied(merge_result)
 }
 
 /// Build the NIP-FI command components from the issuer policies and key source.
@@ -4131,6 +4186,128 @@ mod route_integration_tests {
         );
     }
 
+    /// A restore closes sessions only for targets it added or extended; a
+    /// target whose held entry already covers the stored one stays open.
+    #[tokio::test]
+    async fn restore_closes_only_added_or_extended_targets() {
+        let store = Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
+        let keys: Vec<_> = (0..3)
+            .map(|_| nostr::Keys::generate().public_key())
+            .collect();
+        let (held, extended) = (&keys[0], &keys[2]);
+        for key in &keys {
+            store_deny(&store, key).await;
+        }
+        let source: Arc<dyn buzz_auth::CommandReplayGuard> = store;
+        let pod = store_pod(10, Arc::clone(&source)).await;
+        let map = pod.nip_fi_deny_map.as_deref().unwrap();
+        let now = chrono::Utc::now();
+        map.merge_cross_pod_deny(TEST_ISS, held, now + chrono::Duration::hours(1), now);
+        map.merge_cross_pod_deny(TEST_ISS, extended, now + chrono::Duration::seconds(5), now);
+        let sessions: Vec<_> = keys
+            .iter()
+            .map(|k| IssuerSessions::register(&pod, TEST_ISS, k))
+            .collect();
+        map.begin_restore();
+        restore_nip_fi_denies(&pod, &[source])
+            .await
+            .expect("restore");
+        sessions[0].assert_open("held entry unchanged");
+        sessions[1].assert_closed("entry added");
+        sessions[2].assert_closed("entry extended");
+    }
+
+    /// A restore that fails part-way still closes the targets it already
+    /// added, so a retry that finds them unchanged hides no close.
+    #[tokio::test]
+    async fn failed_restore_still_closes_targets_it_added() {
+        let store = Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
+        let (a, b) = (
+            nostr::Keys::generate().public_key(),
+            nostr::Keys::generate().public_key(),
+        );
+        store_deny(&store, &a).await;
+        // Capacity: the first entry fits, the second misses.
+        store_deny(&store, &b).await;
+        let full = store_pod(
+            1,
+            Arc::clone(&store) as Arc<dyn buzz_auth::CommandReplayGuard>,
+        )
+        .await;
+        let sessions = [&a, &b].map(|k| IssuerSessions::register(&full, TEST_ISS, k));
+        full.nip_fi_deny_map.as_deref().unwrap().begin_restore();
+        assert_eq!(
+            restore_nip_fi_denies(&full, &[Arc::clone(&store) as _]).await,
+            Err("capacity")
+        );
+        sessions[0].assert_closed("first target");
+        sessions[1].assert_closed("second target");
+
+        // Store: the first source merges, the second fails to load.
+        let pod = store_pod(
+            10,
+            Arc::clone(&store) as Arc<dyn buzz_auth::CommandReplayGuard>,
+        )
+        .await;
+        let sessions = [&a, &b].map(|k| IssuerSessions::register(&pod, TEST_ISS, k));
+        pod.nip_fi_deny_map.as_deref().unwrap().begin_restore();
+        let failing = Arc::new(FailingReplayGuard {
+            load_fails: true,
+            ..Default::default()
+        });
+        assert_eq!(
+            restore_nip_fi_denies(&pod, &[Arc::clone(&store) as _, failing]).await,
+            Err("store")
+        );
+        sessions[0].assert_closed("merged before the store error");
+        sessions[1].assert_closed("merged before the store error");
+    }
+
+    /// Live delivery still closes sessions when the entry is unchanged.
+    #[tokio::test]
+    async fn live_unchanged_delivery_closes_sessions() {
+        let store = Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
+        let key = nostr::Keys::generate().public_key();
+        let message = store_deny(&store, &key).await;
+        let pod = store_pod(10, store).await;
+        let now = chrono::Utc::now();
+        pod.nip_fi_deny_map
+            .as_deref()
+            .unwrap()
+            .merge_cross_pod_deny(TEST_ISS, &key, now + chrono::Duration::hours(1), now);
+        let sessions = IssuerSessions::register(&pod, TEST_ISS, &key);
+        assert_eq!(
+            apply_nip_fi_disconnect(&pod, &message, now),
+            NipFiDisconnectApplyResult::Applied(buzz_auth::CrossPodMergeResult::Unchanged)
+        );
+        sessions.assert_closed("unchanged live delivery");
+    }
+
+    /// A broadcast lag after a restore restores again: overflow the channel
+    /// with retained messages while a newer store entry no longer fits, and
+    /// the pod stays closed.
+    #[tokio::test]
+    async fn lag_after_restore_restores_again() {
+        let store = Arc::new(buzz_auth::InMemoryCommandReplayGuard::default());
+        let a = nostr::Keys::generate().public_key();
+        let message = store_deny(&store, &a).await;
+        let source = StaleFirstLoad::new(Arc::clone(&store), None);
+        let (pod, tx, sub_tx, consumer) = capacity_one_consumer(source.clone()).await;
+        go_live(&sub_tx);
+        restored(&pod).await;
+        store_deny(&store, &nostr::Keys::generate().public_key()).await;
+        for _ in 0..17 {
+            tx.send(message.clone()).unwrap();
+        }
+        source.loaded(2).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            !pod.nip_fi_deny_map.as_deref().unwrap().is_restored(),
+            "a lag restores again"
+        );
+        consumer.abort();
+    }
+
     #[test]
     fn subscribe_channels_and_restore_sources_follow_mode_and_bridge() {
         use buzz_pubsub::conn_control::{
@@ -4432,6 +4609,63 @@ mod route_integration_tests {
                 capacity,
                 now: chrono::Utc::now(),
             }
+        }
+
+        /// An expired entry frees its slot, and a shorter later command never
+        /// lowers the index score, so a later prune keeps the longer deny.
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn redis_store_prunes_expired_entries_and_never_lowers_a_score() {
+            use buzz_auth::ClaimOutcome::Claimed;
+            let store = redis_guard();
+            let issuer = format!("https://{}.example", uuid::Uuid::new_v4());
+            let keys: Vec<_> = (0..3)
+                .map(|_| nostr::Keys::generate().public_key())
+                .collect();
+            let (a, b, c) = (&keys[0], &keys[1], &keys[2]);
+            let t = chrono::Utc::now();
+            let s = chrono::Duration::seconds;
+            let at = |jti: &'static str, target, until, capacity, now| buzz_auth::CommandClaim {
+                issuer: &issuer,
+                jti,
+                ttl_secs: 60,
+                target,
+                until,
+                capacity,
+                now,
+            };
+            assert_eq!(
+                store.try_claim(at("p1", a, t + s(1), 1, t)).await.unwrap(),
+                Claimed
+            );
+            assert_eq!(
+                store
+                    .try_claim(at("p2", b, t + s(120), 1, t + s(2)))
+                    .await
+                    .unwrap(),
+                Claimed,
+                "an expired entry frees its slot"
+            );
+            assert_eq!(
+                store
+                    .try_claim(at("p3", b, t + s(30), 2, t + s(2)))
+                    .await
+                    .unwrap(),
+                Claimed
+            );
+            // A later accept prunes entries whose score is below its now.
+            assert_eq!(
+                store
+                    .try_claim(at("p4", c, t + s(90), 2, t + s(60)))
+                    .await
+                    .unwrap(),
+                Claimed
+            );
+            let mut loaded = store.load_denies(&issuer, t + s(60)).await.unwrap();
+            loaded.sort_by_key(|(k, _)| k.to_hex());
+            let mut expected = vec![(*b, t + s(120)), (*c, t + s(90))];
+            expected.sort_by_key(|(k, _)| k.to_hex());
+            assert_eq!(loaded, expected, "the longer deny for b survives the prune");
         }
 
         /// The Redis script checks replay and shared capacity before writing,

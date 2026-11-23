@@ -2085,6 +2085,41 @@ mod tests {
         }
     }
 
+    /// A restoring deny map refuses protected HTTP 503
+    /// `authorization unavailable`, never 403 `authorization denied`.
+    #[test]
+    fn restoring_deny_map_refuses_http_as_unavailable() {
+        use buzz_auth::{IssuerCapacity, NipFiDenyMap};
+        let (agent, owner) = (any_pubkey(), any_pubkey());
+        let verifier = AgentVerifier(crate::nip_fi_shadow_session::tests::owned_assertion(
+            agent, owner,
+        ));
+        let map = NipFiDenyMap::new(
+            8,
+            vec![IssuerCapacity {
+                issuer: "test-issuer".to_owned(),
+                capacity: 8,
+            }],
+        );
+        let now = Utc::now();
+        map.merge_cross_pod_deny("test-issuer", &owner, now + chrono::Duration::hours(1), now);
+        map.begin_restore();
+        let headers = bearer_headers("Bearer a.b.c");
+        let refused = admit_stateless(
+            &headers,
+            || Ok(Nip98Proof::new(agent, ())),
+            &communities(),
+            Some(&verifier as &dyn VerifyAssertion),
+            NipFiMode::Enforce,
+            &map,
+        )
+        .now_or_never()
+        .expect("env resolution never waits");
+        let (status, body) = denial_parts(refused);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, b"authorization unavailable\n");
+    }
+
     // Pins: step 7 reads the owner of an agent assertion. With the owner's
     // deny entry live, enforce denies the agent with the deny-map row and
     // shadow records the would-deny; without it, enforce admits and the

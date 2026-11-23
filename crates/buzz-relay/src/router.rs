@@ -4704,6 +4704,30 @@ mod tests {
         );
     }
 
+    /// While the deny map restores, the upgrade is refused
+    /// 503 `authorization unavailable`, for a revoked key and an unknown one.
+    #[tokio::test]
+    async fn restoring_deny_map_refuses_ws_admission_as_unavailable() {
+        let denied_key = nostr::Keys::generate().public_key();
+        for key in [denied_key, nostr::Keys::generate().public_key()] {
+            let state = nip_fi_deny_state(&denied_key).await;
+            state
+                .nip_fi_deny_map
+                .as_deref()
+                .expect("deny map")
+                .begin_restore();
+            let bearer = format!("Bearer {}", mint_deny_test_token(&key.to_hex()));
+            let resp =
+                nip_fi_gate_response(state, "/", Some("Nostr-Federated-Identity"), Some(&bearer))
+                    .await;
+            assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+            let body = axum::body::to_bytes(resp.into_body(), 64)
+                .await
+                .expect("body");
+            assert_eq!(body.as_ref(), b"authorization unavailable\n");
+        }
+    }
+
     #[tokio::test]
     async fn deny_map_blocks_ws_admission_for_live_entry() {
         // A key with a live deny entry is refused 403 `authorization_denied`
