@@ -14,9 +14,7 @@ async fn gate_then_media_requires_delete_and_retries_storage_failure_before_comm
     let error = run(store, id, "worker-a", &read_only, &CancellationToken::new())
         .await
         .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("real workflow execution requires --delete"));
+    assert!(error.to_string().contains("select exactly one worker mode"));
     let paused = store.inspect(id).await.unwrap();
     assert_eq!(paused.stage_history.len(), 2);
     let gate = serde_json::to_value(&paused.stage_history[0]).unwrap();

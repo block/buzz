@@ -519,7 +519,7 @@ async fn real_user_requires_gate_then_global_media_before_community_cleanup() {
     assert_eq!(gate.stage, "gate_user");
     assert_eq!(gate.target_community_id, None);
     let options = super::super::worker::RunOptions {
-        db: None,
+        db: Some(Db::from_pool(store.pool.clone())),
         media: None,
         relay_pubkey: None,
         batch_size: 100,
@@ -532,7 +532,7 @@ async fn real_user_requires_gate_then_global_media_before_community_cleanup() {
         stage_delay: Duration::ZERO,
         no_agents_in: vec![],
     };
-    let error = super::super::handlers::dispatch(&store, &lease, &gate, &options)
+    let error = super::super::worker::execute_stage(&store, &lease, &gate, &options)
         .await
         .unwrap_err();
     assert!(error
@@ -540,9 +540,14 @@ async fn real_user_requires_gate_then_global_media_before_community_cleanup() {
         .contains("real handler gate_user is not implemented"));
     assert_eq!(
         store.inspect(request.id).await.unwrap().stage_history[0].status,
-        "pending"
+        "failed"
     );
     // Seed a completed gate to exercise routing independently of its unfinished handler.
+    sqlx::query("UPDATE entity_deletion_requests SET next_attempt_at=now() WHERE id=$1")
+        .bind(request.id)
+        .execute(&store.pool)
+        .await
+        .unwrap();
     store.start_stage(&lease, gate.id).await.unwrap();
     store
         .save_stage_success(&lease, gate.id, serde_json::json!({"fixture": true}))

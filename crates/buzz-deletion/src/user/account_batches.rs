@@ -140,7 +140,7 @@ pub(super) async fn run_command(
 }
 
 // Preview never needs secret material and never invokes the signing path.
-fn store(
+pub(super) fn store(
     db: &buzz_db::Db,
     mode: ExecutionMode,
 ) -> Result<buzz_db::user_deletion::UserDeletionStore> {

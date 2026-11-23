@@ -90,7 +90,7 @@ impl UserDeletionInventory {
                     "all-community inspection is only supported for rehearsals",
                 ));
             }
-            if row["relationship"] == "owner" && !rehearsal {
+            if row["relationship"] == "owner" && value["workflow_version"] != 2 && !rehearsal {
                 return Err(invalid("owned-community execution is not supported yet"));
             }
             let id = row["community_id"]
@@ -159,5 +159,16 @@ impl UserDeletionInventory {
                 .ok_or_else(|| invalid("stage community is outside inventory"))?,
         };
         Ok(json!({"target": target, "community": community}))
+    }
+
+    pub(super) fn non_owner_inputs(&self, target: &str, community: Option<Uuid>) -> Result<Value> {
+        let community = community.ok_or_else(|| invalid("missing stage community"))?;
+        let inputs = self.inputs(target, Some(community))?;
+        if inputs["community"]["relationship"] == "owner" {
+            return Err(invalid(
+                "owner inventory requires the community deletion handoff",
+            ));
+        }
+        Ok(inputs)
     }
 }

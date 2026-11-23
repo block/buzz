@@ -40,9 +40,7 @@ and profile candidates; ordinary messages mentioning the target do not select
 their communities. The supplied discovery key is saved in the inventory. The same option is accepted
 by `inventory` and ordinary `submit`; identical subject and relay inputs select
 identical communities in both modes. Rehearsal mode adds only its run metadata
-to the inventory. The existing ordinary-submission restriction on owner cleanup remains:
-the shared selector reports owners, then ordinary submission refuses the unsupported
-scope and rolls back its request. It never silently drops owner communities.
+to the inventory. Both modes use the same owned-community handler to submit or adopt a child request and advance.
 
 The request target is `rehearsal:<run-uuid>:<canonical-pubkey>`, preserving the
 existing database uniqueness constraint without a migration. Approval binds its
@@ -62,7 +60,7 @@ that has completed.
      child intent, save its ID/status, continue without awaiting deletion.
    - Otherwise `purge_content` → `purge_account` → `purge_profile`, all real previews.
 4. `global_cleanup`: simulated, no deployment-wide account records changed.
-5. `remaining_cleanup`: print and save the report, then atomically finish the
+5. `remaining_cleanup`: save the report, then atomically finish the
    request through the existing transition function.
 
 After each completed `purge_content` preview, `user-deletions inspect <request-id>`
@@ -70,7 +68,9 @@ shows the counts for that community in the stage’s `metadata_json.result.conte
 `delete` counts rows removed entirely. `redact_content` counts rows retained with
 personal fields erased, such as an event kept to preserve its thread. Both groups contain a row total (`rows`), counts by table
 (`by_table`), and counts for the `events` table by Nostr kind (`events_by_kind`).
-The kind counts break down the events already counted under `by_table.events`.
+The `targets` list gives the same counts for each public key and labels it
+`human` or `owned_agent`. Rows linked to several targets count once under
+`shared`. Rows with no attributable target count under `unattributed`.
 `excluded_event_kinds` lists events outside the selection. Older completed
 stages retain their original summary.
 
@@ -82,8 +82,8 @@ counts proposed field clears by table and column. In both groups,
 attribution triggered the action. A clear can affect another person's row.
 Two field clears can refer to one row, and different read-only stages can
 select the same row because the rehearsal leaves source data intact.
-Detailed batch keys still stream during the run. For events they also carry
-the event kind. Earlier completed rows keep their saved totals.
+The `targets` list shows deletions and field clears for each individual public
+key, including targets with zero actions. Earlier completed rows keep their saved totals.
 
 After a completed `purge_profile` preview, read `metadata_json.result.profile` in
 the stepped command's stdout or a later `user-deletions inspect <request-id>`.
@@ -92,7 +92,8 @@ counts by table and event counts by kind. A snapshot replacement counts once in
 its group and twice in the existing `items` mutation total. The stage result
 labels each entry in `profile.targets` with its `pubkey`, its `role`
 (`human` or `owned_agent`), and whether this community has a `users` row
-selected for deletion (`delete_users_row`). It also records unmet prerequisites. The persisted
+selected for deletion (`delete_users_row`). Each target has its own action counts. The `shared` group records work involving
+multiple identities. The handler also records unmet prerequisites. The persisted
 profile step sends diagnostics to stderr and keeps its preview in the journal.
 Older completed stages keep the result written when they ran.
 
@@ -152,7 +153,8 @@ buzz-admin user-deletions inspect "$request_id" |
   jq '.stage_history[] | select(.stage == "purge_media") | .metadata_json.result.files[]? | {filename, decision, reason}'
 ```
 
-Each file includes its hash and storage versions. A `delete` decision means the
+Each file includes its hash, storage versions and attributable target uploaders
+with their public keys, roles, communities and evidence sources. A `delete` decision means the
 handler would delete the file. The outcome counts stay zero during rehearsal.
 During a multi-stage run, stderr prints the inspection command when the media
 row commits. Operators can use it while later stages are running. The saved

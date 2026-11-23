@@ -112,7 +112,6 @@ impl UserDeletionStore {
             if let Some(id) = run_id {
                 inventory["execution_mode"] = "rehearsal".into();
                 inventory["run_id"] = id.to_string().into();
-                inventory["workflow_version"] = 2.into();
             }
             let digest = inventory_digest(&inventory)?;
             request = sqlx::query_as(sqlx::AssertSqlSafe(format!(

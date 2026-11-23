@@ -302,7 +302,7 @@ pub async fn run(command: Command) -> Result<i32> {
                 media: None,
                 delete,
                 read_only,
-                community_store: read_only.then(|| db.deletion_store()),
+                community_store: (read_only || delete).then(|| db.deletion_store()),
                 relay_pubkey,
                 batch_size,
                 max_items,
@@ -312,14 +312,7 @@ pub async fn run(command: Command) -> Result<i32> {
                 no_agents_in: demo_no_agents_in,
             };
             if (real && !delete && !read_only) || print_only || stage.is_some() {
-                return rehearsal_preview::run(
-                    &db,
-                    &request,
-                    &options,
-                    stage.as_deref(),
-                    community,
-                )
-                .await;
+                return preview::run(&db, &request, &options, stage.as_deref(), community).await;
             }
             let code = worker::run(
                 &store,
@@ -346,9 +339,8 @@ mod inventory;
 pub mod media;
 /// Standalone delegation of an owned community to community deletion.
 pub mod owned_community;
+mod preview;
 mod profile_batches;
-mod rehearsal;
-mod rehearsal_preview;
 /// Read-only summaries of locally saved request progress and external waits.
 pub mod summary;
 mod transition;

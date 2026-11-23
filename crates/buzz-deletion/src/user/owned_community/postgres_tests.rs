@@ -41,12 +41,11 @@ async fn fixture_mode(rehearsal: bool) -> Fixture {
         "11".repeat(32)
     };
     let item = json!({"community_id": community.as_uuid(), "relationship": "owner", "label": "owned.example"});
-    let mut inventory = json!({"communities": [item, {
+    let mut inventory = json!({"workflow_version": 2, "communities": [item, {
         "community_id": Uuid::new_v4(), "relationship": "participant", "label": "not-reached"
     }]});
     if rehearsal {
         inventory["execution_mode"] = "rehearsal".into();
-        inventory["workflow_version"] = 2.into();
         inventory["run_id"] = run_id.to_string().into();
     }
     let digest = inventory_digest(&inventory).unwrap();

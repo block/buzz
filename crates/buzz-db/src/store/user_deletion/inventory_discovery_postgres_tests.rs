@@ -146,7 +146,7 @@ async fn shared_inventory_discovers_residue_and_scoped_agents_without_unrelated_
         .unwrap();
     assert_eq!(deletion.inventory_manifest.as_ref().unwrap(), &preview);
     let mut rehearsal_inventory = first.inventory_manifest.clone().unwrap();
-    for field in ["execution_mode", "run_id", "workflow_version"] {
+    for field in ["execution_mode", "run_id"] {
         rehearsal_inventory.as_object_mut().unwrap().remove(field);
     }
     assert_eq!(rehearsal_inventory, preview);

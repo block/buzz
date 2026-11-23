@@ -58,8 +58,8 @@ fn decide_next(request: &EntityRequest, history: &[EntityStage]) -> Result<Stage
     match current.status.as_str() {
         "pending" | "running" | "failed" => Ok(StageTransition::Resume(current.id)),
         "completed" => {
-            let outcome = decision(&current)?;
-            let successor = progress.apply(&inventory, &current, outcome)?;
+            let outcome = decision(&current, progress.legacy)?;
+            let successor = progress.apply(&inventory, current.target_community_id, outcome)?;
             if successor.is_none()
                 && progress.completed_communities.len() != inventory.communities.len()
             {

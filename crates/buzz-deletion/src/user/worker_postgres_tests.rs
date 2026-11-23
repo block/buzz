@@ -461,8 +461,6 @@ async fn execute_without_transition(store: &EntityDeletionStore, id: Uuid, optio
     else {
         panic!("expected an executable stage");
     };
-    handlers::dispatch(store, &lease, &row, options)
-        .await
-        .unwrap();
+    execute_stage(store, &lease, &row, options).await.unwrap();
     store.release(&lease).await.unwrap();
 }

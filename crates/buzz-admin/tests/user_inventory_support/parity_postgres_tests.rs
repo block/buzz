@@ -76,7 +76,7 @@ async fn preview_and_both_submission_modes_capture_identical_inventory() {
         assert_eq!(workflow_cli(&url, &submit_args, true).await, rehearsal);
         assert_ne!(deletion["id"], rehearsal["id"]);
         let mut common = rehearsal["inventory_manifest"].clone();
-        for field in ["execution_mode", "run_id", "workflow_version"] {
+        for field in ["execution_mode", "run_id"] {
             common.as_object_mut().unwrap().remove(field);
         }
         assert_eq!(common, preview);

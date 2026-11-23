@@ -135,7 +135,8 @@ pub(super) async fn generate_inventory_on(
         };
         Ok(json!({"community_id":row.community_id,"label":row.host,"relationship":relationship}))
     }).collect::<Result<Vec<_>>>()?;
-    let mut inventory = json!({"communities":rows,"scope":"affected_communities"});
+    let mut inventory =
+        json!({"communities":rows,"scope":"affected_communities","workflow_version":2});
     if let Some(key) = relay_pubkey {
         inventory["discovery_relay_pubkey"] = key.into();
     }

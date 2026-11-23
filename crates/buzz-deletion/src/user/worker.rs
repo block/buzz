@@ -2,8 +2,9 @@
 
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Context, Result};
 use buzz_db::entity_deletion::{EntityDeletionStore, EntityLease, EntityStage, NextStage};
+use buzz_db::user_deletion::{ExecutionMode, UserDeletionInventory};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -41,8 +42,11 @@ pub(super) async fn run(
             request.entity_type
         );
     }
-    if !request.target.starts_with("demo:") {
+    let demo = request.target.starts_with("demo:");
+    if !demo || options.read_only {
         validate_mode(&request, options.delete, options.read_only)?;
+    }
+    if !demo {
         anyhow::ensure!(
             super::inventory::saved_relay_key(
                 request.inventory_manifest.as_ref(),
@@ -107,15 +111,8 @@ async fn execute_claim(
     let mut previous_stage_id = None;
     let mut executed = 0;
     // Keep ordinary runs bounded; stepping uses the same transition boundary.
-    let handler_budget = if options.next_step {
-        1
-    } else if options.read_only {
-        // At most 1,000 communities, three handlers each, plus request-wide stages.
-        // Retain a hard bound while allowing one ordinary rehearsal to finish.
-        10_000
-    } else {
-        100
-    };
+    // A complete inventory has at most 1,000 communities plus request-wide stages.
+    let handler_budget = if options.next_step { 1 } else { 10_000 };
     loop {
         if shutdown.is_cancelled() {
             return Ok(0);
@@ -151,6 +148,81 @@ async fn execute_claim(
     }
 }
 
+pub(super) async fn execute_stage(
+    store: &EntityDeletionStore,
+    lease: &EntityLease,
+    row: &EntityStage,
+    options: &RunOptions,
+) -> Result<()> {
+    let request = store.get(lease.request_id).await?;
+    let demo = request.target.starts_with("demo:");
+    if !demo || options.read_only {
+        validate_mode(&request, options.delete, options.read_only)?;
+    }
+    if !demo {
+        let inventory = UserDeletionInventory::read(&request)?;
+        ensure!(
+            row.request_id == request.id
+                && row.metadata_json["inputs"]
+                    == inventory.inputs(&request.target, row.target_community_id)?,
+            "stage differs from approved inventory"
+        );
+    }
+    let source = if demo {
+        None
+    } else {
+        Some(options.db.as_ref().context("missing source database")?)
+    };
+    let row = store.start_stage(lease, row.id).await?;
+    let result = if let Some(db) = source {
+        let handler = handlers::Handler {
+            db,
+            request: &request,
+            options,
+            mode: if options.delete {
+                ExecutionMode::Delete
+            } else {
+                ExecutionMode::ReadOnly
+            },
+            current: Some((lease, &row)),
+        };
+        handler.run(&row.stage, row.target_community_id).await
+    } else {
+        handlers::demo(&row, options).await
+    };
+    match result {
+        Ok(metadata) => {
+            store.save_stage_success(lease, row.id, metadata).await?;
+            if options.read_only && row.stage == "purge_media" && !options.next_step {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr(), "Media preview saved. View file decisions now with: buzz-admin user-deletions inspect {}", request.id);
+            }
+        }
+        Err(mut error) => {
+            if let Some(child) = error.downcast_ref::<super::owned_community::BlockedChild>() {
+                if let Err(save) = store
+                    .save_stage_waiting(lease, row.id, child.metadata.clone())
+                    .await
+                {
+                    error = error.context(format!("also could not save child observation: {save}"));
+                }
+            }
+            if let Err(save) = store
+                .fail_stage(lease, row.id, &format!("{error:#}"), crate::RETRY_DELAY)
+                .await
+            {
+                return Err(error.context(format!("also could not record retry: {save}")));
+            }
+            // Demo failure injection returns the persisted retry deadline to the operator.
+            if !demo {
+                return Err(error);
+            }
+            eprintln!("dummy stage {} failed: {error:#}", row.stage);
+        }
+    }
+    Ok(())
+}
+
 async fn run_stage_with_heartbeat(
     store: &EntityDeletionStore,
     lease: &EntityLease,
@@ -159,7 +231,7 @@ async fn run_stage_with_heartbeat(
     shutdown: &CancellationToken,
     heartbeat_period: Duration,
 ) -> StageOutcome {
-    let handler = handlers::dispatch(store, lease, stage, options);
+    let handler = execute_stage(store, lease, stage, options);
     tokio::pin!(handler);
     let mut interval = tokio::time::interval(heartbeat_period);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

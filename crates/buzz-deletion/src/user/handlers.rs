@@ -1,235 +1,157 @@
-//! Dispatch real account cleanup or demo handlers; transitions own routing.
-
-use super::worker::RunOptions;
-use crate::RETRY_DELAY;
+//! The current workflow stage selects one handler. Its mode controls source changes.
+use super::{media, summary, worker::RunOptions};
 use anyhow::{bail, ensure, Context, Result};
-use buzz_db::entity_deletion::{EntityDeletionStore, EntityLease, EntityStage};
+use buzz_db::entity_deletion::{EntityLease, EntityRequest, EntityStage};
 use buzz_db::user_deletion::{
-    account_batches::AccountBatchOptions, content_batches::ContentBatchOptions, ExecutionMode,
-    UserDeletionInventory,
+    account_batches::AccountBatchOptions, content_batches::ContentBatchOptions,
+    profile_batches::ProfileBatchOptions, ExecutionMode, UserDeletionInventory,
 };
+use buzz_db::Db;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
-pub(super) async fn dispatch(
-    store: &EntityDeletionStore,
-    lease: &EntityLease,
-    row: &EntityStage,
-    options: &RunOptions,
-) -> Result<()> {
-    if options.read_only {
-        return super::rehearsal::dispatch(store, lease, row, options).await;
-    }
-    let target = row.metadata_json["inputs"]["target"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("missing target input"))?;
-    if !target.starts_with("demo:") && row.stage == "purge_media" {
-        return purge_media(store, lease, row, options).await;
-    }
-    if !target.starts_with("demo:") {
-        if row.stage == "purge_content" {
-            return purge_content(store, lease, row, options).await;
-        }
-        if row.stage == "purge_account" {
-            ensure!(options.delete, "real workflow execution requires --delete");
-            let db = options.db.as_ref().context("missing account database")?;
-            let row = store.start_stage(lease, row.id).await?;
-            let result = async {
-                let target = row.metadata_json["inputs"]["target"]
-                    .as_str()
-                    .context("missing target")?;
-                let community = row
-                    .target_community_id
-                    .context("missing account community")?;
-                let summary = super::account_batches::run(
-                    db,
-                    &AccountBatchOptions {
-                        community,
-                        pubkey: target.to_owned(),
-                        batch_size: options.batch_size,
-                        max_items: options.max_items,
-                    },
-                    ExecutionMode::Delete,
-                    Some((lease, row.id)),
-                )
-                .await?;
-                ensure!(
-                    summary.supported_scope_exhausted,
-                    "account batch limit reached; rerun to continue"
-                );
-                Ok::<_, anyhow::Error>(serde_json::to_value(summary)?)
-            }
-            .await;
-            match result {
-                Ok(value) => store.save_stage_success(lease, row.id, value).await?,
-                Err(error) => {
-                    store
-                        .fail_stage(lease, row.id, &format!("{error:#}"), RETRY_DELAY)
-                        .await?;
-                    return Err(error);
+/// A persisted invocation has a leased stage. Stateless previews have no checkpoint.
+pub(super) struct Handler<'a> {
+    pub db: &'a Db,
+    pub request: &'a EntityRequest,
+    pub mode: ExecutionMode,
+    pub options: &'a RunOptions,
+    pub current: Option<(&'a EntityLease, &'a EntityStage)>,
+}
+
+impl Handler<'_> {
+    pub async fn run(&self, stage: &str, community: Option<Uuid>) -> Result<Value> {
+        let subject = UserDeletionInventory::subject(self.request)?;
+        let mode = self.mode;
+        let options = self.options;
+        let delete = mode == ExecutionMode::Delete;
+        let saved_preview = !delete && self.current.is_some();
+        // Only destructive handlers need lease checks inside source transactions.
+        let checkpoint = self
+            .current
+            .filter(|_| delete)
+            .map(|(lease, row)| (lease, row.id));
+        let users = self.db.user_deletion_store();
+        let mut stderr = std::io::stderr();
+        let mut sink = std::io::sink();
+        let mut output: &mut (dyn std::io::Write + Send) = if saved_preview {
+            &mut sink
+        } else {
+            &mut stderr
+        };
+        let mut value = match stage {
+            "gate_user" | "global_cleanup" if !delete => json!({
+                "simulated":true,"stage":stage,"source_data_unchanged":true,
+                "detail":"dummy rehearsal stage; no gate or global cleanup performed"
+            }),
+            "purge_media" => {
+                let configured;
+                let storage = match options.media.as_deref() {
+                    Some(storage) => storage,
+                    None => {
+                        configured = media::configured_storage()?;
+                        &configured
+                    }
+                };
+                if saved_preview {
+                    media::stage_preview(self.db, storage, subject).await?
+                } else {
+                    media::handle_with_storage(self.db, storage, subject, delete, &mut output)
+                        .await?
                 }
             }
-            return Ok(());
-        }
-        bail!(
-            "real handler {} is not implemented in this account-cleanup PR",
-            row.stage
-        );
-    }
-    match row.stage.as_str() {
-        "purge_media" => dummy_action(store, lease, row, options, "would purge user media").await,
-        "gate_user" => gate_user(store, lease, row, options).await,
-        "purge_content" => {
-            dummy_action(store, lease, row, options, "would purge user content").await
-        }
-        "purge_agents" => purge_agents(store, lease, row, options).await,
-        name => bail!("unknown workflow stage {name}"),
-    }
-}
-
-async fn purge_media(
-    store: &EntityDeletionStore,
-    lease: &EntityLease,
-    row: &EntityStage,
-    options: &RunOptions,
-) -> Result<()> {
-    if !options.delete {
-        bail!("media deletion requires --delete; use media-batches --read-only for observation");
-    }
-    store.start_stage(lease, row.id).await?;
-    let result = async {
-        let target = row.metadata_json["inputs"]["target"]
-            .as_str()
-            .context("missing target input")?;
-        let db = options
-            .db
-            .as_ref()
-            .context("media handler requires database")?;
-        let configured;
-        let storage = match options.media.as_deref() {
-            Some(storage) => storage,
-            None => {
-                configured = super::media::configured_storage()?;
-                &configured
+            "purge_content" => {
+                let summary = users
+                    .run_message_batches(
+                        &ContentBatchOptions {
+                            community: community.context("missing content community")?,
+                            pubkey: subject.into(),
+                            relay_pubkey: options.relay_pubkey.clone(),
+                            batch_size: options.batch_size,
+                            max_items: options.max_items,
+                        },
+                        mode,
+                        checkpoint,
+                        &mut output,
+                    )
+                    .await?;
+                json!({"content": summary, "account_erasure_complete": false})
             }
+            "purge_account" => {
+                let summary = super::account_batches::store(self.db, mode)?
+                    .run_account_batches(
+                        &AccountBatchOptions {
+                            community: community.context("missing account community")?,
+                            pubkey: subject.into(),
+                            batch_size: options.batch_size,
+                            max_items: options.max_items,
+                        },
+                        mode,
+                        &mut output,
+                        checkpoint,
+                    )
+                    .await?;
+                ensure!(
+                    summary.supported_scope_exhausted,
+                    "account batch limit reached; increase --max-items and retry"
+                );
+                serde_json::to_value(summary)?
+            }
+            "purge_profile" if !delete => {
+                let summary = users
+                    .preview_profile_plan(
+                        &ProfileBatchOptions {
+                            community: community.context("missing profile community")?,
+                            pubkey: subject.into(),
+                            relay_pubkeys: options.relay_pubkey.iter().cloned().collect(),
+                            batch_size: options.batch_size,
+                            max_items: options.max_items,
+                        },
+                        &mut output,
+                    )
+                    .await?;
+                serde_json::to_value(summary)?
+            }
+            "delete_owned_community" => {
+                if let Some((_, row)) = self.current {
+                    let storage;
+                    let media = match options.media.as_deref() {
+                        Some(media) => media,
+                        None => {
+                            storage = media::configured_storage()?;
+                            &storage
+                        }
+                    };
+                    let communities = options
+                        .community_store
+                        .as_ref()
+                        .context("missing child journal")?;
+                    super::owned_community::run_stage(self.request, row, communities, media).await?
+                } else {
+                    json!({"community":community, "would_submit_or_adopt_child":true, "child_submitted":false})
+                }
+            }
+            "remaining_cleanup" if !delete => {
+                summary::report(&self.db.entity_deletion_store(), self.request).await?
+            }
+            _ => bail!("real handler {stage} is not implemented for this execution mode"),
         };
-        // Keep workflow stdout a single inspection JSON document.
-        super::media::handle_with_storage(db, storage, target, true, &mut std::io::stderr()).await
-    }
-    .await;
-    match result {
-        Ok(result) => store.save_stage_success(lease, row.id, result).await?,
-        Err(error) => {
-            store
-                .fail_stage(lease, row.id, &format!("{error:#}"), RETRY_DELAY)
-                .await?;
-            return Err(error);
+        if saved_preview {
+            value["execution_mode"] = "rehearsal".into();
+            value["account_erasure_complete"] = false.into();
         }
+        Ok(value)
     }
-    Ok(())
 }
 
-async fn gate_user(
-    store: &EntityDeletionStore,
-    lease: &EntityLease,
-    row: &EntityStage,
-    options: &RunOptions,
-) -> Result<()> {
-    dummy_action(store, lease, row, options, "would gate user").await
-}
-
-async fn purge_content(
-    store: &EntityDeletionStore,
-    lease: &EntityLease,
-    row: &EntityStage,
-    options: &RunOptions,
-) -> Result<()> {
-    ensure!(
-        options.delete,
-        "real workflow execution requires --delete; use content-batches --read-only to inspect"
-    );
-    let db = options.db.as_ref().context("missing content database")?;
-    let request = store.get(lease.request_id).await?;
-    let inventory = UserDeletionInventory::read(&request)?;
-    let community = row
-        .target_community_id
-        .context("missing content community")?;
-    ensure!(
-        row.request_id == request.id
-            && row.metadata_json["inputs"] == inventory.inputs(&request.target, Some(community))?,
-        "content stage differs from approved inventory"
-    );
-    store.start_stage(lease, row.id).await?;
-    let result = async {
-        let summary = db
-            .user_deletion_store()
-            .run_message_batches(
-                &ContentBatchOptions {
-                    community,
-                    pubkey: request.target.clone(),
-                    relay_pubkey: options.relay_pubkey.clone(),
-                    batch_size: options.batch_size,
-                    max_items: options.max_items,
-                },
-                ExecutionMode::Delete,
-                Some((lease, row.id)),
-                &mut std::io::stderr(),
-            )
-            .await?;
-        // Agent cleanup is a separate handler; do not claim it is unnecessary.
-        Ok::<_, anyhow::Error>(
-            serde_json::json!({"content": summary, "account_erasure_complete": false}),
-        )
-    }
-    .await;
-    match result {
-        Ok(result) => store.save_stage_success(lease, row.id, result).await?,
-        Err(error) => {
-            store
-                .fail_stage(lease, row.id, &format!("{error:#}"), crate::RETRY_DELAY)
-                .await?;
-            return Err(error);
-        }
-    }
-    Ok(())
-}
-
-async fn purge_agents(
-    store: &EntityDeletionStore,
-    lease: &EntityLease,
-    row: &EntityStage,
-    options: &RunOptions,
-) -> Result<()> {
-    dummy_action(store, lease, row, options, "would purge user agents").await
-}
-
-async fn dummy_action(
-    store: &EntityDeletionStore,
-    lease: &EntityLease,
-    row: &EntityStage,
-    options: &RunOptions,
-    message: &str,
-) -> Result<()> {
-    store.start_stage(lease, row.id).await?;
-    let result = perform(row, options, message).await;
-    match result {
-        Ok(result) => store.save_stage_success(lease, row.id, result).await?,
-        Err(error) => {
-            eprintln!("dummy stage {} failed: {error:#}", row.stage);
-            // Ok means the outcome is durable, not that the action succeeded.
-            // The transition function will reload this row and return WaitUntil.
-            store
-                .fail_stage(lease, row.id, &format!("{error:#}"), RETRY_DELAY)
-                .await?;
-        }
-    }
-    Ok(())
-}
-
-async fn perform(
-    row: &EntityStage,
-    options: &RunOptions,
-    message: &str,
-) -> Result<serde_json::Value> {
+pub(super) async fn demo(row: &EntityStage, options: &RunOptions) -> Result<serde_json::Value> {
+    let message = match row.stage.as_str() {
+        "gate_user" => "would gate user",
+        "purge_media" => "would purge user media",
+        "purge_content" => "would purge user content",
+        "purge_agents" => "would purge user agents",
+        name => bail!("unknown demo stage {name}"),
+    };
     let inputs = &row.metadata_json["inputs"];
     let target = inputs["target"]
         .as_str()

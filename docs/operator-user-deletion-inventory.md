@@ -219,11 +219,9 @@ a read-only transaction and needs no deletion-workflow tables. It cannot find
 communities in other databases. Saved requests keep their inventories and digests
 on retry, even after source data changes.
 
-The common selector reports owner communities. Ordinary submission, approval
-and execution retain the existing refusal: "owned-community execution is not
-supported yet". Ordinary submission rolls back rather than saving a request
-that cannot proceed. Rehearsals can save and inspect that scope; neither mode
-silently drops owners from the selected inventory.
+New inventories include owned communities in both modes. When the workflow reaches
+one, it submits or adopts the community deletion request and advances to the
+next community. The child has its own approval and execution.
 See [the rehearsal guide](operator-user-deletion-rehearsal.md) for the current
 read-only workflow and its limits.
 

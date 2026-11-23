@@ -192,10 +192,10 @@ impl Fixture {
         );
         assert_eq!(
             account.metadata_json["transition"],
-            json!({"kind":"stage","stage":"purge_agents"})
+            json!({"kind":"stage","stage":"purge_profile"})
         );
         let next = state.stage_history.iter().find(|s| s.is_current).unwrap();
-        assert_eq!(next.stage, "purge_agents");
+        assert_eq!(next.stage, "purge_profile");
         assert_eq!(next.status, "pending");
         assert!(next.started_at.is_none());
     }

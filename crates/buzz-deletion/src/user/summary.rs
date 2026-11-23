@@ -3,7 +3,7 @@
 
 use buzz_db::entity_deletion::{EntityDeletionStore, EntityInspection, EntityStage};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 /// Saved workflow progress, suitable for an operator report or future handler.
@@ -106,4 +106,41 @@ pub async fn summarize_request(
         communities_not_reached,
         explanation,
     })
+}
+
+pub(super) async fn report(
+    store: &EntityDeletionStore,
+    request: &buzz_db::entity_deletion::EntityRequest,
+) -> anyhow::Result<Value> {
+    let inspection = store.inspect(request.id).await?;
+    let mut stages = Vec::new();
+    for mut stage in inspection
+        .stage_history
+        .into_iter()
+        .filter(|s| s.stage != "remaining_cleanup")
+    {
+        anyhow::ensure!(
+            stage.status == "completed",
+            "cannot report completion with unfinished stages"
+        );
+        let mut result = stage.metadata_json["result"].take();
+        // The final report links to the full media preview by stage ID.
+        if stage.stage == "purge_media" {
+            if let Some(media) = result.as_object_mut() {
+                media.remove("files");
+                media.remove("target_pubkeys");
+            }
+        }
+        stages.push(json!({
+            "id": stage.id, "stage": stage.stage, "community": stage.target_community_id,
+            "status": stage.status, "result": result,
+        }));
+    }
+    let report = json!({"record":"rehearsal_report","execution_mode":"rehearsal","request_id":request.id,
+        "run_id":request.inventory_manifest.as_ref().map(|m| &m["run_id"]),
+        "subject":buzz_db::user_deletion::UserDeletionInventory::subject(request)?,"source_data_unchanged":true,
+        "account_erasure_complete":false,"stages":stages,
+        "unsupported":["online gate and writer drain","global cleanup","cache reconciliation","final erasure verification"],
+        "meaning":"inspection finished; no user data deleted; community children need separate approval and execution"});
+    Ok(report)
 }

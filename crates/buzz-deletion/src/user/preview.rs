@@ -1,5 +1,9 @@
 //! Stateless inspection: no lease, stage write, child submission or completion claim.
-use super::{rehearsal::preview_handler, worker::RunOptions};
+use super::{
+    handlers::Handler,
+    worker::RunOptions,
+    workflow::{rule, Progress, Step, INITIAL_STAGE},
+};
 use anyhow::{ensure, Result};
 use buzz_db::{entity_deletion::EntityRequest, user_deletion::UserDeletionInventory, Db};
 use uuid::Uuid;
@@ -29,6 +33,13 @@ pub(super) async fn run(
         );
     }
     let source = options.db.as_ref().unwrap_or(db);
+    let handler = Handler {
+        db: source,
+        request,
+        options,
+        mode: buzz_db::user_deletion::ExecutionMode::ReadOnly,
+        current: None,
+    };
     let current = if options.next_step && selected.is_none() {
         db.entity_deletion_store()
             .inspect(request.id)
@@ -42,46 +53,37 @@ pub(super) async fn run(
     let selected = selected
         .or_else(|| current.as_ref().map(|s| s.stage.as_str()))
         .or(if options.next_step {
-            Some("gate_user")
+            Some(INITIAL_STAGE)
         } else {
             None
         });
     let community = community.or_else(|| current.as_ref().and_then(|s| s.target_community_id));
-    for stage in ["gate_user", "purge_media"] {
-        if selected.is_none_or(|s| s == stage) {
-            crate::print_json(&preview_handler(source, request, stage, None, options).await?)?;
-        }
-    }
-    for (id, attrs) in &inventory.communities {
-        if community.is_some_and(|c| c != *id) {
-            continue;
-        }
-        let stages: &[&str] = if attrs["relationship"] == "owner" {
-            &["delete_owned_community"]
-        } else {
-            &["purge_content", "purge_account", "purge_profile"]
-        };
-        if community == Some(*id) && selected.is_some_and(|s| !stages.contains(&s)) {
-            anyhow::bail!(
-                "selected stage does not apply to this community's approved relationship"
-            );
-        }
-        for stage in stages {
-            if selected.is_none_or(|s| s == *stage) {
-                crate::print_json(
-                    &preview_handler(source, request, stage, Some(*id), options).await?,
-                )?;
-            }
-        }
-    }
-    if selected.is_none_or(|s| s == "global_cleanup") {
-        crate::print_json(
-            &preview_handler(source, request, "global_cleanup", None, options).await?,
-        )?;
-    }
     ensure!(
         selected != Some("purge_agents"),
         "agents are included in content/account/profile previews"
+    );
+    let mut progress = Progress::new(false);
+    let mut step = Some(Step {
+        name: INITIAL_STAGE,
+        community: None,
+    });
+    let mut matched = false;
+    while let Some(current) = step {
+        // The terminal report reads persisted results. Stateless previews have none.
+        if current.name == "remaining_cleanup" {
+            break;
+        }
+        if selected.is_none_or(|s| s == current.name)
+            && community.is_none_or(|c| Some(c) == current.community)
+        {
+            crate::print_json(&handler.run(current.name, current.community).await?)?;
+            matched = true;
+        }
+        step = progress.apply(&inventory, current.community, rule(current.name)?.next)?;
+    }
+    ensure!(
+        community.is_none() || matched,
+        "selected stage does not apply to this community's approved relationship"
     );
     crate::print_json(
         &serde_json::json!({"record":"stateless_preview_complete","workflow_advanced":false,

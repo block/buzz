@@ -21,8 +21,7 @@ pub(super) enum Decision {
 pub(super) struct Rule {
     pub name: &'static str,
     pub community_scope: bool,
-    pub allowed: &'static [Decision],
-    pub decide: fn(&Value) -> Result<Decision>,
+    pub next: Decision,
 }
 
 pub(super) const INITIAL_STAGE: &str = "gate_user";
@@ -31,84 +30,62 @@ const RULES: &[Rule] = &[
     Rule {
         name: "gate_user",
         community_scope: false,
-        allowed: &[Decision::Stage("purge_media")],
-        decide: |_| Ok(Decision::Stage("purge_media")),
+        next: Decision::Stage("purge_media"),
     },
     Rule {
         name: "purge_media",
         community_scope: false,
-        allowed: &[Decision::EnterCommunities],
-        decide: |_| Ok(Decision::EnterCommunities),
+        next: Decision::EnterCommunities,
     },
     Rule {
         name: "purge_content",
         community_scope: true,
-        allowed: &[
-            Decision::Stage("purge_account"),
-            Decision::Stage("purge_agents"),
-            Decision::CommunityComplete,
-        ],
-        decide: after_purge_content,
+        next: Decision::Stage("purge_account"),
     },
     Rule {
         name: "purge_account",
         community_scope: true,
-        allowed: &[
-            Decision::Stage("purge_agents"),
-            Decision::Stage("purge_profile"),
-        ],
-        decide: |result| {
-            Ok(Decision::Stage(
-                if result["execution_mode"] == "rehearsal" {
-                    "purge_profile"
-                } else {
-                    "purge_agents"
-                },
-            ))
-        },
+        next: Decision::Stage("purge_profile"),
     },
     Rule {
         name: "purge_profile",
         community_scope: true,
-        allowed: &[Decision::CommunityComplete],
-        decide: |_| Ok(Decision::CommunityComplete),
+        next: Decision::CommunityComplete,
     },
     Rule {
         name: "delete_owned_community",
         community_scope: true,
-        allowed: &[Decision::CommunityComplete],
-        decide: |_| Ok(Decision::CommunityComplete),
+        next: Decision::CommunityComplete,
     },
     Rule {
         name: "global_cleanup",
         community_scope: false,
-        allowed: &[Decision::Stage("remaining_cleanup")],
-        decide: |_| Ok(Decision::Stage("remaining_cleanup")),
+        next: Decision::Stage("remaining_cleanup"),
     },
     Rule {
         name: "remaining_cleanup",
         community_scope: false,
-        allowed: &[Decision::RequestComplete],
-        decide: |_| Ok(Decision::RequestComplete),
+        next: Decision::RequestComplete,
     },
     Rule {
         name: "purge_agents",
         community_scope: true,
-        allowed: &[Decision::CommunityComplete],
-        decide: |_| Ok(Decision::CommunityComplete),
+        next: Decision::CommunityComplete,
     },
 ];
 
-fn after_purge_content(result: &Value) -> Result<Decision> {
-    // Real content cleanup leaves account and agent cleanup to later stages.
-    if result["account_erasure_complete"] == false {
-        return Ok(Decision::Stage("purge_account"));
-    }
-    // Demo execution retains its saved, simulated agent-routing result.
-    match result["has_agents"].as_bool() {
-        Some(true) => Ok(Decision::Stage("purge_agents")),
-        Some(false) => Ok(Decision::CommunityComplete),
-        None => Err(invalid("purge_content result must contain has_agents")),
+impl Rule {
+    fn decide(&self, result: &Value) -> Result<Decision> {
+        // Real content cleanup leaves account and agent cleanup to later stages.
+        if self.name != "purge_content" || result["account_erasure_complete"] == false {
+            return Ok(self.next);
+        }
+        // Demo execution retains its saved, simulated agent-routing result.
+        match result["has_agents"].as_bool() {
+            Some(true) => Ok(Decision::Stage("purge_agents")),
+            Some(false) => Ok(Decision::CommunityComplete),
+            None => Err(invalid("purge_content result must contain has_agents")),
+        }
     }
 }
 
@@ -126,17 +103,17 @@ pub(super) fn parse_stage(name: &str) -> std::result::Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
-pub(super) fn decision(stage: &EntityStage) -> Result<Decision> {
+pub(super) fn decision(stage: &EntityStage, legacy: bool) -> Result<Decision> {
     let rule = rule(&stage.stage)?;
     let result = stage
         .metadata_json
         .get("result")
         .ok_or_else(|| invalid("completed stage has no saved result"))?;
-    let next = (rule.decide)(result)?;
-    if !rule.allowed.contains(&next) {
-        return Err(invalid("stage selected a disallowed transition"));
+    if legacy && stage.stage == "purge_account" {
+        Ok(Decision::Stage("purge_agents"))
+    } else {
+        rule.decide(result)
     }
-    Ok(next)
 }
 
 #[derive(Debug, PartialEq)]
@@ -149,10 +126,18 @@ pub(super) struct Progress {
     pub current: Option<EntityStage>,
     pub completed_communities: HashSet<Uuid>,
     pub terminal: bool,
-    rehearsal: bool,
+    pub(super) legacy: bool,
 }
 
 impl Progress {
+    pub fn new(legacy: bool) -> Self {
+        Self {
+            current: None,
+            completed_communities: HashSet::new(),
+            terminal: false,
+            legacy,
+        }
+    }
     /// Replay saved decisions through the persisted predecessor chain. This
     /// validates chronology without relying on timestamps or UUID ordering.
     pub fn rebuild(
@@ -160,12 +145,13 @@ impl Progress {
         inventory: &Inventory,
         history: &[EntityStage],
     ) -> Result<Self> {
-        let mut progress = Self {
-            current: None,
-            completed_communities: HashSet::new(),
-            terminal: false,
-            rehearsal: Inventory::is_rehearsal(request)?,
-        };
+        let mut progress = Self::new(
+            request
+                .inventory_manifest
+                .as_ref()
+                .is_none_or(|m| m["workflow_version"] != 2)
+                && !Inventory::is_rehearsal(request)?,
+        );
         let mut successors = HashMap::new();
         for row in history {
             let predecessor: Option<Uuid> = serde_json::from_value(
@@ -217,11 +203,11 @@ impl Progress {
             if row.status != "completed" {
                 return Err(invalid("non-current stage is not completed"));
             }
-            let outcome = decision(row)?;
+            let outcome = decision(row, progress.legacy)?;
             if row.metadata_json["transition"] != serde_json::to_value(outcome)? {
                 return Err(invalid("saved transition disagrees with handler result"));
             }
-            expected = progress.apply(inventory, row, outcome)?;
+            expected = progress.apply(inventory, row.target_community_id, outcome)?;
             progress.terminal = expected.is_none();
         }
         if visited.len() != history.len() {
@@ -233,24 +219,20 @@ impl Progress {
     pub fn apply(
         &mut self,
         inventory: &Inventory,
-        row: &EntityStage,
+        community: Option<Uuid>,
         outcome: Decision,
     ) -> Result<Option<Step>> {
         match outcome {
             Decision::Stage(name) => {
-                if rule(name)?.community_scope != row.target_community_id.is_some() {
+                if rule(name)?.community_scope != community.is_some() {
                     return Err(invalid("transition crosses incompatible stage scopes"));
                 }
-                Ok(Some(Step {
-                    name,
-                    community: row.target_community_id,
-                }))
+                Ok(Some(Step { name, community }))
             }
             Decision::EnterCommunities | Decision::CommunityComplete => {
                 if outcome == Decision::CommunityComplete {
-                    let id = row
-                        .target_community_id
-                        .ok_or_else(|| invalid("community outcome on request stage"))?;
+                    let id =
+                        community.ok_or_else(|| invalid("community outcome on request stage"))?;
                     if !self.completed_communities.insert(id) {
                         return Err(invalid("community completed twice"));
                     }
@@ -261,18 +243,18 @@ impl Progress {
                     .find(|(id, _)| !self.completed_communities.contains(id))
                 {
                     Some((id, attrs)) => Ok(Some(Step {
-                        name: if self.rehearsal && attrs["relationship"] == "owner" {
+                        name: if attrs["relationship"] == "owner" {
                             "delete_owned_community"
                         } else {
                             COMMUNITY_INITIAL_STAGE
                         },
                         community: Some(*id),
                     })),
-                    None if self.rehearsal => Ok(Some(Step {
+                    None if !self.legacy => Ok(Some(Step {
                         name: "global_cleanup",
                         community: None,
                     })),
-                    None => self.apply(inventory, row, Decision::RequestComplete),
+                    None => self.apply(inventory, community, Decision::RequestComplete),
                 }
             }
             Decision::RequestComplete => {
@@ -312,9 +294,9 @@ mod tests {
                 Decision::CommunityComplete,
             ),
         ] {
-            assert_eq!((content.decide)(&result).unwrap(), expected);
+            assert_eq!(content.decide(&result).unwrap(), expected);
         }
-        assert!((content.decide)(&serde_json::json!({})).is_err());
+        assert!(content.decide(&serde_json::json!({})).is_err());
     }
 
     #[test]
@@ -323,13 +305,13 @@ mod tests {
         let gate = rule(INITIAL_STAGE).unwrap();
         assert!(!gate.community_scope);
         assert_eq!(
-            (gate.decide)(&serde_json::json!({})).unwrap(),
+            gate.decide(&serde_json::json!({})).unwrap(),
             Decision::Stage("purge_media")
         );
         let media = rule("purge_media").unwrap();
         assert!(!media.community_scope);
         assert_eq!(
-            (media.decide)(&serde_json::json!({})).unwrap(),
+            media.decide(&serde_json::json!({})).unwrap(),
             Decision::EnterCommunities
         );
     }
