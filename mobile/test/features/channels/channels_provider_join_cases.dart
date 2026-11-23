@@ -485,6 +485,7 @@ void _confirmedJoinCases() {
         ]);
       final container = _buildContainer(session: session);
       addTearDown(container.dispose);
+      container.read(_testPubkeyProvider.notifier).set('9' * 64);
       container
           .read(userCacheProvider.notifier)
           .put(UserProfile(pubkey: scout, displayName: 'Scout'));
@@ -497,7 +498,7 @@ void _confirmedJoinCases() {
               session: session,
               nsec: keys.nsec,
             ),
-            currentPubkey: 'me',
+            currentPubkey: '9' * 64,
           ),
         ),
       );
@@ -518,12 +519,12 @@ void _confirmedJoinCases() {
 
       await expectLater(
         open(),
-        shows('Only Scout’s owner can add it to a DM.'),
+        shows('Only the owner of Scout can add it to a DM.'),
       );
       // Without a name to show, it says whose owner in general.
       await expectLater(
         open(),
-        shows('Only this agent’s owner can add it to a DM.'),
+        shows('Only the owner of this agent can add it to a DM.'),
       );
       // Any other refusal is shown as before.
       await expectLater(
@@ -552,6 +553,90 @@ void _confirmedJoinCases() {
             'Exception: Couldn’t add them. Try again.',
           ),
         ),
+      );
+    });
+
+    test('a refused agent is named by its disambiguated label', () async {
+      final keys = nostr.Keys.generate();
+      final scout = 'd' * 64;
+      final otherScout = 'c' * 64;
+      final alice = 'a' * 64;
+      final aliceAgent = 'b' * 64;
+      final morgan = '1' * 64;
+      final session = _WriterReplicaRelaySession(memberships: const []);
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      container.read(_testPubkeyProvider.notifier).set('9' * 64);
+      container.read(userCacheProvider.notifier)
+        ..put(UserProfile(pubkey: morgan, displayName: 'Morgan'))
+        ..put(UserProfile(pubkey: alice, displayName: 'Alice'))
+        ..put(
+          UserProfile(pubkey: scout, displayName: 'Scout', ownerPubkey: morgan),
+        )
+        ..put(
+          UserProfile(
+            pubkey: otherScout,
+            displayName: 'Scout',
+            ownerPubkey: alice,
+          ),
+        )
+        ..put(UserProfile(pubkey: aliceAgent, displayName: 'Alice'));
+      final actions = container.read(
+        Provider<ChannelActions>(
+          (ref) => ChannelActions(
+            ref: ref,
+            session: session,
+            signedEventRelay: SignedEventRelay(
+              session: session,
+              nsec: keys.nsec,
+            ),
+            currentPubkey: '9' * 64,
+          ),
+        ),
+      );
+      Future<void> open(String agent, List<String> others, bool ownerOnly) {
+        session.dmOpenRefusals.add(
+          'forbidden: policy:${ownerOnly ? 'owner_only' : 'nobody'} — no '
+          '(agent $agent)',
+        );
+        return actions.openDm(pubkeys: [agent, ...others]);
+      }
+
+      Matcher shows(String message) => throwsA(
+        isA<DmAgentRefused>().having(
+          (error) => error.toString(),
+          'message',
+          message,
+        ),
+      );
+
+      // Two agents named Scout differ by their owners, and the owner is
+      // named too.
+      await expectLater(
+        open(scout, [otherScout], true),
+        shows('Only Morgan can add Morgan’s Scout to a DM.'),
+      );
+      await expectLater(
+        open(otherScout, [scout], false),
+        shows('Alice’s Scout can’t be added to a DM.'),
+      );
+      // An agent sharing a person's name is marked as the agent.
+      await expectLater(
+        open(aliceAgent, [alice], true),
+        shows('Only the owner of Alice (agent) can add it to a DM.'),
+      );
+      // A unique name stays plain, and an owner with no profile or no
+      // verified owner is not named.
+      await expectLater(
+        open(scout, [], true),
+        shows('Only Morgan can add Scout to a DM.'),
+      );
+      container
+          .read(userCacheProvider.notifier)
+          .put(UserProfile(pubkey: scout, displayName: 'Scout'));
+      await expectLater(
+        open(scout, [], true),
+        shows('Only the owner of Scout can add it to a DM.'),
       );
     });
 

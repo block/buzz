@@ -199,7 +199,11 @@ class ChannelActions {
     } on StateError {
       rethrow;
     } catch (error) {
-      await _throwIfAgentRefused(relayErrorText(error), adding: false);
+      await _throwIfAgentRefused(
+        relayErrorText(error),
+        adding: false,
+        context: pubkeys,
+      );
       rethrow;
     }
     _ensureCommunityValid();
@@ -323,7 +327,20 @@ class ChannelActions {
               reason == 'invalid: history must be "include", got "ask"')) {
         throw const DmNeedsHistoryChoice();
       }
-      await _throwIfAgentRefused(reason, adding: true);
+      await _throwIfAgentRefused(
+        reason,
+        adding: true,
+        context: [
+          ...?_ref
+              .read(channelsProvider)
+              .asData
+              ?.value
+              .where((channel) => channel.id == channelId)
+              .firstOrNull
+              ?.participantPubkeys,
+          ...pubkeys,
+        ],
+      );
       throw Exception(
         reason.contains('at most 9 people')
             ? dmAdditionFailedMessage
@@ -346,26 +363,46 @@ class ChannelActions {
   }
 
   /// Throws [DmAgentRefused] naming the agent when [reason] is an agent's
-  /// add-policy refusal of a DM. A failed name read still refuses, without
-  /// the name.
+  /// add-policy refusal of a DM. The agent and its verified owner are named
+  /// as the app's identity labels do, compared against [context] (the DM's
+  /// people, as its own label compares them) and this account, so namesakes
+  /// stay distinguishable. A failed name read still refuses, without the name.
   Future<void> _throwIfAgentRefused(
     String reason, {
     required bool adding,
+    required Iterable<String> context,
   }) async {
     final refusal = dmAgentPolicyRefusal(reason);
     if (refusal == null) return;
     final cache = _ref.read(userCacheProvider.notifier);
-    final profile = await cache
-        .resolve([refusal.agent])
-        .then((profiles) => profiles[refusal.agent])
-        .catchError((Object _) => cache.get(refusal.agent));
+    Future<void> load(Iterable<String> keys) => cache
+        .resolve(keys.toList())
+        .then<void>((_) {})
+        .catchError((Object _) {});
+    final keys = {
+      refusal.agent,
+      for (final key in [...context, ?_currentPubkey])
+        if (isHexPubkey(key.toLowerCase())) key.toLowerCase(),
+    };
+    await load(keys);
+    var sources = _ref.read(identityNameSourcesProvider);
+    final owner = sources.factFor(refusal.agent)?.ownerPubkey;
+    if (owner != null) {
+      await load([owner]);
+      sources = _ref.read(identityNameSourcesProvider);
+    }
     _ensureCommunityValid();
-    final name = profile?.displayName;
+    final names = sources.scope(keys, agentPubkeys: {refusal.agent});
     throw DmAgentRefused(
       dmAgentRefusedMessage(
         adding: adding,
         ownerOnly: refusal.ownerOnly,
-        name: name != null && name.trim().isNotEmpty ? name : null,
+        agent: names.hasName(refusal.agent)
+            ? names.labelFor(refusal.agent)
+            : null,
+        owner: owner != null && names.hasName(owner)
+            ? names.labelFor(owner)
+            : null,
       ),
     );
   }
