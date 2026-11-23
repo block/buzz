@@ -12,6 +12,7 @@
         <exclude domain="sharedpref" path="FlutterSecureKeyStorage.xml"/>
         <exclude domain="sharedpref" path="FlutterSecureStorageConfiguration.xml"/>
         <exclude domain="file" path="diagnostics_install_id"/>
+        <exclude domain="sharedpref" path="buzz_push.xml"/>
     </cloud-backup>
     <device-transfer>
         <exclude domain="file" path="bestie-transcripts/"/>
@@ -20,5 +21,6 @@
         <exclude domain="sharedpref" path="FlutterSecureKeyStorage.xml"/>
         <exclude domain="sharedpref" path="FlutterSecureStorageConfiguration.xml"/>
         <exclude domain="file" path="diagnostics_install_id"/>
+        <exclude domain="sharedpref" path="buzz_push.xml"/>
     </device-transfer>
 </data-extraction-rules>

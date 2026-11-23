@@ -5,7 +5,12 @@ import 'package:buzz/shared/widgets/app_list_card.dart';
 import 'dart:ui' as ui;
 import 'dart:convert';
 import 'dart:io';
+import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
+import 'package:buzz/shared/emoji/emoji_picker.dart';
+import 'package:buzz/shared/emoji/emoji_burst.dart';
+import 'package:buzz/shared/emoji/recent_emoji_provider.dart';
 import 'package:flutter/services.dart';
 import 'package:buzz/shared/emoji/emoji_data_provider.dart';
 
@@ -27,6 +32,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart' show Override;
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -35,6 +41,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/thread_ids.dart';
 
+part 'message_actions_row_rebuild_tests.dart';
 part 'message_actions_scroll_journeys.dart';
 part 'message_actions_test_helpers.dart';
 
@@ -42,6 +49,7 @@ const _channelId = 'chan-1';
 
 void main() {
   _messageActionsScrollTests();
+  _messageActionsRowRebuildTests();
   testWidgets(
     'quick reactions show selection, label controls, and remove our reaction',
     (tester) async {

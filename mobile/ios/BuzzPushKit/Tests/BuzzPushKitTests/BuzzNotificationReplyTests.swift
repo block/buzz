@@ -6,6 +6,7 @@ import Testing
 private let root = String(repeating: "a", count: 64)
 private let parent = String(repeating: "b", count: 64)
 private let sender = String(repeating: "C", count: 64)
+private let recipient = String(repeating: "F", count: 64)
 
 private func event(kind: Int, tags: [[String]] = []) -> VerifiedNostrEvent {
   VerifiedNostrEvent(
@@ -36,8 +37,10 @@ private func event(kind: Int, tags: [[String]] = []) -> VerifiedNostrEvent {
 func `Reply context carries the sender and NIP-10 thread root`(
   tags: [[String]], expectedRoot: String?
 ) throws {
-  let context = try #require(BuzzNotificationReplyContext.make(for: event(kind: 9, tags: tags)))
+  let context = try #require(
+    BuzzNotificationReplyContext.make(for: event(kind: 9, tags: tags), recipientPubkey: recipient))
   #expect(context.senderPubkey == sender.lowercased())
+  #expect(context.recipientPubkey == recipient.lowercased())
   #expect(context.threadRootID == expectedRoot)
   #expect(context.messageCreatedAt == 1_000)
   #expect(
@@ -47,7 +50,8 @@ func `Reply context carries the sender and NIP-10 thread root`(
 
 @Test(arguments: [45001, 45003, 7])
 func `Forum posts and other kinds offer no reply`(kind: Int) {
-  #expect(BuzzNotificationReplyContext.make(for: event(kind: kind)) == nil)
+  #expect(
+    BuzzNotificationReplyContext.make(for: event(kind: kind), recipientPubkey: recipient) == nil)
 }
 
 @Test func `Reply context rejects unexpected or malformed fields`() {
@@ -65,16 +69,21 @@ func `Forum posts and other kinds offer no reply`(kind: Int) {
   #expect(
     BuzzNotificationReplyContext.decodeIfPresent(
       from: [key: ["sender_pubkey": "pk", "created_at": "1", "thread_root_id": ""]]) == nil)
+  #expect(
+    BuzzNotificationReplyContext.decodeIfPresent(
+      from: [key: ["sender_pubkey": "pk", "created_at": "1", "recipient_pubkey": ""]]) == nil)
 }
 
 @Test func `Resolution offers reply only for a channel message`() {
   let community = PushLeaseCommunity(
     id: "community", name: "Community", relayUrl: "https://relay.example.org",
-    pubkey: String(repeating: "f", count: 64), policies: [])
+    pubkey: recipient, policies: [])
   let inChannel = BuzzPushNotificationResolver.makeResolution(
     event: event(kind: 9, tags: [["h", "channel"]]), community: community, profile: nil,
     channel: nil)
   #expect(inChannel?.replyContext?.senderPubkey == sender.lowercased())
+  // The reply is bound to the account the notification was for.
+  #expect(inChannel?.replyContext?.recipientPubkey == recipient.lowercased())
   let noChannel = BuzzPushNotificationResolver.makeResolution(
     event: event(kind: 9), community: community, profile: nil, channel: nil)
   #expect(noChannel != nil)
@@ -126,13 +135,18 @@ func `Forum posts and other kinds offer no reply`(kind: Int) {
       threadIdentifier: "t")
   ) { outcomes["5", default: []].append($0) }
 
+  // Taken, a reply is still held until it finishes; then it's no longer
+  // allowed to go out.
+  #expect(buffer.holds(id: "1"))
   #expect(buffer.complete(id: "1", outcome: .sent))
+  #expect(!buffer.holds(id: "1"))
   // A deadline after the app reported the outcome changes nothing.
   buffer.expire(id: "1", mayHavePublished: false)
   #expect(!buffer.complete(id: "1", outcome: .sent))
   buffer.complete(id: "2", outcome: .notSent(draftThreadRootID: "head"))
   buffer.complete(id: "3", outcome: .unknown)
   buffer.expire(id: "4", mayHavePublished: false)
+  #expect(!buffer.holds(id: "4"))
   buffer.expire(id: "5", mayHavePublished: false)
   // One the app may already have published can't be called not sent.
   buffer.add(request("6")) { outcomes["6", default: []].append($0) }
@@ -195,7 +209,8 @@ func `Forum posts and other kinds offer no reply`(kind: Int) {
     target: BuzzPushNavigationTarget(
       eventID: parent, communityID: "c", channelID: "ch", threadRootID: "root"),
     context: BuzzNotificationReplyContext(
-      senderPubkey: "pk", threadRootID: "root", messageCreatedAt: 7, inSolo: true),
+      senderPubkey: "pk", threadRootID: "root", messageCreatedAt: 7, inSolo: true,
+      recipientPubkey: "me"),
     threadIdentifier: "t",
     deadline: Date(timeIntervalSince1970: 1_700_000_000.5))
   let rebuilt = BuzzNotificationReplyRequest(

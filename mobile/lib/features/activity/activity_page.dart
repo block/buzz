@@ -42,6 +42,8 @@ import '../channels/channels_provider.dart';
 import '../channels/me/me_page.dart';
 import '../channels/dm_channel_labels.dart';
 import '../channels/message_content.dart';
+import '../channels/message_content/preview_text.dart'
+    show messagePreviewIdentityKeys;
 import '../../shared/read_state/read_state_format.dart';
 import '../../shared/reminders/remind_me_later_sheet.dart';
 import '../../shared/reminders/reminder_service.dart'

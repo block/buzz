@@ -9,6 +9,7 @@ void _useChannelScrollToOldest(
   required ChannelMessagesNotifier notifier,
   required ItemScrollController itemScrollController,
   required int displayCount,
+  required bool relayHistoryReady,
   required ValueNotifier<bool> isLoadingOlder,
   required ObjectRef<bool> navigatingOldest,
   required ObjectRef<bool> olderFetchPaused,
@@ -37,7 +38,8 @@ void _useChannelScrollToOldest(
       while (isLoadingOlder.value && context.mounted && isCurrent()) {
         await WidgetsBinding.instance.endOfFrame;
       }
-      while (context.mounted &&
+      while (relayHistoryReady &&
+          context.mounted &&
           isCurrent() &&
           !notifier.reachedOldest &&
           pagesFetched < _oldestNavigationPageLimit) {

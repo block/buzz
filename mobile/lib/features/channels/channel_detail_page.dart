@@ -83,6 +83,8 @@ import 'channel_link_navigation.dart';
 import 'channel_management_provider.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_messages_provider.dart';
+import 'channel_timeline_projection.dart';
+import '../../shared/channels/saved_message_store.dart';
 import 'channel_typing_provider.dart';
 import 'inline_agent_typing.dart';
 import 'typing_motion_preview.dart';
@@ -109,12 +111,14 @@ import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
 import 'message_reply_drag_target.dart';
 import 'message_content.dart';
+import 'message_mention_pill.dart';
 import 'message_media_avatar.dart';
 import 'message_skeleton_body.dart';
 import '../../shared/read_state/deferred_read_state_update.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 import 'reaction_row.dart';
+import 'saved_channel_page.dart';
 import '../../shared/emoji/recent_emoji_provider.dart';
 import 'send_message_provider.dart';
 import '../profile/user_profile_sheet.dart';
@@ -128,6 +132,7 @@ import 'reading_marks.dart';
 import 'timeline_message.dart';
 
 part 'channel_detail_page/message_list.dart';
+part 'channel_detail_page/initial_thread_route.dart';
 part 'channel_detail_page/jump_to_oldest_unread_button.dart';
 part 'channel_detail_page/row_cache.dart';
 part 'channel_detail_page/placement_route.dart';
@@ -234,7 +239,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     final sendMessage = ref.read(
       personalChat ? meSendMessageProvider : sendMessageProvider,
     );
-    final messagesState = ref.watch(messagesProvider);
+    final relayMessagesState = ref.watch(messagesProvider);
     final workspace = useMeWorkspace(
       context,
       ref,
@@ -247,7 +252,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       enabled: personalChat,
       channelId: channel.id,
       initial: initialAssistant,
-      messages: messagesState.value ?? const [],
+      messages: relayMessagesState.value ?? const [],
     );
     final mePlacement = personalChat ? ref.watch(meGroupsProvider) : null;
     final detailsAsync = ref.watch(channelDetailsProvider(channel.id));
@@ -488,6 +493,25 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         !isAgentIdentityUnresolved &&
         (!isAgentDm || voiceAgent != null);
     final messagesNotifier = ref.read(messagesProvider.notifier);
+    final timeline = ref.watch(
+      channelTimelineProjectionProvider((
+        channelId: channel.id,
+        personal: personalChat,
+        allowPreview:
+            !resolvedChannel.isForum &&
+            (!resolvedChannel.isPrivate || resolvedChannel.isMember),
+      )),
+    );
+    final messagesState = timeline.messages;
+    final refreshNotice = timeline.isShowingPreview
+        ? _PreviewRefreshNotice(
+            onRetry:
+                timeline.previewRefreshFailed &&
+                    sessionStatus == SessionStatus.connected
+                ? messagesNotifier.retryHistoryRefresh
+                : null,
+          )
+        : null;
     final isConnectionInProgress =
         sessionStatus == SessionStatus.connecting ||
         sessionStatus == SessionStatus.reconnecting;
@@ -511,7 +535,8 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     final showInitialConnectionSkeleton =
         !resolvedChannel.isForum &&
         isConnectionInProgress &&
-        !messagesNotifier.hasLoadedMessages;
+        !messagesNotifier.hasLoadedMessages &&
+        !timeline.isShowingPreview;
     final appBarTitleContentHeight =
         defaultTargetPlatform == TargetPlatform.android
         ? max(
@@ -528,7 +553,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     final openReadTimestamp = _openReadTimestamp(
       channel: resolvedChannel,
       personalChat: personalChat,
-      messagesState: messagesState,
+      messagesState: relayMessagesState,
     );
 
     useEffect(() {
@@ -536,6 +561,20 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       return session.registerVisibleChannel(channel.id);
     }, [channel.id]);
     useOpenChannelRoute(ref, channel.id);
+    useEffect(() {
+      if (!resolvedChannel.isForum && messagesNotifier.hasLoadedMessages) {
+        final scope = ref.read(savedMessageScopeProvider);
+        if (scope != null) {
+          final cache = ref.read(savedMessageStoreProvider);
+          unawaited(
+            cache.touch(
+              cache.capture(scope, (channelId: channel.id, rootId: '')),
+            ),
+          );
+        }
+      }
+      return null;
+    }, [channel.id]);
 
     useEffect(
       () {
@@ -685,7 +724,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
           )
           .toList(),
       flat: personalChat,
-      relaySummaries: ref.read(messagesProvider.notifier).threadSummaries,
+      relaySummaries: timeline.summaries,
     );
 
     return FrostedScaffold(
@@ -742,7 +781,9 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
         nativeTitleRefreshing: resolvedChannel.isForum
             ? isConnectionInProgress &&
                   ref.watch(forumPostsProvider(channel.id)).value != null
-            : (isConnectionInProgress && messagesNotifier.hasLoadedMessages) ||
+            : (isConnectionInProgress &&
+                      (messagesNotifier.hasLoadedMessages ||
+                          timeline.isShowingPreview)) ||
                   messagesNotifier.isCatchingUp,
         onNativeTitlePressed: openChannelDetails,
         nativeActions: [
@@ -869,6 +910,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                             return _MessageList(
                               welcomeAgent: welcomeAgent,
                               notifier: ref.watch(messagesProvider.notifier),
+                              relayHistoryReady: timeline.relayHistoryReady,
                               inlineTyping:
                                   resolvedChannel.isMember &&
                                       !resolvedChannel.isArchived
@@ -923,6 +965,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                         ),
                       ),
               ),
+              if (!showsComposer) ?refreshNotice,
               if (!resolvedChannel.isForum &&
                   (!resolvedChannel.isMember ||
                       resolvedChannel.isArchived)) ...[
@@ -944,6 +987,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      ?refreshNotice,
                       BestieTranscriptionStatus(channelId: channel.id),
                       ?assistant.pendingNotice,
                       ComposeBar(

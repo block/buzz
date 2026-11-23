@@ -1,4 +1,5 @@
 import 'package:duo_kit/duo_kit.dart';
+import 'package:buzz/shared/widgets/buzz_toast_host.dart';
 import 'package:buzz/shared/widgets/duo_toolbar.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/features/activity/activity_page.dart';
@@ -9,6 +10,9 @@ import 'package:buzz/features/forum/forum_posts_view.dart';
 import 'package:buzz/features/channels/me/me_chat_settings.dart';
 import 'package:buzz/shared/widgets/dm_header_portrait.dart';
 import 'package:buzz/features/channels/dm_voice_agent_provider.dart';
+import 'package:buzz/shared/relay/relay_author_provider.dart';
+import 'package:buzz/shared/community/community.dart';
+import 'package:buzz/features/channels/add_members_sheet.dart';
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/channels/bestie_welcome.dart';
 import 'package:buzz/features/channels/bestie_welcome_storage.dart';
@@ -23,6 +27,7 @@ import 'package:buzz/features/channels/me/me_page.dart';
 import 'package:buzz/shared/me/me_groups.dart';
 import 'package:flutter/semantics.dart';
 import 'package:buzz/features/channels/message_media_avatar.dart';
+import 'package:buzz/features/channels/saved_channel_page.dart';
 
 import 'dart:async';
 
@@ -51,6 +56,7 @@ import 'package:flutter/rendering.dart'
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart' show Override;
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 import 'package:buzz/shared/theme/buzz_icons.dart';
@@ -84,6 +90,9 @@ import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/features/channels/message_mention_pill.dart';
+import 'package:buzz/shared/utils/string_utils.dart';
+import 'package:buzz/shared/profile/profile_event_parser.dart';
+import 'package:buzz/shared/profile/profile_snapshot.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
@@ -107,7 +116,6 @@ import 'package:buzz/shared/emoji/emoji_burst.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/huddle/huddle.dart';
 import 'package:buzz/shared/relay/relay.dart';
-import 'package:buzz/shared/relay/relay_author_provider.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/avatar_shape.dart';
 import 'package:buzz/shared/widgets/app_list_card.dart';
@@ -135,6 +143,7 @@ part 'channel_detail_page_test/author_visibility_tests.dart';
 part 'channel_detail_page_test/swipe_reply_tests.dart';
 part 'channel_detail_page_test/review_avatar_tests.dart';
 part 'channel_detail_page_test/archive_navigation_tests.dart';
+part 'channel_detail_page_test/saved_channel_preview_tests.dart';
 
 const _channelId = '11111111-2222-4333-8444-555555555555';
 const _huddleChannelId = '8d764100-fd8f-44cf-9c98-6d8fbd739b8c';
@@ -270,6 +279,8 @@ NostrEvent _edit({
 );
 
 Widget _buildTestable({
+  /// Wraps the navigator in [BuzzToastHost], as the app does.
+  bool toastHost = false,
   List<AgentDirectoryEntry> soloAgents = const [],
   String? bestie,
   bool useRealChannelProviders = false,
@@ -310,6 +321,8 @@ Widget _buildTestable({
   ReadStateNotifier? readStateNotifier,
   InboxLocalStateNotifier? inboxLocalState,
   _FakeMessagesNotifier? messagesNotifier,
+  Future<SavedChannelPreview?>? savedPreview,
+  Future<List<NostrEvent>?>? savedThreadPreview,
 
   /// The channel's own history in a personal chat, which [messagesNotifier]
   /// does not back there.
@@ -317,6 +330,7 @@ Widget _buildTestable({
   _FakeTypingNotifier? typingNotifier,
   _FakeTypingNotifier? huddleTypingNotifier,
   String? canvasContent,
+  List<Override> extraOverrides = const [],
   String? initialMessageId,
   String? initialThreadRootId,
   InitialThreadRouteBehavior initialThreadRouteBehavior =
@@ -395,6 +409,12 @@ Widget _buildTestable({
             ? channelMessagesNotifier ?? _FakeMessagesNotifier(messages)
             : fakeMessagesNotifier,
       ),
+      if (savedPreview != null)
+        savedChannelPreviewProvider(
+          _channelId,
+        ).overrideWith((ref) => savedPreview),
+      if (savedThreadPreview != null)
+        savedThreadPreviewProvider.overrideWith((ref, _) => savedThreadPreview),
       channelMessagesProvider(_huddleChannelId).overrideWith(
         () => _FakeMessagesNotifier(
           huddleMessages,
@@ -518,6 +538,10 @@ Widget _buildTestable({
             entry.value,
           ),
         ),
+      // Keep profile parsing real, but off the isolate fake async can't run.
+      profileEventBatchParserProvider.overrideWithValue(
+        (events) async => events.map(parseProfileEvent).toList(),
+      ),
       // Stub the relay client provider so preloadMembers doesn't crash.
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
@@ -557,6 +581,7 @@ Widget _buildTestable({
       appLifecycleProvider.overrideWith(_TestAppLifecycleNotifier.new),
       // Compose bar drafts persist through SharedPreferences.
       savedPrefsProvider.overrideWithValue(_testPrefs),
+      ...extraOverrides,
     ],
     child: MaterialApp(
       debugShowCheckedModeBanner: false,
@@ -569,25 +594,28 @@ Widget _buildTestable({
           : darkTheme
           ? AppTheme.dark()
           : AppTheme.light(),
-      builder: (context, child) => MediaQuery(
-        data: MediaQuery.of(context).copyWith(
-          textScaler: textScaler,
-          disableAnimations: disableAnimations,
-        ),
-        child: huddleStrip == null
-            ? MobileHuddleShell(navigatorKey: navigatorKey, child: child!)
-            : ValueListenableBuilder<FoldStrip?>(
-                valueListenable: huddleStrip,
-                builder: (context, strip, _) => DuoToolbarScope(
-                  strip: strip,
-                  active: true,
-                  child: MobileHuddleShell(
-                    navigatorKey: navigatorKey,
-                    child: child!,
+      builder: (context, child) {
+        final page = MediaQuery(
+          data: MediaQuery.of(context).copyWith(
+            textScaler: textScaler,
+            disableAnimations: disableAnimations,
+          ),
+          child: huddleStrip == null
+              ? MobileHuddleShell(navigatorKey: navigatorKey, child: child!)
+              : ValueListenableBuilder<FoldStrip?>(
+                  valueListenable: huddleStrip,
+                  builder: (context, strip, _) => DuoToolbarScope(
+                    strip: strip,
+                    active: true,
+                    child: MobileHuddleShell(
+                      navigatorKey: navigatorKey,
+                      child: child!,
+                    ),
                   ),
                 ),
-              ),
-      ),
+        );
+        return toastHost ? BuzzToastHost(child: page) : page;
+      },
       navigatorObservers: navigatorObservers,
       home:
           home ??
@@ -683,6 +711,7 @@ const _directoryAlice =
 const _directoryBob =
     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 void main() {
+  _savedChannelPreviewTests();
   testWidgets('chat Back follows visibility of the conversation list', (
     tester,
   ) async {
@@ -1782,6 +1811,147 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byTooltip('View members'), findsNothing);
       expect(find.byTooltip('Start Huddle'), findsOneWidget);
+    });
+
+    testWidgets('a DM member can add people from its details', (tester) async {
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Alice'],
+        participantPubkeys: const ['self', 'alice'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          relaySessionNotifier: PresenceTestRelay()..emptySnapshots = true,
+          channel: dmChannel,
+          members: [
+            for (final key in ['self', 'alice'])
+              ChannelMember(
+                pubkey: key,
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+          ],
+          users: const {
+            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('dm-header-settings-trigger')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('channel-details-edit-action')),
+        findsNothing,
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('channel-details-add-action')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(AddChannelMembersSheet), findsOneWidget);
+
+      // The DM grows in place: its details show it as a group.
+      expect(
+        find.byKey(const ValueKey('channel-details-members-card')),
+        findsNothing,
+      );
+      tester
+          .widget<AddChannelMembersSheet>(find.byType(AddChannelMembersSheet))
+          .onAddedToDm!(
+        Channel(
+          id: _channelId,
+          name: 'DM',
+          channelType: 'dm',
+          visibility: 'private',
+          description: 'Direct message',
+          createdBy: 'self',
+          createdAt: DateTime(2025),
+          memberCount: 3,
+          participants: const ['Self', 'Alice', 'Robin'],
+          participantPubkeys: const ['self', 'alice', 'robin'],
+          isMember: true,
+        ),
+      );
+      Navigator.of(
+        tester.element(find.byType(AddChannelMembersSheet)),
+      ).pop(true);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('channel-details-members-card')),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('the moderation DM offers no Add', (tester) async {
+      final relayAuthor = 'b' * 64;
+      final moderationDm = Channel(
+        id: _channelId,
+        name: 'DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message',
+        createdBy: relayAuthor,
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Moderation'],
+        participantPubkeys: ['self', relayAuthor],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          relaySessionNotifier: PresenceTestRelay()..emptySnapshots = true,
+          channel: moderationDm,
+          members: [
+            for (final key in ['self', relayAuthor])
+              ChannelMember(
+                pubkey: key,
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+          ],
+          extraOverrides: [
+            activeCommunityProvider.overrideWith(
+              (ref) async => Community(
+                id: 'community',
+                name: 'Community',
+                relayUrl: 'wss://relay.example',
+                addedAt: DateTime(2025),
+              ),
+            ),
+            relayAuthorProvider(
+              'wss://relay.example',
+            ).overrideWith((ref) async => relayAuthor),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('dm-header-settings-trigger')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('channel-details-star-action')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('channel-details-add-action')),
+        findsNothing,
+      );
     });
 
     testWidgets('labels unnamed DMs with the participant key', (tester) async {
@@ -7003,6 +7173,48 @@ void main() {
       }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
     }
 
+    testWidgets('status bar jumps within saved rows before history is ready', (
+      tester,
+    ) async {
+      final saved = [
+        for (var i = 1; i <= 35; i++)
+          _textMsg(
+            id: 'saved-$i',
+            pubkey: 'alice',
+            content: i == 1 ? 'Oldest saved message' : 'Saved message $i',
+            createdAt: 1000 + i,
+          ),
+      ];
+      final notifier = _FakeMessagesNotifier(
+        [],
+        hasLoadedMessages: false,
+        failOlderFetch: true,
+      );
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          messagesNotifier: notifier,
+          disableAnimations: true,
+          savedPreview: Future.value((
+            events: saved,
+            summaries: <String, ChannelWindowThreadSummary>{},
+          )),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(findRichText('Oldest saved message'), findsNothing);
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        'flutter/status_bar',
+        const JSONMethodCodec().encodeMethodCall(
+          const MethodCall('handleScrollToTop'),
+        ),
+        (_) {},
+      );
+      await tester.pumpAndSettle();
+      expect(findRichText('Oldest saved message'), findsOneWidget);
+      expect(notifier.fetchOlderCalls, 0);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
     for (final personal in [false, true]) {
       testWidgets(
         'loads history through the oldest unread boundary personal=$personal',
@@ -7036,7 +7248,8 @@ void main() {
               ),
           ];
           final messagesNotifier = _FakeMessagesNotifier(
-            newestPage,
+            personal ? newestPage : const [],
+            hasLoadedMessages: personal,
             olderPages: [olderPage],
           );
           final channelsNotifier = _FakeChannelsNotifier(
@@ -7070,12 +7283,27 @@ void main() {
               messagesNotifier: messagesNotifier,
               channelsNotifier: channelsNotifier,
               readStateNotifier: readState,
+              savedPreview: personal
+                  ? null
+                  : Future.value((
+                      events: newestPage,
+                      summaries: <String, ChannelWindowThreadSummary>{},
+                    )),
               users: const {
                 'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
               },
             ),
           );
           await tester.pumpAndSettle();
+
+          if (!personal) {
+            expect(messagesNotifier.fetchOlderCalls, 0);
+            messagesNotifier.setMessages(newestPage);
+            await tester.pump();
+            await tester.pump(const Duration(milliseconds: 1));
+            await tester.pumpAndSettle();
+            expect(messagesNotifier.fetchOlderCalls, 1);
+          }
 
           await tester.tap(
             find.byKey(const ValueKey('channel-jump-to-oldest-unread')),
@@ -14228,19 +14456,21 @@ void main() {
     testWidgets('pages past a newest page of only hidden notices', (
       tester,
     ) async {
+      final hiddenPage = [
+        for (var i = 0; i < 5; i++)
+          _systemMsg(
+            id: 'join$i',
+            payload: {
+              'type': 'member_joined',
+              'actor': 'user$i',
+              'target': 'user$i',
+            },
+            createdAt: 2000 + i,
+          ),
+      ];
       final messagesNotifier = _FakeMessagesNotifier(
-        [
-          for (var i = 0; i < 5; i++)
-            _systemMsg(
-              id: 'join$i',
-              payload: {
-                'type': 'member_joined',
-                'actor': 'user$i',
-                'target': 'user$i',
-              },
-              createdAt: 2000 + i,
-            ),
-        ],
+        [],
+        hasLoadedMessages: false,
         failOlderFetch: true,
         olderPages: [
           [
@@ -14258,11 +14488,19 @@ void main() {
         _buildTestable(
           messages: const [],
           messagesNotifier: messagesNotifier,
+          savedPreview: Future.value((
+            events: hiddenPage,
+            summaries: <String, ChannelWindowThreadSummary>{},
+          )),
           users: const {
             'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
           },
         ),
       );
+      await tester.pumpAndSettle();
+      expect(messagesNotifier.fetchOlderCalls, 0);
+
+      messagesNotifier.setMessages(hiddenPage);
       await tester.pumpAndSettle();
 
       // A thrown fetch pauses paging once, without retrying on its own.
@@ -14823,6 +15061,189 @@ void main() {
   });
 
   group('Edits', () {
+    testWidgets('an identity link pill names the key it opens', (tester) async {
+      // An edit carries no p tag, so the row resolves the keys its links
+      // name: a label written into the link can't pass Mallory off as Wes,
+      // and two edited namesakes keep their qualifiers.
+      final wes = '1' * 64;
+      final mallory = '2' * 64;
+      final scoutA = '3' * 64;
+      final scoutB = '4' * 64;
+      final unknown = '5' * 64;
+      final taggedUnknown = '6' * 64;
+      String link(String label, String key) =>
+          '[@$label](nostr:${fullNpub(key)})';
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'linked',
+              pubkey: 'alice',
+              content: 'Draft',
+              createdAt: 1000,
+            ),
+            _edit(
+              id: 'linked-edit',
+              targetId: 'linked',
+              content:
+                  'ok ${link('Wes', mallory)} '
+                  '${link('Scout', scoutA)} ${link('Scout', scoutB)} '
+                  '${link('Previous', unknown)}',
+              createdAt: 1100,
+            ),
+            // buzz-app writes a tagged mention as a link too.
+            _textMsg(
+              id: 'tagged-link',
+              pubkey: 'alice',
+              content: 'cc ${link('Tagged', taggedUnknown)}',
+              createdAt: 1200,
+              extraTags: [
+                ['p', taggedUnknown],
+              ],
+            ),
+          ],
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            wes: UserProfile(pubkey: wes, displayName: 'Wes'),
+            mallory: UserProfile(pubkey: mallory, displayName: 'Mallory'),
+            scoutA: UserProfile(pubkey: scoutA, displayName: 'Scout'),
+            scoutB: UserProfile(pubkey: scoutB, displayName: 'Scout'),
+          },
+          members: [
+            for (final key in ['alice', wes, scoutA, scoutB])
+              ChannelMember(
+                pubkey: key,
+                role: 'member',
+                joinedAt: DateTime(2025),
+              ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final pills = tester
+          .widgetList<MessageMentionPill>(find.byType(MessageMentionPill))
+          .map((pill) => pill.label)
+          .toList();
+      // The newest row, the tagged link, draws first.
+      expect(pills, hasLength(5));
+      expect(pills[1], 'Mallory');
+      expect(pills.sublist(2, 4).toSet(), hasLength(2));
+      expect(pills.sublist(2, 4), everyElement(startsWith('Scout ')));
+      // A key with no name here, tagged or not, keeps the label written
+      // into its link.
+      expect([pills.first, pills.last], ['Tagged', 'Previous']);
+    });
+
+    testWidgets('an identity link pill catches up after restart and reconnect', (
+      tester,
+    ) async {
+      // Review of #9841: an untagged link must not keep a restored former
+      // name, must recover from an offline first lookup once the relay
+      // reconnects, and must not ask again for a key that has no profile.
+      final renamed = 'a' * 64;
+      final offline = 'b' * 64;
+      final nameless = 'c' * 64;
+      String link(String label, String key) =>
+          '[@$label](nostr:${fullNpub(key)})';
+      final config = _LinkedProfileConfig();
+      final storage = ProfileSnapshotStorage(_testPrefs);
+      final me = pubkeyFromNsec(config.build().nsec)!;
+      await storage.write(storage.capture(me, config.build().baseUrl), [
+        (
+          profile: UserProfile(pubkey: renamed, displayName: 'Old'),
+          createdAt: 1,
+          eventId: 'old',
+        ),
+      ]);
+      addTearDown(() => storage.remove(me, config.build().baseUrl));
+      final session = _LinkedProfileSession({renamed: 'New', offline: 'Back'})
+        ..offline = true;
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'links',
+              pubkey: 'alice',
+              content:
+                  'cc ${link('Renamed', renamed)} ${link('Written', offline)} '
+                  '${link('Nobody', nameless)}',
+              createdAt: 1000,
+            ),
+          ],
+          relayConfigNotifier: config,
+          relaySessionNotifier: session,
+          userCacheNotifier: UserCacheNotifier(),
+        ),
+      );
+      await tester.pumpAndSettle();
+      List<String> labels() => tester
+          .widgetList<MessageMentionPill>(find.byType(MessageMentionPill))
+          .map((pill) => pill.label)
+          .toList();
+      // Offline: the restored name and the written labels.
+      expect(labels(), ['Old', 'Written', 'Nobody']);
+      expect(session.requested, containsAll([renamed, offline, nameless]));
+
+      // The relay comes back: one retry resolves every link.
+      session
+        ..offline = false
+        ..requested.clear()
+        ..setConnectionStatus(SessionStatus.reconnecting);
+      await tester.pump();
+      session.setConnectionStatus(SessionStatus.connected);
+      await tester.pumpAndSettle();
+      expect(labels(), ['New', 'Back', 'Nobody']);
+      expect(session.requested, unorderedEquals([renamed, offline, nameless]));
+
+      // A key with no profile is not asked for again when a pill rebuilds
+      // or remounts, while a key that failed would be.
+      session.requested.clear();
+      final cache = ProviderScope.containerOf(
+        tester.element(find.byType(MessageMentionPill).first),
+      ).read(userCacheProvider.notifier);
+      expect(cache.needsLinkedLookup(nameless), isFalse);
+      cache.requestLinked([nameless, renamed]);
+      await tester.pumpAndSettle();
+      expect(session.requested, isEmpty);
+    });
+
+    testWidgets('a row loads only the identity links it draws as pills', (
+      tester,
+    ) async {
+      final drawn = '7' * 64;
+      final quoted = '8' * 64;
+      final commented = '9' * 64;
+      String link(String key) => '[@Name](nostr:${fullNpub(key)})';
+      final preloaded = <String>{};
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'links',
+              pubkey: 'alice',
+              content:
+                  'see ${link(drawn)}\n\n> ~~~\n> ${link(quoted)}\n> ~~~\n\n'
+                  '<!-- ${link(commented)} -->',
+              createdAt: 1000,
+            ),
+          ],
+          userCacheNotifier: _FakeUserCacheNotifier(
+            const {},
+            preload: (pubkeys) async {
+              preloaded.addAll(pubkeys);
+              return true;
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(MessageMentionPill), findsOneWidget);
+      expect(preloaded, contains(drawn));
+      expect(preloaded, isNot(anyOf(contains(quoted), contains(commented))));
+    });
+
     testWidgets('edited messages show updated content and (edited) label', (
       tester,
     ) async {
@@ -22191,6 +22612,9 @@ class _FakeThreadLocalRepliesNotifier extends ThreadLocalRepliesNotifier {
 class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   List<NostrEvent> _messages;
   bool _hasLoadedMessages;
+  bool _historyCompleted;
+  @override
+  bool historyRefreshFailed = false;
   final List<List<NostrEvent>> _olderPages;
   bool failOlderFetch;
 
@@ -22214,6 +22638,7 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
     this.failOlderFetch = false,
     this.summaries = const {},
   }) : _hasLoadedMessages = hasLoadedMessages,
+       _historyCompleted = hasLoadedMessages,
        _olderPages = [...olderPages],
        super(channelId);
 
@@ -22221,7 +22646,16 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
   AsyncValue<List<NostrEvent>> build() => AsyncData(_messages);
 
   @override
+  void retryHistoryRefresh() {
+    historyRefreshFailed = false;
+    super.retryHistoryRefresh();
+  }
+
+  @override
   bool get hasLoadedMessages => _hasLoadedMessages;
+
+  @override
+  bool get hasLoadedHistory => _historyCompleted;
 
   @override
   Map<String, ChannelWindowThreadSummary> get threadSummaries => summaries;
@@ -22240,9 +22674,10 @@ class _FakeMessagesNotifier extends ChannelMessagesNotifier {
     return true;
   }
 
-  void setMessages(List<NostrEvent> messages) {
+  void setMessages(List<NostrEvent> messages, {bool historyCompleted = true}) {
     _messages = messages;
     _hasLoadedMessages = true;
+    _historyCompleted = historyCompleted;
     state = AsyncData(messages);
   }
 }
@@ -22400,6 +22835,50 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
   void connect() {
     state = const SessionState(status: SessionStatus.connected);
   }
+}
+
+/// Serves kind:0 profiles for identity-link lookups, or fails them while
+/// [offline], recording each requested key.
+class _LinkedProfileSession extends _IdentityUpdateRelaySession {
+  _LinkedProfileSession(this.names);
+
+  final Map<String, String> names;
+  bool offline = false;
+  final List<String> requested = [];
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (filter.kinds.length != 1 || filter.kinds.single != 0) {
+      return super.fetchHistory(filter, timeout: timeout);
+    }
+    final authors = filter.authors ?? const <String>[];
+    requested.addAll(authors);
+    if (offline) throw StateError('offline');
+    return [
+      for (final key in authors)
+        if (names[key] case final name?)
+          NostrEvent(
+            id: 'profile-$key',
+            pubkey: key,
+            createdAt: 2,
+            kind: 0,
+            tags: const [],
+            content: jsonEncode({'name': name}),
+            sig: 'sig',
+          ),
+    ];
+  }
+}
+
+class _LinkedProfileConfig extends RelayConfigNotifier {
+  @override
+  RelayConfig build() => RelayConfig(
+    baseUrl: 'https://relay.example',
+    nsec: nostr.Nip19.encode(prefix: nostr.Nip19Prefix.nsec, data: '1' * 64),
+  );
 }
 
 class _IdentityUpdateRelaySession extends RelaySessionNotifier {
@@ -22864,6 +23343,9 @@ class _FakeUserCacheNotifier extends UserCacheNotifier {
 
   @override
   Future<bool> refresh(List<String> pubkeys) => preload(pubkeys);
+
+  @override
+  void requestLinked(Iterable<String> pubkeys) => preload(pubkeys.toList());
 
   void replace(UserProfile profile) {
     state = {...state, profile.pubkey.toLowerCase(): profile};

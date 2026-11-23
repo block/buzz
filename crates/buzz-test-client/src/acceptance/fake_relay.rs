@@ -11,6 +11,8 @@ use nostr::{Event, PublicKey};
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+use tokio_tungstenite::tungstenite::http::HeaderMap;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::{AUTH_REQUIRED, PUBKEY_MISMATCH};
@@ -33,6 +35,8 @@ pub struct Script {
     pub close_after: HashSet<u16>,
     /// The answer to a write without AUTH.
     pub unauthenticated: Unauthenticated,
+    /// Accept a write signed by a key other than the authenticated one.
+    pub accept_mismatched: bool,
     /// Serve events of these kinds, stored and live, with altered content
     /// under their original id and signature.
     pub corrupt: HashSet<u16>,
@@ -45,6 +49,7 @@ impl Default for Script {
             no_ack: HashSet::new(),
             close_after: HashSet::new(),
             unauthenticated: Unauthenticated::Reason(format!("{AUTH_REQUIRED} not authenticated")),
+            accept_mismatched: false,
             corrupt: HashSet::new(),
         }
     }
@@ -69,6 +74,10 @@ struct Shared {
     events: Mutex<Vec<Event>>,
     /// Live subscriptions: subscription id and the connection to send to.
     live: Mutex<Vec<(String, Outbox)>>,
+    /// The headers of every WebSocket upgrade, in order.
+    upgrades: Mutex<Vec<HeaderMap>>,
+    /// The `relay` tag of every AUTH event, in order.
+    auth_relays: Mutex<Vec<String>>,
 }
 
 /// A running scripted relay.
@@ -83,6 +92,16 @@ impl FakeRelay {
     pub fn events(&self) -> Vec<Event> {
         self.shared.events.lock().unwrap().clone()
     }
+
+    /// The headers of every WebSocket upgrade so far, in order.
+    pub fn upgrades(&self) -> Vec<HeaderMap> {
+        self.shared.upgrades.lock().unwrap().clone()
+    }
+
+    /// The `relay` tag of every AUTH event so far, in order.
+    pub fn auth_relays(&self) -> Vec<String> {
+        self.shared.auth_relays.lock().unwrap().clone()
+    }
 }
 
 /// Starts a relay that follows `script` on a free local port.
@@ -93,6 +112,8 @@ pub async fn start(script: Script) -> FakeRelay {
         script,
         events: Mutex::new(Vec::new()),
         live: Mutex::new(Vec::new()),
+        upgrades: Mutex::new(Vec::new()),
+        auth_relays: Mutex::new(Vec::new()),
     });
     let accept = shared.clone();
     tokio::spawn(async move {
@@ -103,9 +124,17 @@ pub async fn start(script: Script) -> FakeRelay {
     FakeRelay { url, shared }
 }
 
+// The handshake callback's `Result<Response, ErrorResponse>` is fixed by tungstenite.
+#[allow(clippy::result_large_err)]
 async fn serve(tcp: tokio::net::TcpStream, shared: Arc<Shared>) {
     // A plain HTTP request (the NIP-11 fetch) fails the upgrade; that is fine.
-    let Ok(ws) = tokio_tungstenite::accept_async(tcp).await else {
+    let upgrade =
+        tokio_tungstenite::accept_hdr_async(tcp, |request: &Request, response: Response| {
+            let headers = request.headers().clone();
+            shared.upgrades.lock().unwrap().push(headers);
+            Ok(response)
+        });
+    let Ok(ws) = upgrade.await else {
         return;
     };
     let (mut sink, mut stream) = ws.split();
@@ -131,6 +160,9 @@ async fn serve(tcp: tokio::net::TcpStream, shared: Arc<Shared>) {
         match msg.first().and_then(Value::as_str) {
             Some("AUTH") => {
                 let event: Event = serde_json::from_value(msg[1].clone()).unwrap();
+                let relay = event.tags.iter().find(|t| t.kind().to_string() == "relay");
+                let relay = relay.and_then(|t| t.content()).unwrap_or_default();
+                shared.auth_relays.lock().unwrap().push(relay.to_owned());
                 authed = Some(event.pubkey);
                 send(&out, json!(["OK", event.id.to_hex(), true, ""]));
             }
@@ -163,7 +195,7 @@ async fn serve(tcp: tokio::net::TcpStream, shared: Arc<Shared>) {
                     }
                     continue;
                 };
-                if event.pubkey != pubkey {
+                if event.pubkey != pubkey && !shared.script.accept_mismatched {
                     send(&out, json!(["OK", id, false, PUBKEY_MISMATCH]));
                     continue;
                 }

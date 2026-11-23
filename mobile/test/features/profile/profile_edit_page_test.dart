@@ -8,14 +8,10 @@ import 'package:buzz/features/profile/profile_avatar_crop_page.dart';
 import 'package:buzz/features/profile/avatar_background_grid.dart';
 import 'package:buzz/features/profile/avatar_editor_option_button.dart';
 import 'package:buzz/features/profile/animated_avatar_capture.dart';
-import 'package:buzz/shared/widgets/emoji_avatar_tile.dart';
 import 'package:buzz/features/profile/image_avatar_capture.dart';
 import 'package:buzz/shared/widgets/immediate_page_route.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/shared/emoji/emoji_avatar.dart';
-import 'package:buzz/shared/emoji/emoji_data.dart';
-import 'package:buzz/shared/emoji/emoji_data_provider.dart';
-import 'package:buzz/shared/emoji/native_emoji_glyph.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -236,27 +232,9 @@ void main() {
     tester,
   ) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-    const emoji = EmojiEntry(
-      id: 'smile',
-      name: 'Smile',
-      keywords: [],
-      native: '😊',
-      categoryId: 'people',
-    );
-    const dataset = EmojiDataset(
-      categories: [
-        EmojiCategory(id: 'people', emoji: [emoji]),
-      ],
-      all: [emoji],
-      nativeToShortcode: {'😊': ':smile:'},
-    );
-
     await tester.pumpWidget(
       WidgetHelpers.testable(
-        overrides: [
-          profileProvider.overrideWith(_FakeProfileNotifier.new),
-          emojiDatasetOrEmptyProvider.overrideWithValue(dataset),
-        ],
+        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
         child: const ProfileEditPage(),
       ),
     );
@@ -273,10 +251,7 @@ void main() {
     addTearDown(tester.view.reset);
     await tester.pumpWidget(
       WidgetHelpers.testable(
-        overrides: [
-          profileProvider.overrideWith(_FakeProfileNotifier.new),
-          emojiDatasetOrEmptyProvider.overrideWithValue(dataset),
-        ],
+        overrides: [profileProvider.overrideWith(_FakeProfileNotifier.new)],
         child: SettingsPage(
           profileHeader: const SizedBox(),
           identityRecoveryPageBuilder: (_) => const SizedBox(),
@@ -344,7 +319,26 @@ void main() {
     final modeControl = tester.widget<IosNativeSegmentedControl>(
       find.byType(IosNativeSegmentedControl),
     );
+    expect(modeControl.items, ['Image', 'Animated']);
     modeControl.onChanged!(1);
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(
+      tester
+          .widget<IosNativeSegmentedControl>(
+            find.byType(IosNativeSegmentedControl),
+          )
+          .selectedIndex,
+      1,
+    );
+    expect(
+      find.byKey(const ValueKey('animated-avatar-capture-preview')),
+      findsOneWidget,
+    );
+    tester
+        .widget<IosNativeSegmentedControl>(
+          find.byType(IosNativeSegmentedControl),
+        )
+        .onChanged!(0);
     await tester.pumpAndSettle();
     tester.view.physicalSize = const Size(932, 656);
     tester.view.padding = const FakeViewPadding(right: 84);
@@ -361,7 +355,7 @@ void main() {
             find.byType(IosNativeSegmentedControl),
           )
           .selectedIndex,
-      1,
+      0,
     );
     expect(
       tester
@@ -376,20 +370,7 @@ void main() {
           .left,
       greaterThanOrEqualTo(848),
     );
-    final background = find.byKey(const ValueKey('emoji-editor-background'));
-    expect(
-      find.descendant(of: sideOptions, matching: background),
-      findsOneWidget,
-    );
-    final backgroundButton = tester.widget<AvatarEditorOptionButton>(
-      background,
-    );
-    backgroundButton.onTap!();
-    await tester.pumpAndSettle();
-    expect(
-      find.byKey(const ValueKey('emoji-background-editor')),
-      findsOneWidget,
-    );
+    expect(find.text('Camera'), findsOneWidget);
     expect(find.text('Profile'), findsOneWidget);
     tester.view.physicalSize = const Size(466, 678);
     tester.view.padding = const FakeViewPadding(right: 76);
@@ -401,7 +382,7 @@ void main() {
             find.byType(IosNativeSegmentedControl),
           )
           .selectedIndex,
-      1,
+      0,
     );
     final back = find.byKey(const ValueKey('duo-toolbar-Back to profile'));
     final bar = tester.widget<IosNavigationBar>(
@@ -577,7 +558,6 @@ void main() {
     expect(find.text('Image'), findsOneWidget);
     expect(find.text('Camera'), findsOneWidget);
     expect(find.text('Photo Library'), findsOneWidget);
-    expect(find.text('Emoji'), findsOneWidget);
     expect(find.text('Animated'), findsOneWidget);
     expect(find.text('Photo'), findsNothing);
     final modeControl = find.byKey(const ValueKey('avatar-mode-control'));
@@ -589,7 +569,7 @@ void main() {
     expect(controlRect.bottom - indicatorRect.bottom, Grid.quarter);
     expect(
       controlRect.width - Grid.quarter * 2,
-      closeTo(indicatorRect.width * 3, 0.01),
+      closeTo(indicatorRect.width * 2, 0.01),
     );
     final indicatorDecoration =
         tester.widget<DecoratedBox>(modeIndicator).decoration as BoxDecoration;
@@ -805,75 +785,6 @@ void main() {
       _editorControlBottomForTest,
     );
 
-    await tester.tap(find.text('Emoji'));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 150));
-    expect(
-      tester.getCenter(find.byKey(const ValueKey('emoji-avatar-preview'))).dy,
-      closeTo(screenSize.height / 2 - 140, 0.01),
-    );
-    expect(
-      tester
-          .getSize(find.byKey(const ValueKey('emoji-avatar-picker-content')))
-          .width,
-      closeTo(expectedContentWidth, 0.01),
-    );
-    expect(
-      find.byKey(const ValueKey('emoji-editor-background')),
-      findsOneWidget,
-    );
-    expect(find.byKey(const ValueKey('emoji-editor-emoji')), findsOneWidget);
-    expect(
-      find.descendant(
-        of: find.byKey(const ValueKey('emoji-avatar-picker-content')),
-        matching: find.byType(AnimatedSwitcher),
-      ),
-      findsNothing,
-    );
-    final backgroundSurface = find.descendant(
-      of: find.byKey(const ValueKey('emoji-editor-background')),
-      matching: find.byType(AnimatedContainer),
-    );
-    final emojiSurface = find.descendant(
-      of: find.byKey(const ValueKey('emoji-editor-emoji')),
-      matching: find.byType(AnimatedContainer),
-    );
-    expect(
-      tester.getRect(emojiSurface).left -
-          tester.getRect(backgroundSurface).right,
-      closeTo(imageControlGap, 0.01),
-    );
-    expect(
-      screenSize.height -
-          tester
-              .getRect(find.byKey(const ValueKey('emoji-editor-background')))
-              .bottom,
-      _editorControlBottomForTest,
-    );
-
-    final expandedPickerHeight = tester
-        .getSize(find.byKey(const ValueKey('emoji-avatar-picker-content')))
-        .height;
-    await tester.tap(find.byKey(const ValueKey('emoji-editor-background')));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 150));
-    expect(
-      tester.getCenter(find.byKey(const ValueKey('emoji-avatar-preview'))).dy,
-      closeTo(screenSize.height / 2 - 140, 0.01),
-    );
-    expect(
-      tester
-          .getSize(find.byKey(const ValueKey('emoji-avatar-picker-content')))
-          .height,
-      expandedPickerHeight,
-    );
-    expect(
-      tester.getCenter(find.byKey(const ValueKey('emoji-background-editor'))),
-      tester.getCenter(
-        find.byKey(const ValueKey('emoji-background-editor-alignment')),
-      ),
-    );
-
     await tester.tap(find.text('Animated'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 150));
@@ -1033,157 +944,6 @@ void main() {
       findsOneWidget,
     );
     expect(notifier.savedAvatarUrls.single, contains('#buzz-anim='));
-  });
-
-  testWidgets('saves a desktop-compatible emoji avatar', (tester) async {
-    final notifier = _FakeProfileNotifier();
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        overrides: [profileProvider.overrideWith(() => notifier)],
-        child: const ProfileEditPage(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('Edit Photo'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Emoji'));
-    await tester.pump();
-    expect(find.byKey(const ValueKey('emoji-avatar-search')), findsOneWidget);
-    expect(
-      find.byKey(const ValueKey('emoji-avatar-skin-tone')),
-      findsOneWidget,
-    );
-    expect(
-      tester.getSize(find.byKey(const ValueKey('emoji-avatar-preview'))),
-      const Size.square(220),
-    );
-    await tester.enterText(
-      find.byKey(const ValueKey('emoji-avatar-search')),
-      'rocket',
-    );
-    await tester.pump(const Duration(milliseconds: 300));
-    final focusedSearch = tester.widget<TextField>(
-      find.byKey(const ValueKey('emoji-avatar-search')),
-    );
-    final focusedBorder =
-        focusedSearch.decoration?.focusedBorder! as OutlineInputBorder;
-    expect(
-      focusedBorder.borderRadius,
-      const BorderRadius.all(Radius.circular(Radii.full)),
-    );
-    expect(
-      tester
-          .widget<TextField>(find.byKey(const ValueKey('emoji-avatar-search')))
-          .controller
-          ?.text,
-      'rocket',
-    );
-    await tester.tap(find.byKey(const ValueKey('emoji-avatar-skin-tone')));
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text('Dark'), findsOneWidget);
-    await tester.tapAt(const Offset(8, 8));
-    await tester.pump(const Duration(milliseconds: 300));
-    await tester.enterText(
-      find.byKey(const ValueKey('emoji-avatar-search')),
-      '',
-    );
-    await tester.pump(const Duration(milliseconds: 300));
-    final previewFinder = find.byKey(const ValueKey('emoji-avatar-preview'));
-    final previewBefore = tester.widget<AnimatedContainer>(previewFinder);
-    final decorationBefore = previewBefore.decoration! as BoxDecoration;
-    expect(decorationBefore.color, isNot(Colors.white));
-    final glyph = tester.widget<NativeEmojiGlyph>(
-      find.descendant(
-        of: previewFinder,
-        matching: find.byType(NativeEmojiGlyph),
-      ),
-    );
-    expect(glyph.size, closeTo(220 * 258 / 512, 0.01));
-    final nextColorIndex = emojiAvatarColors.indexWhere(
-      (value) => Color(value) != decorationBefore.color,
-    );
-    final nextColor = find.byKey(
-      ValueKey('emoji-avatar-color-$nextColorIndex'),
-    );
-    await tester.tap(find.byKey(const ValueKey('emoji-editor-background')));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 200));
-    await tester.tap(nextColor);
-    await tester.pump();
-    final previewAfter = tester.widget<AnimatedContainer>(previewFinder);
-    expect(previewAfter.decoration, isNot(previewBefore.decoration));
-    await tester.tap(find.byKey(const ValueKey('avatar-save')));
-    await tester.pumpAndSettle();
-
-    final avatarUrl = notifier.savedAvatarUrls.single;
-    expect(avatarUrl, startsWith('data:image/svg+xml,'));
-    expect(Uri.decodeComponent(avatarUrl), contains('😊'));
-    expect(
-      find.byKey(const ValueKey('profile-information-page')),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(const ValueKey('profile-avatar-editor-page')),
-      findsNothing,
-    );
-  });
-
-  testWidgets('saves the displayed default emoji without another selection', (
-    tester,
-  ) async {
-    final notifier = _FakeProfileNotifier();
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        overrides: [profileProvider.overrideWith(() => notifier)],
-        child: const ProfileEditPage(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('Edit Photo'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Emoji'));
-    await tester.pump(const Duration(milliseconds: 250));
-    await tester.tap(find.byKey(const ValueKey('avatar-save')));
-    await tester.pumpAndSettle();
-
-    expect(notifier.savedAvatarUrls, hasLength(1));
-    expect(notifier.savedAvatarUrls.single, startsWith('data:image/svg+xml,'));
-    expect(
-      Uri.decodeComponent(notifier.savedAvatarUrls.single),
-      contains('😊'),
-    );
-  });
-
-  testWidgets('keeps emoji drafts scoped to the emoji mode', (tester) async {
-    final notifier = _FakeProfileNotifier();
-    await tester.pumpWidget(
-      WidgetHelpers.testable(
-        overrides: [profileProvider.overrideWith(() => notifier)],
-        child: const ProfileEditPage(),
-      ),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Edit Photo'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Emoji'));
-    await tester.pump(const Duration(milliseconds: 500));
-
-    await tester.tap(find.byKey(const ValueKey('emoji-editor-background')));
-    await tester.pump(const Duration(milliseconds: 200));
-    await tester.tap(find.byKey(const ValueKey('emoji-avatar-color-1')));
-    await tester.pump();
-    await tester.tap(find.text('Image'));
-    await tester.pump(const Duration(milliseconds: 500));
-    await tester.tap(find.byKey(const ValueKey('avatar-save')));
-    await tester.pump();
-
-    expect(notifier.savedAvatarUrls, isEmpty);
-    expect(
-      find.byKey(const ValueKey('profile-avatar-editor-page')),
-      findsOneWidget,
-    );
   });
 
   runProfileEditMotionAndAccessibilityTests();
