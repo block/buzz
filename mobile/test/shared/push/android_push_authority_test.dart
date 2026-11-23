@@ -149,20 +149,32 @@ void main() {
   test(
     'an unavailable gateway keeps the journal and a refusal clears it',
     () async {
-      gateway.failWith['/v1/installations'] = 503;
-      await expectLater(
-        enroll(),
-        throwsA(
-          isA<AndroidPushGatewayRejection>().having(
-            (e) => e.isTransient,
-            'transient',
-            true,
+      // Even when the refusal's body is too large to read.
+      for (final oversized in [false, true]) {
+        gateway
+          ..oversizeFailures = oversized
+          ..failWith['/v1/installations'] = 503;
+        await expectLater(
+          enroll(),
+          throwsA(
+            isA<AndroidPushGatewayRejection>().having(
+              (e) => e.isTransient,
+              'transient',
+              true,
+            ),
           ),
-        ),
-      );
-      expect(store.value, contains('pendingEnrollment'));
-      expect(keystore.key, isNotNull);
-      gateway.failWith.remove('/v1/installations');
+        );
+        expect(store.value, contains('pendingEnrollment'));
+        expect(keystore.key, isNotNull);
+      }
+
+      gateway.failWith['/v1/installations'] = 403;
+      await expectLater(enroll(), throwsA(isA<AndroidPushGatewayRejection>()));
+      expect(keystore.key, isNull);
+      expect(store.value, isNot(contains('pendingEnrollment')));
+      gateway
+        ..oversizeFailures = false
+        ..failWith.remove('/v1/installations');
 
       gateway.refuseAttestation = true;
       await expectLater(

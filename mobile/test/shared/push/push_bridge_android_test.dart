@@ -214,9 +214,12 @@ void main() {
     for (final (reply, reported) in [
       // A refusal and gateway trouble are routine.
       (http.Response(jsonEncode({'error': 'unavailable'}), 503), false),
+      // Even when the refusal's body is too large to read.
+      (http.Response('x' * 65537, 503), false),
       // A challenge with no fields, and a body that is not JSON, are not.
       (http.Response(jsonEncode({}), 200), true),
       (http.Response('<html>', 200), true),
+      (http.Response('x' * 65537, 200), true),
     ]) {
       diagnostics.errors.clear();
       debugAndroidPushAuthority = AndroidPushAuthority(
@@ -235,7 +238,7 @@ void main() {
             AndroidPushGatewayResponseInvalid,
             DiagnosticOperation.pushGatewayResponse,
           ),
-      ], reason: reply.body);
+      ], reason: '${reply.statusCode} ${reply.body.length} bytes');
     }
   });
 

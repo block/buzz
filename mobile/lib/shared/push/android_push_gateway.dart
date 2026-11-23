@@ -59,6 +59,7 @@ class AndroidPushGatewayClient {
     int expectedStatus = 200,
   }) async {
     final http.Response response;
+    int? status;
     try {
       response = await boundedHttpResponse(
         _client,
@@ -66,9 +67,14 @@ class AndroidPushGatewayClient {
           ..headers['content-type'] = 'application/json'
           ..body = jsonEncode(body),
         timeout: timeout,
+        onHeaders: (headers) => status = headers.statusCode,
       );
     } on FormatException catch (error) {
-      // The only one a bounded read throws: a body over its limit.
+      // The only one a bounded read throws: a body over its limit. A refusal
+      // keeps its status, so an oversized 503 still reads as transient.
+      if (status case final status? when status != expectedStatus) {
+        throw AndroidPushGatewayRejection(route, status, null);
+      }
       throw AndroidPushGatewayResponseInvalid(
         'Push gateway answered $route unreadably: ${error.message}',
       );
