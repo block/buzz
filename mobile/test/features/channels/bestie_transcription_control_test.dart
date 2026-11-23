@@ -582,6 +582,18 @@ void main() {
       await mount(tester);
       final gesture = await hold(tester);
       expect(find.text('Preparing speech…'), findsOneWidget);
+      // UIKit cancels the hold if the avatar's platform view stops painting.
+      final avatar = find.text('Bestie');
+      expect(avatar, findsOneWidget);
+      expect(
+        find.ancestor(
+          of: avatar,
+          matching: find.byWidgetPredicate(
+            (w) => w is Opacity && w.opacity == 0,
+          ),
+        ),
+        findsNothing,
+      );
       expect(find.byTooltip('Send transcript'), findsNothing);
       expect(find.byType(VoiceNoteWaveform), findsNothing);
       await gesture.up();
