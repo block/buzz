@@ -8,7 +8,7 @@
 //! ```text
 //! Config::from_cli()
 //!   └─ SetupPayload::from_env()?
-//!        ├─ Some(payload) → run_setup_listener(config, payload)  [this module]
+//!        ├─ Some(payload) → run_setup_listener(&config, payload)  [this module]
 //!        └─ None          → normal pool path (unchanged)
 //! ```
 //!
@@ -318,7 +318,19 @@ impl SetupPayload {
 /// pool. Reconnects on relay close (mirroring normal mode) so the nudge
 /// listener survives transient disconnects; `nudged_event_ids` deduplication
 /// guards against replay on reconnect.
-pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) -> Result<()> {
+/// How the setup listener ended.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SetupExit {
+    /// The relay background task is gone; the process should exit.
+    RelayGone,
+    /// Every requirement now passes its probe; start the agent pool.
+    RequirementsSatisfied,
+}
+
+pub(crate) async fn run_setup_listener(
+    config: &Config,
+    payload: SetupPayload,
+) -> Result<SetupExit> {
     tracing::info!(
         agent = %payload.agent_name,
         requirements = payload.requirements.len(),
@@ -359,7 +371,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         crate::InboundAuthorGate::connect(&rest_client, &pubkey_hex, "setup startup").await;
 
     // Resolve owner for author-gate (same priority as normal mode).
-    let startup_owner = crate::resolve_agent_owner(&config);
+    let startup_owner = crate::resolve_agent_owner(config);
     let owner_cache = crate::OwnerCache::new(startup_owner);
 
     // Discover channels and subscribe (using a "mentions" rule so we get
@@ -378,9 +390,9 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
 
     // Build subscription rules: mentions only (setup mode must not react to
     // every message in a channel).
-    let rules = build_setup_subscription_rules(&config);
+    let rules = build_setup_subscription_rules(config);
 
-    let channel_filters = crate::config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let channel_filters = crate::config::resolve_channel_filters(config, &channel_ids, &rules);
 
     if channel_filters.is_empty() {
         tracing::warn!(
@@ -403,12 +415,43 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
     // Deduplicate by event-id so reconnect replay cannot double-nudge.
     let mut nudged_event_ids: HashSet<EventId> = HashSet::new();
 
+    // Re-probe self-healing CLI logins so a login fixed after spawn leaves
+    // setup mode without a manual restart.
+    let probes = crate::setup_reprobe::retryable_probes(&payload).unwrap_or_default();
+    if !probes.is_empty() {
+        tracing::info!(
+            "setup-mode: will re-probe {} CLI login(s) with backoff",
+            probes.len()
+        );
+    }
+    let mut reprobe_delay = crate::setup_reprobe::INITIAL_REPROBE_DELAY;
+    let reprobe_sleep = tokio::time::sleep(reprobe_delay);
+    tokio::pin!(reprobe_sleep);
+
     loop {
-        let Some(buzz_event) = relay.next_event().await else {
+        let next = tokio::select! {
+            event = relay.next_event() => event,
+            () = &mut reprobe_sleep, if !probes.is_empty() => {
+                if crate::setup_reprobe::all_probes_pass(&probes).await {
+                    tracing::info!("setup-mode: requirements now satisfied — leaving setup mode");
+                    return Ok(SetupExit::RequirementsSatisfied);
+                }
+                reprobe_delay = crate::setup_reprobe::next_reprobe_delay(reprobe_delay);
+                tracing::info!(
+                    "setup-mode: requirements still missing — next re-probe in {}s",
+                    reprobe_delay.as_secs()
+                );
+                reprobe_sleep
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + reprobe_delay);
+                continue;
+            }
+        };
+        let Some(buzz_event) = next else {
             tracing::warn!("setup-mode: relay event stream ended — requesting reconnect");
             if let Err(e) = relay.reconnect().await {
                 tracing::error!("setup-mode: relay background task is gone: {e} — exiting");
-                break;
+                return Ok(SetupExit::RelayGone);
             }
             continue;
         };
@@ -420,7 +463,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION
             || kind_u32 == KIND_MEMBER_REMOVED_NOTIFICATION
         {
-            handle_setup_membership(&mut relay, &buzz_event, &config, &rules, &channel_ids).await;
+            handle_setup_membership(&mut relay, &buzz_event, config, &rules, &channel_ids).await;
             continue;
         }
 
@@ -460,8 +503,6 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             continue;
         }
     }
-
-    Ok(())
 }
 
 /// Pre-authorization listener gate: nudge-eligible kind, not our own event,

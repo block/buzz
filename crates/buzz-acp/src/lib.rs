@@ -23,6 +23,7 @@ mod runtime;
 use runtime::{AgentRuntime, PoolStartup, SessionMode};
 mod scope;
 mod setup_mode;
+mod setup_reprobe;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -2835,7 +2836,12 @@ async fn tokio_main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("setup payload error: {e}"))?
     {
         tracing::info!("buzz-acp: setup payload present, entering setup-listener mode");
-        return setup_mode::run_setup_listener(config, payload).await;
+        match setup_mode::run_setup_listener(&config, payload).await? {
+            setup_mode::SetupExit::RelayGone => return Ok(()),
+            // A CLI login was fixed after spawn: continue into normal startup
+            // with the same config, as if the agent had been ready at spawn.
+            setup_mode::SetupExit::RequirementsSatisfied => {}
+        }
     }
 
     // Register termination before creating temporary key material or spawning
