@@ -49,6 +49,10 @@ class DmAddUnconfirmed implements Exception {
   String toString() => 'Added. Tap Add again to open the DM.';
 }
 
+/// How long a DM agent refusal waits for profiles before naming with what
+/// it has.
+const _refusalNamingDeadline = Duration(milliseconds: 1500);
+
 class ChannelActions {
   final Ref _ref;
   final RelaySessionNotifier _session;
@@ -330,13 +334,11 @@ class ChannelActions {
       await _throwIfAgentRefused(
         reason,
         adding: true,
+        // channelById also finds a DM opened ahead of the list.
         context: [
           ...?_ref
-              .read(channelsProvider)
-              .asData
-              ?.value
-              .where((channel) => channel.id == channelId)
-              .firstOrNull
+              .read(channelsProvider.notifier)
+              .channelById(channelId)
               ?.participantPubkeys,
           ...pubkeys,
         ],
@@ -375,10 +377,15 @@ class ChannelActions {
     final refusal = dmAgentPolicyRefusal(reason);
     if (refusal == null) return;
     final cache = _ref.read(userCacheProvider.notifier);
-    Future<void> load(Iterable<String> keys) => cache
-        .resolve(keys.toList())
-        .then<void>((_) {})
-        .catchError((Object _) {});
+    // The relay has already refused: profiles get one short deadline, then
+    // the message uses the best names loaded so far.
+    final deadline = Future<void>.delayed(_refusalNamingDeadline);
+    Future<void> load(Iterable<String> keys) => keys.isEmpty
+        ? Future.value()
+        : Future.any([
+            cache.resolve(keys.toList()).then<void>((_) {}),
+            deadline,
+          ]).catchError((Object _) {});
     final keys = {
       refusal.agent,
       for (final key in [...context, ?_currentPubkey])
@@ -386,13 +393,20 @@ class ChannelActions {
     };
     await load(keys);
     var sources = _ref.read(identityNameSourcesProvider);
-    final owner = sources.factFor(refusal.agent)?.ownerPubkey;
-    if (owner != null) {
-      await load([owner]);
+    // Every agent's owner loads together, so same-named owners get told apart.
+    final owners = {
+      for (final key in keys) ?sources.factFor(key)?.ownerPubkey,
+    }.difference(keys);
+    if (owners.isNotEmpty) {
+      await load(owners);
       sources = _ref.read(identityNameSourcesProvider);
     }
+    final owner = sources.factFor(refusal.agent)?.ownerPubkey;
     _ensureCommunityValid();
-    final names = sources.scope(keys, agentPubkeys: {refusal.agent});
+    final names = sources.scope(
+      {...keys, ...owners},
+      agentPubkeys: {refusal.agent},
+    );
     throw DmAgentRefused(
       dmAgentRefusedMessage(
         adding: adding,
@@ -739,6 +753,9 @@ class ChannelActions {
     _ensureCommunityValid();
     _ref.invalidate(channelMembersProvider(channelId));
     _ref.invalidate(channelBotPubkeysProvider(channelId));
+    // A DM's title and portraits come from the list's participants, which the
+    // relay republished before accepting the removal.
+    unawaited(_ref.read(channelsProvider.notifier).refresh());
   }
 
   /// [targetAuthor] fills the NIP-25 `p` tag, which Activity reads by `#p`.

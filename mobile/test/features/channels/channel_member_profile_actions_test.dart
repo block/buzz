@@ -269,6 +269,7 @@ void main() {
       Map<String, String> owners = const {},
       bool inSheet = false,
       _Actions? actions,
+      Future<List<ChannelMember>> Function()? load,
     }) => _pump(
       tester,
       dm: true,
@@ -279,7 +280,9 @@ void main() {
       owners: owners,
       inSheet: inSheet,
       actions: actions,
-      load: () async => [_member(me, 'member'), _member(agent, targetRole)],
+      load:
+          load ??
+          () async => [_member(me, 'member'), _member(agent, targetRole)],
     );
 
     testWidgets('the owner removes their own agent after confirming', (
@@ -302,6 +305,33 @@ void main() {
       await tester.pumpAndSettle();
       expect(actions.calls, ['test:$agent:remove']);
       expect(find.byType(ChannelMemberProfileActions), findsNothing);
+    });
+
+    testWidgets('a removal that can no longer be checked says to retry', (
+      tester,
+    ) async {
+      final actions = _Actions();
+      var loads = 0;
+      final container = await pumpDm(
+        tester,
+        owners: {agent: me},
+        inSheet: true,
+        actions: actions,
+        load: () => loads++ == 0
+            ? Future.value([_member(me, 'member'), _member(agent, 'bot')])
+            : Completer<List<ChannelMember>>().future,
+      );
+      await tester.tap(find.text('Remove from DM'));
+      await tester.pumpAndSettle();
+      // The roster starts reloading while the confirmation is open.
+      container.invalidate(channelMembersProvider('test'));
+      await tester.tap(find.text('Remove'));
+      await tester.pump();
+      expect(actions.calls, isEmpty);
+      expect(
+        find.text('Could not remove this agent. Please try again.'),
+        findsOneWidget,
+      );
     });
 
     testWidgets(

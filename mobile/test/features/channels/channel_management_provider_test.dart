@@ -920,6 +920,34 @@ void main() {
     ]);
   });
 
+  test(
+    'a removal refreshes the list so DM participants drop the member',
+    () async {
+      final relay = FakeRelay();
+      final container = ProviderContainer(
+        overrides: [
+          ...relay.overrides,
+          channelsProvider.overrideWith(_CountingRefreshes.new),
+        ],
+      );
+      addTearDown(container.dispose);
+      final connected = Completer<void>();
+      container.listen(relaySessionProvider, (_, state) {
+        if (state.status == SessionStatus.connected && !connected.isCompleted) {
+          connected.complete();
+        }
+      }, fireImmediately: true);
+      await connected.future;
+      final channels =
+          container.read(channelsProvider.notifier) as _CountingRefreshes;
+      await container
+          .read(channelActionsProvider)
+          .removeMember(channelId: _channelId, pubkey: _memberPubkey);
+      expect(relay.published.single.kind, 9001);
+      expect(channels.refreshes, 1);
+    },
+  );
+
   test('conversion keeps unrelated labels and preserves access settings', () {
     expect(buildSoloConversionTags(_channelId, ['buzz.solo', 'project']), [
       ['h', _channelId],
@@ -1332,6 +1360,16 @@ class _HeldRosterRelaySession extends RelaySessionNotifier {
 
   void disconnect() =>
       state = const SessionState(status: SessionStatus.disconnected);
+}
+
+class _CountingRefreshes extends ChannelsNotifier {
+  var refreshes = 0;
+
+  @override
+  Future<List<Channel>> build() async => const [];
+
+  @override
+  Future<void> refresh({bool fetchDirectory = false}) async => refreshes++;
 }
 
 class _ChannelsAfterLeave extends ChannelsNotifier {

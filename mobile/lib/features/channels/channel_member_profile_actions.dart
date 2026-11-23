@@ -85,8 +85,24 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
       return member;
     }
 
+    final message = error.value;
+    final errorText = message == null
+        ? null
+        : Semantics(
+            liveRegion: true,
+            label: message,
+            child: ExcludeSemantics(
+              child: Text(
+                message,
+                style: context.textTheme.bodyMedium?.copyWith(
+                  color: context.colors.error,
+                ),
+              ),
+            ),
+          );
     final member = manageableMember(roster, actor, currentChannel, names);
-    if (member == null) return const SizedBox.shrink();
+    // A failure stays visible even while the rows wait on a reload.
+    if (member == null) return errorText ?? const SizedBox.shrink();
 
     bool stillAllowed() {
       final latest =
@@ -124,7 +140,9 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
                 : 'Remove $label from ${currentChannel.name}?',
             confirmLabel: 'Remove',
           );
-          if (!context.mounted || confirmed != true || !stillAllowed()) return;
+          if (!context.mounted || confirmed != true) return;
+          // A change or a reload since confirming: say so, don't drop it.
+          if (!stillAllowed()) throw StateError('Removal no longer allowed');
           await ref
               .read(channelActionsProvider)
               .removeMember(channelId: channel.id, pubkey: target);
@@ -187,19 +205,7 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
               child: Center(child: Text('Updating…')),
             ),
           ),
-        if (error.value != null)
-          Semantics(
-            liveRegion: true,
-            label: error.value!,
-            child: ExcludeSemantics(
-              child: Text(
-                error.value!,
-                style: context.textTheme.bodyMedium?.copyWith(
-                  color: context.colors.error,
-                ),
-              ),
-            ),
-          ),
+        ?errorText,
       ],
     );
   }
