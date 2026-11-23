@@ -105,22 +105,24 @@ test("keeps a mention eligible when its channel is not in the loaded channel lis
   assert.equal(items[0].id, unknownItem.id);
 });
 
-test("excludes mentions from opted-out workflow steps", () => {
+test("excludes mentions from opted-out workflow steps but keeps needs-action items", () => {
+  const optOut = ["buzz:workflow-notify", "false"];
   const quietMention = feedItem({
     id: "quiet-mention",
     category: "mention",
-    tags: [["buzz:workflow-notify", "false"]],
+    tags: [optOut],
   });
   const mention = feedItem({ id: "mention", category: "mention" });
+  const markedApproval = feedItem({ id: "approval", tags: [optOut] });
 
   const items = eligibleFeedNotificationItems(
-    feedResponse([quietMention, mention], []),
+    feedResponse([quietMention, mention], [markedApproval]),
     allSlots,
     channels,
   );
   assert.deepEqual(
     items.map((item) => item.id),
-    ["mention"],
+    ["mention", "approval"],
   );
 });
 
