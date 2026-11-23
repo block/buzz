@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
+import '../../shared/diagnostics/diagnostic_navigation_observer.dart';
 import '../../shared/clipboard_utils.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/identity_archives/identity_archives.dart';
@@ -31,6 +32,7 @@ import '../../shared/widgets/tabler_star_icon.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/duo_toolbar.dart';
 import 'channel.dart';
+import 'channel_detail_page.dart';
 import 'add_members_sheet.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
@@ -43,7 +45,10 @@ import 'members_sheet.dart';
 import 'unread_badge/observed_unread_event.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/read_state/read_state_provider.dart';
+import '../activity/inbox_local_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
+import '../../shared/community/community_provider.dart';
+import '../../shared/relay/relay_author_provider.dart';
 import '../../shared/widgets/covered_route_keyboard_insets.dart';
 
 part 'channel_details_page.dart';
@@ -81,7 +86,8 @@ bool _usesNativeChannelSheet(BuildContext context) {
 }
 
 // Keep the result alive after retiring the invisible route for relay work.
-class _NativeChannelSheetRoute extends PageRouteBuilder<bool> {
+class _NativeChannelSheetRoute extends PageRouteBuilder<bool>
+    with DiagnosticSheetRoute<bool> {
   _NativeChannelSheetRoute(WidgetBuilder builder)
     : super(
         opaque: false,
@@ -142,6 +148,7 @@ void _markChannelReadNow(WidgetRef ref, String channelId) {
       .read(readStateProvider.notifier)
       .markContextRead(channelId, timestamp ?? 0, clearForcedMessages: true);
   if (timestamp != null) {
+    ref.read(inboxLocalStateProvider.notifier).clearScope(channelId);
     channels.clearObservedUnreadCoveredByRead(channelId, timestamp);
   }
 }
@@ -169,6 +176,10 @@ class ChannelActionsSheet extends HookConsumerWidget {
     final isMuted =
         ref.watch(channelMutesProvider).store.channels[channel.id]?.muted ==
         true;
+    // Desktop's unified workspaces are read-only here.
+    final canFile = ref.watch(
+      channelSectionsProvider.select((state) => state.editable),
+    );
     final isStarred =
         !channel.isDm &&
         ref.watch(channelStarsProvider).store.channels[channel.id]?.starred ==
@@ -225,9 +236,19 @@ class ChannelActionsSheet extends HookConsumerWidget {
             if (isUnread) {
               _markChannelReadNow(ref, channel.id);
             } else {
-              ref
+              final marked = ref
                   .read(readStateProvider.notifier)
                   .markContextUnread(channel.id, channelId: channel.id);
+              if (!marked) {
+                ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+                  const SnackBar(
+                    content: Text(
+                      'Couldn’t mark this channel unread. Try again.',
+                    ),
+                  ),
+                  kind: ToastKind.error,
+                );
+              }
             }
           },
         ),
@@ -235,7 +256,7 @@ class ChannelActionsSheet extends HookConsumerWidget {
       ],
       SheetActionSection(
         children: [
-          if (!channel.isDm)
+          if (!channel.isDm && canFile)
             _ChannelSheetRow(
               leading: const Icon(BuzzIcons.folderInput),
               title: const Text('Move to section…'),
@@ -247,7 +268,6 @@ class ChannelActionsSheet extends HookConsumerWidget {
                 close();
                 await _showMoveSectionSheet(
                   pageContext,
-                  ref,
                   channel: channel,
                   sectionId: sectionId,
                 );
@@ -600,104 +620,176 @@ Future<void> _confirmAndRun(
 }
 
 Future<void> _showMoveSectionSheet(
-  BuildContext context,
-  WidgetRef ref, {
+  BuildContext context, {
   required Channel channel,
   required String? sectionId,
 }) async {
-  final sections = [...ref.read(channelSectionsProvider).store.sections]
+  // The actions sheet that opened this picker is already closing, and its
+  // WidgetRef is disposed with it. Use the page's container throughout.
+  final container = ProviderScope.containerOf(context, listen: false);
+  // A notification can switch communities while the picker or name dialog is
+  // open. Both close then, and only the community that opened them is edited.
+  final config = container.read(relayConfigProvider);
+  bool inScope() {
+    final current = container.read(relayConfigProvider);
+    return current.storedOrigin == config.storedOrigin &&
+        current.nsec == config.nsec;
+  }
+
+  void edit(void Function(ChannelSectionsNotifier sections) change) {
+    if (inScope()) change(container.read(channelSectionsProvider.notifier));
+  }
+
+  final sections = [...container.read(channelSectionsProvider).store.sections]
     ..sort((a, b) => a.order.compareTo(b.order));
+  BuildContext? sheet;
+  void close() {
+    final open = sheet;
+    if (open != null) _closeOwnRoute(open);
+  }
+
+  // Desktop's unified layout can lock legacy filing while this is open.
+  final lock = container.listen(
+    channelSectionsProvider.select((state) => state.editable),
+    (_, editable) {
+      if (!editable) close();
+    },
+  );
+  final scope = container.listen(relayConfigProvider, (_, _) {
+    if (!inScope()) close();
+  });
   await showBuzzModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
-    builder: (sheetContext) => SafeArea(
-      child: IconTheme.merge(
-        data: const IconThemeData(size: 22),
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(
-            Grid.gutter,
-            0,
-            Grid.gutter,
-            Grid.xs,
-          ),
-          child: SheetActionSection(
-            children: [
-              for (final section in sections)
+    builder: (sheetContext) {
+      // A lock or switch that landed before this first frame found no sheet
+      // to close.
+      if (sheet == null &&
+          (!container.read(channelSectionsProvider).editable || !inScope())) {
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _closeOwnRoute(sheetContext),
+        );
+      }
+      sheet = sheetContext;
+      return SafeArea(
+        child: IconTheme.merge(
+          data: const IconThemeData(size: 22),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(
+              Grid.gutter,
+              0,
+              Grid.gutter,
+              Grid.xs,
+            ),
+            child: SheetActionSection(
+              children: [
+                for (final section in sections)
+                  ListTile(
+                    leading: const Icon(BuzzIcons.folder),
+                    title: Text(section.name),
+                    trailing: sectionId == section.id
+                        ? Icon(
+                            BuzzIcons.check,
+                            color: sheetContext.colors.primary,
+                          )
+                        : null,
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      edit((s) => s.assignChannel(channel.id, section.id));
+                    },
+                  ),
                 ListTile(
-                  leading: const Icon(BuzzIcons.folder),
-                  title: Text(section.name),
-                  trailing: sectionId == section.id
-                      ? Icon(
-                          BuzzIcons.check,
-                          color: sheetContext.colors.primary,
-                        )
-                      : null,
-                  onTap: () {
+                  leading: const Icon(BuzzIcons.folderPlus),
+                  title: const Text('New section…'),
+                  onTap: () async {
                     Navigator.of(sheetContext).pop();
-                    ref
-                        .read(channelSectionsProvider.notifier)
-                        .assignChannel(channel.id, section.id);
+                    final name = await _showSectionNameDialog(
+                      context,
+                      inScope: inScope,
+                    );
+                    if (name == null || name.isEmpty) return;
+                    edit((s) => s.createSection(name, channelId: channel.id));
                   },
                 ),
-              ListTile(
-                leading: const Icon(BuzzIcons.folderPlus),
-                title: const Text('New section…'),
-                onTap: () async {
-                  Navigator.of(sheetContext).pop();
-                  final name = await _showSectionNameDialog(context);
-                  if (name == null || name.isEmpty) return;
-                  final notifier = ref.read(channelSectionsProvider.notifier);
-                  notifier.createSection(name);
-                  final created = ref
-                      .read(channelSectionsProvider)
-                      .store
-                      .sections
-                      .where((section) => section.name == name.trim())
-                      .lastOrNull;
-                  if (created != null) {
-                    notifier.assignChannel(channel.id, created.id);
-                  }
-                },
-              ),
-              if (sectionId != null)
-                ListTile(
-                  leading: const Icon(BuzzIcons.folderMinus),
-                  title: const Text('Remove from section'),
-                  onTap: () {
-                    Navigator.of(sheetContext).pop();
-                    ref
-                        .read(channelSectionsProvider.notifier)
-                        .unassignChannel(channel.id);
-                  },
-                ),
-            ],
+                if (sectionId != null)
+                  ListTile(
+                    leading: const Icon(BuzzIcons.folderMinus),
+                    title: const Text('Remove from section'),
+                    onTap: () {
+                      Navigator.of(sheetContext).pop();
+                      edit((s) => s.unassignChannel(channel.id));
+                    },
+                  ),
+              ],
+            ),
           ),
         ),
-      ),
-    ),
-  );
+      );
+    },
+  ).whenComplete(() {
+    lock.close();
+    scope.close();
+  });
 }
 
-Future<String?> _showSectionNameDialog(BuildContext context) async {
-  final controller = TextEditingController();
-  final result = await showBuzzDialog<String>(
-    context: context,
-    builder: (dialogContext) => AlertDialog(
+/// Closes the route that [context] belongs to, once. Later calls, such as a
+/// second community switch, find it already leaving and never pop the page
+/// underneath.
+void _closeOwnRoute(BuildContext context) {
+  if (!context.mounted) return;
+  final route = ModalRoute.of(context);
+  if (route == null || !route.isActive) return;
+  final navigator = Navigator.of(context);
+  if (route.isCurrent) {
+    navigator.pop();
+  } else {
+    navigator.removeRoute(route);
+  }
+}
+
+Future<String?> _showSectionNameDialog(
+  BuildContext context, {
+  required bool Function() inScope,
+}) => showBuzzDialog<String>(
+  context: context,
+  builder: (_) => _SectionNameDialog(inScope: inScope),
+);
+
+/// Owns its controller so the field outlives the dialog's exit animation.
+class _SectionNameDialog extends HookConsumerWidget {
+  const _SectionNameDialog({required this.inScope});
+
+  /// False once the community that opened the dialog is no longer active.
+  final bool Function() inScope;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final controller = useTextEditingController();
+    ref.listen(relayConfigProvider, (_, _) {
+      if (!inScope()) _closeOwnRoute(context);
+    });
+    // A switch that landed before this first frame found no dialog to close.
+    useEffect(() {
+      if (!inScope()) {
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => _closeOwnRoute(context),
+        );
+      }
+      return null;
+    }, const []);
+    return AlertDialog(
       title: const Text('New Section'),
       content: TextField(controller: controller, autofocus: true),
       actions: [
         TextButton(
-          onPressed: () => Navigator.of(dialogContext).pop(),
+          onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
         FilledButton(
-          onPressed: () =>
-              Navigator.of(dialogContext).pop(controller.text.trim()),
+          onPressed: () => Navigator.of(context).pop(controller.text.trim()),
           child: const Text('Create'),
         ),
       ],
-    ),
-  );
-  controller.dispose();
-  return result;
+    );
+  }
 }

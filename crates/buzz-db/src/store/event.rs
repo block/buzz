@@ -844,7 +844,7 @@ fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q
     if let Some(ref e_tags) = q.e_tags {
         if !e_tags.is_empty() {
             qb.push(" AND ");
-            push_e_tag_match(qb, col_prefix, e_tags);
+            push_exact_tag_match(qb, col_prefix, "e", e_tags);
         }
     }
 
@@ -1316,64 +1316,28 @@ pub(crate) async fn fetch_with_read_deadline(
 /// `[["t","t"]]` is contained in `["t","other"]`, and `[["e",id]]` in
 /// `["x","e",id]`. Over-matching before `LIMIT` lets a non-matching newer row
 /// take the slot, so containment stays only as the GIN-indexed prefilter
-/// (one array bind, so the SQL text does not change with `values`) and the
-/// positional check makes the predicate exact.
+/// (one array-bound test, so planner cost does not scale with `values`) and
+/// the positional check makes the predicate exact.
 fn push_exact_tag_match(
     qb: &mut QueryBuilder<sqlx::Postgres>,
     col_prefix: &str,
     name: &str,
     values: &[String],
 ) {
-    push_tag_match(qb, col_prefix, name, values, false);
-}
-
-/// Above this many `#e` values, [`push_e_tag_match`] hides them from the
-/// planner's selectivity estimate. Hiding plans faster from one value up, but
-/// visible values keep a narrow read's per-value plan; at 8 they cost at most
-/// ~0.6 ms of extra planning.
-const E_TAG_ESTIMATED_VALUES_MAX: usize = 8;
-
-/// [`push_exact_tag_match`] for `#e`. Planning a bound array estimates GIN
-/// selectivity once per element in every partition, about 0.07 ms per value:
-/// a 201-id thread-page aux closure spent ~14 ms planning against ~1 ms
-/// executing, on every page, because its custom plan never yields to the
-/// cached generic one. Past [`E_TAG_ESTIMATED_VALUES_MAX`] values the arrays
-/// are read through a scalar subquery, which the planner estimates as one
-/// unknown value (the estimate a cached generic plan already uses for these
-/// reads) while the GIN index still serves the containment at run time.
-fn push_e_tag_match(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, values: &[String]) {
-    let opaque = values.len() > E_TAG_ESTIMATED_VALUES_MAX;
-    push_tag_match(qb, col_prefix, "e", values, opaque);
-}
-
-fn push_tag_match(
-    qb: &mut QueryBuilder<sqlx::Postgres>,
-    col_prefix: &str,
-    name: &str,
-    values: &[String],
-    opaque_values: bool,
-) {
-    // `ANY((SELECT $n)::T[])` is an array expression over an InitPlan, while
-    // `ANY((SELECT $n))` would compare against a subquery's rows instead.
-    let (open, close, text_cast) = if opaque_values {
-        ("(SELECT ", ")", "::text[]")
-    } else {
-        ("", "", "")
-    };
     let containments: Vec<serde_json::Value> = values
         .iter()
         .map(|value| serde_json::json!([[name, value]]))
         .collect();
-    qb.push(format!("({col_prefix}tags @> ANY({open}"))
+    qb.push(format!("({col_prefix}tags @> ANY("))
         .push_bind(containments)
         .push(format!(
-            "{close}::jsonb[]) AND EXISTS (SELECT 1 FROM jsonb_array_elements({col_prefix}tags) AS tag \
+            "::jsonb[]) AND EXISTS (SELECT 1 FROM jsonb_array_elements({col_prefix}tags) AS tag \
              WHERE tag->>0 = "
         ))
         .push_bind(name.to_owned())
-        .push(format!(" AND tag->>1 = ANY({open}"))
+        .push(" AND tag->>1 = ANY(")
         .push_bind(values.to_vec())
-        .push(format!("{close}{text_cast})))"));
+        .push(")))");
 }
 
 /// Whether `q` must run as an unnamed statement, so Postgres plans it with the
@@ -1695,7 +1659,7 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
     if let Some(ref e_tags) = q.e_tags {
         if !e_tags.is_empty() {
             qb.push(" AND ");
-            push_e_tag_match(&mut qb, col_prefix, e_tags);
+            push_exact_tag_match(&mut qb, col_prefix, "e", e_tags);
         }
     }
 
@@ -2989,8 +2953,13 @@ impl Db {
     /// resending a deletion repairs a target an earlier write left live. Ingest
     /// accepts the resend only within its timestamp window, so this does not
     /// repair older rows.
-    /// Returns `(StoredEvent, was_inserted, deleted)`, where `deleted[i]`
-    /// tells whether `targets[i]` was soft-deleted by this call.
+    ///
+    /// A target that is pinned leaves its channel's NIP-PM pin list in the
+    /// same transaction; the list is re-signed with `relay_signer`.
+    ///
+    /// Returns `(StoredEvent, was_inserted, deleted, pin_lists)`, where
+    /// `deleted[i]` tells whether `targets[i]` was soft-deleted by this call
+    /// and `pin_lists` holds each pin list this call rewrote.
     #[datastore_span(name = "insert_deletion_event", system = "postgresql")]
     pub async fn insert_deletion_event(
         &self,
@@ -2999,7 +2968,8 @@ impl Db {
         channel_id: Option<Uuid>,
         thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
         targets: &[crate::event::DeletionTarget<'_>],
-    ) -> Result<(StoredEvent, bool, Vec<bool>)> {
+        relay_signer: &nostr::Keys,
+    ) -> Result<(StoredEvent, bool, Vec<bool>, Vec<StoredEvent>)> {
         let mut tx = crate::begin_community_event_write_transaction(
             &self.pool,
             community_id,
@@ -3018,8 +2988,9 @@ impl Db {
             crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
         }
         let mut deleted = Vec::with_capacity(targets.len());
+        let mut messages = Vec::new();
         for target in targets {
-            deleted.push(
+            let (was_deleted, channel_id) =
                 crate::event::soft_delete_event_and_update_thread_in_tx(
                     &mut tx,
                     target.event_id,
@@ -3027,11 +2998,14 @@ impl Db {
                     target.parent_event_id,
                     target.root_event_id,
                 )
-                .await?,
-            );
+                .await?;
+            deleted.push(was_deleted);
+            messages.extend(channel_id.map(|channel_id| (channel_id, target.event_id)));
         }
+        let pin_lists =
+            crate::pins::unpin_deleted_messages(&mut tx, &messages, relay_signer).await?;
         tx.commit().await?;
-        Ok((stored, inserted, deleted))
+        Ok((stored, inserted, deleted, pin_lists))
     }
 
     /// Soft-delete NIP-29 discovery events for a channel created by a specific relay pubkey.
@@ -3106,19 +3080,6 @@ mod e_tag_filter_shape_tests {
         assert!(!sql[..fence_end].contains("ORDER BY"));
         assert!(!sql[..fence_end].contains("LIMIT"));
         assert!(sql[fence_end..].contains("ORDER BY created_at DESC, id ASC LIMIT "));
-        // A wide `#e` set reaches the planner as one unknown value, not 188
-        // estimated elements; a narrow one keeps its bound-value estimate.
-        assert!(sql.contains("tags @> ANY((SELECT $"));
-        assert!(sql.contains("tag->>1 = ANY((SELECT $"));
-        for (ids, opaque) in [
-            (1, false),
-            (E_TAG_ESTIMATED_VALUES_MAX, false),
-            (E_TAG_ESTIMATED_VALUES_MAX + 1, true),
-        ] {
-            q.e_tags = Some((0..ids).map(|i| format!("{i:064x}")).collect());
-            let qb = build_query_events_sql(&q, Range::All, page_limit(&q));
-            assert_eq!(qb.sql().as_str().contains("(SELECT $"), opaque, "{ids} ids");
-        }
     }
 
     /// Only a one-channel, one-root read of channel-message kinds without a
@@ -7291,7 +7252,14 @@ mod postgres_tests {
         .expect("install failure injection");
 
         let error = db
-            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+            .insert_deletion_event(
+                community,
+                &deletion,
+                Some(channel),
+                None,
+                &targets,
+                &nostr::Keys::generate(),
+            )
             .await
             .expect_err("a failed target soft-delete must fail the deletion");
         assert!(
@@ -7314,8 +7282,15 @@ mod postgres_tests {
             .execute(&pool)
             .await
             .expect("remove failure injection");
-        let (_, inserted, deleted) = db
-            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+        let (_, inserted, deleted, _) = db
+            .insert_deletion_event(
+                community,
+                &deletion,
+                Some(channel),
+                None,
+                &targets,
+                &nostr::Keys::generate(),
+            )
             .await
             .expect("resend after the failure clears");
         assert!(inserted, "the resend stores the deletion");
@@ -7353,8 +7328,15 @@ mod postgres_tests {
             root_event_id: None,
         }];
 
-        let (_, inserted, deleted) = db
-            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+        let (_, inserted, deleted, _) = db
+            .insert_deletion_event(
+                community,
+                &deletion,
+                Some(channel),
+                None,
+                &targets,
+                &nostr::Keys::generate(),
+            )
             .await
             .expect("resend the deletion");
         assert!(!inserted, "the deletion was already stored");
@@ -7369,8 +7351,15 @@ mod postgres_tests {
                 .is_some()
         );
 
-        let (_, inserted, deleted) = db
-            .insert_deletion_event(community, &deletion, Some(channel), None, &targets)
+        let (_, inserted, deleted, _) = db
+            .insert_deletion_event(
+                community,
+                &deletion,
+                Some(channel),
+                None,
+                &targets,
+                &nostr::Keys::generate(),
+            )
             .await
             .expect("resend again");
         assert!(!inserted);

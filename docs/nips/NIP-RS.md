@@ -24,7 +24,7 @@ This NIP defines a minimal, privacy-preserving protocol for propagating read sta
 
 ## Non-Goals
 
-This NIP does not define a durable log of all read messages — frontier blobs are best-effort recent activity hints bounded by a time horizon. Exception: `ov_*` override entries, including tombstone floors, are durable state — they are exempt from age pruning, budget eviction, and horizon-bounded fetching, they live in a single coordinate per installation, and they MUST be carried forward before that coordinate is deleted or abandoned (see Manual-Unread Override Layer — Override State Durability).
+This NIP does not define a durable log of all read messages — frontier blobs are best-effort recent activity hints bounded by a time horizon. Exception: `ov_*` override entries, including tombstone floors, are durable state — they are exempt from age pruning, budget eviction, and horizon-bounded fetching (except for the expiry of the Buzz version-2 unread profile), they live in a single coordinate per installation, and they MUST be carried forward before that coordinate is deleted or abandoned (see Manual-Unread Override Layer — Override State Durability).
 This NIP does not define cross-client interoperability on context ID format — context identifiers are opaque by default and meaningful only within a single client family, except for OPTIONAL well-known schemes defined in this NIP (`thread:<root-event-id>` and `msg:<event-id>`, defined under Read Context Schemes), which are provided for cross-client thread/message-read interoperability.
 This NIP does not guarantee ordering of read events across devices.
 This NIP does not require relay-stored read-state logic: no new event kind, no new wire message, and nothing a relay must interpret about read state. Clients implementing the manual-unread override layer do depend on relay behaviour their full-state load cannot verify (see Full-State Load).
@@ -476,21 +476,122 @@ precedence over the legacy finite-horizon, per-message-writing, frontier
 replication, and unconditional frontier-slot deletion guidance in this document; the manual-unread override register algebra and durability rules
 are unchanged.
 
+- **Catch-up.** A *catch-up* of a channel occurs when the reader reaches the
+  bottom of that channel's top-level timeline while the app is in the
+  foreground and its window has focus. A catch-up of a thread occurs when the
+  reader reaches the bottom of a full view of that thread under the same
+  condition. A partial or nested thread view is not a catch-up of the thread.
+- **Displayed.** A message is *displayed* when it is rendered on screen while
+  the app is in the foreground and its window has focus.
 - **Semantic retention:** `floor = max(0, now - 2592000)` (30 days, Unix
-  seconds). Every effective frontier includes this floor in its maximum,
-  including missing contexts and unresolved parents. A message at the floor is
+  seconds). Every effective frontier used to determine whether a
+  message is read includes this floor in its maximum, including missing
+  contexts and unresolved parents; however, the manual-unread override layer
+  MUST exclude the semantic retention floor and use the context's merged
+  stored frontier (0 if absent), captured at Mark-unread for baseline B and
+  evaluated at liveness and canonical publication for F. A message at the floor is
   read; a message one second newer is not read without a covering frontier.
-  Forced-unread overrides still take precedence. Legacy per-message entries
-  remain readable, but clients MUST NOT create or republish `msg:` hints outside
-  an existing primary override group. Sparse device-local UI feedback may be
-  persisted locally, but is not synchronized state and MUST NOT be described as
-  synchronized. Individual-message menu and dwell actions MUST NOT acknowledge
-  their entire channel or thread; direct mentions do not opt into msg writes.
-- **Catch-up frontiers:** `activity:<channel-id>` covers ordinary top-level
-  channel messages, excluding DMs, mentions and broadcasts.
-  `thread-activity:<root-event-id>` covers that thread's replies. Neither is a
-  substitute for the broad channel frontier. A partial/nested thread view MUST
-  NOT advance the entire thread solely because that view reached its bottom.
+  Forced-unread overrides still take precedence.
+- **Per-message entries.** Legacy per-message entries remain readable. A
+  client MUST NOT create a `msg:<event-id>` entry except by a user-initiated
+  explicit mark-read of a message that has no override group, which writes
+  only its `msg:<event-id>` frontier. That
+  frontier is an ordinary frontier: it is pruned below the retention floor
+  and creates no override register and no tombstone floor. Only whole-channel
+  mark-unread creates an override group (see Synchronized manual state). Display, dwell, scroll, catch-up and mention
+  visibility MUST NOT create `msg:` entries; the prohibition is on creation,
+  and advancing an existing frontier or group is not creation. If a creation
+  does not fit the budget, the action MUST fail visibly. Individual-message actions MUST NOT
+  acknowledge their entire channel or thread.
+- **Synchronized manual state.** Explicit mark-read of a channel, thread or
+  single message, and mark-unread of a whole channel, are synchronized state.
+  A client MUST publish override groups only for whole-channel contexts
+  (`<channel-id>`); it MUST NOT publish an override group for a `msg:` or
+  `thread:` context. Clients MUST honour channel override groups from peer
+  installations of the same identity with the same precedence as their own,
+  while preserving the self-authored and quiet-message exclusions. A reader
+  MUST ignore any `msg:` or `thread:` override group it finds on a peer
+  primary: it MUST NOT evaluate it, merge it, or carry it forward. A client
+  MUST NOT present a manual unread as synchronized while it is held only
+  locally.
+- **Device-local overrides.** Mark-unread of a single message or a thread is
+  device-local state: it is stored only on the installation where the user
+  acted and is never published. It forces its message or thread unread on
+  that installation until any of these occurs, after which it MUST be
+  removed:
+  (a) the merged synchronized frontier covering it advances past the
+  frontier it had when it was set, whether by this installation or a peer
+  (a peer's display, explicit mark-read or catch-up);
+  (b) on this installation, the message is displayed, or a catch-up or
+  explicit mark-read covers it, in the scope given under Clearing.
+  A peer frontier merge MUST be evaluated against device-local overrides
+  when it arrives, not only at next display.
+- **Clearing.** An installation performs Mark-read (frontier advance plus
+  clear-counter increment, per Actions) on every channel override group it
+  has merged that is in scope of any of these events, even when no frontier
+  value changes, and removes device-local overrides in the same scope:
+  (a) a message is *displayed*: its own device-local override;
+  (b) a message, thread or channel is explicitly marked read: that context's
+  override and, for a thread or channel, the device-local overrides of
+  messages it covers;
+  (c) a *catch-up* of a channel: the channel's group and the device-local
+  overrides of the top-level messages it covers; a catch-up of a thread:
+  the thread's device-local override and those of its replies.
+  A catch-up of a partial or nested thread view clears only the device-local
+  overrides of messages it displayed, never the thread's override.
+  An installation MAY keep a thread's device-local override through a
+  catch-up of that thread during the full view of the thread in which the
+  user set it; clause (a) under Device-local overrides and an explicit
+  mark-read still remove it.
+- **Concurrency limitation (accepted).** An installation clears only
+  channel overrides it had merged when the event occurred. A frontier
+  advance on another installation that has not yet merged a mark-unread,
+  or a mark-unread whose baseline was taken from a stale view, deactivates
+  that override through the Liveness Predicate (`F > B`) without any clear.
+  This is an accepted limitation of the Buzz profile: a manual unread MAY be
+  lost to a concurrent or stale-baseline read on another installation, and
+  clients MUST NOT attempt to restore it.
+- **Bounds and expiry.** Every channel override group, and its tombstone
+  floor once dead, lives with its paired frontier on the installation's
+  version-2 unread record (see Expiring unread state (version 2), Override
+  Group Co-Location Rule) and is discarded only as that profile permits.
+  Read-position coordinates carry no override keys. Each installation's
+  unread record MUST carry the merged union
+  of its own and its peers' channel groups, so the capacity is shared by the
+  identity across all its installations, not per installation. A new group
+  that does not fit MUST fail visibly. If the merged union no longer fits,
+  the client MUST rewrite its unread record compactly from the nonexpired
+  groups its last published unread record carried: each group in its canonical form against the
+  current frontiers (a dead group as its tombstone floor), with its
+  co-located frontier advanced. The rewrite MUST NOT omit nonexpired groups or
+  tombstone floors that record carried, and override actions, including the
+  synchronized clears above, MUST fail visibly while the union does not fit,
+  per Bounds and Budget (Terminal behaviour at the ceiling); ordinary
+  frontier advances and device-local overrides remain permitted. It MUST NOT
+  prune nonexpired tombstones or peer groups to make room.
+- **Catch-up advances the main frontier:** on a catch-up of a channel, the
+  client advances that channel's own context (`<channel-id>`) to the newest
+  top-level message the reader reached, following the Write Discipline (not
+  including thread replies). On a catch-up of a thread, the client advances
+  `thread:<root-event-id>` to the newest reply reached. Every message at or
+  below the resulting effective frontier, including mentions, broadcasts and
+  DMs, is read on every installation. A partial or nested thread view MUST NOT
+  advance the entire thread.
+- **Accepted ordering tradeoff:** frontiers compare against author-assigned
+  `created_at`. A message that arrives after the reader caught up but carries
+  an older timestamp (for example a delayed or retried send, or a sender with
+  a slow clock) is covered by the frontier and is treated as read without
+  having been displayed. Buzz accepts this in exchange for frontier-only
+  state. Clients MUST NOT add per-message writes to compensate for it.
+- **Legacy catch-up keys:** `activity:<channel-id>` and
+  `thread-activity:<root-event-id>` are legacy. Clients MUST NOT create or
+  advance them. Clients MUST read existing values with their original
+  meaning (`activity:` covers ordinary top-level messages, excluding DMs,
+  mentions and broadcasts; `thread-activity:` covers that thread's replies)
+  and MAY carry them in their own published state until they fall below the
+  retention floor. Installations that predate this rule may continue to
+  write fresh legacy values, so readers MUST NOT assume the namespace empties
+  after any fixed period.
 - **Own values, not observed maxima:** publish only frontiers advanced locally,
   or recovered from the installation's owned coordinates/journal. Keep these
   values separate from the merged view. If a local value is 5, a peer supplies
@@ -514,7 +615,8 @@ are unchanged.
   and assignments before publication. Publish changed coordinates only. Never
   remove a sole carrier before its replacement is accepted. Unused slots may be
   reused after their entries are below the floor, with read-before-write conflict
-  detection. Override groups and their frontiers remain on the primary.
+  detection. Override groups and their paired frontiers live only on the
+  version-2 unread record.
 - **Recovery:** save pending signed event bytes durably before sending. An
   unknown outcome retries those exact bytes. A partially accepted batch is not
   whole-revision success; successful slots need not be resent, and unsynced
@@ -528,11 +630,105 @@ are unchanged.
   or tag filter. The floor is evaluated on frontier values, not containing
   event age. An old blob can carry a newer frontier because message timestamps
   are author-controlled. Orphan slots are not automatically deleted or ignored.
-  No age policy applies to override tombstone floors.
+  Override groups expire only as specified in Expiring unread state
+  (version 2).
 
 Legacy clients do not gain the semantic floor automatically. A mixed-version
 installation may continue showing old messages unread; wire max-register
 interoperability alone does not imply identical unread presentation.
+
+**Expiring unread state (version 2).** Version-2 unread primaries use the isolated `read-state-unread-v2:` coordinate and `read-state-unread-v2` tag, NIP-44 encryption, `v:2`, `client_id`, and a `contexts` map. Override group validation, co-location, max merge and canonical publication are unchanged except as specified here. S and C are uint32 Unix-second action stamps. An action MUST use `q=max(now,max(S,C)+1)` for its edited S or C. It MUST refuse allocation beyond uint32 or more than 60 seconds ahead of its local clock. Republish, retry, restore and convergence MUST NOT re-stamp an action.
+
+This profile requires clocks within 300 seconds of real Unix time. A receiver MUST defer a group whose greatest action stamp is more than 660 seconds ahead of its local clock, MUST NOT advance its clock from received counters, and MUST not claim a complete usable override view while such a group is unresolved. A detected clock rollback MUST NOT lower the installation's persisted expiry watermark. Deployments unable to satisfy the time assumption MUST NOT advertise this profile's eviction guarantee.
+
+A manual-unread mark expires when `S < now-2592000`, even if it has not been read. Its baseline and liveness frontier still exclude the message-retention floor. A dead group MUST first canonicalize to `C=K=max(S,C)`. A publisher MAY discard that group, its causal counter ceiling and its no-longer-required paired frontier only when `K < now-2592000-600`. A reader MUST discard an incoming group whose greatest action stamp is below `now-2592000` before merging it, and MUST apply the S-expiry condition when evaluating liveness. Expired marks MUST NOT be restored by replay, backup import or automatic renewal.
+
+Current byte/key/snapshot limits remain enforced. Nonexpired groups MUST NOT be budget-evicted. A new mark that cannot fit MUST fail without discarding another nonexpired group. Expiry MUST apply consistently in memory, journal hydration/write, receive/merge, display, normal publication and overfull fallback. Pending signed events retain their original stamps; retry MUST NOT turn an expired action into a new one.
+
+Version-1 read-position coordinates continue to carry frontiers. Override keys found in version-1 coordinates MUST NOT be imported into, merged with, or dual-published as version-2 state.
+
+### Buzz Thread Follow Choices
+
+**Coordinates.** Each installation publishes only its own choices, in
+kind-30078 events with exactly one `d` tag `thread-follows:<slot-id>`
+(`<slot-id>` exactly 32 lowercase hex, random, persisted locally), a `t` tag
+`thread-follows`, and content NIP-44 encrypted to the author's own key. The
+plaintext is
+`{"v":1,"client_id":"<client-id>","threads":{"<channel-id>:<root-event-id>":{"follow":<bool>,"at":<uint32>}}}`.
+
+**Validation.** Events with zero or several `d` tags, another prefix, or a
+malformed `<slot-id>` MUST be ignored. A recognized coordinate whose content
+fails to decrypt, has an unknown `v`, a missing or non-string `client_id`, a
+key that is not `<channel-id>:<64 lowercase hex>`, a non-boolean `follow` or
+an `at` outside 0-4294967295 is *unreadable*: its entries are unknown, not
+absent. A client MUST NOT publish its own coordinate while that coordinate is
+unreadable, and MUST report follow state as possibly incomplete while any
+coordinate is unreadable. Unknown top-level or entry fields MUST be carried
+unchanged by their author.
+
+**States.** No merged entry means *automatic*: the thread counts when the
+user started or replied in it, derived from events. `follow:true` is an
+explicit follow. `follow:false` is an explicit unfollow and overrides
+automatic interest for ordinary replies. An explicit unfollow does not
+suppress mentions of the user, broadcasts, or DMs.
+
+**Writes.** Only an explicit user follow or unfollow writes an entry, with
+`at` set to the time of that action, into the acting installation's own
+slot. Sending a reply, opening a thread, or any automatic interest MUST NOT
+write or re-stamp an entry. A client MUST NOT remove an entry to express
+automatic; a later explicit choice supersedes it. A client MUST NOT copy
+another slot's entries into its own and MUST NOT change `at` on an entry it
+did not just edit.
+
+**Merge.** Readers load every `thread-follows:` coordinate of the identity
+with the full-state retrieval used for read state and merge per key across
+all slots: the greater `at` wins; if `at` is equal, `follow:false` wins.
+Because no installation writes another's slot, concurrent edits from
+different installations cannot erase each other. A choice made in the same
+second as an opposite choice on another installation, or within that
+installation's clock skew, may lose to it.
+
+**Publication and recovery.** Follow coordinates follow the read-state
+rules for own coordinates: `client_id` conflict detection and slot
+regeneration (see `d` Tag); read-before-write of the own coordinate; an
+event `created_at` strictly greater than every pending or observed event for
+that coordinate, independent of the entries' `at`; durable journaling of the
+signed event before sending, exact-byte retry on unknown outcome,
+partial-batch handling, identity/community-scoped and fenced journal
+writers, and the snapshot preflight (see Buzz Frontier-Only Retention
+Profile, Recovery and No loss to fit); and live subscription with
+reconnect refresh (see Live Subscription and Convergence). A retried or
+republished entry keeps its original `at`. A choice is *pending* until its
+event is accepted, *synchronized* after, and *failed* if it cannot be
+published; clients MUST show a failed choice as failed.
+
+**Reinstall and retirement.** A new installation creates a new slot and does
+not need to find its old one; old slots remain merge inputs and a newer `at`
+wins. Clients MUST NOT delete a `thread-follows:` coordinate they did not
+create.
+
+**Legacy import.** A client with pre-sync local choices imports them once
+per identity and community, after a complete merge, and only for keys with
+no synced entry. Imported entries use `at = 0`, so any real action wins over
+them; between imported entries from different installations the equal-`at`
+rule applies. A client MUST NOT stamp an imported entry with the import
+time. A legacy entry without a channel ID is imported only after its root is
+resolved to a channel from verified event evidence; unresolved entries are
+retained locally and retried, not dropped. The import is idempotent and
+journaled like any publication, so a crash mid-import is retried safely.
+
+**Capacity.** Each event's plaintext is at most 40 KiB. When an
+installation's slot is full it MUST spill to additional persisted slots
+under the same `client_id`, using the stable-placement and
+publish-before-remove rules of read state. Before spilling it SHOULD drop
+its own entries that are not the merged winner for their key. Entries do not
+expire by age, and explicit unfollows are never evicted. An installation
+MUST NOT exceed 16 `thread-follows:` coordinates or push the identity's
+kind-30078 snapshot past the read-state snapshot bounds; at that ceiling it
+MUST refuse the new choice and report it as failed.
+
+**Scope.** These choices govern unread and in-app attention only; they do
+not change channel mute or push subscription semantics.
 
 ### Merge Rule
 
@@ -740,22 +936,22 @@ Clear-wins also matches the product semantics this layer is designed for: a fals
 
 Because legacy clients can carry and republish old `ov_*` keys indefinitely (they pass through `sanitizeContexts` as unknown opaque entries), there is no finite time after which all stale override components are guaranteed absent. Therefore:
 
-**Clients MUST NOT drop `ov_*` override entries (including tombstone floors) based on age pruning or budget eviction.** This exemption applies permanently. Age-based pruning applies to frontier entries only. Eviction strategies that respect byte/key budgets MUST apply to frontier and `msg:`/`thread:` entries first and MUST NOT touch `ov_*` entries.
+**Clients MUST NOT drop `ov_*` override entries (including tombstone floors) based on age pruning or budget eviction.** This exemption applies permanently, except that a client implementing Expiring unread state (version 2) expires and discards version-2 groups exactly as that profile specifies. Age-based pruning applies to frontier entries only. Eviction strategies that respect byte/key budgets MUST apply to frontier and `msg:`/`thread:` entries first and MUST NOT touch `ov_*` entries.
 
 **Durability is a property of retrievable logical state, not of keys within one blob.** An override register survives only if a client that loads its full state can still reach every component. Therefore, in addition to the per-entry rule above:
 
 - Full-state loads by clients implementing this layer MUST NOT be restricted by a finite event-level `since` window, and MUST establish completeness rather than assume it; the containing event must remain reachable, not merely retain its keys (see Full-State Load).
 - No coordinate carrying `ov_*` entries may be deleted or abandoned until the componentwise `max()` of every override register it holds — especially every tombstone ceiling — has been republished under the client's current primary coordinate and accepted on every relay from which the old coordinate will be deleted or allowed to lapse (see Client-ID Rotation, Orphaned Blob Deletion).
 
-**There is no safe finite GC horizon for override state.** Any protocol that proposes to delete tombstone floors after a bounded period requires a separately proved guarantee that no stale override component can re-enter the merge — this amendment does not provide such a guarantee.
+**Outside the version-2 profile there is no safe finite GC horizon for override state.** Deleting tombstone floors after a bounded period requires a guarantee that no stale override component can re-enter the merge. Expiring unread state (version 2) supplies it: its groups live in an isolated namespace that never imports version-1 override keys, every stamp is a bounded-skew action time, a reader discards any incoming group whose greatest stamp is older than the lifetime before merging it, and a publisher discards a dead group only after the lifetime plus a skew guard has passed.
 
 #### Bounds and Budget
 
 - **Key growth:** a live override adds 3 entries per context; a tombstoned override adds 1 entry per context. At 100 overridden channel contexts: ~300 live entries or ~100 tombstone entries.
 - **Byte cost (small-counter example, common case):** channel UUID context (36 chars), counters S=1/C=0/B=10 — live override ~138 bytes; tombstone ~45 bytes. **Byte cost at uint32 maximum** (S=4294967295, worst case): live override ~164 bytes; tombstone ~54 bytes.
-- **Hard ceiling on ever-overridden contexts.** Because all `ov_*` entries live in one coordinate (see `d` Tag) and tombstones can never be pruned (see Override State Durability — there is no safe finite GC horizon), the primary blob's plaintext budget is a hard ceiling on the number of contexts a single installation can ever have manually marked unread. Against a 32 KiB plaintext budget: roughly **600** tombstoned contexts at the worst-case ~54 bytes, ~730 at the common ~45 bytes, or ~199 simultaneously live overrides at ~164 bytes — and that is before frontier entries get any room at all.
-- **Terminal behaviour at the ceiling.** When the primary blob cannot accommodate a new override group after all prunable frontier entries have been evicted, the client MUST refuse the mark-unread action and report it as failed. It MUST NOT split override state across coordinates and MUST NOT drop tombstone floors to make room. Likewise, a client whose merged override state — including tombstones merged in from peer installations — no longer fits in its primary blob MUST leave its last-published primary in place, MUST NOT publish a primary that omits merged `ov_*` entries, and MUST report override actions as failed; publishing a truncated override set is budget-driven override loss under another name. No floor is lost in this state, because the installations that originated those floors still carry them; the constrained installation simply stops acting as a replica until it has room. This is the same policy shape as counter exhaustion (see Actions): visible failure, never silent degradation.
-- **10,000-key limit:** override entries count toward the existing per-blob validation limit. Tombstones accumulate permanently with every distinct ever-overridden context; they cannot be pruned. Clients SHOULD compact dead overrides aggressively and MAY enforce an active-live-override cap. Note that a cap on live overrides does not bound the total `ov_*` entry count over an unbounded context lifetime — tombstones from all historical overrides remain. The 32 KiB and 10,000-entry limits are expressed per blob at write time; a client that has overridden many distinct contexts over its lifetime must account for all accumulated tombstones when evaluating budget headroom.
+- **Hard ceiling on overridden contexts.** Because all `ov_*` entries live in one coordinate (see `d` Tag) and, outside the version-2 profile, tombstones can never be pruned (see Override State Durability), the primary blob's plaintext budget is a hard ceiling on the number of contexts a single installation can ever have manually marked unread. Under Expiring unread state (version 2) the same budget bounds only the groups marked or cleared within the last 2592000 seconds plus the 600-second guard; against its 40 KiB plaintext budget, with each group's paired frontier (about 50 bytes) included, that is roughly 390 dead or 190 live groups in that window. Against a 32 KiB plaintext budget: roughly **600** tombstoned contexts at the worst-case ~54 bytes, ~730 at the common ~45 bytes, or ~199 simultaneously live overrides at ~164 bytes — and that is before frontier entries get any room at all.
+- **Terminal behaviour at the ceiling.** When the primary blob cannot accommodate a new override group after all prunable frontier entries have been evicted, the client MUST refuse the mark-unread action and report it as failed. It MUST NOT split override state across coordinates and MUST NOT drop tombstone floors to make room. Likewise, a client whose merged override state — including tombstones merged in from peer installations — no longer fits in its primary blob MUST rewrite its primary compactly from the groups its last-published primary carried, each canonical against the current frontiers with its co-located frontier advanced; it MUST NOT omit merged groups or tombstone floors that primary carried, and MUST report override actions as failed; publishing a truncated override set is budget-driven override loss under another name. No floor is lost in this state, because the installations that originated those floors still carry them; the constrained installation simply stops acting as a replica until it has room. This is the same policy shape as counter exhaustion (see Actions): visible failure, never silent degradation.
+- **10,000-key limit:** override entries count toward the existing per-blob validation limit. Outside the version-2 profile, tombstones accumulate permanently with every distinct ever-overridden context; they cannot be pruned. Clients SHOULD compact dead overrides aggressively and MAY enforce an active-live-override cap. Note that a cap on live overrides does not bound the total `ov_*` entry count over an unbounded context lifetime — tombstones from all historical overrides remain. The 32 KiB and 10,000-entry limits are expressed per blob at write time; a client that has overridden many distinct contexts over its lifetime must account for all accumulated tombstones when evaluating budget headroom.
 - **256-byte key limit:** override keys (`ov_s:`, `ov_c:`, `ov_b:` + context ID) count toward the per-entry 256-byte validation limit. Context IDs up to 251 bytes are safe. Buzz's own context ID shapes (UUID 36 bytes, `msg:hex64` 68 bytes, `thread:hex64` 71 bytes) are well within this limit.
 
 #### Verification Artifact
@@ -902,16 +1098,18 @@ Device A MUST publish with `created_at` = 1700001501 (max_fetched + 1), not 1700
 
 ## Invalid Cases
 
+These cases apply to read-position coordinates (`read-state:` prefix, `read-state` tag, `v:1`). A client implementing Expiring unread state (version 2) validates `read-state-unread-v2:` events by that section instead: they carry `v:2`, a `d` tag of `read-state-unread-v2:` followed by exactly 32 lowercase hexadecimal characters, and exactly one `read-state-unread-v2` tag; any other version, prefix or slot form under that tag MUST be ignored.
+
 Clients MUST reject or discard each of the following:
 
 - A blob whose `content` does not decrypt to valid JSON — discard the entire event.
 - A blob with a missing `client_id` field — discard the entire event.
-- A blob with `v: 2` (unknown version) — ignore the entire event.
+- A read-position blob with any `v` other than `1` — ignore the entire event.
 - A blob with a non-integer timestamp for a context entry (e.g., `"ctx:AAA": "yesterday"`) — discard that context entry; process remaining entries.
 - A blob with a context ID exceeding 256 bytes — discard that context entry; process remaining entries.
 - A blob with more than 10,000 context entries — client MUST reject the entire blob.
 - An event with no `d` tag — ignore the entire event.
-- An event with a `d` tag value that does not begin with `read-state:` — ignore the entire event.
+- An event with a `d` tag value that begins with neither `read-state:` nor, for a version-2 client, `read-state-unread-v2:` — ignore the entire event.
 
 ## Privacy Considerations
 
@@ -941,7 +1139,9 @@ that expose read activity to other users MUST require explicit user consent.
 
 This NIP introduces no changes to existing event kinds or relay-stored read-state logic. The baseline uses only standard NIP-01 event storage, NIP-33 addressable event semantics, NIP-44 encryption, and NIP-78 application data conventions. The optional Buzz Atomic Snapshot Extension adds explicitly discovered, versioned query/discovery envelopes; ordinary query arrays and WebSocket messages remain unchanged. Clients that do not implement this NIP are unaffected, as are clients that implement everything but the manual-unread override layer.
 
-The override layer is the exception, and it is a relay-compatibility one rather than a client one. Its paginated full-state load carries the completeness guarantee only against a relay that satisfies the ordering, capacity, floor, push, and barrier requirements enumerated in Full-State Load. A validated atomic snapshot supplies the alternative point-in-time guarantee described in Buzz Atomic Snapshot Extension, without asserting those WebSocket properties. Without either proof, every load resolves to *cannot prove complete* and the actions that depend on a complete load report as failed; against an undetectably nonconforming relay, a load may still return *complete*, and the completeness guarantee does not apply to that verdict. In either case the layer still runs and still merges, and frontier sync is unaffected.
+The override layer is the exception. Within one override profile it is a relay-compatibility exception rather than a client one; across profiles, version-1 and version-2 unread state are also client-incompatible (below). Its paginated full-state load carries the completeness guarantee only against a relay that satisfies the ordering, capacity, floor, push, and barrier requirements enumerated in Full-State Load. A validated atomic snapshot supplies the alternative point-in-time guarantee described in Buzz Atomic Snapshot Extension, without asserting those WebSocket properties. Without either proof, every load resolves to *cannot prove complete* and the actions that depend on a complete load report as failed; against an undetectably nonconforming relay, a load may still return *complete*, and the completeness guarantee does not apply to that verdict. In either case the layer still runs and still merges, and frontier sync is unaffected.
+
+Expiring unread state (version 2) keeps read positions compatible: version-1 and version-2 clients publish and merge the same frontiers. Manual-unread state is not compatible across them. A version-2 client neither reads nor writes version-1 override keys, and a version-1 client ignores the version-2 record, so a mark made on one is not seen by the other.
 
 ## References
 

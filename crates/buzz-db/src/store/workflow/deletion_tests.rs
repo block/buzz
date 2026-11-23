@@ -122,8 +122,8 @@ async fn workflow_deletion_removes_both_projections_and_is_scoped_and_retryable(
     )
     .await
     .expect("run");
-    // A fired schedule links both the workflow and a cascading run. Deletion
-    // must also remove the claim despite its NO ACTION run foreign key.
+    // A fired schedule links both the workflow and a run. Deletion must also
+    // remove the claim.
     sqlx::query(
         "INSERT INTO scheduled_workflow_fires \
         (community_id, workflow_id, scheduled_for, workflow_run_id) VALUES ($1, $2, NOW(), $3)",
@@ -382,14 +382,12 @@ async fn count_where(db: &Db, table: &str, column: &str, community: CommunityId,
     .expect("count children")
 }
 
-/// With every foreign-key delete action retired, the coordinate delete must
-/// remove approvals (of the workflow or of its runs), fires and runs itself,
-/// in an order the remaining constraints accept.
+/// No foreign key cascades, so the coordinate delete must remove approvals (of
+/// the workflow or of its runs), fires and runs itself.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn workflow_deletion_removes_children_without_cascades() {
     let (db, community) = setup().await;
-    crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
     let keys = Keys::generate();
     let owner = keys.public_key().to_bytes();
     let id = Uuid::new_v4();
@@ -462,16 +460,12 @@ async fn workflow_deletion_removes_children_without_cascades() {
 /// A run inserted concurrently with the delete holds the workflow's key-share
 /// lock, taken by the run writer's reference check. The delete must wait for it
 /// at its row lock and then remove the run; if it took its child snapshot
-/// first, the run would commit after the child delete and dangle. The
-/// run-to-workflow foreign key is dropped, so only the explicit lock can make
-/// the delete wait.
+/// first, the run would commit after the child delete and dangle. No foreign
+/// key exists, so only the explicit lock can make the delete wait.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn workflow_deletion_waits_for_and_removes_concurrent_run() {
     let (db, community) = setup().await;
-    crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
-    crate::test_support::drop_foreign_keys_between(&db.pool, &[("workflow_runs", "workflows")])
-        .await;
     let keys = Keys::generate();
     let owner = keys.public_key().to_bytes();
     let id = Uuid::new_v4();
@@ -519,21 +513,12 @@ async fn workflow_deletion_waits_for_and_removes_concurrent_run() {
 /// key-share locks that run (in its reference check), so the workflow lock does
 /// not exclude it. The delete must lock the runs, wait for the insert, and then
 /// remove it; if the approval committed between the approval and run deletes it
-/// would dangle. The approval foreign keys are dropped, so only the explicit
-/// locks can make the delete wait.
+/// would dangle. No foreign key exists, so only the explicit locks can make
+/// the delete wait.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn workflow_deletion_waits_for_and_removes_concurrent_cross_workflow_approval() {
     let (db, community) = setup().await;
-    crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
-    crate::test_support::drop_foreign_keys_between(
-        &db.pool,
-        &[
-            ("workflow_approvals", "workflows"),
-            ("workflow_approvals", "workflow_runs"),
-        ],
-    )
-    .await;
     let keys = Keys::generate();
     let owner = keys.public_key().to_bytes();
     let id = Uuid::new_v4();
@@ -601,16 +586,14 @@ async fn workflow_deletion_waits_for_and_removes_concurrent_cross_workflow_appro
     assert!(get_workflow(&db.pool, community, other).await.is_ok());
 }
 
-/// Attaching a run to a scheduled fire locks the fire row, then, while the
-/// fire's run foreign key exists (this test keeps it), key-share locks the
-/// run. The delete must take those two in the same
-/// order (fire before run), so an attach in flight when the delete starts
-/// completes and is then removed, rather than deadlocking with it.
+/// Attaching a run to a scheduled fire locks the fire row before the run. The
+/// delete must take those two in the same order (fire before run), so an
+/// attach in flight when the delete starts completes and is then removed,
+/// rather than deadlocking with it.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn workflow_deletion_waits_for_concurrent_fire_attach_without_deadlock() {
     let (db, community) = setup().await;
-    crate::test_support::retire_foreign_key_delete_actions(&db.pool).await;
     let keys = Keys::generate();
     let owner = keys.public_key().to_bytes();
     let id = Uuid::new_v4();
@@ -637,7 +620,7 @@ async fn workflow_deletion_waits_for_concurrent_fire_attach_without_deadlock() {
     .await
     .expect("unlinked scheduled claim");
 
-    // Hold the fire row as an attach does before its foreign-key check runs.
+    // Hold the fire row as an attach does before it touches the run.
     let mut attacher = db.pool.begin().await.expect("begin fire attach");
     sqlx::query(
         "SELECT 1 FROM scheduled_workflow_fires \
@@ -735,7 +718,7 @@ async fn write_while_delete_holds_locks<T: Send + 'static>(
     write.await.expect("join writer")
 }
 
-/// With the fire-to-workflow foreign key dropped, a fire claim racing a
+/// With no fire-to-workflow foreign key, a fire claim racing a
 /// workflow delete must wait on the workflow row (its `FOR KEY SHARE`) and then
 /// find no workflow. Without that lock the claim reads its snapshot while the
 /// delete is uncommitted, inserts after the delete removed the fires, and leaves
@@ -744,11 +727,6 @@ async fn write_while_delete_holds_locks<T: Send + 'static>(
 #[ignore = "requires Postgres"]
 async fn fire_claim_waits_for_workflow_delete_and_leaves_no_orphan_fire() {
     let (db, community) = setup().await;
-    crate::test_support::drop_foreign_keys_between(
-        &db.pool,
-        &[("scheduled_workflow_fires", "workflows")],
-    )
-    .await;
     let keys = Keys::generate();
     let id = Uuid::new_v4();
     seed(
@@ -795,8 +773,6 @@ async fn fire_claim_waits_for_workflow_delete_and_leaves_no_orphan_fire() {
 #[ignore = "requires Postgres"]
 async fn run_create_waits_for_workflow_delete_and_leaves_no_orphan_run() {
     let (db, community) = setup().await;
-    crate::test_support::drop_foreign_keys_between(&db.pool, &[("workflow_runs", "workflows")])
-        .await;
     let keys = Keys::generate();
     let id = Uuid::new_v4();
     seed(
@@ -840,15 +816,6 @@ async fn run_create_waits_for_workflow_delete_and_leaves_no_orphan_run() {
 /// names under another workflow, waits on that parent's lock and then fails.
 async fn approval_waits_for_delete_and_leaves_no_orphan_approval(names_deleted_workflow: bool) {
     let (db, community) = setup().await;
-    crate::test_support::drop_foreign_keys_between(
-        &db.pool,
-        &[
-            ("workflow_runs", "workflows"),
-            ("workflow_approvals", "workflows"),
-            ("workflow_approvals", "workflow_runs"),
-        ],
-    )
-    .await;
     let keys = Keys::generate();
     let now = Timestamp::now().as_secs();
     let id = Uuid::new_v4();

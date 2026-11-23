@@ -646,6 +646,13 @@ async fn migration_schema_desired_pgschema_reconcile_matches_populated_upgrade()
     // Existing partitioned tables require the operator prebuild before pgschema,
     // which otherwise tries unsupported CREATE INDEX CONCURRENTLY on the parent.
     crate::test_support::prebuild_media_edit_index(&pool).await;
+    // pgschema cannot drop the partitioned tables' foreign keys itself.
+    sqlx::raw_sql(include_str!(
+        "../../../../../scripts/drop-partitioned-foreign-keys.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
     apply_pgschema_to_existing_database(&pool).await;
     assert_admission_column(&pool).await;
     assert_join_role_preserved(&pool, cases[0].community).await;

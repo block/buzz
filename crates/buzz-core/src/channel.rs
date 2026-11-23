@@ -41,6 +41,9 @@ pub const MAX_CHANNEL_LABELS: usize = 8;
 /// Maximum length of one channel label, in bytes.
 pub const MAX_CHANNEL_LABEL_LEN: usize = 64;
 
+/// Maximum number of messages one channel can pin (NIP-PM).
+pub const MAX_CHANNEL_PINS: usize = 250;
+
 /// Names a label may not take, because the channel type uses the same `t`
 /// tag. A label equal to one of these could make a channel look like
 /// another type. The list includes types that a later relay may add.

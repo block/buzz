@@ -15,6 +15,7 @@ Do not infer permission to delete another person's data from a matching key.
 | Shared device registrations | Keep registrations used by other accounts. Delete only with proven exclusive ownership; preserve and report uncertain ownership. Relay identity keys and client installation strings do not establish gateway ownership. |
 | Shared signed membership lists | Rebuild current member/admin/metadata lists using the existing relay signer, atomically with each channel membership removal. Preserve superseded historical events and creator attribution. Never edit a signed payload in place. |
 | Multi-subject commands and membership notices | Preserve; attribution and historical-message removal remain separate. |
+| Pin and unpin commands | Content cleanup removes them. A command under an hour old keeps its event ID, timestamp, kind and channel, with no author, tags or signature, so that sending it again cannot repeat a pin. A running relay removes that record on its periodic maintenance tick once the command is an hour old. The relay-signed `message_pinned` notice of a pin stays, and names the member and the command ID. |
 | Deletion evidence and replay protection | Keep deletion requests, approvals, inventories, stage history, fences and replay watermarks. Watermark removal is not unfinished cleanup. |
 
 These are explicit retention exceptions, not assertions of anonymous data.

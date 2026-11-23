@@ -94,6 +94,8 @@ class ChannelSectionStore {
   }
 }
 
+typedef WorkspaceHead = ({String plaintext, int createdAt, String eventId});
+
 class ChannelSectionsStorage {
   final SharedPreferences _prefs;
 
@@ -121,6 +123,40 @@ class ChannelSectionsStorage {
       return const ChannelSectionStore();
     }
   }
+
+  /// The last readable unified layout head, so a cold start renders the
+  /// desktop layout before the relay answers.
+  WorkspaceHead? readWorkspace(String pubkey, String relayUrl) {
+    final raw = _prefs.getString(_workspaceKey(pubkey, relayUrl));
+    if (raw == null) return null;
+    try {
+      final parsed = jsonDecode(raw);
+      if (parsed case {
+        'plaintext': final String plaintext,
+        'createdAt': final int createdAt,
+        'eventId': final String eventId,
+      }) {
+        return (plaintext: plaintext, createdAt: createdAt, eventId: eventId);
+      }
+    } on FormatException {
+      // Fall through: the relay head replaces an unreadable cache.
+    }
+    return null;
+  }
+
+  void writeWorkspace(String pubkey, String relayUrl, WorkspaceHead head) {
+    _prefs.setString(
+      _workspaceKey(pubkey, relayUrl),
+      jsonEncode({
+        'plaintext': head.plaintext,
+        'createdAt': head.createdAt,
+        'eventId': head.eventId,
+      }),
+    );
+  }
+
+  String _workspaceKey(String pubkey, String relayUrl) =>
+      '${channelSectionsKey(pubkey, relayUrl)}:workspaces';
 
   void write(String pubkey, String relayUrl, ChannelSectionStore store) {
     _prefs.setString(

@@ -25,13 +25,13 @@ import 'forum_thread_page.dart';
 class ForumPostsView extends HookConsumerWidget {
   final Channel channel;
   final String? currentPubkey;
-  final double titleContentHeight;
+  final double? headerHeight;
 
   const ForumPostsView({
     super.key,
     required this.channel,
     required this.currentPubkey,
-    this.titleContentHeight = 0,
+    this.headerHeight,
   });
 
   @override
@@ -63,6 +63,7 @@ class ForumPostsView extends HookConsumerWidget {
       return timer.cancel;
     }, [channel.id]);
 
+    final topInset = headerHeight ?? frostedAppBarHeight(context);
     final canPost = channel.isMember && !channel.isArchived;
 
     return Column(
@@ -84,12 +85,7 @@ class ForumPostsView extends HookConsumerWidget {
               // A retry from an error shows loading, not the stale error and its Retry.
               skipLoadingOnRefresh: !postsAsync.hasError,
               loading: () => Padding(
-                padding: EdgeInsets.only(
-                  top: frostedAppBarHeight(
-                    context,
-                    titleContentHeight: titleContentHeight,
-                  ),
-                ),
+                padding: EdgeInsets.only(top: topInset),
                 child: const Center(
                   child: BuzzLoadingIndicator(
                     size: 44,
@@ -98,12 +94,7 @@ class ForumPostsView extends HookConsumerWidget {
                 ),
               ),
               error: (e, _) => Padding(
-                padding: EdgeInsets.only(
-                  top: frostedAppBarHeight(
-                    context,
-                    titleContentHeight: titleContentHeight,
-                  ),
-                ),
+                padding: EdgeInsets.only(top: topInset),
                 child: LoadErrorView(
                   message: 'Failed to load posts',
                   onRetry: () => ref.invalidate(forumPostsProvider(channel.id)),
@@ -124,10 +115,7 @@ class ForumPostsView extends HookConsumerWidget {
                   },
                   child: ListView.separated(
                     padding: EdgeInsets.only(
-                      top: frostedAppBarHeight(
-                        context,
-                        titleContentHeight: titleContentHeight,
-                      ),
+                      top: topInset,
                       left: Grid.gutter,
                       right: Grid.gutter,
                       bottom: Grid.xs,

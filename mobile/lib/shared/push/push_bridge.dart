@@ -6,10 +6,15 @@ import 'package:flutter/services.dart';
 
 import '../community/community.dart';
 import '../deeplink/deep_link.dart';
+import '../diagnostics/diagnostic_reporter.dart';
 import '../relay/relay_provider.dart';
 import 'push_snapshot.dart';
 
 const _channel = MethodChannel('buzz/push');
+
+/// The code native enrollment fails with when the push gateway's reply does
+/// not match its protocol.
+const _gatewayResponseInvalid = 'gateway_response_invalid';
 
 /// Latest APNs registration state, including callbacks replayed by iOS after
 /// the Flutter method channel attaches.
@@ -60,6 +65,7 @@ class BuzzNotificationReply {
     required this.messageCreatedAt,
     required this.deadline,
     this.replyRootId,
+    this.recipientPubkey,
     this.inSolo = false,
     this.recovered = false,
     this.mayHavePublished = false,
@@ -76,6 +82,11 @@ class BuzzNotificationReply {
 
   /// NIP-10 thread root of the notified message; null when it is top-level.
   final String? replyRootId;
+
+  /// The account the notification was for, which the reply must go out as,
+  /// guarding against a community's credentials being replaced in place. Null
+  /// for a notification an earlier build posted.
+  final String? recipientPubkey;
 
   /// When the notified message was created, in Unix seconds.
   final int messageCreatedAt;
@@ -109,6 +120,7 @@ class BuzzNotificationReply {
     final text = arguments['text'];
     final sender = arguments['senderPubkey'];
     final root = arguments['replyRootId'];
+    final recipient = arguments['recipientPubkey'];
     final createdAt = switch (arguments['messageCreatedAt']) {
       final String value => int.tryParse(value),
       _ => null,
@@ -127,7 +139,8 @@ class BuzzNotificationReply {
         createdAt == null ||
         createdAt <= 0 ||
         deadline == null ||
-        (root != null && (root is! String || root.isEmpty))) {
+        (root != null && (root is! String || root.isEmpty)) ||
+        (recipient != null && (recipient is! String || recipient.isEmpty))) {
       return null;
     }
     return BuzzNotificationReply(
@@ -138,6 +151,7 @@ class BuzzNotificationReply {
       messageCreatedAt: createdAt,
       deadline: DateTime.fromMillisecondsSinceEpoch(deadline),
       replyRootId: root as String?,
+      recipientPubkey: recipient as String?,
       inSolo: arguments['inSolo'] == 'true',
       recovered: arguments['recovered'] == 'true',
       mayHavePublished: arguments['publishing'] == 'true',
@@ -165,25 +179,34 @@ Future<List<BuzzNotificationReply>> takePendingBuzzNotificationReplies() async {
 }
 
 /// Tells iOS that a notification reply may be published from now on, so a
-/// relaunch never drafts or resends it. Returns once that is saved.
-Future<void> markBuzzNotificationReplyPublishing(String id) async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+/// relaunch never drafts or resends it. Returns once that is saved, false
+/// when iOS has already ended the reply, which then must not be published.
+Future<bool> markBuzzNotificationReplyPublishing(String id) async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return true;
   try {
-    await _channel.invokeMethod<void>('markNotificationReplyPublishing', id);
+    return await _channel.invokeMethod<bool>(
+          'markNotificationReplyPublishing',
+          id,
+        ) ??
+        true;
   } on MissingPluginException {
     // Flutter tests and non-Runner embeddings do not install the native bridge.
+    return true;
   }
 }
 
 /// Reports whether a notification reply was sent, so iOS clears the
 /// conversation's notifications or shows that it wasn't. [unknown] means it
 /// may have gone out; [draftThreadRootId] is the thread holding its draft,
-/// which the "Reply not sent" notification opens.
+/// which the "Reply not sent" notification opens. Without [draftKept], iOS
+/// shows the unsent text in a notification even for a reply an earlier
+/// launch was given.
 Future<void> completeBuzzNotificationReply(
   String id, {
   required bool sent,
   bool unknown = false,
   String? draftThreadRootId,
+  bool draftKept = true,
 }) async {
   if (defaultTargetPlatform != TargetPlatform.iOS) return;
   try {
@@ -192,6 +215,7 @@ Future<void> completeBuzzNotificationReply(
       'sent': sent,
       if (unknown) 'unknown': true,
       'draftThreadRootId': ?draftThreadRootId,
+      if (!draftKept) 'noDraft': true,
     });
   } on MissingPluginException {
     // Flutter tests and non-Runner embeddings do not install the native bridge.
@@ -307,11 +331,27 @@ Future<BuzzPushEndpointGrant> enrollBuzzPush(
   String relayUrl,
   String gatewayUrl, {
   List<Community>? communitiesForSnapshotRefresh,
+  DiagnosticReporter diagnostics = const NoopDiagnosticReporter(),
 }) async {
-  final raw = await _channel.invokeMapMethod<dynamic, dynamic>('enrollPush', {
-    'relayUrl': relayUrl,
-    'gatewayUrl': gatewayUrl,
-  });
+  final Map<dynamic, dynamic>? raw;
+  try {
+    raw = await _channel.invokeMapMethod<dynamic, dynamic>('enrollPush', {
+      'relayUrl': relayUrl,
+      'gatewayUrl': gatewayUrl,
+    });
+  } on PlatformException catch (error, stackTrace) {
+    // The gateway is called from native code. It has its own code for a reply
+    // the app cannot read; every other failure (offline, refused, expired,
+    // server errors) is routine and not reported.
+    if (error.code == _gatewayResponseInvalid) {
+      diagnostics.reportError(
+        error,
+        stackTrace,
+        operation: DiagnosticOperation.pushGatewayResponse,
+      );
+    }
+    rethrow;
+  }
   if (raw == null) {
     throw StateError('Native push enrollment returned no grant.');
   }

@@ -121,7 +121,7 @@ void reviewAvatarTests() {
         findsOneWidget,
       );
       await tester.pump(const Duration(milliseconds: 300));
-      expect(readState.markedContexts['activity:$_channelId'], 1300);
+      expect(readState.markedContexts[_channelId], 1300);
     },
   );
   testWidgets(

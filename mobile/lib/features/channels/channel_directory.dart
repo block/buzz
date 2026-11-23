@@ -681,13 +681,23 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
     if (!countQuiet && isQuietAgentMessage(event.tags)) return false;
     // A counted quiet event is only a backlog marker: it never earns attention
     // through its mentions or thread.
+    final isBroadcast = !countQuiet && _isBroadcastReply(event);
     final isThreadedReply =
-        !countQuiet &&
-        event.threadReference.parentId != null &&
-        !_isBroadcastReply(event);
+        !countQuiet && event.threadReference.parentId != null && !isBroadcast;
+    // A reply also sent to the channel earns attention only in one of the
+    // viewer's threads; elsewhere it is ordinary unread, like a top-level post.
     final isHighPriority =
-        channel.isDm || (!countQuiet && isHighPriorityEvent(event.tags, myPk));
-    recordObservedUnreadEvent(
+        channel.isDm ||
+        (!countQuiet &&
+            (isHighPriorityEvent(event.tags, myPk) ||
+                (isBroadcast &&
+                    isInViewerThread(
+                      event.threadReference.rootId,
+                      participatedRootIds: _participatedRootIds,
+                      followedRootIds: _followedRootIds(),
+                      authoredRootIds: _authoredRootIds,
+                    ))));
+    final inserted = recordObservedUnreadEvent(
       _observedUnreadEventsByChannel,
       channel.id,
       makeObservedUnreadEvent(
@@ -697,10 +707,21 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
         highPriority: isHighPriority,
         channelType: channel.channelType,
         isThreadedReply: isThreadedReply,
-        threadReply: isThreadedReply && !channel.isDm ? event : null,
+        isBroadcast: isBroadcast,
+        // Activity lists the thread replies that earn attention, including
+        // ones also sent to the channel, which earn it only here.
+        threadReply:
+            (isThreadedReply || (isBroadcast && isHighPriority)) &&
+                !channel.isDm
+            ? event
+            : null,
       ),
       _unreadCatchUpLimit,
     );
+
+    // Refresh and reconnect replay history the registry already holds. Only
+    // an insertion changes the channel's events, so only it stamps them.
+    if (inserted) _observedUnreadRevisions.touch(channel.id);
 
     final current = _latestObservedByChannel[channel.id] ?? 0;
     if (event.createdAt > current) {

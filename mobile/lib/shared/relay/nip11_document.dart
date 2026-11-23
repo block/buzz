@@ -3,6 +3,8 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../http/app_http_client.dart';
+
 const _maxDocumentBytes = 256 * 1024;
 
 /// How long a NIP-11 read may take, headers and body together.
@@ -43,6 +45,9 @@ Future<Object?> fetchNip11Document(
   try {
     final bytes = await read().timeout(deadline);
     return jsonDecode(utf8.decode(bytes));
+  } on TimeoutException {
+    noteHttpDeadline(request);
+    rethrow;
   } finally {
     if (!abort.isCompleted) abort.complete();
     unawaited(body?.cancel());

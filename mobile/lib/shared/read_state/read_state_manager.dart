@@ -13,32 +13,31 @@ import 'read_state_format.dart';
 import 'read_state_storage.dart';
 import 'read_state_packing.dart';
 import 'read_state_time.dart';
+import 'thread_follows_format.dart';
 import '../theme/community_theme_preference.dart';
+
+part 'read_state_follows.dart';
+part 'read_state_journal.dart';
+part 'read_state_capacity.dart';
+part 'read_state_overrides.dart';
+part 'read_state_retry.dart';
 
 class ReadStateCrypto {
   final Uint8List conversationKey;
   final String Function(Uint8List conversationKey, String ciphertext) _decrypt;
   final int _maxRetainedLength;
 
-  /// Plaintext by ciphertext, least recently used first. NIP-44 payloads
-  /// carry a random nonce and a MAC, so under this one conversation key the
-  /// same ciphertext always decrypts to the same plaintext. Every publish
-  /// and every resume re-read up to [readStateFetchLimit] of our own blobs
-  /// through the snapshot, and the relay echoes each publish back, so most
-  /// decrypts here repeat a ciphertext this instance already decrypted or
-  /// produced. Decrypting is pure-Dart ChaCha20 and HMAC
-  /// on the UI isolate, so repeats are served from this memo.
+  /// Plaintext by ciphertext, least recently used first. Under one NIP-44
+  /// key a ciphertext always decrypts the same, and each publish and resume
+  /// re-reads up to [readStateFetchLimit] of our own blobs, so repeats of the
+  /// pure-Dart, UI-isolate decrypt are served from this memo.
   final Map<String, String> _plaintextByCiphertext = {};
   int _retainedLength = 0;
 
-  /// Upper bound on the code units the memo retains, counting each ciphertext
-  /// key and its plaintext, so it cannot grow without limit however large the
-  /// blobs get (about 8 MB of one-byte strings at the default). Each slot's
-  /// current blob costs up to about 95,000 (a 40 KiB plaintext and its
-  /// base64 ciphertext), so this holds about 80 slots. Each snapshot walks
-  /// every slot in turn, so a bound below the live slots' total evicts each
-  /// entry before its next use and nothing hits; an account with 27 slots measured
-  /// about 2.6M.
+  /// Upper bound on the code units the memo retains (keys and plaintexts).
+  /// A slot's blob costs up to about 95,000, so this holds about 80 slots;
+  /// a bound below the live slots' total would evict each entry before its
+  /// next use (27 slots measured about 2.6M).
   static const defaultMaxRetainedLength = 8000000;
 
   ReadStateCrypto._(
@@ -121,27 +120,6 @@ class ReadStateCrypto {
 
 enum _ApplyRemoteContextResult { unchanged, advanced }
 
-/// The relay refused a pending update for its timestamp, but the update is
-/// not old by this device's clock, so the device clock is off from the
-/// relay's. Signing a newer update would be refused the same way, so the
-/// exact update is kept for retry.
-class ReadStateClockSkewError implements Exception {
-  const ReadStateClockSkewError();
-
-  @override
-  String toString() =>
-      'ReadStateClockSkewError: the device clock differs from the relay clock';
-}
-
-/// The relay's accepted distance between an event's `created_at` and its own
-/// clock (`MAX_TIMESTAMP_DRIFT_SECS` in the relay's ingest).
-const readStateRelayTimestampWindowSeconds = 15 * 60;
-
-/// Backoff between snapshot retries after a failed sync: doubling from
-/// [_snapshotRetryBase], at most [_snapshotRetryMax].
-const _snapshotRetryBase = Duration(seconds: 5);
-const _snapshotRetryMax = Duration(minutes: 5);
-
 class ReadStateManager {
   final String pubkey;
   final String relayUrl;
@@ -169,8 +147,25 @@ class ReadStateManager {
   final Map<String, Map<String, int>> _published = {};
   final Map<String, NostrEvent> _pending = {};
   Future<void> _saved = Future.value();
+  // The follow keys the latest scheduled journal write covers, each with the
+  // pending edit generation it wrote (0: no pending edit, already synced).
+  Future<Map<String, int>> _savedFollows = Future.value(const {});
   bool _saveScheduled = false;
   Object? syncError;
+  // Channels whose synced clear failed. Their error outlives unrelated
+  // successful syncs until the clear lands or the override ends.
+  final Set<String> _failedClears = {};
+  // Refused reading clears and the register each reader saw: retried once
+  // after the next usable snapshot, never journaled (a restart keeps it live).
+  final Map<String, OverrideRegister> _refusedReadingClears = {};
+
+  Object? get _standingError {
+    _failedClears.retainAll(activeChannelOverrides);
+    return _failedClears.isEmpty
+        ? null
+        : StateError('Channel mark read cannot be synchronized');
+  }
+
   // Whether the newest snapshot read succeeded. A publish that skips its own
   // snapshot clears [syncError] only on this evidence.
   bool _lastSnapshotSucceeded = false;
@@ -182,10 +177,56 @@ class ReadStateManager {
   // late cannot clear the retry a newer failure needs.
   int _snapshotsStarted = 0;
   int _newestSettledSnapshot = 0;
+  int _staleThrough = 0; // Reads up to this predate the live stream's ready.
   final int Function() _now;
-  // Override keys already in this device's own slot, carried unchanged.
-  // See [isOverrideContext].
-  final Map<String, int> _carriedOverrides = {};
+  // Merged whole-channel override registers, from this installation and its
+  // peers. The primary carries all of them (NIP-RS, Buzz profile).
+  final Map<String, OverrideRegister> _overrides = {};
+  // Received groups stamped too far ahead, held until the clock reaches them.
+  /// Groups stamped too far ahead, each contribution kept apart with where
+  /// it came from, so each meets its own admission rule once due.
+  final List<({String channelId, OverrideRegister register, bool local})>
+  _deferredOverrides = [];
+  // The unread record's coordinate slot and its last published contexts.
+  String _unreadSlot = generateReadStateSlotId();
+  Map<String, int> _unreadPublished = const {};
+  // The verified head of this installation's own unread coordinate.
+  NostrEvent? _unreadHead;
+  // The durable, never-decreasing expiry clock; see [_expiryNow].
+  int _expiryWatermark = 0;
+
+  /// The watermark the journal last saved.
+  int _savedExpiryWatermark = 0;
+
+  // Synced thread follow choices. [_ownFollows] is this installation's own
+  // entries (raw, so unknown fields are carried), placed into
+  // [_followSlots] by [_followPlacement]. [_remoteFollows] is every follow
+  // coordinate observed, by slot.
+  final List<String> _followSlots = [];
+  List<Set<String>> _followPlacement = [];
+  final Map<String, Map<String, Object?>> _ownFollows = {};
+  // Each own slot's unknown top-level fields, carried with that slot.
+  final Map<String, Map<String, Object?>> _followExtra = {};
+  // The newest event seen per follow coordinate.
+  final Map<String, ({int createdAt, String id})> _followHeads = {};
+  final Map<String, String> _followPublished = {};
+  final Map<String, Map<String, ThreadFollowChoice>> _remoteFollows = {};
+  final Set<String> _unreadableFollowSlots = {};
+  bool _followsLoaded = false;
+  // Whether this writer durably saved a complete recovery; never reset.
+  bool _followsRecovered = false;
+  // Pending own follow edits not yet covered by an accepted own head, by key:
+  // the reservation (generation) of the edit. Their entries are in
+  // [_ownFollows], which is the accepted heads plus these edits.
+  final Map<String, int> _followEdits = {};
+  // The edit generations each retained follow packet in [_pending] captured.
+  final Map<String, Map<String, int>> _followCaptured = {};
+  // The highest timestamp reserved here; every edit and packet takes a
+  // strictly later one, so a wall-clock rollback cannot reuse a version.
+  int _lastReserved = 0;
+  // The newest full snapshot a publish read: the shared size basis that
+  // follow acceptance checks against.
+  List<NostrEvent> _capacitySnapshot = const [];
 
   Timer? _debounceTimer;
   Timer? _snapshotRetryTimer;
@@ -264,7 +305,8 @@ class ReadStateManager {
     await _requestSync();
     if (_localContexts.isNotEmpty ||
         _pending.isNotEmpty ||
-        _carriedOverrides.isNotEmpty) {
+        _overrides.isNotEmpty ||
+        _ownFollows.isNotEmpty) {
       _schedulePublish();
     }
 
@@ -274,18 +316,59 @@ class ReadStateManager {
     );
   }
 
-  void markContextRead(String contextId, int unixTimestamp) {
+  /// Advance a context's frontier. A `msg:` frontier is published only for
+  /// an [explicit] mark read; passive reading keeps it on this device. A
+  /// channel read also clears that channel's live override group.
+  void markContextRead(
+    String contextId,
+    int unixTimestamp, {
+    bool explicit = false,
+  }) {
     if (_disposed || isOverrideContext(contextId) || unixTimestamp < 0) return;
-    if (_advanceContext(
+    final publishable = explicit || !contextId.startsWith(msgContextPrefix);
+    // Decide the clear before the read passes the baseline; save both.
+    final cleared = _clearChannelOverride(contextId) == true;
+    final advanced = _advanceContext(
       contextId,
       unixTimestamp,
-      publishable: !contextId.startsWith(msgContextPrefix),
-    )) {
+      publishable: publishable,
+    );
+    if (advanced || cleared) {
       _persistLocalState();
       _onChanged();
-      if (!contextId.startsWith(msgContextPrefix)) _schedulePublish();
+      if (publishable || cleared) _schedulePublish();
     }
   }
+
+  /// Whether the last full-state load succeeded, as override actions need.
+  /// Deferred future groups leave it incomplete until they resolve.
+  bool get _hasFullState =>
+      _lastSnapshotSucceeded &&
+      _newestSettledSnapshot > _staleThrough &&
+      _resolveDeferred();
+
+  /// The live stream dropped: no read before its next ready is current.
+  void liveInterrupted() => _staleThrough = 1 << 62;
+
+  /// The merged stored frontier synced overrides use, 0 if absent: the
+  /// retention floor decides message reads only, never override liveness.
+  int _frontierOf(String contextId) => _effectiveState[contextId] ?? 0;
+
+  Map<String, int> _publishableLocalContexts() {
+    final horizon = _now() - readStateHorizonSeconds;
+    return {
+      for (final entry in _localContexts.entries)
+        if (entry.value >= horizon) entry.key: entry.value,
+    };
+  }
+
+  /// The read-position slot plan. Override groups travel in the unread
+  /// record instead ([_planUnread]).
+  List<Map<String, int>> _planSlots() => packReadStateContexts(
+    _publishableLocalContexts(),
+    clientId: _clientId,
+    previous: _placement,
+  );
 
   void seedContextRead(String contextId, int unixTimestamp) {
     seedContextsRead({contextId: unixTimestamp});
@@ -319,40 +402,6 @@ class ReadStateManager {
     _debounceTimer = null;
     if (!_remoteEnabled || _remoteUnsupported || _disposed) return;
     await _publish();
-  }
-
-  /// Retry now after a failed sync: the remote snapshot again if the last one
-  /// failed, else any unpublished state. Does nothing while in sync.
-  Future<void> retrySync() async {
-    if (_disposed ||
-        !_remoteEnabled ||
-        !_initialized ||
-        syncError == null ||
-        !_isConnected()) {
-      return;
-    }
-    if (!_lastSnapshotSucceeded) {
-      _snapshotRetryTimer?.cancel();
-      _snapshotRetryTimer = null;
-      // A successful read hands any unpublished marks to publication.
-      await _requestSync();
-      return;
-    }
-    await flush();
-  }
-
-  void _scheduleSnapshotRetry() {
-    if (_disposed || _snapshotRetryTimer != null) return;
-    final seconds =
-        _snapshotRetryBase.inSeconds << min(_snapshotRetryAttempt, 6);
-    _snapshotRetryAttempt++;
-    _snapshotRetryTimer = Timer(
-      Duration(seconds: min(seconds, _snapshotRetryMax.inSeconds)),
-      () {
-        _snapshotRetryTimer = null;
-        unawaited(retrySync());
-      },
-    );
   }
 
   /// Catch up after a reconnect. The session replays the live subscription
@@ -440,17 +489,21 @@ class ReadStateManager {
 
   Future<bool> _fetchAndMerge() async {
     final read = ++_snapshotsStarted;
+    final heads = Map.of(_followHeads);
     try {
       // Snapshot transport validates completeness and fences retired sessions.
       final events = await _relaySession!.fetchReadStateSnapshot();
       if (_disposed || !_servesThisCommunity) return false;
-      // An older success must not cancel a newer failure's retry.
-      final recovered = _settleSnapshot(read, succeeded: true);
+      final newest = _settleSnapshot(read, succeeded: true);
       _mergeEvents(events);
+      if (newest) _dropAbsentPeerFollows(heads, _capacitySnapshot = events);
+      _followsLoaded = true;
+      _retryRefusedReadingClears();
       await _persistLocalState();
+      _followsRecovered = true;
       // Recheck after the save: a newer read may have failed meanwhile, and
       // its retry and error are its own.
-      if (recovered &&
+      if (newest &&
           !_disposed &&
           _newestSettledSnapshot == read &&
           _lastSnapshotSucceeded) {
@@ -490,6 +543,12 @@ class ReadStateManager {
   void _mergeEvents(List<NostrEvent> events) {
     if (!_servesThisCommunity) return;
     for (final event in events) {
+      if (event.pubkey.toLowerCase() == pubkey.toLowerCase()) {
+        if (threadFollowsSlotOf(event) case final slot?) {
+          _mergeFollowEvent(event, slot);
+          continue;
+        }
+      }
       final decoded = decodeReadStateEvent(
         event,
         pubkey: pubkey,
@@ -498,6 +557,14 @@ class ReadStateManager {
       if (decoded == null) continue;
       if (_isPlausibleCreatedAt(event.createdAt)) {
         _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
+      }
+      if (decoded.blob.version == 2) {
+        _mergeUnreadRecord(
+          decoded.dTag.substring(readStateUnreadDTagPrefix.length),
+          decoded.blob,
+          event,
+        );
+        continue;
       }
       final slot = decoded.dTag.substring(readStateDTagPrefix.length);
       final index = _slots.indexOf(slot);
@@ -510,7 +577,6 @@ class ReadStateManager {
       }
       final own = index >= 0 && decoded.blob.clientId == _clientId;
       if (own) {
-        if (index == 0) _carryOwnOverrides(decoded.blob.contexts);
         _published[slot] = Map.of(decoded.blob.contexts);
         while (_placement.length <= index) {
           _placement.add({});
@@ -527,7 +593,7 @@ class ReadStateManager {
         }
         // Historical own-slot values are recoverable local writes. Peer
         // maxima never change the locally owned values or placement.
-        if (own && !entry.key.startsWith(msgContextPrefix)) {
+        if (own) {
           _localContexts[entry.key] = max(
             _localContexts[entry.key] ?? 0,
             entry.value,
@@ -538,20 +604,6 @@ class ReadStateManager {
         }
       }
     }
-  }
-
-  /// Merges the complete override groups of this device's own slot into
-  /// [_carriedOverrides] by `max()`, the NIP-RS merge rule. An incomplete
-  /// group is rejected whole (see [completeOverrideGroups]).
-  bool _carryOwnOverrides(Map<String, int> contexts) {
-    var changed = false;
-    for (final entry in completeOverrideGroups(contexts).entries) {
-      if (entry.value > (_carriedOverrides[entry.key] ?? -1)) {
-        _carriedOverrides[entry.key] = entry.value;
-        changed = true;
-      }
-    }
-    return changed;
   }
 
   /// Whether the live subscription is open on the session's current build.
@@ -590,7 +642,7 @@ class ReadStateManager {
           kinds: const [EventKind.readState],
           authors: [pubkey],
           tags: const {
-            '#t': ['read-state'],
+            '#t': ['read-state', readStateUnreadTag, threadFollowsTag],
           },
           // Change notifications only: the snapshot that follows reads the
           // stored blobs, so a stored replay here would download them twice.
@@ -600,11 +652,12 @@ class ReadStateManager {
         // With limit 0 nothing replays marks published before the REQ went
         // live, so read the snapshot every time it goes live: its EOSE, which
         // can come after the 500 ms fallback on a slow AUTH, on a reconnect's
-        // replay, or after a CLOSED's retry.
+        // replay, or after a CLOSED's retry. Only reads started after it count.
         onStatusChanged: (status) {
-          if (status == RelaySubscriptionStatus.ready && !_disposed) {
-            unawaited(_requestSync());
-          }
+          if (_disposed) return;
+          if (status != RelaySubscriptionStatus.ready) return liveInterrupted();
+          _staleThrough = _snapshotsStarted;
+          unawaited(_requestSync());
         },
         // The session dropped it, so the next reconnect opens a new one.
         onClosed: (_) => _unsubscribeLive = null,
@@ -615,9 +668,12 @@ class ReadStateManager {
 
   void _handleIncomingEvent(NostrEvent event) {
     if (_disposed || !_servesThisCommunity) return;
+    if (!isAuthenticReadStateEvent(event, viewer: pubkey)) return;
     _mergeEvents([event]);
     _persistLocalState();
     _onChanged();
+    // A merged peer group can change this device's canonical primary.
+    if (_hasFullState && _hasUnpublishedState()) _schedulePublish();
   }
 
   _ApplyRemoteContextResult _applyRemoteContextTimestamp({
@@ -680,45 +736,13 @@ class ReadStateManager {
     } finally {
       _isPublishing = false;
       _publishAgain = false;
+      if (!_disposed) _onChanged(); // Surfaces syncError.
       completer.complete();
       if (_publishCompleter == completer) {
         _publishCompleter = null;
       }
       if (!_disposed && !identical(errorBefore, syncError)) _onChanged();
     }
-  }
-
-  /// Whether a publish would send anything: a pending event to retry, or a
-  /// slot whose packed contexts differ from what was last published. Mirrors
-  /// the packing in [_publishOnce] without changing any state.
-  bool _hasUnpublishedState() {
-    if (_pending.isNotEmpty) return true;
-    final primary = <String, int>{..._carriedOverrides};
-    for (final key in overrideGroupFrontierKeys(_carriedOverrides)) {
-      if (_effectiveState[key] case final value?) primary[key] = value;
-    }
-    final horizon = _now() - readStateHorizonSeconds;
-    final List<Map<String, int>> placement;
-    try {
-      placement = packReadStateContexts(
-        {
-          for (final entry in _localContexts.entries)
-            if (entry.value >= horizon) entry.key: entry.value,
-        },
-        clientId: _clientId,
-        previous: _placement,
-        primary: primary,
-      );
-    } on StateError {
-      // Let the real publish surface the capacity error.
-      return true;
-    }
-    if (placement.length > _slots.length) return true;
-    for (var index = 0; index < placement.length; index++) {
-      final published = _published[_slots[index]] ?? const <String, int>{};
-      if (!mapEquals(published, placement[index])) return true;
-    }
-    return false;
   }
 
   Future<void> _publishOnce(
@@ -743,13 +767,17 @@ class ReadStateManager {
       if (_lastSnapshotSucceeded && !_hasUnpublishedState()) {
         // Nothing pending and every slot published, so this device is in
         // sync, as a full publish would have concluded.
-        syncError = null;
+        syncError = _standingError;
         return;
       }
       final checkConnection = _relaySession?.captureConnectionFence();
       var snapshot = <NostrEvent>[];
+      var recovered = false;
+      // Refuses only the unread step; the rest of the pass still publishes.
+      StateError? unreadUnreadable;
       if (_relaySession != null) {
         final read = ++_snapshotsStarted;
+        final heads = Map.of(_followHeads);
         final List<NostrEvent> events;
         try {
           events = await _relaySession.fetchReadStateSnapshot();
@@ -760,7 +788,8 @@ class ReadStateManager {
           _scheduleSnapshotRetry();
           rethrow;
         }
-        if (_settleSnapshot(read, succeeded: true)) {
+        final newest = _settleSnapshot(read, succeeded: true);
+        if (newest) {
           // This read was the retry the backoff timer was waiting to make.
           _snapshotRetryAttempt = 0;
           _snapshotRetryTimer?.cancel();
@@ -776,9 +805,32 @@ class ReadStateManager {
         checkConnection?.call();
         snapshot = events;
         _mergeEvents(events);
+        if (newest) _dropAbsentPeerFollows(heads, _capacitySnapshot = events);
+        _followsLoaded = recovered = true;
+        _retryRefusedReadingClears();
         // Unchanged slots publish nothing, so no echo would announce marks
         // this snapshot brought in.
         _onChanged();
+        if (events.any(
+          (event) =>
+              hasValidUnreadStateTags(event) &&
+              event.tags.any(
+                (tag) =>
+                    tag.length >= 2 &&
+                    tag.first == 'd' &&
+                    tag[1] == _unreadCoordinate,
+              ) &&
+              decodeReadStateEvent(
+                    event,
+                    pubkey: pubkey,
+                    decrypt: _crypto.decrypt,
+                  ) ==
+                  null,
+        )) {
+          unreadUnreadable = StateError(
+            'Unreadable unread-state coordinate blocks publication',
+          );
+        }
         if (events.any(
           (event) =>
               hasValidReadStateTags(event) &&
@@ -803,31 +855,20 @@ class ReadStateManager {
         }
       }
       if (_disposed && !allowDisposed) return;
-      final primary = <String, int>{..._carriedOverrides};
-      for (final key in overrideGroupFrontierKeys(_carriedOverrides)) {
-        if (_effectiveState[key] case final value?) primary[key] = value;
-      }
       _localContexts.removeWhere(
         (key, value) => value < _now() - readStateHorizonSeconds,
       );
-      _placement = packReadStateContexts(
-        _localContexts,
-        clientId: _clientId,
-        previous: _placement,
-        primary: primary,
-      );
+      _discardOverrides();
+      _placement = _planSlots();
       while (_slots.length < _placement.length) {
         _slots.add(generateReadStateSlotId());
       }
       await _persistLocalState();
+      if (recovered) _followsRecovered = true;
       final planned = [
         for (final blob in _placement) Map<String, int>.of(blob),
       ];
       final prepared = <String, NostrEvent>{};
-      var createdAt = max(_now(), _maxFetchedCreatedAt + 1);
-      for (final pending in _pending.values) {
-        createdAt = max(createdAt, pending.createdAt + 1);
-      }
       for (var index = 0; index < planned.length; index++) {
         final slot = _slots[index];
         final contexts = planned[index];
@@ -842,7 +883,7 @@ class ReadStateManager {
           pubkey: pubkey,
           sig: '0' * 128,
           kind: EventKind.readState,
-          createdAt: createdAt++,
+          createdAt: _reserve(),
           tags: [
             ['d', '$readStateDTagPrefix$slot'],
             ['t', 'read-state'],
@@ -854,14 +895,97 @@ class ReadStateManager {
           ),
         );
       }
+      final unreadReady = _unreadPublishable && unreadUnreadable == null;
+      final unread = _planUnread();
+      final unreadCoordinate = _unreadCoordinate;
+      if (unreadReady &&
+          (!mapEquals(_unreadPublished, unread) ||
+              _pending.containsKey(unreadCoordinate))) {
+        prepared[unreadCoordinate] = NostrEvent(
+          id: '0' * 64,
+          pubkey: pubkey,
+          sig: '0' * 128,
+          kind: EventKind.readState,
+          createdAt: _reserve(),
+          tags: [
+            ['d', unreadCoordinate],
+            ['t', readStateUnreadTag],
+          ],
+          content: _crypto.encrypt(
+            jsonEncode(
+              ReadStateBlob(
+                clientId: _clientId,
+                contexts: unread,
+                version: 2,
+              ).toJson(),
+            ),
+          ),
+        );
+      }
+      // Each follow candidate is frozen in one synchronous step: plaintext,
+      // captured edit generations, basis head and reservation together. Only
+      // then is the reservation journaled, before anything is signed.
+      final followPlanned = _canPublishFollows
+          ? _plannedFollowSlots()
+          : const <String, String>{};
+      final followCaptures = <String, Map<String, int>>{};
+      final followBases = <String, String?>{};
+      for (final MapEntry(key: slot, value: plaintext)
+          in followPlanned.entries) {
+        final coordinate = '$threadFollowsDTagPrefix$slot';
+        if (_followPublished[slot] == plaintext ||
+            _pending.containsKey(coordinate)) {
+          continue;
+        }
+        final placed = _followPlacement[_followSlots.indexOf(slot)];
+        followCaptures[coordinate] = {
+          for (final key in placed) key: ?_followEdits[key],
+        };
+        followBases[coordinate] = _followHeads[slot]?.id;
+        prepared[coordinate] = NostrEvent(
+          id: '0' * 64,
+          pubkey: pubkey,
+          sig: '0' * 128,
+          kind: EventKind.readState,
+          createdAt: _reserve(),
+          tags: [
+            ['d', coordinate],
+            ['t', threadFollowsTag],
+          ],
+          content: _crypto.encrypt(plaintext),
+        );
+      }
+      await _persistLocalState();
       // Check replay and successor prefixes before sending. Not a reservation:
       // another device can still grow the remote snapshot concurrently.
       _checkSnapshotCapacity(snapshot, _pending.values);
-      _checkSnapshotCapacity(snapshot, [
-        ..._pending.values,
-        ...prepared.values,
-      ]);
+      // A follow candidate that overfills the snapshot waits, visibly; read
+      // positions that fit still publish.
+      Object? followsFull, unreadFull;
+      try {
+        _checkSnapshotCapacity(snapshot, [
+          ..._pending.values,
+          ...prepared.values,
+        ]);
+      } on StateError {
+        prepared.removeWhere(
+          (coordinate, _) => coordinate.startsWith(threadFollowsDTagPrefix),
+        );
+        _checkSnapshotCapacity(snapshot, [
+          ..._pending.values,
+          ...prepared.values,
+        ]);
+        followsFull = StateError(threadFollowsFullMessage);
+      }
       for (final entry in _pending.entries.toList()) {
+        if (entry.key.startsWith(threadFollowsDTagPrefix) &&
+            !_canPublishFollows) {
+          continue; // Held with its edits; the pass reports why below.
+        }
+        if (entry.key == unreadCoordinate &&
+            (unreadUnreadable != null || !_unreadStillCurrent(unread))) {
+          continue; // Kept until no held-back group could need its carrier.
+        }
         if (_relaySession == null) {
           throw StateError('No relay for pending retry');
         }
@@ -885,7 +1009,7 @@ class ReadStateManager {
             (_disposed && !allowDisposed)) {
           return;
         }
-        _acknowledge(entry.key, entry.value);
+        unreadFull = _acknowledgeOrHold(entry.key, entry.value) ?? unreadFull;
         await _persistLocalState();
       }
       for (var index = 0; index < planned.length; index++) {
@@ -928,11 +1052,124 @@ class ReadStateManager {
         }
         _published[slot] = contexts;
         _pending.remove(slot);
-        _maxFetchedCreatedAt = event.createdAt;
+        _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
         await _persistLocalState();
       }
+      if (prepared[unreadCoordinate] case final event?
+          when !mapEquals(_unreadPublished, unread) &&
+              _unreadStillCurrent(unread)) {
+        if (!_servesThisCommunity ||
+            !_ownsJournal ||
+            (_disposed && !allowDisposed)) {
+          return;
+        }
+        checkConnection?.call();
+        await signedEventRelay.submit(
+          kind: event.kind,
+          content: event.content,
+          tags: event.tags,
+          createdAt: event.createdAt,
+          onSigned: (event) async {
+            _pending[unreadCoordinate] = event;
+            await _persistLocalState();
+            checkConnection?.call();
+            if (!_unreadStillCurrent(unread)) {
+              throw StateError('A held-back unread group defers publication');
+            }
+            if (!_servesThisCommunity ||
+                !_ownsJournal ||
+                (_disposed && !allowDisposed) ||
+                _unreadCoordinate != unreadCoordinate) {
+              throw StateError(
+                'Unread-state owner or coordinate retired before publication',
+              );
+            }
+          },
+        );
+        if (!_servesThisCommunity ||
+            !_ownsJournal ||
+            (_disposed && !allowDisposed)) {
+          return;
+        }
+        // `OK true` (a `duplicate:` no-op included) doesn't prove this
+        // became the head: a newer own head supersedes it, so its intent is
+        // rebuilt above that head rather than acknowledged.
+        final head = _unreadHead;
+        final superseded =
+            head != null && head.id != event.id && _outranks(head, event);
+        if (!superseded) _unreadPublished = unread;
+        _pending.remove(unreadCoordinate);
+        _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
+        await _persistLocalState();
+        if (superseded) _schedulePublish();
+      }
+      for (final MapEntry(key: slot, value: plaintext)
+          in followPlanned.entries) {
+        final coordinate = '$threadFollowsDTagPrefix$slot';
+        final event = prepared[coordinate];
+        if (_followPublished[slot] == plaintext) continue;
+        if (followsFull != null) continue;
+        if (event == null) {
+          // Skipped for a pending replay; send the newer choice next pass.
+          _publishAgain = true;
+          continue;
+        }
+        if (!_servesThisCommunity ||
+            !_ownsJournal ||
+            (_disposed && !allowDisposed)) {
+          return;
+        }
+        checkConnection?.call();
+        final accepted = await signedEventRelay.submit(
+          kind: event.kind,
+          content: event.content,
+          tags: event.tags,
+          createdAt: event.createdAt,
+          onSigned: (event) async {
+            // The accepted head moved while signing: this payload is stale.
+            // Recompose next pass rather than sending or re-stamping it.
+            if (_followHeads[slot]?.id != followBases[coordinate] ||
+                !_followSlots.contains(slot)) {
+              throw StateError('Thread follow head moved before publication');
+            }
+            _pending[coordinate] = event;
+            _followCaptured[coordinate] = followCaptures[coordinate]!;
+            await _persistLocalState();
+            checkConnection?.call();
+            if (!_servesThisCommunity ||
+                !_ownsJournal ||
+                (_disposed && !allowDisposed) ||
+                !_followSlots.contains(slot)) {
+              throw StateError(
+                'Thread follow owner or coordinate retired before publication',
+              );
+            }
+          },
+        );
+        if (!_servesThisCommunity ||
+            !_ownsJournal ||
+            (_disposed && !allowDisposed)) {
+          return;
+        }
+        // The OK result is a placeholder carrying only the event ID; resolve
+        // it against the exact signed packet retained in onSigned. An echo
+        // may already have resolved it, or a successor replaced it.
+        if (_pending[coordinate] case final retained?
+            when retained.id == accepted.id) {
+          _acknowledge(coordinate, retained);
+        }
+        await _persistLocalState();
+      }
+      if (!_canPublishFollows && _ownFollows.isNotEmpty) {
+        throw StateError(
+          'Unreadable thread follow coordinate blocks publication',
+        );
+      }
+      if (unreadUnreadable ?? followsFull ?? unreadFull case final error?) {
+        throw error;
+      }
       // An older send must not erase a newer read's failure.
-      if (_lastSnapshotSucceeded) syncError = null;
+      if (_lastSnapshotSucceeded) syncError = _standingError;
     } catch (error) {
       // The journal retains local advances, placements and exact pending
       // events. Reconnect/flush retries; never acknowledge the whole batch.
@@ -944,166 +1181,10 @@ class ReadStateManager {
     }
   }
 
-  void _checkSnapshotCapacity(
-    List<NostrEvent> snapshot,
-    Iterable<NostrEvent> writes,
-  ) {
-    String coordinate(NostrEvent event) =>
-        '${event.kind}:${event.pubkey}:${event.tags.where((tag) => tag.length >= 2 && tag.first == 'd').map((tag) => tag[1]).firstOrNull ?? ''}';
-    final projected = {for (final event in snapshot) coordinate(event): event};
-    for (final event in writes) {
-      projected[coordinate(event)] = event;
-      if (projected.length > readStateSnapshotMaxEvents ||
-          utf8
-                  .encode(
-                    jsonEncode(
-                      projected.values.map((event) => event.toJson()).toList(),
-                    ),
-                  )
-                  .length >
-              readStateSnapshotMaxBytes) {
-        throw StateError(
-          'Read-state publication exceeds full snapshot capacity',
-        );
-      }
-    }
-  }
-
-  bool _isTimestampRefusal(Exception error) =>
-      error.toString().contains('timestamp too far from server time');
-
-  /// Retires [pending] after the relay refused it for its timestamp. The
-  /// outcome is known, the relay did not store it, so NIP-RS allows a
-  /// strictly newer successor in place of exact retry. Its marks were planned
-  /// from the journaled local state, which still holds them, so the next plan
-  /// reads a fresh snapshot and sends a successor, journaled before it is
-  /// sent, unless the relay already holds this update or an own update
-  /// covering it. An update that is not old by this device's clock means the
-  /// device clock is off, so it is kept for exact retry.
-  Future<void> _recoverRefusedPending(String slot, NostrEvent pending) async {
-    if (pending.createdAt >= _now() - readStateRelayTimestampWindowSeconds) {
-      throw const ReadStateClockSkewError();
-    }
-    if (identical(_pending[slot], pending)) _pending.remove(slot);
-    _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, pending.createdAt);
-    await _persistLocalState();
-  }
-
-  void _acknowledge(String slot, NostrEvent event) {
-    final blob = decodeReadStateBlob(_crypto.decrypt(event.content));
-    if (blob == null) throw StateError('Invalid pending read-state event');
-    _published[slot] = Map.of(blob.contexts);
-    _pending.remove(slot);
-    _maxFetchedCreatedAt = max(_maxFetchedCreatedAt, event.createdAt);
-  }
-
   Set<String> drainSyncedAdvances() {
     final drained = Set<String>.from(_pendingSyncedAdvances);
     _pendingSyncedAdvances.clear();
     return drained;
-  }
-
-  void _hydrateFromLocalStorage() {
-    final journal = _storage.readJournal(_journalKey);
-    Map<String, int> contexts(Object? value) => (value as Map).map(
-      (key, value) => MapEntry(key as String, value as int),
-    );
-    if (journal != null) {
-      // An existing journal, even empty, means this is not a first landing.
-      _initialSeedComplete = true;
-      _clientId = journal['clientId'] as String;
-      _effectiveState.addAll(contexts(journal['observed']));
-      _localContexts.addAll(contexts(journal['local']));
-      _carriedOverrides.addAll(contexts(journal['overrides']));
-      _slots
-        ..clear()
-        ..addAll((journal['slots'] as List).cast<String>());
-      if (_slots.isEmpty) {
-        throw const FormatException('Empty read-state slot list');
-      }
-      _slotId = _slots.first;
-      _placement = (journal['placement'] as List).map(contexts).toList();
-      for (final entry in (journal['published'] as Map).entries) {
-        _published[entry.key as String] = contexts(entry.value);
-      }
-      for (final entry in (journal['pending'] as Map).entries) {
-        _pending[entry.key as String] = NostrEvent.fromJson(
-          Map<String, dynamic>.from(entry.value as Map),
-        );
-      }
-      _maxFetchedCreatedAt = journal['createdAt'] as int;
-    } else {
-      final stored = _storage.read(pubkey, relayUrl);
-      _effectiveState.addEntries(
-        stored.contexts.entries.where((entry) => !isOverrideContext(entry.key)),
-      );
-      // Legacy storage did not preserve provenance. Carry its existing
-      // publishable values once; subsequent peer merges never enter this map.
-      _localContexts.addEntries(
-        stored.contexts.entries.where(
-          (entry) =>
-              stored.publishableContextIds.contains(entry.key) &&
-              !isOverrideContext(entry.key) &&
-              !entry.key.startsWith(msgContextPrefix),
-        ),
-      );
-      _carriedOverrides.addAll(
-        completeOverrideGroups({
-          for (final entry in stored.contexts.entries)
-            if (isOverrideContext(entry.key) &&
-                stored.publishableContextIds.contains(entry.key))
-              entry.key: entry.value,
-        }, frontiers: stored.contexts),
-      );
-    }
-    _persistLocalState();
-  }
-
-  Future<void> _persistLocalState() {
-    if (_saveScheduled) return _saved;
-    _saveScheduled = true;
-    Future<void> save() async {
-      _saveScheduled = false;
-      if (!_ownsJournal) {
-        throw StateError('Read-state journal writer retired');
-      }
-      final observed = pruneStaleContexts(
-        _effectiveState,
-        nowUnixSeconds: _now(),
-      );
-      for (final key in overrideGroupFrontierKeys(_carriedOverrides)) {
-        if (_effectiveState[key] case final value?) observed[key] = value;
-      }
-      final encoded = jsonEncode({
-        'v': 1,
-        'clientId': _clientId,
-        'observed': observed,
-        'local': _localContexts,
-        'overrides': _carriedOverrides,
-        'slots': _slots,
-        'placement': _placement,
-        'published': _published,
-        'pending': {
-          for (final entry in _pending.entries) entry.key: entry.value.toJson(),
-        },
-        'createdAt': _maxFetchedCreatedAt,
-      });
-      await _storage.writeJournal(_journalKey, encoded, owner: _journalOwner);
-    }
-
-    // Coalesce synchronous batches without allowing a later write to race an
-    // earlier write. A sender awaits this entire chain before network I/O.
-    _saved = _saved.then(
-      (_) => save(),
-      onError: (Object _, StackTrace _) => save(),
-    );
-    unawaited(
-      _saved.catchError((Object error) {
-        syncError = error;
-        debugPrint('[ReadStateManager] journal save failed: $error');
-      }),
-    );
-    return _saved;
   }
 
   /// Switching community rebuilds the session in place before this manager
@@ -1115,15 +1196,4 @@ class ReadStateManager {
 
   bool _isPlausibleCreatedAt(int createdAt) =>
       createdAt <= _now() + readStateMaxClockDriftSeconds;
-
-  bool _isPermanentReadStateRemoteError(Object error) {
-    // Relay rejections come back as `Exception("<message>")` from the
-    // websocket OK handler. Pattern-match on the message text since we no
-    // longer have HTTP status codes.
-    final msg = error.toString().toLowerCase();
-    return msg.contains('unknown event kind') ||
-        msg.contains('missing users:write') ||
-        msg.contains('insufficient scope') ||
-        msg.contains('restricted: unknown');
-  }
 }

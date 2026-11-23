@@ -78,36 +78,17 @@ class PresetAgentAvatar extends HookWidget {
     final videoShown =
         showNativeVideo && controller != null && ready.value == controller;
     // A fresh AVPlayerLayer draws nothing until its first frame arrives, so
-    // keep the poster under it until playback advances in this showing. The
-    // baseline is read from the player, and the controller's last polled
-    // position is kept beside it: while paused that value lags the player,
-    // so it differs from the baseline until a poll in this showing.
+    // keep the poster under it until playback advances in this showing.
     final shownFrom = useState<(Duration, Duration)?>(null);
-    useEffect(() {
-      shownFrom.value = null;
-      if (!videoShown) return null;
-      var active = true;
-      unawaited(
-        controller.position
-            .then((position) {
-              if (active) {
-                shownFrom.value = (
-                  position ?? Duration.zero,
-                  controller.value.position,
-                );
-              }
-            })
-            .catchError((Object _) {}),
-      );
-      return () => active = false;
-    }, [videoShown, controller]);
     final presented = useState(false);
     useListenable(isIos && videoShown && !presented.value ? controller : null);
     useEffect(() {
       if (!videoShown) {
         presented.value = false;
       } else if (shownFrom.value case (final fresh, final polled)
-          when controller.value.position != fresh &&
+          // A failed player resets its position to zero and stops polling.
+          when !controller.value.hasError &&
+              controller.value.position != fresh &&
               controller.value.position != polled) {
         presented.value = true;
       }
@@ -140,20 +121,52 @@ class PresetAgentAvatar extends HookWidget {
         unawaited(controller.dispose().catchError((Object _) {}));
       };
     }, [controller]);
+    final playback = useRef<Future<void>>(Future.value());
     useEffect(() {
       if (controller != null && ready.value == controller) {
-        unawaited(
-          (playing ? controller.play() : controller.pause()).catchError((
-            Object _,
-          ) {
-            if (context.mounted && ready.value == controller) {
-              ready.value = null;
-            }
-          }),
-        );
+        playback.value = (playing ? controller.play() : controller.pause())
+            .catchError((Object _) {
+              if (context.mounted && ready.value == controller) {
+                ready.value = null;
+              }
+            });
       }
       return null;
     }, [controller, ready.value, playing]);
+    // The baseline is read from the player once the play command lands,
+    // since play() seeks a finished loop back to zero. The controller's last
+    // polled position is kept beside it: while paused that value lags the
+    // player, so it differs from the baseline until a poll in this showing.
+    useEffect(() {
+      shownFrom.value = null;
+      // While paused (an inactive app), wait for the play() that resumes it.
+      if (!isIos || !videoShown || !playing || presented.value) return null;
+      var active = true;
+      unawaited(
+        playback.value
+            .then((_) => controller.position)
+            .then((position) {
+              if (active) {
+                shownFrom.value = (
+                  position ?? Duration.zero,
+                  controller.value.position,
+                );
+              }
+            })
+            .catchError((Object _) {}),
+      );
+      return () => active = false;
+    }, [videoShown, playing, controller]);
+
+    final nativeVideoVisible =
+        isIos &&
+        showNativeVideo &&
+        controller != null &&
+        ready.value == controller;
+    // HEVC artwork carries its own alpha silhouette. A Flutter path clip around
+    // its platform view can also clip selection overlays above other native views.
+    Widget clipArtwork(Widget child) =>
+        nativeVideoVisible ? child : AvatarClip(isAgent: true, child: child);
 
     // Keyed by URL so a new character never shows the previous one's poster
     // while its own loads.
@@ -169,9 +182,8 @@ class PresetAgentAvatar extends HookWidget {
     );
     return SizedBox.square(
       dimension: size,
-      child: AvatarClip(
-        isAgent: true,
-        child: Transform.scale(
+      child: clipArtwork(
+        Transform.scale(
           scale: animatedAvatarArtworkScale,
           child: isAndroid && videoUrl != null
               ? AndroidTransparentAvatar(

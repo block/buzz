@@ -41,6 +41,11 @@ bool isBroadcastReply(List<List<String>> tags) {
   );
 }
 
+/// A thread reply also sent to the channel: it has a parent and the
+/// broadcast tag. [isThreadReply] excludes it.
+bool isChannelSentReply(List<List<String>> tags) =>
+    threadReferenceOf(tags).parentId != null && isBroadcastReply(tags);
+
 /// A thread reply that is not broadcast — desktop's `isThreadReply`.
 bool isThreadReply(List<List<String>> tags) {
   return threadReferenceOf(tags).parentId != null && !isBroadcastReply(tags);

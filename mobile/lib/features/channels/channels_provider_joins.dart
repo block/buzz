@@ -31,6 +31,20 @@ extension ChannelsNotifierJoins on ChannelsNotifier {
     }
   }
 
+  /// Records [channelId] as a membership this client itself ended (a
+  /// confirmed leave or delete), so the next list read doesn't treat its
+  /// absence as a loss that needs a writer read. The saved-page purge has
+  /// already been recorded.
+  void noteConfirmedRemoval(String channelId) {
+    _confirmedJoins.remove(channelId);
+    _confirmedRemovals.add(channelId);
+  }
+
+  void _forgetConfirmedMemberships() {
+    _confirmedJoins.clear();
+    _confirmedRemovals.clear();
+  }
+
   /// The current user's latest kind:39002 rosters for a list read.
   ///
   /// A writer-pool answer also settles each recorded join: one it lacks was
@@ -41,6 +55,17 @@ extension ChannelsNotifierJoins on ChannelsNotifier {
     RelaySessionNotifier session,
     String pubkey,
   ) async {
+    final scope = _lifecycleRef.read(savedMessageScopeProvider);
+    final removedHere = {..._confirmedRemovals};
+    _confirmedRemovals.clear();
+    final previouslyJoined = <String>{
+      if (scope != null && _hasLoaded)
+        for (final channel in _listState.value ?? const <Channel>[])
+          if (channel.isMember) channel.id,
+      if (scope != null)
+        for (final entry in _memberSnapshotsByChannelId.entries)
+          if (entry.value.any((member) => member.pubkey == pubkey)) entry.key,
+    }..removeAll(removedHere);
     Future<List<NostrEvent>> read(bool strong) async => _latestChannelEvents(
       await _fenced(
         fence,
@@ -54,13 +79,34 @@ extension ChannelsNotifierJoins on ChannelsNotifier {
         .toSet();
 
     final memberships = await read(false);
-    if (_confirmedJoins.isEmpty) return memberships;
-    if (ids(memberships).containsAll(_confirmedJoins)) {
+    final listed = ids(memberships);
+    if (listed.containsAll(_confirmedJoins) &&
+        listed.containsAll(previouslyJoined)) {
       _confirmedJoins.clear();
       return memberships;
     }
+    // A stale replica can omit a recent join or recovery. Only a writer read
+    // can turn the disappearance of a known membership into a disk purge.
     final fromWriter = await read(true);
-    _confirmedJoins.retainAll(ids(fromWriter));
+    final confirmed = ids(fromWriter);
+    _confirmedJoins.retainAll(confirmed);
+    fence.ensureCurrent();
+    if (scope != null &&
+        scope == _lifecycleRef.read(savedMessageScopeProvider)) {
+      final removed = previouslyJoined.difference(confirmed);
+      if (removed.isNotEmpty) {
+        final cache = _lifecycleRef.read(savedMessageStoreProvider);
+        final purges = [
+          for (final channelId in removed)
+            cache.removeChannel(scope, channelId),
+        ];
+        for (final channelId in removed) {
+          _lifecycleRef.invalidate(savedChannelPreviewProvider(channelId));
+        }
+        // Keep the old membership on disk until its cache purge runs.
+        await _fenced(fence, Future.wait(purges));
+      }
+    }
     return fromWriter;
   }
 }

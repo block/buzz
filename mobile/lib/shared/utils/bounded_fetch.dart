@@ -3,6 +3,8 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
+import '../http/app_http_client.dart';
+
 /// Longest wait for response headers or the next body chunk. A slow link that
 /// keeps delivering bytes finishes; one that stops is aborted.
 const defaultStallTimeout = Duration(seconds: 20);
@@ -59,19 +61,24 @@ Future<BoundedResponse> boundedGet(
   Future<void>? cancel,
 }) async {
   final stop = Completer<void>();
+  final request = http.AbortableRequest('GET', uri, abortTrigger: stop.future)
+    ..headers.addAll(headers)
+    ..followRedirects = followRedirects;
   var cancelled = false;
+  void timedOut() {
+    if (stop.isCompleted) return;
+    noteHttpDeadline(request);
+    stop.complete();
+  }
+
   Timer? stall;
   void restartStallTimer() {
     stall?.cancel();
-    stall = Timer(stallTimeout, () {
-      if (!stop.isCompleted) stop.complete();
-    });
+    stall = Timer(stallTimeout, timedOut);
   }
 
   restartStallTimer();
-  final deadline = Timer(maxFetchDuration, () {
-    if (!stop.isCompleted) stop.complete();
-  });
+  final deadline = Timer(maxFetchDuration, timedOut);
   unawaited(
     cancel?.then((_) {
       if (stop.isCompleted) return;
@@ -81,9 +88,6 @@ Future<BoundedResponse> boundedGet(
   );
   StreamIterator<List<int>>? body;
   try {
-    final request = http.AbortableRequest('GET', uri, abortTrigger: stop.future)
-      ..headers.addAll(headers)
-      ..followRedirects = followRedirects;
     final streamed = await client.send(request);
     restartStallTimer();
     if (streamed.statusCode == 200 &&

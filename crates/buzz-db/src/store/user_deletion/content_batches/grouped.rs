@@ -14,7 +14,7 @@ fn tables(batch: &Value) -> Result<Vec<&str>> {
     // A batch can straddle selection pages, with an event from the previous
     // page preceding the next page's side rows. Always remove dependants first.
     tables.sort_by_key(|table| match *table {
-        "subscriptions" | "push_leases" => 1,
+        "push_leases" | "workflows" => 1,
         "events" => 2,
         _ => 0,
     });
@@ -115,6 +115,8 @@ pub(super) async fn execute(tx: &mut AdmittedTx, batch: &Value) -> Result<()> {
         children(tx.conn(), community, number, table).await?;
         if table == "events" {
             erase_events(tx, number).await?;
+        } else if matches!(table, "workflow_runs" | "workflow_approvals") {
+            workflows::scrub(tx, number, table, expected).await?;
         } else {
             let query = format!(
                 "DELETE FROM {table} t USING content_batch_work w
@@ -145,12 +147,13 @@ async fn children(
     table: &str,
 ) -> Result<()> {
     let dependent = match table {
-        "subscriptions" => "EXISTS(SELECT 1 FROM delivery_log WHERE community_id=$1 AND subscription_id=w.row_key->>'id')",
         "push_leases" => "EXISTS(SELECT 1 FROM push_wake_outbox WHERE community_id=$1 AND author=decode(w.row_key->>'author','hex') AND installation_id=w.row_key->>'installation_id')",
         "events" => "EXISTS(SELECT 1 FROM event_mentions WHERE community_id=$1 AND event_id=decode(w.row_key->>'id','hex'))
             OR EXISTS(SELECT 1 FROM push_match_queue WHERE community_id=$1 AND event_id=decode(w.row_key->>'id','hex'))
             OR EXISTS(SELECT 1 FROM push_wake_outbox WHERE community_id=$1 AND event_id=decode(w.row_key->>'id','hex'))
             OR EXISTS(SELECT 1 FROM operator_listener_outbox WHERE community_id=$1 AND event_id=decode(w.row_key->>'id','hex'))",
+        "workflows" => workflows::DEFINITION_CHILDREN,
+        "scheduled_workflow_fires" => workflows::FIRE_HISTORY,
         _ => return Ok(()),
     };
     let query = format!(
@@ -161,7 +164,7 @@ async fn children(
         .bind(community)
         .bind(table)
         .bind(number)
-        .fetch_one(conn)
+        .fetch_one(&mut *conn)
         .await?;
     if remains {
         return Err(invalid(
@@ -200,13 +203,16 @@ async fn erase_events(tx: &mut AdmittedTx, number: i64) -> Result<()> {
     sqlx::query("UPDATE events e SET pubkey=''::bytea,content='',sig=''::bytea,
         tags=COALESCE((SELECT jsonb_agg(jsonb_build_array('e',lower(tag->>1),'',tag->>3))
             FROM jsonb_array_elements(e.tags) tag WHERE tag->>0='e'
-              AND tag->>3 IN ('root','reply') AND tag->>1 ~ '^[0-9a-fA-F]{64}$'),'[]'::jsonb),
+              AND tag->>3 IN ('root','reply') AND tag->>1 ~ '^[0-9a-fA-F]{64}$'
+              AND NOT(e.kind=ANY($3))),'[]'::jsonb),
         d_tag=NULL,not_before=NULL,delivered_at=NULL,
         deleted_at=COALESCE(deleted_at,clock_timestamp())
         FROM content_batch_work w WHERE w.table_name='events' AND w.batch=$2
         AND w.action='would_scrub' AND e.community_id=$1
         AND e.id=decode(w.row_key->>'id','hex') AND e.created_at=(w.row_key->>'created_at')::timestamptz")
-        .bind(community).bind(number).execute(tx.conn()).await?;
+        // A pin command's `e` tag names its target, not an ancestor to keep.
+        .bind(community).bind(number).bind(crate::pins::COMMAND_KINDS.as_slice())
+        .execute(tx.conn()).await?;
     sqlx::query(
         "DELETE FROM thread_metadata tm USING content_batch_work w
         WHERE w.table_name='events' AND w.batch=$2 AND w.action='would_delete'
@@ -247,18 +253,17 @@ pub(super) async fn verify_remaining(
     let relay = start["trusted_relay_pubkey"].as_str();
     let query = format!("WITH authored AS ({}) SELECT EXISTS(SELECT 1 FROM authored WHERE kind=ANY($4))
         OR EXISTS(SELECT 1 FROM reactions WHERE community_id=$1 AND pubkey=ANY($2))
-        OR EXISTS(SELECT 1 FROM subscriptions WHERE community_id=$1 AND owner_pubkey=ANY($2))
         OR EXISTS(SELECT 1 FROM push_leases WHERE community_id=$1 AND author=ANY($2))
         OR EXISTS(SELECT 1 FROM push_wake_outbox WHERE community_id=$1 AND author=ANY($2))
         OR EXISTS(SELECT 1 FROM operator_listener_outbox WHERE community_id=$1 AND (target_pubkey=ANY($2) OR listener_pubkey=ANY($2)))",include_str!("authored.sql"));
     let remains: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
         .bind(options.community)
-        .bind(targets)
+        .bind(&targets)
         .bind(relay)
         .bind(KINDS)
-        .fetch_one(conn)
+        .fetch_one(&mut *conn)
         .await?;
-    if remains {
+    if remains || workflows::remaining(conn, options.community, &targets).await? {
         return Err(invalid(
             "supported rows remain after execution; deletion incomplete; rerun",
         ));

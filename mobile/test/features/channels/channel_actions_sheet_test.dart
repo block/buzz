@@ -1,14 +1,17 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_actions_sheet.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
 import 'package:buzz/features/channels/channel_sections/channel_sections_storage.dart';
+import 'package:buzz/features/channels/channel_sections/workspace_layout.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/manage_channel_sheet.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/buzz_action_tile.dart';
@@ -18,6 +21,10 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart';
+import 'package:nostr/nostr.dart' as nostr;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
 
 const _currentPubkey = 'me';
 
@@ -68,15 +75,21 @@ Widget _modalApp({
   required Future<List<ChannelMember>> Function() loadMembers,
   required ChannelActions Function(Ref ref) createChannelActions,
   bool soloDetails = false,
+  bool details = false,
   String? canvasContent,
   Future<ChannelCanvas>? pendingCanvas,
+  List<Override>? sectionOverrides,
+  String? sectionId,
 }) => ProviderScope(
   overrides: [
     currentPubkeyProvider.overrideWith((ref) => _currentPubkey),
     channelMembersProvider(channel.id).overrideWith((ref) => loadMembers()),
-    channelSectionsProvider.overrideWith(
-      () => _FakeChannelSectionsNotifier(const ChannelSectionStore()),
-    ),
+    ...sectionOverrides ??
+        [
+          channelSectionsProvider.overrideWith(
+            () => _FakeChannelSectionsNotifier(const ChannelSectionStore()),
+          ),
+        ],
     agentOwnersProvider.overrideWithValue(
       const AsyncValue.data(<String, String>{}),
     ),
@@ -96,18 +109,19 @@ Widget _modalApp({
     home: Builder(
       builder: (context) => Scaffold(
         body: TextButton(
-          onPressed: () => soloDetails
+          onPressed: () => soloDetails || details
               ? showChannelDetailsSheet(
                   context: context,
                   channel: channel,
                   currentPubkey: _currentPubkey,
                   onMemberTap: (_, _) {},
-                  personalChat: true,
+                  personalChat: soloDetails,
                 )
               : showChannelActionsSheet(
                   context: context,
                   channel: channel,
                   isUnread: false,
+                  sectionId: sectionId,
                 ),
           child: const Text('Open actions'),
         ),
@@ -553,6 +567,252 @@ void main() {
     expect(find.text('Archive channel'), findsNothing);
     expect(find.text('Delete channel'), findsNothing);
   });
+
+  for (final (details, early) in [
+    (false, false),
+    (true, false),
+    (true, true),
+  ]) {
+    testWidgets('desktop workspaces close filing (details: $details, '
+        'before the picker draws: $early)', (tester) async {
+      tester.view.physicalSize = const Size(1200, 3000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          details: details,
+          loadMembers: () async => const [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+        ),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      void lock() =>
+          (ProviderScope.containerOf(
+                    tester.element(find.text('Open actions')),
+                  ).read(channelSectionsProvider.notifier)
+                  as _FakeChannelSectionsNotifier)
+              .lock();
+      await tester.tap(find.text('Move to section…'));
+      if (early) lock();
+      await tester.pumpAndSettle();
+      if (!early) {
+        expect(find.text('New section…'), findsOneWidget);
+        // Desktop saves a unified layout while the picker is open.
+        lock();
+        await tester.pumpAndSettle();
+      }
+      expect(find.text('New section…'), findsNothing);
+      // Details stays open beneath the picker; the actions sheet reopens.
+      if (!details) {
+        await tester.tap(find.text('Open actions'));
+        await tester.pumpAndSettle();
+      }
+      expect(find.text('Copy channel name'), findsOneWidget);
+      expect(find.text('Move to section…'), findsNothing);
+    });
+  }
+
+  for (final (pick, laterExists) in [
+    ('Work', false),
+    ('Remove from section', false),
+    ('New section…', false),
+    ('New section…', true),
+  ]) {
+    testWidgets('Move to section: $pick files the channel after the actions '
+        'sheet closes (a "Later" section already exists: $laterExists)', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(1200, 3000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final keys = nostr.Keys.generate();
+      const relayUrl = 'https://relay.example';
+      final storeKey = channelSectionsKey(keys.public, relayUrl);
+      // Records every snapshot saved for this layout, so one pick must be
+      // exactly one write.
+      final saves = _LayoutSaves('flutter.$storeKey', {
+        'flutter.$storeKey': jsonEncode(
+          ChannelSectionStore(
+            sections: [
+              const ChannelSection(id: 'work', name: 'Work', order: 0),
+              if (laterExists)
+                const ChannelSection(id: 'old-later', name: 'Later', order: 1),
+            ],
+            assignments: {
+              if (pick == 'Remove from section') 'channel-id': 'work',
+            },
+          ).toJson(),
+        ),
+      });
+      final previousStore = SharedPreferencesStorePlatform.instance;
+      SharedPreferencesStorePlatform.instance = saves;
+      SharedPreferences.resetStatic();
+      addTearDown(() {
+        SharedPreferencesStorePlatform.instance = previousStore;
+        SharedPreferences.resetStatic();
+      });
+      final prefs = await SharedPreferences.getInstance();
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          loadMembers: () async => const [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+          sectionId: pick == 'Remove from section' ? 'work' : null,
+          sectionOverrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            relayConfigProvider.overrideWith(
+              () => _SignedInConfig(relayUrl, keys.nsec),
+            ),
+            activeCommunityProvider.overrideWith((ref) async => null),
+          ],
+        ),
+      );
+      final container = ProviderScope.containerOf(
+        tester.element(find.text('Open actions')),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Move to section…'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ChannelActionsSheet), findsNothing);
+
+      await tester.tap(find.text(pick));
+      await tester.pumpAndSettle();
+      if (pick == 'New section…') {
+        await tester.enterText(find.byType(TextField), 'Later');
+        await tester.tap(find.text('Create'));
+        await tester.pumpAndSettle();
+      }
+
+      expect(tester.takeException(), isNull);
+      // The provider shows the move at once, and it is saved in one write.
+      final shown = container.read(channelSectionsProvider).store;
+      final saved = ChannelSectionStore.fromJson(
+        jsonDecode(saves.snapshots.single) as Map<String, dynamic>,
+      );
+      expect(prefs.getString(storeKey), saves.snapshots.single);
+      for (final store in [shown, saved]) {
+        final filed = store.assignments['channel-id'];
+        switch (pick) {
+          case 'Work':
+            expect(filed, 'work');
+          case 'Remove from section':
+            expect(store.assignments, isNot(contains('channel-id')));
+          default:
+            final created = store.sections.singleWhere(
+              (s) => s.name == 'Later' && s.id != 'old-later',
+            );
+            expect(filed, created.id);
+        }
+      }
+    });
+  }
+
+  for (final (pick, newKey, beforeDialog) in [
+    ('Work', true, false),
+    ('Work', false, false),
+    ('New section…', true, false),
+    ('New section…', false, false),
+    // The switch lands after the tap but before the name dialog's first frame.
+    ('New section…', true, true),
+    ('New section…', false, true),
+  ]) {
+    testWidgets('Move to section: $pick closes and files nothing once the '
+        'community changes behind it (new signing key: $newKey, before the '
+        'dialog builds: $beforeDialog)', (tester) async {
+      tester.view.physicalSize = const Size(1200, 3000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final keys = nostr.Keys.generate();
+      final other = nostr.Keys.generate();
+      const relayUrl = 'https://relay.example';
+      const otherRelayUrl = 'https://other.example';
+      final mine = channelSectionsKey(keys.public, relayUrl);
+      // A portable identity keeps its key in another community's relay.
+      final theirs = newKey
+          ? channelSectionsKey(other.public, relayUrl)
+          : channelSectionsKey(keys.public, otherRelayUrl);
+      final workOnly = jsonEncode(
+        const ChannelSectionStore(
+          sections: [ChannelSection(id: 'work', name: 'Work', order: 0)],
+          assignments: {},
+        ).toJson(),
+      );
+      SharedPreferences.setMockInitialValues({
+        mine: workOnly,
+        theirs: workOnly,
+      });
+      final prefs = await SharedPreferences.getInstance();
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          loadMembers: () async => const [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+          sectionOverrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            relayConfigProvider.overrideWith(
+              () => _SignedInConfig(relayUrl, keys.nsec),
+            ),
+            activeCommunityProvider.overrideWith((ref) async => null),
+          ],
+        ),
+      );
+      final container = ProviderScope.containerOf(
+        tester.element(find.text('Open actions')),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Move to section…'));
+      await tester.pumpAndSettle();
+      final config =
+          container.read(relayConfigProvider.notifier) as _SignedInConfig;
+      void switchToThird() => config.signInAs(
+        nostr.Keys.generate().nsec,
+        baseUrl: 'https://third.example',
+      );
+      // A second switch follows, so a stale route is asked to close more
+      // than once. Before the dialog builds, it lands just after the first
+      // frame builds the dialog.
+      void switchCommunity() {
+        config.signInAs(
+          newKey ? other.nsec : keys.nsec,
+          baseUrl: newKey ? relayUrl : otherRelayUrl,
+        );
+        if (beforeDialog) {
+          tester.binding.addPostFrameCallback((_) => switchToThird());
+        } else {
+          switchToThird();
+        }
+      }
+
+      if (beforeDialog) {
+        await tester.tap(find.text(pick));
+      } else if (pick == 'New section…') {
+        await tester.tap(find.text(pick));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byType(TextField), 'Later');
+      }
+      switchCommunity();
+      await tester.pumpAndSettle();
+
+      // The stale picker or name dialog closes rather than offering a pick
+      // that would be dropped.
+      expect(find.text(pick), findsNothing);
+      expect(find.text('Create'), findsNothing);
+      // Only the stale route closes; the page under it stays.
+      expect(find.text('Open actions'), findsOneWidget);
+
+      expect(tester.takeException(), isNull);
+      expect(
+        container.read(channelSectionsProvider).store.assignments,
+        isEmpty,
+      );
+      expect(prefs.getString(mine), workOnly);
+      expect(prefs.getString(theirs), workOnly);
+    });
+  }
 
   testWidgets('member sees neither owner action', (tester) async {
     await tester.pumpWidget(
@@ -1124,6 +1384,31 @@ void main() {
   });
 }
 
+class _LayoutSaves extends InMemorySharedPreferencesStore {
+  _LayoutSaves(this.key, Map<String, Object> data) : super.withData(data);
+
+  final String key;
+  final snapshots = <String>[];
+
+  @override
+  Future<bool> setValue(String valueType, String key, Object value) {
+    if (key == this.key) snapshots.add(value as String);
+    return super.setValue(valueType, key, value);
+  }
+}
+
+class _SignedInConfig extends RelayConfigNotifier {
+  _SignedInConfig(this.baseUrl, this.nsec);
+  final String baseUrl;
+  final String nsec;
+
+  @override
+  RelayConfig build() => RelayConfig(baseUrl: baseUrl, nsec: nsec);
+
+  void signInAs(String other, {required String baseUrl}) =>
+      state = RelayConfig(baseUrl: baseUrl, nsec: other);
+}
+
 class _FakeChannelSectionsNotifier extends ChannelSectionsNotifier {
   _FakeChannelSectionsNotifier(this._store);
 
@@ -1132,6 +1417,18 @@ class _FakeChannelSectionsNotifier extends ChannelSectionsNotifier {
   @override
   ChannelSectionsState build() =>
       ChannelSectionsState(isReady: true, store: _store, version: 1);
+
+  void lock() => state = ChannelSectionsState(
+    isReady: true,
+    store: _store,
+    workspace: WorkspaceRecord.fromJson({
+      'version': 1,
+      'sections': <Object>[],
+      'assignments': <String, Object>{},
+      'sectionOrder': <String>[],
+    }),
+    version: 2,
+  );
 }
 
 class _FakeChannelActions extends ChannelActions {
@@ -1175,7 +1472,10 @@ class _FakeChannelActions extends ChannelActions {
   String? unarchivedChannelId;
 
   @override
-  Future<void> leaveChannel(String channelId) async {}
+  Future<void> leaveChannel(
+    String channelId, {
+    Future<bool> Function()? mayPublish,
+  }) async {}
 
   @override
   Future<void> archiveChannel(String channelId) async {}
@@ -1224,5 +1524,6 @@ class _RecordingReadState extends ReadStateNotifier {
     String contextId,
     int unixTimestamp, {
     bool clearForcedMessages = false,
+    bool explicit = false,
   }) => marks.add((contextId, unixTimestamp, clearForcedMessages));
 }

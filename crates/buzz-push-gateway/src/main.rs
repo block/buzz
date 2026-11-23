@@ -68,9 +68,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .android
             .as_ref()
             .map(|android| -> Result<_, Box<dyn std::error::Error>> {
-                let fcm = FcmTransport::service_account(
+                let fcm = FcmTransport::from_credentials(
                     &android.fcm_project_id,
-                    &fs::read(&android.fcm_service_account_path)?,
+                    &fs::read(&android.fcm_credentials_path)?,
                 )?;
                 let roots = match &android.attestation_roots_path {
                     Some(path) => fs::read_to_string(path)?,

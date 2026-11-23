@@ -1,3 +1,4 @@
+import '../../shared/widgets/native_route_controls.dart';
 import 'dart:ui' as ui;
 
 import 'package:duo_kit/duo_kit.dart';
@@ -29,7 +30,6 @@ import '../activity/inbox_unread_provider.dart';
 import '../channels/channels_page.dart';
 import '../search/search_page.dart';
 import 'home_screen_shortcut_host.dart';
-import 'messages_filters.dart';
 import 'messages_navigation_bar.dart';
 import '../../shared/widgets/covered_route_keyboard_insets.dart';
 
@@ -87,10 +87,8 @@ class HomePage extends HookConsumerWidget {
 
     final communitySurfaceProgress = useState(0.0);
     final recordingFocus = useState(false);
-    final filter = useState('All');
     final hasUnreadInbox = ref.watch(inboxHasUnreadProvider);
     final inboxLabel = hasUnreadInbox ? 'Activity, unread items' : 'Activity';
-    final reselect = useValueNotifier(0);
     final newChat = useValueNotifier<VoidCallback?>(null);
     final newWorkspace = useValueNotifier<VoidCallback?>(null);
     final newChannel = useValueNotifier<VoidCallback?>(null);
@@ -129,6 +127,7 @@ class HomePage extends HookConsumerWidget {
       BottomUpPageRoute<void>(
         builder: (_) => AdaptiveConversationDestination(
           preferredListWidth: sidebarWidth,
+          listToolbarSlots: 1,
           child: const ActivityPage(),
         ),
         reducedMotion: reducedMotion,
@@ -136,8 +135,6 @@ class HomePage extends HookConsumerWidget {
     );
     final messages = ChannelsPage(
       settingsPageBuilder: settingsPageBuilder,
-      messagesActionsWidth:
-          2 * (defaultTargetPlatform == TargetPlatform.iOS ? 44 : 48) + Grid.xs,
       messagesActionsBuilder: (openSwitcher, avatarKey) {
         final moreActions = [
           // An internal build reaches only its organization's community.
@@ -307,29 +304,11 @@ class HomePage extends HookConsumerWidget {
           ),
         ];
       },
-      messagesFilters: (isCollapsed) => MessagesFilters(
-        useNativeGlass: !recordingFocus.value,
-        isCollapsed: isCollapsed,
-        selected: filter.value,
-        onSelected: (value) {
-          filter.value = value;
-          reselect.value++;
-        },
-      ),
-      soloSliver: solo == null
-          ? null
-          : SliverOffstage(
-              key: const ValueKey('messages-solo-inventory'),
-              offstage: filter.value == 'Team',
-              sliver: solo,
-            ),
-      showTeam: filter.value != 'Solo',
-      showTeamHeading: filter.value == 'All',
+      soloSliver: solo,
       newChannelAction: newChannel,
       newDmAction: newDm,
       communityInvitePageBuilder: communityInvitePageBuilder,
       communityAppearancePageBuilder: communityAppearancePageBuilder,
-      tabReselection: reselect,
       onSettingsTransitionProgress: (progress) {
         communitySurfaceProgress.value = progress;
       },
@@ -585,13 +564,6 @@ class _NativeControlsGate extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
-    final route = ModalRoute.of(context);
-    final coveringProgress = useAnimation(
-      route?.secondaryAnimation ?? kAlwaysDismissedAnimation,
-    );
-    return builder(
-      context,
-      (route?.isCurrent ?? true) && coveringProgress == 0,
-    );
+    return builder(context, useNativeRouteControlsVisible(context));
   }
 }

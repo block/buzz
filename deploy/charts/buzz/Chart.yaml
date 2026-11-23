@@ -7,7 +7,7 @@ description: |
   PostgreSQL and Redis. Configurable for single-node evaluation
   (subcharts on) and HA production (external services, existingSecret).
 type: application
-version: 0.1.12
+version: 0.1.13
 appVersion: "0.3.0"
 home: https://github.com/block/buzz
 sources:
@@ -23,8 +23,8 @@ maintainers:
     url: https://github.com/block
 annotations:
   artifacthub.io/changes: |
-    - kind: changed
-      description: Default the relay image to release 0.3.0.
+    - kind: added
+      description: Optional acceptance probe CronJob (acceptance.enabled) that runs buzz-acceptance from the relay image, with its key from a Secret or a file.
   artifacthub.io/license: Apache-2.0
 
 # Optional eval-only subcharts. Production deploys disable both and point

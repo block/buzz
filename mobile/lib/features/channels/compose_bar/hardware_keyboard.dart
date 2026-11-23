@@ -3,7 +3,9 @@ part of '../compose_bar.dart';
 // Hardware keyboards only: software Return keeps its newline. While the
 // suggestion picker is shown, Tab and Enter accept its first selectable row
 // (or do nothing when it has none); otherwise Enter sends and Tab traverses.
-// Shift+Enter leaves newline handling to the field.
+// Shift+Enter leaves newline handling to the field. An editor with no
+// [send], such as the message edit sheet, keeps Enter as a newline whenever
+// the picker is not shown.
 KeyEventResult _handleComposerHardwareKey(
   KeyEvent event,
   TextEditingController controller, {
@@ -12,7 +14,7 @@ KeyEventResult _handleComposerHardwareKey(
   required (String?, String?) renderedQuery,
   required bool pickerVisible,
   required VoidCallback? acceptSuggestion,
-  required Future<void> Function() send,
+  required Future<void> Function()? send,
 }) {
   if (inputOwned) return KeyEventResult.handled;
   // A new query must render its own rows before a key can select one.
@@ -50,10 +52,11 @@ KeyEventResult _handleComposerHardwareKey(
       event.physicalKey != PhysicalKeyboardKey.numpadEnter) {
     return KeyEventResult.ignored;
   }
+  if (!pickerVisible && send == null) return KeyEventResult.ignored;
   if (event is KeyDownEvent) {
     if (pickerVisible) {
       acceptSuggestion?.call();
-    } else {
+    } else if (send != null) {
       unawaited(send());
     }
   }

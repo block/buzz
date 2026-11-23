@@ -7,7 +7,6 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/me/default_agent.dart';
-import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/drafts/compose_drafts_provider.dart';
 import 'bestie_conversation.dart';
@@ -73,10 +72,7 @@ class QuickSendHost extends HookConsumerWidget {
   }
 }
 
-/// The Bestie a quick send will go to, named so the person can confirm it.
-///
-/// This is the saved choice, which may predate a change made on another
-/// device that this one hasn't synced; naming it lets the person catch that.
+/// The Bestie a quick send will go to.
 Future<Map<String, String?>> _bestie(WidgetRef ref) async {
   // Captured first: a switch during the awaits must not pair this
   // community's scope with another's Bestie.
@@ -87,31 +83,18 @@ Future<Map<String, String?>> _bestie(WidgetRef ref) async {
   if (bestie == null) {
     throw const _QuickSendRefused('Choose a Bestie in Buzz first.');
   }
-  if (ref.read(userCacheProvider)[bestie] == null) {
-    // Briefly: Siri can say "your Bestie" rather than keep the person waiting.
-    await ref
-        .read(userCacheProvider.notifier)
-        .preload([bestie])
-        .timeout(const Duration(seconds: 2), onTimeout: () => false);
-  }
   _ensureScope(ref, scope);
-  return {
-    'pubkey': bestie,
-    'name': ref.read(userCacheProvider)[bestie]?.label,
-    'scope': scope,
-  };
+  return {'pubkey': bestie, 'scope': scope};
 }
 
-/// The account and community a confirmed Bestie belongs to.
+/// The account and community a looked-up Bestie belongs to.
 String _scope(WidgetRef ref) =>
     '${ref.read(relayConfigProvider).baseUrl} ${ref.read(myPubkeyProvider)}';
 
-/// Refuses a send whose confirmation was for another account or community.
+/// Refuses a send whose Bestie was looked up in another account or community.
 void _ensureScope(WidgetRef ref, String scope) {
   if (_scope(ref) != scope) {
-    throw const _QuickSendRefused(
-      'Buzz switched communities. Try again to confirm the new Bestie.',
-    );
+    throw const _QuickSendRefused('Buzz switched communities. Try again.');
   }
 }
 
@@ -204,7 +187,8 @@ void _keepDraft(ComposeDraftsNotifier drafts, Channel dm, String content) {
     key: key,
     channelId: dm.id,
     text: before == null ? content : '${before.text}\n\n$content',
-    mentionKeys: before?.mentionKeys ?? const {},
+    mentions: before?.mentions ?? const [],
+    mentionsInvalid: before?.mentionsInvalid ?? false,
   );
 }
 

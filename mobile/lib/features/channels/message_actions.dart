@@ -23,11 +23,13 @@ import '../../shared/emoji/native_emoji_glyph.dart';
 import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/modal_scroll_handoff.dart';
 import '../../shared/reminders/remind_me_later_sheet.dart';
 import '../../shared/reminders/reminder_service.dart';
 import 'channel_management_provider.dart';
 import 'me/me_page.dart';
 import 'channels_provider.dart';
+import 'compose_bar.dart';
 import '../../shared/emoji/emoji_picker.dart';
 import 'reaction_row.dart';
 import '../../shared/emoji/recent_emoji_provider.dart';
@@ -107,7 +109,7 @@ Future<void> showMessageActions({
           constraints: BoxConstraints(
             maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.7,
           ),
-          child: SingleChildScrollView(
+          child: ModalScrollHandoff(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(
                 Grid.gutter,
@@ -148,7 +150,10 @@ Future<void> showMessageActions({
                           channelId: channelId,
                           currentPubkey: currentPubkey,
                         ),
-                        _FollowThreadTile(message: message),
+                        _FollowThreadTile(
+                          message: message,
+                          channelId: channelId,
+                        ),
                       ],
                     ),
                     SheetActionSection(
@@ -195,9 +200,8 @@ Future<void> showMessageActions({
                           title: const Text('Edit message'),
                           onTap: () {
                             if (!_selectMessageAction(sheetContext)) return;
-                            _showEditSheet(
+                            showMessageEditSheet(
                               context: context,
-                              ref: ref,
                               message: message,
                               channelId: channelId,
                             );
@@ -559,7 +563,14 @@ bool messageActionShowsUnread(
       channel != null &&
       readByChannelCatchUp(
         isDm: channel.isDm,
-        isReply: message.parentId != null,
+        // A message also sent to the channel is read only by its own mark,
+        // with or without a parent.
+        isReply:
+            message.parentId != null ||
+            message.tags.any(
+              (tag) =>
+                  tag.length >= 2 && tag[0] == 'broadcast' && tag[1] == '1',
+            ),
         highPriority: isHighPriorityEvent(message.tags, readerPubkey),
       );
   return isMessageUnread(
@@ -615,20 +626,37 @@ class _MarkReadUnreadTile extends ConsumerWidget {
         if (!_selectMessageAction(context)) return;
         final notifier = ref.read(readStateProvider.notifier);
         if (unread) {
-          // Advances the `msg:` marker and clears this message's own forced
-          // flag — a channel-level forced unread (channel tile) is a separate
-          // choice and stays untouched.
+          // Advances and publishes the `msg:` marker and clears this
+          // message's own forced flag — a channel-level manual unread
+          // (channel tile) is a separate choice and stays untouched.
           notifier.markContextRead(
             msgContextKey(message.id),
             message.createdAt,
+            explicit: true,
           );
         } else {
           // Read markers are monotonic and cannot move backward, so mark
-          // unread forces this message unread locally (session-local, does
-          // not survive relaunch). The channel surfaces it as unread too.
+          // unread forces this message unread on this device only (not
+          // synced, session-local). It ends when the message is read here
+          // or any device reads past it. The channel surfaces it as unread.
+          final readerPubkey = ref.read(myPubkeyProvider);
+          final channel = ref
+              .read(channelsProvider.notifier)
+              .channelById(channelId);
           notifier.markContextUnread(
             msgContextKey(message.id),
             channelId: channelId,
+            threadRootId: message.parentId == null
+                ? null
+                : message.rootId ?? message.parentId,
+            channelCatchUp:
+                readerPubkey != null &&
+                channel != null &&
+                readByChannelCatchUp(
+                  isDm: channel.isDm,
+                  isReply: message.parentId != null,
+                  highPriority: isHighPriorityEvent(message.tags, readerPubkey),
+                ),
           );
         }
       },
@@ -638,8 +666,9 @@ class _MarkReadUnreadTile extends ConsumerWidget {
 
 class _FollowThreadTile extends ConsumerWidget {
   final TimelineMessage message;
+  final String channelId;
 
-  const _FollowThreadTile({required this.message});
+  const _FollowThreadTile({required this.message, required this.channelId});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -652,13 +681,18 @@ class _FollowThreadTile extends ConsumerWidget {
     return ListTile(
       leading: Icon(following ? BuzzIcons.bellOff : BuzzIcons.bellRing),
       title: Text(following ? 'Unfollow thread' : 'Follow thread'),
-      onTap: () {
+      onTap: () async {
         if (!_selectMessageAction(context)) return;
+        final messenger = ScaffoldMessenger.maybeOf(context);
         final notifier = ref.read(threadFollowsProvider.notifier);
-        if (following) {
-          notifier.unfollowThread(rootId);
-        } else {
-          notifier.followThread(rootId);
+        final saved = await (following
+            ? notifier.unfollowThread(channelId, rootId)
+            : notifier.followThread(channelId, rootId));
+        if (!saved) {
+          messenger?.showFeedbackSnackBar(
+            SnackBar(content: Text(notifier.failureMessage)),
+            kind: ToastKind.error,
+          );
         }
       },
     );
@@ -894,73 +928,6 @@ class _QuickReactionCircle extends StatelessWidget {
       ),
     );
   }
-}
-
-void _showEditSheet({
-  required BuildContext context,
-  required WidgetRef ref,
-  required TimelineMessage message,
-  required String channelId,
-}) {
-  final controller = TextEditingController(text: message.content);
-  showBuzzModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
-    showDragHandle: true,
-    builder: (sheetContext) => Padding(
-      padding: EdgeInsets.fromLTRB(
-        Grid.gutter,
-        0,
-        Grid.gutter,
-        MediaQuery.viewInsetsOf(sheetContext).bottom,
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: controller,
-            autofocus: true,
-            minLines: 1,
-            maxLines: 5,
-            decoration: const InputDecoration(hintText: 'Edit message'),
-          ),
-          const SizedBox(height: Grid.xxs),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              TextButton(
-                onPressed: () => Navigator.of(sheetContext).pop(),
-                child: const Text('Cancel'),
-              ),
-              const SizedBox(width: Grid.half),
-              FilledButton(
-                onPressed: () {
-                  final text = controller.text.trim();
-                  if (text.isEmpty || text == message.content) {
-                    Navigator.of(sheetContext).pop();
-                    return;
-                  }
-                  ref
-                      .read(channelActionsProvider)
-                      .editMessage(
-                        channelId: channelId,
-                        eventId: message.id,
-                        content: text,
-                        mediaTags: buildCustomEmojiTags(
-                          text,
-                          ref.read(customEmojiListProvider),
-                        ),
-                      );
-                  Navigator.of(sheetContext).pop();
-                },
-                child: const Text('Save'),
-              ),
-            ],
-          ),
-        ],
-      ),
-    ),
-  );
 }
 
 void _confirmDelete({

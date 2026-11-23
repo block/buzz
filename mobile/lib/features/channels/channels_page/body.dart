@@ -2,8 +2,6 @@ part of '../channels_page.dart';
 
 class _ChannelsBody extends StatelessWidget {
   final Widget? soloSliver;
-  final bool showTeam;
-  final bool showTeamHeading;
   final VoidCallback? onInbox;
   final List<Channel>? channels;
   final AsyncValue<List<Channel>> channelsAsync;
@@ -19,8 +17,6 @@ class _ChannelsBody extends StatelessWidget {
 
   const _ChannelsBody({
     this.soloSliver,
-    this.showTeam = true,
-    this.showTeamHeading = false,
     required this.onInbox,
     required this.channels,
     required this.channelsAsync,
@@ -108,74 +104,27 @@ class _ChannelsBody extends StatelessWidget {
                     padding: const EdgeInsets.only(top: Grid.twelve),
                     sliver: SliverToBoxAdapter(child: inbox),
                   ),
-                if (soloSliver != null && showTeamHeading)
-                  SliverToBoxAdapter(
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(
-                        Grid.gutter,
-                        Grid.lg,
-                        Grid.gutter,
-                        0,
-                      ),
-                      child: Semantics(
-                        header: true,
-                        child: Text(
-                          'Solo',
-                          style: navigationSectionTextStyle.copyWith(
-                            fontSize: 17,
-                            height: 22 / 17,
-                            color: navigationPrimaryForeground(context),
+                usesPinnedGradient
+                    ? _SliverChannelsList(
+                        channels: loadedChannels,
+                        currentPubkey: currentPubkey,
+                        onSelectChannel: onSelectChannel,
+                        soloSliver: soloSliver,
+                      )
+                    : DecoratedSliver(
+                        decoration: BoxDecoration(
+                          color: context.colors.surface,
+                          borderRadius: const BorderRadius.vertical(
+                            top: Radius.circular(Radii.dialog),
                           ),
                         ),
-                      ),
-                    ),
-                  ),
-                ?soloSliver,
-                if (showTeamHeading && showTeam)
-                  SliverToBoxAdapter(
-                    child: Padding(
-                      padding: const EdgeInsets.fromLTRB(
-                        Grid.gutter,
-                        Grid.lg,
-                        Grid.gutter,
-                        0,
-                      ),
-                      child: Semantics(
-                        header: true,
-                        child: Text(
-                          'Team',
-                          style: navigationSectionTextStyle.copyWith(
-                            fontSize: 17,
-                            height: 22 / 17,
-                            color: navigationPrimaryForeground(context),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                SliverOffstage(
-                  key: const ValueKey('messages-team-inventory'),
-                  offstage: !showTeam,
-                  sliver: usesPinnedGradient
-                      ? _SliverChannelsList(
+                        sliver: _SliverChannelsList(
                           channels: loadedChannels,
                           currentPubkey: currentPubkey,
                           onSelectChannel: onSelectChannel,
-                        )
-                      : DecoratedSliver(
-                          decoration: BoxDecoration(
-                            color: context.colors.surface,
-                            borderRadius: const BorderRadius.vertical(
-                              top: Radius.circular(Radii.dialog),
-                            ),
-                          ),
-                          sliver: _SliverChannelsList(
-                            channels: loadedChannels,
-                            currentPubkey: currentPubkey,
-                            onSelectChannel: onSelectChannel,
-                          ),
+                          soloSliver: soloSliver,
                         ),
-                ),
+                      ),
                 SliverToBoxAdapter(
                   child: SizedBox(height: MediaQuery.paddingOf(context).bottom),
                 ),
@@ -216,16 +165,25 @@ class _SliverChannelsList extends HookConsumerWidget {
   final String? currentPubkey;
   final Future<void> Function(Channel channel) onSelectChannel;
 
+  /// Home's Solo chats, rendered at the Solo section's place in the order.
+  /// Without it, Solo chats stay out of this list.
+  final Widget? soloSliver;
+
   const _SliverChannelsList({
     required this.channels,
     required this.currentPubkey,
     required this.onSelectChannel,
+    this.soloSliver,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final readState = ref.watch(readStateProvider);
     final sectionsState = ref.watch(channelSectionsProvider);
+    final layout = ref.watch(sidebarLayoutProvider);
+    final legacySoloIds = ref.watch(
+      meGroupsProvider.select((g) => g.value?.channels ?? const <String>[]),
+    );
     final mutesState = ref.watch(channelMutesProvider);
     final mutedChannelIds = {
       for (final entry in mutesState.store.channels.entries)
@@ -236,13 +194,41 @@ class _SliverChannelsList extends HookConsumerWidget {
       for (final entry in starsState.store.channels.entries)
         if (entry.value.starred) entry.key,
     };
+    bool isSoloRow(Channel channel) => channel.isSoloChat(legacySoloIds);
+    // Team conversations own this list's read-state seeding and highlights;
+    // Solo rows keep Solo's own unread tracking.
     final visibleChannels = channels
-        .where((channel) => channel.isMember && !channel.isArchived)
+        .where(
+          (channel) =>
+              channel.isMember && !channel.isArchived && !isSoloRow(channel),
+        )
         .toList();
-    final streamChannels = visibleChannels
-        .where((channel) => channel.isStream)
-        .toList();
-    final unsortedDms = visibleChannels.where((channel) => channel.isDm);
+    final soloChannels = soloSliver == null
+        ? const <Channel>[]
+        : channels
+              .where((c) => c.isMember && !c.isArchived && isSoloRow(c))
+              .toList();
+    // Place each row once, as desktop's sidebar does: Starred, then its
+    // workspace, then its home section. Mobile doesn't show forums.
+    final sectionKeyOf = <String, String>{};
+    final buckets = <String, List<Channel>>{};
+    for (final channel in [...visibleChannels, ...soloChannels]) {
+      if (!channel.isStream && !channel.isDm) continue;
+      final solo = isSoloRow(channel);
+      final key = layout.sectionKeyFor(
+        channel.id,
+        starred: starredChannelIds.contains(channel.id),
+        home: solo
+            ? 'solo'
+            : channel.isDm
+            ? 'dms'
+            : 'channels',
+      );
+      sectionKeyOf[channel.id] = key;
+      // Solo's own section lists its chats itself.
+      if (key != 'solo') (buckets[key] ??= []).add(channel);
+    }
+    final unsortedDms = buckets['dms'] ?? const <Channel>[];
     // Rebuild only when the DM order changes, not for every profile fetch.
     final dmOrder = ref.watch(
       identityNameSourcesProvider.select(
@@ -262,9 +248,6 @@ class _SliverChannelsList extends HookConsumerWidget {
     final dmChannels = unsortedDms.toList()
       ..sort((a, b) => dmRank[a.id]!.compareTo(dmRank[b.id]!));
 
-    final starredExpanded = useState(true);
-    final channelsExpanded = useState(true);
-    final dmsExpanded = useState(true);
     final sortState = ref.watch(channelSortProvider);
     final filters = ref.watch(channelFilterProvider);
     useListenable(filters);
@@ -272,24 +255,15 @@ class _SliverChannelsList extends HookConsumerWidget {
     final clock = useState(0);
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final activity = <String, AsyncValue<int?>>{};
-    final liveFilterSectionIds = {
-      for (final section in sectionsState.store.sections) section.id,
-    };
-    String filterGroupFor(Channel channel) {
-      if (channel.isDm) return 'dms';
-      if (starredChannelIds.contains(channel.id)) return 'starred';
-      final assignment = sectionsState.store.assignments[channel.id];
-      return liveFilterSectionIds.contains(assignment)
-          ? sectionSortGroupKey(assignment!)
-          : 'channels';
-    }
 
     var nextExpiry = 0;
-    for (final channel in visibleChannels) {
-      final group = filterGroupFor(channel);
+    for (final MapEntry(key: id, value: key) in sectionKeyOf.entries) {
+      final group = sidebarGroupKey(key);
       if (filters?.store.modeFor(group) != ChannelFilterMode.active) continue;
-      final evidence = ref.watch(channelFilterActivityProvider(channel.id));
-      activity[channel.id] = evidence;
+      final evidence = ref.watch(channelFilterActivityProvider(id));
+      activity[id] = evidence;
+      // Solo uses the same evidence and handles its own row expiry.
+      if (key == 'solo') continue;
       final at = evidence.asData?.value;
       if (at == null) continue;
       final expiry = at + filters!.store.windowFor(group);
@@ -362,57 +336,33 @@ class _SliverChannelsList extends HookConsumerWidget {
     final unreadChannelIds = highlights.unread
         .where((id) => seeded(id) || locallyForcedChannelIds.contains(id))
         .toSet();
+    final rowUnreadChannelIds = unreadChannelIds.intersection(
+      highlights.rowUnread,
+    );
     final attentionChannelIds = highlights.attention.where(seeded).toSet();
-    // Build sorted user-defined sections and compute which stream channels
-    // belong to each section. Channels not assigned to any valid section fall
-    // through to the built-in "Channels" list.
-    final userSections = sectionsState.store.sections.toList()
-      ..sort((a, b) => a.order.compareTo(b.order));
-    final sectionAssignments = sectionsState.store.assignments;
-    final validSectionIds = {for (final s in userSections) s.id};
-    final assignedChannelIds = {
-      for (final entry in sectionAssignments.entries)
-        if (validSectionIds.contains(entry.value)) entry.key,
-    };
-    // Starred is exclusive: a starred channel lives only in the Starred section,
-    // not in its custom section or the default Channels list.
-    final starredStreamChannels = sortChannelsForList(
-      streamChannels.where((c) => starredChannelIds.contains(c.id)).toList(),
-      sortState.sortModeFor('starred'),
-    );
-    final ungroupedStreamChannels = sortChannelsForList(
-      streamChannels
-          .where(
-            (c) =>
-                !assignedChannelIds.contains(c.id) &&
-                !starredChannelIds.contains(c.id),
-          )
-          .toList(),
-      sortState.sortModeFor('channels'),
-    );
-    // DMs default to the display-label alphabetical order (labels can differ
-    // from channel names); Recent mode reorders by last message time.
-    final sortedDmChannels =
-        sortState.sortModeFor('dms') == ChannelSortMode.recent
-        ? sortChannelsForList(dmChannels, ChannelSortMode.recent)
-        : dmChannels;
+    // Solo rows show Solo's own unread state; filters must agree with it.
+    final soloUnreadIds = soloSliver == null
+        ? const <String>{}
+        : ref.watch(meUnreadChannelIdsProvider);
 
-    final liveSectionIds = [for (final s in userSections) s.id];
-    void setSortMode(String groupKey, ChannelSortMode mode) {
-      ref
-          .read(channelSortProvider.notifier)
-          .setSortModeFor(groupKey, mode, liveSectionIds: liveSectionIds);
-    }
+    final liveSectionIds = [for (final s in layout.sections) s.id];
+    // Desktop's unified sort record is read-only here.
+    ValueChanged<ChannelSortMode>? sortSetter(String groupKey) =>
+        sortState.editable
+        ? (mode) => ref
+              .read(channelSortProvider.notifier)
+              .setSortModeFor(groupKey, mode, liveSectionIds: liveSectionIds)
+        : null;
 
     final sectionExpandedStates = useState<Map<String, bool>>({});
 
-    bool sectionExpanded(String sectionId) =>
-        sectionExpandedStates.value[sectionId] ?? true;
+    bool sectionExpanded(String key) =>
+        sectionExpandedStates.value[key] ?? true;
 
-    void toggleSection(String sectionId) {
+    void toggleSection(String key) {
       sectionExpandedStates.value = {
         ...sectionExpandedStates.value,
-        sectionId: !sectionExpanded(sectionId),
+        key: !sectionExpanded(key),
       };
     }
 
@@ -420,9 +370,10 @@ class _SliverChannelsList extends HookConsumerWidget {
       final evidence = activity[channel.id];
       return channelMatchesFilter(
         mode: filters?.store.modeFor(group) ?? ChannelFilterMode.all,
-        unread:
-            unreadChannelIds.contains(channel.id) ||
-            attentionChannelIds.contains(channel.id),
+        unread: isSoloRow(channel)
+            ? soloUnreadIds.contains(channel.id)
+            : rowUnreadChannelIds.contains(channel.id) ||
+                  attentionChannelIds.contains(channel.id),
         activitySeconds: evidence?.asData?.value,
         activityKnown: evidence?.asData != null,
         nowSeconds: now,
@@ -432,197 +383,207 @@ class _SliverChannelsList extends HookConsumerWidget {
       );
     }
 
-    List<Channel> customRoster(String id) => sortChannelsForList(
-      streamChannels
-          .where(
-            (c) =>
-                sectionAssignments[c.id] == id &&
-                !starredChannelIds.contains(c.id),
-          )
-          .toList(),
-      sortState.sortModeFor(sectionSortGroupKey(id)),
-    );
-
-    return SliverPadding(
-      padding: EdgeInsets.zero,
-      sliver: SliverMainAxisGroup(
-        slivers: [
-          if (activity.values.any((value) => value.hasError))
-            SliverToBoxAdapter(
-              child: ListTile(
-                title: const Text(
-                  'Some channel activity is unavailable. Channels remain visible.',
-                ),
-                trailing: TextButton(
-                  onPressed: () {
-                    for (final entry in activity.entries) {
-                      if (entry.value.hasError) {
-                        ref.invalidate(
-                          channelFilterActivityProvider(entry.key),
-                        );
-                      }
-                    }
-                  },
-                  child: const Text('Retry'),
-                ),
-              ),
+    // Only the team sections record can be edited, and only until desktop's
+    // unified workspaces exist. The mobile display order is stored separately.
+    final teamSections = sectionsState.editable
+        ? (sectionsState.store.sections.toList()
+            ..sort((a, b) => a.order.compareTo(b.order)))
+        : const <ChannelSection>[];
+    final teamSectionIds = {for (final s in teamSections) s.id};
+    // A Team workspace's layout ID differs from its section ID when a Solo
+    // project shares that ID.
+    String? teamIdOf(String key) => switch (layout.section(key.substring(6))) {
+      WorkspaceSection(:final teamId?) when teamSectionIds.contains(teamId) =>
+        teamId,
+      _ => null,
+    };
+    Widget row(Channel channel, String key) => isSoloRow(channel)
+        ? Padding(
+            key: ValueKey(channel.id),
+            padding: const EdgeInsets.symmetric(
+              horizontal: Grid.gutter - Grid.xxs,
             ),
-          if (visibleChannels.isEmpty)
-            const SliverToBoxAdapter(child: _EmptyState())
-          else ...[
-            // Starred channels (exclusive — pinned above all sections).
-            if (starredStreamChannels.isNotEmpty)
-              _ChannelSection(
-                key: const ValueKey('starred'),
-                title: 'Starred',
-                expanded: starredExpanded.value,
-                onToggle: () => starredExpanded.value = !starredExpanded.value,
-                channels: starredStreamChannels,
-                isVisible: (c) => visible('starred', c),
-                unreadChannelIds: unreadChannelIds,
-                attentionChannelIds: attentionChannelIds,
-                mutedChannelIds: mutedChannelIds,
-                currentPubkey: currentPubkey,
-                emptyLabel: '',
-                sortMode: sortState.sortModeFor('starred'),
-                onSortModeChange: (mode) => setSortMode('starred', mode),
-                onSelectChannel: openFilteredChannel,
+            child: SoloChatTile(channel: channel),
+          )
+        : _ChannelTile(
+            key: ValueKey(channel.id),
+            channel: channel,
+            isUnread: unreadChannelIds.contains(channel.id),
+            boldUnread: rowUnreadChannelIds.contains(channel.id),
+            hasAttention: attentionChannelIds.contains(channel.id),
+            isMuted: mutedChannelIds.contains(channel.id),
+            currentPubkey: currentPubkey,
+            onTap: () => openFilteredChannel(channel),
+            sectionId: key.startsWith('group:') ? teamIdOf(key) : null,
+          );
+
+    // [layoutId] keys the workspace's saved filter; it differs from the Team
+    // section's ID when a Solo project shares that ID.
+    _SectionEdits editsFor(ChannelSection section, String layoutId) => (
+      onRename: () async {
+        final config = ref.read(relayConfigProvider);
+        final edit = await showSectionRenameEditor(context, section);
+        if (!context.mounted || edit == null) return;
+        final current = ref.read(relayConfigProvider);
+        if (current.storedOrigin != config.storedOrigin ||
+            current.nsec != config.nsec) {
+          return;
+        }
+        ref
+            .read(channelSectionsProvider.notifier)
+            .renameSection(
+              section.id,
+              edit.name == section.name.trim() ? null : edit.name,
+              icon: edit.icon == section.icon ? null : edit.icon,
+            );
+      },
+      onDelete: () async {
+        final confirmed = await showBuzzDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: Text('Delete "${section.name}"?'),
+            content: const Text(
+              'Channels in this section will move back to the main list.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
               ),
-            // User-defined sections for stream channels, in user-defined order.
-            for (final section in userSections) ...[
-              if (section != userSections.first ||
-                  starredStreamChannels.isNotEmpty)
-                const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
-              _CustomChannelSection(
-                key: ValueKey(section.id),
-                section: section,
-                channels: customRoster(section.id),
-                isVisible: (c) => visible(sectionSortGroupKey(section.id), c),
-                unreadChannelIds: unreadChannelIds,
-                attentionChannelIds: attentionChannelIds,
-                mutedChannelIds: mutedChannelIds,
-                currentPubkey: currentPubkey,
-                expanded: sectionExpanded(section.id),
-                isFirst: userSections.first.id == section.id,
-                isLast: userSections.last.id == section.id,
-                onToggle: () => toggleSection(section.id),
-                onRename: () async {
-                  final name = await showBuzzDialog<String>(
-                    context: context,
-                    builder: (_) => _SectionNameDialog(
-                      title: 'Rename Section',
-                      confirmLabel: 'Rename',
-                      initialValue: section.name,
-                    ),
-                  );
-                  if (name != null && name.isNotEmpty) {
-                    ref
-                        .read(channelSectionsProvider.notifier)
-                        .renameSection(section.id, name);
-                  }
-                },
-                onDelete: () async {
-                  final confirmed = await showBuzzDialog<bool>(
-                    context: context,
-                    builder: (_) => AlertDialog(
-                      title: Text('Delete "${section.name}"?'),
-                      content: const Text(
-                        'Channels in this section will move back to the main list.',
-                      ),
-                      actions: [
-                        TextButton(
-                          onPressed: () => Navigator.pop(context, false),
-                          child: const Text('Cancel'),
-                        ),
-                        TextButton(
-                          onPressed: () => Navigator.pop(context, true),
-                          child: Text(
-                            'Delete',
-                            style: TextStyle(color: context.colors.error),
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
-                  if (confirmed == true && context.mounted) {
-                    // Local section removal must work without filter-read/write
-                    // authority. Cleanup is optional for this never-reused ID.
-                    ref
-                        .read(channelSectionsProvider.notifier)
-                        .deleteSection(section.id);
-                    try {
-                      await filters?.clearDeletedSection(section.id);
-                    } catch (_) {
-                      if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text(
-                              'Section deleted. Its saved filter could not be cleared.',
-                            ),
-                          ),
-                        );
-                      }
-                    }
-                  }
-                },
-                onMoveUp: () => ref
-                    .read(channelSectionsProvider.notifier)
-                    .moveSectionUp(section.id),
-                onMoveDown: () => ref
-                    .read(channelSectionsProvider.notifier)
-                    .moveSectionDown(section.id),
-                sortMode: sortState.sortModeFor(
-                  sectionSortGroupKey(section.id),
+              TextButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: Text(
+                  'Delete',
+                  style: TextStyle(color: context.colors.error),
                 ),
-                onSortModeChange: (mode) =>
-                    setSortMode(sectionSortGroupKey(section.id), mode),
-                onSelectChannel: openFilteredChannel,
               ),
             ],
-            if (userSections.isNotEmpty || starredStreamChannels.isNotEmpty)
+          ),
+        );
+        // Desktop can lock legacy edits while the confirmation is open; the
+        // section and its saved filter then both stay.
+        if (confirmed == true &&
+            context.mounted &&
+            ref.read(channelSectionsProvider).editable) {
+          // Local section removal must work without filter-read/write
+          // authority. Cleanup is optional for this never-reused ID.
+          ref.read(channelSectionsProvider.notifier).deleteSection(section.id);
+          try {
+            await filters?.clearDeletedSection(layoutId);
+          } catch (_) {
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text(
+                    'Section deleted. Its saved filter could not be cleared.',
+                  ),
+                ),
+              );
+            }
+          }
+        }
+      },
+    );
+
+    Widget? sectionFor(String key) {
+      final rows = buckets[key] ?? const <Channel>[];
+      final group = sidebarGroupKey(key);
+      ChannelSortMode mode() => sortState.sortModeFor(group);
+      if (key == 'solo') return soloSliver;
+      if (key == 'starred' || key == 'channels' || key == 'dms') {
+        if (key == 'starred' && rows.isEmpty) return null;
+        return _ChannelSection(
+          key: ValueKey(key),
+          title: switch (key) {
+            'starred' => 'Starred',
+            'channels' => 'Team',
+            _ => 'Direct messages',
+          },
+          group: group,
+          expanded: sectionExpanded(key),
+          onToggle: () => toggleSection(key),
+          // DMs default to the display-label alphabetical order (labels can
+          // differ from channel names); Recent mode reorders by last message.
+          channels: key == 'dms' && mode() == ChannelSortMode.alpha
+              ? dmChannels
+              : sortChannelsForList(rows, mode()),
+          isVisible: (c) => visible(group, c),
+          buildRow: (c) => row(c, key),
+          emptyLabel: switch (key) {
+            'channels' => 'No stream channels yet',
+            'dms' => 'No direct messages yet',
+            _ => '',
+          },
+          sortMode: mode(),
+          onSortModeChange: sortSetter(group),
+        );
+      }
+      final section = layout.section(key.substring(6));
+      if (section == null) return null;
+      final teamId = teamIdOf(key);
+      final team = teamSections.where((s) => s.id == teamId).firstOrNull;
+      return _CustomChannelSection(
+        key: ValueKey(section.id),
+        section: section,
+        channels: sortChannelsForList(rows, mode()),
+        isVisible: (c) => visible(group, c),
+        buildRow: (c) => row(c, key),
+        expanded: sectionExpanded(section.id),
+        onToggle: () => toggleSection(section.id),
+        edits: team == null ? null : editsFor(team, section.id),
+        sortMode: mode(),
+        onSortModeChange: sortSetter(group),
+      );
+    }
+
+    final keys = layout.sectionKeys.where((key) => key != 'forums').toList();
+    final orderKey = ref.watch(mobileSectionOrderKeyProvider);
+    final saved = orderKey == null
+        ? const <String>[]
+        : ref.watch(mobileSectionOrderProvider(orderKey)).value ??
+              const <String>[];
+    final labels = <String, String>{};
+    final sections = <Widget>[];
+    for (final key in resolveMobileSectionOrder(keys, saved)) {
+      final section = sectionFor(key);
+      if (section == null) continue;
+      sections.add(section);
+      labels[key] = switch (key) {
+        'starred' => 'Starred',
+        'solo' => 'Solo',
+        'channels' => 'Team',
+        'dms' => 'Direct messages',
+        _ => layout.section(key.substring(6))!.name,
+      };
+    }
+    final empty = sectionKeyOf.isEmpty && layout.sections.isEmpty;
+    final inventory = SliverMainAxisGroup(
+      slivers: [
+        if (empty) ...[
+          ?soloSliver,
+          const SliverToBoxAdapter(child: _EmptyState()),
+        ] else
+          for (final (index, section) in sections.indexed) ...[
+            if (index > 0)
               const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
-            _ChannelSection(
-              key: const ValueKey('channels'),
-              title: 'Channels',
-              expanded: channelsExpanded.value,
-              onToggle: () => channelsExpanded.value = !channelsExpanded.value,
-              channels: ungroupedStreamChannels,
-              isVisible: (c) => visible('channels', c),
-              unreadChannelIds: unreadChannelIds,
-              attentionChannelIds: attentionChannelIds,
-              mutedChannelIds: mutedChannelIds,
-              currentPubkey: currentPubkey,
-              emptyLabel: 'No stream channels yet',
-              sortMode: sortState.sortModeFor('channels'),
-              onSortModeChange: (mode) => setSortMode('channels', mode),
-              onSelectChannel: openFilteredChannel,
-            ),
-            const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
-            _ChannelSection(
-              key: const ValueKey('dms'),
-              title: 'DMs',
-              expanded: dmsExpanded.value,
-              onToggle: () => dmsExpanded.value = !dmsExpanded.value,
-              channels: sortedDmChannels,
-              isVisible: (c) => visible('dms', c),
-              unreadChannelIds: unreadChannelIds,
-              attentionChannelIds: attentionChannelIds,
-              mutedChannelIds: mutedChannelIds,
-              currentPubkey: currentPubkey,
-              emptyLabel: 'No direct messages yet',
-              sortMode: sortState.sortModeFor('dms'),
-              onSortModeChange: (mode) => setSortMode('dms', mode),
-              onSelectChannel: openFilteredChannel,
-            ),
+            section,
           ],
-        ],
-      ),
+      ],
+    );
+    final content = _ActivityRecovery(activity: activity, child: inventory);
+    if (orderKey == null) return content;
+    return SectionOrderScope(
+      labels: labels,
+      defaultOrder: keys,
+      storageKey: orderKey,
+      child: content,
     );
   }
 }
 
-/// Says when unread status is not syncing with other devices: retries on tap,
-/// or, once the relay refused read state for the session, says how to recover.
+/// Says when unread status is not syncing with other devices: retries on tap
+/// while connected, says it resumes on reconnect while offline, or, once the
+/// relay refused read state for the session, says how to recover.
 class _ReadStateSyncNotice extends ConsumerWidget {
   const _ReadStateSyncNotice();
 
@@ -634,16 +595,26 @@ class _ReadStateSyncNotice extends ConsumerWidget {
             (failed: state.syncFailed, unsupported: state.syncUnsupported),
       ),
     );
-    if (!failed) return const SizedBox.shrink();
+    final online = ref.watch(
+      relaySessionProvider.select(
+        (session) => session.status == SessionStatus.connected,
+      ),
+    );
+    // Unsupported outlasts unrelated successes: marks stay unsendable until
+    // a new session, so it does not depend on the current error.
+    if (!failed && !unsupported) return const SizedBox.shrink();
     final text = Text(
       unsupported
           ? 'Unread status can’t sync with your other devices right now. Sign in again or restart Buzz to try again.'
-          : 'Unread status isn’t syncing with your other devices. Tap to retry.',
+          : online
+          ? 'Unread status isn’t syncing with your other devices. Tap to retry.'
+          // Reconnecting resyncs read state on its own.
+          : 'Unread status isn’t syncing with your other devices. It will retry when you’re back online.',
       style: context.textTheme.bodySmall?.copyWith(
         color: context.colors.onSurfaceVariant,
       ),
     );
-    if (unsupported) {
+    if (unsupported || !online) {
       return Padding(
         key: const Key('read-state-sync-notice'),
         padding: const EdgeInsets.fromLTRB(

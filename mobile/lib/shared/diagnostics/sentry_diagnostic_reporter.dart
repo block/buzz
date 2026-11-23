@@ -52,26 +52,50 @@ class SentryDiagnosticReporter implements DiagnosticReporter {
 
   @override
   void leaveBreadcrumb(DiagnosticBreadcrumb breadcrumb) => _drop(
-    () => _hub.addBreadcrumb(
-      Breadcrumb(
+    () => _hub.addBreadcrumb(switch (breadcrumb) {
+      NetworkBreadcrumb(:final event) => Breadcrumb(
         category: DiagnosticFilter.networkCategory,
-        level: breadcrumb.event.outcome == NetworkOutcome.failure
+        level: event.outcome == NetworkOutcome.failure
             ? SentryLevel.warning
             : SentryLevel.info,
         data: {
-          for (final entry in _attributes(breadcrumb.event).entries)
+          for (final entry in _attributes(event).entries)
             entry.key: entry.value.value,
         },
       ),
-    ),
+      ScreenBreadcrumb(:final screen) => Breadcrumb(
+        category: DiagnosticFilter.navigationCategory,
+        data: {DiagnosticFilter.screenKey: screen.name},
+      ),
+    }),
   );
 
   @override
-  void setMember(String? pubkey) => _drop(
-    () => _hub.configureScope(
-      (scope) => scope.setUser(pubkey == null ? null : SentryUser(id: pubkey)),
-    ),
-  );
+  String? get member => _member;
+  String? _member;
+
+  @override
+  int get memberChanges => _memberChanges;
+  var _memberChanges = 0;
+
+  @override
+  void setMember(String? pubkey) {
+    final previous = _member;
+    _member = pubkey;
+    if (pubkey != previous) _memberChanges++;
+    _drop(
+      () => _hub.configureScope((scope) {
+        final user = scope.setUser(
+          pubkey == null ? null : SentryUser(id: pubkey),
+        );
+        // The trail holds the previous member's network events, with their
+        // relay's host. Leaving a member clears it, so none of them reach
+        // the next member's reports.
+        if (previous == null || previous == pubkey) return user;
+        return Future.wait([user, scope.clearBreadcrumbs()]);
+      }),
+    );
+  }
 
   @override
   bool get reporting => true;

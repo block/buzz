@@ -81,12 +81,13 @@ struct SettingMenuSelectionTests {
       // Invoke the actual menu UIAction through UIKit, without synthesizing a
       // Flutter method-channel message or depending on dismissal callback order.
       let selection = UIButton(primaryAction: choices[0])
+      let interaction = UIContextMenuInteraction(delegate: button)
+      let configuration = UIContextMenuConfiguration(identifier: nil, previewProvider: nil, actionProvider: nil)
+      button.contextMenuInteraction(interaction, willDisplayMenuFor: configuration, animator: nil)
       selection.sendActions(for: .touchUpInside)
       precondition(messenger.selections == (deferred ? [] : [0]))
       if deferred {
-        precondition(button.pendingMenuAction != nil)
-        button.pendingMenuAction?()
-        button.pendingMenuAction = nil
+        button.contextMenuInteraction(interaction, willEndFor: configuration, animator: nil)
         precondition(messenger.selections == [0])
       }
     }

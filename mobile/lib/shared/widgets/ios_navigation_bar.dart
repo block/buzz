@@ -16,6 +16,7 @@ import 'avatar_image.dart';
 import 'dm_header_portrait.dart';
 import 'dm_header_cluster.dart';
 import 'app_route_observer.dart';
+import 'bottom_up_page_route.dart';
 import 'ios_navigation_metrics.dart';
 export 'ios_navigation_metrics.dart';
 
@@ -205,6 +206,18 @@ class IosNavigationBar extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final channel = useState<MethodChannel?>(null);
     final viewKey = useMemoized(GlobalKey.new);
+    final reportedSlot = useState<({int layout, Rect rect})?>(null);
+    final layoutCounter = useRef(0);
+    final portraitHeader = IosNavigationMetrics.of(context).portraitHeaderFor(
+      View.of(context).physicalSize / View.of(context).devicePixelRatio,
+    );
+    final inlinePortrait = portraitHeader != null && titleAvatars.isNotEmpty;
+    final portraitLayout = useMemoized(() => ++layoutCounter.value, [
+      inlinePortrait,
+      portraitHeader,
+    ]);
+    final slot = reportedSlot.value;
+    final portraitSlot = slot?.layout == portraitLayout ? slot?.rect : null;
     final latest = useRef(this)..value = this;
     final offset = IosNavigationScrollScope.maybeOf(context);
     final collapseRange = IosNavigationMetrics.of(context).largeTitleHeight;
@@ -279,7 +292,7 @@ class IosNavigationBar extends HookConsumerWidget {
         colors.onPrimaryContainer,
       ],
     );
-    final iconImages = useState(<String, String>{});
+    final iconImages = useState(<String, ({IconData icon, String data})>{});
     final icons = <String, IconData>{
       if (leading?.icon != null) 'leading': leading!.icon!,
       for (var i = 0; i < actions.length; i++)
@@ -299,7 +312,7 @@ class IosNavigationBar extends HookConsumerWidget {
       var active = true;
       unawaited(
         Future.microtask(() async {
-          final rendered = <String, String>{};
+          final rendered = <String, ({IconData icon, String data})>{};
           for (final entry in icons.entries) {
             final recorder = ui.PictureRecorder();
             final painter = TextPainter(
@@ -325,7 +338,10 @@ class IosNavigationBar extends HookConsumerWidget {
               format: ui.ImageByteFormat.png,
             );
             if (bytes != null) {
-              rendered[entry.key] = base64Encode(bytes.buffer.asUint8List());
+              rendered[entry.key] = (
+                icon: entry.value,
+                data: base64Encode(bytes.buffer.asUint8List()),
+              );
             }
             image.dispose();
             picture.dispose();
@@ -341,7 +357,8 @@ class IosNavigationBar extends HookConsumerWidget {
       final retained = avatarImages.value[id];
       return {
         ...action._encode(id),
-        if (iconImages.value[id] != null) 'iconData': iconImages.value[id],
+        if (action.icon != null && iconImages.value[id]?.icon == action.icon)
+          'iconData': iconImages.value[id]!.data,
         'avatarBackground': colors.primaryContainer.toARGB32(),
         'avatarForeground': colors.onPrimaryContainer.toARGB32(),
         if (retained?.key == key) 'imageData': retained!.data,
@@ -351,6 +368,8 @@ class IosNavigationBar extends HookConsumerWidget {
     final portraitTopPadding = centerTitleInPane ? 12.0 : 0.0;
     final payload = <String, Object?>{
       'title': title,
+      'inlinePortrait': inlinePortrait,
+      'portraitLayout': portraitLayout,
       'titleMaxWidth': titleMaxWidth,
       'portraitTopPadding': portraitTopPadding,
       'titleHasAnimatedPortrait':
@@ -377,7 +396,7 @@ class IosNavigationBar extends HookConsumerWidget {
       'backdropOnly': backdropOnly,
       'standaloneControl': standaloneControl,
       'standaloneLargeTitle': standaloneLargeTitle,
-      'horizontalControls': horizontalControls,
+      'horizontalControls': horizontalControls || inlinePortrait,
       'centerTitleInPane': centerTitleInPane,
       'titleInsetLeft': titleInsets.left,
       'titleInsetRight': titleInsets.right,
@@ -399,6 +418,33 @@ class IosNavigationBar extends HookConsumerWidget {
       final current = channel.value;
       if (current == null) return null;
       current.setMethodCallHandler((call) async {
+        if (call.method == 'portraitHeaderGeometry') {
+          if (context.mounted) {
+            IosNavigationMetrics.updatePortraitHeader(
+              context,
+              call.arguments as List<Object?>,
+            );
+          }
+          return;
+        }
+        if (call.method == 'portraitSlot') {
+          final v = (call.arguments as List).cast<num>();
+          if (v.length == 5 &&
+              v.every((n) => n.isFinite) &&
+              v[4] == layoutCounter.value &&
+              context.mounted) {
+            reportedSlot.value = (
+              layout: v[4].toInt(),
+              rect: Rect.fromLTWH(
+                v[0].toDouble(),
+                v[1].toDouble(),
+                v[2].toDouble(),
+                v[3].toDouble(),
+              ),
+            );
+          }
+          return;
+        }
         if (call.method == 'railGeometry') {
           if (context.mounted) {
             IosNavigationMetrics.updateRail(
@@ -471,7 +517,9 @@ class IosNavigationBar extends HookConsumerWidget {
           try {
             await current.invokeMethod<void>('configure', payload);
             if (!active) return;
-            if (latest.value.onReadyChanged != null) {
+            if (latest.value.onReadyChanged != null ||
+                latest.value.titleAvatars.isNotEmpty ||
+                latest.value.backdropOnly) {
               await current.invokeMethod<void>('prepareForReveal');
             }
             report(true);
@@ -530,6 +578,9 @@ class IosNavigationBar extends HookConsumerWidget {
       }
 
       void scheduleRestore() {
+        // The section sheet keeps Home visible at the same scroll depth. A
+        // second UIKit layout pass during its scrim fade disturbs the glass.
+        if (BottomUpPageRoute.hasRetainedControls(route)) return;
         // Restore at reveal and again after the covering route exits. Route
         // transforms can change UIKit's safe-area layout during transitions.
         // The initial didPopNext alone runs before that transform has settled.
@@ -566,15 +617,20 @@ class IosNavigationBar extends HookConsumerWidget {
       fit: StackFit.expand,
       children: [
         nativeBar,
-        if (titleAvatars.isNotEmpty)
+        if (titleAvatars.isNotEmpty &&
+            (!inlinePortrait || portraitSlot != null))
           Positioned(
-            top:
-                MediaQuery.viewPaddingOf(context).top +
-                portraitTopPadding -
-                (payload['titleHasAnimatedPortrait'] == true ? 4 : 0),
-            left: 0,
-            right: 0,
-            child: Center(
+            top: inlinePortrait
+                ? portraitSlot!.top
+                : MediaQuery.viewPaddingOf(context).top +
+                      portraitTopPadding -
+                      (payload['titleHasAnimatedPortrait'] == true ? 4 : 0),
+            left: inlinePortrait ? portraitSlot!.left : titleInsets.left,
+            right: inlinePortrait ? null : titleInsets.right,
+            width: inlinePortrait ? portraitSlot!.width : null,
+            height: inlinePortrait ? portraitSlot!.height : 64,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
               child: ExcludeSemantics(
                 child: GestureDetector(
                   key: const ValueKey('navigation-header-avatar-settings'),
@@ -587,7 +643,7 @@ class IosNavigationBar extends HookConsumerWidget {
                       isAgent: titleAvatars[i].avatarIsAgent,
                       initial: titleAvatars[i].avatarInitial ?? '?',
                       size: size,
-                      standalone: titleAvatars.length == 1,
+                      standalone: titleAvatars.length == 1 && !inlinePortrait,
                     ),
                   ),
                 ),

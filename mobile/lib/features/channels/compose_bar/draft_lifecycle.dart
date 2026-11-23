@@ -3,7 +3,6 @@ part of '../compose_bar.dart';
 Future<void> _sendTextOnlyDraft({
   required BuildContext context,
   required _MarkdownEditingController controller,
-  required ObjectRef<Map<String, MentionCandidate>> mentionMap,
   required ObjectRef<int> draftRevision,
   required int submittedDraftRevision,
   required FocusNode focusNode,
@@ -15,7 +14,8 @@ Future<void> _sendTextOnlyDraft({
   required ScaffoldMessengerState? messenger,
 }) async {
   TextEditingValue? clearedDraftText;
-  Map<String, MentionCandidate>? clearedDraftMentions;
+  List<_ComposerMention>? clearedDraftMentions;
+  var clearedDraftMentionsInvalid = false;
   int? clearedDraftRevision;
 
   void restoreClearedDraft() {
@@ -26,10 +26,11 @@ Future<void> _sendTextOnlyDraft({
         draftRevision.value != clearedDraftRevision) {
       return;
     }
-    mentionMap.value
-      ..clear()
-      ..addAll(clearedDraftMentions);
-    controller.value = clearedDraftText;
+    controller.replaceDraft(
+      clearedDraftText,
+      mentions: clearedDraftMentions,
+      mentionsInvalid: clearedDraftMentionsInvalid,
+    );
     focusNode.requestFocus();
   }
 
@@ -48,7 +49,8 @@ Future<void> _sendTextOnlyDraft({
     // appear simultaneously during the send transition.
     if (context.mounted) {
       clearedDraftText = controller.value;
-      clearedDraftMentions = Map<String, MentionCandidate>.of(mentionMap.value);
+      clearedDraftMentions = controller.bindings;
+      clearedDraftMentionsInvalid = controller.mentionsInvalid;
       clearComposer();
       clearedDraftRevision = draftRevision.value;
     }
@@ -57,7 +59,7 @@ Future<void> _sendTextOnlyDraft({
       outgoing.pubkeys,
       mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
     );
-  } on StateError {
+  } on ActiveCommunityChangedError {
     restoreClearedDraft();
     _reportSendCancelledByCommunitySwitch(messenger);
   } catch (error) {
@@ -65,7 +67,7 @@ Future<void> _sendTextOnlyDraft({
     // sent draft unless the user has already started a new one.
     restoreClearedDraft();
     messenger?.showFeedbackSnackBar(
-      SnackBar(content: Text(_composeSendErrorMessage(error))),
+      SnackBar(content: Text(_sendFailureMessage(error))),
       kind: ToastKind.error,
     );
   }
@@ -74,7 +76,6 @@ Future<void> _sendTextOnlyDraft({
 void _useComposeDraftLifecycle({
   required BuildContext context,
   required ObjectRef<_ComposerVoiceNote> voiceNote,
-  required ObjectRef<Map<String, MentionCandidate>> mentionMap,
   required WidgetRef ref,
   required _MarkdownEditingController controller,
   required String draftKey,
@@ -105,21 +106,13 @@ void _useComposeDraftLifecycle({
         lastDraftIdentity.value != null && lastDraftIdentity.value != identity;
     lastDraftIdentity.value = identity;
     final saved = ref.read(composeDraftsProvider.notifier).draftFor(draftKey);
-    void restoreBindings(ComposeDraft? draft) {
-      mentionMap.value
-        ..clear()
-        ..addAll({
-          for (final entry
-              in (draft?.mentionKeys ?? <String, String>{}).entries)
-            entry.key: MentionCandidate(
-              pubkey: entry.value,
-              displayName: entry.key,
-              requiresRevalidation: true,
-            ),
-        });
-    }
-
-    if (shouldHydrate) restoreBindings(saved);
+    // Text and bindings restore from one persisted snapshot, together.
+    final restored = controller.restoredMentions(saved);
+    void hydrate(String text) => controller.replaceDraft(
+      TextEditingValue(text: text),
+      mentions: restored,
+      mentionsInvalid: saved?.mentionsInvalid ?? false,
+    );
     if (identityChanged) {
       prefillText.value = null;
       draftRevision.value += 1;
@@ -135,41 +128,32 @@ void _useComposeDraftLifecycle({
       final staleAttachments = attachments.value;
       attachments.value = const [];
       unawaited(_deleteOwnedAttachments(staleAttachments));
-      controller.text = saved?.text ?? '';
+      hydrate(saved?.text ?? '');
     } else if (saved != null && controller.text.isEmpty) {
-      controller.text = saved.text;
+      hydrate(saved.text);
+    } else if (shouldHydrate && saved == null) {
+      controller.replaceDraft(controller.value, mentions: const []);
     }
 
     var lastPersistedText = controller.text;
-    var lastBindings = <String, String>{
-      for (final e in mentionMap.value.entries) e.key: e.value.pubkey,
-    };
+    var lastBindings = [for (final m in controller.bindings) m.toDraft()];
+    var lastInvalid = controller.mentionsInvalid;
     void persistDraft() {
       if (!identical(currentOwner.value, owner)) return;
       final text = controller.text;
       // An untouched agent prefill is not a draft.
       if (text == prefillText.value) return;
-      if (text != lastPersistedText) {
-        // Prune before the atomic snapshot, not in a later editor listener.
-        // Code formatting hides a binding without deleting its literal.
-        final retained = mentionOccurrences(
-          text.replaceAll('`', ' '),
-          mentionMap.value.keys,
-        ).map((range) => range.label).toSet();
-        // Whole-record taint has no literal to prune. Removing every @ is a
-        // safe reset; unrelated edits must not turn lost keys into name lookup.
-        mentionMap.value.removeWhere(
-          (label, _) =>
-              label.isEmpty ? !text.contains('@') : !retained.contains(label),
-        );
-      }
-      final bindings = <String, String>{
-        for (final e in mentionMap.value.entries) e.key: e.value.pubkey,
-      };
-      if (text == lastPersistedText && mapEquals(bindings, lastBindings)) {
+      // The editor already carried the bindings across the edit, so text and
+      // bindings are one snapshot here.
+      final bindings = [for (final m in controller.bindings) m.toDraft()];
+      final invalid = controller.mentionsInvalid;
+      if (text == lastPersistedText &&
+          invalid == lastInvalid &&
+          listEquals(bindings, lastBindings)) {
         return;
       }
       lastBindings = bindings;
+      lastInvalid = invalid;
       lastPersistedText = text;
       draftRevision.value += 1;
       ref
@@ -179,7 +163,9 @@ void _useComposeDraftLifecycle({
             channelId: channelId,
             threadHeadId: threadHeadId,
             text: text,
-            mentionKeys: bindings,
+            mentions: bindings,
+            mentionsInvalid: invalid,
+            transcriptionId: voiceNote.value.insertedTranscriptionId.value,
           );
     }
 
@@ -196,16 +182,21 @@ void _useComposeDraftLifecycle({
         if (saved == null ||
             ((saved.text == lastPersistedText ||
                     saved.text == controller.text) &&
-                mapEquals(saved.mentionKeys, lastBindings))) {
+                saved.mentionsInvalid == lastInvalid &&
+                listEquals(saved.mentions, lastBindings))) {
           return;
         }
         // A newer draft: an ordinary send that fails must not restore over it.
         // Text and the keys its mentions are bound to change together.
         draftRevision.value += 1;
         lastPersistedText = saved.text;
-        lastBindings = Map.of(saved.mentionKeys);
-        restoreBindings(saved);
-        if (controller.text != saved.text) controller.text = saved.text;
+        lastBindings = List.of(saved.mentions);
+        lastInvalid = saved.mentionsInvalid;
+        controller.replaceDraft(
+          TextEditingValue(text: saved.text),
+          mentions: controller.restoredMentions(saved),
+          mentionsInvalid: saved.mentionsInvalid,
+        );
       },
     );
     return () {

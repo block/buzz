@@ -67,9 +67,27 @@ void main() {
         null,
       ),
       (
-        'a navigation breadcrumb is dropped',
+        'a navigation breadcrumb that names no app screen is dropped',
         () async => crumb(Breadcrumb(category: 'navigation', message: 'Chat')),
         null,
+      ),
+      (
+        'a navigation breadcrumb with an unlisted screen name is dropped',
+        () async => crumb(
+          Breadcrumb(category: 'navigation', data: {'screen': 'secret-room'}),
+        ),
+        null,
+      ),
+      (
+        'a navigation breadcrumb keeps only its screen name',
+        () async => crumb(
+          Breadcrumb(
+            category: 'navigation',
+            message: 'secret-room',
+            data: {'screen': 'channel', 'route': '/channels/secret-id'},
+          ),
+        )?.data,
+        {'screen': 'channel'},
       ),
       (
         'a lifecycle breadcrumb is kept',
@@ -100,6 +118,19 @@ void main() {
         'failed https://e.org/p and wss://r.org/x',
       ),
       (
+        'an event without a message gets none',
+        () async => (await event(SentryEvent())).message,
+        null,
+      ),
+      (
+        'additional data is dropped',
+        () async => (await event(
+          // ignore: deprecated_member_use
+          SentryEvent(extra: {'body': 'private-marker'}),
+        )).extra, // ignore: deprecated_member_use
+        null,
+      ),
+      (
         'a tag not on the list is dropped',
         () async => (await event(
           SentryEvent(
@@ -120,6 +151,14 @@ void main() {
           'path': SentryAttribute.string('/channels/secret'),
         })).keys.toSet(),
         {'backend', 'user.id'},
+      ),
+      (
+        'a count keeps the install ID',
+        () async => (await metric({
+          'backend': SentryAttribute.string('relay.example.org'),
+          'install.id': SentryAttribute.string('i'),
+        })).keys.toSet(),
+        {'backend', 'install.id'},
       ),
     ];
 
@@ -207,6 +246,56 @@ void main() {
       await transport.first();
 
       expect(transport.events.single['user']['id'], 'a' * 64);
+    });
+
+    test('a member change drops the previous member\'s trail', () async {
+      DiagnosticBreadcrumb trail(String host) => DiagnosticBreadcrumb(
+        NetworkEvent(
+          backend: host,
+          endpoint: NetworkEndpoint.relayConnection,
+          outcome: NetworkOutcome.failure,
+          failure: NetworkFailure.serverError,
+        ),
+      );
+      List<Object?> backends(Map<String, dynamic> event) => [
+        for (final crumb in (event['breadcrumbs'] as List? ?? const []))
+          (crumb as Map)['data']?['backend'],
+      ];
+      final reporter = SentryDiagnosticReporter(hub: hub)
+        ..leaveBreadcrumb(trail('before.example.org'))
+        ..setMember('a' * 64)
+        ..leaveBreadcrumb(trail('a.example.org'))
+        ..reportError(
+          StateError('failed'),
+          StackTrace.current,
+          operation: DiagnosticOperation.relayFrame,
+        );
+      await transport.first();
+      reporter
+        ..setMember('b' * 64)
+        ..leaveBreadcrumb(trail('b.example.org'))
+        ..reportError(
+          StateError('failed'),
+          StackTrace.current,
+          operation: DiagnosticOperation.relayFrame,
+        );
+      await transport.count(2);
+      reporter
+        ..setMember(null)
+        ..reportError(
+          StateError('failed'),
+          StackTrace.current,
+          operation: DiagnosticOperation.relayFrame,
+        );
+      await transport.count(3);
+
+      // Signing in keeps what came before it.
+      expect(backends(transport.events[0]), [
+        'before.example.org',
+        'a.example.org',
+      ]);
+      expect(backends(transport.events[1]), ['b.example.org']);
+      expect(backends(transport.events[2]), isEmpty);
     });
 
     test('a test report is a test error from the test operation', () async {

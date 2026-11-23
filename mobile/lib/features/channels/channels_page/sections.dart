@@ -1,45 +1,29 @@
 part of '../channels_page.dart';
 
+/// A workspace. Edit actions are null where mobile can't write it: always
+/// for desktop's unified workspaces, and for legacy Solo workspaces.
 class _CustomChannelSection extends StatelessWidget {
-  final ChannelSection section;
+  final WorkspaceSection section;
   final List<Channel> channels;
   final bool Function(Channel) isVisible;
-  final Set<String> unreadChannelIds;
-  final Set<String> attentionChannelIds;
-  final Set<String> mutedChannelIds;
-  final String? currentPubkey;
+  final Widget Function(Channel) buildRow;
   final bool expanded;
-  final bool isFirst;
-  final bool isLast;
   final VoidCallback onToggle;
-  final VoidCallback onRename;
-  final VoidCallback onDelete;
-  final VoidCallback onMoveUp;
-  final VoidCallback onMoveDown;
+  final _SectionEdits? edits;
   final ChannelSortMode sortMode;
-  final ValueChanged<ChannelSortMode> onSortModeChange;
-  final Future<void> Function(Channel channel) onSelectChannel;
+  final ValueChanged<ChannelSortMode>? onSortModeChange;
 
   const _CustomChannelSection({
     super.key,
     required this.section,
     required this.channels,
     required this.isVisible,
-    required this.unreadChannelIds,
-    required this.attentionChannelIds,
-    required this.mutedChannelIds,
-    required this.currentPubkey,
+    required this.buildRow,
     required this.expanded,
-    required this.isFirst,
-    required this.isLast,
     required this.onToggle,
-    required this.onRename,
-    required this.onDelete,
-    required this.onMoveUp,
-    required this.onMoveDown,
+    required this.edits,
     required this.sortMode,
     required this.onSortModeChange,
-    required this.onSelectChannel,
   });
 
   @override
@@ -49,107 +33,186 @@ class _CustomChannelSection extends StatelessWidget {
         child: _CustomSectionHeader(
           section: section,
           expanded: expanded,
-          isFirst: isFirst,
-          isLast: isLast,
           onToggle: onToggle,
-          onRename: onRename,
-          onDelete: onDelete,
-          onMoveUp: onMoveUp,
-          onMoveDown: onMoveDown,
+          edits: edits,
           sortMode: sortMode,
           onSortModeChange: onSortModeChange,
         ),
       ),
-      _SectionChannelsBody(
+      FilteredChannelSectionBody(
         expanded: expanded,
         channels: channels,
         isVisible: isVisible,
-        buildRow: (channel) => _ChannelTile(
-          key: ValueKey(channel.id),
-          channel: channel,
-          isUnread: unreadChannelIds.contains(channel.id),
-          hasAttention: attentionChannelIds.contains(channel.id),
-          isMuted: mutedChannelIds.contains(channel.id),
-          currentPubkey: currentPubkey,
-          onTap: () => onSelectChannel(channel),
-          sectionId: section.id,
-        ),
+        buildRow: buildRow,
       ),
     ],
   );
 }
 
+typedef _SectionEdits = ({VoidCallback onRename, VoidCallback onDelete});
+
+/// A workspace's decorative icon: a Unicode emoji, or a community custom
+/// emoji. As on desktop, a shortcode the catalog lacks draws nothing.
+class _WorkspaceIcon extends ConsumerWidget {
+  const _WorkspaceIcon(this.icon, {this.inHeader = false});
+  final bool inHeader;
+  final String icon;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    Widget display(Widget child) {
+      if (!inHeader) return ExcludeSemantics(child: child);
+      return _SectionLeadingIcon(child);
+    }
+
+    if (!(icon.length > 2 && icon.startsWith(':') && icon.endsWith(':'))) {
+      return display(
+        FittedBox(
+          child: Text(
+            icon,
+            style: const TextStyle(fontSize: _kWorkspaceIconSize, height: 1),
+          ),
+        ),
+      );
+    }
+    final shortcode = normalizeShortcode(icon);
+    final url = shortcode == null
+        ? null
+        : ref.watch(
+            customEmojiListProvider.select(
+              (palette) => palette
+                  .where((emoji) => emoji.shortcode == shortcode)
+                  .firstOrNull
+                  ?.url,
+            ),
+          );
+    if (url == null) return const SizedBox.shrink();
+    return display(
+      CustomEmojiImage(
+        shortcode: shortcode!,
+        url: url,
+        size: _kWorkspaceIconSize,
+        compact: true,
+      ),
+    );
+  }
+}
+
+const _kWorkspaceIconSize = 16.0;
+
+class _SectionLeadingIcon extends StatelessWidget {
+  const _SectionLeadingIcon(this.child);
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    const sideInset = (_kChannelIconSize - _kWorkspaceIconSize) / 2;
+    return Padding(
+      padding: const EdgeInsets.only(right: Grid.xxs - sideInset),
+      child: SizedBox.square(
+        dimension: _kChannelIconSize,
+        child: Center(
+          child: SizedBox.square(
+            dimension: _kWorkspaceIconSize,
+            child: ExcludeSemantics(child: child),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _CustomSectionHeader extends StatelessWidget {
-  final ChannelSection section;
+  final WorkspaceSection section;
   final bool expanded;
-  final bool isFirst;
-  final bool isLast;
   final VoidCallback onToggle;
-  final VoidCallback onRename;
-  final VoidCallback onDelete;
-  final VoidCallback onMoveUp;
-  final VoidCallback onMoveDown;
+  final _SectionEdits? edits;
   final ChannelSortMode sortMode;
-  final ValueChanged<ChannelSortMode> onSortModeChange;
+  final ValueChanged<ChannelSortMode>? onSortModeChange;
 
   const _CustomSectionHeader({
     required this.section,
     required this.expanded,
-    required this.isFirst,
-    required this.isLast,
     required this.onToggle,
-    required this.onRename,
-    required this.onDelete,
-    required this.onMoveUp,
-    required this.onMoveDown,
+    required this.edits,
     required this.sortMode,
     required this.onSortModeChange,
   });
 
   @override
   Widget build(BuildContext context) {
+    final label = section.name;
+    final edits = this.edits;
+    final onSortModeChange = this.onSortModeChange;
     Future<void> openOptions(BuildContext buttonContext) async {
-      final action = await _showSectionViewSheet(
+      final action = await showSectionViewSheet(
         buttonContext,
-        title: section.name,
+        title: label,
         group: sectionSortGroupKey(section.id),
         sortMode: sortMode,
-        onSort: onSortModeChange,
-        custom: true,
-        isFirst: isFirst,
-        isLast: isLast,
+        onSort: (mode) => onSortModeChange?.call(mode),
+        custom: edits != null,
       );
-      if (!buttonContext.mounted) return;
+      if (!buttonContext.mounted || edits == null) return;
       switch (action) {
         case 'rename':
-          onRename();
-        case 'move_up':
-          onMoveUp();
-        case 'move_down':
-          onMoveDown();
+          edits.onRename();
         case 'delete':
-          onDelete();
+          edits.onDelete();
       }
     }
+
+    final menu = [
+      if (edits != null)
+        (label: 'Rename section', symbol: 'pencil', onPressed: edits.onRename),
+      (
+        label: 'Reorder sections',
+        symbol: 'arrow.up.arrow.down',
+        onPressed: () => SectionOrderScope.of(context)?.show(context),
+      ),
+      ..._sortMenu(sortMode, onSortModeChange),
+      (
+        label: 'Filter…',
+        symbol: 'line.3.horizontal.decrease',
+        onPressed: () => openOptions(context),
+      ),
+      if (edits != null)
+        (label: 'Delete section', symbol: 'trash', onPressed: edits.onDelete),
+    ];
+    final sortAt = edits == null ? 1 : 2;
 
     final sectionColor = navigationHeadingForeground(context);
     return GestureDetector(
       onTap: onToggle,
       behavior: HitTestBehavior.opaque,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(
+        padding: EdgeInsets.fromLTRB(
           Grid.gutter,
           _kSectionHeaderVerticalPadding,
-          Grid.gutter,
+          _usesNativeSectionMenu(context)
+              ? Grid.gutter + Grid.half
+              : Grid.twelve,
           _kSectionHeaderVerticalPadding,
         ),
         child: Row(
           children: [
             Expanded(
-              child: _SectionLabel(
-                label: section.name,
+              // The options button stays its own screen-reader stop.
+              child: Semantics(
+                label: label,
+                button: true,
                 expanded: expanded,
-                color: sectionColor,
+                onTap: onToggle,
+                excludeSemantics: true,
+                child: _SectionLabel(
+                  label: label,
+                  icon: switch (section.icon) {
+                    final icon? => _WorkspaceIcon(icon, inHeader: true),
+                    null => null,
+                  },
+                  expanded: expanded,
+                  color: sectionColor,
+                ),
               ),
             ),
             if (_usesNativeSectionMenu(context))
@@ -157,63 +220,27 @@ class _CustomSectionHeader extends StatelessWidget {
                 key: ValueKey('section-menu-${section.id}'),
                 icon: 'more',
                 trailingIconSlotWidth: _kChannelIconSize,
-                accessibilityLabel: '${section.name} options',
+                accessibilityLabel: '$label options',
                 width: 44,
                 height: 44,
                 plain: true,
                 iconSize: 14,
                 foregroundColor: navigationAccessoryForeground(context),
-                selectedIndex: sortMode == ChannelSortMode.recent ? 3 : 4,
-                dividerBefore: const {3, 6},
-                destructiveIndices: const {6},
-                actions: [
-                  (
-                    label: 'Rename section',
-                    symbol: 'pencil',
-                    onPressed: onRename,
-                  ),
-                  (
-                    label: 'Move up',
-                    symbol: 'arrow.up',
-                    onPressed: isFirst ? null : onMoveUp,
-                  ),
-                  (
-                    label: 'Move down',
-                    symbol: 'arrow.down',
-                    onPressed: isLast ? null : onMoveDown,
-                  ),
-                  (
-                    label: 'Sort: Recent',
-                    symbol: '',
-                    onPressed: () => onSortModeChange(ChannelSortMode.recent),
-                  ),
-                  (
-                    label: 'Sort: A–Z',
-                    symbol: '',
-                    onPressed: () => onSortModeChange(ChannelSortMode.alpha),
-                  ),
-                  (
-                    label: 'Filter…',
-                    symbol: 'line.3.horizontal.decrease',
-                    onPressed: () => openOptions(context),
-                  ),
-                  (
-                    label: 'Delete section',
-                    symbol: 'trash',
-                    onPressed: onDelete,
-                  ),
-                ],
+                selectedIndex: onSortModeChange == null
+                    ? null
+                    : sortAt + (sortMode == ChannelSortMode.recent ? 0 : 1),
+                dividerBefore: {
+                  if (edits != null) sortAt,
+                  if (edits != null) menu.length - 1,
+                },
+                destructiveIndices: {if (edits != null) menu.length - 1},
+                actions: menu,
               )
             else
               Builder(
-                builder: (buttonContext) => _SectionOptionsButton(
+                builder: (buttonContext) => SectionOptionsButton(
                   key: ValueKey('section-menu-${section.id}'),
-                  tooltip: '${section.name} options',
-                  icon: Icon(
-                    BuzzIcons.ellipsis,
-                    size: 14,
-                    color: navigationAccessoryForeground(context),
-                  ),
+                  tooltip: '$label options',
                   onPressed: () => openOptions(buttonContext),
                 ),
               ),
@@ -224,75 +251,32 @@ class _CustomSectionHeader extends StatelessWidget {
   }
 }
 
-class _SectionNameDialog extends HookWidget {
-  final String title;
-  final String confirmLabel;
-  final String initialValue;
-
-  const _SectionNameDialog({
-    required this.title,
-    required this.confirmLabel,
-    this.initialValue = '',
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final controller = useTextEditingController(text: initialValue);
-
-    void confirm() {
-      final name = controller.text.trim();
-      if (name.isNotEmpty) Navigator.of(context).pop(name);
-    }
-
-    return AlertDialog(
-      title: Text(title),
-      content: TextField(
-        controller: controller,
-        autofocus: true,
-        decoration: const InputDecoration(labelText: 'Name'),
-        onSubmitted: (_) => confirm(),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        TextButton(onPressed: confirm, child: Text(confirmLabel)),
-      ],
-    );
-  }
-}
-
 class _ChannelSection extends StatelessWidget {
   final String title;
+
+  /// The sort and filter group key, such as `channels` or `dms`.
+  final String group;
   final bool expanded;
   final VoidCallback onToggle;
   final List<Channel> channels;
   final bool Function(Channel) isVisible;
-  final Set<String> unreadChannelIds;
-  final Set<String> attentionChannelIds;
-  final Set<String> mutedChannelIds;
-  final String? currentPubkey;
+  final Widget Function(Channel) buildRow;
   final String emptyLabel;
   final ChannelSortMode? sortMode;
   final ValueChanged<ChannelSortMode>? onSortModeChange;
-  final Future<void> Function(Channel channel) onSelectChannel;
 
   const _ChannelSection({
     super.key,
     required this.title,
+    required this.group,
     required this.expanded,
     required this.onToggle,
     required this.channels,
     required this.isVisible,
-    required this.unreadChannelIds,
-    required this.attentionChannelIds,
-    required this.mutedChannelIds,
-    required this.currentPubkey,
+    required this.buildRow,
     required this.emptyLabel,
     this.sortMode,
     this.onSortModeChange,
-    required this.onSelectChannel,
   });
 
   @override
@@ -301,13 +285,14 @@ class _ChannelSection extends StatelessWidget {
       SliverToBoxAdapter(
         child: _SectionHeader(
           label: title,
+          group: group,
           expanded: expanded,
           onToggle: onToggle,
           sortMode: sortMode,
           onSortModeChange: onSortModeChange,
         ),
       ),
-      _SectionChannelsBody(
+      FilteredChannelSectionBody(
         expanded: expanded,
         channels: channels,
         isVisible: isVisible,
@@ -332,84 +317,10 @@ class _ChannelSection extends StatelessWidget {
             ),
           ),
         ),
-        buildRow: (channel) => _ChannelTile(
-          key: ValueKey(channel.id),
-          channel: channel,
-          isUnread: unreadChannelIds.contains(channel.id),
-          hasAttention: attentionChannelIds.contains(channel.id),
-          isMuted: mutedChannelIds.contains(channel.id),
-          currentPubkey: currentPubkey,
-          onTap: () => onSelectChannel(channel),
-          sectionId: null,
-        ),
+        buildRow: buildRow,
       ),
     ],
   );
-}
-
-class _SectionChannelsBody extends HookWidget {
-  const _SectionChannelsBody({
-    required this.expanded,
-    required this.channels,
-    required this.isVisible,
-    required this.buildRow,
-    this.emptySliver,
-  });
-
-  final bool expanded;
-  final List<Channel> channels;
-  final bool Function(Channel) isVisible;
-  final Widget Function(Channel) buildRow;
-  final Widget? emptySliver;
-
-  @override
-  Widget build(BuildContext context) {
-    final visibleChannels = <Channel>[];
-    final hiddenIds = <String>[];
-    for (final channel in channels) {
-      if (isVisible(channel)) {
-        visibleChannels.add(channel);
-      } else {
-        hiddenIds.add(channel.id);
-      }
-    }
-    final hiddenCount = hiddenIds.length;
-    final reveal = useState(false);
-    useEffect(() {
-      reveal.value = false;
-      return null;
-    }, [hiddenIds.join(',')]);
-    final displayed = reveal.value ? channels : visibleChannels;
-
-    return CollapsibleSliverBody(
-      expanded: expanded,
-      sliver: channels.isEmpty && emptySliver != null
-          ? emptySliver!
-          : SliverList.builder(
-              itemCount: displayed.length + (hiddenCount == 0 ? 0 : 1),
-              findChildIndexCallback: (key) {
-                final index = displayed.indexWhere(
-                  (c) => ValueKey(c.id) == key,
-                );
-                return index < 0 ? null : index;
-              },
-              itemBuilder: (context, index) {
-                if (index < displayed.length) return buildRow(displayed[index]);
-                return Align(
-                  alignment: Alignment.centerLeft,
-                  child: TextButton(
-                    onPressed: () => reveal.value = !reveal.value,
-                    child: Text(
-                      reveal.value
-                          ? 'Hide filtered channels'
-                          : 'Show hidden channels · $hiddenCount',
-                    ),
-                  ),
-                );
-              },
-            ),
-    );
-  }
 }
 
 class _EmptyState extends StatelessWidget {
@@ -444,13 +355,17 @@ class _EmptyState extends StatelessWidget {
 
 class _SectionHeader extends StatelessWidget {
   final String label;
+  final String group;
   final bool expanded;
   final VoidCallback onToggle;
   final ChannelSortMode? sortMode;
+
+  /// Null when the sort is read-only; the menu still offers filters.
   final ValueChanged<ChannelSortMode>? onSortModeChange;
 
   const _SectionHeader({
     required this.label,
+    required this.group,
     required this.expanded,
     required this.onToggle,
     this.sortMode,
@@ -460,10 +375,10 @@ class _SectionHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     void openOptions(BuildContext buttonContext, ChannelSortMode mode) {
-      _showSectionViewSheet(
+      showSectionViewSheet(
         buttonContext,
         title: label,
-        group: label.toLowerCase(),
+        group: group,
         sortMode: mode,
         onSort: (value) => onSortModeChange?.call(value),
       );
@@ -475,10 +390,12 @@ class _SectionHeader extends StatelessWidget {
       onTap: onToggle,
       behavior: HitTestBehavior.opaque,
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(
+        padding: EdgeInsets.fromLTRB(
           Grid.gutter,
           _kSectionHeaderVerticalPadding,
-          Grid.gutter,
+          _usesNativeSectionMenu(context)
+              ? Grid.gutter + Grid.half
+              : Grid.twelve,
           _kSectionHeaderVerticalPadding,
         ),
         child: Row(
@@ -486,6 +403,15 @@ class _SectionHeader extends StatelessWidget {
             Expanded(
               child: _SectionLabel(
                 label: label,
+                icon: group == 'starred'
+                    ? _SectionLeadingIcon(
+                        TablerStarIcon(
+                          color: sectionColor,
+                          filled: true,
+                          size: _kWorkspaceIconSize,
+                        ),
+                      )
+                    : null,
                 expanded: expanded,
                 color: sectionColor,
               ),
@@ -502,20 +428,13 @@ class _SectionHeader extends StatelessWidget {
                   plain: true,
                   iconSize: 14,
                   foregroundColor: navigationAccessoryForeground(context),
-                  selectedIndex: mode == ChannelSortMode.recent ? 0 : 1,
+                  selectedIndex: onSortModeChange == null
+                      ? null
+                      : mode == ChannelSortMode.recent
+                      ? 0
+                      : 1,
                   actions: [
-                    (
-                      label: 'Sort: Recent',
-                      symbol: '',
-                      onPressed: () =>
-                          onSortModeChange?.call(ChannelSortMode.recent),
-                    ),
-                    (
-                      label: 'Sort: A–Z',
-                      symbol: '',
-                      onPressed: () =>
-                          onSortModeChange?.call(ChannelSortMode.alpha),
-                    ),
+                    ..._sortMenu(mode, onSortModeChange),
                     (
                       label: 'Filter…',
                       symbol: 'line.3.horizontal.decrease',
@@ -525,14 +444,9 @@ class _SectionHeader extends StatelessWidget {
                 )
               else
                 Builder(
-                  builder: (buttonContext) => _SectionOptionsButton(
+                  builder: (buttonContext) => SectionOptionsButton(
                     key: ValueKey('sort-menu-$label'),
                     tooltip: '$label options',
-                    icon: Icon(
-                      BuzzIcons.ellipsis,
-                      size: 14,
-                      color: navigationAccessoryForeground(context),
-                    ),
                     onPressed: () => openOptions(buttonContext, mode),
                   ),
                 ),
@@ -547,19 +461,24 @@ class _SectionHeader extends StatelessWidget {
 class _SectionLabel extends StatelessWidget {
   const _SectionLabel({
     required this.label,
+    this.icon,
     required this.expanded,
     required this.color,
   });
 
   final String label;
+
+  /// A decorative icon before the label.
+  final Widget? icon;
   final bool expanded;
   final Color color;
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.only(top: Grid.xxs),
+    padding: EdgeInsets.only(top: icon == null ? Grid.xxs : 0),
     child: Row(
       children: [
+        ?icon,
         Flexible(
           child: Text(
             label,
@@ -600,45 +519,26 @@ class _SectionChevron extends StatelessWidget {
   }
 }
 
+/// Sort choices for a section menu; none while the sort is read-only.
+List<({String label, String symbol, VoidCallback? onPressed})> _sortMenu(
+  ChannelSortMode mode,
+  ValueChanged<ChannelSortMode>? onChange,
+) => onChange == null
+    ? const []
+    : [
+        (
+          label: 'Sort: Recent',
+          symbol: '',
+          onPressed: () => onChange(ChannelSortMode.recent),
+        ),
+        (
+          label: 'Sort: A–Z',
+          symbol: '',
+          onPressed: () => onChange(ChannelSortMode.alpha),
+        ),
+      ];
+
 bool _usesNativeSectionMenu(BuildContext context) =>
     defaultTargetPlatform == TargetPlatform.iOS &&
     (DuoToolbarScope.maybeStripOf(context) ?? FoldGeometry.of(context).strip) !=
         null;
-
-class _SectionOptionsButton extends StatelessWidget {
-  const _SectionOptionsButton({
-    super.key,
-    required this.tooltip,
-    required this.icon,
-    required this.onPressed,
-  });
-
-  final String tooltip;
-  final Widget icon;
-  final VoidCallback onPressed;
-
-  @override
-  Widget build(BuildContext context) => Semantics(
-    button: true,
-    label: tooltip,
-    onTap: onPressed,
-    excludeSemantics: true,
-    child: Tooltip(
-      message: tooltip,
-      child: SizedBox.square(
-        dimension: 44,
-        child: InkWell(
-          onTap: onPressed,
-          borderRadius: BorderRadius.circular(Radii.full),
-          child: Align(
-            alignment: Alignment.centerRight,
-            child: SizedBox(
-              width: _kChannelIconSize,
-              child: Center(child: icon),
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
-}

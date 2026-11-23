@@ -10,21 +10,6 @@ pub(super) async fn plan(
     let reason = json!({"type": "owned_resource"});
     // Workflow state can contain another user's approvals or work. Leave it
     // intact in this initial ownership-only content pass.
-    rows(
-        conn,
-        output,
-        "delivery_log",
-        "SELECT jsonb_build_object('delivered_at',delivered_at,'id',id) AS row_key,
-        NULL::text AS warning FROM delivery_log WHERE community_id=$1 AND subscription_id IN
-        (SELECT id FROM subscriptions WHERE community_id=$1 AND owner_pubkey=ANY($2::bytea[]))",
-        targets,
-        &reason,
-        "would_delete",
-    )
-    .await?;
-    rows(conn, output, "subscriptions", "SELECT jsonb_build_object('id',id) AS row_key,
-        NULL::text AS warning FROM subscriptions WHERE community_id=$1 AND owner_pubkey=ANY($2::bytea[])",
-        targets, &reason, "would_delete").await?;
     rows(conn, output, "push_wake_outbox", "SELECT jsonb_build_object('id',id) AS row_key,
         CASE WHEN lease_until>transaction_timestamp() THEN 'delivery worker is active' END AS warning
         FROM push_wake_outbox WHERE community_id=$1 AND author=ANY($2::bytea[])",

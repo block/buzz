@@ -6,8 +6,5 @@ CREATE TABLE community_deletion_approvals (
     approval_origin TEXT NOT NULL DEFAULT 'operator'
         CHECK (approval_origin IN ('operator', 'owner_automatic')),
     note TEXT,
-    approved_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    FOREIGN KEY (request_id, community_id, inventory_digest)
-        REFERENCES community_deletion_requests(id, community_id, inventory_digest)
-        ON DELETE RESTRICT
+    approved_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

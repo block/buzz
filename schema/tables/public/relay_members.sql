@@ -3,7 +3,7 @@
 -- (unchanged wire form). PK (community_id, pubkey).
 
 CREATE TABLE relay_members (
-    community_id UUID NOT NULL REFERENCES communities(id),
+    community_id UUID NOT NULL,
     pubkey      TEXT NOT NULL,
     role        TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
     added_by    TEXT,

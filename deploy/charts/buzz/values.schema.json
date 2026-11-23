@@ -217,6 +217,40 @@
         "secretKey": { "type": "string" }
       }
     },
+    "acceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "schedule": { "type": "string", "minLength": 1 },
+        "activeDeadlineSeconds": { "type": "integer", "minimum": 1 },
+        "successfulJobsHistoryLimit": { "type": "integer", "minimum": 0 },
+        "failedJobsHistoryLimit": { "type": "integer", "minimum": 0 },
+        "relayUrl": { "type": "string" },
+        "connectAddr": { "type": "string" },
+        "stageTimeoutSeconds": { "type": "integer", "minimum": 1 },
+        "privateKeySecret": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string" },
+            "key": { "type": "string", "minLength": 1 }
+          }
+        },
+        "privateKeyFile": { "type": "string" },
+        "assertionFile": { "type": "string" },
+        "statsdAddr": { "type": "string" },
+        "metricPrefix": { "type": "string", "minLength": 1 },
+        "tags": { "type": "array", "items": { "type": "string", "pattern": "^[a-z](_?[a-z0-9./-])*:.+$" } },
+        "serviceAccountName": { "type": "string" },
+        "podLabels": { "type": "object" },
+        "podAnnotations": { "type": "object" },
+        "extraInitContainers": { "type": "array", "items": { "type": "object" } },
+        "extraVolumes": { "type": "array", "items": { "type": "object" } },
+        "extraVolumeMounts": { "type": "array", "items": { "type": "object" } },
+        "resources": { "type": "object" }
+      }
+    },
     "storageAccounting": {
       "type": "object",
       "additionalProperties": false,

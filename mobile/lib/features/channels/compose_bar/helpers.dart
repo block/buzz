@@ -51,6 +51,76 @@ void _useComposerChannelNames(
   }, [controller, channelNamesKey]);
 }
 
+// Springs the composer between its capsule and expanded shapes. On Android
+// the expansion waits for the IME transition to start.
+void _useComposerExpansionMotion({
+  required AnimationController controller,
+  required ValueNotifier<bool> isExpanded,
+  required ValueNotifier<bool> androidImeTransitionStarted,
+  required bool reducedMotion,
+}) {
+  useEffect(() {
+    final target = isExpanded.value && androidImeTransitionStarted.value
+        ? 1.0
+        : 0.0;
+    if (reducedMotion) {
+      controller.value = target;
+    } else if ((controller.value - target).abs() > 0.001) {
+      controller.animateWith(
+        SpringSimulation(
+          SpringDescription.withDurationAndBounce(
+            duration: const Duration(milliseconds: 220),
+            bounce: 0.08,
+          ),
+          controller.value,
+          target,
+          0,
+          snapToEnd: true,
+        ),
+      );
+    }
+    return null;
+  }, [isExpanded.value, androidImeTransitionStarted.value, reducedMotion]);
+}
+
+// iOS only: whether the clipboard holds an image, for the paste action.
+// Re-checked when the field takes focus and when the app resumes.
+void _useComposerClipboardImage({
+  required BuildContext context,
+  required WidgetRef ref,
+  required FocusNode focusNode,
+  required ValueNotifier<bool> clipboardHasImage,
+}) {
+  useEffect(() {
+    if (defaultTargetPlatform != TargetPlatform.iOS) return null;
+
+    var disposed = false;
+    Future<void> refreshClipboardAvailability() async {
+      final hasImage = await ref
+          .read(mediaUploadServiceProvider)
+          .clipboardHasImage();
+      if (!disposed && context.mounted) {
+        clipboardHasImage.value = hasImage;
+      }
+    }
+
+    void refreshWhenFocused() {
+      if (focusNode.hasFocus) refreshClipboardAvailability();
+    }
+
+    final lifecycleListener = AppLifecycleListener(
+      onResume: refreshClipboardAvailability,
+    );
+    focusNode.addListener(refreshWhenFocused);
+    refreshClipboardAvailability();
+    return () {
+      disposed = true;
+      focusNode.removeListener(refreshWhenFocused);
+      lifecycleListener.dispose();
+    };
+  }, [focusNode]);
+}
+
 const _typingThrottleMs = 3000;
 
 /// How long a keyboard that was up before an inactive spell may take to come
@@ -66,6 +136,7 @@ void _useComposerKeyboardMetrics({
   required ObjectRef<Timer?> androidImeFallbackTimer,
   required ValueNotifier<bool> androidImeTransitionStarted,
   required VoidCallback collapseComposer,
+  bool Function()? keepKeyboardSpace,
 }) {
   final appView = View.of(context);
   useEffect(() {
@@ -80,6 +151,7 @@ void _useComposerKeyboardMetrics({
         if (defaultTargetPlatform == TargetPlatform.android) {
           androidImeTransitionStarted.value = false;
         }
+        if (keepKeyboardSpace?.call() ?? false) return;
         voiceNote.onKeyboardHidden();
         collapseComposer();
         focusNode.unfocus();
@@ -97,6 +169,7 @@ class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
   final FlutterView view;
   final VoidCallback onKeyboardShown;
   final VoidCallback onKeyboardHidden;
+  final ValueChanged<double>? onKeyboardInsetChanged;
   bool _wasVisible;
   Timer? _restoreGrace;
 
@@ -104,6 +177,7 @@ class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
     required this.view,
     required this.onKeyboardShown,
     required this.onKeyboardHidden,
+    this.onKeyboardInsetChanged,
   }) : _wasVisible = view.viewInsets.bottom > 0;
 
   // iOS drops the keyboard inset while the app is inactive (Control Center,
@@ -147,6 +221,7 @@ class _ComposerKeyboardMetricsObserver with WidgetsBindingObserver {
   }
 
   void _reconcile() {
+    onKeyboardInsetChanged?.call(view.viewInsets.bottom);
     final isVisible = view.viewInsets.bottom > 0;
     if (!_wasVisible && isVisible) onKeyboardShown();
     if (_wasVisible && !isVisible) onKeyboardHidden();
@@ -181,6 +256,7 @@ void _chooseComposerAttachment(
   ValueNotifier<_AttachmentSurface> attachmentSurface,
   ValueNotifier<String?> uploadError,
   Future<void> Function() choose, {
+  ValueNotifier<_InputTool?>? inputTool,
   String? errorMessage,
 }) {
   attachmentSurface.value = _AttachmentSurface.closed;
@@ -190,6 +266,12 @@ void _chooseComposerAttachment(
     } catch (error) {
       if (context.mounted) {
         uploadError.value = errorMessage ?? _formatUploadError(error);
+      }
+    } finally {
+      if (context.mounted &&
+          inputTool?.value == _InputTool.attachments &&
+          attachmentSurface.value == _AttachmentSurface.closed) {
+        attachmentSurface.value = _AttachmentSurface.menu;
       }
     }
   }());
@@ -241,6 +323,10 @@ void _expandComposer({
   });
 }
 
+/// The chooser above an editor's field. Its rows and Retry sit in the
+/// field's [TextFieldTapRegion]: a mouse or stylus press outside that region
+/// unfocuses the field, and the chooser follows focus, so a press on a row
+/// would remove the row before its release could pick it.
 Widget _composerSuggestionPanel({
   required List<Channel> channelSuggestions,
   required List<MentionCandidate> mentionSuggestions,
@@ -257,30 +343,34 @@ Widget _composerSuggestionPanel({
 }) => channelSuggestions.isNotEmpty
     ? KeyedSubtree(
         key: const ValueKey('channel-suggestions'),
-        child: _ChannelSuggestions(
-          suggestions: channelSuggestions,
-          onSelect: onChannelSelect,
+        child: TextFieldTapRegion(
+          child: _ChannelSuggestions(
+            suggestions: channelSuggestions,
+            onSelect: onChannelSelect,
+          ),
         ),
       )
     : mentionSuggestions.isNotEmpty || mentionSearchFailed
     ? KeyedSubtree(
         key: const ValueKey('mention-suggestions'),
-        child: _MentionSuggestions(
-          suggestions: mentionSuggestions,
-          unavailable: unavailableMentions,
-          searchFailed: mentionSearchFailed,
-          reserveHeight: reserveMentionHeight,
-          searching: mentionSearching,
-          onRetry: onMentionSearchRetry,
-          userCache: userCache,
-          currentPubkey: currentPubkey,
-          isDmChannel: isDmChannel,
-          onSelect: onMentionSelect,
+        child: TextFieldTapRegion(
+          child: _MentionSuggestions(
+            suggestions: mentionSuggestions,
+            unavailable: unavailableMentions,
+            searchFailed: mentionSearchFailed,
+            reserveHeight: reserveMentionHeight,
+            searching: mentionSearching,
+            onRetry: onMentionSearchRetry,
+            userCache: userCache,
+            currentPubkey: currentPubkey,
+            isDmChannel: isDmChannel,
+            onSelect: onMentionSelect,
+          ),
         ),
       )
     : const SizedBox.shrink(key: ValueKey('no-suggestions'));
 
-Widget _composerAttachmentPanel({
+_AttachmentSurfacePanel _composerAttachmentPanel({
   required _AttachmentSurface surface,
   required Widget suggestionPanel,
   required VoidCallback onBack,
@@ -367,13 +457,42 @@ void spliceAndMoveCursor(
               : text.length)
           .clamp(start, text.length);
 
-  final before = text.substring(0, start);
-  final after = text.substring(cursor);
-  controller.value = TextEditingValue(
-    text: '$before$replacement$after',
-    selection: TextSelection.collapsed(offset: start + replacement.length),
+  _replaceComposerRange(
+    controller,
+    start: start,
+    end: cursor,
+    replacement: replacement,
+    caret: start + replacement.length,
   );
   focusNode.requestFocus();
+}
+
+/// Replaces `[start, end)` of [controller]'s text for a composer command.
+/// The composer's own controller moves its bound mentions by the exact
+/// range, see [_MarkdownEditingController.replaceRange]; [keptShift] says
+/// the replaced text is kept inside [replacement], that far in.
+void _replaceComposerRange(
+  TextEditingController controller, {
+  required int start,
+  required int end,
+  required String replacement,
+  required int caret,
+  int? keptShift,
+}) {
+  if (controller is _MarkdownEditingController) {
+    controller.replaceRange(
+      start: start,
+      end: end,
+      replacement: replacement,
+      caret: caret,
+      keptShift: keptShift,
+    );
+    return;
+  }
+  controller.value = TextEditingValue(
+    text: controller.text.replaceRange(start, end, replacement),
+    selection: TextSelection.collapsed(offset: caret),
+  );
 }
 
 /// Channel members as the send resolves typed names: loaded members, or the
@@ -396,62 +515,6 @@ List<MentionCandidate> _typedMemberCandidates({
   ownerByAgentPubkey: agentOwners ?? const {},
 );
 
-/// Qualify earlier namesake mentions outside code, keeping the cursor in
-/// place, and rebind [mentions] before the text changes. A key with any
-/// plain occurrence left, by the presence rule draft persistence uses (code
-/// formatting ignored), stays bound beside its qualified label. Returns
-/// [start] shifted by the edits before it. Call it before tracking the new
-/// selection: persistence prunes keys absent from the text. [competitors] are
-/// the typed member labels the send resolves: a longer one keeps its
-/// occurrence instead of losing its prefix to a rename.
-int _requalifyNamesakes(
-  _MarkdownEditingController controller,
-  Map<String, MentionCandidate> mentions,
-  MentionCandidate candidate,
-  int start,
-  Iterable<String> competitors,
-) {
-  final renames = namesakeRequalifications(candidate.label, candidate.pubkey, {
-    for (final entry in mentions.entries) entry.key: entry.value.pubkey,
-  });
-  if (renames.isEmpty) return start;
-  final text = controller.text;
-  final cursor = controller.selection.isValid
-      ? controller.selection.baseOffset
-      : text.length;
-  final code = controller._styledCodeRanges(text);
-  // Selected keys first, so an equal-length duplicate stays the selection's.
-  final selected = {for (final key in mentions.keys) key.toLowerCase()};
-  final labels = [
-    ...mentions.keys,
-    ...competitors.where((label) => !selected.contains(label.toLowerCase())),
-  ];
-  final result = renameMentions(
-    text,
-    labels,
-    renames,
-    start,
-    // Exactly what the editor draws as code stays as typed.
-    excluded: (from, to) => code.any((c) => c.start < from && to < c.end),
-  );
-  // Backtick-adjacent code is no occurrence, but persistence still keeps it.
-  final remaining = mentionOccurrences(
-    result.text.replaceAll('`', ' '),
-    labels,
-  ).map((range) => range.label).toSet().intersection(result.renamed);
-  for (final key in result.renamed) {
-    mentions[renames[key]!] =
-        result.kept.contains(key) || remaining.contains(key)
-        ? mentions[key]!
-        : mentions.remove(key)!;
-  }
-  controller.value = TextEditingValue(
-    text: result.text,
-    selection: TextSelection.collapsed(offset: cursor + result.offset - start),
-  );
-  return result.offset;
-}
-
 /// Insert [trigger] (e.g. `@` or `#`) at the cursor position, prefixed with
 /// a space if needed for word separation. Used by `triggerMention` and
 /// `triggerChannel`.
@@ -467,11 +530,13 @@ void _insertTriggerAtCursor(
   final needsSpace =
       cursor > 0 && text[cursor - 1] != ' ' && text[cursor - 1] != '\n';
   final insert = needsSpace ? ' $trigger' : trigger;
-  final before = text.substring(0, cursor);
-  final after = text.substring(cursor);
-  controller.value = TextEditingValue(
-    text: '$before$insert$after',
-    selection: TextSelection.collapsed(offset: cursor + insert.length),
+  // Inserted at the caret, never over a selection: a selected chip stays.
+  _replaceComposerRange(
+    controller,
+    start: cursor,
+    end: cursor,
+    replacement: insert,
+    caret: cursor + insert.length,
   );
   focusNode.requestFocus();
 }
@@ -483,8 +548,20 @@ enum _NonMemberMentionChoice { invite, sendWithoutInviting }
 /// User-facing text for a failed add or send.
 String _composeSendErrorMessage(Object error) {
   if (error is AddMembersException) return error.message;
-  return error.toString().replaceFirst('Exception: ', '');
+  return relayErrorText(error);
 }
+
+/// Describes why a text send failed. A community switch is reported
+/// separately by [_reportSendCancelledByCommunitySwitch]. Failures after the
+/// EVENT went out say "Not confirmed": the relay may have accepted it.
+String _sendFailureMessage(Object error) => switch (error) {
+  RelayNotConnectedError() => 'Not sent. No connection.',
+  RelayAckTimeoutError() => "Not confirmed. The relay didn't respond.",
+  RelayAckLostError() => 'Not confirmed. Connection lost.',
+  TimeoutException() => "Not sent. The relay didn't respond.",
+  StateError(:final message) => 'Not sent: $message',
+  _ => 'Not sent: ${_composeSendErrorMessage(error)}',
+};
 
 /// Ask whether to invite mentioned humans who aren't channel members, or
 /// send without inviting them. Mirrors desktop's `NonMemberMentionDialog`.
@@ -810,58 +887,61 @@ class _OutgoingMentions {
   }
 }
 
-/// Insert an emoji at the cursor without replacing the draft.
+VoidCallback _composerEmojiAction(
+  BuildContext context,
+  FocusNode focusNode,
+  ValueNotifier<_InputTool?> inputTool,
+  ValueNotifier<_AttachmentSurface> attachmentSurface,
+  ValueNotifier<bool> isEmojiPickerOpen,
+  ValueChanged<String> insertEmoji,
+) => () {
+  if (isEmojiPickerOpen.value) return;
+  _dismissComposerKeyboard(focusNode);
+  inputTool.value = null;
+  attachmentSurface.value = _AttachmentSurface.closed;
+  isEmojiPickerOpen.value = true;
+  _showComposerEmojiPicker(context, insertEmoji, () {
+    if (!context.mounted) return;
+    isEmojiPickerOpen.value = false;
+    focusNode.requestFocus();
+    // Native sheets can hide the keyboard without removing Flutter focus.
+    // Wait for an unfocused draft to reconnect before showing its keyboard.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!context.mounted || !focusNode.hasFocus) return;
+      unawaited(SystemChannels.textInput.invokeMethod<void>('TextInput.show'));
+    });
+  });
+};
+
+OverlayPortalController _useComposerSuggestionPortal(BuildContext context) {
+  final controller = useMemoized(OverlayPortalController.new);
+  useEffect(() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (context.mounted) controller.show();
+    });
+    return null;
+  }, [controller]);
+  return controller;
+}
+
+/// Insert an emoji without restoring the keyboard underneath a native picker.
 void _insertComposerEmoji(
   TextEditingController controller,
   FocusNode focusNode,
-  String emoji,
-) {
+  String emoji, {
+  required bool restoreFocus,
+}) {
   final text = controller.text;
   final selection = controller.selection;
   final cursor = selection.isValid
       ? selection.baseOffset.clamp(0, text.length)
       : text.length;
-  controller.value = TextEditingValue(
-    text: text.replaceRange(cursor, cursor, emoji),
-    selection: TextSelection.collapsed(offset: cursor + emoji.length),
+  _replaceComposerRange(
+    controller,
+    start: cursor,
+    end: cursor,
+    replacement: emoji,
+    caret: cursor + emoji.length,
   );
-  focusNode.requestFocus();
-}
-
-// Wrap or insert markdown formatting around the current selection.
-void _applyComposerFormat(
-  TextEditingController controller,
-  FocusNode focusNode,
-  ObjectRef<bool> isModifyingText,
-  String prefix,
-  String? suffix,
-) {
-  suffix ??= prefix;
-  final text = controller.text;
-  final sel = controller.selection;
-  if (!sel.isValid) return;
-
-  isModifyingText.value = true;
-  try {
-    if (sel.isCollapsed) {
-      final offset = sel.baseOffset;
-      final updated =
-          '${text.substring(0, offset)}$prefix$suffix${text.substring(offset)}';
-      controller.text = updated;
-      controller.selection = TextSelection.collapsed(
-        offset: offset + prefix.length,
-      );
-    } else {
-      final selected = text.substring(sel.start, sel.end);
-      final updated =
-          '${text.substring(0, sel.start)}$prefix$selected$suffix${text.substring(sel.end)}';
-      controller.text = updated;
-      controller.selection = TextSelection.collapsed(
-        offset: sel.start + prefix.length + selected.length + suffix.length,
-      );
-    }
-  } finally {
-    isModifyingText.value = false;
-  }
-  focusNode.requestFocus();
+  if (restoreFocus) focusNode.requestFocus();
 }

@@ -17,8 +17,8 @@ PostgreSQL stores data. The application owns behavior.
 |---|---|---|
 | Schema source of truth | Two parallel sources: ordered sqlx migrations in `migrations/` and the desired-state manifest in `schema/` | The declarative desired state in `schema/tables/public/` is the source of truth. Deployments that apply schema out of band plan each change from it, with the tool of their choice. `migrations/` stays, because auto-migration stays supported (next row). Each app owns its own migrations and declarative schema: the relay's copies of the push gateway's tables are debt to remove (Rule 4). |
 | Who applies DDL | Startup migrations when `BUZZ_AUTO_MIGRATE` is on (binary default off, Helm chart default on), `buzz-admin migrate`, the push gateway's pre-upgrade Helm Job, and partition creation at relay startup and on a schedule | Both modes stay supported. Deployments at scale, including Block's hosted deployment, apply schema changes out of band through a reviewed workflow before deploying, and their serving relay runs no DDL. Smaller and self-hosted deployments MAY keep auto-migration on. Still open: how the two modes share one schema source, how auto-migration orders a release whose expand, backfill, and contract steps arrive in one upgrade, and how an operator recovers after a contract migration fails at boot (Rule 5). Monthly partition creation is planned to move out of the relay. Changes to partitioned tables (`events`, `delivery_log`) are outside the out-of-band envelope (Rule 6): attaching a partition to a live parent and building an index on a partitioned parent need their own reviewed procedure. |
-| Integrity between tables | Some foreign keys, including `ON DELETE CASCADE` and `ON DELETE SET NULL` | None in the database. The owning application transaction checks references and performs deletes explicitly. |
-| Guards and follow-up writes | Triggers and PL/pgSQL functions (`schema/functions/`, `schema/triggers/`) | None in the database. Guards run in the owning writer's transaction; follow-up work is recorded in the same transaction and processed as durable, retryable application work. |
+| Integrity between tables | None in the database (migrations `0102`-`0104` dropped the last foreign keys) | None in the database. The owning application transaction checks references and performs deletes explicitly. |
+| Guards and follow-up writes | None in the database. Earlier migrations dropped the last triggers and functions | None in the database. Guards run in the owning writer's transaction; follow-up work is recorded in the same transaction and processed as durable, retryable application work. |
 | Data repair | Some historical repair embedded in migrations | Backfill definitions in application code, run by the durable framework in [data-backfills.md](data-backfills.md). |
 | Rollout | Effectively schema and code together | Expand, then deploy, then backfill, then contract. Each step is applied and verified on its own. |
 
@@ -47,11 +47,9 @@ adds to them moves away from the target.
   unbounded, in one transaction, while holding locks, with no checkpoint, pause,
   or recovery. The backfill framework exists to provide those properties.
 
-The move to declarative, out-of-band schema changes is in progress. Until it
-finishes, existing triggers, functions, and foreign keys stay in place as
-backstops. They are removed one at a time, after their application replacement
-has shipped and been verified. They are not removed early, and new ones are not
-added.
+The move to declarative, out-of-band schema changes is in progress. The last
+triggers, functions, and foreign keys are already dropped. Rules 1 and 2 keep
+new ones out, and CI enforces both.
 
 ## Rules for changes now
 
@@ -75,6 +73,17 @@ transaction that owns the write:
 
 Dropping or narrowing an existing trigger or function is welcome. Follow the
 retirement sequence below.
+
+**Enforcement.** `migrations_after_retirement_add_no_triggers_functions_or_foreign_keys`
+in `crates/buzz-db/src/runtime/migration.rs` fails CI when a migration numbered
+after `0104` contains `CREATE FUNCTION`, `CREATE PROCEDURE`, `CREATE TRIGGER`,
+`CREATE RULE` (each with or without `OR REPLACE`), `CREATE CONSTRAINT TRIGGER`,
+`CREATE EVENT TRIGGER`, `REFERENCES`, or `FOREIGN KEY`. It names the file and
+line. Comments, quoted identifiers, and string values are skipped; a string
+passed to `EXECUTE` or `format(` is checked as SQL. The desired-state layout
+test applies the same check to every file under `schema/`.
+`admin_schema_parity_between_desired_state_and_migrations` asserts that both
+bootstrap paths leave no trigger, function, rule, or foreign key.
 
 **No exception for the community write fence.** Migration 0090 dropped the
 universal fence triggers and their helper functions; a new table MUST NOT bring
@@ -125,7 +134,7 @@ Then, all in the same PR:
 - [ ] Every writer of the table goes through community admission
       (`begin_community_write_transaction` or another constructor that returns
       `AdmittedTx`). Nothing writes the table outside it.
-- [ ] No fence trigger in the migration or under `schema/triggers/`.
+- [ ] No fence trigger in the migration.
 - [ ] The table in `EXPECTED_SCOPED_TABLES` (`crates/buzz-db/src/store/deletion.rs`).
 - [ ] The table in `PURGE_SCOPED_TABLES` in the same file, ordered child
       before parent. A table missing here keeps its rows after the purge, and
@@ -148,6 +157,19 @@ rewritten. An approval made before the expand migration therefore still
 executes after it, and still purges the new table's rows. A table that is not
 on the list is not covered by an older approval, even when it is in
 `EXPECTED_SCOPED_TABLES`.
+
+#### Retiring a tenant-owned table
+
+Before a contract migration drops a table with a `community_id` column, ship a
+release that removes every reader and writer of it and moves it from
+`EXPECTED_SCOPED_TABLES` and `PURGE_SCOPED_TABLES` to
+`RETIRING_SCOPED_TABLES` (`crates/buzz-db/src/store/deletion.rs`), and deploy it
+to every relay, deletion executor and operator CLI. The catalog then accepts
+the table present or absent, the purge deletes its rows only while it exists,
+and an approval that froze it still executes after the drop
+(`validate_approved_schema` tolerates a frozen `RETIRING_SCOPED_TABLES` entry
+that is gone, and nothing else). Run the drop migration after that release
+is everywhere, and remove the entry once no pre-drop approval remains.
 
 #### Checklist: adding a provenance-only table
 
@@ -268,9 +290,9 @@ apply:
 | `migrations/NNNN_<name>.sql` | The forward migration for existing databases. Use the next free number; rebase and renumber on a collision. Never edit a merged migration: its checksum changes, and relays that run the migrator fail with sqlx `VersionMismatch`. Fix forward in a new migration. |
 | `schema/tables/public/<table>.sql` | The table's final `CREATE TABLE` and its `CREATE INDEX` statements, one table per file. This is the declarative schema source. |
 | `schema/schema.sql` | An `\i` line for each new file, after the tables it depends on. |
-| `schema/types/`, `schema/partitions/`, `schema/seeds/` | The matching non-table objects. The layout test permits nothing else here. Rule 1 forbids any addition to `functions/` and `triggers/`. |
+| `schema/types/`, `schema/partitions/`, `schema/seeds/` | The matching non-table objects. The layout test permits nothing else here. `schema/` has no `functions/` or `triggers/` directory, and Rule 1 forbids adding one. |
 | `scripts/reconcile-schema-after-pgschema.sql` | Idempotent convergence, plus a live assertion, for anything `pgschema` does not preserve: seed rows, some storage parameters, partition attachment, and the shapes listed in AGENTS.md *Common Gotchas* #7. |
-| `crates/buzz-push-gateway/migrations/` **and** the relay copies | The six `push_gateway_*` tables have two homes. The gateway applies its own migration history to its own database, through a pre-install/pre-upgrade Helm Job ([push-gateway-deployment.md](push-gateway-deployment.md)). The relay schema also defines them: `migrations/` (`0015`, `0043`, `0045`, `0060`), `schema/tables/public/push_gateway_*.sql`, and `schema/seeds/push_gateway_*.sql`. Until the duplication is removed, a gateway schema change goes in both, as relay `0060` mirrors gateway `0006`. Every rule here applies to both. The target is for the gateway to own its tables alone, in its own migrations and declarative schema; do not add new gateway tables to the relay schema. |
+| `crates/buzz-push-gateway/migrations/`, `crates/buzz-push-gateway/schema/`, **and** the relay copies | The six `push_gateway_*` tables have two homes. The gateway applies its own migration history to its own database, through a pre-install/pre-upgrade Helm Job ([push-gateway-deployment.md](push-gateway-deployment.md)). `crates/buzz-push-gateway/schema/tables/public/` holds the gateway's declarative end state, one table per file; its parity test fails when it drifts from the gateway migrations. The relay schema also defines them: `migrations/` (`0015`, `0043`, `0045`, `0060`), `schema/tables/public/push_gateway_*.sql`, and `schema/seeds/push_gateway_*.sql`. Until the duplication is removed, a gateway schema change goes in both, as relay `0060` mirrors gateway `0006`. Every rule here applies to both. The target is for the gateway to own its tables alone, in its own migrations and declarative schema; do not add new gateway tables to the relay schema. |
 
 A fresh desired-state database and a migrated database MUST converge on the
 same live catalog. The desired-state layout test in
@@ -413,6 +435,14 @@ parity assertion on the table for that window.
    notes name the step-1 release as a required stop (Rule 5).
 3. Removing a guard requires a falsifiable test showing that the application
    path enforces what the guard enforced.
+
+pgschema cannot drop a trigger or foreign key from a partitioned table: it
+plans a drop for each partition's copy, which PostgreSQL refuses (`2BP01`) or
+which the parent's drop already removed (`42704`). A deployment that applies
+`schema/` with pgschema applies the dropping migration first, under that
+migration's lock budgets, then runs pgschema. For the trigger drops see
+[trigger-retirement-deployment.md](trigger-retirement-deployment.md); for the
+foreign keys on `events` and `delivery_log`, apply `0104`.
 
 ### 6. Bound every lock and statement
 

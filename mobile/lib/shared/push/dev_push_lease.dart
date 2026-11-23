@@ -50,12 +50,14 @@ class BuzzPushLeaseDescriptor {
   factory BuzzPushLeaseDescriptor.fromRelayInformation(
     Map<String, dynamic> information,
   ) {
-    final extensions = _stringList(
-      information['supported_extensions'],
-      name: 'supported_extensions',
-    );
+    // NIP-11 makes the list optional: a relay may leave it out or send none.
+    final advertised = information['supported_extensions'];
+    if (advertised == null || (advertised is List && advertised.isEmpty)) {
+      throw const BuzzPushNotAdvertised();
+    }
+    final extensions = _stringList(advertised, name: 'supported_extensions');
     if (!extensions.contains('buzz-push-v1')) {
-      throw const FormatException('NIP-11 does not advertise buzz-push-v1');
+      throw const BuzzPushNotAdvertised();
     }
 
     final push = _stringMap(information['push'], name: 'push');
@@ -206,6 +208,12 @@ class BuzzPushLeaseDescriptor {
   }
 }
 
+/// The relay does not offer Buzz push: an expected answer, not a fault.
+class BuzzPushNotAdvertised extends FormatException {
+  const BuzzPushNotAdvertised()
+    : super('NIP-11 does not advertise buzz-push-v1');
+}
+
 /// The desired lease requires channel IDs that this relay cannot accept yet.
 class BuzzPushChannelGrammarException implements Exception {
   const BuzzPushChannelGrammarException();
@@ -248,12 +256,12 @@ Future<BuzzPushLeaseDescriptor> fetchBuzzPushLeaseDescriptor(
   final ownedClient = client ?? newAppHttpClient();
   // Closing a client does not stop a request on a shared session.
   final abort = Completer<void>();
+  final request = http.AbortableRequest(
+    'GET',
+    requestUri,
+    abortTrigger: abort.future,
+  )..headers['Accept'] = 'application/nostr+json';
   try {
-    final request = http.AbortableRequest(
-      'GET',
-      requestUri,
-      abortTrigger: abort.future,
-    )..headers['Accept'] = 'application/nostr+json';
     final response = await ownedClient
         .send(request)
         .then(http.Response.fromStream)
@@ -268,6 +276,9 @@ Future<BuzzPushLeaseDescriptor> fetchBuzzPushLeaseDescriptor(
       throw const FormatException('NIP-11 response must be a JSON object');
     }
     return BuzzPushLeaseDescriptor.fromRelayInformation(decoded);
+  } on TimeoutException {
+    noteHttpDeadline(request);
+    rethrow;
   } finally {
     abort.complete();
     if (client == null) ownedClient.close();

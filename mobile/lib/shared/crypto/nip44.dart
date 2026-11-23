@@ -119,11 +119,19 @@ Uint8List _pad(Uint8List plaintext) {
 
 String _unpad(Uint8List padded) {
   if (padded.length < 2) throw FormatException('Padded data too short');
-  final len = (padded[0] << 8) | padded[1];
-  if (len == 0 || 2 + len > padded.length) {
+  var len = (padded[0] << 8) | padded[1];
+  var prefix = 2;
+  // Plaintexts of 64 KiB or more use a zero u16 then a u32 big-endian length,
+  // as nostr-tools writes them.
+  if (len == 0 && padded.length >= 6) {
+    len = ByteData.sublistView(padded, 2, 6).getUint32(0);
+    prefix = 6;
+    if (len < 65536) throw FormatException('Invalid padding length: $len');
+  }
+  if (len == 0 || prefix + len > padded.length) {
     throw FormatException('Invalid padding length: $len');
   }
-  return utf8.decode(padded.sublist(2, 2 + len));
+  return utf8.decode(padded.sublist(prefix, prefix + len));
 }
 
 // ── ChaCha20 (IETF, 12-byte nonce) ─────────────────────────────────────────

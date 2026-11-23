@@ -320,6 +320,15 @@ import os.log
       )
     }
 
+    if let toolStripRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzComposerToolStripGlass"
+    ) {
+      toolStripRegistrar.register(
+        ComposerToolStripGlassFactory(messenger: toolStripRegistrar.messenger()),
+        withId: "buzz/composer_tool_strip_glass"
+      )
+    }
+
     if let stickyDateGlassRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzStickyDateGlassHeader"
     ) {
@@ -843,6 +852,19 @@ import os.log
             relayURL: relayURL
           )
           await MainActor.run { result(record.flutterArguments) }
+        } catch BuzzDevPushEnrollmentError.invalidGatewayResponse(let route) {
+          // Its own code, with no text from the reply, so Dart can report
+          // contract drift without parsing messages. The details are only the
+          // fixed route label, so local logs still tell the routes apart.
+          await MainActor.run {
+            result(
+              FlutterError(
+                code: "gateway_response_invalid",
+                message: "The push gateway sent a response the app cannot read.",
+                details: route
+              )
+            )
+          }
         } catch {
           await MainActor.run {
             result(

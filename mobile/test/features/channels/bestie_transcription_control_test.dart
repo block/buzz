@@ -110,6 +110,8 @@ class _Speech implements DeviceTranscription {
   int transcriptions = 0;
   bool cancelled = false;
   @override
+  Future<bool> isAvailable() async => true;
+  @override
   Future<void> prepare() async {
     await preparation?.future;
     if (preparationFailure case final failure?) throw failure;
@@ -676,6 +678,7 @@ class _Actions implements ChannelActions {
   Future<Channel> openDm({
     required List<String> pubkeys,
     bool waitForChannelList = true,
+    bool includeHistory = false,
   }) async {
     await opening?.future;
     return Channel(

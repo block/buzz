@@ -43,6 +43,10 @@ class IosGlassNavigationAction extends HookWidget {
   @override
   Widget build(BuildContext context) {
     assert(defaultTargetPlatform == TargetPlatform.iOS);
+    return HookBuilder(builder: _buildNative);
+  }
+
+  Widget _buildNative(BuildContext context) {
     final nativeChannel = useState<MethodChannel?>(null);
     final onPressedRef = useRef(onPressed)..value = onPressed;
     final brightness = context.theme.brightness.name;

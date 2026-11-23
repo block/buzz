@@ -36,12 +36,23 @@ final identityArchivesProvider = FutureProvider<Set<String>>((ref) async {
   final abort = Completer<void>();
   try {
     final uri = Uri.parse(sync.community);
+    final request = http.AbortableRequest(
+      'GET',
+      uri,
+      abortTrigger: abort.future,
+    )..headers['Accept'] = 'application/nostr+json';
     final response = await client
-        .send(
-          http.AbortableRequest('GET', uri, abortTrigger: abort.future)
-            ..headers['Accept'] = 'application/nostr+json',
-        )
-        .timeout(const Duration(seconds: 3));
+        .send(request)
+        .timeout(
+          const Duration(seconds: 3),
+          onTimeout: () {
+            noteHttpDeadline(request);
+            throw TimeoutException(
+              'Future not completed',
+              const Duration(seconds: 3),
+            );
+          },
+        );
     if (response.statusCode != 200) return {};
     final chunks = StreamIterator(
       response.stream.timeout(const Duration(seconds: 3)),

@@ -58,6 +58,7 @@ enum NativeTabler {
   }
 
   private static let glyphs: [String: UInt32] = [
+    "arrow.up": 0xea25, // arrow-up
     "arrow.down": 0xea16, // arrow-down
     "xmark": 0xeb55, // x
     "xmark.circle.fill": 0xea6a, // circle-x

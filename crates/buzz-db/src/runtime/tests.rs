@@ -3693,56 +3693,6 @@ async fn e_tag_any_runs_with_real_binds_on_p_join_and_count() {
             .expect("miss count"),
         0
     );
-
-    // A thread-page-wide `#e` set binds its arrays through a scalar subquery;
-    // the match must be the same with and without the `#p` join. A newer
-    // reply targets two of the ids (one row, newest first), and a decoy holds
-    // the root id in a tag that is not an `e` tag at position 1, which the
-    // containment probe admits and the positional check must reject.
-    let mut wide: Vec<String> = (1..=200).map(|i| format!("{i:064x}")).collect();
-    wide.push(fx.root_hex.clone());
-    let author = nostr::Keys::generate();
-    let mentioned = nostr::PublicKey::from_hex(&fx.mentioned_hex).expect("mentioned key");
-    let p_tag = nostr::Tag::public_key(mentioned);
-    for (content, e_tags, seconds) in [
-        (
-            "second-reply",
-            vec![
-                nostr::Tag::parse(["e", fx.root_hex.as_str()]).expect("e tag"),
-                nostr::Tag::parse(["e", wide[0].as_str()]).expect("e tag"),
-            ],
-            20,
-        ),
-        (
-            "decoy",
-            vec![nostr::Tag::parse(["x", "e", fx.root_hex.as_str()]).expect("decoy tag")],
-            30,
-        ),
-    ] {
-        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), content)
-            .tags(e_tags.into_iter().chain([p_tag.clone()]))
-            .custom_created_at(nostr::Timestamp::from((fx.root_seconds + seconds) as u64))
-            .sign_with_keys(&author)
-            .expect("sign wide-match event");
-        insert_top_level(&fx.writer, *fx.cid.as_uuid(), fx.channel, &event).await;
-        crate::insert_mentions(&fx.writer, fx.cid, &event, Some(fx.channel))
-            .await
-            .expect("insert mentions");
-    }
-    q.e_tags = Some(wide);
-    for p_tag in [None, Some(fx.mentioned_hex.clone())] {
-        q.p_tag_hex = p_tag;
-        let rows = event::query_events(&fx.writer, &q)
-            .await
-            .expect("wide e-tag select");
-        assert_eq!(contents(&rows), vec!["second-reply", "writer-reply"]);
-        assert_eq!(
-            event::count_events(&fx.writer, &q)
-                .await
-                .expect("wide e-tag count"),
-            2
-        );
-    }
 }
 
 #[path = "tests/thread_window_postgres_tests.rs"]

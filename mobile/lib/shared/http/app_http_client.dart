@@ -1,12 +1,19 @@
 import 'dart:async';
-import 'dart:io' show Platform;
+import 'dart:io'
+    show Platform, SocketException, TlsException, WebSocketException;
 
 import 'package:cronet_http/cronet_http.dart';
 import 'package:cupertino_http/cupertino_http.dart';
 import 'package:http/http.dart' as http;
 import 'package:jni/jni.dart' show JThrowable;
 import 'package:objective_c/objective_c.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
+
+import '../diagnostics/diagnostic_reporter.dart';
+import '../diagnostics/network_event_reporting.dart';
+
+part 'counted_http_client.dart';
 
 /// Which app-wide connection pool a request belongs to.
 enum HttpTraffic {
@@ -31,10 +38,16 @@ final _sessions = <HttpTraffic, http.Client?>{};
 /// cannot starve queries queued behind them on a shared connection.
 ///
 /// Elsewhere this is `http.Client()`, which also honors `http.runWithClient`.
+///
+/// Every request through the returned client is counted for diagnostics
+/// ([appHttpDiagnostics]).
 http.Client newAppHttpClient([HttpTraffic traffic = HttpTraffic.api]) {
   final session = _sessions.putIfAbsent(traffic, _openNativeSession);
-  if (session == null) return http.Client();
-  return SharedSessionClient(session, streamsUploads: !Platform.isAndroid);
+  if (session == null) return _CountedClient(http.Client(), traffic);
+  return _CountedClient(
+    SharedSessionClient(session, streamsUploads: !Platform.isAndroid),
+    traffic,
+  );
 }
 
 /// Whether [newAppHttpClient] uses a native session on this device.
@@ -246,6 +259,26 @@ TransportFailure? transportFailure(Object error) => switch (error) {
   NetworkException(:final errorCode, :final cronetInternalErrorCode) =>
     cronetErrorFailure(errorCode, cronetInternalErrorCode),
   _ => null,
+};
+
+/// Whether a native transport [error] says the device has no connection, as
+/// opposed to a host that cannot be reached: `URLSession`'s not connected to
+/// the internet, or Cronet's internet disconnected.
+bool isOfflineTransportError(Object error) => switch (error) {
+  NSErrorClientException(:final error) =>
+    error.domain.toDartString() == 'NSURLErrorDomain' && error.code == -1009,
+  NetworkException(:final errorCode) => errorCode == 2,
+  _ => false,
+};
+
+/// Whether a native transport [error] says an open connection was lost:
+/// `URLSession`'s network connection lost, or Cronet's connection closed or
+/// reset.
+bool isConnectionLostTransportError(Object error) => switch (error) {
+  NSErrorClientException(:final error) =>
+    error.domain.toDartString() == 'NSURLErrorDomain' && error.code == -1005,
+  NetworkException(:final errorCode) => errorCode == 5 || errorCode == 8,
+  _ => false,
 };
 
 /// Classifies an `NSURLErrorDomain` code.

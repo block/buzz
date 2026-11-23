@@ -501,6 +501,59 @@ void main() {
     expect(actions.mintRequests.last, (7 * 24 * 60 * 60, 5));
   });
 
+  testWidgets('invite failures show the error with its name', (tester) async {
+    tester.view.physicalSize = const Size(430, 1100);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final actions = _FakeInviteActions()
+      ..mintError = const FormatException('bad invite response')
+      ..memberInviteError = const FormatException('bad member list');
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          currentCommunityRoleProvider.overrideWithValue(
+            const AsyncData<CommunityMemberRole?>(CommunityMemberRole.owner),
+          ),
+          communityMembershipProvider.overrideWith(
+            (ref) async => const CommunityMembershipSnapshot(
+              snapshotFound: true,
+              members: [
+                CommunityMember(pubkey: owner, role: CommunityMemberRole.owner),
+              ],
+            ),
+          ),
+          myPubkeyProvider.overrideWithValue(owner),
+          communityInviteProfileProvider.overrideWith(
+            (ref, pubkey) async => CommunityInviteDirectoryUser(pubkey: pubkey),
+          ),
+          communityInviteActionsProvider.overrideWithValue(actions),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light().copyWith(platform: TargetPlatform.iOS),
+          home: const CommunityInvitePage(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('FormatException: bad invite response'), findsOneWidget);
+
+    const pastedPubkey =
+        'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
+    await tester.enterText(
+      find.byKey(const Key('community-invite-search')),
+      nostr.Nip19.encode(prefix: nostr.Nip19Prefix.npub, data: pastedPubkey),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('community-invite-submit')));
+    await tester.pumpAndSettle();
+
+    expect(actions.memberInvites, hasLength(1));
+    expect(find.text('FormatException: bad member list'), findsOneWidget);
+  });
+
   testWidgets('plain members cannot open invite tools', (tester) async {
     await tester.pumpWidget(
       ProviderScope(
@@ -526,6 +579,8 @@ class _FakeInviteActions implements CommunityInviteActions {
   final List<(int, int?)> mintRequests = [];
   final List<(List<String>, CommunityMemberRole)> memberInvites = [];
   Completer<void>? memberInviteCompleter;
+  Object? memberInviteError;
+  Object? mintError;
 
   @override
   Future<void> inviteMembers({
@@ -534,6 +589,7 @@ class _FakeInviteActions implements CommunityInviteActions {
   }) async {
     memberInvites.add((pubkeys.toList(), role));
     await memberInviteCompleter?.future;
+    if (memberInviteError case final error?) throw error;
   }
 
   @override
@@ -542,6 +598,7 @@ class _FakeInviteActions implements CommunityInviteActions {
     required int? maxUses,
   }) async {
     mintRequests.add((ttlSeconds, maxUses));
+    if (mintError case final error?) throw error;
     return MintedCommunityInvite(
       code: '${mintRequests.length}',
       expiresAt: 12345,

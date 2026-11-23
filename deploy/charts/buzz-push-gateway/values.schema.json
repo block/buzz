@@ -396,7 +396,7 @@
         "bootKeyDigests",
         "revocationGraceSeconds",
         "fcmProjectId",
-        "fcmServiceAccount",
+        "fcmCredentials",
         "attestationRoots"
       ],
       "properties": {
@@ -430,7 +430,7 @@
           "type": "string",
           "minLength": 1
         },
-        "fcmServiceAccount": {
+        "fcmCredentials": {
           "$ref": "#/$defs/apnsCert"
         },
         "attestationRoots": {

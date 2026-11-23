@@ -1,5 +1,5 @@
 CREATE TABLE push_wake_outbox (
-    community_id UUID NOT NULL REFERENCES communities(id),
+    community_id UUID NOT NULL,
     id UUID NOT NULL DEFAULT gen_random_uuid(),
     author BYTEA NOT NULL CHECK (length(author) = 32),
     installation_id TEXT NOT NULL,
@@ -15,8 +15,6 @@ CREATE TABLE push_wake_outbox (
     claim_id UUID,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (community_id, id),
-    FOREIGN KEY (community_id, author, installation_id)
-        REFERENCES push_leases (community_id, author, installation_id),
     UNIQUE (community_id, endpoint_hash, event_id)
 );
 CREATE INDEX push_wake_outbox_due

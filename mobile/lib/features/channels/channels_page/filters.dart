@@ -1,55 +1,108 @@
-part of '../channels_page.dart';
+import '../channel_sort/channel_sort_provider.dart';
+import '../channel_sections/section_reorder_sheet.dart';
+import '../../../shared/widgets/app_list.dart';
+import '../channel_sections/channel_sections_provider.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
+import '../../../shared/theme/theme.dart';
+import '../../../shared/theme/buzz_icons.dart';
+import 'package:flutter/foundation.dart';
+import '../../../shared/widgets/buzz_setting_menu.dart';
+import '../../../shared/widgets/ios_glass_navigation_button.dart';
+import '../../../shared/widgets/app_list_card.dart';
+import '../../../shared/widgets/collapsible_section_body.dart';
+import '../../../shared/widgets/buzz_sheet_header.dart';
 
-Future<String?> _showSectionViewSheet(
+import '../../../shared/widgets/modal_presentation.dart';
+import '../../../shared/widgets/bottom_up_page_route.dart';
+import '../channel_filter/channel_filter_provider.dart';
+import '../channel_filter/channel_filter_store.dart';
+import '../channel_sort/channel_sort_storage.dart';
+
+Future<String?> showSectionViewSheet(
   BuildContext context, {
   required String title,
   required String group,
   required ChannelSortMode sortMode,
   required ValueChanged<ChannelSortMode> onSort,
   bool custom = false,
-  bool isFirst = false,
-  bool isLast = false,
-}) => showBuzzModalBottomSheet<String>(
-  context: context,
-  showCloseButton: false,
-  showDragHandle: false,
-  isScrollControlled: true,
-  isDismissible: false,
-  enableDrag: false,
-  builder: (_) => _SectionViewSheet(
-    title: title,
-    group: group,
-    initialSort: sortMode,
-    onSort: onSort,
-    custom: custom,
-    isFirst: isFirst,
-    isLast: isLast,
-  ),
-);
+}) async {
+  final orderScope = context
+      .getElementForInheritedWidgetOfExactType<SectionOrderScope>();
+  final presentingRoute = defaultTargetPlatform == TargetPlatform.iOS
+      ? ModalRoute.of(context)
+      : null;
+  final release = presentingRoute == null
+      ? null
+      : BottomUpPageRoute.retainControlsForSheet(presentingRoute);
+  ModalRoute<dynamic>? sheetRoute;
+  try {
+    return await showBuzzModalBottomSheet<String>(
+      context: context,
+      nativeIosBarrier: presentingRoute != null,
+      showCloseButton: false,
+      showDragHandle: false,
+      isScrollControlled: true,
+      isDismissible: true,
+      enableDrag: false,
+      builder: (sheetContext) {
+        if (release != null) sheetRoute = ModalRoute.of(sheetContext);
+        return _SectionViewSheet(
+          onReorder: orderScope != null
+              ? () {
+                  if (!orderScope.mounted) return;
+                  (orderScope.widget as SectionOrderScope).show(sheetContext);
+                }
+              : null,
+          title: title,
+          group: group,
+          initialSort: sortMode,
+          onSort: onSort,
+          custom: custom,
+        );
+      },
+    );
+  } finally {
+    // A pop resolves before the scrim finishes fading.
+    if (release != null) {
+      await sheetRoute?.completed;
+      release();
+    }
+  }
+}
 
 class _SectionViewSheet extends HookConsumerWidget {
+  final VoidCallback? onReorder;
   final String title;
   final String group;
   final ChannelSortMode initialSort;
   final ValueChanged<ChannelSortMode> onSort;
   final bool custom;
-  final bool isFirst;
-  final bool isLast;
 
   const _SectionViewSheet({
+    required this.onReorder,
     required this.title,
     required this.group,
     required this.initialSort,
     required this.onSort,
     required this.custom,
-    required this.isFirst,
-    required this.isLast,
   });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final manager = ref.watch(channelFilterProvider);
+    final manager = ref.watch(
+      group.startsWith('solo:') ? soloFilterProvider : channelFilterProvider,
+    );
     useListenable(manager);
+    // Watched, not captured: a sheet opened before desktop's unified records
+    // arrive turns read-only when they do.
+    final sortEditable = ref.watch(
+      channelSortProvider.select((state) => state.editable),
+    );
+    final layoutEditable = ref.watch(
+      channelSectionsProvider.select((state) => state.editable),
+    );
     final originalManager = useRef(manager);
     final sort = useState(initialSort);
     final mode = useState(
@@ -120,7 +173,7 @@ class _SectionViewSheet extends HookConsumerWidget {
           );
         }
         if (!context.mounted) return;
-        if (sort.value != initialSort) onSort(sort.value);
+        if (sortEditable && sort.value != initialSort) onSort(sort.value);
         Navigator.of(context).pop();
       } catch (_) {
         if (context.mounted) failed.value = true;
@@ -134,37 +187,24 @@ class _SectionViewSheet extends HookConsumerWidget {
       Map<T, String> values,
       T selected,
       ValueChanged<T>? change,
-    ) => AppListCard(
+    ) => BuzzSettingMenu<T>(
+      controlKey: ValueKey('section-menu-$label'),
+      grouped: true,
+      trailingIcon: Icons.unfold_more,
+      enabled: change != null,
       label: label,
-      dividerIndent: Grid.xs,
-      children: [
+      value: selected,
+      valueLabel: values[selected]!,
+      onSelected: (value) => change?.call(value),
+      options: [
         for (final entry in values.entries)
-          Semantics(
-            checked: entry.key == selected,
-            inMutuallyExclusiveGroup: true,
-            enabled: change != null,
-            child: AppListRow(
-              key: ValueKey('section-choice-$label-${entry.value}'),
-              title: entry.value,
-              trailing: entry.key == selected
-                  ? Icon(
-                      BuzzIcons.check,
-                      size: 18,
-                      color: context.colors.primary,
-                    )
-                  : null,
-              titleColor: change == null
-                  ? context.colors.onSurfaceVariant
-                  : null,
-              onTap: change == null
-                  ? null
-                  : () {
-                      change(entry.key);
-                    },
-            ),
-          ),
+          BuzzSettingMenuOption(label: entry.value, value: entry.key),
       ],
     );
+    final onApply = saving.value || (filterChanged() && manager?.busy == true)
+        ? null
+        : apply;
+    final applyLabel = saving.value ? 'Saving…' : 'Apply changes';
     return PopScope(
       canPop: !saving.value,
       child: SafeArea(
@@ -179,58 +219,98 @@ class _SectionViewSheet extends HookConsumerWidget {
               children: [
                 BuzzSheetHeader(
                   title: title,
-                  trailing: saving.value
-                      ? const IconButton(
-                          tooltip: 'Saving…',
-                          onPressed: null,
-                          icon: Icon(BuzzIcons.x),
+                  leading: defaultTargetPlatform == TargetPlatform.iOS
+                      ? IosGlassNavigationButton(
+                          icon: IosGlassNavigationIcon.close,
+                          semanticLabel: 'Discard changes',
+                          onPressed: saving.value ? null : () => close(),
                         )
-                      : null,
+                      : IconButton(
+                          tooltip: 'Discard changes',
+                          onPressed: saving.value ? null : () => close(),
+                          icon: const Icon(BuzzIcons.x),
+                        ),
+                  trailing: defaultTargetPlatform == TargetPlatform.iOS
+                      ? IosGlassNavigationButton(
+                          icon: IosGlassNavigationIcon.check,
+                          semanticLabel: applyLabel,
+                          onPressed: onApply,
+                          isBusy: saving.value,
+                        )
+                      : IconButton(
+                          tooltip: applyLabel,
+                          onPressed: onApply,
+                          icon: const Icon(BuzzIcons.check),
+                        ),
                 ),
                 Flexible(
                   child: SingleChildScrollView(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        choices<ChannelSortMode>(
-                          'Sort',
-                          {
-                            ChannelSortMode.alpha: 'A–Z',
-                            ChannelSortMode.recent: 'Recent',
-                          },
-                          sort.value,
-                          saving.value ? null : (value) => sort.value = value,
-                        ),
-                        choices<ChannelFilterMode>(
-                          'Show',
-                          {
-                            ChannelFilterMode.all: 'All',
-                            ChannelFilterMode.unreads: 'Unreads',
-                            ChannelFilterMode.active: 'Active',
-                          },
-                          mode.value,
-                          writable
-                              ? (value) {
-                                  filterDirty.value = true;
-                                  mode.value = value;
-                                }
-                              : null,
-                        ),
-                        CollapsibleSectionBody(
-                          expanded: mode.value == ChannelFilterMode.active,
-                          child: choices<int>(
-                            'Active in the past',
-                            {
-                              for (final day in {1, 7, 30, 90, days.value})
-                                day: '$day ${day == 1 ? 'day' : 'days'}',
-                            },
-                            days.value,
-                            writable
-                                ? (value) {
-                                    filterDirty.value = true;
-                                    days.value = value;
-                                  }
-                                : null,
+                        AnimatedSize(
+                          duration: MediaQuery.disableAnimationsOf(context)
+                              ? Duration.zero
+                              : sectionExpandDuration,
+                          alignment: Alignment.topCenter,
+                          curve: sectionExpandCurve,
+                          child: AppListCard(
+                            // A rounded clip around UIKit pickers also clips Flutter's
+                            // following overlay, hiding the management actions below.
+                            clipBehavior:
+                                defaultTargetPlatform == TargetPlatform.iOS
+                                ? Clip.none
+                                : Clip.antiAlias,
+                            dividerIndent: Grid.xs,
+                            children: [
+                              choices<ChannelSortMode>(
+                                'Sort',
+                                {
+                                  ChannelSortMode.alpha: 'A–Z',
+                                  ChannelSortMode.recent: 'Recent',
+                                },
+                                sort.value,
+                                saving.value || !sortEditable
+                                    ? null
+                                    : (value) => sort.value = value,
+                              ),
+                              choices<ChannelFilterMode>(
+                                'Show',
+                                {
+                                  ChannelFilterMode.all: 'All',
+                                  ChannelFilterMode.unreads: 'Unreads',
+                                  ChannelFilterMode.active: 'Active',
+                                },
+                                mode.value,
+                                writable
+                                    ? (value) {
+                                        filterDirty.value = true;
+                                        mode.value = value;
+                                      }
+                                    : null,
+                              ),
+                              if (mode.value == ChannelFilterMode.active)
+                                choices<int>(
+                                  'Active in the past',
+                                  {
+                                    for (final day in {
+                                      1,
+                                      7,
+                                      30,
+                                      90,
+                                      days.value,
+                                    })
+                                      day: '$day ${day == 1 ? 'day' : 'days'}',
+                                  },
+                                  days.value,
+                                  writable
+                                      ? (value) {
+                                          filterDirty.value = true;
+                                          days.value = value;
+                                        }
+                                      : null,
+                                ),
+                            ],
                           ),
                         ),
                         if (manager?.ready != true)
@@ -247,36 +327,34 @@ class _SectionViewSheet extends HookConsumerWidget {
                                   },
                             child: const Text('Retry loading preferences'),
                           ),
-                        if (custom) ...[
-                          const Divider(),
-                          for (final action in {
-                            'rename': ('Rename section', BuzzIcons.pencil),
-                            'move_up': ('Move up', BuzzIcons.arrowUp),
-                            'move_down': ('Move down', BuzzIcons.arrowDown),
-                            'delete': ('Delete section', BuzzIcons.trash2),
-                          }.entries)
-                            ListTile(
-                              contentPadding: EdgeInsets.zero,
-                              leading: Icon(
-                                action.value.$2,
-                                size: 16,
-                                color: action.key == 'delete'
-                                    ? context.colors.error
-                                    : null,
-                              ),
-                              title: Text(
-                                action.value.$1,
-                                style: action.key == 'delete'
-                                    ? TextStyle(color: context.colors.error)
-                                    : null,
-                              ),
-                              enabled:
-                                  !saving.value &&
-                                  !(action.key == 'move_up' && isFirst) &&
-                                  !(action.key == 'move_down' && isLast),
-                              onTap: () => close(action.key),
-                            ),
-                        ],
+                        if (custom && layoutEditable || onReorder != null)
+                          AppListCard(
+                            children: [
+                              if (custom && layoutEditable)
+                                AppListRow(
+                                  title: 'Rename section',
+                                  icon: BuzzIcons.pencil,
+                                  onTap: saving.value
+                                      ? null
+                                      : () => close('rename'),
+                                ),
+                              if (onReorder != null)
+                                AppListRow(
+                                  title: 'Reorder sections',
+                                  icon: BuzzIcons.arrowUpDown,
+                                  onTap: saving.value ? null : onReorder,
+                                ),
+                              if (custom && layoutEditable)
+                                AppListRow(
+                                  title: 'Delete section',
+                                  icon: BuzzIcons.trash2,
+                                  titleColor: context.colors.error,
+                                  onTap: saving.value
+                                      ? null
+                                      : () => close('delete'),
+                                ),
+                            ],
+                          ),
                       ],
                     ),
                   ),
@@ -295,44 +373,6 @@ class _SectionViewSheet extends HookConsumerWidget {
                       ),
                     ),
                   ),
-                const SizedBox(height: Grid.xxs),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: Wrap(
-                      alignment: WrapAlignment.end,
-                      spacing: Grid.xxs,
-                      runSpacing: Grid.xxs,
-                      children: [
-                        TextButton(
-                          onPressed: saving.value ? null : () => close(),
-                          child: const Text('Cancel'),
-                        ),
-                        FilledButton(
-                          style: FilledButton.styleFrom(
-                            backgroundColor: context.colors.onSurface,
-                            foregroundColor: context.colors.surface,
-                          ),
-                          // Only a filter write waits on the filter read;
-                          // sort applies locally, as it did before filters.
-                          onPressed:
-                              saving.value ||
-                                  (filterChanged() && manager?.busy == true)
-                              ? null
-                              : apply,
-                          child: Text(
-                            saving.value
-                                ? 'Saving…'
-                                : failed.value
-                                ? 'Retry'
-                                : 'Apply',
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
               ],
             ),
           ),

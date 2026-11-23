@@ -11,9 +11,17 @@ import '../channel_sort/channel_sort_storage.dart';
 import 'channel_filter_manager.dart';
 import 'channel_filter_store.dart';
 
-final channelFilterProvider = Provider.autoDispose<ChannelFilterManager?>((
-  ref,
-) {
+final channelFilterProvider = Provider.autoDispose<ChannelFilterManager?>(
+  (ref) => _createManager(ref, 'channel-filter'),
+);
+
+// Solo projects and Team sections each support 100 entries. Keep their
+// preference budgets independent when both inventories are full.
+final soloFilterProvider = Provider.autoDispose<ChannelFilterManager?>(
+  (ref) => _createManager(ref, 'solo-channel-filter'),
+);
+
+ChannelFilterManager? _createManager(Ref ref, String coordinate) {
   // Identity and community scope only: push bookkeeping rewrites the active
   // community and the socket reconnects without changing either, and a new
   // manager would abandon an open section sheet.
@@ -33,7 +41,7 @@ final channelFilterProvider = Provider.autoDispose<ChannelFilterManager?>((
   }
   final prefs = ref.read(savedPrefsProvider);
   final cacheKey =
-      'buzz.channel-filter.v1:$pubkey:${Uri.encodeComponent(normalizeChannelSortRelayUrl(relayUrl))}';
+      'buzz.$coordinate.v1:$pubkey:${Uri.encodeComponent(normalizeChannelSortRelayUrl(relayUrl))}';
   ChannelFilterStore? cached;
   try {
     final raw = prefs.getString(cacheKey);
@@ -48,13 +56,10 @@ final channelFilterProvider = Provider.autoDispose<ChannelFilterManager?>((
   final session = ref.read(relaySessionProvider.notifier);
   final signer = SignedEventRelay(session: session, nsec: nsec);
   final manager = ChannelFilterManager(
+    coordinate: coordinate,
     isGroupLive: (group) =>
         !group.startsWith('section:') ||
-        ref
-            .read(channelSectionsProvider)
-            .store
-            .sections
-            .any((s) => 'section:${s.id}' == group),
+        ref.read(sidebarLayoutProvider).section(group.substring(8)) != null,
     pubkey: pubkey,
     crypto: crypto,
     cached: cached,
@@ -62,8 +67,8 @@ final channelFilterProvider = Provider.autoDispose<ChannelFilterManager?>((
       NostrFilter(
         kinds: const [EventKind.readState],
         authors: [pubkey],
-        tags: const {
-          '#d': ['channel-filter'],
+        tags: {
+          '#d': [coordinate],
         },
         limit: 1,
       ),
@@ -72,9 +77,9 @@ final channelFilterProvider = Provider.autoDispose<ChannelFilterManager?>((
       await signer.submit(
         kind: EventKind.readState,
         content: content,
-        tags: const [
-          ['d', 'channel-filter'],
-          ['t', 'channel-filter'],
+        tags: [
+          ['d', coordinate],
+          ['t', coordinate],
         ],
         createdAt: createdAt,
       );
@@ -99,4 +104,4 @@ final channelFilterProvider = Provider.autoDispose<ChannelFilterManager?>((
   });
   ref.onDispose(manager.dispose);
   return manager;
-});
+}

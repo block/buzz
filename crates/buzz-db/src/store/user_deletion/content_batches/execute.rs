@@ -103,8 +103,10 @@ pub(super) fn selection(item: &Value) -> Result<(&'static str, &'static str)> {
         Some("push_match_queue") => ("push_match_queue", "event_id=decode($2->>'event_id','hex')"),
         Some("push_wake_outbox") => ("push_wake_outbox", "id=($2->>'id')::uuid"),
         Some("operator_listener_outbox") => ("operator_listener_outbox", "id=($2->>'id')::uuid"),
-        Some("delivery_log") => ("delivery_log", "id=($2->>'id')::bigint AND delivered_at=($2->>'delivered_at')::timestamptz"),
-        Some("subscriptions") => ("subscriptions", "id=$2->>'id'"),
+        Some("workflows") => ("workflows", "id=($2->>'id')::uuid"),
+        Some("workflow_runs") => ("workflow_runs", "id=($2->>'id')::uuid"),
+        Some("workflow_approvals") => ("workflow_approvals", "token=decode($2->>'token','hex')"),
+        Some("scheduled_workflow_fires") => ("scheduled_workflow_fires", "workflow_id=($2->>'workflow_id')::uuid AND scheduled_for=($2->>'scheduled_for')::timestamptz"),
         Some("push_leases") => ("push_leases", "author=decode($2->>'author','hex') AND installation_id=$2->>'installation_id'"),
         _ => return Err(invalid("unknown internal batch table")),
     })

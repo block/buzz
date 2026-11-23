@@ -1,5 +1,7 @@
 import 'package:sentry_flutter/sentry_flutter.dart';
 
+import 'diagnostic_reporter.dart';
+
 /// The one filter every Dart report, breadcrumb and count passes through
 /// before it leaves the device. Reports the native SDKs capture themselves
 /// (native crashes, app hangs) do not pass through it.
@@ -12,10 +14,17 @@ abstract final class DiagnosticFilter {
   /// Breadcrumb category the app writes for networking events.
   static const networkCategory = 'network';
 
+  /// Breadcrumb category the app writes for the screen the person moved to.
+  static const navigationCategory = 'navigation';
+
+  /// The one data key of a navigation breadcrumb: a `DiagnosticScreen` name.
+  static const screenKey = 'screen';
+
   /// Breadcrumb category of the SDK's foreground/background entries.
   static const lifecycleCategory = 'app.lifecycle';
 
-  /// Tag carrying the random per-installation identifier on every report.
+  /// Tag carrying the random per-installation identifier on every report, and
+  /// the attribute that carries it on every count.
   static const installIdTag = 'install.id';
 
   /// Attributes the app itself sets on counts and breadcrumbs.
@@ -28,7 +37,11 @@ abstract final class DiagnosticFilter {
   /// Fixed wording that replaces an error's own text.
   static const removedText = 'Error text removed before sending.';
 
-  static const _breadcrumbCategories = {networkCategory, lifecycleCategory};
+  static const _breadcrumbCategories = {
+    networkCategory,
+    navigationCategory,
+    lifecycleCategory,
+  };
 
   /// Device fields that may leave: the hardware and its state, never the
   /// name a person gave it or its locale and timezone.
@@ -124,7 +137,9 @@ abstract final class DiagnosticFilter {
 
   /// Whether an attribute [key] may leave the device.
   static bool allowsAttribute(String key) =>
-      appAttributes.contains(key) || _sdkAttributePrefixes.any(key.startsWith);
+      appAttributes.contains(key) ||
+      key == installIdTag ||
+      _sdkAttributePrefixes.any(key.startsWith);
 
   /// The app tags a report with where it came from and which installation
   /// sent it; the SDK tags it with its origin and environment.
@@ -160,6 +175,9 @@ abstract final class DiagnosticFilter {
         SentryRuntime.fromJson(_only(runtime.toJson(), _runtime)),
     ];
     event.tags?.removeWhere((key, _) => !_allowsTag(key));
+    // Nothing sets additional data today; drop it so nothing later can.
+    // ignore: deprecated_member_use
+    event.extra = null;
     event.message = switch (event.message) {
       final message? => SentryMessage(stripUrlTails(message.formatted)),
       null => null,
@@ -182,6 +200,7 @@ abstract final class DiagnosticFilter {
     if (crumb == null || !_breadcrumbCategories.contains(crumb.category)) {
       return null;
     }
+    if (crumb.category == navigationCategory) return _screenCrumb(crumb);
     crumb.message = switch (crumb.message) {
       final message? => stripUrlTails(message),
       null => null,
@@ -189,6 +208,18 @@ abstract final class DiagnosticFilter {
     if (crumb.category == networkCategory) {
       crumb.data?.removeWhere((key, _) => !appAttributes.contains(key));
     }
+    return crumb;
+  }
+
+  /// A navigation breadcrumb leaves as its screen name and nothing else, and
+  /// only when that name is on the app's list.
+  static Breadcrumb? _screenCrumb(Breadcrumb crumb) {
+    final screen = crumb.data?[screenKey];
+    if (!DiagnosticScreen.values.any((value) => value.name == screen)) {
+      return null;
+    }
+    crumb.message = null;
+    crumb.data = {screenKey: screen};
     return crumb;
   }
 

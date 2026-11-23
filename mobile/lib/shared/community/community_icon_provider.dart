@@ -113,7 +113,15 @@ Future<({List<int> bytes, String mimeType})?> _download(
   if (metadata) request.headers['Accept'] = 'application/nostr+json';
   StreamIterator<List<int>>? iterator;
   try {
-    final response = await client.send(request).timeout(_lookupTimeout);
+    final response = await client
+        .send(request)
+        .timeout(
+          _lookupTimeout,
+          onTimeout: () {
+            noteHttpDeadline(request);
+            throw TimeoutException('Future not completed', _lookupTimeout);
+          },
+        );
     iterator = StreamIterator(response.stream);
     final limit = metadata ? _maximumIconBytes * 2 : _maximumIconBytes;
     if (response.statusCode < 200 ||

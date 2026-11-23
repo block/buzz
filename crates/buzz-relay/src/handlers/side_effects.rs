@@ -105,7 +105,7 @@ pub(crate) async fn apply_kick_live_side_effects(
         .map_err(|e| {
             warn!(
                 channel = %channel_id,
-                target = %hex::encode(target_pubkey),
+                target_pubkey = %hex::encode(target_pubkey),
                 error = %e,
                 "kick live effects: membership_removal_fence failed; \
                  skipping eviction and workflow-disable"
@@ -120,7 +120,7 @@ pub(crate) async fn apply_kick_live_side_effects(
         // legitimately restored.
         tracing::info!(
             channel = %channel_id,
-            target = %hex::encode(target_pubkey),
+            target_pubkey = %hex::encode(target_pubkey),
             "kick live effects: member re-added before fence acquired; \
              skipping eviction and workflow-disable"
         );
@@ -1015,6 +1015,11 @@ pub async fn validate_admin_event(
                     "artifact removal markers cannot be deleted"
                 ));
             }
+            // Deleting the list would clear a channel's pins without a new
+            // list for subscribers to replace their copy with.
+            if event_kind_u32(&target_event.event) == buzz_core::kind::KIND_CHANNEL_PINS {
+                return Err(anyhow::anyhow!("the pin list cannot be deleted"));
+            }
             Ok(())
         }
         9008 => {
@@ -1077,7 +1082,7 @@ pub async fn emit_system_message(
 }
 
 /// Sign a kind:40099 system message for `channel_id` with the relay keypair.
-fn sign_system_message(
+pub(super) fn sign_system_message(
     state: &Arc<AppState>,
     channel_id: Uuid,
     content: serde_json::Value,
@@ -1094,7 +1099,7 @@ fn sign_system_message(
 
 /// Fan out a stored system message. Best-effort: clients can retrieve the
 /// persisted event.
-async fn fan_out_system_message(
+pub(super) async fn fan_out_system_message(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     channel_id: Uuid,
@@ -1457,7 +1462,7 @@ async fn emit_typed_membership_notification(
             .invalidate(&(tenant.community(), stored.event.id.to_bytes()));
         warn!(
             channel = %channel_id,
-            target = %target_hex,
+            target_pubkey = %target_hex,
             kind = notification_kind,
             "membership notification Redis publish failed: {e}"
         );
@@ -1470,7 +1475,7 @@ async fn emit_typed_membership_notification(
 
     info!(
         channel = %channel_id,
-        target = %target_hex,
+        target_pubkey = %target_hex,
         kind = notification_kind,
         "membership notification emitted"
     );
@@ -3554,10 +3559,20 @@ pub(crate) async fn persist_deletion(
             })
         })
         .collect::<anyhow::Result<_>>()?;
-    let (stored, inserted, deleted) = state
+    let (stored, inserted, deleted, pin_lists) = state
         .db
-        .insert_deletion_event(tenant.community(), event, channel_id, thread_meta, &targets)
+        .insert_deletion_event(
+            tenant.community(),
+            event,
+            channel_id,
+            thread_meta,
+            &targets,
+            &state.relay_keypair,
+        )
         .await?;
+    for list in &pin_lists {
+        super::pins::dispatch_list(tenant, state, list).await;
+    }
 
     let mut repaired = false;
     for (planned, deleted) in planned.iter().zip(deleted) {
@@ -4399,7 +4414,7 @@ async fn publish_nip43_delta(
         .await;
 
     info!(
-        target = %target_pubkey_hex,
+        target_pubkey = %target_pubkey_hex,
         relay = %relay_pubkey_hex,
         "NIP-43 {label} event published"
     );
@@ -4923,7 +4938,7 @@ async fn publish_nipia_delta(
     dispatch_persistent_event(tenant, state, &stored, kind, &relay_pubkey_hex, None).await;
 
     info!(
-        target = %target_pubkey_hex,
+        target_pubkey = %target_pubkey_hex,
         relay = %relay_pubkey_hex,
         kind,
         consent = %consent_path,
