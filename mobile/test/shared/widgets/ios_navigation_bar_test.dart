@@ -497,6 +497,92 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
+  testWidgets('standalone artwork reconfigures only when the image changes', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    const red =
+        'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAA'
+        'DElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
+    const blue =
+        'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAA'
+        'DElEQVR4nGNgYPgPAAEDAQAIicLsAAAAAElFTkSuQmCC';
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform_views,
+      (_) async => null,
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform_views,
+        null,
+      ),
+    );
+    const channel = MethodChannel('buzz/ios_navigation_bar/847');
+    final configurations = <Map<Object?, Object?>>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      if (call.method == 'configure') configurations.add(call.arguments as Map);
+      return null;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+    Widget bar(String icon) => ProviderScope(
+      child: _testApp(
+        home: IosNavigationBar(
+          title: '',
+          standaloneControl: true,
+          leading: IosNavigationAction(
+            label: 'Community menu',
+            avatarInitial: 'E',
+            imageUrl: icon,
+            children: const [IosNavigationAction(label: 'Settings')],
+          ),
+        ),
+      ),
+    );
+    Object? imageData() =>
+        ((tester.widget<UiKitView>(find.byType(UiKitView)).creationParams
+                as Map)['leading']
+            as Map)['imageData'];
+    Future<void> settleArtwork(bool Function() done) async {
+      await tester.runAsync(() async {
+        for (var attempt = 0; attempt < 100 && !done(); attempt++) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+          await tester.pump();
+        }
+      });
+      await tester.pumpAndSettle();
+    }
+
+    await tester.pumpWidget(bar(red));
+    tester.widget<UiKitView>(find.byType(UiKitView)).onPlatformViewCreated!(
+      847,
+    );
+    await settleArtwork(() => imageData() != null);
+    final redImage = imageData();
+    expect(redImage, isNotNull);
+    configurations.clear();
+
+    // An equal action, rebuilt, leaves UIKit alone.
+    await tester.pumpWidget(bar(red));
+    await tester.pumpAndSettle();
+    expect(configurations, isEmpty);
+
+    // New artwork reaches UIKit as a new rendered image.
+    await tester.pumpWidget(bar(blue));
+    await settleArtwork(() => imageData() != null && imageData() != redImage);
+    expect(imageData(), isNot(redImage));
+    expect((configurations.last['leading'] as Map)['imageData'], imageData());
+    await tester.pumpWidget(const SizedBox());
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('native material follows live theme surface changes', (
     tester,
   ) async {

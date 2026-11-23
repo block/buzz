@@ -4,6 +4,7 @@ import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:buzz/features/channels/default_agent_launcher.dart';
 import 'package:buzz/features/agents/agents_page.dart';
@@ -27,6 +28,9 @@ import 'package:buzz/shared/widgets/ios_message_create_button.dart';
 import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/features/search/search_page.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/community/community.dart';
+import 'package:buzz/shared/community/community_icon_provider.dart';
+import 'package:buzz/shared/community/community_provider.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -49,6 +53,7 @@ void main() {
     );
   });
   Future<Widget> buildHome({
+    String? communityIcon,
     bool longSolo = false,
     bool inboxUnread = false,
     bool disableAnimations = false,
@@ -63,6 +68,19 @@ void main() {
     return ProviderScope(
       overrides: [
         savedPrefsProvider.overrideWithValue(prefs),
+        if (communityIcon != null) ...[
+          activeCommunityProvider.overrideWith(
+            (_) => Community(
+              id: 'example',
+              name: 'Example',
+              relayUrl: 'wss://example.org',
+              addedAt: DateTime.utc(2026),
+            ),
+          ),
+          communityIconPresentationProvider(
+            'wss://example.org',
+          ).overrideWithValue(communityIcon),
+        ],
         inboxHasUnreadProvider.overrideWithValue(inboxUnread),
         defaultAgentProvider.overrideWith(
           (ref) => bestieUpdates ?? Stream.value(bestie),
@@ -251,7 +269,13 @@ void main() {
       tester.view.viewPadding = const FakeViewPadding(right: 76);
       tester.view.padding = const FakeViewPadding(right: 76);
       addTearDown(tester.view.reset);
-      await tester.pumpWidget(await buildHome(longSolo: true));
+      // Community artwork arrives as an inline `data:` URI.
+      const icon =
+          'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC'
+          'AAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+      await tester.pumpWidget(
+        await buildHome(longSolo: true, communityIcon: icon),
+      );
       await tester.pumpAndSettle();
       final bar = find.byWidgetPredicate(
         (widget) => widget is FrostedAppBar && widget.nativeTitle == 'Messages',
@@ -283,6 +307,21 @@ void main() {
 
       const wideTitle = Rect.fromLTRB(20, 19.5, 196, 48.5);
       expectLeadingTitle(wideTitle, 76);
+      // The rail's Community menu shows the community artwork, as main's
+      // header button did.
+      expect(
+        tester
+            .widget<IosNavigationBar>(
+              find.descendant(
+                of: rail,
+                matching: find.byType(IosNavigationBar),
+              ),
+            )
+            .leading!
+            .imageUrl,
+        icon,
+      );
+      // UIKit gets only the rendered avatar, never the source artwork, and
       // Home's scrolling never reaches the rail controls: no rebuilds and no
       // `scroll` calls, which UIKit ignores for standalone controls.
       final railCalls = <String>[];
@@ -294,6 +333,11 @@ void main() {
             matching: find.byType(UiKitView),
           ),
         );
+        if (name == 'Community menu') {
+          final params = view.creationParams! as Map;
+          expect((params['leading'] as Map).containsKey('imageUrl'), isFalse);
+          expect(jsonEncode(params), isNot(contains(icon)));
+        }
         final channel = MethodChannel('${IosNavigationBar.viewType}/$id');
         binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
           call,
@@ -353,6 +397,71 @@ void main() {
       expect(tester.getSize(bar).width, 375 + 76);
       expectLeadingTitle(wideTitle.shift(const Offset(76, 0)), 76);
       expect(tester.getCenter(rail).dx, lessThan(76));
+      expect(tester.takeException(), isNull);
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
+  testWidgets(
+    'Duo Messages keeps its scroll position when the side strip comes and goes',
+    (tester) async {
+      void cover() {
+        tester.view.physicalSize = const Size(466, 678);
+        tester.view.viewPadding = const FakeViewPadding(right: 76);
+        tester.view.padding = const FakeViewPadding(right: 76);
+      }
+
+      tester.view.devicePixelRatio = 1;
+      cover();
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        await buildHome(longSolo: true, disableAnimations: true),
+      );
+      await tester.pumpAndSettle();
+      final page = tester.element(find.byType(ChannelsPage));
+      final position = tester
+          .widget<CustomScrollView>(find.byType(CustomScrollView).first)
+          .controller!
+          .position;
+      position.jumpTo(240);
+      await tester.pumpAndSettle();
+      final railActivity = find.byKey(const ValueKey('duo-toolbar-Activity'));
+      final railMenu = find.byKey(const ValueKey('duo-toolbar-Community menu'));
+      final headerMenu = find.byWidgetPredicate(
+        (widget) =>
+            widget is IosMessageCreateButton &&
+            widget.accessibilityLabel == 'Community menu',
+      );
+      ScrollPosition currentPosition() => tester
+          .widget<CustomScrollView>(find.byType(CustomScrollView).first)
+          .controller!
+          .position;
+
+      // Unfolding to the inner display in portrait, and rotating the cover to
+      // landscape (insets on both sides), both remove the side strip.
+      for (final (size, inset) in [
+        (const Size(669, 951), const FakeViewPadding(top: 90)),
+        (const Size(678, 466), const FakeViewPadding(left: 59, right: 59)),
+      ]) {
+        tester.view.physicalSize = size;
+        tester.view.viewPadding = inset;
+        tester.view.padding = inset;
+        await tester.pumpAndSettle();
+        expect(tester.element(find.byType(ChannelsPage)), same(page));
+        expect(currentPosition(), same(position));
+        expect(position.maxScrollExtent, greaterThan(240));
+        expect(position.pixels, 240);
+        expect(railActivity, findsNothing);
+        expect(railMenu, findsNothing);
+        expect(headerMenu, findsOneWidget);
+
+        cover();
+        await tester.pumpAndSettle();
+        expect(currentPosition(), same(position));
+        expect(position.pixels, 240);
+        expect(railActivity, findsOneWidget);
+        expect(railMenu, findsOneWidget);
+      }
       expect(tester.takeException(), isNull);
     },
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),

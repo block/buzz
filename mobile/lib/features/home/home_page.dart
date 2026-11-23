@@ -173,6 +173,7 @@ class HomePage extends HookConsumerWidget {
               ),
               IosNavigationAction(
                 label: 'Community menu',
+                imageUrl: communityIcon,
                 avatarInitial: communityName.isEmpty
                     ? '?'
                     : communityName.characters.first.toUpperCase(),
