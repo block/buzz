@@ -1,10 +1,6 @@
 import '../channels_page/filters.dart' show markMessagesRow;
-import 'dart:async';
-import 'dart:math' as math;
+import '../../../shared/widgets/pin_shortcut_grid.dart';
 
-import 'package:duo_kit/duo_kit.dart';
-import 'package:flutter/foundation.dart';
-import '../../../shared/widgets/duo_toolbar.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import '../../../shared/widgets/adaptive_conversation_pane.dart';
 import '../../../shared/widgets/avatar_shape.dart';
@@ -23,10 +19,7 @@ import '../../../shared/widgets/dm_header_cluster.dart';
 import '../../../shared/widgets/dm_header_portrait.dart';
 import '../dm_channel_labels.dart';
 
-const _compactSlotSize = 80.0;
-
-/// Pin shortcuts wrap when the next portrait no longer fits in the card.
-class HomePins extends HookWidget {
+class HomePins extends StatelessWidget {
   const HomePins({
     required this.channels,
     required this.label,
@@ -41,216 +34,16 @@ class HomePins extends HookWidget {
   final ValueChanged<Channel> onLongPress;
   final String? viewer;
 
-  static const _duration = Duration(milliseconds: 280);
-
   @override
-  Widget build(BuildContext context) {
-    final previous = usePrevious(channels) ?? channels;
-    final held = useState<List<Channel>?>(null);
-    final entering = useState(<String>{});
-    final reflow = useRef<Timer?>(null);
-    final reveal = useRef<Timer?>(null);
-    useEffect(() {
-      final ids = channels.map((c) => c.id).toSet();
-      final added = ids.difference(previous.map((c) => c.id).toSet());
-      if (added.isNotEmpty) {
-        entering.value = {...entering.value.where(ids.contains), ...added};
-        reveal.value?.cancel();
-        reveal.value = Timer(_duration, () => entering.value = {});
-      }
-      if (previous.any((c) => !ids.contains(c.id))) {
-        held.value ??= List.of(previous);
-        reflow.value?.cancel();
-        reflow.value = Timer(_duration, () => held.value = null);
-      }
-      if (held.value case final slots?) {
-        final heldIds = slots.map((c) => c.id).toSet();
-        slots.addAll(channels.where((c) => heldIds.add(c.id)));
-      }
-      return null;
-    }, [channels]);
-    useEffect(
-      () => () {
-        reflow.value?.cancel();
-        reveal.value?.cancel();
-      },
-      const [],
-    );
-    return channels.isEmpty
-        ? const SizedBox.shrink()
-        : Padding(
-            padding: const EdgeInsets.fromLTRB(
-              Grid.xs,
-              Grid.half,
-              Grid.xs,
-              Grid.xxs,
-            ),
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                const gap = Grid.twelve;
-                final phone =
-                    defaultTargetPlatform == TargetPlatform.iOS &&
-                    MediaQuery.sizeOf(context).shortestSide < 600 &&
-                    (DuoToolbarScope.maybeStripOf(context) ??
-                            FoldGeometry.of(context).strip) ==
-                        null;
-                final slotSize = phone
-                    ? math
-                          .min(104.0, (constraints.maxWidth - 2 * gap) / 3)
-                          .clamp(1.0, 104.0)
-                          .toDouble()
-                    : _compactSlotSize;
-                final capacity = phone
-                    ? 3
-                    : math.max(
-                        1,
-                        ((constraints.maxWidth + gap) / (slotSize + gap))
-                            .floor(),
-                      );
-                final duration = MediaQuery.disableAnimationsOf(context)
-                    ? Duration.zero
-                    : _duration;
-                final current = {
-                  for (final channel in channels) channel.id: channel,
-                };
-                final slots = duration == Duration.zero
-                    ? channels
-                    : held.value ?? channels;
-                final count = slots.length;
-                final columns = math.min(capacity, count);
-                final split = count <= 2;
-                final cellWidth = constraints.maxWidth / columns;
-                final startInset = split
-                    ? math.max(0.0, (cellWidth - slotSize) / 2)
-                    : 0.0;
-                final step = split
-                    ? cellWidth
-                    : columns == 1
-                    ? 0.0
-                    : (constraints.maxWidth - slotSize) / (columns - 1);
-                const captionSize = 12.0;
-                const captionLineHeight = 1.25;
-                final captionColor =
-                    Theme.of(context).brightness == Brightness.light &&
-                        !MediaQuery.highContrastOf(context)
-                    ? const Color(0xFF6D6D6D)
-                    : context.colors.onSurfaceVariant;
-                final captionHeight =
-                    MediaQuery.textScalerOf(context).scale(captionSize) *
-                    captionLineHeight;
-                final rowHeight = slotSize + captionHeight.ceilToDouble();
-                final rows = (count / columns).ceil();
-                Widget slot(
-                  Channel channel,
-                  int index, {
-                  bool leaving = false,
-                }) {
-                  final name = label(channel);
-                  final hidden =
-                      leaving ||
-                      (duration != Duration.zero &&
-                          entering.value.contains(channel.id));
-                  void hold() => onLongPress(channel);
-                  return AnimatedPositionedDirectional(
-                    key: ValueKey(channel.id),
-                    duration: duration,
-                    curve: Curves.easeOutQuad,
-                    start: startInset + (index % columns) * step,
-                    top: (index ~/ columns) * (rowHeight + gap),
-                    child: IgnorePointer(
-                      ignoring: hidden,
-                      child: ExcludeSemantics(
-                        excluding: hidden,
-                        child: TweenAnimationBuilder<double>(
-                          tween: Tween(begin: 0.0, end: hidden ? 0.0 : 1.0),
-                          duration: duration,
-                          curve: Curves.easeOutQuad,
-                          builder: (_, scale, child) =>
-                              Transform.scale(scale: scale, child: child),
-                          child: markMessagesRow(
-                            context,
-                            Semantics(
-                              button: true,
-                              onLongPress: hold,
-                              selected:
-                                  ConversationPaneScope.maybeOf(
-                                    context,
-                                  )?.selectedId ==
-                                  channel.id,
-                              onTap: () => onOpen(channel),
-                              label: 'Open pinned $name',
-                              excludeSemantics: true,
-                              child: Tooltip(
-                                triggerMode: TooltipTriggerMode.manual,
-                                message: name,
-                                child: InkWell(
-                                  onLongPress: hold,
-                                  customBorder: const CircleBorder(),
-                                  onTap: () => onOpen(channel),
-                                  child: SizedBox(
-                                    width: slotSize,
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        SizedBox.square(
-                                          dimension: slotSize,
-                                          child: FittedBox(
-                                            child: SizedBox.square(
-                                              dimension: _compactSlotSize,
-                                              child: _PinArtwork(
-                                                channel: channel,
-                                                viewer: viewer,
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                        Transform.translate(
-                                          // The portrait fills 80% of its square slot.
-                                          offset: Offset(0, -slotSize * .05),
-                                          child: Text(
-                                            name,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            textAlign: TextAlign.center,
-                                            style: TextStyle(
-                                              fontSize: captionSize,
-                                              height: captionLineHeight,
-                                              color: captionColor,
-                                            ),
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  );
-                }
-
-                return AnimatedContainer(
-                  duration: duration,
-                  curve: Curves.easeOutQuad,
-                  height: rows * rowHeight + (rows - 1) * gap,
-                  child: Stack(
-                    children: [
-                      for (var i = 0; i < count; i++)
-                        slot(
-                          current[slots[i].id] ?? slots[i],
-                          i,
-                          leaving: !current.containsKey(slots[i].id),
-                        ),
-                    ],
-                  ),
-                );
-              },
-            ),
-          );
-  }
+  Widget build(BuildContext context) => PinShortcutGrid<Channel>(
+    items: channels,
+    idOf: (channel) => channel.id,
+    label: label,
+    onOpen: onOpen,
+    onLongPress: onLongPress,
+    artwork: (channel) => _PinArtwork(channel: channel, viewer: viewer),
+    decorate: markMessagesRow,
+  );
 }
 
 class _PinArtwork extends HookConsumerWidget {
