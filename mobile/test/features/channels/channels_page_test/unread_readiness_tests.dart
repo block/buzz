@@ -4,6 +4,7 @@ void _communityUnreadLandingTests(
   Widget Function({
     required List<Override> overrides,
     _FakeProfileNotifier? profile,
+    SharedPreferences? prefs,
   })
   buildTestable,
 ) {
@@ -183,7 +184,8 @@ class _StalledProfileNotifier extends _FakeProfileNotifier {
 }
 
 void _communityCachedLandingTests(
-  Widget Function({required List<Override> overrides}) buildTestable,
+  Widget Function({required List<Override> overrides, SharedPreferences? prefs})
+  buildTestable,
 ) {
   testWidgets('a cached destination lands while its relay never answers', (
     tester,
@@ -222,8 +224,8 @@ void _communityCachedLandingTests(
     final session = _StalledDestinationSession(communitiesNotifier);
     await tester.pumpWidget(
       buildTestable(
+        prefs: prefs,
         overrides: [
-          savedPrefsProvider.overrideWithValue(prefs),
           // Remote preference state never becomes ready for the destination.
           channelSectionsProvider.overrideWith(_UnreadyLandingSections.new),
           channelStarsProvider.overrideWith(_LandingStars.new),
