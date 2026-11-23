@@ -1213,7 +1213,7 @@ mod postgres_tests {
     #[ignore = "requires PostgreSQL"]
     async fn enrollment_replay_waits_for_an_uncommitted_enrollment() {
         for (commits, replay_delay) in [(true, 0), (false, 0), (true, 301), (false, 301)] {
-            let (pool, schema) = full_schema(2).await;
+            let (pool, schema) = full_schema(3).await;
             let store = PostgresAuthorityStore::new(pool.clone());
             let now = Utc::now().timestamp();
             let replay_at = now + replay_delay;
@@ -1222,6 +1222,10 @@ mod postgres_tests {
 
             // The original request: challenge spent, installation pending.
             let mut original = pool.begin().await.expect("begin original enrollment");
+            let original_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *original)
+                .await
+                .expect("read original pid");
             let spent = sqlx::query("DELETE FROM push_gateway_challenges WHERE id=$1")
                 .bind(challenge_id)
                 .execute(&mut *original)
@@ -1245,12 +1249,30 @@ mod postgres_tests {
                     )
                     .await
             });
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            assert!(
-                !replay.is_finished(),
-                "the replay waits on the original request's challenge row \
-                 (commits={commits}, replay_delay={replay_delay})"
-            );
+            // Finish the original only once the replay is blocked on its row
+            // lock, so every case exercises the race rather than a replay that
+            // has not reached the database yet.
+            let mut waited = 0;
+            loop {
+                let blocked: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))",
+                )
+                .bind(original_pid)
+                .fetch_one(&pool)
+                .await
+                .expect("read lock waiters");
+                if blocked > 0 {
+                    break;
+                }
+                waited += 1;
+                assert!(
+                    waited < 400,
+                    "the replay never waited on the original request's challenge row \
+                     (commits={commits}, replay_delay={replay_delay})"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            assert!(!replay.is_finished());
             let expected = if commits {
                 original.commit().await.expect("commit original");
                 Some(original_id)
