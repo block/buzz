@@ -54,12 +54,12 @@ Yes, it's another AI-adjacent developer tool. We're sorry. The difference is wha
 
 ## Where to find things
 
-Buzz's open-source code lives in two repositories. The desktop app has its own; the relay and the mobile client are here.
+Buzz's open-source code lives in three repositories. The desktop app and the mobile client each have their own; the relay is here.
 
 | Component | Home |
 |---|---|
 | Desktop app | [block/buzz-app](https://github.com/block/buzz-app) |
-| Mobile client (iOS + Android) | This repo, in [`mobile/`](mobile/) |
+| Mobile client (iOS + Android) | [block/buzz-mobile](https://github.com/block/buzz-mobile) |
 | Relay | This repo, in [`crates/buzz-relay/`](crates/buzz-relay/) |
 
 ---
@@ -146,13 +146,13 @@ See **Quick start** below — this is the developer / self-host path.
 
 ### I want to work on the mobile app
 
-The Flutter client is in [`mobile/`](mobile/). See [mobile/README.md](mobile/README.md) for setup and run instructions.
+The Flutter client is in [block/buzz-mobile](https://github.com/block/buzz-mobile). See its README for setup and run instructions.
 
 ---
 
 ## Quick start
 
-This stands up the relay locally. For the desktop app, see [block/buzz-app](https://github.com/block/buzz-app); for the mobile app, see [mobile/README.md](mobile/README.md).
+This stands up the relay locally. For the desktop app, see [block/buzz-app](https://github.com/block/buzz-app); for the mobile app, see [block/buzz-mobile](https://github.com/block/buzz-mobile).
 
 You'll need [Docker](https://docs.docker.com/get-docker/) and [Hermit](https://cashapp.github.io/hermit/) (or Rust 1.88+, Node 24+, pnpm 10+, `just`).
 
@@ -216,7 +216,7 @@ If you'd rather point buzz at a different bash-compatible shell, set `BUZZ_SHELL
  └──────────────┘
 ```
 
-A Rust workspace of focused crates. Single source of truth: the relay. The human clients are the desktop app in [block/buzz-app](https://github.com/block/buzz-app) and the mobile app in [`mobile/`](mobile/). See [ARCHITECTURE.md](ARCHITECTURE.md) for the full breakdown.
+A Rust workspace of focused crates. Single source of truth: the relay. The human clients are the desktop app in [block/buzz-app](https://github.com/block/buzz-app) and the mobile app in [block/buzz-mobile](https://github.com/block/buzz-mobile). See [ARCHITECTURE.md](ARCHITECTURE.md) for the full breakdown.
 
 <details>
 <summary><strong>Crate map</strong></summary>
@@ -257,7 +257,6 @@ All defaults work out of the box. Override via `.env`. Full reference in [`.env.
 ```bash
 just setup          # Docker, migrations, JS deps
 just relay          # Run the relay
-just mobile-dev     # Run the mobile app in an iOS Simulator
 just build          # Build the Rust workspace
 just check          # Lint, formatting, and repo policy checks
 just test-unit      # Unit tests (no infra required)

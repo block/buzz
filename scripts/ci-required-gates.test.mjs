@@ -20,7 +20,6 @@ const gates = [
   "postgres-tests",
   "relay-e2e",
   "web",
-  "mobile",
   "security",
 ];
 for (const gate of gates) {

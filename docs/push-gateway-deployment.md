@@ -153,7 +153,7 @@ Do not point distributed clients at this personal gateway.
 
 Build the mobile client with the personal team and parent bundle ID, its matching
 `.NotificationService` extension, development APNs/App Attest entitlements, and
-an explicit `BUZZ_PUSH_GATEWAY_URL`. See `mobile/README.md` for gitignored signing
+an explicit `BUZZ_PUSH_GATEWAY_URL`. See the [block/buzz-mobile](https://github.com/block/buzz-mobile) README for gitignored signing
 overrides. Both targets need matching provisioning profiles; the parent profile
 must include the capabilities in `Runner.entitlements`. Validate enrollment and
 notification presentation on a physical device, not a simulator.

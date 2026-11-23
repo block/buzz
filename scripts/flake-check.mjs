@@ -1,5 +1,5 @@
 // Advisory pull-request flake check. `select` maps a diff to the tests it
-// changed, per runner; `rust`, `node` and `dart` repeat a selection and report
+// changed, per runner; `rust` and `node` repeat a selection and report
 // every iteration. Playwright repeats natively with --repeat-each, and
 // `playwright-summary` tabulates its JSON report afterwards.
 import { spawnSync } from "node:child_process";
@@ -40,7 +40,7 @@ export const MAX_PLAYWRIGHT_JOURNEYS = Math.floor(
 // one past the journey cap, is a sweeping refactor rather than a test change
 // worth ten repetitions, so the lane skips rather than overrunning its timeout.
 export const MAX_OUTPUT_BYTES = 64 * 1024;
-export const runners = ["rust", "tauri", "node", "playwright", "dart"];
+export const runners = ["rust", "tauri", "node", "playwright"];
 // The two cargo workspaces, by runner: the root workspace's crates, and the
 // desktop Tauri workspace (desktop/src-tauri and its crates/*), which the
 // Desktop Tauri lane (_ci-desktop.yml) builds with its own manifest, system
@@ -118,8 +118,8 @@ export const rustFeatureGraphs = {
 };
 
 // Mirrors desktop/package.json "test", desktop/playwright.config.ts testDir,
-// the two cargo workspaces' packages and mobile's test directory. Paths are
-// later split on whitespace in a shell, so admit only plain names. The
+// and the two cargo workspaces' packages. Paths are later split on
+// whitespace in a shell, so admit only plain names. The
 // desktop `*.perf.ts` measurements are deliberately not specs here: they time
 // the app rather than assert on it, so a slow repetition is not a flake.
 export function classify(file) {
@@ -133,7 +133,6 @@ export function classify(file) {
   )
     return "node";
   if (/^desktop\/tests\/e2e\/[^/]+\.spec\.ts$/.test(file)) return "playwright";
-  if (/^mobile\/test\/.*_test\.dart$/.test(file)) return "dart";
   return undefined;
 }
 
@@ -785,7 +784,7 @@ function select(base = "HEAD^1", head = "HEAD") {
       ...(rows.length
         ? ["| File | Runner | Selection |", "| --- | --- | --- |", ...rows]
         : [
-            "No Rust, desktop Tauri, node:test, Playwright or Flutter test files changed.",
+            "No Rust, desktop Tauri, node:test or Playwright test files changed.",
           ]),
       "",
       "",
@@ -1110,74 +1109,6 @@ function repeatNode(files, iterations) {
   report("Flake check (node:test)", runs);
 }
 
-// Per-test statuses of a `dart test` JSON report (one event per line), keyed
-// `<file> › <name>`. Hidden entries are the runner's own file-loading steps.
-// A test declared through a helper (every `testWidgets` is) has the helper's
-// `package:` URL as its `url`, so its file comes from its suite, else from
-// `root_url`.
-export function parseDartReport(text, mobileRoot = `${root}mobile/`) {
-  const started = new Map();
-  const suites = new Map();
-  const statuses = new Map();
-  for (const line of text.split("\n")) {
-    let event;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (event.type === "suite") suites.set(event.suite.id, event.suite.path);
-    if (event.type === "testStart") started.set(event.test.id, event.test);
-    if (event.type !== "testDone" || event.hidden) continue;
-    const test = started.get(event.testID);
-    if (!test) continue;
-    const url = test.root_url ?? test.url;
-    const source = suites.get(test.suiteID) ??
-      (url?.startsWith("file:") ? fileURLToPath(url) : url ?? "unknown");
-    const file = source.replace(mobileRoot, "");
-    statuses.set(
-      `${file} › ${test.name}`,
-      event.skipped
-        ? "skipped"
-        : event.result === "success"
-          ? "passed"
-          : "failed",
-    );
-  }
-  return statuses;
-}
-
-// `flutter test` has no repeat flag; each iteration recompiles only the
-// selected files, as the sharded mobile lane does.
-function repeatDart(files, iterations) {
-  const dir = resultsDir("dart");
-  const runs = [];
-  // The Justfile unsets these so a worktree's git context never reaches flutter.
-  const { GIT_DIR, GIT_WORK_TREE, ...env } = process.env;
-  for (let i = 1; i <= iterations; i += 1) {
-    const reportFile = `${dir}/iter-${i}.json`;
-    const result = run(
-      "flutter",
-      [
-        "test",
-        `--file-reporter=json:${reportFile}`,
-        ...files.map((file) => file.replace(/^mobile\//, "")),
-      ],
-      { cwd: `${root}mobile`, env, stdio: "inherit" },
-    );
-    let statuses = new Map();
-    try {
-      statuses = parseDartReport(readFileSync(reportFile, "utf8"));
-    } catch {
-      statuses = new Map();
-    }
-    const ok = result.status === 0 && statuses.size > 0;
-    runs.push({ ok, statuses });
-    progress(i, iterations, ok);
-  }
-  report("Flake check (Flutter)", runs);
-}
-
 // Playwright's JSON report lists a `--repeat-each` journey once per
 // repetition, in order; `unexpected` is a failed repetition since the lane
 // runs with --retries=0.
@@ -1231,7 +1162,6 @@ function main() {
     rust: repeatRust,
     tauri: repeatRust,
     node: repeatNode,
-    dart: repeatDart,
   }[command];
   if (repeat) {
     const iterations = Number(
@@ -1244,7 +1174,7 @@ function main() {
       return repeat(entries, iterations);
   }
   throw new Error(
-    "usage: flake-check select [base] [head] | rust|tauri|node|dart [--iterations=N] <entry…> | playwright-summary <report.json> <title>",
+    "usage: flake-check select [base] [head] | rust|tauri|node [--iterations=N] <entry…> | playwright-summary <report.json> <title>",
   );
 }
 

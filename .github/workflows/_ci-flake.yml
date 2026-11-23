@@ -28,7 +28,6 @@ jobs:
       playwright: ${{ steps.select.outputs.playwright }}
       playwright_shards: ${{ steps.select.outputs.playwright_shards }}
       playwright_shard_total: ${{ steps.select.outputs.playwright_shard_total }}
-      dart: ${{ steps.select.outputs.dart }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -279,54 +278,5 @@ jobs:
           path: |
             desktop/playwright-report.json
             desktop/test-results
-          if-no-files-found: ignore
-          retention-days: 7
-
-  flake-dart:
-    name: Flake check (Flutter)
-    needs: [flake-select]
-    if: needs.flake-select.outputs.dart != ''
-    runs-on: ubuntu-26.04
-    # Large mobile changes take about three minutes per repetition, plus SDK
-    # setup. Allow all ten repetitions to finish with runner variance.
-    timeout-minutes: 45
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
-      # Restores the Mobile lane's Hermit and pub caches read-only; that lane
-      # saves them.
-      - name: Compute Hermit cache key
-        id: hermit-bin-hash
-        run: |
-          hash="$(find ./bin ! -type d | sort | xargs openssl sha256 | openssl sha256 -r | cut -d' ' -f1)"
-          echo "hash=$hash" >> "$GITHUB_OUTPUT"
-      - name: Restore Hermit package cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ~/.cache/hermit/pkg
-          key: ${{ runner.os }}-hermit-cache-${{ steps.hermit-bin-hash.outputs.hash }}
-          restore-keys: ${{ runner.os }}-hermit-cache-
-      - name: Prime Flutter SDK
-        run: flutter --version
-      - name: Restore pub cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: ~/.pub-cache
-          key: pub-${{ runner.os }}-${{ hashFiles('mobile/pubspec.lock') }}
-          restore-keys: pub-${{ runner.os }}-
-      - name: Install dependencies
-        run: cd mobile && flutter pub get
-      - name: Repeat changed Flutter tests
-        env:
-          SELECTED: ${{ needs.flake-select.outputs.dart }}
-        run: node scripts/flake-check.mjs dart --iterations=10 $SELECTED
-      - name: Flutter iteration reports
-        if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: flake-dart
-          path: test-results/flake
           if-no-files-found: ignore
           retention-days: 7

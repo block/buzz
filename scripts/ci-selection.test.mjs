@@ -181,7 +181,7 @@ async function select(paths, pullRequest = false, apiStatus = 200) {
   const rawOutputs = Object.fromEntries(
     [
       ...readFileSync(output, "utf8").matchAll(
-        /^(rust|desktop|desktop-rust|web|mobile|mobile-native)<<([^\n]+)\n(true|false)\n\2/gm,
+        /^(rust|desktop|desktop-rust|web)<<([^\n]+)\n(true|false)\n\2/gm,
       ),
     ].map(([, key, , value]) => [key, value]),
   );
@@ -209,64 +209,9 @@ async function select(paths, pullRequest = false, apiStatus = 200) {
 }
 const scenarios = [
   [
-    "mobile source and tests",
-    [
-      "mobile/lib/features/age_gate/age_signal_provider.dart",
-      "mobile/test/features/age_gate/age_signal_provider_test.dart",
-    ],
-    ["mobile"],
-  ],
-  ["mobile lockfile", ["mobile/pubspec.lock"], ["mobile", "mobile-native"]],
-  [
-    "Flutter SDK pin",
-    ["bin/.flutter-3.47.9.pkg"],
-    ["mobile", "mobile-native"],
-  ],
-  [
-    "mobile bundled font",
-    ["mobile/assets/fonts/InterVariable.ttf"],
-    ["mobile", "mobile-native"],
-  ],
-  [
-    "mobile build script",
-    ["mobile/scripts/require-push-gateway-origin.sh"],
-    ["mobile", "mobile-native"],
-  ],
-  [
-    "mobile iOS source",
-    ["mobile/ios/Runner/IosMediaCarousel.swift"],
-    ["mobile", "mobile-native"],
-  ],
-  [
-    "mobile native package",
-    ["mobile/packages/buzz_secp256k1/src/buzz_secp256k1_ecdh.c"],
-    ["mobile", "mobile-native"],
-  ],
-  [
-    "mobile Android source",
-    ["mobile/android/app/build.gradle.kts"],
-    ["mobile"],
-  ],
-  [
-    "mobile native control script",
-    ["scripts/test-mobile-carousel.sh"],
-    ["mobile", "mobile-native"],
-  ],
-  [
     "clients workflow",
     [".github/workflows/_ci-clients.yml"],
-    ["mobile", "mobile-native", "rust"],
-  ],
-  [
-    "mobile release source helper",
-    ["scripts/mobile-release-source.sh"],
-    ["mobile"],
-  ],
-  ["mobile release script", ["scripts/mobile-release.sh"], ["mobile"]],
-  [
-    "mobile gateway recipe tests",
-    ["scripts/test-mobile-gateway-recipes.sh"],
-    ["mobile"],
+    ["rust"],
   ],
   ["desktop", ["desktop/src/main.tsx"], ["desktop"]],
   ["Tauri", ["desktop/src-tauri/src/main.rs"], ["desktop", "desktop-rust"]],
@@ -275,28 +220,18 @@ const scenarios = [
   [
     "shared workflow",
     [".github/workflows/ci.yml"],
-    ["desktop", "mobile", "mobile-native", "rust"],
+    ["desktop", "rust"],
   ],
   [
     "desktop workflow",
     [".github/workflows/_ci-desktop.yml"],
-    ["desktop", "mobile", "rust"],
+    ["desktop", "rust"],
   ],
-  ["Justfile", ["Justfile"], ["desktop", "mobile", "rust"]],
+  ["Justfile", ["Justfile"], ["desktop", "rust"]],
   ["CI apt retry", ["scripts/ci-apt-retry.sh"], ["desktop", "rust"]],
-  ["CI Hermit retry", ["scripts/ci-hermit-retry.sh"], ["mobile", "rust"]],
+  ["CI Hermit retry", ["scripts/ci-hermit-retry.sh"], ["rust"]],
   ["integration services", ["docker-compose.yml"], ["rust"]],
   ["CI integration images", ["docker-compose.ci.yml"], ["rust"]],
-  [
-    "mixed mobile and relay",
-    ["mobile/lib/main.dart", "crates/buzz-core/src/lib.rs"],
-    ["rust", "mobile"],
-  ],
-  [
-    "mixed mobile and desktop",
-    ["mobile/lib/main.dart", "desktop/src/main.tsx"],
-    ["desktop", "mobile"],
-  ],
   ["web", ["web/src/main.tsx"], ["web"]],
   ["documentation", ["README.md"], []],
   [
@@ -317,7 +252,6 @@ const scenarios = [
     ["desktop", "desktop-rust"],
   ],
   ["web Markdown", ["web/docs/design.md"], ["web"]],
-  ["mobile Markdown", ["mobile/test/README.md"], ["mobile"]],
   ["schema Markdown", ["schema/README.md"], ["rust"]],
   ["migration Markdown", ["migrations/README.md"], ["rust"]],
   [
@@ -340,7 +274,7 @@ const scenarios = [
 for (const [name, paths, expected] of scenarios) {
   test(`real paths-filter: ${name}`, async () => {
     const outputs = await select(paths);
-    assert.equal(Object.keys(outputs).length, 6);
+    assert.equal(Object.keys(outputs).length, 4);
     assert.deepEqual(
       Object.keys(outputs)
         .filter((key) => outputs[key] === "true")
@@ -357,11 +291,6 @@ for (const [name, paths, expected] of [
     [],
   ],
   [
-    "mixed mobile and Markdown",
-    ["VISION_MOBILE.md", "mobile/lib/main.dart"],
-    ["mobile"],
-  ],
-  [
     "mixed desktop and Markdown",
     ["CONTEXT.md", "desktop/src/main.tsx"],
     ["desktop"],
@@ -369,7 +298,7 @@ for (const [name, paths, expected] of [
 ]) {
   test(`PR file list ignores newer base changes: ${name}`, async () => {
     const outputs = await select(paths, true);
-    assert.equal(Object.keys(outputs).length, 6);
+    assert.equal(Object.keys(outputs).length, 4);
     assert.deepEqual(
       Object.keys(outputs)
         .filter((key) => outputs[key] === "true")
@@ -386,8 +315,6 @@ test("workflow consumes guarded selection outputs", () => {
     "desktop",
     "desktop-rust",
     "web",
-    "mobile",
-    "mobile-native",
   ]) {
     assert.ok(outputs.includes(`steps.selection.outputs.${key}`));
   }

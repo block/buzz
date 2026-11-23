@@ -7,7 +7,6 @@ desktop_workflow="$repo_root/.github/workflows/_ci-desktop.yml"
 macos_workflow="$repo_root/.github/workflows/_ci-desktop-macos.yml"
 rust_workflow="$repo_root/.github/workflows/_ci-rust.yml"
 relay_workflow="$repo_root/.github/workflows/_ci-relay.yml"
-clients_workflow="$repo_root/.github/workflows/_ci-clients.yml"
 
 fail() {
   echo "CI required-context isolation contract failed: $*" >&2
@@ -33,8 +32,6 @@ rust_cross_compile_call=$(extract_job rust-cross-compile-domain "$orchestrator")
 relay_call=$(extract_job relay-domain "$orchestrator")
 relay_artifacts_call=$(extract_job relay-artifacts-domain "$orchestrator")
 postgres_call=$(extract_job postgres-domain "$orchestrator")
-clients_call=$(extract_job clients "$orchestrator")
-mobile_swift_call=$(extract_job mobile-swift-domain "$orchestrator")
 desktop_gate=$(extract_job desktop "$orchestrator")
 macos_gate=$(extract_job desktop-build-macos "$orchestrator")
 relay_e2e_job=$(extract_job relay-e2e "$relay_workflow")
@@ -60,8 +57,6 @@ relay_e2e_job=$(extract_job relay-e2e "$relay_workflow")
   fail "required relay checks must wait for the artifact producer"
 [[ "$postgres_call" == *'needs: [changes, relay-artifacts-domain]'* ]] ||
   fail "PostgreSQL tests must wait for the artifact producer"
-[[ "$clients_call" == *'lane: required'* && "$mobile_swift_call" == *'lane: mobile-swift'* ]] ||
-  fail "required client checks and Mobile Swift must use isolated calls"
 
 grep -Fq "inputs.lane == 'cross-compile'" "$rust_workflow" ||
   fail "Rust cross-compiles must be selected by their isolated lane"
@@ -71,8 +66,6 @@ grep -Fq "inputs.lane == 'artifacts'" "$relay_workflow" ||
   fail "relay artifacts must be selected by their isolated lane"
 [[ "$relay_e2e_job" == *'cargo test -p buzz-test-client --test e2e_relay nip29_departure_wire -- --ignored --nocapture'* ]] ||
   fail "Relay E2E must select the NIP-29 departure wire tests"
-grep -Fq "inputs.lane == 'mobile-swift'" "$clients_workflow" ||
-  fail "Mobile Swift must be selected by its isolated lane"
 
 grep -Fq 'on:' "$macos_workflow" || fail "macOS workflow is missing its trigger"
 grep -Fq '  workflow_call:' "$macos_workflow" || fail "macOS workflow must use workflow_call"
