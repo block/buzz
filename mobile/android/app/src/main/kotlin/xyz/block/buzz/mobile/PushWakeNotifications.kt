@@ -132,8 +132,11 @@ internal class WakeNotifier(private val context: Context) {
             val tag = conversationTag(conversationId)
             val style = existingStyle(tag)
                 ?: NotificationCompat.MessagingStyle(Person.Builder().setName(context.getString(R.string.notification_you)).build())
-            style.conversationTitle = newest.conversationTitle
-            style.isGroupConversation = newest.conversationTitle != null
+            // A wake that could not read the channel's name sends none, so
+            // keep the one an earlier wake showed. Mentions are in channels and
+            // DMs are one to one, whether or not a name arrived.
+            style.conversationTitle = newest.conversationTitle ?: style.conversationTitle
+            style.isGroupConversation = newest.category == WakeCategory.MENTION
             val shown = style.messages.mapNotNull { it.extras.getString(EVENT_ID_EXTRA) }.toSet()
             for (message in oldestFirst) {
                 if (message.eventId in shown) continue
