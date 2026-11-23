@@ -218,7 +218,7 @@ void main() {
     expect(history, hasLength(1));
     expect(find.text('Filed labeled chat'), findsNothing);
     expect(find.text('Unfiled labeled chat'), findsOneWidget);
-    expect(find.text('No matching chats'), findsOneWidget);
+    expect(find.bySemanticsLabel('See all App work'), findsOneWidget);
   });
 
   testWidgets('label-only desktop chats appear in projects and unfiled chats', (

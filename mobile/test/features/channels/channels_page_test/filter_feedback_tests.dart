@@ -290,7 +290,7 @@ void _filterFeedbackTests(
     );
     await tester.pumpAndSettle();
     expect(find.text('history'), findsNothing);
-    expect(find.text('See all'), findsNothing);
+    expect(find.text('See all'), findsOneWidget);
     expect(find.text('forced'), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
     manager.dispose();

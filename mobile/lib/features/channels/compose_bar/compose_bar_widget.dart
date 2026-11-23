@@ -535,6 +535,9 @@ class ComposeBar extends HookConsumerWidget {
         () => onSend(content, mentionPubkeys, mediaTags: mediaTags),
       );
       final submittedDraftRevision = draftRevision.value;
+      final cleanupStoredDraft = ref
+          .read(composeDraftsProvider.notifier)
+          .cleanupAfterSend(draftKey);
       // Resolved before any await: see
       // `_reportSendCancelledByCommunitySwitch`.
       final messenger = ScaffoldMessenger.maybeOf(context);
@@ -665,6 +668,7 @@ class ComposeBar extends HookConsumerWidget {
             controller: controller,
             draftRevision: draftRevision,
             submittedDraftRevision: submittedDraftRevision,
+            cleanupStoredDraft: cleanupStoredDraft,
             focusNode: focusNode,
             clearComposer: clearComposer,
             addMentionedNonMembers: addMentionedNonMembers,

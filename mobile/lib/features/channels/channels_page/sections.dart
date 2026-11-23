@@ -44,6 +44,7 @@ class _CustomChannelSection extends StatelessWidget {
         ),
       ),
       _SectionChannelsBody(
+        sectionKey: 'group:${section.id}',
         title: section.name,
         buildDetail: buildDetail,
         previewLimit: previewLimit,
@@ -70,9 +71,9 @@ class _WorkspaceIcon extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    Widget display(Widget child) {
+    Widget display(Widget child, [String? source]) {
       if (!inHeader) return ExcludeSemantics(child: child);
-      return _SectionLeadingIcon(child);
+      return _SectionLeadingIcon(child, key: ValueKey((icon, source)));
     }
 
     if (!(icon.length > 2 && icon.startsWith(':') && icon.endsWith(':'))) {
@@ -106,6 +107,7 @@ class _WorkspaceIcon extends ConsumerWidget {
         size: inHeader ? _kChannelIconSize : _kWorkspaceIconSize,
         compact: true,
       ),
+      url,
     );
   }
 }
@@ -113,7 +115,7 @@ class _WorkspaceIcon extends ConsumerWidget {
 const _kWorkspaceIconSize = 16.0;
 
 class _SectionLeadingIcon extends HookWidget {
-  const _SectionLeadingIcon(this.child);
+  const _SectionLeadingIcon(this.child, {super.key});
   final Widget child;
 
   @override
@@ -158,12 +160,13 @@ class _EmojiArtworkBoundary extends RenderRepaintBoundary {
   ValueChanged<Offset> onCenter;
   int revision = 0;
   bool measuring = false;
+  bool measured = false;
 
   @override
   void paint(PaintingContext context, Offset offset) {
     super.paint(context, offset);
     revision++;
-    if (measuring) return;
+    if (measuring || measured) return;
     measuring = true;
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       try {
@@ -190,6 +193,7 @@ class _EmojiArtworkBoundary extends RenderRepaintBoundary {
             }
           }
           if (right >= left) {
+            measured = true;
             onCenter(
               Offset(
                 (image.width - left - right - 1) / (2 * scale),
@@ -364,6 +368,7 @@ class _ChannelSection extends StatelessWidget {
         ),
       ),
       _SectionChannelsBody(
+        sectionKey: group,
         title: title,
         buildDetail: buildDetail,
         previewLimit: previewLimit,
@@ -399,7 +404,9 @@ class _ChannelSection extends StatelessWidget {
 
 class _SectionChannelsBody extends StatelessWidget {
   final String title;
+  final String sectionKey;
   const _SectionChannelsBody({
+    required this.sectionKey,
     required this.title,
     required this.expanded,
     required this.channels,
@@ -420,9 +427,10 @@ class _SectionChannelsBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final messages = MessagesSectionOptions.active(context);
     final matching = channels.where(isVisible).toList();
     final displayed = matching.take(previewLimit ?? matching.length).toList();
-    final hiddenCount = matching.length - displayed.length;
+    final hiddenCount = channels.length - displayed.length;
     return CollapsibleSliverBody(
       expanded: expanded,
       sliver: channels.isEmpty && emptySliver != null
@@ -440,10 +448,12 @@ class _SectionChannelsBody extends StatelessWidget {
                   return buildRow(displayed[index]);
                 }
                 return SectionShowMore(
+                  liveContent: (ref) =>
+                      _watchSectionChats(ref, sectionKey, title, messages),
                   leadingInset: MessagesSectionOptions.leadingInset(context),
                   buildRow: buildRow,
                   title: title,
-                  channels: matching,
+                  channels: channels,
                   buildDetail: buildDetail,
                 );
               },
