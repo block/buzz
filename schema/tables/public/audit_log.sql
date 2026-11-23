@@ -22,3 +22,6 @@ CREATE UNIQUE INDEX idx_audit_log_hash ON audit_log (community_id, hash);
 CREATE INDEX idx_audit_media_actor_hash ON audit_log (actor_pubkey, object_id) WHERE action = 'media_uploaded';
 
 CREATE INDEX idx_audit_media_hash_actor ON audit_log (object_id, actor_pubkey) WHERE action = 'media_uploaded';
+
+CREATE INDEX idx_audit_governance_head ON audit_log (community_id, (detail->>'document'), seq DESC) WHERE action = 'governance_changed';
+CREATE INDEX idx_audit_governance_command ON audit_log (community_id, object_id, seq) WHERE action = 'governance_changed';

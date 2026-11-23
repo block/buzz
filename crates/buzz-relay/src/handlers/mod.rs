@@ -28,6 +28,9 @@ mod dm_growth_postgres_tests;
 mod edit_metadata_postgres_tests;
 /// EVENT handler — WS dispatcher → ingest pipeline → fan-out.
 pub mod event;
+mod governance;
+#[cfg(test)]
+mod governance_postgres_tests;
 #[cfg(test)]
 pub(crate) mod group_state_postgres_tests;
 /// NIP-IA identity archive request handler (kinds 9035–9036).

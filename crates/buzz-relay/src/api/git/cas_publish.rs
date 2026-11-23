@@ -1116,8 +1116,138 @@ async fn cas_publish_inner(
     workspace: &WorkspaceState,
     options: PublishOptions,
 ) -> Result<CasSuccess, CasError> {
-    let limits = options.limits;
+    let prepared = prepare_inner(store, repo_path, parent_state, workspace, options).await?;
     let pkey = pointer_key(ctx.community(), owner, repo);
+    match prepared.put_pointer(store, &pkey, parent_state).await? {
+        CasOutcome::Won(_new_etag) => {
+            prepared.record("success");
+            Ok(prepared.into_success())
+        }
+        CasOutcome::LostRace => {
+            prepared.record("cas_conflict");
+            // Surface a typed Conflict carrying the winner so the caller
+            // can reconcile the on-disk workspace without re-reading the
+            // pointer. We re-GET the pointer here on the slow path; a
+            // *third* writer may have landed between our 412 and this
+            // GET, in which case we surface that third winner — also
+            // correct (loser re-pushes against whatever's current).
+            let expected = parent_state
+                .if_match
+                .as_ref()
+                .map(|e| e.0.as_str())
+                .unwrap_or("<first-push>");
+            warn!(
+                pointer = %pkey,
+                expected_etag = %expected,
+                attempted_manifest = %prepared.manifest_key,
+                "CAS lost race; resolving winner for reconcile"
+            );
+            let (winner_manifest, winner_manifest_key) =
+                read_winner_after_conflict(store, &pkey).await?;
+            Err(CasError::Conflict {
+                winner_manifest,
+                winner_manifest_key,
+            })
+        }
+    }
+}
+
+/// A publication with its packs and manifest stored (§Push steps 4–6) and
+/// its commit not yet made. A governed push commits it in the land
+/// (`super::land`) and then writes the pointer as a cache; [`cas_publish`]
+/// commits it by the pointer CAS itself.
+pub struct Prepared {
+    manifest: Manifest,
+    manifest_key: String,
+    digest: String,
+    compaction: Option<CompactionObservation>,
+}
+
+impl Prepared {
+    /// The manifest this publication installs.
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
+
+    /// Its content-addressed digest (64-hex).
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    /// Record the publication's outcome on the compaction metrics, if it
+    /// compacted.
+    pub fn record(&self, outcome: &'static str) {
+        if let Some(observation) = &self.compaction {
+            record_compaction(
+                outcome,
+                observation.started_at,
+                observation.packs_before,
+                Some(observation.packs_after),
+                Some(observation.compacted_bytes),
+            );
+        }
+    }
+
+    /// Write the pointer from the state the workspace was hydrated from to
+    /// this manifest (§Push step 7).
+    pub async fn put_pointer(
+        &self,
+        store: &GitStore,
+        pointer: &str,
+        parent_state: &ParentState,
+    ) -> Result<CasOutcome, CasError> {
+        let precond = match &parent_state.if_match {
+            Some(e) => Precond::IfMatch(e.clone()),
+            None => Precond::IfNoneMatchStar,
+        };
+        store
+            .put_pointer(pointer, self.digest.as_bytes(), precond)
+            .await
+            .map_err(|error| {
+                self.record("publish_error");
+                error.into()
+            })
+    }
+
+    /// The published state, once committed.
+    pub fn into_success(self) -> CasSuccess {
+        CasSuccess {
+            manifest: self.manifest,
+            manifest_key: self.manifest_key,
+        }
+    }
+}
+
+/// Store a publication's packs and manifest (§Push steps 4–6) without
+/// committing it.
+pub async fn prepare_publish(
+    store: &GitStore,
+    repo_path: &Path,
+    parent_state: &ParentState,
+    workspace: &WorkspaceState,
+    limits: PublishLimits,
+) -> Result<Prepared, CasError> {
+    prepare_inner(
+        store,
+        repo_path,
+        parent_state,
+        workspace,
+        PublishOptions {
+            limits,
+            compaction_threshold: PACK_COMPACTION_THRESHOLD,
+        },
+    )
+    .await
+}
+
+async fn prepare_inner(
+    store: &GitStore,
+    repo_path: &Path,
+    parent_state: &ParentState,
+    workspace: &WorkspaceState,
+    options: PublishOptions,
+) -> Result<Prepared, CasError> {
+    let limits = options.limits;
     let scratch_dir = scratch_dir_of(repo_path)?;
 
     // `workspace` is the post-receive-pack state. `parent_state.parent.refs`
@@ -1303,82 +1433,13 @@ async fn cas_publish_inner(
             return Err(error.into());
         }
     };
-    let manifest_digest = digest_from_manifest_key(&manifest_key)?;
-
-    // Step 7: CAS the pointer.
-    let precond = match &parent_state.if_match {
-        Some(e) => Precond::IfMatch(e.clone()),
-        None => Precond::IfNoneMatchStar,
-    };
-    let cas_outcome = match store
-        .put_pointer(&pkey, manifest_digest.as_bytes(), precond)
-        .await
-    {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            if let Some(observation) = &compaction_observation {
-                record_compaction(
-                    "publish_error",
-                    observation.started_at,
-                    observation.packs_before,
-                    Some(observation.packs_after),
-                    Some(observation.compacted_bytes),
-                );
-            }
-            return Err(error.into());
-        }
-    };
-    match cas_outcome {
-        CasOutcome::Won(_new_etag) => {
-            if let Some(observation) = &compaction_observation {
-                record_compaction(
-                    "success",
-                    observation.started_at,
-                    observation.packs_before,
-                    Some(observation.packs_after),
-                    Some(observation.compacted_bytes),
-                );
-            }
-            Ok(CasSuccess {
-                manifest: m_after,
-                manifest_key,
-            })
-        }
-        CasOutcome::LostRace => {
-            if let Some(observation) = &compaction_observation {
-                record_compaction(
-                    "cas_conflict",
-                    observation.started_at,
-                    observation.packs_before,
-                    Some(observation.packs_after),
-                    Some(observation.compacted_bytes),
-                );
-            }
-            // Surface a typed Conflict carrying the winner so the caller
-            // can reconcile the on-disk workspace without re-reading the
-            // pointer. We re-GET the pointer here on the slow path; a
-            // *third* writer may have landed between our 412 and this
-            // GET, in which case we surface that third winner — also
-            // correct (loser re-pushes against whatever's current).
-            let expected = parent_state
-                .if_match
-                .as_ref()
-                .map(|e| e.0.as_str())
-                .unwrap_or("<first-push>");
-            warn!(
-                pointer = %pkey,
-                expected_etag = %expected,
-                attempted_manifest = %manifest_key,
-                "CAS lost race; resolving winner for reconcile"
-            );
-            let (winner_manifest, winner_manifest_key) =
-                read_winner_after_conflict(store, &pkey).await?;
-            Err(CasError::Conflict {
-                winner_manifest,
-                winner_manifest_key,
-            })
-        }
-    }
+    let digest = digest_from_manifest_key(&manifest_key)?;
+    Ok(Prepared {
+        manifest: m_after,
+        manifest_key,
+        digest,
+        compaction: compaction_observation,
+    })
 }
 
 /// Re-read the pointer after a `LostRace` and fetch the winner's manifest.

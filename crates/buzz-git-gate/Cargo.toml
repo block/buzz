@@ -1,0 +1,17 @@
+[package]
+name = "buzz-git-gate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Verified pure decision for governed Git ref updates"
+
+[dependencies]
+vstd = "=0.0.0-2026-10-04-0306"
+
+[package.metadata.verus]
+verify = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)', 'cfg(verus_keep_ghost)', 'cfg(verus_keep_ghost_body)'] }

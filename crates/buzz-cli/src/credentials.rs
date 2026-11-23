@@ -202,14 +202,23 @@ fn evidence_source(
 /// JSON; all validation and signature verification happen on the strict path.
 fn parse_auth_tag(input: &str, public_key: &PublicKey) -> Result<AuthTag, CliError> {
     let json = crate::normalize_auth_tag_input(input);
-    let tag = buzz_sdk::nip_oa::parse_auth_tag(&json)
+    // This input edge verifies who signed the tag. The relay authorizes its use.
+    buzz_sdk::nip_oa::verify_auth_tag(&json, public_key)
+        .map(|_| ())
+        .or_else(|_| {
+            buzz_sdk::nip_oa::verify_git_grant(&json, public_key, nostr::Timestamp::now().as_secs())
+                .map(|_| ())
+        })
+        .map_err(|e| {
+            CliError::Auth(format!(
+                "BUZZ_AUTH_TAG verification failed for pubkey {}: {e}",
+                public_key.to_hex()
+            ))
+        })?;
+    let fields: Vec<String> = serde_json::from_str(&json)
         .map_err(|e| CliError::Auth(format!("BUZZ_AUTH_TAG is malformed: {e}")))?;
-    buzz_sdk::nip_oa::verify_auth_tag(&json, public_key).map_err(|e| {
-        CliError::Auth(format!(
-            "BUZZ_AUTH_TAG verification failed for pubkey {}: {e}",
-            public_key.to_hex()
-        ))
-    })?;
+    let tag = Tag::parse(fields)
+        .map_err(|e| CliError::Auth(format!("BUZZ_AUTH_TAG is malformed: {e}")))?;
     // Canonical wire form derives from the parsed-and-verified tag
     // (same shape as buzz-acp's RestClient), never from raw input.
     let canonical = serde_json::to_string(tag.as_slice())
@@ -366,6 +375,19 @@ impl Credentials {
     pub fn with_auth_tag(mut self, tag: Tag, json: String) -> Self {
         self.auth_tag = Some(AuthTag { tag, json });
         self
+    }
+
+    /// Mint an owner attestation without exposing local key material.
+    pub(crate) fn compute_git_grant(
+        &self,
+        agent: &PublicKey,
+        conditions: &str,
+    ) -> Result<String, CliError> {
+        let keys = self.local_keys.as_ref().ok_or_else(|| {
+            CliError::Auth("this signer does not support minting owner attestations; use an explicit signing key for repos grant".into())
+        })?;
+        buzz_sdk::nip_oa::compute_git_grant(keys, agent, conditions)
+            .map_err(|error| CliError::Usage(error.to_string()))
     }
 
     /// The local keys behind a [`Self::from_keys`] credential.
@@ -574,6 +596,26 @@ fn customer_id(secret_key_bytes: &[u8], relay_url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_input_accepts_plain_or_git_tags_for_only_the_signed_agent() {
+        let owner = Keys::generate();
+        let agent = Keys::generate().public_key();
+        for conditions in ["", "kind=9", "repo=*&git=push"] {
+            let json = if conditions.starts_with("repo=") {
+                buzz_sdk::nip_oa::compute_git_grant(&owner, &agent, conditions)
+            } else {
+                buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent, conditions)
+            }
+            .unwrap();
+            let parsed = parse_auth_tag(&json, &agent).unwrap();
+            assert_eq!(parsed.json, json);
+            assert!(parse_auth_tag(&json, &Keys::generate().public_key()).is_err());
+            let mut changed: Vec<String> = serde_json::from_str(&json).unwrap();
+            changed[2] = "repo=*&git=manage".into();
+            assert!(parse_auth_tag(&serde_json::to_string(&changed).unwrap(), &agent).is_err());
+        }
+    }
 
     // -----------------------------------------------------------------------
     // customer_id

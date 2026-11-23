@@ -206,11 +206,7 @@ mod postgres_tests {
     //
     // Same P-256 key as buzz-auth/src/nip_fi/verifier/tests.rs so
     // the construction pattern can be reviewed against a known-good example.
-    const TEST_EC_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-        MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n\
-        WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n\
-        zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n\
-        -----END PRIVATE KEY-----\n";
+    const TEST_EC_PKCS8_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\nWZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\nzhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n-----END PRIVATE KEY-----\n"; // sadscan:disable np.pem.1 kingfisher.privkey.2 -- unchanged public ES256 test fixture
     const TEST_JWK_X: &str = "RW-mZ7H5Kjjl8hIY9ygUKYRiheL02s4Xm22r22dWaJI";
     const TEST_JWK_Y: &str = "WqQXVwaD6NM7us40BUTNe9dRa1XoJ0NX6vJuJWYU_bA";
     const TEST_KID: &str = "test-key-1";
@@ -620,7 +616,7 @@ mod postgres_tests {
             StatusCode::NOT_FOUND,
             "NIP-FI Enforce: same-key assertion + NIP-98 MUST reach handler → 404 \
              (repo does not exist). \
-             If 403: key pairing is wrongly denying, or authorize_management denied. \
+             If 403: key pairing is wrongly denying, or the land refused. \
              If 401: NIP-FI outer guard is wrongly denying a valid assertion. \
              Body: {body:?}"
         );
@@ -1130,6 +1126,330 @@ mod postgres_tests {
              Falsifying mutation: set mode=Enforce → guard fires → 401."
         );
     }
+
+    #[tokio::test]
+    async fn smart_git_records_the_presented_owner_before_crediting_a_role() {
+        use axum::extract::FromRequestParts;
+        use buzz_core::channel::MemberRole;
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .unwrap();
+        buzz_db::Db::from_pool(pool).migrate().await.unwrap();
+        let state = off_state().await.unwrap();
+        let host = format!("owner-admission-{}.example", uuid::Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .unwrap()
+            .id;
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let creator = Keys::generate();
+        state
+            .db
+            .ensure_user(community, agent.public_key().as_bytes())
+            .await
+            .unwrap();
+        let channel = uuid::Uuid::new_v4();
+        state
+            .db
+            .create_channel_with_id(
+                community,
+                channel,
+                "owner-admission",
+                buzz_db::channel::ChannelType::Stream,
+                buzz_db::channel::ChannelVisibility::Open,
+                None,
+                creator.public_key().as_bytes(),
+                None,
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .add_member(
+                community,
+                channel,
+                agent.public_key().as_bytes(),
+                MemberRole::Admin,
+                Some(creator.public_key().as_bytes()),
+            )
+            .await
+            .unwrap();
+        let path = format!(
+            "/git/{}/repo/info/refs?service=git-upload-pack",
+            agent.public_key().to_hex()
+        );
+        let url = format!("http://{host}/git/{}/repo", agent.public_key().to_hex());
+        let request = |owner: &Keys| {
+            let auth = buzz_sdk::nip_oa::compute_auth_tag(owner, &agent.public_key(), "").unwrap();
+            let parts: Vec<String> = serde_json::from_str(&auth).unwrap();
+            let event = EventBuilder::new(Kind::Custom(27235), "")
+                .tags([
+                    Tag::parse(["u", &url]).unwrap(),
+                    Tag::parse(["method", "GET"]).unwrap(),
+                    Tag::parse(parts).unwrap(),
+                ])
+                .sign_with_keys(&agent)
+                .unwrap();
+            let token = format!(
+                "Nostr {}",
+                base64::engine::general_purpose::STANDARD
+                    .encode(serde_json::to_vec(&event).unwrap())
+            );
+            Request::builder()
+                .uri(&path)
+                .header("host", &host)
+                .header("authorization", token)
+                .body(Body::empty())
+                .unwrap()
+                .into_parts()
+                .0
+        };
+        let authenticated = super::super::super::transport::GitAuth::from_request_parts(
+            &mut request(&owner),
+            &state,
+        )
+        .await;
+        assert!(
+            authenticated.is_ok(),
+            "valid signed Git request must reach role authorization"
+        );
+        let role = super::super::super::authority::credited_role(
+            &state.db,
+            community,
+            channel,
+            &super::super::super::land::coordinate(&agent.public_key().to_hex(), "repo"),
+            agent.public_key().as_bytes(),
+            None,
+            buzz_core::governance::GrantAction::Read,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            role,
+            Err(super::super::super::authority::NOT_A_MEMBER),
+            "first presented owner is outside channel, so smart Git must cap this request"
+        );
+
+        // The recorded owner is first-write-wins: a different one is refused.
+        let other = Keys::generate();
+        let refused = super::super::super::transport::GitAuth::from_request_parts(
+            &mut request(&other),
+            &state,
+        )
+        .await;
+        let status = refused.err().expect("a second owner is refused").status();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    #[tokio::test]
+    async fn a_restricted_land_preserves_owner_admission() {
+        use axum::extract::FromRequestParts;
+        use buzz_core::channel::MemberRole;
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .unwrap();
+        buzz_db::Db::from_pool(pool).migrate().await.unwrap();
+        let mut state = off_state().await.unwrap();
+        let host = format!("owner-admission-{}.example", uuid::Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .unwrap()
+            .id;
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let creator = Keys::generate();
+        state
+            .db
+            .ensure_user(community, agent.public_key().as_bytes())
+            .await
+            .unwrap();
+        let channel = uuid::Uuid::new_v4();
+        state
+            .db
+            .create_channel_with_id(
+                community,
+                channel,
+                "owner-admission",
+                buzz_db::channel::ChannelType::Stream,
+                buzz_db::channel::ChannelVisibility::Open,
+                None,
+                creator.public_key().as_bytes(),
+                None,
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .add_member(
+                community,
+                channel,
+                agent.public_key().as_bytes(),
+                MemberRole::Admin,
+                Some(creator.public_key().as_bytes()),
+            )
+            .await
+            .unwrap();
+        let path = format!(
+            "/git/{}/repo/info/refs?service=git-upload-pack",
+            agent.public_key().to_hex()
+        );
+        let url = format!("http://{host}/git/{}/repo", agent.public_key().to_hex());
+        let request = |owner: &Keys| {
+            let auth = buzz_sdk::nip_oa::compute_auth_tag(owner, &agent.public_key(), "").unwrap();
+            let parts: Vec<String> = serde_json::from_str(&auth).unwrap();
+            let event = EventBuilder::new(Kind::Custom(27235), "")
+                .tags([
+                    Tag::parse(["u", &url]).unwrap(),
+                    Tag::parse(["method", "GET"]).unwrap(),
+                    Tag::parse(parts).unwrap(),
+                ])
+                .sign_with_keys(&agent)
+                .unwrap();
+            let token = format!(
+                "Nostr {}",
+                base64::engine::general_purpose::STANDARD
+                    .encode(serde_json::to_vec(&event).unwrap())
+            );
+            Request::builder()
+                .uri(&path)
+                .header("host", &host)
+                .header("authorization", token)
+                .body(Body::empty())
+                .unwrap()
+                .into_parts()
+                .0
+        };
+        let authenticated = super::super::super::transport::GitAuth::from_request_parts(
+            &mut request(&owner),
+            &state,
+        )
+        .await;
+        assert!(
+            authenticated.is_ok(),
+            "valid signed Git request must reach role authorization"
+        );
+        let role = super::super::super::authority::credited_role(
+            &state.db,
+            community,
+            channel,
+            &super::super::super::land::coordinate(&agent.public_key().to_hex(), "repo"),
+            agent.public_key().as_bytes(),
+            None,
+            buzz_core::governance::GrantAction::Read,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            role,
+            Err(super::super::super::authority::NOT_A_MEMBER),
+            "first presented owner is outside channel, so smart Git must cap this request"
+        );
+
+        // The recorded owner is first-write-wins: a different one is refused.
+        let other = Keys::generate();
+        let refused = super::super::super::transport::GitAuth::from_request_parts(
+            &mut request(&other),
+            &state,
+        )
+        .await;
+        let status = refused.err().expect("a second owner is refused").status();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        state
+            .db
+            .ensure_user(community, owner.public_key().as_bytes())
+            .await
+            .unwrap();
+        state
+            .db
+            .add_member(
+                community,
+                channel,
+                owner.public_key().as_bytes(),
+                MemberRole::Admin,
+                Some(creator.public_key().as_bytes()),
+            )
+            .await
+            .unwrap();
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1,$2,'member')",
+        )
+        .bind(community.as_uuid())
+        .bind(owner.public_key().to_hex())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let config =
+            Arc::make_mut(&mut Arc::get_mut(&mut state).expect("fixture owns state").config);
+        config.require_relay_membership = true;
+        config.allow_nip_oa_auth = true;
+        assert!(
+            super::super::super::transport::GitAuth::from_request_parts(
+                &mut request(&owner),
+                &state
+            )
+            .await
+            .is_ok(),
+            "owner admits agent on restricted relay"
+        );
+        let repo = buzz_core::governance::RepoCoordinate {
+            owner: agent.public_key().to_hex(),
+            name: "repo".into(),
+        };
+        state
+            .db
+            .reserve_repo_name(community, &repo.name, &repo.owner)
+            .await
+            .unwrap();
+        let announcement = EventBuilder::new(Kind::Custom(30617), "")
+            .tags([
+                Tag::parse(["d", "repo"]).unwrap(),
+                Tag::parse(["buzz-channel", &channel.to_string()]).unwrap(),
+            ])
+            .sign_with_keys(&agent)
+            .unwrap();
+        state
+            .db
+            .insert_event(community, &announcement, None)
+            .await
+            .unwrap();
+        let guard = buzz_deletion::acquire_serving_write(&state.db, community, "restricted-land")
+            .await
+            .unwrap();
+        let result = super::super::super::land::land(
+            &state,
+            guard.lease(),
+            super::super::super::land::Change {
+                kind: "push",
+                repo: &repo,
+                actor: agent.public_key().as_bytes(),
+                grant: None,
+                seen: None,
+                new: "review-manifest",
+                updates: &[],
+            },
+            async |_tx, authority| {
+                assert_eq!(
+                    authority.role,
+                    Some(MemberRole::Admin),
+                    "land must preserve valid owner admission while capping own channel role"
+                );
+                Ok(super::super::super::gate::Decision {
+                    verdict: Ok(()),
+                    counted: Default::default(),
+                })
+            },
+        )
+        .await;
+        assert!(result.is_ok());
+        guard.finish().await.unwrap();
+    }
 } // mod postgres_tests
 
 mod external_infra {
@@ -1278,6 +1598,11 @@ mod external_infra {
                 .insert_event(community, &announcement, None)
                 .await
                 .unwrap();
+            state
+                .db
+                .reserve_repo_name(community, &repo, &owner.public_key().to_hex())
+                .await
+                .unwrap();
             let f = Self {
                 state,
                 pool,
@@ -1303,13 +1628,39 @@ mod external_infra {
 
         async fn snapshot(&self) -> DefaultBranchSnapshot {
             DefaultBranchSnapshot::load(
-                &self.state.git_store,
+                &self.state,
                 &self.tenant,
-                &self.owner.public_key().to_hex(),
-                &self.repo,
+                crate::api::git::land::coordinate(&self.owner.public_key().to_hex(), &self.repo),
             )
             .await
             .unwrap()
+        }
+
+        /// Set the default branch from `snapshot` as the owner, below the
+        /// HTTP route, so a test can hold a stale snapshot.
+        async fn set_from(
+            &self,
+            snapshot: DefaultBranchSnapshot,
+            request: SetDefaultBranch,
+        ) -> Result<(DefaultBranchSnapshot, bool), Response> {
+            let serving_write = buzz_deletion::acquire_serving_write(
+                &self.state.db,
+                self.tenant.community(),
+                "git_default_branch_test",
+            )
+            .await
+            .unwrap();
+            let result = snapshot
+                .set(
+                    &self.state,
+                    &serving_write,
+                    &self.owner.public_key().to_bytes(),
+                    None,
+                    request,
+                )
+                .await;
+            serving_write.finish().await.unwrap();
+            result
         }
 
         async fn seed_git(&self) {
@@ -1386,6 +1737,248 @@ mod external_infra {
                 tag,
             )
             .await
+        }
+
+        /// Push what `push` holds through the land, as the owner, as
+        /// receive-pack's finalize does.
+        async fn land_push(
+            &self,
+            push: &super::super::super::hydrate::HydratedRepo,
+            parent: &super::super::super::cas_publish::ParentState,
+        ) -> super::super::super::land::Verdict {
+            self.land_push_as(&self.owner, None, push, parent).await
+        }
+
+        /// As `land_push`, as `pusher`, judged as receive-pack judges.
+        async fn land_push_as(
+            &self,
+            pusher: &Keys,
+            grant: Option<&buzz_core::governance::GitGrant>,
+            push: &super::super::super::hydrate::HydratedRepo,
+            parent: &super::super::super::cas_publish::ParentState,
+        ) -> super::super::super::land::Verdict {
+            let workspace = super::super::super::cas_publish::snapshot_workspace(push.path())
+                .await
+                .unwrap();
+            let prepared = super::super::super::cas_publish::prepare_publish(
+                &self.state.git_store,
+                push.path(),
+                parent,
+                &workspace,
+                limits(push.hydrated_bytes()),
+            )
+            .await
+            .unwrap();
+            let updates = super::super::super::land::ref_updates(
+                push.path(),
+                &parent.parent.refs,
+                &workspace.refs,
+            )
+            .await;
+            let scan =
+                super::super::super::scan::push(push.path(), &parent.parent.refs, &workspace.refs)
+                    .await;
+            let serving_write = buzz_deletion::acquire_serving_write(
+                &self.state.db,
+                self.tenant.community(),
+                "git_publish_test",
+            )
+            .await
+            .unwrap();
+            let repo = super::super::super::land::coordinate(
+                &self.owner.public_key().to_hex(),
+                &self.repo,
+            );
+            let pusher = pusher.public_key().to_bytes();
+            let verdict = super::super::super::land::land(
+                &self.state,
+                serving_write.lease(),
+                super::super::super::land::Change {
+                    kind: "push",
+                    repo: &repo,
+                    actor: &pusher,
+                    grant,
+                    seen: parent.parent_digest.as_deref(),
+                    new: prepared.digest(),
+                    updates: &updates,
+                },
+                async |tx, authority| {
+                    super::super::super::gate::push(
+                        tx,
+                        authority,
+                        &repo,
+                        &pusher,
+                        &updates,
+                        scan,
+                        !self.state.config.require_relay_membership,
+                    )
+                    .await
+                },
+            )
+            .await
+            .unwrap();
+            if verdict == super::super::super::land::Verdict::Landed {
+                super::super::super::land::write_cache(
+                    &self.state.git_store,
+                    &self.tenant,
+                    &repo,
+                    parent.if_match.as_ref(),
+                    prepared.digest(),
+                )
+                .await;
+            }
+            serving_write.finish().await.unwrap();
+            verdict
+        }
+
+        /// Publish `body` for `document` as `signer`, through ingest; the
+        /// relay-authored head it installed.
+        async fn govern(
+            &self,
+            signer: &Keys,
+            document: &str,
+            expected: &buzz_core::governance::ExpectedHead,
+            body: &str,
+        ) -> nostr::EventId {
+            let event = buzz_core::governance::command_builder(
+                *self.tenant.community().as_uuid(),
+                &document.parse().unwrap(),
+                expected,
+                body,
+            )
+            .unwrap()
+            .sign_with_keys(signer)
+            .unwrap();
+            let auth = crate::handlers::ingest::IngestAuth::Http {
+                pubkey: signer.public_key(),
+                scopes: vec![buzz_auth::Scope::ReposWrite],
+                auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
+            };
+            crate::handlers::ingest::ingest_event(&self.state, &self.tenant, event, auth)
+                .await
+                .unwrap_or_else(|e| panic!("{document}: {e:?}"));
+            let head: String = sqlx::query_scalar(
+                "SELECT detail->'state'->>'id' FROM audit_log WHERE community_id=$1 \
+                 AND action='governance_changed' AND detail->>'document'=$2 ORDER BY seq DESC LIMIT 1",
+            )
+            .bind(self.tenant.community().as_uuid())
+            .bind(document)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap();
+            nostr::EventId::from_hex(&head).unwrap()
+        }
+
+        /// Publish the community's floor, as its admin, so grants can be
+        /// issued under its lifetime cap.
+        async fn floor(&self) {
+            let admin = self.owner.public_key().to_hex();
+            sqlx::query("INSERT INTO relay_members (community_id,pubkey,role) VALUES ($1,$2,'admin') ON CONFLICT (community_id,pubkey) DO UPDATE SET role='admin'")
+                .bind(self.tenant.community().as_uuid()).bind(&admin).execute(&self.pool).await.unwrap();
+            self.govern(
+                &self.owner,
+                "floor",
+                &buzz_core::governance::ExpectedHead::Absent,
+                r#"{"version":1,"body":{"type":"floor","rules":[],"labels":{},"max_grant_seconds":3600}}"#,
+            )
+            .await;
+        }
+
+        /// As `owner`, a Git grant tag for `agent` at `level` on the fixture
+        /// repo, signed now, from a minute ago until `seconds` from now.
+        fn grant(&self, owner: &Keys, agent: &Keys, level: &str, seconds: i64) -> String {
+            let now = chrono::Utc::now().timestamp();
+            buzz_sdk::nip_oa::compute_git_grant(
+                owner,
+                &agent.public_key(),
+                &format!(
+                    "repo={}:{}&git={level}&created_at>{}&created_at<{}",
+                    self.owner.public_key().to_hex(),
+                    self.repo,
+                    now - 60,
+                    now + seconds
+                ),
+            )
+            .unwrap()
+        }
+
+        /// The doors of every recorded read of the fixture repo by `key`, in order.
+        async fn reads(&self, key: &Keys) -> Vec<String> {
+            sqlx::query_scalar(
+                "SELECT detail->>'door' FROM audit_log WHERE community_id=$1 \
+                 AND action='git_read' AND object_id=$2 AND actor_pubkey=$3 ORDER BY seq",
+            )
+            .bind(self.tenant.community().as_uuid())
+            .bind(
+                super::super::super::land::coordinate(
+                    &self.owner.public_key().to_hex(),
+                    &self.repo,
+                )
+                .to_string(),
+            )
+            .bind(key.public_key().to_bytes().to_vec())
+            .fetch_all(&self.pool)
+            .await
+            .unwrap()
+        }
+
+        /// Ask upload-pack at `host`, as the member, for `tip`: served its
+        /// pack exactly when `served`, else refused as not a ref it has.
+        async fn assert_served(&self, host: &str, tip: &str, served: bool, label: &str) {
+            let owner = self.owner.public_key().to_hex();
+            let url = format!("http://{host}/git/{owner}/{}", self.repo);
+            let want = format!("want {tip}\n");
+            let request = Request::builder()
+                .method("POST")
+                .uri(format!("/git/{owner}/{}/git-upload-pack", self.repo))
+                .header("host", host)
+                .header("authorization", token(&self.member, "GET", &url, None))
+                .body(Body::from(format!(
+                    "{:04x}{want}00000009done\n",
+                    want.len() + 4
+                )))
+                .unwrap();
+            let response = super::super::super::transport::git_router(self.state.clone())
+                .oneshot(request)
+                .await
+                .unwrap();
+            let bytes = to_bytes(response.into_body(), 4 * 1024 * 1024)
+                .await
+                .unwrap();
+            let shown = String::from_utf8_lossy(&bytes);
+            assert_eq!(
+                bytes.windows(4).any(|w| w == b"PACK"),
+                served,
+                "{label}: {shown}"
+            );
+            if !served {
+                assert!(
+                    shown.contains(&format!("not our ref {tip}")),
+                    "{label}: {shown}"
+                );
+            }
+        }
+
+        /// POST `filter` to the bridge's `/query` as `key`; the status.
+        async fn query(&self, key: &Keys, filter: Value) -> StatusCode {
+            let body = filter.to_string();
+            let url = crate::api::bridge::nip98_expected_url(
+                &self.state.config.relay_url,
+                &self.tenant,
+                "/query",
+            );
+            let request = Request::builder()
+                .method("POST")
+                .uri("/query")
+                .header("host", self.tenant.host())
+                .header("authorization", token(key, "POST", &url, Some(&body)))
+                .body(Body::from(body))
+                .unwrap();
+            crate::router::build_router(self.state.clone())
+                .oneshot(request)
+                .await
+                .unwrap()
+                .status()
         }
 
         async fn add(&self, key: &Keys) {
@@ -1477,9 +2070,9 @@ mod external_infra {
             "refs/heads/legacy"
         );
         assert_eq!(
-            f.set(&f.member, "main", None).await.0,
+            f.set(&f.maintainer, "main", None).await.0,
             StatusCode::FORBIDDEN,
-            "push-capable channel admin is not a repo manager"
+            "being named in the announcement grants nothing; members do not manage"
         );
         assert_eq!(
             f.set(&Keys::generate(), "main", None).await.0,
@@ -1507,8 +2100,12 @@ mod external_infra {
             before.digest,
             "denials do not write"
         );
-        let result = f.set(&f.maintainer, "main", None).await;
-        assert_eq!(result.0, StatusCode::OK, "{result:?}");
+        let result = f.set(&f.member, "main", None).await;
+        assert_eq!(
+            result.0,
+            StatusCode::OK,
+            "channel admins manage: {result:?}"
+        );
         assert_eq!(result.1["changed"], true);
         let after = f.snapshot().await;
         assert_eq!(after.manifest.head, "refs/heads/main");
@@ -1647,16 +2244,22 @@ mod external_infra {
 
     #[tokio::test]
     #[ignore = "requires isolated Postgres, Redis and MinIO"]
-    async fn default_branch_direct_authority_survives_unrelated_tag() {
+    async fn default_branch_owner_attestation_caps_the_signer() {
         let f = Fixture::new().await;
-        // The signer has no role here and owns no announcer, so only the
-        // caller's own named-maintainer authority can grant this request.
+        // An admin that presents an owner attestation becomes that owner's
+        // agent, and acts with no more than the owner holds: here, nothing.
+        assert_eq!(f.set(&f.member, "main", None).await.0, StatusCode::OK);
         let unrelated = Keys::generate();
         let tag =
-            buzz_sdk::nip_oa::compute_auth_tag(&unrelated, &f.maintainer.public_key(), "").unwrap();
+            buzz_sdk::nip_oa::compute_auth_tag(&unrelated, &f.member.public_key(), "").unwrap();
         assert_eq!(
-            f.set(&f.maintainer, "main", Some(&tag)).await.0,
-            StatusCode::OK
+            f.set(&f.member, "legacy", Some(&tag)).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            f.set(&f.member, "legacy", None).await.0,
+            StatusCode::NOT_FOUND,
+            "the recorded owner keeps capping it"
         );
     }
 
@@ -1664,79 +2267,124 @@ mod external_infra {
     #[ignore = "requires isolated Postgres, Redis and MinIO"]
     async fn default_branch_delegation_and_revocation() {
         let f = Fixture::new().await;
+        let community = f.tenant.community();
+        let put = |key: &Keys, role| {
+            let (state, channel, key, by) = (
+                Arc::clone(&f.state),
+                f.channel,
+                key.public_key(),
+                f.owner.public_key(),
+            );
+            async move {
+                state
+                    .db
+                    .add_member(
+                        community,
+                        channel,
+                        key.as_bytes(),
+                        role,
+                        Some(by.as_bytes()),
+                    )
+                    .await
+                    .unwrap();
+            }
+        };
+        // An owner's credential does not lend the owner's authority: a bot
+        // writes as a member, and members do not manage.
+        f.floor().await;
+        let bot = Keys::generate();
+        f.add(&bot).await;
+        let tag = buzz_sdk::nip_oa::compute_auth_tag(&f.owner, &bot.public_key(), "").unwrap();
+        assert_eq!(
+            f.set(&bot, "main", Some(&tag)).await.0,
+            StatusCode::NOT_FOUND,
+            "ungranted, it cannot even read"
+        );
+        let read = f.grant(&f.owner, &bot, "read", 1800);
+        assert_eq!(
+            f.set(&bot, "main", Some(&read)).await.0,
+            StatusCode::FORBIDDEN
+        );
+        // An agent that is an admin itself manages, capped by its recorded
+        // owner's current role, under a grant it carries per request.
         let agent = Keys::generate();
         f.add(&agent).await;
-        let tag = buzz_sdk::nip_oa::compute_auth_tag(&f.owner, &agent.public_key(), "").unwrap();
-        assert_eq!(f.set(&agent, "main", None).await.0, StatusCode::FORBIDDEN);
-        let limited =
-            buzz_sdk::nip_oa::compute_auth_tag(&f.owner, &agent.public_key(), "kind=1").unwrap();
+        put(&agent, MemberRole::Admin).await;
+        let tag =
+            buzz_sdk::nip_oa::compute_auth_tag(&f.maintainer, &agent.public_key(), "").unwrap();
         assert_eq!(
-            f.set(&agent, "main", Some(&limited)).await.0,
-            StatusCode::FORBIDDEN
+            f.set(&agent, "main", Some(&tag)).await.0,
+            StatusCode::NOT_FOUND,
+            "its owner has granted it nothing, not even a read"
         );
-        let expired =
-            buzz_sdk::nip_oa::compute_auth_tag(&f.owner, &agent.public_key(), "created_at<1")
-                .unwrap();
+        let push = f.grant(&f.maintainer, &agent, "push", 1800);
+        let manage = f.grant(&f.maintainer, &agent, "manage", 1800);
         assert_eq!(
-            f.set(&agent, "main", Some(&expired)).await.0,
-            StatusCode::FORBIDDEN
+            f.set(&agent, "main", Some(&manage)).await.0,
+            StatusCode::FORBIDDEN,
+            "its owner is only a member"
         );
-        assert_eq!(f.set(&agent, "main", Some(&tag)).await.0, StatusCode::OK);
-        // A human can administer a repository announced by their managed agent,
-        // recorded as its owner through the verified tag.
-        let own_tag =
-            buzz_sdk::nip_oa::compute_auth_tag(&f.member, &f.owner.public_key(), "").unwrap();
+        put(&f.maintainer, MemberRole::Owner).await;
         assert_eq!(
-            f.set(&f.owner, "legacy", Some(&own_tag)).await.0,
-            StatusCode::OK
+            f.set(&agent, "main", Some(&push)).await.0,
+            StatusCode::FORBIDDEN,
+            "a push grant does not manage"
         );
+        assert_eq!(f.set(&agent, "main", Some(&manage)).await.0, StatusCode::OK);
+        assert_eq!(
+            f.set(&agent, "legacy", None).await.0,
+            StatusCode::NOT_FOUND,
+            "a grant lives in the request: without it, not even a read"
+        );
+        // Another owner's grant is refused at the door.
+        let foreign = f.grant(&f.owner, &agent, "manage", 1800);
+        assert_eq!(
+            f.set(&agent, "legacy", Some(&foreign)).await,
+            (
+                StatusCode::FORBIDDEN,
+                json!({"error": crate::api::relay_members::OWNER_MISMATCH})
+            ),
+        );
+        // Owning the announcer grants nothing.
         assert!(f
             .state
             .db
-            .is_agent_owner(
-                f.tenant.community(),
+            .set_agent_owner(
+                community,
                 f.owner.public_key().as_bytes(),
-                f.member.public_key().as_bytes(),
+                f.member.public_key().as_bytes()
             )
             .await
             .unwrap());
-        assert_eq!(f.set(&f.member, "main", None).await.0, StatusCode::OK);
-        f.state
-            .db
-            .add_member(
-                f.tenant.community(),
-                f.channel,
-                f.maintainer.public_key().as_bytes(),
-                MemberRole::Owner,
-                Some(f.owner.public_key().as_bytes()),
-            )
-            .await
-            .unwrap();
+        put(&f.member, MemberRole::Member).await;
+        assert_eq!(
+            f.set(&f.member, "legacy", None).await.0,
+            StatusCode::FORBIDDEN
+        );
+        // Nor does announcing it: the announcer outside the channel cannot
+        // even read.
         f.state
             .db
             .remove_member(
-                f.tenant.community(),
+                community,
                 f.channel,
                 f.owner.public_key().as_bytes(),
                 f.owner.public_key().as_bytes(),
             )
             .await
             .unwrap();
-        assert_eq!(
-            f.set(&agent, "legacy", Some(&tag)).await.0,
-            StatusCode::FORBIDDEN
-        );
         assert_eq!(
             f.set(&f.owner, "legacy", None).await.0,
             StatusCode::NOT_FOUND
         );
-        // Durable ban cascades even when the signer has independent maintainer rights.
+        // A durable ban cascades through a presented owner credential even
+        // when the signer holds the role itself.
         let ban_tag =
             buzz_sdk::nip_oa::compute_auth_tag(&f.member, &f.maintainer.public_key(), "").unwrap();
         f.state
             .db
             .ban_community_member(
-                f.tenant.community(),
+                community,
                 f.member.public_key().as_bytes(),
                 f.member.public_key().as_bytes(),
                 Some("test"),
@@ -1749,7 +2397,7 @@ mod external_infra {
             StatusCode::FORBIDDEN
         );
         sqlx::query("UPDATE channels SET archived_at = NOW() WHERE community_id = $1 AND id = $2")
-            .bind(f.tenant.community().as_uuid())
+            .bind(community.as_uuid())
             .bind(f.channel)
             .execute(&f.pool)
             .await
@@ -1767,9 +2415,9 @@ mod external_infra {
         let a = f.snapshot().await;
         let b = f.snapshot().await;
         let old_digest = a.digest.clone();
-        let (_, changed) = a
-            .set(
-                &f.state.git_store,
+        let (_, changed) = f
+            .set_from(
+                a,
                 SetDefaultBranch {
                     branch: "main".into(),
                     expected_manifest: old_digest.clone(),
@@ -1778,9 +2426,9 @@ mod external_infra {
             .await
             .unwrap();
         assert!(changed);
-        let loser = b
-            .set(
-                &f.state.git_store,
+        let loser = f
+            .set_from(
+                b,
                 SetDefaultBranch {
                     branch: "legacy".into(),
                     expected_manifest: old_digest,
@@ -1811,23 +2459,10 @@ mod external_infra {
         .await
         .unwrap();
         assert_eq!(f.set(&f.owner, "legacy", None).await.0, StatusCode::OK);
-        let result = super::super::super::cas_publish::cas_publish(
-            &f.state.git_store,
-            &f.tenant,
-            push.path(),
-            &f.owner.public_key().to_hex(),
-            &f.repo,
-            &parent,
-            &super::super::super::cas_publish::snapshot_workspace(push.path())
-                .await
-                .unwrap(),
-            limits(push.hydrated_bytes()),
-        )
-        .await;
-        assert!(matches!(
-            result,
-            Err(super::super::super::cas_publish::CasError::Conflict { .. })
-        ));
+        assert_eq!(
+            f.land_push(&push, &parent).await,
+            super::super::super::land::Verdict::Superseded
+        );
         // Other direction: a push deletes the candidate after settings loaded it.
         let stale = f.snapshot().await;
         let digest = stale.digest.clone();
@@ -1841,33 +2476,22 @@ mod external_infra {
         .await
         .unwrap();
         git(push.path(), &["update-ref", "-d", "refs/heads/main"]).await;
-        super::super::super::cas_publish::cas_publish(
-            &f.state.git_store,
-            &f.tenant,
-            push.path(),
-            &f.owner.public_key().to_hex(),
-            &f.repo,
-            &parent,
-            &super::super::super::cas_publish::snapshot_workspace(push.path())
-                .await
-                .unwrap(),
-            limits(push.hydrated_bytes()),
-        )
-        .await
-        .unwrap();
         assert_eq!(
-            stale
-                .set(
-                    &f.state.git_store,
-                    SetDefaultBranch {
-                        branch: "main".into(),
-                        expected_manifest: digest
-                    }
-                )
-                .await
-                .err()
-                .unwrap()
-                .status(),
+            f.land_push(&push, &parent).await,
+            super::super::super::land::Verdict::Landed
+        );
+        assert_eq!(
+            f.set_from(
+                stale,
+                SetDefaultBranch {
+                    branch: "main".into(),
+                    expected_manifest: digest
+                }
+            )
+            .await
+            .err()
+            .unwrap()
+            .status(),
             StatusCode::CONFLICT
         );
         assert!(!f
@@ -1894,20 +2518,10 @@ mod external_infra {
             &["update-ref", "refs/heads/release/v1", main.trim()],
         )
         .await;
-        super::super::super::cas_publish::cas_publish(
-            &f.state.git_store,
-            &f.tenant,
-            push.path(),
-            &f.owner.public_key().to_hex(),
-            &f.repo,
-            &parent,
-            &super::super::super::cas_publish::snapshot_workspace(push.path())
-                .await
-                .unwrap(),
-            limits(push.hydrated_bytes()),
-        )
-        .await
-        .unwrap();
+        assert_eq!(
+            f.land_push(&push, &parent).await,
+            super::super::super::land::Verdict::Landed
+        );
         assert_eq!(f.set(&f.owner, "release/v1", None).await.0, StatusCode::OK);
         let (push, parent) = super::super::super::hydrate::hydrate_for_write(
             &f.state.git_store,
@@ -1923,20 +2537,10 @@ mod external_infra {
             &["update-ref", "refs/heads/later", main.trim()],
         )
         .await;
-        super::super::super::cas_publish::cas_publish(
-            &f.state.git_store,
-            &f.tenant,
-            push.path(),
-            &f.owner.public_key().to_hex(),
-            &f.repo,
-            &parent,
-            &super::super::super::cas_publish::snapshot_workspace(push.path())
-                .await
-                .unwrap(),
-            limits(push.hydrated_bytes()),
-        )
-        .await
-        .unwrap();
+        assert_eq!(
+            f.land_push(&push, &parent).await,
+            super::super::super::land::Verdict::Landed
+        );
         assert_eq!(f.snapshot().await.manifest.head, "refs/heads/release/v1");
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1981,6 +2585,1350 @@ mod external_infra {
             b"selected branch\n"
         );
         server.abort();
+    }
+
+    /// Seeds unrecorded-read and archive-drops-record: once governance is in
+    /// force, every door that shows the repo records whom it showed it to,
+    /// by door, before showing it; a refused read records nothing, and
+    /// archiving the channel keeps the record. Ungoverned reads are not
+    /// recorded.
+    #[tokio::test]
+    #[ignore = "requires isolated Postgres, Redis and MinIO"]
+    async fn reads_of_a_governed_repo_are_recorded_by_door() {
+        let f = Fixture::new().await;
+        let stranger = Keys::generate();
+        assert_eq!(f.call(&f.member, None, None).await.0, StatusCode::OK);
+        assert!(
+            f.reads(&f.member).await.is_empty(),
+            "ungoverned reads are not recorded"
+        );
+
+        f.floor().await;
+        assert_eq!(f.call(&f.member, None, None).await.0, StatusCode::OK);
+        assert_eq!(f.reads(&f.member).await, ["state"]);
+        assert_eq!(f.call(&stranger, None, None).await.0, StatusCode::NOT_FOUND);
+        assert!(
+            f.reads(&stranger).await.is_empty(),
+            "a refused read records nothing"
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        sqlx::query("UPDATE communities SET host = $1 WHERE id = $2")
+            .bind(addr.to_string())
+            .bind(f.tenant.community().as_uuid())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let router = super::super::super::transport::git_router(f.state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let repo_url = format!(
+            "http://{addr}/git/{}/{}",
+            f.owner.public_key().to_hex(),
+            f.repo
+        );
+        let auth = format!(
+            "http.extraHeader=Authorization: {}",
+            token(&f.member, "GET", &repo_url, None)
+        );
+        git(
+            f.scratch.path(),
+            &["-c", &auth, "clone", &repo_url, "clone"],
+        )
+        .await;
+        server.abort();
+        assert_eq!(
+            f.reads(&f.member).await,
+            ["state", "fetch", "fetch"],
+            "a clone is an advertisement and a pack, each recorded"
+        );
+
+        f.state
+            .db
+            .archive_channel(f.tenant.community(), f.channel)
+            .await
+            .unwrap();
+        assert_eq!(f.reads(&f.member).await, ["state", "fetch", "fetch"]);
+    }
+
+    /// Seeds state-for-community, and evidence-for-community as far as the
+    /// relay has an evidence door: the doors that show a repository's state
+    /// are the repository's, not the community's. A community member who
+    /// owns another of its channels is refused at each and leaves no row;
+    /// the repository's channel member is served at the same doors. The
+    /// relay has no evidence read: evidence shows only through the land and
+    /// its receipts, so the door that takes it stands in, and keeps nothing
+    /// from the neighbor.
+    #[tokio::test]
+    #[ignore = "requires isolated Postgres, Redis and MinIO"]
+    async fn a_place_elsewhere_in_the_community_reaches_no_repository_door() {
+        use buzz_core::governance::{Evidence, EvidenceBody};
+        let f = Fixture::new().await;
+        f.floor().await;
+        let community = f.tenant.community();
+        let neighbor = Keys::generate();
+        let elsewhere = uuid::Uuid::new_v4();
+        f.state
+            .db
+            .ensure_user(community, neighbor.public_key().as_bytes())
+            .await
+            .unwrap();
+        f.state
+            .db
+            .create_channel_with_id(
+                community,
+                elsewhere,
+                &format!("elsewhere-{elsewhere}"),
+                buzz_db::channel::ChannelType::Stream,
+                buzz_db::channel::ChannelVisibility::Open,
+                None,
+                neighbor.public_key().as_bytes(),
+                None,
+            )
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO relay_members (community_id,pubkey,role) VALUES ($1,$2,'member')")
+            .bind(community.as_uuid())
+            .bind(neighbor.public_key().to_hex())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+
+        let owner = f.owner.public_key().to_hex();
+        let repo = super::super::super::land::coordinate(&owner, &f.repo).to_string();
+        let repo_url = format!("http://{}/git/{owner}/{}", f.tenant.host(), f.repo);
+        for (door, refused) in [
+            ("fetch", StatusCode::NOT_FOUND),
+            ("default branch", StatusCode::NOT_FOUND),
+            ("effective", StatusCode::FORBIDDEN),
+            ("receipts", StatusCode::FORBIDDEN),
+            ("rules", StatusCode::FORBIDDEN),
+        ] {
+            for (key, expected) in [(&f.member, StatusCode::OK), (&neighbor, refused)] {
+                let status = match door {
+                    "fetch" => {
+                        let request = Request::builder()
+                            .uri(format!(
+                                "/git/{owner}/{}/info/refs?service=git-upload-pack",
+                                f.repo
+                            ))
+                            .header("host", f.tenant.host())
+                            .header("authorization", token(key, "GET", &repo_url, None))
+                            .body(Body::empty())
+                            .unwrap();
+                        super::super::super::transport::git_router(f.state.clone())
+                            .oneshot(request)
+                            .await
+                            .unwrap()
+                            .status()
+                    }
+                    "default branch" => f.call(key, None, None).await.0,
+                    "effective" => {
+                        f.query(key, json!([{"git_effective": 1, "repo": repo}]))
+                            .await
+                    }
+                    "receipts" => {
+                        f.query(key, json!([{"git_receipts": 1, "repo": repo}]))
+                            .await
+                    }
+                    _ => {
+                        f.query(
+                            key,
+                            json!([{"governance_head": 1, "document": format!("rules:{repo}")}]),
+                        )
+                        .await
+                    }
+                };
+                assert_eq!(status, expected, "{door}");
+            }
+        }
+
+        for (key, takes) in [(&f.member, true), (&neighbor, false)] {
+            let approval = Evidence {
+                community: *community.as_uuid(),
+                repo: repo.clone(),
+                git_ref: "refs/heads/main".into(),
+                head: "a".repeat(40),
+                base: "b".repeat(40),
+                body: EvidenceBody::Approval { approved: true },
+            }
+            .builder()
+            .unwrap()
+            .sign_with_keys(key)
+            .unwrap();
+            let auth = crate::handlers::ingest::IngestAuth::Http {
+                pubkey: key.public_key(),
+                scopes: vec![buzz_auth::Scope::ReposWrite],
+                auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
+            };
+            let taken =
+                crate::handlers::ingest::ingest_event(&f.state, &f.tenant, approval, auth).await;
+            match taken {
+                Ok(_) => assert!(takes, "the neighbor's evidence was taken"),
+                Err(crate::handlers::ingest::IngestError::AuthFailed(reason)) if !takes => {
+                    assert!(reason.contains("governance authority required"), "{reason}")
+                }
+                Err(e) => panic!("evidence: {e:?}"),
+            }
+            let kept: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM audit_log WHERE community_id=$1 \
+                 AND action='git_evidence' AND actor_pubkey=$2",
+            )
+            .bind(community.as_uuid())
+            .bind(key.public_key().to_bytes().to_vec())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+            assert_eq!(kept, i64::from(takes), "evidence kept");
+        }
+
+        assert_eq!(
+            f.reads(&f.member).await,
+            ["fetch", "state", "state", "state", "state"]
+        );
+        assert!(
+            f.reads(&neighbor).await.is_empty(),
+            "a refusal records nothing"
+        );
+    }
+
+    /// A read found ungoverned serves only what it picked before that
+    /// decision. Each door is parked after it, while a floor goes up and a
+    /// governed push lands a new commit on a new branch; resumed, it shows
+    /// neither, and records nothing.
+    #[tokio::test]
+    #[ignore = "requires isolated Postgres, Redis and MinIO"]
+    async fn a_read_found_ungoverned_serves_what_it_picked_before() {
+        fn pkt(line: &str) -> String {
+            format!("{:04x}{line}", line.len() + 4)
+        }
+        for door in [
+            "advertisement",
+            "tagged advertisement",
+            "receive-pack advertisement",
+            "upload-pack",
+            "default branch",
+        ] {
+            let f = Fixture::new().await;
+            let owner = f.owner.public_key().to_hex();
+            let hydrate = |dir: &'static str| {
+                let f = &f;
+                let owner = owner.clone();
+                async move {
+                    let scratch = f.scratch.path().join(dir);
+                    std::fs::create_dir(&scratch).unwrap();
+                    super::super::super::hydrate::hydrate_for_write(
+                        &f.state.git_store,
+                        &f.tenant,
+                        &owner,
+                        &f.repo,
+                        super::super::super::hydrate::HydrationOptions {
+                            pack_cache: &f.state.git_pack_cache,
+                            scratch_dir: &scratch,
+                            max_pack_bytes: 1024 * 1024,
+                            max_repo_bytes: 2 * 1024 * 1024,
+                        },
+                    )
+                    .await
+                    .unwrap()
+                }
+            };
+            let _ = f.snapshot().await;
+            if door == "tagged advertisement" {
+                let (push, parent) = hydrate("tag").await;
+                git(
+                    push.path(),
+                    &["update-ref", "refs/tags/v0", "refs/heads/main"],
+                )
+                .await;
+                assert_eq!(
+                    f.land_push(&push, &parent).await,
+                    super::super::super::land::Verdict::Landed
+                );
+            }
+            let before = f.snapshot().await.digest;
+            let repo_url = format!("http://{}/git/{owner}/{}", f.tenant.host(), f.repo);
+            let fetch_token = token(&f.member, "GET", &repo_url, None);
+            let (method, path, body) = match door {
+                "advertisement" | "tagged advertisement" => (
+                    "GET",
+                    "info/refs?service=git-upload-pack".to_string(),
+                    String::new(),
+                ),
+                "receive-pack advertisement" => (
+                    "GET",
+                    "info/refs?service=git-receive-pack".to_string(),
+                    String::new(),
+                ),
+                "upload-pack" => ("POST", "git-upload-pack".to_string(), String::new()),
+                _ => ("GET", "default-branch".to_string(), String::new()),
+            };
+            // The governed commit, made now so upload-pack can want it.
+            let (push, parent) = hydrate("governed").await;
+            let commit = git(
+                push.path(),
+                &[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@example.invalid",
+                    "commit-tree",
+                    "refs/heads/main^{tree}",
+                    "-p",
+                    "refs/heads/main",
+                    "-m",
+                    "governed",
+                ],
+            )
+            .await;
+            let commit = commit.trim().to_string();
+            let main = git(push.path(), &["rev-parse", "refs/heads/main"]).await;
+            let main = main.trim().to_string();
+            let body = if door == "upload-pack" {
+                format!("{}0000{}", pkt(&format!("want {commit}\n")), pkt("done\n"))
+            } else {
+                body
+            };
+            let request = Request::builder()
+                .method(method)
+                .uri(format!("/git/{owner}/{}/{path}", f.repo))
+                .header("host", f.tenant.host())
+                .header(
+                    "authorization",
+                    if door == "default branch" {
+                        token(
+                            &f.member,
+                            "GET",
+                            &format!("http://{}{}", f.tenant.host(), f.path()),
+                            None,
+                        )
+                    } else {
+                        fetch_token.clone()
+                    },
+                )
+                .body(Body::from(body))
+                .unwrap();
+            let (arrived, release) =
+                crate::nip_fi_test_hooks::git_read_decided_hook::arm(f.tenant.community());
+            let router = super::super::super::transport::git_router(f.state.clone());
+            let read = tokio::spawn(async move { router.oneshot(request).await.unwrap() });
+            tokio::time::timeout(std::time::Duration::from_secs(30), arrived)
+                .await
+                .expect("the read decided ungoverned in time")
+                .unwrap();
+            f.floor().await;
+            git(
+                push.path(),
+                &["update-ref", "refs/heads/governed-only", &commit],
+            )
+            .await;
+            assert_eq!(
+                f.land_push(&push, &parent).await,
+                super::super::super::land::Verdict::Landed,
+                "{door}"
+            );
+            assert_ne!(
+                f.snapshot().await.digest,
+                before,
+                "{door}: the governed push landed"
+            );
+            release.notify_one();
+            let response = read.await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 4 * 1024 * 1024)
+                .await
+                .unwrap();
+            let shown = String::from_utf8_lossy(&bytes);
+            if door.ends_with("advertisement") {
+                assert_eq!(status, StatusCode::OK, "{door}: {shown}");
+                assert!(
+                    shown.contains(&format!("{main} refs/heads/main")),
+                    "{door} shows what it picked: {shown}"
+                );
+            }
+            assert!(
+                !shown.contains("governed-only"),
+                "{door} showed the governed ref: {shown}"
+            );
+            if door == "upload-pack" {
+                assert!(
+                    shown.contains(&format!("not our ref {commit}")),
+                    "{door} refuses what it did not pick: {shown}"
+                );
+            } else {
+                assert!(
+                    !shown.contains(&commit),
+                    "{door} showed the governed commit: {shown}"
+                );
+            }
+            assert!(
+                !bytes.windows(4).any(|w| w == b"PACK"),
+                "{door} served the governed commit"
+            );
+            if door == "default branch" {
+                assert!(
+                    shown.contains(&before),
+                    "{door} shows what it picked: {shown}"
+                );
+            }
+            assert!(
+                f.reads(&f.member).await.is_empty(),
+                "{door}: no row for an ungoverned read"
+            );
+        }
+    }
+
+    /// An agent pushes only under a live Git grant from its recorded owner
+    /// for the repository, inside the floor's cap: every other grant refuses
+    /// at the land.
+    #[tokio::test]
+    #[ignore = "requires isolated Postgres, Redis and MinIO"]
+    async fn an_agent_pushes_only_under_a_live_grant() {
+        use super::super::super::land::Verdict;
+        let f = Fixture::new().await;
+        let agent = Keys::generate();
+        f.add(&agent).await;
+        f.state
+            .db
+            .add_member(
+                f.tenant.community(),
+                f.channel,
+                agent.public_key().as_bytes(),
+                MemberRole::Member,
+                Some(f.owner.public_key().as_bytes()),
+            )
+            .await
+            .unwrap();
+        assert!(f
+            .state
+            .db
+            .set_agent_owner(
+                f.tenant.community(),
+                agent.public_key().as_bytes(),
+                f.owner.public_key().as_bytes()
+            )
+            .await
+            .unwrap());
+        f.floor().await;
+        // Reconcile the legacy fixture manifest before a governed land.
+        let _ = f.snapshot().await;
+        let push = |branch: &'static str, grant: Option<buzz_core::governance::GitGrant>| {
+            let f = &f;
+            let agent = agent.clone();
+            async move {
+                let (push, parent) = super::super::super::hydrate::hydrate_for_write(
+                    &f.state.git_store,
+                    &f.tenant,
+                    &f.owner.public_key().to_hex(),
+                    &f.repo,
+                    super::super::super::hydrate::HydrationOptions {
+                        pack_cache: &f.state.git_pack_cache,
+                        scratch_dir: f.scratch.path(),
+                        max_pack_bytes: 1024 * 1024,
+                        max_repo_bytes: 2 * 1024 * 1024,
+                    },
+                )
+                .await
+                .unwrap();
+                git(push.path(), &["update-ref", branch, "refs/heads/main"]).await;
+                f.land_push_as(&agent, grant.as_ref(), &push, &parent).await
+            }
+        };
+        let refused = |v: &Verdict| matches!(v, Verdict::Refused(d) if d[0].reason == "no live grant from the agent's owner");
+        let now = chrono::Utc::now().timestamp() as u64;
+        let repo = super::super::super::land::coordinate(&f.owner.public_key().to_hex(), &f.repo);
+        let grant =
+            |level, after: Option<u64>, before: Option<u64>| buzz_core::governance::GitGrant {
+                owner: f.owner.public_key(),
+                repo: Some(repo.clone()),
+                level,
+                after,
+                before,
+            };
+        use buzz_core::governance::GrantAction::{Manage, Push, Read};
+        let live = grant(Push, Some(now - 60), Some(now + 1800));
+
+        let v = push("refs/heads/a", None).await;
+        assert!(refused(&v), "no grant: {v:?}");
+        let v = push(
+            "refs/heads/b",
+            Some(grant(Read, Some(now - 60), Some(now + 1800))),
+        )
+        .await;
+        assert!(refused(&v), "a read grant does not push: {v:?}");
+        let other = buzz_core::governance::GitGrant {
+            owner: Keys::generate().public_key(),
+            ..live.clone()
+        };
+        let v = push("refs/heads/b", Some(other)).await;
+        assert!(refused(&v), "only the recorded owner's grant counts: {v:?}");
+        let elsewhere = buzz_core::governance::GitGrant {
+            repo: Some(super::super::super::land::coordinate(
+                &f.owner.public_key().to_hex(),
+                "other",
+            )),
+            ..live.clone()
+        };
+        let v = push("refs/heads/b", Some(elsewhere)).await;
+        assert!(refused(&v), "another repository's grant: {v:?}");
+        let v = push(
+            "refs/heads/b",
+            Some(grant(Push, Some(now - 120), Some(now - 60))),
+        )
+        .await;
+        assert!(refused(&v), "lapsed: {v:?}");
+        let v = push(
+            "refs/heads/b",
+            Some(grant(Push, Some(now + 60), Some(now + 120))),
+        )
+        .await;
+        assert!(refused(&v), "not yet valid: {v:?}");
+        // The floor caps the window it may sign: both bounds, at most 3600s.
+        let v = push("refs/heads/b", Some(grant(Push, None, Some(now + 60)))).await;
+        assert!(refused(&v), "no lower bound under a cap: {v:?}");
+        let v = push("refs/heads/b", Some(grant(Push, None, None))).await;
+        assert!(refused(&v), "no bounds under a cap: {v:?}");
+        let v = push(
+            "refs/heads/b",
+            Some(grant(Push, Some(now - 60), Some(now + 3541))),
+        )
+        .await;
+        assert!(refused(&v), "one second over the cap: {v:?}");
+        let v = push(
+            "refs/heads/b",
+            Some(grant(Push, Some(now - 60), Some(now + 3540))),
+        )
+        .await;
+        assert_eq!(v, Verdict::Landed, "exactly the cap");
+        assert_eq!(
+            push("refs/heads/c", Some(live.clone())).await,
+            Verdict::Landed
+        );
+        assert_eq!(
+            push(
+                "refs/heads/d",
+                Some(grant(Manage, Some(now - 60), Some(now + 60)))
+            )
+            .await,
+            Verdict::Landed,
+            "manage includes push"
+        );
+        let all = buzz_core::governance::GitGrant {
+            repo: None,
+            ..live.clone()
+        };
+        assert_eq!(
+            push("refs/heads/e", Some(all)).await,
+            Verdict::Landed,
+            "repo=*"
+        );
+
+        // A grant live at decision time must still be live at the swap.
+        let before = f
+            .state
+            .db
+            .git_repo_manifest(f.tenant.community(), &repo)
+            .await
+            .unwrap();
+        let serving = buzz_deletion::acquire_serving_write(
+            &f.state.db,
+            f.tenant.community(),
+            "expiry-review",
+        )
+        .await
+        .unwrap();
+        let ending = grant(
+            Push,
+            Some(now - 60),
+            Some(chrono::Utc::now().timestamp() as u64 + 2),
+        );
+        let verdict = super::super::super::land::land(
+            &f.state,
+            serving.lease(),
+            super::super::super::land::Change {
+                kind: "push",
+                repo: &repo,
+                actor: agent.public_key().as_bytes(),
+                grant: Some(&ending),
+                seen: before.as_deref(),
+                new: "expired-candidate",
+                updates: &[],
+            },
+            async |_tx, authority| {
+                assert!(
+                    authority.valid_until.is_some(),
+                    "live grant carries expiry into swap"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                Ok(super::super::super::gate::Decision {
+                    verdict: Ok(()),
+                    counted: Default::default(),
+                })
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            verdict,
+            Verdict::Superseded,
+            "expiry after decision must prevent swap"
+        );
+        assert_eq!(
+            f.state
+                .db
+                .git_repo_manifest(f.tenant.community(), &repo)
+                .await
+                .unwrap(),
+            before
+        );
+        serving.finish().await.unwrap();
+    }
+
+    /// Seeds scan-tip-only, scan-governed-only and evidence-shows-quarantine,
+    /// through the land: a secret in a commit below the tip of an ungoverned
+    /// branch refuses the push, moves nothing, and upload-pack serves
+    /// nothing it brought; the same history without it lands and is served.
+    #[tokio::test]
+    #[ignore = "requires isolated Postgres, Redis and MinIO"]
+    async fn a_secret_anywhere_in_a_push_refuses_it() {
+        use super::super::super::land::Verdict;
+        let f = Fixture::new().await;
+        let _ = f.snapshot().await;
+        // Built at run time so no credential-shaped literal is in the source.
+        let secret = ["AK", "IA", &"Q".repeat(16)].concat();
+        let clean = "key = from the environment\n";
+        for (branch, body, replaced, lands) in [
+            (
+                "refs/heads/scratch",
+                format!("key = {secret}\n"),
+                false,
+                false,
+            ),
+            // A replace ref must not show the scan other bytes than the
+            // ones the repository serves.
+            (
+                "refs/heads/masked",
+                format!("key = {secret}\n"),
+                true,
+                false,
+            ),
+            ("refs/heads/clean", clean.into(), false, true),
+        ] {
+            let (push, parent) = super::super::super::hydrate::hydrate_for_write(
+                &f.state.git_store,
+                &f.tenant,
+                &f.owner.public_key().to_hex(),
+                &f.repo,
+                super::super::super::hydrate::HydrationOptions {
+                    pack_cache: &f.state.git_pack_cache,
+                    scratch_dir: f.scratch.path(),
+                    max_pack_bytes: 1024 * 1024,
+                    max_repo_bytes: 2 * 1024 * 1024,
+                },
+            )
+            .await
+            .unwrap();
+            let path = push.path();
+            let file = path.join("blob");
+            std::fs::write(&file, body).unwrap();
+            let blob = git(path, &["hash-object", "-w", file.to_str().unwrap()]).await;
+            std::fs::remove_file(&file).unwrap();
+            let commit = |tree: String, parent: String, message: &'static str| async move {
+                let id = [
+                    "-c",
+                    "user.name=scan",
+                    "-c",
+                    "user.email=scan@example.invalid",
+                ];
+                let mut args = id.to_vec();
+                args.extend(["commit-tree", &tree, "-p", &parent, "-m", message]);
+                git(path, &args).await.trim().to_string()
+            };
+            let main = git(path, &["rev-parse", "refs/heads/main"]).await;
+            let main = main.trim().to_string();
+            let mut tree = tokio::process::Command::new("git");
+            tree.current_dir(path).arg("mktree");
+            super::super::super::transport::harden_git_env(&mut tree);
+            let mut tree = tree
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            tokio::io::AsyncWriteExt::write_all(
+                tree.stdin.as_mut().unwrap(),
+                format!("100644 blob {}\tconfig.txt\n", blob.trim()).as_bytes(),
+            )
+            .await
+            .unwrap();
+            drop(tree.stdin.take());
+            let tree = String::from_utf8(tree.wait_with_output().await.unwrap().stdout).unwrap();
+            let below = commit(tree.trim().to_string(), main, "add config").await;
+            // The tip takes the file away again: only the commit below has it.
+            let tip = commit(
+                git(path, &["rev-parse", "refs/heads/main^{tree}"])
+                    .await
+                    .trim()
+                    .to_string(),
+                below,
+                "remove config",
+            )
+            .await;
+            git(path, &["update-ref", branch, &tip]).await;
+            let mut refused = vec![branch.to_string()];
+            if replaced {
+                std::fs::write(&file, clean).unwrap();
+                let mask = git(path, &["hash-object", "-w", file.to_str().unwrap()]).await;
+                std::fs::remove_file(&file).unwrap();
+                let replace = format!("refs/replace/{}", blob.trim());
+                git(path, &["update-ref", &replace, mask.trim()]).await;
+                refused.push(replace);
+            }
+            let before = f.snapshot().await.digest;
+            let verdict = f.land_push(&push, &parent).await;
+            if lands {
+                assert_eq!(verdict, Verdict::Landed, "{branch}");
+            } else {
+                let denials = refused
+                    .into_iter()
+                    .map(|ref_name| buzz_core::git_perms::Denial {
+                        ref_name,
+                        reason: super::super::super::gate::SECRET_DETECTED.into(),
+                    });
+                assert_eq!(verdict, Verdict::Refused(denials.collect()), "{branch}");
+            }
+            // Seed evidence-shows-quarantine, at upload-pack: a fetch
+            // wanting a refused push's tip is refused; the same fetch of a
+            // landed tip is served its pack.
+            f.assert_served(f.tenant.host(), &tip, lands, branch).await;
+            if !lands {
+                assert_eq!(f.snapshot().await.digest, before, "a refusal moves nothing");
+            }
+        }
+    }
+
+    /// As above, through receive-pack itself: `git push` of a branch whose
+    /// secret sits below its tip is refused with the reason, moves nothing,
+    /// and upload-pack serves nothing it brought; a clean push lands and is
+    /// served.
+    #[tokio::test]
+    #[ignore = "requires isolated Postgres, Redis and MinIO"]
+    async fn receive_pack_refuses_a_secret_and_serves_nothing_it_brought() {
+        let f = Fixture::new().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        sqlx::query("UPDATE communities SET host = $1 WHERE id = $2")
+            .bind(addr.to_string())
+            .bind(f.tenant.community().as_uuid())
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        // The pre-receive hook calls the policy door on the relay's own address.
+        let mut state = (*f.state).clone();
+        Arc::make_mut(&mut state.config).bind_addr = addr;
+        let state = Arc::new(state);
+        let router = super::super::super::transport::git_router(state.clone())
+            .merge(super::super::super::git_policy_router(state))
+            .into_make_service_with_connect_info::<std::net::SocketAddr>();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let repo_url = format!(
+            "http://{addr}/git/{}/{}",
+            f.owner.public_key().to_hex(),
+            f.repo
+        );
+        let auth = format!(
+            "http.extraHeader=Authorization: {}",
+            token(&f.owner, "GET", &repo_url, None)
+        );
+        git(
+            f.scratch.path(),
+            &["-c", &auth, "clone", &repo_url, "clone"],
+        )
+        .await;
+        let clone = f.scratch.path().join("clone");
+        let id = [
+            "-c",
+            "user.name=scan",
+            "-c",
+            "user.email=scan@example.invalid",
+        ];
+        // Built at run time so no credential-shaped literal is in the source.
+        let secret = ["AK", "IA", &"Q".repeat(16)].concat();
+        for (branch, body, lands) in [
+            ("scratch", format!("key = {secret}\n"), false),
+            ("clean", "key = from the environment\n".to_string(), true),
+        ] {
+            git(&clone, &["checkout", "-q", "-B", branch, "origin/main"]).await;
+            std::fs::write(clone.join("config.txt"), body).unwrap();
+            git(&clone, &["add", "config.txt"]).await;
+            git(
+                &clone,
+                &[&id[..], &["commit", "-qm", "add config"]].concat(),
+            )
+            .await;
+            git(&clone, &["rm", "-q", "config.txt"]).await;
+            git(
+                &clone,
+                &[&id[..], &["commit", "-qm", "remove config"]].concat(),
+            )
+            .await;
+            let tip = git(&clone, &["rev-parse", "HEAD"]).await.trim().to_string();
+            let before = f.snapshot().await.digest;
+            let mut push = tokio::process::Command::new("git");
+            push.current_dir(&clone)
+                .args(["-c", &auth, "push", "--porcelain", "origin", branch]);
+            super::super::super::transport::harden_git_env(&mut push);
+            let pushed = push.output().await.unwrap();
+            let said = String::from_utf8_lossy(&pushed.stdout);
+            assert_eq!(pushed.status.success(), lands, "{branch}: {said}");
+            if !lands {
+                assert!(
+                    said.contains(super::super::super::gate::SECRET_DETECTED),
+                    "{branch}: {said}"
+                );
+                assert_eq!(f.snapshot().await.digest, before, "a refusal moves nothing");
+            }
+            f.assert_served(&addr.to_string(), &tip, lands, branch)
+                .await;
+        }
+        server.abort();
+    }
+
+    /// A name announced as `<name>.git` is not a second door to `<name>`:
+    /// a member refused on `r` is refused through the URL `r.git.git`, which
+    /// moves nothing, so the repository's own writers still land. Ungoverned
+    /// (the alias would be adopted) and governed (it would fork the cache).
+    #[tokio::test]
+    #[ignore = "requires isolated Postgres, Redis and MinIO"]
+    async fn a_dot_git_alias_reaches_no_other_repository() {
+        let mut failures = Vec::new();
+        for governed in [false, true] {
+            let arm = if governed { "governed" } else { "ungoverned" };
+            let f = Fixture::new().await;
+            let owner = f.owner.public_key().to_hex();
+            let announce = |name: &str, protect: bool| {
+                let mut tags = vec![
+                    Tag::parse(["d", name]).unwrap(),
+                    Tag::parse(["buzz-channel", &f.channel.to_string()]).unwrap(),
+                ];
+                if protect {
+                    tags.push(
+                        Tag::parse(["buzz-protect", "refs/heads/main", "push:admin"]).unwrap(),
+                    );
+                }
+                EventBuilder::new(Kind::Custom(30617), "")
+                    .tags(tags)
+                    .custom_created_at(nostr::Timestamp::from(
+                        nostr::Timestamp::now().as_secs() + 5,
+                    ))
+                    .sign_with_keys(&f.owner)
+                    .unwrap()
+            };
+            // `r` needs an admin for main; `r.git`, stored as before this
+            // relay refused such names, has no rules.
+            let alias = format!("{}.git", f.repo);
+            for event in [announce(&f.repo, true), announce(&alias, false)] {
+                f.state
+                    .db
+                    .insert_event(f.tenant.community(), &event, None)
+                    .await
+                    .unwrap();
+            }
+            f.state
+                .db
+                .reserve_repo_name(f.tenant.community(), &alias, &owner)
+                .await
+                .unwrap();
+            if governed {
+                let repo = super::super::super::land::coordinate(&owner, &f.repo);
+                f.govern(
+                    &f.owner,
+                    &format!("rules:{repo}"),
+                    &buzz_core::governance::ExpectedHead::Absent,
+                    r#"{"version":1,"body":{"type":"rules","rules":[]}}"#,
+                )
+                .await;
+            }
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            sqlx::query("UPDATE communities SET host = $1 WHERE id = $2")
+                .bind(addr.to_string())
+                .bind(f.tenant.community().as_uuid())
+                .execute(&f.pool)
+                .await
+                .unwrap();
+            let mut state = (*f.state).clone();
+            Arc::make_mut(&mut state.config).bind_addr = addr;
+            let state = Arc::new(state);
+            let router = super::super::super::transport::git_router(state.clone())
+                .merge(super::super::super::git_policy_router(state))
+                .into_make_service_with_connect_info::<std::net::SocketAddr>();
+            let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let url = |name: &str| format!("http://{addr}/git/{owner}/{name}");
+            let auth = |key: &Keys, url: &str| {
+                format!(
+                    "http.extraHeader=Authorization: {}",
+                    token(key, "GET", url, None)
+                )
+            };
+            // The owner uses the URL's usual `.git` form: the same repository.
+            let repo_url = url(&alias);
+            git(
+                f.scratch.path(),
+                &[
+                    "-c",
+                    &auth(&f.owner, &repo_url),
+                    "clone",
+                    &repo_url,
+                    "clone",
+                ],
+            )
+            .await;
+            let clone = f.scratch.path().join("clone");
+            git(&clone, &["checkout", "-q", "main"]).await;
+            std::fs::write(clone.join("member.txt"), b"member\n").unwrap();
+            git(&clone, &["add", "member.txt"]).await;
+            git(
+                &clone,
+                &[
+                    "-c",
+                    "user.name=m",
+                    "-c",
+                    "user.email=m@example.invalid",
+                    "commit",
+                    "-qm",
+                    "member",
+                ],
+            )
+            .await;
+            let pointer =
+                super::super::super::manifest::pointer_key(f.tenant.community(), &owner, &f.repo);
+            let cache = || async {
+                f.state
+                    .git_store
+                    .get_pointer(&pointer)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .1
+            };
+            let push = |key: &Keys, url: String| {
+                let auth = auth(key, &url);
+                let clone = clone.clone();
+                async move {
+                    let mut push = tokio::process::Command::new("git");
+                    push.current_dir(&clone).args([
+                        "-c",
+                        &auth,
+                        "push",
+                        "--porcelain",
+                        &url,
+                        "main",
+                    ]);
+                    super::super::super::transport::harden_git_env(&mut push);
+                    push.output().await.unwrap()
+                }
+            };
+            let before = cache().await;
+            // Control: the member may not move `r`'s main.
+            let control = push(&f.maintainer, repo_url.clone()).await;
+            if control.status.success() {
+                failures.push(format!("{arm}: control: the member moved r's main"));
+            }
+            // The alias: the same push, through `r.git.git`.
+            let attack = push(&f.maintainer, url(&format!("{alias}.git"))).await;
+            if attack.status.success() {
+                failures.push(format!(
+                    "{arm}: the member's push through {alias}.git was accepted: {}",
+                    String::from_utf8_lossy(&attack.stdout)
+                ));
+            }
+            if cache().await != before {
+                failures.push(format!("{arm}: the alias moved r's object-store pointer"));
+            }
+            // `r`'s own writer still lands, on `r`.
+            let landed = push(&f.owner, repo_url.clone()).await;
+            if !landed.status.success() {
+                failures.push(format!(
+                    "{arm}: the owner's push to r was refused: {}",
+                    String::from_utf8_lossy(&landed.stderr)
+                ));
+            } else if cache().await == before {
+                failures.push(format!("{arm}: the owner's push did not move r"));
+            }
+            server.abort();
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// The land, end to end against Postgres and MinIO: a refused push
+    /// commits only its receipt, the object-store cache one land behind is
+    /// advanced, a pointer written outside the land stops writes, and a
+    /// re-announcement cannot move the repository to another channel.
+    #[tokio::test]
+    #[ignore = "requires isolated Postgres, Redis and MinIO"]
+    async fn the_land_decides_records_and_owns_the_commit_point() {
+        use super::super::super::land::{committed_for_write, coordinate, Verdict};
+        use super::super::super::manifest::pointer_key;
+        use super::super::super::store::{CasOutcome, Precond};
+        let f = Fixture::new().await;
+        let options = || super::super::super::hydrate::HydrationOptions {
+            pack_cache: &f.state.git_pack_cache,
+            scratch_dir: f.scratch.path(),
+            max_pack_bytes: 1024 * 1024,
+            max_repo_bytes: 2 * 1024 * 1024,
+        };
+        let owner = f.owner.public_key().to_hex();
+        let repo = coordinate(&owner, &f.repo);
+        let community = f.tenant.community();
+        let object = repo.to_string();
+        let receipts = |action: &'static str| {
+            let (pool, object) = (f.pool.clone(), object.clone());
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM audit_log WHERE community_id = $1 AND action = $2 AND object_id = $3",
+                )
+                .bind(community.as_uuid())
+                .bind(action)
+                .bind(object)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+
+        // A stranger's push is refused at the land; only its receipt commits.
+        let before = f.snapshot().await.digest;
+        let (push, parent) = super::super::super::hydrate::hydrate_for_write(
+            &f.state.git_store,
+            &f.tenant,
+            &owner,
+            &f.repo,
+            options(),
+        )
+        .await
+        .unwrap();
+        git(
+            push.path(),
+            &["update-ref", "refs/heads/stranger", "refs/heads/main"],
+        )
+        .await;
+        let stranger = Keys::generate();
+        assert!(matches!(
+            f.land_push_as(&stranger, None, &push, &parent).await,
+            Verdict::Refused(_)
+        ));
+        assert_eq!(f.snapshot().await.digest, before, "a refusal moves nothing");
+        assert_eq!(receipts("git_refused").await, 1);
+        assert_eq!(receipts("git_landed").await, 0);
+
+        // A stale precondition is a land refusal: decided after the role and
+        // receipted, so a member learns only that it may not, and nothing moves.
+        let stale = json!({"branch": "main", "expected_manifest": "0".repeat(64)});
+        let (status, body) = f.call(&f.maintainer, Some(stale.clone()), None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(
+            f.call(&f.owner, Some(stale), None).await.0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            f.snapshot().await.digest,
+            before,
+            "a stale request moves nothing"
+        );
+        assert_eq!(receipts("git_refused").await, 3);
+        assert_eq!(receipts("git_landed").await, 0);
+        let stages: Vec<String> = sqlx::query_scalar(
+            "SELECT detail->>'stage' FROM audit_log WHERE community_id = $1 AND object_id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(&object)
+        .fetch_all(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(stages, ["land"; 3], "every land receipt names its stage");
+
+        // A land whose cache write was lost leaves the cache one land behind;
+        // the next writer advances it rather than refusing.
+        let a = f.snapshot().await;
+        assert_eq!(f.set(&f.owner, "main", None).await.0, StatusCode::OK);
+        assert_eq!(receipts("git_landed").await, 1);
+        let b = f.snapshot().await;
+        let pointer = pointer_key(f.tenant.community(), &owner, &f.repo);
+        let behind = f
+            .state
+            .git_store
+            .put_pointer(
+                &pointer,
+                a.digest.as_bytes(),
+                Precond::IfMatch(b.etag.clone()),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(behind, CasOutcome::Won(_)));
+        let (_, digest, _) = committed_for_write(&f.state, &f.tenant, &repo)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(digest, b.digest, "the row is the commit point");
+        let (_, cached) = f
+            .state
+            .git_store
+            .get_pointer(&pointer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&cached[..], b.digest.as_bytes(), "the cache caught up");
+
+        // Re-announcing the repository in another channel moves no authority.
+        let moved = EventBuilder::new(Kind::Custom(30617), "")
+            .tags([
+                Tag::parse(["d", &f.repo]).unwrap(),
+                Tag::parse(["buzz-channel", &uuid::Uuid::new_v4().to_string()]).unwrap(),
+            ])
+            .custom_created_at(nostr::Timestamp::from(
+                nostr::Timestamp::now().as_secs() + 5,
+            ))
+            .sign_with_keys(&f.owner)
+            .unwrap();
+        f.state
+            .db
+            .insert_event(f.tenant.community(), &moved, None)
+            .await
+            .unwrap();
+        // The land judges by the pinned channel, so the owner, an admin
+        // there, still lands; the tag it just announced moved nothing.
+        let stale = f.snapshot().await;
+        let expected_manifest = stale.digest.clone();
+        f.set_from(
+            stale,
+            SetDefaultBranch {
+                branch: "legacy".into(),
+                expected_manifest,
+            },
+        )
+        .await
+        .unwrap();
+        let b = f.snapshot().await;
+        assert_eq!(receipts("git_landed").await, 2);
+
+        // A pointer written outside the land stops every write.
+        let mut foreign = b.manifest.clone();
+        foreign.parent = None;
+        foreign.published_at = Some(b.manifest.published_at.unwrap_or(0) + 1);
+        let key = f
+            .state
+            .git_store
+            .put_manifest(&foreign.canonical_bytes().unwrap())
+            .await
+            .unwrap();
+        let (etag, _) = f
+            .state
+            .git_store
+            .get_pointer(&pointer)
+            .await
+            .unwrap()
+            .unwrap();
+        f.state
+            .git_store
+            .put_pointer(
+                &pointer,
+                key.strip_prefix("manifests/").unwrap().as_bytes(),
+                Precond::IfMatch(etag),
+            )
+            .await
+            .unwrap();
+        let refused = committed_for_write(&f.state, &f.tenant, &repo)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+    }
+
+    #[derive(Default)]
+    struct VecLandTracer(std::sync::Mutex<Vec<buzz_conformance::git_land::LandStep>>);
+
+    impl buzz_conformance::git_land::LandTracer for VecLandTracer {
+        fn record(&self, step: buzz_conformance::git_land::LandStep) {
+            self.0.lock().unwrap().push(step);
+        }
+    }
+
+    impl VecLandTracer {
+        fn take(&self) -> Vec<buzz_conformance::git_land::LandStep> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    /// The governed land, end to end on real relay traces: a rule written
+    /// through governance ingress refuses an unapproved push (receipted,
+    /// nothing moves), an approval signed through evidence ingress lands it,
+    /// and each recorded trace passes `check_land_trace` while the same trace
+    /// with one fact broken fails it.
+    #[tokio::test]
+    #[ignore = "requires isolated Postgres, Redis and MinIO"]
+    async fn governed_land_traces_check_against_the_land_model() {
+        use super::super::super::land::{coordinate, Verdict};
+        use buzz_conformance::git_land::{check_land_trace, LandAction};
+        use buzz_core::governance::{Evidence, EvidenceBody};
+        let mut f = Fixture::new().await;
+        let tracer = Arc::new(VecLandTracer::default());
+        let mut state = (*f.state).clone();
+        state.land_tracer = tracer.clone();
+        f.state = Arc::new(state);
+        let owner = f.owner.public_key().to_hex();
+        let repo = coordinate(&owner, &f.repo);
+        let auth = |keys: &Keys| crate::handlers::ingest::IngestAuth::Http {
+            pubkey: keys.public_key(),
+            scopes: vec![buzz_auth::Scope::ReposWrite],
+            auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
+        };
+        let rules = r#"{"version":1,"body":{"type":"rules","rules":[{"id":"review","refs":["refs/heads/main"],"labels":{},"require":[{"type":"review","count":1,"group":null}]}]}}"#;
+        let command = buzz_core::governance::command_builder(
+            *f.tenant.community().as_uuid(),
+            &format!("rules:{repo}").parse().unwrap(),
+            &buzz_core::governance::ExpectedHead::Absent,
+            rules,
+        )
+        .unwrap()
+        .sign_with_keys(&f.owner)
+        .unwrap();
+        crate::handlers::ingest::ingest_event(&f.state, &f.tenant, command, auth(&f.owner))
+            .await
+            .unwrap();
+
+        let options = super::super::super::hydrate::HydrationOptions {
+            pack_cache: &f.state.git_pack_cache,
+            scratch_dir: f.scratch.path(),
+            max_pack_bytes: 1024 * 1024,
+            max_repo_bytes: 2 * 1024 * 1024,
+        };
+        let (push, parent) = super::super::super::hydrate::hydrate_for_write(
+            &f.state.git_store,
+            &f.tenant,
+            &owner,
+            &f.repo,
+            options,
+        )
+        .await
+        .unwrap();
+        let base = git(push.path(), &["rev-parse", "refs/heads/main"]).await;
+        let base = base.trim().to_string();
+        let tip = git(
+            push.path(),
+            &[
+                "commit-tree",
+                "refs/heads/main^{tree}",
+                "-p",
+                &base,
+                "-m",
+                "governed",
+            ],
+        )
+        .await;
+        let tip = tip.trim().to_string();
+        git(push.path(), &["update-ref", "refs/heads/main", &tip]).await;
+        let required = ["decide", "receipt"];
+
+        // Seed no-receipt-on-refusal: unapproved, refused, receipted.
+        let before = f.snapshot().await.digest;
+        assert!(matches!(
+            f.land_push_as(&f.owner, None, &push, &parent).await,
+            Verdict::Refused(_)
+        ));
+        assert_eq!(f.snapshot().await.digest, before, "a refusal moves nothing");
+        let refused = tracer.take();
+        check_land_trace(&refused, &required).unwrap();
+        assert!(!refused.iter().any(|s| s.action.kind() == "land"));
+
+        // An approval of exactly this tip on this target, through ingress.
+        let approval = Evidence {
+            community: *f.tenant.community().as_uuid(),
+            repo: repo.to_string(),
+            git_ref: "refs/heads/main".into(),
+            head: tip.clone(),
+            base: base.clone(),
+            body: EvidenceBody::Approval { approved: true },
+        }
+        .builder()
+        .unwrap()
+        .sign_with_keys(&f.member)
+        .unwrap();
+        crate::handlers::ingest::ingest_event(&f.state, &f.tenant, approval, auth(&f.member))
+            .await
+            .unwrap();
+        assert_eq!(
+            f.land_push_as(&f.owner, None, &push, &parent).await,
+            Verdict::Landed
+        );
+        let landed = tracer.take();
+        check_land_trace(&landed, &["decide", "land", "receipt"]).unwrap();
+
+        // Seed receipt-omits-evidence: the durable receipt names the
+        // approval the decision counted.
+        let counted = landed
+            .iter()
+            .find_map(|s| match &s.action {
+                LandAction::Decide { evidence, .. } => Some(evidence.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(counted.len(), 1, "the decision counted the approval");
+        let stored: Vec<String> = sqlx::query_scalar(
+            "SELECT jsonb_array_elements_text(detail->'counted'->'refs/heads/main'->'evidence') \
+             FROM audit_log WHERE community_id = $1 AND action = 'git_landed' AND object_id = $2",
+        )
+        .bind(f.tenant.community().as_uuid())
+        .bind(repo.to_string())
+        .fetch_all(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            stored,
+            counted.iter().map(|o| o.0.clone()).collect::<Vec<_>>()
+        );
+
+        // The checker sees a broken fact in this same real trace.
+        let broken = |edit: &dyn Fn(&mut LandAction) -> bool| {
+            let mut t = landed.clone();
+            assert!(t.iter_mut().any(|s| edit(&mut s.action)), "nothing edited");
+            check_land_trace(&t, &["decide", "land", "receipt"]).is_err()
+        };
+        assert!(
+            broken(&|a| match a {
+                LandAction::Decide { read_version, .. } => {
+                    *read_version += 1;
+                    true
+                }
+                _ => false,
+            }),
+            "authority-at-receive: decided on other authority than it landed on"
+        );
+        assert!(
+            broken(&|a| match a {
+                LandAction::Receipt { evidence, .. } => {
+                    evidence.clear();
+                    true
+                }
+                _ => false,
+            }),
+            "receipt-omits-evidence"
+        );
+        assert!(
+            broken(&|a| match a {
+                LandAction::Decide { valid_until, .. } => {
+                    *valid_until = Some(0);
+                    true
+                }
+                _ => false,
+            }),
+            "expiry-at-read: landed after the authority lapsed"
+        );
+        let mut dropped = refused.clone();
+        dropped.retain(|s| s.action.kind() != "receipt");
+        assert!(
+            check_land_trace(&dropped, &required).is_err(),
+            "no-receipt-on-refusal"
+        );
     }
 
     struct UnavailableReplayGuard;
@@ -2081,11 +4029,8 @@ mod external_infra {
         const NIP_FI_ISSUER: &str = "https://nip-fi-settings-test.invalid";
         const NIP_FI_AUDIENCE: &str = "https://relay.settings-test.invalid";
         const NIP_FI_KID: &str = "settings-test-key-1";
-        const NIP_FI_EC_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
-            MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\n\
-            WZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\n\
-            zhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n\
-            -----END PRIVATE KEY-----\n";
+        const NIP_FI_EC_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcnxDM4EiirH9dHUE\nWZc759TX4s5PAn8kO5ovXSnGxCWhRANCAARFb6ZnsfkqOOXyEhj3KBQphGKF4vTa\nzhebbavbZ1ZoklqkF1cGg+jTO7rONAVEzXvXUWtV6CdDV+rybiVmFP2w\n-----END PRIVATE KEY-----\n"; // sadscan:disable np.pem.1 kingfisher.privkey.2 -- unchanged public ES256 test fixture
+
         // Public key coordinates for the JWK (matches the private key above).
         const NIP_FI_JWK_X: &str = "RW-mZ7H5Kjjl8hIY9ygUKYRiheL02s4Xm22r22dWaJI";
         const NIP_FI_JWK_Y: &str = "WqQXVwaD6NM7us40BUTNe9dRa1XoJ0NX6vJuJWYU_bA";
@@ -2288,10 +4233,9 @@ mod external_infra {
 
         // ── Step 5: owner POST → 200 OK, changed=true, new digest ──────────────
         // Owner NIP-98 + owner assertion → pairing passes → handler reached.
-        // `authorize_management` at settings.rs:273-292 authorizes the repository
-        // author OR a named maintainer.  The fixture signs the announcement with
-        // `f.owner` (see fixture:1267-1342), so `named_manager(&auth.caller)` is
-        // true and the request is authorized.  The POST requests `branch: "main"`,
+        // The land authorizes admins of the repository's channel;
+        // the fixture makes `f.owner` the channel's owner, so the request is
+        // authorized.  The POST requests `branch: "main"`,
         // which exists in the seeded git store, so `set_default_branch` runs and
         // returns `changed: true` with a new HEAD digest.
         //
@@ -2315,9 +4259,9 @@ mod external_infra {
             status_ok,
             StatusCode::OK,
             "Owner POST with valid NIP-FI assertion MUST return 200. \
-             authorize_management authorizes the repo author; the seeded 'main' \
+             the land authorizes the repo author; the seeded 'main' \
              branch exists and expected_manifest matches digest_before. \
-             If 403: NIP-FI key-pairing or authorize_management is denying the owner. \
+             If 403: NIP-FI key-pairing or the land is denying the owner. \
              If 401: NIP-FI outer guard is wrongly denying a valid assertion."
         );
         let ok_json: serde_json::Value = body_ok.clone();
@@ -2347,5 +4291,320 @@ mod external_infra {
              updated the branch → new digest. \
              Falsifying mutation: set_default_branch skipped → digest unchanged."
         );
+    }
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL, Redis and MinIO"]
+    async fn channel_metadata_cannot_weaken_a_label_scoped_land_rule() {
+        use super::super::super::land::{coordinate, Verdict};
+        use buzz_core::governance::{command_builder, ExpectedHead};
+        let f = Fixture::new().await;
+        let owner = f.owner.public_key().to_hex();
+        let repo = coordinate(&owner, &f.repo);
+        sqlx::query("INSERT INTO relay_members (community_id,pubkey,role) VALUES ($1,$2,'admin') ON CONFLICT (community_id,pubkey) DO UPDATE SET role='admin'")
+            .bind(f.tenant.community().as_uuid()).bind(&owner).execute(&f.pool).await.unwrap();
+        let auth = crate::handlers::ingest::IngestAuth::Http {
+            pubkey: f.owner.public_key(),
+            scopes: vec![buzz_auth::Scope::ReposWrite],
+            auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
+        };
+        let labels_id: buzz_core::governance::DocumentId =
+            format!("labels:{repo}").parse().unwrap();
+        for (document, body) in [
+            (
+                "floor".parse().unwrap(),
+                r#"{"version":1,"body":{"type":"floor","rules":[{"id":"high-review","refs":["refs/heads/main"],"labels":{"tier":"high"},"require":[{"type":"review","count":1,"group":null}]}],"labels":{"tier":{"values":["high","low"],"default":"low"}},"max_grant_seconds":3600}}"#,
+            ),
+            (
+                labels_id.clone(),
+                r#"{"version":1,"body":{"type":"labels","values":{"tier":"high"}}}"#,
+            ),
+        ] {
+            let event = command_builder(
+                *f.tenant.community().as_uuid(),
+                &document,
+                &ExpectedHead::Absent,
+                body,
+            )
+            .unwrap()
+            .sign_with_keys(&f.owner)
+            .unwrap();
+            crate::handlers::ingest::ingest_event(&f.state, &f.tenant, event, auth.clone())
+                .await
+                .unwrap();
+        }
+        // Reconcile the legacy fixture manifest before attempting a governed land.
+        let _ = f.snapshot().await;
+        let options = super::super::super::hydrate::HydrationOptions {
+            pack_cache: &f.state.git_pack_cache,
+            scratch_dir: f.scratch.path(),
+            max_pack_bytes: 1024 * 1024,
+            max_repo_bytes: 2 * 1024 * 1024,
+        };
+        let (push, parent) = super::super::super::hydrate::hydrate_for_write(
+            &f.state.git_store,
+            &f.tenant,
+            &owner,
+            &f.repo,
+            options,
+        )
+        .await
+        .unwrap();
+        let base = git(push.path(), &["rev-parse", "refs/heads/main"]).await;
+        let base = base.trim().to_string();
+        let tip = git(
+            push.path(),
+            &[
+                "commit-tree",
+                "refs/heads/main^{tree}",
+                "-p",
+                &base,
+                "-m",
+                "governed",
+            ],
+        )
+        .await;
+        let tip = tip.trim().to_string();
+        git(push.path(), &["update-ref", "refs/heads/main", &tip]).await;
+
+        assert!(
+            matches!(f.land_push(&push, &parent).await, Verdict::Refused(_)),
+            "protected high label requires review"
+        );
+        let edit = EventBuilder::new(Kind::Custom(9002), "")
+            .tags([
+                Tag::parse(["h", &f.channel.to_string()]).unwrap(),
+                Tag::parse(["t", "tier:low"]).unwrap(),
+            ])
+            .sign_with_keys(&f.owner)
+            .unwrap();
+        let edit_auth = crate::handlers::ingest::IngestAuth::Http {
+            pubkey: f.owner.public_key(),
+            scopes: vec![
+                buzz_auth::Scope::ChannelsWrite,
+                buzz_auth::Scope::AdminChannels,
+            ],
+            auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
+        };
+        crate::handlers::ingest::ingest_event(&f.state, &f.tenant, edit, edit_auth)
+            .await
+            .unwrap();
+        assert!(
+            matches!(f.land_push(&push, &parent).await, Verdict::Refused(_)),
+            "channel metadata must not weaken the land rule"
+        );
+        let head = f
+            .state
+            .db
+            .governance_head(
+                f.tenant.community(),
+                &labels_id,
+                f.owner.public_key().as_bytes(),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let labels = command_builder(
+            *f.tenant.community().as_uuid(),
+            &labels_id,
+            &ExpectedHead::Event(head.id.to_hex()),
+            r#"{"version":1,"body":{"type":"labels","values":{"tier":"low"}}}"#,
+        )
+        .unwrap()
+        .sign_with_keys(&f.owner)
+        .unwrap();
+        crate::handlers::ingest::ingest_event(&f.state, &f.tenant, labels, auth)
+            .await
+            .unwrap();
+        assert_eq!(
+            f.land_push(&push, &parent).await,
+            Verdict::Landed,
+            "a governed label change can alter the decision"
+        );
+    }
+
+    /// NIP-IA archival is visibility, not access (NIP-IA.md:436): an archived
+    /// identity's push lands.
+    #[tokio::test]
+    #[ignore = "requires isolated Postgres, Redis and MinIO"]
+    async fn an_archived_identity_push_lands() {
+        let f = Fixture::new().await;
+        let owner = f.owner.public_key().to_hex();
+        assert!(f
+            .state
+            .db
+            .archive(
+                f.tenant.community(),
+                &owner,
+                "self",
+                &owner,
+                None,
+                None,
+                &"c".repeat(64)
+            )
+            .await
+            .unwrap());
+        let before = f.snapshot().await.digest;
+        let (push, parent) = super::super::super::hydrate::hydrate_for_write(
+            &f.state.git_store,
+            &f.tenant,
+            &owner,
+            &f.repo,
+            super::super::super::hydrate::HydrationOptions {
+                pack_cache: &f.state.git_pack_cache,
+                scratch_dir: f.scratch.path(),
+                max_pack_bytes: 1024 * 1024,
+                max_repo_bytes: 2 * 1024 * 1024,
+            },
+        )
+        .await
+        .unwrap();
+        git(
+            push.path(),
+            &["update-ref", "refs/heads/archived", "refs/heads/main"],
+        )
+        .await;
+        assert_eq!(
+            f.land_push(&push, &parent).await,
+            super::super::super::land::Verdict::Landed
+        );
+        assert_ne!(f.snapshot().await.digest, before);
+    }
+
+    /// As a relay that predates the land pushes: hydrate the pointer, add
+    /// `branch`, publish by the pointer CAS alone. The row does not move.
+    async fn legacy_publish(
+        f: &Fixture,
+        branch: &str,
+    ) -> (super::super::super::manifest::Manifest, String) {
+        let owner = f.owner.public_key().to_hex();
+        let scratch = f.scratch.path().join(branch);
+        std::fs::create_dir(&scratch).unwrap();
+        let (push, parent) = super::super::super::hydrate::hydrate_for_write(
+            &f.state.git_store,
+            &f.tenant,
+            &owner,
+            &f.repo,
+            super::super::super::hydrate::HydrationOptions {
+                pack_cache: &f.state.git_pack_cache,
+                scratch_dir: &scratch,
+                max_pack_bytes: 1024 * 1024,
+                max_repo_bytes: 2 * 1024 * 1024,
+            },
+        )
+        .await
+        .unwrap();
+        git(
+            push.path(),
+            &[
+                "update-ref",
+                &format!("refs/heads/{branch}"),
+                "refs/heads/main",
+            ],
+        )
+        .await;
+        let published = super::super::super::cas_publish::cas_publish(
+            &f.state.git_store,
+            &f.tenant,
+            push.path(),
+            &owner,
+            &f.repo,
+            &parent,
+            &super::super::super::cas_publish::snapshot_workspace(push.path())
+                .await
+                .unwrap(),
+            limits(push.hydrated_bytes()),
+        )
+        .await
+        .unwrap();
+        let digest = published.manifest_key.strip_prefix("manifests/").unwrap();
+        (published.manifest, digest.to_owned())
+    }
+
+    /// Mixed-version rollout: a relay without the land publishes by the
+    /// pointer CAS alone, moving the cache m0 -> m1 (parent m0) while the
+    /// row stays at m0. An ungoverned repository adopts m1, because it was
+    /// built directly on the row: reads serve it and writes build on it. A
+    /// governed one refuses writes with 409 and reads serve the row, hiding
+    /// m1, until an operator reconciles it. So does an ungoverned one whose
+    /// cache is more than one legacy push past the row.
+    #[tokio::test]
+    #[ignore = "requires isolated Postgres, Redis and MinIO"]
+    async fn a_legacy_pointer_publish_is_adopted_only_when_ungoverned_and_direct() {
+        use super::super::super::land::{committed_for_read, committed_for_write, coordinate};
+        for governed in [false, true] {
+            let f = Fixture::new().await;
+            if governed {
+                f.floor().await;
+            }
+            let repo = coordinate(&f.owner.public_key().to_hex(), &f.repo);
+            let row = || async {
+                f.state
+                    .db
+                    .git_repo_manifest(f.tenant.community(), &repo)
+                    .await
+                    .unwrap()
+            };
+            // A read seeds the row from the cache: row = cache = m0.
+            let m0 = f.snapshot().await;
+            assert_eq!(row().await.as_deref(), Some(m0.digest.as_str()));
+            let (m1, d1) = legacy_publish(&f, "legacy-push").await;
+            assert_eq!(m1.parent.as_deref(), Some(m0.digest.as_str()));
+            assert_eq!(row().await.as_deref(), Some(m0.digest.as_str()));
+            if governed {
+                let refused = committed_for_write(&f.state, &f.tenant, &repo)
+                    .await
+                    .map(|_| ())
+                    .expect_err("a legacy publish refuses governed writes");
+                assert_eq!(refused.status(), StatusCode::CONFLICT);
+                assert_eq!(
+                    f.call(
+                        &f.owner,
+                        Some(json!({"branch": "main", "expected_manifest": m0.digest})),
+                        None
+                    )
+                    .await
+                    .0,
+                    StatusCode::CONFLICT,
+                    "the owner's governed write through the route refuses too"
+                );
+                let read = committed_for_read(&f.state, &f.tenant, &repo)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(read, m0.manifest, "governed reads serve the row");
+                assert_eq!(row().await.as_deref(), Some(m0.digest.as_str()));
+                continue;
+            }
+            // Each door adopts on its own: a write adopts m1, a read adopts
+            // m2 (parent m1).
+            let (_, digest, _) = committed_for_write(&f.state, &f.tenant, &repo)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(digest, d1, "writes build on the adopted push");
+            assert_eq!(row().await.as_deref(), Some(d1.as_str()));
+            let (_, d2) = legacy_publish(&f, "second").await;
+            let read = committed_for_read(&f.state, &f.tenant, &repo)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(read.refs.contains_key("refs/heads/second"), "reads adopt");
+            assert_eq!(row().await.as_deref(), Some(d2.as_str()));
+            // Two legacy pushes past the row: the cache's parent is not the
+            // row, so nothing is adopted.
+            let (_, d3) = legacy_publish(&f, "third").await;
+            let (m4, _) = legacy_publish(&f, "fourth").await;
+            assert_eq!(m4.parent.as_deref(), Some(d3.as_str()));
+            assert_eq!(
+                committed_for_write(&f.state, &f.tenant, &repo)
+                    .await
+                    .map(|_| ())
+                    .expect_err("an indirect legacy publish refuses")
+                    .status(),
+                StatusCode::CONFLICT
+            );
+            assert_eq!(row().await.as_deref(), Some(d2.as_str()));
+        }
     }
 }

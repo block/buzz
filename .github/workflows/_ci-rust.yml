@@ -67,6 +67,16 @@ jobs:
         uses: taiki-e/install-action@0fd46367812ee04360509b4169d9f659d6892bb2 # v2.79.15
         with:
           tool: cargo-nextest@0.9.136
+      # Verus ships as one ~450 MB archive, so allow each attempt longer than
+      # the default deadline.
+      - name: Fetch Verus
+        env:
+          CI_HERMIT_ATTEMPT_SECONDS: "300"
+        run: scripts/ci-hermit-retry.sh ./bin/verus --version
+      # Proves the governed Git decision. Cargo erases the proofs, so the
+      # unit tests below do not check what this step checks.
+      - name: Verify Git gate
+        run: just verify-git-gate
       - name: Unit tests
         run: just test-unit
 

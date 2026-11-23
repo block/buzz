@@ -1,7 +1,7 @@
 //! Default-branch management of the authoritative Git manifest.
 //!
-//! This is a Git control-plane operation, not a replaceable announcement:
-//! the pointer CAS is the commit point, shared with receive-pack. A separate
+//! This is a Git control-plane operation, not a replaceable announcement: it
+//! commits through the governed land, shared with receive-pack. A separate
 //! strict NIP-98 request prevents reusable Smart HTTP credentials authorizing
 //! metadata changes (URL, method, payload and replay are all checked).
 
@@ -18,16 +18,14 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use buzz_core::TenantContext;
+use buzz_core::{governance::RepoCoordinate, TenantContext};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::{
-    binding::{resolve_repo_binding, RepoBinding},
-    hydrate::load_pointer,
-    manifest::{is_safe_refname, next_published_at, pointer_key, Manifest},
+    manifest::{is_safe_refname, next_published_at, Manifest},
     manifest_event::{build_ref_state_event, RefStateInputs},
-    store::{CasOutcome, ETag, GitStore, Precond},
+    store::{ETag, GitStore},
     transport::{authorize_git_read, deny_banned_git_principal, validate_repo_id},
 };
 use crate::{
@@ -48,11 +46,10 @@ fn backend(error: impl std::fmt::Display) -> Response {
     )
 }
 
+const STALE: &str = "repository changed concurrently; read the latest manifest and retry";
+
 fn conflict() -> Response {
-    error(
-        StatusCode::CONFLICT,
-        "repository changed concurrently; read the latest manifest and retry",
-    )
+    error(StatusCode::CONFLICT, STALE)
 }
 
 #[derive(Deserialize)]
@@ -62,9 +59,12 @@ struct SetDefaultBranch {
     expected_manifest: String,
 }
 
-/// A loaded snapshot cannot be rebound to another pointer or refreshed at CAS.
+/// The committed state a request read. It cannot be rebound to another
+/// repository or refreshed before the land, which commits only if the
+/// repository is still at `digest`.
 struct DefaultBranchSnapshot {
-    pointer: String,
+    tenant: TenantContext,
+    repo: RepoCoordinate,
     etag: ETag,
     digest: String,
     manifest: Manifest,
@@ -72,14 +72,12 @@ struct DefaultBranchSnapshot {
 
 impl DefaultBranchSnapshot {
     async fn load(
-        store: &GitStore,
+        state: &AppState,
         tenant: &TenantContext,
-        owner: &str,
-        repo: &str,
+        repo: RepoCoordinate,
     ) -> Result<Self, Response> {
-        let (etag, digest, manifest) = load_pointer(store, tenant, owner, repo)
-            .await
-            .map_err(backend)?
+        let (etag, digest, manifest) = super::land::committed_for_write(state, tenant, &repo)
+            .await?
             .ok_or_else(|| {
                 error(
                     StatusCode::NOT_FOUND,
@@ -87,25 +85,42 @@ impl DefaultBranchSnapshot {
                 )
             })?;
         Ok(Self {
-            pointer: pointer_key(tenant.community(), owner, repo),
+            tenant: tenant.clone(),
+            repo,
             etag,
             digest,
             manifest,
         })
     }
 
+    /// Record that `reader` is shown this snapshot.
+    async fn record_read(
+        &self,
+        state: &AppState,
+        reader: &nostr::PublicKey,
+    ) -> Result<(), Response> {
+        super::transport::record_read(
+            &state.db,
+            self.tenant.community(),
+            &self.repo,
+            reader,
+            super::reads::Door::State,
+        )
+        .await
+    }
+
     fn response(&self) -> Value {
         json!({"branch": self.manifest.head.strip_prefix("refs/heads/"), "head": self.manifest.head, "manifest": self.digest})
     }
 
-    async fn set(
-        mut self,
+    /// The manifest naming `request.branch` as the default, stored but not
+    /// committed; unchanged when it already is the default, or when the
+    /// request is stale, which the land refuses.
+    async fn compose(
+        &self,
         store: &GitStore,
-        request: SetDefaultBranch,
-    ) -> Result<(Self, bool), Response> {
-        if self.digest != request.expected_manifest {
-            return Err(conflict());
-        }
+        request: &SetDefaultBranch,
+    ) -> Result<(String, Manifest), Response> {
         let head = format!("refs/heads/{}", request.branch);
         if request.branch.is_empty()
             || request.branch.len() > 1024
@@ -128,44 +143,111 @@ impl DefaultBranchSnapshot {
                 "default branch must name an existing published branch",
             ));
         }
-        let changed = self.manifest.head != head;
-        if changed {
-            self.manifest.published_at = Some(next_published_at(
-                &self.manifest,
-                nostr::Timestamp::now().as_secs(),
-            ));
-            self.manifest.head = head;
-            self.manifest.parent = Some(self.digest.clone());
-            self.manifest.validate().map_err(backend)?;
-            let bytes = self.manifest.canonical_bytes().map_err(backend)?;
-            let key = store.put_manifest(&bytes).await.map_err(backend)?;
-            self.digest = key
-                .strip_prefix("manifests/")
-                .ok_or_else(|| backend("invalid manifest key"))?
-                .to_string();
+        if self.manifest.head == head || self.digest != request.expected_manifest {
+            return Ok((self.digest.clone(), self.manifest.clone()));
         }
-        // Even a no-op checks the observed ETag: concurrent deletion/push must
-        // not be reported as a successful setting of a now-missing branch.
-        match store
-            .put_pointer(
-                &self.pointer,
-                self.digest.as_bytes(),
-                Precond::IfMatch(self.etag.clone()),
-            )
+        let mut manifest = self.manifest.clone();
+        manifest.published_at = Some(next_published_at(
+            &self.manifest,
+            nostr::Timestamp::now().as_secs(),
+        ));
+        manifest.head = head;
+        manifest.parent = Some(self.digest.clone());
+        manifest.validate().map_err(backend)?;
+        let bytes = manifest.canonical_bytes().map_err(backend)?;
+        let key = store.put_manifest(&bytes).await.map_err(backend)?;
+        let digest = key
+            .strip_prefix("manifests/")
+            .ok_or_else(|| backend("invalid manifest key"))?
+            .to_string();
+        Ok((digest, manifest))
+    }
+
+    /// Make `request.branch` the default through the land, as `caller`.
+    /// Even a no-op lands: a concurrent push or deletion, or a lost admin
+    /// role, must not be reported as a successful setting.
+    async fn set(
+        self,
+        state: &AppState,
+        serving_write: &buzz_deletion::ServingWriteGuard,
+        caller: &[u8],
+        grant: Option<&buzz_core::governance::GitGrant>,
+        request: SetDefaultBranch,
+    ) -> Result<(Self, bool), Response> {
+        let (digest, manifest) = serving_write
+            .protect(self.compose(&state.git_store, &request))
             .await
-            .map_err(backend)?
-        {
-            CasOutcome::Won(etag) => self.etag = etag,
-            CasOutcome::LostRace => return Err(conflict()),
+            .map_err(backend)??;
+        // A stale request is refused in the land, after the role, so the
+        // refusal is receipted and a non-admin learns only that it may not.
+        let stale = self.digest != request.expected_manifest;
+        let verdict = super::land::land(
+            state,
+            serving_write.lease(),
+            super::land::Change {
+                kind: "default_branch",
+                repo: &self.repo,
+                actor: caller,
+                grant,
+                seen: Some(&self.digest),
+                new: &digest,
+                updates: &[],
+            },
+            async |_tx, authority| {
+                Ok(super::gate::Decision {
+                    verdict: match authority.role {
+                        Some(role) if role.has_at_least(buzz_core::channel::MemberRole::Admin) => {
+                            match stale {
+                                false => Ok(()),
+                                true => Err(refusal(STALE)),
+                            }
+                        }
+                        _ => Err(refusal(MANAGE_DENIED)),
+                    },
+                    counted: Default::default(),
+                })
+            },
+        )
+        .await?;
+        match verdict {
+            super::land::Verdict::Landed => {}
+            super::land::Verdict::Superseded => return Err(conflict()),
+            super::land::Verdict::Refused(denials)
+                if denials.first().is_some_and(|d| d.reason == STALE) =>
+            {
+                return Err(conflict())
+            }
+            super::land::Verdict::Refused(denials) => {
+                let reason = denials.first().map_or(MANAGE_DENIED, |d| d.reason.as_str());
+                return Err(error(StatusCode::FORBIDDEN, reason));
+            }
         }
-        Ok((self, changed))
+        let changed = digest != self.digest;
+        if changed {
+            super::land::write_cache(
+                &state.git_store,
+                &self.tenant,
+                &self.repo,
+                Some(&self.etag),
+                &digest,
+            )
+            .await;
+        }
+        Ok((
+            Self {
+                digest,
+                manifest,
+                ..self
+            },
+            changed,
+        ))
     }
 }
 
 struct SettingsAuth {
     tenant: TenantContext,
     caller: nostr::PublicKey,
-    delegated_owner: Option<nostr::PublicKey>,
+    grant: Option<buzz_core::governance::GitGrant>,
 }
 
 async fn authenticate(
@@ -213,30 +295,24 @@ async fn authenticate(
         .rate_limit_and_replay(state, &tenant)
         .await
         .map_err(IntoResponse::into_response)?;
+    // One owner, and one grant, per request, as smart Git transport proves them.
     let tag = relay_members::extract_auth_tag_header(headers);
-    let membership = relay_members::enforce_relay_membership(
+    let membership = relay_members::enforce_git_membership(
         state,
         &tenant,
-        pubkey.as_bytes(),
-        tag,
-        signed_created_at,
-        token_owner,
-    )
-    .await;
-    caller
-        .check(membership, relay_members::MembershipRefusal::auth_result)
-        .map_err(IntoResponse::into_response)?;
-    #[cfg(test)]
-    crate::nip_fi_test_hooks::before_http_ban_recheck(tenant.community()).await;
-    let ban = deny_banned_git_principal(
-        &state.db,
-        tenant.community(),
         &pubkey,
         tag,
         signed_created_at,
         token_owner,
     )
     .await;
+    let (owner, grant) = caller
+        .check(membership, relay_members::MembershipRefusal::auth_result)
+        .map_err(IntoResponse::into_response)?;
+    #[cfg(test)]
+    crate::nip_fi_test_hooks::before_http_ban_recheck(tenant.community()).await;
+    let ban =
+        deny_banned_git_principal(&state.db, tenant.community(), &pubkey, owner, token_owner).await;
     caller
         .admit(ban, |refused| {
             crate::access::AuthResult::Denied(match refused.status() {
@@ -254,94 +330,22 @@ async fn authenticate(
             }),
             None => legacy,
         })?;
-    // Admission ignores kind= restrictions by design (NIP-AA). Repository
-    // management must not turn a message-only credential into write authority.
-    // This HTTP operation has no event kind: only kind-unrestricted credentials
-    // may inherit management authority. Temporal clauses are still enforced.
-    let delegated_owner = tag
-        .filter(|tag| {
-            serde_json::from_str::<Vec<String>>(tag)
-                .ok()
-                .and_then(|parts| parts.get(2).cloned())
-                .is_some_and(|conditions| {
-                    !conditions
-                        .split('&')
-                        .any(|clause| clause.starts_with("kind="))
-                })
-        })
-        .and_then(|tag| {
-            relay_members::extract_nip_oa_owner(pubkey.as_bytes(), Some(tag), signed_created_at)
-        });
     Ok(SettingsAuth {
         tenant,
         caller: pubkey,
-        delegated_owner,
+        grant,
     })
 }
 
-async fn authorize_management(
-    state: &AppState,
-    auth: &SettingsAuth,
-    repo: &nostr::Event,
-) -> Result<(), Response> {
-    let RepoBinding::Bound(channel) = resolve_repo_binding(repo) else {
-        return Err(error(StatusCode::NOT_FOUND, "repository not found"));
-    };
-    let community = auth.tenant.community();
-    let bound = state
-        .db
-        .get_channel(community, channel)
-        .await
-        .map_err(backend)?;
-    if bound.archived_at.is_some() {
-        return Err(error(
-            StatusCode::FORBIDDEN,
-            "channel is archived (read-only)",
-        ));
-    }
-    let named_manager = |key: &nostr::PublicKey| {
-        *key == repo.pubkey
-            || repo.tags.iter().any(|tag| {
-                let values = tag.as_slice();
-                values.first().is_some_and(|name| name == "maintainers")
-                    && values
-                        .iter()
-                        .skip(1)
-                        .any(|value| nostr::PublicKey::parse(value).ok().as_ref() == Some(key))
-            })
-    };
-    // Direct authority is independent of an optional owner credential.
-    if named_manager(&auth.caller)
-        || state
-            .db
-            .is_agent_owner(community, repo.pubkey.as_bytes(), auth.caller.as_bytes())
-            .await
-            .map_err(backend)?
-    {
-        return Ok(());
-    }
-    if let Some(principal) = &auth.delegated_owner {
-        let role = state
-            .db
-            .get_member_role(community, channel, principal.as_bytes())
-            .await
-            .map_err(backend)?;
-        if role.is_some_and(|r| r.parse::<buzz_core::channel::MemberRole>().is_ok())
-            && (named_manager(principal)
-                || state
-                    .db
-                    .is_agent_owner(community, repo.pubkey.as_bytes(), principal.as_bytes())
-                    .await
-                    .map_err(backend)?)
-        {
-            return Ok(());
-        }
-    }
-    Err(error(
-        StatusCode::FORBIDDEN,
-        "only the repository owner or a named maintainer may change its default branch",
-    ))
+fn refusal(reason: &str) -> Vec<buzz_core::git_perms::Denial> {
+    vec![buzz_core::git_perms::Denial {
+        ref_name: "HEAD".into(),
+        reason: reason.into(),
+    }]
 }
+
+const MANAGE_DENIED: &str =
+    "only an admin of the repository's channel may change its default branch";
 
 async fn get_default_branch(
     State(state): State<Arc<AppState>>,
@@ -356,12 +360,14 @@ async fn get_default_branch(
         &state.db,
         auth.tenant.community(),
         &auth.caller,
+        auth.grant.as_ref(),
         &owner,
         repo_name,
     )
     .await?;
-    let snapshot =
-        DefaultBranchSnapshot::load(&state.git_store, &auth.tenant, &owner, repo_name).await?;
+    let repo = super::land::coordinate(&owner, repo_name);
+    let snapshot = DefaultBranchSnapshot::load(&state, &auth.tenant, repo).await?;
+    snapshot.record_read(&state, &auth.caller).await?;
     Ok(Json(snapshot.response()))
 }
 
@@ -375,23 +381,25 @@ async fn set_default_branch(
     let path = format!("/git/{owner}/{repo}/default-branch");
     let repo_name = validate_repo_id(&owner, &repo)?;
     let auth = authenticate(&state, &slot, &headers, &path, Some(&body)).await?;
-    let announcement = authorize_git_read(
+    // Readers may ask; only the land decides, so every refusal is receipted.
+    authorize_git_read(
         &state.db,
         auth.tenant.community(),
         &auth.caller,
+        auth.grant.as_ref(),
         &owner,
         repo_name,
     )
     .await?;
-    authorize_management(&state, &auth, &announcement).await?;
     let request: SetDefaultBranch = serde_json::from_slice(&body).map_err(|_| {
         error(
             StatusCode::BAD_REQUEST,
             "expected branch and expected_manifest strings",
         )
     })?;
-    let snapshot =
-        DefaultBranchSnapshot::load(&state.git_store, &auth.tenant, &owner, repo_name).await?;
+    let repo = super::land::coordinate(&owner, repo_name);
+    let snapshot = DefaultBranchSnapshot::load(&state, &auth.tenant, repo).await?;
+    snapshot.record_read(&state, &auth.caller).await?;
     let serving_write = buzz_deletion::acquire_serving_write(
         &state.db,
         auth.tenant.community(),
@@ -404,18 +412,15 @@ async fn set_default_branch(
             "community writes are fenced",
         )
     })?;
-    serving_write.verify().await.map_err(backend)?;
-    // As in `finalize_push`, a pointer CAS that landed stands even if the lease
-    // check after it fails; the lease-guarded kind:30618 insert decides
-    // whether publication may continue.
-    let (set, lease_after_cas) = serving_write
-        .protect_landed(snapshot.set(&state.git_store, request))
-        .await
-        .map_err(backend)?;
-    let (snapshot, changed) = set?;
-    if let Err(error) = lease_after_cas {
-        tracing::warn!(%error, "serving lease check failed after the default-branch CAS landed; continuing publication");
-    }
+    let (snapshot, changed) = snapshot
+        .set(
+            &state,
+            &serving_write,
+            &auth.caller.to_bytes(),
+            auth.grant.as_ref(),
+            request,
+        )
+        .await?;
     let publication = async {
         if changed {
             let actor = auth.caller.to_hex();

@@ -597,6 +597,7 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
 /// Returns `Err` for unknown kinds — the relay rejects them.
 fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static str> {
     match kind {
+        buzz_core::kind::KIND_GOVERNANCE_COMMAND | buzz_core::kind::KIND_GIT_EVIDENCE => Ok(Scope::ReposWrite),
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM | buzz_core::kind::KIND_ARTIFACT => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
@@ -858,6 +859,8 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // direct commands, same model as the NIP-43 9030-series. A stray
             // `h` tag must never channel-scope them (pinned contract —
             // handlers/moderation_commands.rs routing docs).
+            | buzz_core::kind::KIND_GOVERNANCE_COMMAND
+            | buzz_core::kind::KIND_GIT_EVIDENCE
             | KIND_MODERATION_BAN
             | KIND_MODERATION_UNBAN
             | KIND_MODERATION_TIMEOUT
@@ -1849,6 +1852,39 @@ const PROJECT_METADATA_TAG_MAX_LEN: usize = 256;
 const PROJECT_SINGLETON_METADATA_TAGS: [&str; 4] =
     ["name", "description", "buzz-channel", "buzz-visibility"];
 
+/// Refuse a kind:30617 whose binding is not its repository's pinned channel.
+async fn check_announced_pin(
+    tenant: &TenantContext,
+    state: &AppState,
+    event: &nostr::Event,
+) -> Result<(), IngestError> {
+    let Some(name) = event.tags.identifier() else {
+        return Ok(());
+    };
+    let repo = buzz_core::governance::RepoCoordinate {
+        owner: event.pubkey.to_hex(),
+        name: name.to_string(),
+    };
+    let pinned = state
+        .db
+        .git_repo_channel(tenant.community(), &repo, None)
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: database error: {}", e.kind())))?;
+    match (
+        pinned,
+        crate::api::git::binding::resolve_repo_binding(event),
+    ) {
+        (Some(pin), crate::api::git::binding::RepoBinding::Bound(channel)) if pin == channel => {
+            Ok(())
+        }
+        (Some(pin), _) => Err(IngestError::Rejected(format!(
+            "invalid: repository is bound to channel {pin}; announce that buzz-channel, \
+             or move it with a governed bind first"
+        ))),
+        (None, _) => Ok(()),
+    }
+}
+
 /// The kind segment every project member coordinate must carry: a project groups
 /// repository *announcements*, so a coordinate naming any other kind (notably
 /// kind:30618 repository state) is malformed.
@@ -2789,6 +2825,27 @@ async fn ingest_event_inner(
         });
     }
 
+    if matches!(
+        kind_u32,
+        buzz_core::kind::KIND_GOVERNANCE_COMMAND | buzz_core::kind::KIND_GIT_EVIDENCE
+    ) {
+        if auth.channel_ids().is_some() {
+            return Err(IngestError::AuthFailed(
+                "restricted: governance requires an unscoped credential".into(),
+            ));
+        }
+        if kind_u32 == buzz_core::kind::KIND_GIT_EVIDENCE {
+            super::governance::evidence(tenant, state, &event).await?;
+        } else {
+            super::governance::apply(tenant, state, &event).await?;
+        }
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: String::new(),
+        });
+    }
+
     // Community moderation commands (9040–9044) are direct, community-global
     // mutations. They are never stored or fanned out as ordinary events; the
     // handler writes the durable audit/enforcement rows after its own capability
@@ -3293,6 +3350,13 @@ async fn ingest_event_inner(
     if kind_u32 == KIND_PROJECT {
         validate_project_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
+    // A pinned repository's announcement must name its pin: only a governed
+    // bind moves it, so a tag that disagrees would mislead every reader of the
+    // tag while granting nothing.
+    if kind_u32 == KIND_GIT_REPO_ANNOUNCEMENT {
+        check_announced_pin(tenant, state, &event).await?;
     }
 
     // A kind:9007 must carry the new channel's id in its `h` tag. It creates

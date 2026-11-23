@@ -398,26 +398,46 @@ async fn cmd_protect_remove(
     submit_repo_update(client, builder).await
 }
 
-/// Bind (or rebind) a repository to a channel — the fix path for issue
-/// #3527's permanently-404 repos. Publishes a read-modify-write update of
-/// the caller's own kind:30617 with exactly one `buzz-channel` tag; all
-/// other metadata (protections, name, description, future tags) is
-/// preserved by the same machinery `repos protect` uses.
+/// Bind (or rebind) a repository to a channel.
 ///
-/// The UUID is validated for *shape* only — deliberately. Channel existence
-/// and the caller's membership are the relay's authority at git-access
-/// time; a CLI-side network pre-check would just be TOCTOU with extra
-/// latency.
+/// The relay's pin is the binding; the announcement's `buzz-channel` tag
+/// only seeds it. A bound repository moves by a governed bind (an admin of
+/// both channels), then its announcement is republished to name the new
+/// channel, which the relay accepts only once the pin agrees. An unbound
+/// repository (issue #3527) just gains the tag, which pins it. The UUID is
+/// checked for shape here; channel existence and roles are the relay's.
 async fn cmd_bind_repo(client: &BuzzClient, repo_id: &str, channel: &str) -> Result<(), CliError> {
     let event = current_repo(client, repo_id).await?;
     let builder =
         build_updated_repo_announcement(&event, RepoChange::BindChannel(channel.to_string()))?;
+    let bound = event
+        .tags
+        .iter()
+        .find(|tag| has_tag_name(tag, "buzz-channel"))
+        .and_then(|tag| tag.as_slice().get(1))
+        .is_some_and(|value| uuid::Uuid::parse_str(value).is_ok());
+    if bound {
+        let repo = format!(
+            "{KIND_GIT_REPO_ANNOUNCEMENT}:{}:{repo_id}",
+            event.pubkey.to_hex()
+        );
+        super::governance::bind(&repo, channel, client).await?;
+    }
     submit_repo_update(client, builder).await
 }
 
 pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::{ReposCmd, ReposProtectCmd};
     match cmd {
+        ReposCmd::Effective { repo } => super::governance::effective(repo, client).await,
+        ReposCmd::Receipts {
+            repo,
+            before,
+            limit,
+        } => super::governance::receipts(repo, before, limit, client).await,
+        ReposCmd::Rules(args) => super::governance::repo("rules", args, client).await,
+        ReposCmd::Labels(args) => super::governance::repo("labels", args, client).await,
+        ReposCmd::Grant(args) => super::repo_grant::grant(args, client),
         ReposCmd::Create {
             id,
             name,

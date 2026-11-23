@@ -1824,6 +1824,26 @@ impl Db {
         }
     }
 
+    /// Begin a transaction admitted under an existing serving-write lease.
+    ///
+    /// An external side effect that ends in a database commit (a Git land
+    /// after its packs are uploaded) presents the lease it has held since
+    /// before the effect, so the commit can finish during quiescing without
+    /// admitting new serving work, and fails once deletion has fenced it.
+    pub async fn begin_serving_write_transaction(
+        &self,
+        lease: &deletion::ServingWriteLease,
+    ) -> Result<AdmittedTx> {
+        let connection =
+            observability::acquire_writer(&self.pool, observability::WriterOperation::EventWrite)
+                .await?;
+        let tx = sqlx::Transaction::begin(connection, None).await?;
+        let mut tx =
+            AdmittedTx::admit_with_serving_lease(tx, &self.deletion_store(), lease).await?;
+        tx.set_push_enqueue(self.push_enqueue.clone());
+        Ok(tx)
+    }
+
     /// Insert an event while holding and validating an admitted serving-write
     /// lease under the community ordering lock through commit.
     ///
@@ -1845,13 +1865,7 @@ impl Db {
             return Err(DbError::EphemeralEventRejected(kind_u16));
         }
 
-        let connection =
-            observability::acquire_writer(&self.pool, observability::WriterOperation::EventWrite)
-                .await?;
-        let tx = sqlx::Transaction::begin(connection, None).await?;
-        let mut tx =
-            AdmittedTx::admit_with_serving_lease(tx, &self.deletion_store(), lease).await?;
-        tx.set_push_enqueue(self.push_enqueue.clone());
+        let mut tx = self.begin_serving_write_transaction(lease).await?;
         event::acquire_canvas_event_write_lock_if_needed(&mut tx, event, channel_id).await?;
         let result =
             event::insert_event_with_thread_metadata_tx(&mut tx, event, channel_id, None).await?;

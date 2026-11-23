@@ -84,8 +84,9 @@ materialized from the current manifest.
 The accepted v1 tradeoff: under concurrent same-repo pushes, every contender
 hydrates and runs receive-pack, and the CAS losers' subprocess work is
 discarded. This is wasted CPU/IO under contention, not a correctness bug —
-`Inv_NoFork` (Theorem 3) holds because the CAS is the only writer
-serialization. Same-ref concurrent push is rare; the alternative (a
+`Inv_NoFork` (Theorem 3) holds because one conditional write serializes
+writers: the pointer CAS here, or the repository row's swap for a governed
+land (§Governed lands). Same-ref concurrent push is rare; the alternative (a
 cross-instance lock service) is the kind of dependency this protocol exists
 to avoid. If contention ever shows up in metrics the fix is a short
 best-effort *local* lock as a latency optimization, never a correctness
@@ -251,6 +252,23 @@ assumption for any S3-compatible backend.
 A3 is the single load-bearing backend assumption. It replaces the POSIX
 `rename()` atomicity that reftable relies on. See §Conformance for how a backend
 is *admitted* against it.
+
+**Governed lands.** A governed relay moves the commit point from the pointer
+to the repository's Postgres row (`git_repo_names.manifest`), which a
+conditional `UPDATE` swaps in the transaction that reads the authority, decides
+the push and writes its receipt (`docs/spec/GitGovernanceLand.tla`, protocol
+"row"). There the row plays the part A3 gives the pointer: at most one swap
+predicated on the same manifest commits. The pointer becomes a cache written
+after commit, still by CAS. Each manifest names its parent, so a reader tells a
+cache one land behind (advanced on the next read or write) from a pointer
+written outside the land, on which writes are refused. A3 still governs the
+cache and every write from a relay that predates the land. A refused land
+answers with git's own report, every `ok` for a ref the push changed rewritten
+to `ng <ref> <reason>`, so the client prints why and is never told `ok` for a
+change that was not published.
+`MCGitGovernanceLand.tla` checks that the row protocol refines `GitRefDB.tla`
+with the commit as the linearization point, so the theorems below hold of a
+governed land with "pointer" read as "the row".
 
 ## Protocol
 

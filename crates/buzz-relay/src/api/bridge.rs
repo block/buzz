@@ -4,6 +4,9 @@
 //! authenticated via NIP-98 signed events.
 
 mod effective_edit;
+mod git_effective;
+mod git_receipts;
+mod governance;
 mod membership_snapshot;
 mod read_state_snapshot;
 pub(crate) mod search_slots;
@@ -1689,21 +1692,40 @@ async fn query_events_authed(
     let pubkey = caller.pubkey;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
+    // A Git read proves its owner, and Git grant, as a Git door does.
     let auth_tag = super::relay_members::extract_auth_tag_header(headers);
-    let membership = super::relay_members::enforce_relay_membership(
-        state,
-        tenant,
-        &pubkey_bytes,
-        auth_tag,
-        caller.signed_at,
-        caller.token_owner,
-    )
-    .await;
-    caller
+    let git_read = serde_json::from_slice::<Vec<Value>>(body).is_ok_and(|filters| {
+        git_effective::requested(&filters)
+            || git_receipts::requested(&filters)
+            || governance::requested(&filters)
+    });
+    let membership = match git_read {
+        true => super::relay_members::enforce_git_membership(
+            state,
+            tenant,
+            &pubkey,
+            auth_tag,
+            caller.signed_at,
+            caller.token_owner,
+        )
+        .await
+        .map(|(_, grant)| grant),
+        false => super::relay_members::enforce_relay_membership(
+            state,
+            tenant,
+            &pubkey_bytes,
+            auth_tag,
+            caller.signed_at,
+            caller.token_owner,
+        )
+        .await
+        .map(|_| None),
+    };
+    let grant = caller
         .admit_member(membership)
         .map_err(IntoResponse::into_response)?;
 
-    query_member_events(state, tenant, body, caller)
+    query_member_events(state, tenant, body, caller, grant.as_ref())
         .await
         .map_err(IntoResponse::into_response)
 }
@@ -1714,6 +1736,7 @@ async fn query_member_events(
     tenant: &TenantContext,
     body: &[u8],
     caller: &ProvenCaller,
+    grant: Option<&buzz_core::governance::GitGrant>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let pubkey = caller.pubkey;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
@@ -1721,6 +1744,18 @@ async fn query_member_events(
     // depth_limit, feed_types) that nostr::Filter silently drops.
     let raw_filters: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    if git_effective::requested(&raw_filters) {
+        caller.read_artifact(&raw_filters);
+        return git_effective::query(state, tenant, &pubkey, grant, &raw_filters).await;
+    }
+    if git_receipts::requested(&raw_filters) {
+        caller.read_artifact(&raw_filters);
+        return git_receipts::query(state, tenant, &pubkey, grant, &raw_filters).await;
+    }
+    if governance::requested(&raw_filters) {
+        caller.read_artifact(&raw_filters);
+        return governance::query(state, tenant, &pubkey, grant, &raw_filters).await;
+    }
     if membership_snapshot::requested(&raw_filters) {
         caller.read_artifact(&raw_filters);
         return membership_snapshot::query(

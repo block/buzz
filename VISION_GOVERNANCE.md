@@ -1,6 +1,6 @@
 # 🏛️ Buzz Governance: Your community, your rules for change
 
-> Dana asks her agent to fix a rounding bug in `ledger`. The agent pushes a branch, opens a pull request, and spins up `#fix-rounding` to work it. The conversation comes alive: the community's CI posts green, the secret scan posts clean. A rules card pinned at the top says what's left. One approval from someone who isn't Dana, and one from `#security`, because `ledger` carries the `payments` label. Sam approves. Ines from security approves. Dana hits **Land**. The relay checks every rule one last time and moves `main`. That evening Dana revokes the agent's grant; the job is done.
+> Dana asks her agent to fix a rounding bug in `ledger`. The agent pushes a branch, opens a pull request, and spins up `#fix-rounding` to work it. The conversation comes alive: the community's CI posts green, the secret scan posts clean. A rules card pinned at the top says what's left. One approval from someone who isn't Dana, and one from `#security`, because `ledger` carries the `payments` label. Sam approves. Ines from security approves. Dana hits **Land**. The relay checks every rule one last time and moves `main`. The grant Dana signed for the agent ran out that evening; the job is done.
 >
 > Fourteen months later an auditor asks who approved the rounding change. `#fix-rounding` is long archived. Sam has moved teams. An admin pulls the receipt: the exact commit, the agent and the human it worked for, both approvals, the check runs, and the rules in force that day. She exports a signed copy the auditor can verify offline. Nobody had to remember anything.
 
@@ -35,7 +35,7 @@ every repo        main: no force-push, no delete
                   any push: reject detected secrets
 label payments    main: 2 approvals, 1 from #security
                   main: check "ledger-ci" from ci-bot must pass
-agents            grants name their repos, last at most 7 days
+agents            grants last at most 7 days
 ```
 
 *(Illustrative. The wire format belongs to the companion protocol proposal.)*
@@ -46,7 +46,7 @@ agents            grants name their repos, last at most 7 days
 
 **Secret scanning** runs at the door. Detected secrets are rejected before incoming code becomes visible to anyone else.
 
-**Agent limits** cap what any member can hand to an agent or integration: which repos, which actions, how long, and whether widening a grant needs an admin.
+**Agent limits** cap what any member can hand to an agent or integration: how long a grant may last.
 
 Every change to the floor is a signed command from a named admin, checked against their role and recorded, the same way moderation actions are. The relay publishes the current rules to the people allowed to read them.
 
@@ -84,7 +84,7 @@ When the change lands, its work channel can archive. The conversation stays as t
 
 ## Agents: A Grant, Not a Key
 
-An agent reaches a repo only through its own membership in the repo channel, never through its owner's. Where the community requires it, the agent also needs a grant from you: these repos, these actions, until Friday. A grant only narrows. It never lets an agent see a channel it isn't in, and it can never exceed your own authority or the community's cap. The grant lives in the community, not in a tag the agent carries, so revoking it bites on the next request. An agent never holds more than its owner currently does. When you lose access to a repo, your agents lose it on the same schedule, grant or no grant.
+An agent reaches a repo only through its own membership in the repo channel, never through its owner's. To read, push or manage, the agent also needs a grant from you: this repo or all of them, this level, until Friday. A grant is a tag you sign and the agent carries on each request, and it is valid for the window you state in it. A grant only narrows. It never lets an agent see a channel it isn't in, and it can never exceed your own authority or the community's cap. To stop an agent before its grant runs out, an admin bans the agent's key, and that bites on the next request. An agent never holds more than its owner currently does. When you lose access to a repo, your agents lose it on the same schedule, grant or no grant.
 
 The agent's key is still its own key, and **handing over the key doesn't hand over the agent**. Anyone holding it can sign as the agent, and anyone can write a new owner attestation. But a community records an agent's first owner and keeps it. A different owner is refused, and whoever holds the key acts on the original owner's account. To give someone an agent, give them a new key.
 
@@ -109,7 +109,7 @@ Your key is yours. The relay never sees it, and an identity assertion doesn't le
 
 In a community backed by an identity issuer ([NIP-FI](docs/nips/NIP-FI.md)), the issuer vouches for who you are and for how long. The relay checks that voucher when you connect and on every git request, and no session outlives it. Corporate identity says who you are and when that stops. The community says what you may do.
 
-A "no" from inside Buzz (a ban, a removal, a revoked grant) takes effect on the next request. A "no" from the issuer lands when the issuer stops vouching for you. Once it stops issuing, you can't get back in after your current voucher runs out, and the community sets how long a voucher can live. A disconnect from the issuer can cut that short wherever it's applied, but it isn't the bound. Whether a write already in flight can still land is a separate promise: only under authority valid at its final acceptance.
+A "no" from inside Buzz (a ban, a removal) takes effect on the next request. A "no" from the issuer lands when the issuer stops vouching for you. Once it stops issuing, you can't get back in after your current voucher runs out, and the community sets how long a voucher can live. A disconnect from the issuer can cut that short wherever it's applied, but it isn't the bound. Whether a write already in flight can still land is a separate promise: only under authority valid at its final acceptance.
 
 A governed community records which person stood behind each change. If you reuse that key on public Nostr, it's linkable to that identity. Use a separate key per governed community if that matters to you.
 

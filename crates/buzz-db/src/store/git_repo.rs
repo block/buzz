@@ -179,6 +179,11 @@ pub async fn count_repos_for_owner(
 /// [`ReserveOutcome::Reserved`], so the announce is all-or-nothing. Scoped to
 /// `owner_pubkey` so a rollback can never delete a name a *different* owner
 /// concurrently holds. Returns the number of rows removed (0 or 1).
+///
+/// A late rollback must not undo what others committed since: a row with a
+/// landed manifest or a governed authority write is kept. The delete waits
+/// for any land holding the row and re-checks this on the committed row, so
+/// a land that commits first always survives.
 pub async fn release_repo_name(
     pool: &PgPool,
     community: CommunityId,
@@ -193,7 +198,8 @@ pub async fn release_repo_name(
     .await?;
     let result = sqlx::query(
         "DELETE FROM git_repo_names \
-         WHERE community_id = $1 AND repo_id = $2 AND owner_pubkey = $3",
+         WHERE community_id = $1 AND repo_id = $2 AND owner_pubkey = $3 \
+           AND manifest IS NULL AND authority_version = 0",
     )
     .bind(community.as_uuid())
     .bind(repo_id)

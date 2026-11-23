@@ -5,6 +5,9 @@
 //! - `transport` — Smart HTTP protocol (info/refs, upload-pack, receive-pack)
 //! - `hook` — Pre-receive hook script and injection
 //! - `policy` — Internal policy endpoint (HMAC-authenticated callback from hook)
+//! - `land` — The governed land: the transaction in which a change takes effect
+//! - `reads` — The record of every read of a governed repository
+//! - `scan` — The secret scan of everything a push brings, read before the land
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -22,14 +25,19 @@ use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::state::AppState;
 
+mod authority;
 pub mod binding;
 pub mod cas_publish;
+pub(crate) mod gate;
 pub mod hook;
 pub mod hydrate;
+mod land;
 pub mod manifest;
 pub mod manifest_event;
 pub mod pack_cache;
 pub mod policy;
+pub(crate) mod reads;
+mod scan;
 mod settings;
 pub mod store;
 pub mod transport;

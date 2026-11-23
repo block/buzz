@@ -118,6 +118,10 @@ fmt:
 fmt-check:
     cargo fmt --all -- --check
 
+# Prove the governed Git decision (crates/buzz-git-gate) with Verus
+verify-git-gate:
+    ./scripts/verify-git-gate.sh
+
 # Run clippy with warnings as errors
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
@@ -480,6 +484,7 @@ test-unit:
         # replay — so it belongs in the unit job. Run all targets (lib + the
         # tests/replay_fixtures.rs integration test), not just --lib.
         cargo nextest run -p buzz-conformance
+        cargo nextest run -p buzz-git-gate
         # Gateway unit and black-box HTTP tests are infra-free. Postgres-backed
         # contract/race tests run in the dedicated CI job below.
         cargo nextest run -p buzz-push-gateway

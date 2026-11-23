@@ -405,6 +405,13 @@ pub const KIND_NIP29_LEAVE_REQUEST: u32 = 9022;
 /// Buzz: Conditionally change the role of an existing Solo member.
 pub const KIND_SOLO_MEMBER_ROLE: u32 = 9050;
 
+/// Signed direct governance command; never ordinary content.
+pub const KIND_GOVERNANCE_COMMAND: u32 = 9060;
+/// Signed Git review or check evidence, retained privately by the relay.
+pub const KIND_GIT_EVIDENCE: u32 = 9061;
+/// Relay-signed accepted governance document.
+pub const KIND_GOVERNANCE_STATE: u32 = 39010;
+
 // Buzz community moderation commands (mod-signed, processed like 9030-series:
 // validated + executed directly, never stored as regular events; every
 // accepted command writes a `moderation_actions` audit row).
@@ -723,6 +730,9 @@ pub const KIND_PROJECT: u32 = 30621;
 
 /// All registered kind constants — used for duplicate detection and iteration.
 pub const ALL_KINDS: &[u32] = &[
+    KIND_GOVERNANCE_COMMAND,
+    KIND_GIT_EVIDENCE,
+    KIND_GOVERNANCE_STATE,
     KIND_PROFILE,
     KIND_TEXT_NOTE,
     KIND_CONTACT_LIST,
@@ -948,7 +958,8 @@ pub const KIND_VERIFIED_PROFILE: u32 = 30382;
 pub const fn is_relay_only_kind(kind: u32) -> bool {
     matches!(
         kind,
-        KIND_VERIFIED_PROFILE
+        KIND_GOVERNANCE_STATE
+            | KIND_VERIFIED_PROFILE
             | KIND_ARTIFACT_REMOVAL
             | KIND_NIP43_MEMBERSHIP_LIST
             | KIND_IA_ARCHIVED_LIST

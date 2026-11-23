@@ -305,6 +305,23 @@ pub(crate) async fn lock_admission(
     Ok(())
 }
 
+/// Hold invitation admission shared: a governed Git land holds it while it
+/// decides, so no ban or first owner link commits under it, and lands do not
+/// wait on each other for it.
+pub(crate) async fn lock_admission_shared(
+    tx: &mut sqlx::PgConnection,
+    community: CommunityId,
+) -> Result<()> {
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock_shared(\
+         hashtextextended('invite-admission:' || $1::text, 0))",
+    )
+    .bind(community.as_uuid())
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
 /// Record that `pubkey` accepted `policy_version`, on the claim's transaction.
 ///
 /// The member row is locked `FOR KEY SHARE` first (`NotFound` when it is gone),

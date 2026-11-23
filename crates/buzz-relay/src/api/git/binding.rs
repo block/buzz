@@ -46,14 +46,18 @@ pub enum RepoBinding {
 
 /// Resolve the channel binding of a kind:30617 announcement from its tags.
 pub fn resolve_repo_binding(event: &nostr::Event) -> RepoBinding {
-    let Some(first) = event
-        .tags
-        .iter()
-        .find(|t| t.as_slice().first().map(String::as_str) == Some("buzz-channel"))
+    resolve_binding_tags(event.tags.iter().map(|t| t.as_slice()))
+}
+
+/// [`resolve_repo_binding`] over raw tags, as stored.
+pub fn resolve_binding_tags<'a>(tags: impl IntoIterator<Item = &'a [String]>) -> RepoBinding {
+    let Some(first) = tags
+        .into_iter()
+        .find(|t| t.first().map(String::as_str) == Some("buzz-channel"))
     else {
         return RepoBinding::NotBound;
     };
-    match first.as_slice().get(1).map(|v| Uuid::parse_str(v)) {
+    match first.get(1).map(|v| Uuid::parse_str(v)) {
         Some(Ok(id)) => RepoBinding::Bound(id),
         _ => RepoBinding::Broken,
     }

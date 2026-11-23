@@ -3898,12 +3898,15 @@ fn delete_tombstone_content(
 
 /// Validate a git repo identifier (d-tag value from kind:30617).
 ///
-/// Rules: `[a-zA-Z0-9._-]{1,64}`, no leading dots, no `..`.
+/// Rules: `[a-zA-Z0-9._-]{1,64}`, no leading dots, no `..`, no `.git` suffix:
+/// the Git routes strip one `.git`, so a name ending in it could never be
+/// reached as itself.
 fn validate_repo_id(repo_id: &str) -> bool {
     !repo_id.is_empty()
         && repo_id.len() <= 64
         && !repo_id.starts_with('.')
         && !repo_id.contains("..")
+        && !repo_id.ends_with(".git")
         && repo_id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
@@ -3956,7 +3959,7 @@ pub(crate) async fn handle_git_repo_announcement_inner(
 
     if !validate_repo_id(&repo_id) {
         return Err(anyhow::anyhow!(
-            "invalid repo identifier: must be [a-zA-Z0-9._-]{{1,64}}, no leading dots, no '..'"
+            "invalid repo identifier: must be [a-zA-Z0-9._-]{{1,64}}, no leading dots, no '..', no '.git' suffix"
         ));
     }
 
@@ -4048,6 +4051,22 @@ pub(crate) async fn handle_git_repo_announcement_inner(
     // pushed), and deleting it here would strand a repo whose pointer that
     // other attempt already established.
     let reserved_by_this_attempt = matches!(outcome, ReserveOutcome::Reserved);
+
+    // Pin the bound channel now, from the first announcement that names one,
+    // so no re-announcement before the first push can choose another. A
+    // pinned repository ignores its announcement's tag from here on.
+    let announced = match crate::api::git::binding::resolve_repo_binding(event) {
+        crate::api::git::binding::RepoBinding::Bound(channel) => Some(channel),
+        _ => None,
+    };
+    let coordinate = buzz_core::governance::RepoCoordinate {
+        owner: owner_hex.clone(),
+        name: repo_id.clone(),
+    };
+    state
+        .db
+        .git_repo_channel(community, &coordinate, announced)
+        .await?;
 
     // The event row and name registry are ordinary database state: if deletion
     // quiescing wins before they commit, the DB write fence rejects them; if
@@ -5018,6 +5037,18 @@ mod tests {
 
     fn tag(name: &str, value: &str) -> Vec<String> {
         vec![name.to_string(), value.to_string()]
+    }
+
+    /// An announced name the Git routes could only reach by stripping it is
+    /// refused: `x.git` would be served as `x`.
+    #[test]
+    fn a_repo_name_ending_in_dot_git_is_refused() {
+        for name in ["x", "x.gitx", "x.git-1", "a.b"] {
+            assert!(validate_repo_id(name), "{name}");
+        }
+        for name in ["x.git", ".git", "x.git.git"] {
+            assert!(!validate_repo_id(name), "{name}");
+        }
     }
 
     #[test]

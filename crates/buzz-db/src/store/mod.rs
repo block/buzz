@@ -48,6 +48,8 @@ mod event_floor_postgres_tests;
 
 /// Home feed queries.
 pub mod feed;
+/// The governed Git land transaction.
+pub mod git_land;
 /// Git repository name registry (NIP-34 kind:30617).
 pub mod git_repo;
 /// Deployment-wide leader election over session advisory locks.
@@ -131,3 +133,15 @@ pub mod media;
 mod media_postgres_tests;
 #[cfg(test)]
 mod message_edit_state_postgres_tests;
+
+/// Transaction-bound audit-chain persistence.
+pub mod audit;
+
+/// Accepted Git governance documents.
+pub mod governance;
+
+/// Git approval and check evidence.
+pub mod git_evidence;
+
+/// Authorized Git decision receipt pages.
+pub mod git_receipts;

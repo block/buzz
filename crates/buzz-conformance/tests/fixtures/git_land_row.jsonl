@@ -1,0 +1,8 @@
+{"schema_version":1,"action":{"type":"pointer_observed","repo":"r1","refs":{"refs/heads/main":"t0"}}}
+{"schema_version":1,"action":{"type":"decide","push":"p1","repo":"r1","git_ref":"refs/heads/main","new_tip":"t1","actor":"g","read_version":7,"verdict":"allow","valid_until":9000,"evidence":["approval-d"],"checks":["ci-pass-3"]}}
+{"schema_version":1,"action":{"type":"land","push":"p1","refs":{"refs/heads/main":"t1"},"cas_version":7,"swapped_at":5000,"cas":"won"}}
+{"schema_version":1,"action":{"type":"receipt","push":"p1","git_ref":"refs/heads/main","verdict":"allow","evidence":["approval-d"],"checks":["ci-pass-3"]}}
+{"schema_version":1,"action":{"type":"pointer_observed","repo":"r1","refs":{"refs/heads/main":"t1"}}}
+{"schema_version":1,"action":{"type":"decide","push":"p2","repo":"r1","git_ref":"refs/heads/main","new_tip":"t1","actor":"g","read_version":8,"verdict":"deny","valid_until":9000,"evidence":["approval-d"],"checks":["ci-pass-3"]}}
+{"schema_version":1,"action":{"type":"receipt","push":"p2","git_ref":"refs/heads/main","verdict":"deny","evidence":["approval-d"],"checks":["ci-pass-3"]}}
+{"schema_version":1,"action":{"type":"pointer_observed","repo":"r1","refs":{"refs/heads/main":"t1"}}}
