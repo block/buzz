@@ -294,8 +294,8 @@ Team membership is channel membership, so it is also access: every member can re
 
 Changing who is on a team is a change to the channel's membership, under the channel's role rules:
 
-- a member of the channel, other than a guest, can add someone who is not yet in the channel as a member or guest, subject to that person's add policy: a policy of only their owner admits additions by their owner alone, and a policy of nobody rejects every addition by someone else, including their owner;
-- only an owner or admin can add someone as an owner or admin, or change an existing member's role, up or down;
+- a member of the channel, other than a guest, can add someone who is not yet in the channel as a member, bot or guest, and can make a guest a member or bot. Both are subject to that person's add policy: a policy of only their owner admits these changes by their owner alone, and a policy of nobody rejects every one by someone else, including their owner;
+- only an owner or admin can add someone as an admin or make any other role change, up or down, and only an owner can add someone as an owner or change an owner's role;
 - only an owner or admin can remove someone else, except that a member can remove an agent they own;
 - a guest can add and remove no one;
 - anyone can leave;
@@ -363,7 +363,7 @@ To find the teams an agent is on, the agent's client queries the channels the ag
 
 then reads those channels' kind:39000 by `#d`.
 
-In every case the client keeps only channels whose type is `system`, whose visibility is `private`, whose labels include the family label, and whose `P` is the expected owner. It MUST NOT put the family label in the same `#t` filter, because values in one filter combine with OR. When more than one channel remains for one agent or team, the client uses the oldest, by NIP-CL's "Choosing one channel" rule. A client creates a config channel only when this query returns none. A client MUST NOT delete or archive a config channel because it was not selected.
+In every case the client keeps only channels whose type is `system`, whose kind:39000 has the NIP-29 `private` tag and no `public` tag, whose labels include the family label, and whose `P` is the expected owner. It MUST NOT put the family label in the same `#t` filter, because values in one filter combine with OR. When more than one channel remains for one agent or team, the client uses the oldest, by NIP-CL's "Choosing one channel" rule. A client creates a config channel only when this query returns none. A client MUST NOT delete or archive a config channel because it was not selected.
 
 ### Config artifacts
 
@@ -470,13 +470,13 @@ The attention channel is the agent attention channel of "Config channels", which
 - An agent with no recorded agent owner has no attention channel. Its Attention stays local.
 - The agent MUST NOT create, delete or archive an attention channel, or change its roster. The relay enforces only part of this (see "Roster and trust").
 
-A private channel lets only its members read its artifacts, and NIP-AR lets only members with a writing role (`owner`, `admin` or `member`) write them. A member with the `guest` role can read but not write.
+A private channel lets only its members read its artifacts, and NIP-AR lets only members with a writing role (`owner`, `admin`, `member` or `bot`) write them. A member with the `guest` role can read but not write.
 
 #### Roster and trust
 
-A reader does not check who signed a record. The relay accepts a write only from a member with a writing role, and the reader trusts that gate. So the roster decides whose records apply. Each roster change is a signed kind:9000 or kind:9001, so the channel's history shows who could write at each time.
+A reader does not check who signed a record. The relay accepts a write only from a member with a writing role, and the reader trusts that gate. So the roster decides who can write. Each roster change is a signed kind:9000 or kind:9001, so the channel's history shows who could write, unless its author redacted it (kind:9005).
 
-The agent owner decides who writes. To make the agent's Attention read-only to the agent, the agent owner gives it the `guest` role in the attention channel; its role in its agent config channel is separate. A person who manages the agent with the agent owner is a member ("Editing"). The relay stops the agent from removing the agent owner or changing roles, because only a channel owner or admin can. It does not stop the agent from adding a key: this NIP lets any member add another key as a member or guest ("Membership"). So a prompt-injected agent can add a writer. The roster shows that key, and the agent owner can remove it.
+The agent owner decides who writes. To make the agent's Attention read-only to the agent, the agent owner gives it the `guest` role in the attention channel; its role in its agent config channel is separate. A person who manages the agent with the agent owner is a member ("Editing"). The relay stops the agent from removing the agent owner or another member, demoting anyone, and granting `owner` or `admin`. It does not stop any member with a writing role, the agent included, from adding a key as a `member` or `bot`, or from making a guest a `member` or `bot` ("Membership"). So a prompt-injected agent can add a writer, and another writer can lift the agent's `guest` role, unless the agent's add policy is only its owner. The roster shows each change. Removing a key stops its writes at once, but the records it already wrote stay in the set until a writer changes or removes them.
 
 #### Lost access
 
@@ -637,7 +637,7 @@ Every change edits exactly one object, and is one NIP-AR revision.
    - an Interest is not removed while a watch, valid or skipped, names it;
    - a watch does not change its `type` or its `interest_id`.
 3. **Publish** one revision and wait for the relay's `OK`:
-   - **Add:** NIP-AR's ensure flow. Send `create`. On `conflict` or `duplicate`, read the head with the `head` view. If it is a deletion, send `restore` with `prev` set to it. If it is live with the same value, the add is done. If it is live with another value, fail: the object exists. If there is no head, the slug was retired; fail and ask for another `<id>`.
+   - **Add:** NIP-AR's ensure flow. Send `create`. On `conflict` or `duplicate`, read the head with the `head` view. If it is a deletion, send `restore` with `prev` set to it. If it is live with the same value, the add is done. If it is live with another value, fail: the object exists. If there is no head in the channel, the `d` is taken: the slug was retired here, or a key used the same `d` in another channel. Fail and ask for another `<id>`.
    - **Change:** `update` with `prev` = the head from step 1.
    - **Remove:** `delete` with `prev` = the head from step 1.
 4. **Lost `OK`.** Read the head. If it is the revision sent, the change is done. If it is still the head from step 1, send the revision again. If it is another revision, fail with `conflict`. If the head cannot be read, do not send again: fail, and say that the change may not have been saved.
@@ -671,7 +671,7 @@ Within each step, by slug.
 
 The agent owner's client moves the agent's local Attention to the relay in this order. It moves only a runtime that has not switched: one that already reads the channel needs no move, and step 1 would stop it.
 
-1. **Find** the channel. If there is none, create it ("Config channels"), without the agent. If the agent is in it with a role that can write (from an earlier move), remove it, so only the agent owner writes until step 4. A guest stays.
+1. **Find** the channel. If there is none, create it ("Config channels"), without the agent. If the agent is in it with a role that can write (from an earlier move), remove it, so the agent does not write until step 4. A guest stays. Other members can still write; step 3 finds their changes.
 2. **Write** each local object ("Writing attention"), in the order above.
 3. **Read back** the set ("Reading attention", steps 2 and 3) and compare it with the local set. If they differ, stop: nothing switches, and the local set keeps running. An Interest that only the relay holds and a local watch names is no difference; the switch keeps it.
 4. **Add the agent** with the `member` role, if it is not in the channel. Then Find again: if the add is not confirmed or the agent is not in the roster, stop, and nothing switches. A later move finds the set already there, writes nothing and adds the agent.
@@ -692,7 +692,8 @@ A runtime that has not switched does not run Find for the agent.
    - its content is not a JSON object with exactly `schema`, `slug` and `value`, or is over 65,535 bytes;
    - its `d` is not the derivation of its `slug`;
    - its `schema` is not one the reader knows;
-   - its slug or value is invalid.
+   - its slug or value is invalid;
+   - it is a watch whose Interest is skipped, including over a limit: that Interest could be paused.
 
    A skipped record does not stop the other records. A reader keeps a record whose `d` does not match its slug under its `d`, so that it cannot hide the record it names.
 4. **Live changes.** After `EOSE`, each `EVENT` names one record by its `d`. A reader removes that record, before it decodes any content, when the event is:
@@ -710,6 +711,8 @@ A watch or timer can name an Interest that does not exist, for example after ano
 ### Running
 
 The agent's settings and instructions ("Config artifacts") bound its Attention. A runtime does not run a record that needs a provider, tool or channel that the agent's settings do not allow; it reports the record as skipped. Interest instructions reach the agent as task text, after the agent's own instructions, and do not replace them.
+
+Every runtime that runs the agent runs the whole set. This NIP does not coordinate runtimes: when two run at once, each runs every watch and timer.
 
 #### Event watch matching
 
@@ -789,12 +792,15 @@ The writer publishes `interest/reviews` first, then `watch/review-requests`. To 
 
 ### Attention security
 
-- **Readers trust the roster, not signers.** Any member with a writing role can add a watch that wakes the agent, or change its instructions. Keep the roster to the agent, its agent owner and the people who manage the agent. The agent can add a key as a member; the agent owner sees it in the roster and can remove it.
+- **Readers trust the roster, not signers.** Any member with a writing role can add a watch that wakes the agent, or change its instructions. Keep the roster to the agent, its agent owner and the people who manage the agent. The agent can add a key as a member; the agent owner sees it in the roster and can remove it, and then checks the records that key wrote, because they stay.
+- **The agent's own records persist.** A prompt-injected agent can write an Interest with an attacker's instructions and a watch on the attacker's messages, or a timer, so it keeps waking after the injected session ends. A watch does not follow the agent's `respond_to` setting. An agent that is a guest in its agent config channel and a member of its attention channel can still write these standing instructions. To stop that, make it a guest in the attention channel too, and set its add policy to only its owner, so that no other member can lift the guest role.
+- **Labels grant nothing.** An owner or admin of another system channel that the agent owner created can label it `agent-attention` with the agent's key. If that channel is older, readers use it. Give the `admin` role in the agent owner's system channels only to people who could manage the agent.
+- **A writer can take a slug.** A key that knows the channel's ID can derive any slug's `d` and use it first in another channel, so that slug cannot be added here. Removing the key does not stop it. The writer picks another `<id>`.
 - **Members can read what the agent writes.** The agent can copy what it read elsewhere into an Interest. Adding a member to the attention channel lets that member read it, so it is a disclosure decision for the agent owner.
 - **Instructions are untrusted input** to the agent, like any message. Writing a record grants no permission that the agent's runtime does not already give.
 - **Titles and content are not encrypted.** The channel is private, so only members and the relay can read them. Put no secrets in Attention; a source's `config` names commands and paths, not credentials.
 - **A destination grants nothing.** The runtime still checks the agent's membership in the destination channel.
-- **Removals are history.** Every revision stays under the community's retention policy, so a removed instruction can still be read by members and the relay.
+- **Removals are history.** Every revision stays under the community's retention policy, so a removed instruction can still be read by members and the relay. A writer can redact its own events (kind:9005), including the roster changes it made and its revisions, so history is not a complete record. Redacting a current head retires its slug.
 
 ## Relay behavior
 
