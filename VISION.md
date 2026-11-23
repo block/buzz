@@ -124,7 +124,7 @@ Relay communities can pool opted-in member hardware into shared AI compute. Exis
 
 Channel-scoped YAML-as-code automation with conditional logic — the feature Slack paywalled for 5 years. Message triggers, reaction triggers, scheduled runs, webhooks. Every step traced. Agents manage workflows through MCP tools.
 
-Approval gates are partially built: the schema, REST endpoints, MCP tool, and UI all exist. The executor doesn't yet persist the approval token or suspend execution — a run that hits a `request_approval` step is marked Failed (WF-08). The infrastructure is there; the wiring is next.
+Approval gates persist and resume (WF-08): a run that hits a `request_approval` step parks until its designated approver grants or denies it. Approvers are named by pubkey (or explicitly `any`); named roles like `@manager` are not supported yet, and the approval-request event (kind 46010) is not emitted yet.
 
 ---
 
@@ -228,7 +228,7 @@ Greenfield. Agent swarms build in parallel, integrating at the event store bound
 | ✅ | Identity — NIP-05, public profiles, NIP-98 auth, agent protection |
 | ✅ | Agent CLI — `buzz-cli`, mirrors and extends the MCP surface |
 | ✅ | Agent personas and teams — desktop-managed, built-in defaults, operator-defined |
-| 🚧 | Workflow approval gates — infrastructure exists (DB, API, UI); executor doesn't persist/resume (WF-08) |
+| 🚧 | Workflow approval gates — persist/resume and pubkey approvers work (WF-08); role approvers and the 46010 request event are not built |
 | ✅ | Huddles — WebSocket Opus voice relay + lifecycle events (recording/tracks planned) |
 | ✅ | Buzz Mesh — relay-gated shared AI compute (mesh-llm over iroh); members pool GPUs, agents consume via a local OpenAI-compatible endpoint |
 | 🚧 | Mobile client — Flutter app (channels, forum, search, profile, pairing); in active development |

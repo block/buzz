@@ -647,8 +647,8 @@ Note: Both `TriggerDef` and `ActionDef` use serde internally-tagged enums. Trigg
 | `set_channel_topic` | Update channel topic |
 | `add_reaction` | React to the trigger message |
 | `call_webhook` | HTTP POST to external URL (SSRF-protected, redirects disabled, 1 MiB response cap) |
-| `request_approval` | Suspend execution; fields: `from`, `message`, `timeout` (default 24h) |
-| `delay` | Pause execution (max 300 seconds) |
+| `request_approval` | Suspend at a persisted approval gate; fields: `from` (approver, see below), `message`, `timeout` (default 24h, 1s–7d) |
+| `delay` | Pause execution (1–270 seconds) |
 
 **Template variables:** `{{trigger.text}}`, `{{trigger.author}}`, `{{steps.ID.output.FIELD}}`. Single-pass resolution (not recursive). Unknown variables left as literal text.
 
@@ -656,7 +656,30 @@ Note: Both `TriggerDef` and `ActionDef` use serde internally-tagged enums. Trigg
 
 **Concurrency:** `Arc<Semaphore>` with 100 permits. `try_acquire()` — returns `CapacityExceeded` immediately rather than queuing.
 
-**Approval gates:** `request_approval` action returns `StepResult::Suspended` with a generated UUID token, but the engine does not yet persist the token or resume execution — runs that hit an approval gate are marked as failed (🚧 WF-08). `execute_from_step()` exists for future resumption support.
+**Durations:** `timeout`, `duration`, and schedule `interval` take ASCII digits with an optional `s`, `m`, `h`, or `d` suffix (no suffix = seconds; no signs, decimals, or compound values). They are validated when the definition is saved, never at run time: approval `timeout` must be 1s–7d, `delay` 1–270s, `interval` at least 60s. Values that overflow are rejected, not wrapped.
+
+**Approval gates (WF-08):** a run that reaches `request_approval` persists a gate (`workflow_approvals`, token stored only as its SHA-256 hash) and parks in `WaitingApproval`. Gates live in Postgres, so they survive restarts, and every decision is authorized against the persisted gate, never in-memory state.
+
+*Approver (`from`) formats* — `buzz_workflow::approver` is the only parser:
+
+| `from` | Who may grant **or** deny |
+|--------|---------------------------|
+| 64-char hex pubkey (any case) | Exactly that identity |
+| `any` | Any identity that may read the workflow's channel (explicit opt-in) |
+| Template, e.g. `{{trigger.author}}` | The pubkey it resolves to at run time. If it resolves to anything other than a pubkey (including `any`), the run fails with `template_resolution_failed` and no gate is created |
+
+A template approver hands the decision to whoever controls the templated value: `{{trigger.author}}` lets the person who triggered the run approve their own gate, and `{{trigger.text}}` or a webhook field lets whoever writes that text or payload pick the approver. Use a literal pubkey when the approver must be independent of the trigger.
+
+Named roles (`@manager`, `@lead`, …), `@`-prefixed keys, npubs, and empty values are **not supported**: there is no role resolver. Definitions using them are rejected when saved, a stored definition that still uses one fails the run with `invalid_definition` instead of parking, and a gate row that somehow holds one can be decided by nobody (403).
+
+*Who may decide.* Grant and deny are authorized identically by `api::workflows::authorize_approval_decision`, which both decision paths call before writing anything: the requester must be able to read the workflow's channel **and** satisfy the gate's approver spec. There is no fallback: the workflow initiator, the workflow owner, and channel owners/admins may decide only if the spec names them (or is `any`). The two paths are:
+
+- `POST /workflows/{workflow_id}/runs/{run_id}/approvals/{approval_ref}/decide` with `{"decision": "granted"|"denied", "note"?: string}`. It requires NIP-98 with a `payload` tag covering the body (no `X-Pubkey` fallback). Answers: 403 not authorized / unsupported spec, 404 workflow, run, or gate not visible (or the ref belongs to another run or workflow), 409 already decided or run not waiting, 410 expired. `approval_ref` (from `GET .../approvals`) identifies the gate; it is not a credential.
+- Nostr kinds 46030 (grant) / 46031 (deny) with the ref in a `d` tag (used by `buzz workflows approve` and the SDK).
+
+*State transitions.* The decision write is a compare-and-set on `status = 'pending'`, so across both paths exactly one decision wins. Repeats and attempts to flip a decided gate are refused and change nothing. Only the winner touches the run, after the decision is committed: a grant resumes the run after the gate step (the gate step's output is `{approved, approver, note}`), a deny ends it (`approval_denied`; the HTTP path marks it `failed`, the Nostr path `cancelled`). Expiry is applied lazily, on an authorized decision attempt after `expires_at`, which marks the gate `expired` and fails the run (`approval_expired`). Unauthorized attempts write nothing.
+
+Known gaps: no 46010 approval-request event is emitted yet (engine-authored signing needs a design), there is no sweeper for expired or never-decided gates, and a crash between the decision commit and the run update/resume leaves the run in `WaitingApproval` with a decided gate.
 
 **Cron scheduler:** loop ticks every 60 seconds, evaluates cron expressions with window-based matching, and creates workflow runs for matched triggers. Fully implemented.
 
@@ -973,5 +996,5 @@ These are verified gaps in the current implementation — not design aspirations
 | 2 | **No rate limiting implementation** | `RateLimiter` trait exists in `buzz-auth`. Only implementation is `AlwaysAllowRateLimiter` (test stub, gated behind `#[cfg(any(test, feature = "test-utils"))]`). `RateLimitConfig` defines 4 tiers (human, agent-standard, agent-elevated, agent-platform) but none are enforced. |
 | 3 | **No dedicated typing REST endpoint** | Typing indicators (kind 20002) are delivered via both local fan-out and Redis pub/sub (cross-node). There is no REST endpoint to query current typers — `/api/presence` returns online/away status only, not typing state. |
 | 4 | **Huddle recording/tracks not built** | Voice, room lifecycle, and join/leave/end events are wired (see Huddle Audio above). Recording and per-track publishing have reserved kinds but no producer yet. |
-| 5 | **Approval gates not wired end-to-end** | The executor returns `StepResult::Suspended` and the relay has grant/deny API endpoints with DB CRUD, but the engine intercepts before creating `WaitingApproval` rows — runs that hit an approval gate are marked as Failed (🚧 WF-08). |
+| 5 | **Approval gates: approvers are pubkeys only** | Gates persist and resume (WF-08), but approvers must be a pubkey, `any`, or a template resolving to a pubkey. Named roles such as `@manager` are rejected because no role resolver exists. No 46010 request event is emitted and no sweeper expires abandoned gates. |
 | 6 | **Workflow actions partially stubbed** | The `send_dm` and `set_channel_topic` workflow actions are in the schema but return `NotImplemented` — a run that reaches one fails at execution (🚧 WF-07). |
