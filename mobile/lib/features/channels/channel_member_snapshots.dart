@@ -60,3 +60,12 @@ final huddleHistoryMembershipProvider = Provider.autoDispose
       if (members == null) return false;
       return members.any((member) => member.pubkey == pubkey);
     });
+
+/// Portraits for inventory shortcuts reuse the directory's existing roster.
+final pinMemberSnapshotProvider = Provider.autoDispose
+    .family<List<ChannelMember>, String>((ref, channelId) {
+      ref.watch(channelsProvider);
+      return ref
+          .read(channelsProvider.notifier)
+          .cachedMembersForChannel(channelId);
+    });

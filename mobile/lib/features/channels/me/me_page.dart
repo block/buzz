@@ -479,7 +479,6 @@ class _SoloFilterSection extends HookConsumerWidget {
       ),
     );
     final sortMode = display.sort ?? sectionSortMode;
-    final matching = <Channel>[];
     final limit = display.limitFor(manager?.store, group);
     final orderedChats =
         display.sort != null || sortMode == ChannelSortMode.alpha
@@ -505,7 +504,6 @@ class _SoloFilterSection extends HookConsumerWidget {
         windowSeconds: window,
         selected: selected == chat.id,
       )) {
-        matching.add(chat);
         if (limit == null || rows.length < limit) rows.add(row(chat));
       }
     }
@@ -516,20 +514,64 @@ class _SoloFilterSection extends HookConsumerWidget {
         () => tick.value++,
       ).cancel;
     }, [nextExpiry, tick.value]);
-    if (rows.length < matching.length) {
+    Widget buildDetail(Channel channel) {
+      final viewer = ref.read(myPubkeyProvider);
+      final legacy =
+          ref.read(meGroupsProvider).value?.channels ?? const <String>[];
+      return ChannelDetailPage(
+        channel: channel,
+        personalChat: channel.isPersonalChat(viewer, legacy),
+      );
+    }
+
+    if (rows.length < orderedChats.length) {
       rows.add(
         SectionShowMore(
           leadingInset: MessagesSectionOptions.leadingInset(context),
           buildRow: row,
           title: label,
-          channels: matching,
-          buildDetail: (channel) {
-            final viewer = ref.read(myPubkeyProvider);
-            final legacy =
-                ref.read(meGroupsProvider).value?.channels ?? const <String>[];
-            return ChannelDetailPage(
-              channel: channel,
-              personalChat: channel.isPersonalChat(viewer, legacy),
+          channels: orderedChats,
+          buildDetail: buildDetail,
+          liveContent: (routeRef) {
+            final organization = routeRef.watch(meGroupsProvider).value;
+            final layout = routeRef.watch(sidebarLayoutProvider);
+            final list =
+                routeRef.watch(channelsProvider).value ?? const <Channel>[];
+            final legacy = organization?.channels ?? const <String>[];
+            final assignments = organization?.assignments ?? const {};
+            final mode =
+                (group == 'solo'
+                    ? routeRef.watch(messagesDisplayProvider).sort
+                    : null) ??
+                routeRef.watch(channelSortProvider).store.groups[group] ??
+                ChannelSortMode.recent;
+            final viewer = routeRef.watch(myPubkeyProvider);
+            return (
+              title: label,
+              channels: sortChannelsForList(
+                list.where((c) {
+                  if (!c.isMember || c.isArchived || !c.isSoloChat(legacy)) {
+                    return false;
+                  }
+                  if (group == 'solo') {
+                    return layout.sectionKeyFor(
+                          c.id,
+                          starred: false,
+                          home: 'solo',
+                        ) ==
+                        'solo';
+                  }
+                  return group == 'solo:chats'
+                      ? !assignments.containsKey(c.id)
+                      : group == 'solo:workspace:${assignments[c.id]}';
+                }).toList(),
+                mode,
+              ),
+              buildRow: row,
+              buildDetail: (c) => ChannelDetailPage(
+                channel: c,
+                personalChat: c.isPersonalChat(viewer, legacy),
+              ),
             );
           },
         ),

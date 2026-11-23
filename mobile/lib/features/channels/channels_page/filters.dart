@@ -1,3 +1,5 @@
+export 'messages_display.dart';
+import 'messages_display.dart';
 import '../channel_sort/channel_sort_provider.dart';
 import '../channel_sections/section_reorder_sheet.dart';
 import '../../../shared/widgets/app_list.dart';
@@ -21,44 +23,6 @@ import '../../../shared/widgets/bottom_up_page_route.dart';
 import '../channel_filter/channel_filter_provider.dart';
 import '../channel_filter/channel_filter_store.dart';
 import '../channel_sort/channel_sort_storage.dart';
-
-class MessagesDisplay {
-  const MessagesDisplay({this.mode, this.count, this.days, this.sort});
-  final ChannelSortMode? sort;
-  final ChannelFilterMode? mode;
-  final int? count;
-  final int? days;
-
-  ChannelFilterMode modeFor(ChannelFilterStore? store, String group) =>
-      mode ?? store?.modeFor(group) ?? ChannelFilterMode.all;
-
-  int? limitFor(ChannelFilterStore? store, String group) {
-    final n = count ?? store?.countFor(group) ?? sectionCounts.first;
-    return modeFor(store, group) == ChannelFilterMode.active || n == 0
-        ? null
-        : n;
-  }
-
-  int windowFor(ChannelFilterStore? store, String group) => days == null
-      ? store?.windowFor(group) ?? defaultActiveWindowSeconds
-      : days! * 86400;
-}
-
-class _DisplayPreferences extends Notifier<MessagesDisplay> {
-  @override
-  MessagesDisplay build() => const MessagesDisplay(
-    sort: ChannelSortMode.recent,
-    mode: ChannelFilterMode.all,
-    count: 5,
-    days: 30,
-  );
-  void update(MessagesDisplay display) => state = display;
-}
-
-final messagesDisplayProvider =
-    NotifierProvider<_DisplayPreferences, MessagesDisplay>(
-      _DisplayPreferences.new,
-    );
 
 Future<void> showMessagesDisplayOptions(BuildContext context) async {
   await showSectionViewSheet(context, title: 'Display Options');
@@ -185,7 +149,9 @@ class _SectionViewSheet extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final group = this.group;
     final global = group == null;
-    final display = ref.read(messagesDisplayProvider);
+    final display = ref.watch(messagesDisplayProvider);
+    final scope = ref.watch(mobileSectionOrderKeyProvider);
+    final initialScope = useRef(scope);
     final manager = global
         ? null
         : ref.watch(
@@ -234,7 +200,8 @@ class _SectionViewSheet extends HookConsumerWidget {
       }
       return null;
     }, [manager, manager?.ready, manager?.store]);
-    if (!identical(originalManager.value, manager)) {
+    if (scope != initialScope.value ||
+        !identical(originalManager.value, manager)) {
       return SafeArea(
         child: Padding(
           padding: const EdgeInsets.all(Grid.xs),
@@ -275,7 +242,7 @@ class _SectionViewSheet extends HookConsumerWidget {
       failed.value = false;
       try {
         if (global) {
-          ref
+          await ref
               .read(messagesDisplayProvider.notifier)
               .update(
                 MessagesDisplay(
@@ -328,7 +295,7 @@ class _SectionViewSheet extends HookConsumerWidget {
       enabled: change != null,
       label: label,
       value: selected,
-      valueLabel: values[selected]!,
+      valueLabel: values[selected] ?? 'Section settings',
       onSelected: (value) => change?.call(value),
       options: [
         for (final entry in values.entries)
@@ -438,8 +405,7 @@ class _SectionViewSheet extends HookConsumerWidget {
                                         }
                                       : null,
                                 ),
-                              if (mode.value == ChannelFilterMode.active ||
-                                  mode.value == null)
+                              if (mode.value == ChannelFilterMode.active)
                                 choices<int>(
                                   'Active in the past',
                                   {

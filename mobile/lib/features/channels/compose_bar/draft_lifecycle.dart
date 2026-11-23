@@ -5,6 +5,7 @@ Future<void> _sendTextOnlyDraft({
   required _MarkdownEditingController controller,
   required ObjectRef<int> draftRevision,
   required int submittedDraftRevision,
+  required VoidCallback cleanupStoredDraft,
   required FocusNode focusNode,
   required VoidCallback clearComposer,
   required Future<void> Function() addMentionedNonMembers,
@@ -67,7 +68,10 @@ Future<void> _sendTextOnlyDraft({
       ),
     );
     // A send destination without an optimistic timeline clears on success.
-    if (clearedDraftRevision == null) clearSubmittedDraft();
+    if (clearedDraftRevision == null) {
+      clearSubmittedDraft();
+      if (clearedDraftRevision == null) cleanupStoredDraft();
+    }
   } on ActiveCommunityChangedError {
     restoreClearedDraft();
     _reportSendCancelledByCommunitySwitch(messenger);

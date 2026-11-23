@@ -1,6 +1,7 @@
 import 'package:buzz/features/channels/channel.dart';
-import 'package:buzz/features/home/home_pins.dart';
+import 'package:buzz/features/channels/channel_sections/pin_shortcuts.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/widgets/dm_header_cluster.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
@@ -36,8 +37,8 @@ void main() {
       await tester.pumpWidget(
         ProviderScope(
           overrides: [
-            channelMembersProvider.overrideWith(
-              (ref, id) async => [
+            pinMemberSnapshotProvider.overrideWith(
+              (ref, id) => [
                 for (final key in ['alice', 'bob'])
                   ChannelMember(
                     pubkey: key,

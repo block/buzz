@@ -50,7 +50,7 @@ class ChannelFilterStore {
     if (copy.containsKey('previewCounts')) {
       copy['previewCounts'] = salvage(
         copy['previewCounts'],
-        sectionCounts.contains,
+        (value) => value is int && sectionCounts.contains(value),
       );
     }
     if (copy.containsKey('activeWindowSeconds')) {

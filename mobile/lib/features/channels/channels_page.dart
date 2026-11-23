@@ -1,6 +1,6 @@
 import '../../shared/widgets/section_state_chevron.dart';
 import 'channel_sections/section_show_more.dart';
-import '../home/home_pins.dart';
+import 'channel_sections/pin_shortcuts.dart';
 import '../../shared/widgets/native_route_controls.dart';
 import '../../shared/emoji/emoji_picker.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
@@ -116,6 +116,7 @@ part 'channels_page/body.dart';
 part 'channels_page/home_buckets.dart';
 part 'channels_page/activity_recovery.dart';
 part 'channels_page/sections.dart';
+part 'channels_page/section_chats.dart';
 part 'channels_page/rename_section.dart';
 
 part 'channels_page/channel_tile.dart';

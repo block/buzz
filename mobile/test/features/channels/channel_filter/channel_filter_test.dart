@@ -13,6 +13,14 @@ import 'package:nostr/nostr.dart' as nostr;
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  test('drops fractional JSON types from preview counts', () {
+    final store = ChannelFilterStore.parse({
+      'version': 1,
+      'previewCounts': {'channels': 10.0, 'dms': 15},
+    });
+    expect(store.countFor('channels'), 5);
+    expect(store.countFor('dms'), 15);
+  });
   test(
     'section count survives Active and is independent of other sections',
     () {

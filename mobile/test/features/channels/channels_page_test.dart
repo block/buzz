@@ -479,6 +479,11 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(HomePage)),
+      );
+      final notifier =
+          container.read(channelsProvider.notifier) as _FakeNotifier;
       final first = find.text('Team chat 0');
       final left = tester.getTopLeft(first).dx;
       final rowHeight = tester
@@ -500,6 +505,10 @@ void main() {
         rowHeight,
       );
       expect(find.text('Team chat 1'), findsNothing);
+      notifier.replaceChannels(channels.skip(1).toList());
+      await tester.pumpAndSettle();
+      expect(first, findsNothing);
+      expect(find.text('No results'), findsOneWidget);
     },
   );
 
@@ -539,7 +548,7 @@ void main() {
     );
     await tester.binding.handlePopRoute();
     await tester.pumpAndSettle();
-    expect(find.text('See all'), findsNothing);
+    expect(find.text('See all'), findsOneWidget);
     expect(manager.store.modeFor('channels'), ChannelFilterMode.unreads);
     await tester.pumpWidget(const SizedBox());
     manager.dispose();
@@ -4675,7 +4684,7 @@ void main() {
         }
 
         expect(find.text('general'), findsNothing);
-        expect(find.text('See all'), findsNothing);
+        expect(find.text('See all'), findsOneWidget);
         semantics.dispose();
       },
     );
@@ -4803,7 +4812,7 @@ void main() {
       final hiddenByUnreads = seenAt != null && !bold && !dot;
       if (hiddenByUnreads) {
         expect(find.text('general'), findsNothing);
-        expect(find.text('See all'), findsNothing);
+        expect(find.text('See all'), findsOneWidget);
       }
 
       if (!hiddenByUnreads) {

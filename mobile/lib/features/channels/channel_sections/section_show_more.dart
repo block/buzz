@@ -20,9 +20,19 @@ import '../dm_channel_labels.dart';
 typedef SectionChatRowBuilder =
     Widget Function(Channel channel, [VoidCallback? onTap]);
 
+/// The inventory owns membership, ordering and row state. Keep its open route
+/// subscribed even when the preview shrinks enough to remove the See all row.
+typedef SectionChatContent = ({
+  List<Channel> channels,
+  SectionChatRowBuilder buildRow,
+  Widget Function(Channel) buildDetail,
+  String title,
+});
+
 class SectionShowMore extends StatelessWidget {
   const SectionShowMore({
     super.key,
+    this.liveContent,
     this.leadingInset,
     this.horizontalInset = Grid.gutter,
     required this.title,
@@ -31,6 +41,7 @@ class SectionShowMore extends StatelessWidget {
     required this.buildRow,
     this.rowInset = 0,
   });
+  final SectionChatContent Function(WidgetRef)? liveContent;
   final double? leadingInset;
   final double horizontalInset;
   final double rowInset;
@@ -40,56 +51,70 @@ class SectionShowMore extends StatelessWidget {
   final Widget Function(Channel) buildDetail;
 
   @override
-  Widget build(BuildContext context) => InkWell(
-    onTap: () async {
-      final options = context
-          .getInheritedWidgetOfExactType<MessagesSectionOptions>();
-      await Navigator.of(context, rootNavigator: true).push<void>(
-        _SectionChatsRoute(
-          builder: (routeContext) {
-            final page = _SectionChatsPage(
-              title: title,
-              channels: channels,
-              buildRow: buildRow,
-              rowInset: rowInset,
-              buildDetail: buildDetail,
-            );
-            final list = options == null
-                ? page
-                : MessagesSectionOptions(child: page);
-            return FoldGeometry.of(routeContext).strip == null
-                ? list
-                : AdaptiveConversationDestination(
-                    preferredListWidth: 375,
-                    listToolbarSlots: 1,
-                    child: list,
-                  );
-          },
-        ),
-      );
-    },
-    child: Padding(
-      padding: EdgeInsets.only(
-        left: leadingInset ?? horizontalInset,
-        right: horizontalInset,
-        top: Grid.inventoryRowInset,
-        bottom: Grid.inventoryRowInset,
-      ),
-      child: Row(
-        children: [
-          Icon(
-            BuzzIcons.arrowRight,
-            size: Grid.inventoryIconSize,
-            color: context.colors.onSurfaceVariant,
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    label: 'See all $title',
+    child: InkWell(
+      onTap: () async {
+        final options = context
+            .getInheritedWidgetOfExactType<MessagesSectionOptions>();
+        await Navigator.of(context, rootNavigator: true).push<void>(
+          _SectionChatsRoute(
+            builder: (routeContext) {
+              Widget pageFor(SectionChatContent content) => _SectionChatsPage(
+                title: content.title,
+                channels: content.channels,
+                buildRow: content.buildRow,
+                rowInset: rowInset,
+                buildDetail: content.buildDetail,
+              );
+              final live = liveContent;
+              final page = live == null
+                  ? pageFor((
+                      title: title,
+                      channels: channels,
+                      buildRow: buildRow,
+                      buildDetail: buildDetail,
+                    ))
+                  : Consumer(builder: (_, ref, _) => pageFor(live(ref)));
+              final list = options == null
+                  ? page
+                  : MessagesSectionOptions(child: page);
+              return AdaptiveConversationDestination(
+                requireFoldForSplit: true,
+                preferredListWidth: 375,
+                listToolbarSlots: 1,
+                child: list,
+              );
+            },
           ),
-          const SizedBox(width: Grid.inventoryLabelGap),
-          Text(
-            'See all',
-            style: navigationChatTitleTextStyle.copyWith(
+        );
+      },
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: leadingInset ?? horizontalInset,
+          right: horizontalInset,
+          top: Grid.inventoryRowInset,
+          bottom: Grid.inventoryRowInset,
+        ),
+        child: Row(
+          children: [
+            Icon(
+              BuzzIcons.arrowRight,
+              size: Grid.inventoryIconSize,
               color: context.colors.onSurfaceVariant,
             ),
-          ),
-        ],
+            const SizedBox(width: Grid.inventoryLabelGap),
+            ExcludeSemantics(
+              child: Text(
+                'See all',
+                style: navigationChatTitleTextStyle.copyWith(
+                  color: context.colors.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     ),
   );
@@ -185,10 +210,12 @@ class _SectionChatsPage extends HookConsumerWidget {
     final searchTopInset = idleInset + (activeInset - idleInset) * progress;
     final safeTop = MediaQuery.paddingOf(context).top;
     final fullHeight = frostedAppBarHeight(context);
+    final detailOpen =
+        ConversationPaneScope.maybeOf(context)?.selectedId != null;
     return PopScope<void>(
-      canPop: !editing.value,
+      canPop: detailOpen || !editing.value,
       onPopInvokedWithResult: (popped, _) {
-        if (!popped) cancel();
+        if (!popped && !detailOpen) cancel();
       },
       child: DuoToolbarPortal(
         strip: ios ? strip : null,
