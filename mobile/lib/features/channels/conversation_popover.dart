@@ -87,35 +87,6 @@ Future<bool?> showConversationPopover({
       final menu = Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (manage && !channel.isArchived)
-            item(
-              'Rename',
-              BuzzIcons.pencil,
-              () => finish(_renameConversation(context, ref, channel)),
-            ),
-          if (manage)
-            item(
-              channel.isArchived ? 'Unarchive' : 'Archive',
-              BuzzIcons.archive,
-              () {
-                final verb = channel.isArchived ? 'Unarchive' : 'Archive';
-                return _confirmAndRun(
-                  context,
-                  ref,
-                  title: '$verb ${channel.name}?',
-                  body: channel.isArchived
-                      ? 'Members can post again.'
-                      : 'The conversation will become read-only.',
-                  confirmLabel: verb,
-                  action: () {
-                    final actions = ref.read(channelActionsProvider);
-                    return channel.isArchived
-                        ? actions.unarchiveChannel(channel.id)
-                        : actions.archiveChannel(channel.id);
-                  },
-                );
-              },
-            ),
           item(isUnread ? 'Mark read' : 'Mark unread', BuzzIcons.mail, () {
             if (isUnread) {
               _markChannelReadNow(ref, channel.id);
@@ -154,6 +125,35 @@ Future<bool?> showConversationPopover({
                     : sectionId,
               );
             }),
+          if (manage && !channel.isArchived)
+            item(
+              'Rename',
+              BuzzIcons.pencil,
+              () => finish(_renameConversation(context, ref, channel)),
+            ),
+          if (manage)
+            item(
+              channel.isArchived ? 'Unarchive' : 'Archive',
+              BuzzIcons.archive,
+              () {
+                final verb = channel.isArchived ? 'Unarchive' : 'Archive';
+                return _confirmAndRun(
+                  context,
+                  ref,
+                  title: '$verb ${channel.name}?',
+                  body: channel.isArchived
+                      ? 'Members can post again.'
+                      : 'The conversation will become read-only.',
+                  confirmLabel: verb,
+                  action: () {
+                    final actions = ref.read(channelActionsProvider);
+                    return channel.isArchived
+                        ? actions.unarchiveChannel(channel.id)
+                        : actions.archiveChannel(channel.id);
+                  },
+                );
+              },
+            ),
         ],
       );
       if (!native) return menu;

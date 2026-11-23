@@ -397,10 +397,10 @@ void main() {
     row.onMenu(nativeMenu);
     await tester.pumpAndSettle();
     expect(updatedLabels ?? await nativeMenu.labels.future, [
-      'Rename',
-      'Archive',
       'Mark unread',
       'Change workspace',
+      'Rename',
+      'Archive',
     ]);
     expect(find.text('Mark unread'), findsNothing);
     nativeMenu.close('Mark unread');
