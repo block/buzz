@@ -1279,18 +1279,26 @@ dependencies = [
 name = "buzz-ingress-gateway"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "chrono",
+ "hex",
  "metrics",
  "metrics-exporter-prometheus",
  "nostr 0.44.7",
+ "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tower 0.5.3",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
