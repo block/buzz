@@ -12,6 +12,9 @@
 //! # Running
 //!
 //! ```text
+//! # Receipt assertions also require DATABASE_URL for the isolated relay DB,
+//! # BUZZ_E2E_GIT_COMMUNITY_ID for that relay's host, and RELAY_HTTP_URL
+//! # when the relay is not at http://localhost:3000.
 //! cargo build --release -p git-credential-nostr
 //! GIT_CREDENTIAL_NOSTR_BIN=$PWD/target/release/git-credential-nostr \
 //!   cargo test -p buzz-test-client --test e2e_git -- --ignored --nocapture
@@ -688,7 +691,7 @@ async fn governed_push_receipts_contain_only_counted_approvals() {
             .unwrap(),
     )
     .await;
-    let tmp = tempdir();
+    let tmp = tempdir_named("buzz-e2e-git-receipt");
     let url = format!("{}/git/{owner_hex}/{repo}", relay_http_url());
     git(&["clone", "--quiet", &url, "repo"], tmp.path(), &nsec);
     let dir = tmp.path().join("repo");
