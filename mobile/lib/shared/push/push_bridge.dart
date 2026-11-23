@@ -256,7 +256,10 @@ Future<void> shareSelectedCommunityWithNotifications(
 /// Pulls a notification response that arrived before the Flutter method
 /// handler was installed.
 Future<void> syncPendingBuzzPushNotificationResponse() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  if (defaultTargetPlatform != TargetPlatform.iOS &&
+      defaultTargetPlatform != TargetPlatform.android) {
+    return;
+  }
   try {
     final arguments = await _channel.invokeMapMethod<dynamic, dynamic>(
       'takePendingNotificationResponse',
