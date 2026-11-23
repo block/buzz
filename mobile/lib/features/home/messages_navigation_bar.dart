@@ -13,6 +13,11 @@ import '../../shared/widgets/navigation_button_surface.dart';
 import '../../shared/widgets/android_expanding_menu_button.dart';
 import '../../shared/widgets/ios_message_create_button.dart';
 
+bool _reduceShortcutMotion(BuildContext context) =>
+    MediaQuery.disableAnimationsOf(context) ||
+    (defaultTargetPlatform == TargetPlatform.iOS &&
+        View.of(context).platformDispatcher.accessibilityFeatures.reduceMotion);
+
 /// Separate glass shortcuts for search and creation.
 class MessagesNavigationBar extends HookWidget {
   const MessagesNavigationBar({
@@ -34,10 +39,9 @@ class MessagesNavigationBar extends HookWidget {
   Widget build(BuildContext context) {
     final menuOpen = useState(false);
     final menuMoving = useState(false);
-    final disableAnimations = MediaQuery.disableAnimationsOf(context);
     void menuVisibilityChanged(bool visible) {
       if (menuOpen.value == visible) return;
-      menuMoving.value = !disableAnimations;
+      menuMoving.value = !_reduceShortcutMotion(context);
       menuOpen.value = visible;
     }
 
@@ -259,7 +263,7 @@ class _MenuNudge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final duration = MediaQuery.disableAnimationsOf(context)
+    final duration = _reduceShortcutMotion(context)
         ? Duration.zero
         : const Duration(milliseconds: 180);
     final scale = menuOpen ? .9 : 1.0;

@@ -22,7 +22,7 @@ private final class SettingMenuMessenger: NSObject, FlutterBinaryMessenger {
 
 @main
 struct SettingMenuSelectionTests {
-  @MainActor static func main() {
+  @MainActor static func main() async {
     let merging = MergingNavigationGlass(frame: CGRect(x: 0, y: 0, width: 256, height: 56))
     merging.layoutIfNeeded()
     UIView.setAnimationsEnabled(false)
@@ -88,6 +88,10 @@ struct SettingMenuSelectionTests {
       precondition(messenger.selections == (deferred ? [] : [0]))
       if deferred {
         button.contextMenuInteraction(interaction, willEndFor: configuration, animator: nil)
+        // The no-animator dismissal queues delivery on the main dispatch queue.
+        await withCheckedContinuation { continuation in
+          DispatchQueue.main.async { continuation.resume() }
+        }
         precondition(messenger.selections == [0])
       }
     }

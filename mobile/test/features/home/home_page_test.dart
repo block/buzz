@@ -1037,6 +1037,20 @@ void main() {
       );
       expect(shortcutOpacities(), [1.0, 1.0]);
       expect(search.hitTestable(), findsOneWidget);
+      final dispatcher = tester.platformDispatcher;
+      dispatcher.accessibilityFeaturesTestValue =
+          const FakeAccessibilityFeatures(reduceMotion: true);
+      addTearDown(dispatcher.clearAccessibilityFeaturesTestValue);
+      expect(MediaQuery.disableAnimationsOf(tester.element(search)), isFalse);
+      for (final open in [true, false]) {
+        creationMenu.onMenuVisibilityChanged!(open);
+        await tester.pump();
+        expect(shortcutOpacities(), everyElement(open ? 0.0 : 1.0));
+        expect(
+          tester.getCenter(search).dx,
+          closeTo(initialX + (open ? 100 : 0), .01),
+        );
+      }
       final inbox = find.byWidgetPredicate(
         (w) => w is IosGlassNavigationButton && w.semanticLabel == 'Activity',
       );
