@@ -354,9 +354,12 @@ class ComposeBar extends HookConsumerWidget {
       void listener() {
         final editingValue = controller.value;
         final previousValue = lastObservedEditingValue.value;
+        // A notify without an edit, such as new channel names, must not
+        // reopen a query the user dismissed.
+        if (editingValue == previousValue) return;
         lastObservedEditingValue.value = editingValue;
         emojiQuery.value = _emojiQuery(editingValue);
-        if (isModifyingText.value || editingValue == previousValue) return;
+        if (isModifyingText.value) return;
         final text = editingValue.text;
         final sel = editingValue.selection;
         final textChanged = text != previousValue.text;
@@ -406,9 +409,13 @@ class ComposeBar extends HookConsumerWidget {
     final channels = channelsAsync.asData?.value ?? <Channel>[];
     final channelSuggestions = filterChannels(channels, channelQuery.value);
 
-    final dataset = emojiQuery.value == null
-        ? null
-        : ref.watch(emojiDatasetOrEmptyProvider);
+    // Load the catalog on the first colon query, then keep it so the next
+    // token reuses the index instead of rebuilding it.
+    final emojiIndexWanted = useRef(false);
+    if (emojiQuery.value != null) emojiIndexWanted.value = true;
+    final dataset = emojiIndexWanted.value
+        ? ref.watch(emojiDatasetOrEmptyProvider)
+        : null;
     final emojiIndex = useMemoized(
       () => dataset == null
           ? null

@@ -83,6 +83,11 @@ part 'compose_bar_test/mention_chip_tests.dart';
 part 'compose_bar_test/mention_search_tests.dart';
 part 'compose_bar_test/large_roster_tests.dart';
 
+/// A complete 1x1 PNG, for tests that need a frame to decode.
+final _decodablePngBytes = base64Decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+);
+
 final _pngBytes = Uint8List.fromList([
   0x89,
   0x50,
@@ -2126,11 +2131,12 @@ void main() {
         final field = find.byType(TextField);
         final panel = find.byKey(const ValueKey('emoji-suggestions-popover'));
 
-        // The palette is indexed once, not ranked again per keystroke.
+        // The palette is indexed once, not ranked again per keystroke or
+        // rebuilt for the next token.
         await tester.enterText(field, ':sm');
         await tester.pump();
         final iterations = palette.iterations;
-        for (final text in [':smi', ':smil']) {
+        for (final text in [':smi', ':smil', ':smil ', ':smil :bl']) {
           await tester.enterText(field, text);
           await tester.pump();
         }
@@ -2154,16 +2160,32 @@ void main() {
         final container = ProviderScope.containerOf(tester.element(field));
         container
             .read(customEmojiBytesCacheProvider)
-            .remember('https://example.com/blob-0.gif', _pngBytes);
+            .remember('https://example.com/blob-0.gif', _decodablePngBytes);
         await tester.enterText(field, ':blo');
         await tester.pumpAndSettle();
         final firstRow = find.descendant(
           of: panel,
           matching: find.widgetWithText(ListTile, ':blob-0:'),
         );
+        final preview = find.descendant(
+          of: firstRow,
+          matching: find.byType(Image),
+        );
+        expect(preview, findsOneWidget);
+        await tester.runAsync(
+          () => precacheImage(
+            tester.widget<Image>(preview).image,
+            tester.element(preview),
+          ),
+        );
+        await tester.pump();
         expect(
-          find.descendant(of: firstRow, matching: find.byType(Image)),
-          findsOneWidget,
+          tester
+              .widget<RawImage>(
+                find.descendant(of: firstRow, matching: find.byType(RawImage)),
+              )
+              .image,
+          isNotNull,
         );
         expect(tester.getSemantics(firstRow), isSemantics(label: ':blob-0:'));
         expect(mediaRequests, isEmpty);
@@ -2225,12 +2247,44 @@ void main() {
           findsOneWidget,
         );
 
+        // An outside tap dismisses the query, and a notify without an edit,
+        // such as new channel names, does not bring it back.
+        await tester.tap(find.text('Outside'));
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('emoji-suggestions-popover')),
+          findsNothing,
+        );
+        final container = ProviderScope.containerOf(tester.element(field));
+        (container.read(channelsProvider.notifier) as _FakeChannelsNotifier)
+            .replaceChannels([
+              Channel(
+                id: 'general',
+                name: 'general',
+                channelType: 'stream',
+                visibility: 'open',
+                description: '',
+                createdBy: 'creator',
+                createdAt: DateTime(2026),
+                memberCount: 1,
+                isMember: true,
+              ),
+            ]);
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('emoji-suggestions-popover')),
+          findsNothing,
+        );
+
+        await tester.enterText(field, ':smi');
+        await tester.pumpAndSettle();
         tester.widget<TextField>(field).focusNode!.unfocus();
         await tester.pumpAndSettle();
         expect(find.text('No matching results'), findsNothing);
+        final tapsBefore = outsideTaps;
         await tester.tap(find.text('Outside'));
         await tester.pumpAndSettle();
-        expect(outsideTaps, 1);
+        expect(outsideTaps, tapsBefore + 1);
       } finally {
         debugDefaultTargetPlatformOverride = previousPlatform;
       }
