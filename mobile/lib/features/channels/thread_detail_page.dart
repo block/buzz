@@ -321,12 +321,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       final update = stickyDateIndex.resolve(
         positions: positions,
         viewportHeight: viewportHeight,
-        stickyTop:
-            frostedAppBarHeight(
-              context,
-              bottomHeight: conversationNavigationBottomPadding(context),
-            ) +
-            Grid.twelve,
+        stickyTop: _threadHeaderHeight(context) + Grid.twelve,
         stickyHeaderHeight: StickyDateHeader.heightOf(context),
       );
       stickyDateHeaderState.value = update.state;
@@ -628,11 +623,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     // scrolled up to read, leave them where they are.
     final previousReplyCount = useRef(replies.length);
     final topOverlayFraction = viewportHeight > 0
-        ? frostedAppBarHeight(
-                context,
-                bottomHeight: conversationNavigationBottomPadding(context),
-              ) /
-              viewportHeight
+        ? _threadHeaderHeight(context) / viewportHeight
         : 0.0;
     final settleGeometry = (
       composerDockHeight.value,
@@ -1012,14 +1003,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                 Positioned(
                   left: 0,
                   right: 0,
-                  top:
-                      frostedAppBarHeight(
-                        context,
-                        bottomHeight: conversationNavigationBottomPadding(
-                          context,
-                        ),
-                      ) +
-                      Grid.twelve,
+                  top: _threadHeaderHeight(context) + Grid.twelve,
                   child: StickyDateHeader(
                     key: const ValueKey('thread-sticky-date-header'),
                     state: stickyDateHeaderState,
