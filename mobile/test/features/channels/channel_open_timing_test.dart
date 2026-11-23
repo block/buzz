@@ -1,6 +1,7 @@
 import 'package:buzz/features/channels/channel_messages_provider.dart';
 import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:clock/clock.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -79,6 +80,49 @@ void main() {
       expect(opens(), hasLength(1));
     });
   });
+
+  for (final correction in [
+    const Duration(hours: 1),
+    -const Duration(hours: 1),
+  ]) {
+    test('a device clock set ${correction.isNegative ? 'back' : 'forward'} '
+        'during an open does not move its time', () {
+      fakeAsync((async) {
+        var shift = Duration.zero;
+        final fake = async.getClock(DateTime.utc(2026));
+        final wall = Clock(() => fake.now().add(shift));
+        withClock(wall, () {
+          // Fake time is the monotonic clock; only the wall clock moves.
+          final relay = FakeRelay(elapsed: () => async.elapsed);
+          final counts = RecordingDiagnostics();
+          final container = ProviderContainer(
+            overrides: [
+              ...relay.overrides,
+              diagnosticReporterProvider.overrideWithValue(counts),
+            ],
+          );
+          addTearDown(container.dispose);
+          container.listen(relaySessionProvider, (_, _) {});
+          async.elapse(const Duration(milliseconds: 50));
+          final held = relay.holdQuery();
+          container.listen(channelMessagesProvider(_channel), (_, _) {});
+          async.elapse(const Duration(seconds: 1));
+          shift = correction;
+          async.elapse(const Duration(seconds: 1));
+          held.complete();
+          async.elapse(const Duration(milliseconds: 50));
+          final open = counts.events.singleWhere(
+            (event) => event.endpoint == NetworkEndpoint.channelOpen,
+          );
+          expect(
+            open.duration,
+            greaterThanOrEqualTo(const Duration(seconds: 2)),
+          );
+          expect(open.duration, lessThan(const Duration(seconds: 3)));
+        });
+      });
+    });
+  }
 
   test('an open that spans a reconnect is timed from its start', () {
     fakeAsync((async) {

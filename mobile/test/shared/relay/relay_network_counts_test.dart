@@ -329,6 +329,29 @@ void main() {
     expect(s.counts.outcomes.last, (_connection, null));
   });
 
+  for (final correction in [
+    const Duration(hours: 1),
+    -const Duration(hours: 1),
+  ]) {
+    journey('a device clock set ${correction.isNegative ? 'back' : 'forward'} '
+        'during an outage does not move its recovery time', (async, s) {
+      s.settle();
+      s.session.debugHandleMessage(['NOTICE', 'still here']);
+      s.counts.clear();
+      s.relay.holdAuth();
+      s.relay.drop();
+      s.settle(const Duration(seconds: 5));
+      s.clockCorrection = correction;
+      s.relay.drop();
+      s.settle(const Duration(seconds: 40));
+      final recovery = s.counts.events.singleWhere(
+        (e) => e.endpoint == _recovery,
+      );
+      expect(recovery.duration, greaterThan(const Duration(seconds: 5)));
+      expect(recovery.duration, lessThan(const Duration(seconds: 45)));
+    });
+  }
+
   journey('an idle socket was alive until at most two pings before its loss', (
     async,
     s,
@@ -402,7 +425,11 @@ class _Session {
 
   final FakeAsync async;
   // On the fake clock, so durations are the time that passed in the test.
-  late final relay = FakeRelay(now: async.getClock(DateTime.utc(2026)).now);
+  // [clockCorrection] moves only the device's wall clock.
+  late final relay = FakeRelay(
+    now: () => async.getClock(DateTime.utc(2026)).now().add(clockCorrection),
+  );
+  Duration clockCorrection = Duration.zero;
   final counts = RecordingDiagnostics();
   late final ProviderContainer container;
 

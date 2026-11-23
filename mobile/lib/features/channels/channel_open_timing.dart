@@ -1,4 +1,3 @@
-import 'package:clock/clock.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/diagnostics/diagnostic_reporter.dart';
@@ -29,7 +28,7 @@ class ChannelOpenTimer {
   ChannelOpenTimer._(this._reporter, this._host, this._session, this._timed)
     : _memberChanges = _reporter.memberChanges,
       _pauses = _session.pauses,
-      _startedAt = clock.now(),
+      _startedAt = _session.elapsed,
       _done = _session.backgrounded;
 
   /// Continues [pending] if it is still running, since an open cut short by
@@ -50,7 +49,7 @@ class ChannelOpenTimer {
   final RelaySessionNotifier _session;
   final int _memberChanges;
   final int _pauses;
-  final DateTime _startedAt;
+  final Duration _startedAt;
   final bool _timed;
   bool _done;
 
@@ -82,7 +81,7 @@ class ChannelOpenTimer {
             ? NetworkOutcome.success
             : NetworkOutcome.failure,
         failure: failure,
-        duration: _timed ? clock.now().difference(_startedAt) : null,
+        duration: _timed ? _session.elapsed - _startedAt : null,
       ),
     );
   }

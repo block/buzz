@@ -38,7 +38,10 @@ extension _RelaySessionDiagnostics on RelaySessionNotifier {
     if (lost != null &&
         lost.context == _contextGeneration &&
         lost.pauses == _pauses) {
-      _noteNetwork(NetworkEndpoint.relayRecovery, since: lost.at);
+      _noteNetwork(
+        NetworkEndpoint.relayRecovery,
+        duration: _elapsed() - lost.at,
+      );
     }
   }
 
@@ -55,13 +58,10 @@ extension _RelaySessionDiagnostics on RelaySessionNotifier {
     // interval, so a quiet socket was alive until at most two intervals
     // before the loss. Failed attempts after the loss keep the first time.
     if (_connectedAt != null && _backgroundedAt == null) {
-      final now = _now();
-      final provenAlive = now.subtract(RelaySocket.pingInterval * 2);
-      final inbound = _lastInboundAt;
+      final provenAlive = _elapsed() - RelaySocket.pingInterval * 2;
+      final inbound = _lastFrameElapsed;
       _connectionLost ??= (
-        at: inbound != null && inbound.isAfter(provenAlive)
-            ? inbound
-            : provenAlive,
+        at: inbound != null && inbound > provenAlive ? inbound : provenAlive,
         context: _contextGeneration,
         pauses: _pauses,
       );
@@ -128,6 +128,11 @@ extension _RelaySessionDiagnostics on RelaySessionNotifier {
     return classifyTransportError(error) ?? NetworkFailure.disconnected;
   }
 }
+
+/// The session's default clock for durations. Unlike the wall clock, a device
+/// clock correction does not move it.
+Duration _monotonic() => _uptime.elapsed;
+final _uptime = Stopwatch()..start();
 
 /// The relay's NOTICE for a refused or expired authorization, sent just before
 /// it closes the connection with 1008.

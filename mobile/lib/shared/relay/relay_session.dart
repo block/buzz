@@ -48,6 +48,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     http.Client Function()? httpClientFactory,
     RelaySocketFactory socketFactory = RelaySocket.new,
     DateTime Function()? now,
+    Duration Function()? elapsed,
     RelayRateLimitGate? rateLimitGate,
     RelayTimerFactory retryTimerFactory = Timer.new,
     Future<void> Function(Duration) replayDelay = Future.delayed,
@@ -61,6 +62,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
        ),
        _socketFactory = socketFactory,
        _now = now ?? DateTime.now,
+       _elapsed = elapsed ?? _monotonic,
        _rateLimitGate = rateLimitGate ?? RelayRateLimitGate(),
        _retryTimerFactory = retryTimerFactory,
        _replayDelay = replayDelay,
@@ -72,6 +74,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   final RelayHttpQueryClient _httpQueryClient;
   final RelaySocketFactory _socketFactory;
   final DateTime Function() _now;
+  final Duration Function() _elapsed;
   final RelayRateLimitGate _rateLimitGate;
   final RelayTimerFactory _retryTimerFactory;
   final Future<void> Function(Duration) _replayDelay;
@@ -105,7 +108,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   // The relay sent its terminal authorization denial on this connection.
   bool _authorizationDenied = false;
   DateTime? _lastInboundAt;
-  ({DateTime at, int context, int pauses})? _connectionLost;
+  Duration? _lastFrameElapsed;
+  ({Duration at, int context, int pauses})? _connectionLost;
   int _reconnectDelayMs = _baseReconnectDelayMs;
   int _subIdCounter = 0;
   bool _disposed = false;
@@ -521,6 +525,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// Counts moves to the background, so work can tell it spanned one.
   int get pauses => _pauses;
 
+  /// Time on a clock that device clock corrections don't move, for durations.
+  Duration get elapsed => _elapsed();
+
   /// Whether the app is in the background now.
   bool get backgrounded => _backgroundedAt != null;
 
@@ -666,6 +673,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _connectStartedAt = null;
     _connectedAt = _now();
     _lastInboundAt = _connectedAt;
+    _lastFrameElapsed = _elapsed();
     state = const SessionState(status: SessionStatus.connected);
     await _replayLiveSubscriptions(generation);
   }
@@ -810,6 +818,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   void _handleMessage(List<dynamic> data) {
     _lastInboundAt = _now();
+    _lastFrameElapsed = _elapsed();
     if (data.isEmpty) return;
     final type = data[0] as String;
 
