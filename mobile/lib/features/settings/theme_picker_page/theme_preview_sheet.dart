@@ -10,10 +10,14 @@ class _ThemePreviewExperience extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final inRail = DuoToolbarScope.maybeOf(context)?.strip != null;
-    final stored = ref.read(communityThemeProvider);
     final draftMode = useState(ref.read(appearanceModeProvider));
-    final storedAccentIndex = chatColorIndex(stored.accent);
-    final draftAccent = useState(storedAccentIndex);
+    final pickedAccent = useState<int?>(null);
+    // Until the user taps a swatch, the preview follows the saved color,
+    // including one synced from another device while this sheet is open.
+    final savedAccent = ref.watch(
+      communityThemeProvider.select((t) => chatColorIndex(t.accent)),
+    );
+    final draftAccent = pickedAccent.value ?? savedAccent;
     final platformBrightness = MediaQuery.platformBrightnessOf(context);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     final brightness = switch (draftMode.value) {
@@ -37,26 +41,27 @@ class _ThemePreviewExperience extends HookConsumerWidget {
     void chooseColor() => showAccentColorPickerSheet(
       context: context,
       colorScheme: selectedBaseScheme,
-      selectedIndex: draftAccent.value,
-      onSelected: (index) => draftAccent.value = index,
+      pickedIndex: pickedAccent.value,
+      onSelected: (index) => pickedAccent.value = index,
     );
 
     void applySelection() {
       unawaited(HapticFeedback.mediumImpact());
       ref.read(appearanceModeProvider.notifier).setMode(draftMode.value);
       // Only the chat color syncs. The synced theme and followSystem stay as
-      // they are, so this device's mode never changes other devices. An
-      // unchanged color keeps its saved value, so a legacy color that only
-      // maps to a swatch is not republished as that swatch.
+      // they are, so this device's mode never changes other devices. A color
+      // the user did not tap keeps its saved value, so a legacy color that
+      // only maps to a swatch is not republished as that swatch.
       final current = ref.read(communityThemeProvider);
       ref
           .read(communityThemeProvider.notifier)
           .setPreference(
             CommunityThemePreference(
               theme: current.theme,
-              accent: draftAccent.value == storedAccentIndex
-                  ? current.accent
-                  : chatColorChoices[draftAccent.value].wireValue,
+              accent: switch (pickedAccent.value) {
+                final index? => chatColorChoices[index].wireValue,
+                null => current.accent,
+              },
               followSystem: current.followSystem,
             ),
           );
@@ -94,7 +99,7 @@ class _ThemePreviewExperience extends HookConsumerWidget {
             child: _ThemePreviewPage(
               theme: selectedEntry,
               mode: draftMode.value,
-              accentIndex: draftAccent.value,
+              accentIndex: draftAccent,
               platformBrightness: platformBrightness,
             ),
           ),
@@ -121,7 +126,7 @@ class _ThemePreviewExperience extends HookConsumerWidget {
                         semanticLabel: 'Chat color',
                         color: chatColorForScheme(
                           selectedBaseScheme,
-                          draftAccent.value,
+                          draftAccent,
                         ),
                         onTap: chooseColor,
                       ),
@@ -166,7 +171,7 @@ class _ThemePreviewExperience extends HookConsumerWidget {
           _PreviewSheetCircleAction(
             key: const ValueKey('theme-preview-accent-action-button'),
             semanticLabel: 'Chat color',
-            color: chatColorForScheme(selectedBaseScheme, draftAccent.value),
+            color: chatColorForScheme(selectedBaseScheme, draftAccent),
             onTap: chooseColor,
           ),
           _AppearanceCycleAction(
@@ -218,10 +223,7 @@ class _ThemePreviewExperience extends HookConsumerWidget {
                   child: _PreviewSheetCircleAction(
                     key: const ValueKey('theme-preview-accent-action-button'),
                     semanticLabel: 'Chat color',
-                    color: chatColorForScheme(
-                      selectedBaseScheme,
-                      draftAccent.value,
-                    ),
+                    color: chatColorForScheme(selectedBaseScheme, draftAccent),
                     onTap: chooseColor,
                   ),
                 ),
