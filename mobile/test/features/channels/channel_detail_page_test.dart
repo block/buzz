@@ -19735,7 +19735,7 @@ void main() {
               id: 'reply-$i',
               pubkey: 'bob',
               content: i == 29
-                  ? List.filled(31, 'Tall reply').join('\n')
+                  ? List.filled(27, 'Tall reply').join('\n')
                   : 'Reply $i',
               createdAt: 1100 + i,
               extraTags: const [
@@ -20101,7 +20101,7 @@ void main() {
               id: 'reply-$i',
               pubkey: 'bob',
               content: i == 29
-                  ? List.filled(14, 'Tall reply').join('\n')
+                  ? List.filled(12, 'Tall reply').join('\n')
                   : 'Reply $i',
               createdAt: 1100 + i,
               extraTags: const [
