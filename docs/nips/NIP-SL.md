@@ -133,7 +133,7 @@ A send that has ended closes its address. The relay MUST refuse every later inst
 
 ## Relay behavior
 
-### Accepting
+### Acceptance checks
 
 The relay accepts an instruction wherever it authenticates the sender, such as a [NIP-42](42.md) WebSocket session. It runs these checks in order, and the first one that fails decides the answer.
 
@@ -146,7 +146,7 @@ The relay accepts an instruction wherever it authenticates the sender, such as a
 | 5 | The address is not closed | `invalid: send ended` |
 | 6 | The generation and ordering rules hold, and a cancel names an existing send | `invalid: stale generation`, `invalid: stale replacement`, `invalid: no such send` |
 | 7 | A cancel is accepted here. The checks below apply to an instruction that holds a message | |
-| 8 | The relay is accepting new sends | `restricted: send later disabled` |
+| 8 | The relay is accepting instructions that hold a message: new sends and replacements | `restricted: send later disabled` |
 | 9 | `now - 60 <= T` and `T <= now + max_not_before_delta` | `invalid: not_before in the past`, `invalid: not_before too far` |
 | 10 | `exec` names a key the relay lists as `current` or `standby`, and `content` decrypts under it | `invalid: unknown executor key`, `invalid: undecryptable content` |
 | 11 | The plaintext and the message meet [Instruction](#instruction), and the message passes every validity check the relay applies to an ordinary event of its kind, apart from the `created_at` tolerance | `invalid: message: <reason>` |
@@ -160,7 +160,7 @@ Notes on the checks:
 
 - Check 2 comes before the timestamp check, so that a client can confirm an acceptance however late it asks.
 - Check 3 is the ordinary one. This NIP makes no exception to the signer rule or the timestamp rule.
-- At check 7 the relay MUST NOT refuse a cancel because it is not accepting new sends, because the author is under a timeout, or because the author may no longer post to the channel.
+- At check 7 the relay MUST NOT refuse a cancel because it has stopped accepting instructions that hold a message, because the author is under a timeout, or because the author may no longer post to the channel.
 - The 60 seconds in check 9 allow for clock difference on a send now.
 - Under check 10 a relay MUST NOT accept a message under a `retiring` key or under a key it does not list.
 - `max_pending` in check 14 is counted for each author key in each community. A replacement does not count against it. An agent's sends count against the agent's key.
@@ -416,7 +416,7 @@ Until this draft has an upstream NIP number, relays MUST NOT list it in [NIP-11]
 | Member | Meaning |
 |--------|---------|
 | `v` | Version of this contract. This document defines `1` |
-| `accepting` | `true` when the relay accepts new sends. When `false` it accepts only cancels and reads |
+| `accepting` | `true` when the relay accepts instructions that hold a message: new sends and replacements. When `false` it accepts only cancels and reads |
 | `keys` | The executor keys, described below |
 | `kinds` | The kinds a message may have |
 | `limitation` | The limits in [Limits summary](#limits-summary) |
@@ -433,7 +433,7 @@ Ids are unique, non-empty and at most 64 bytes. A relay MAY list its NIP-11 `sel
 
 A relay MUST enforce the limits it advertises. A relay that hosts several communities MUST serve the descriptor only for a community in which send later is enabled.
 
-A client MUST treat the descriptor as absent when `supported_extensions` does not contain `"buzz-send-later"`, when `v` is not `1`, when a member shown above is missing or has the wrong type, or when `keys` does not contain exactly one `current` entry. A client MUST NOT publish `kind:30360` to a relay without a valid descriptor, and MUST NOT offer send later there.
+A client MUST treat the descriptor as absent when `supported_extensions` does not contain `"buzz-send-later"`, when `v` is not `1`, when a member in the table above or a `limitation` member listed in [Limits summary](#limits-summary) is missing or has the wrong type, or when `keys` does not contain exactly one `current` entry. A client MUST NOT publish `kind:30360` to a relay without a valid descriptor, and MUST NOT offer send later there.
 
 A relay without this NIP either rejects both kinds as unknown or stores them as ordinary events that any reader can query. That is why a client checks the descriptor before it publishes. A client without this NIP subscribes to neither kind.
 
@@ -510,7 +510,7 @@ An executor key changes in three steps. Every process MUST complete a step befor
 2. Every process marks the new key `current` and the old key `standby`.
 3. Every process marks the old key `retiring`.
 
-A process accepts an instruction under its `current` key and under every key it lists as `standby` (check 10 of [Accepting](#accepting)). So while the processes disagree about a step, each of them accepts an instruction under the key that any of them advertises as `current`, and each lists the key that any of them signs a status with.
+A process accepts an instruction under its `current` key and under every key it lists as `standby` (check 10 of [Acceptance checks](#acceptance-checks)). So while the processes disagree about a step, each of them accepts an instruction under the key that any of them advertises as `current`, and each lists the key that any of them signs a status with.
 
 Every process holds the secret key of each key it lists that still has a pending instruction.
 
@@ -525,7 +525,7 @@ A deployment MUST introduce send later in this order:
 
 A relay SHOULD provide two controls for each community:
 
-- **Accepting.** When it is off, the descriptor carries `"accepting": false` and the relay refuses new sends. Pending sends are still released, cancels are still accepted, and reads still work.
+- **Accepting.** When it is off, the descriptor carries `"accepting": false` and the relay refuses every instruction that holds a message, whether it starts a send or replaces one. Pending sends are still released, cancels are still accepted, and reads still work.
 - **Releasing.** When it is off, nothing is released. A send whose release window passes meanwhile ends as `missed`.
 
 While a pending send, a readable instruction or a status exists in a community, a relay with send later MUST keep serving reads and accepting cancels there, and MUST end every pending send with an outcome.
@@ -544,9 +544,11 @@ A version without send later also cancels nothing:
 A deployment therefore MUST NOT run a version that does not apply NIP-FI "Deferred actions" while a send whose recorded admission names an issuer is pending. Either its step 1 version applies that section to the stored sends, or the deployment does the following, in this order:
 
 1. It switches Accepting off for every community on every process.
-2. It ends every such send as `cancelled` with reason `withdrawn`, and a process with send later stores those statuses.
-3. It confirms that no such send is pending, and repeats step 2 if one is. An instruction that was being accepted when Accepting was switched off can still commit afterwards.
-4. Only then does it start a process without send later.
+2. It waits until every instruction that a process began to check before step 1 took effect there has been accepted or refused. Such an instruction can have passed check 8, and would otherwise commit after step 3.
+3. It ends every such send as `cancelled` with reason `withdrawn`, and a process with send later stores those statuses.
+4. It confirms that no such send is pending. Only then does it start a process without send later.
+
+A relay that evaluates check 8 inside the atomic change of acceptance, against state that every process shares, has nothing to wait for in step 2 once step 1 has committed.
 
 ## Privacy
 
