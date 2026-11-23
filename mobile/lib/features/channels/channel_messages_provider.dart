@@ -273,12 +273,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
                 (event.kind == EventKind.deletion ||
                     event.kind == EventKind.nip29DeleteEvent ||
                     event.kind == EventKind.streamMessageEdit)) {
-              // Remove stale rows and retire a pending save of the old page.
-              final targets = {
+              pruneSavedMessageTargets(ref, cacheScope, channelId, {
                 for (final tag in event.tags)
                   if (tag.length > 1 && tag[0] == 'e') tag[1],
-              };
-              cache.removeChannelEvents(cacheScope, channelId, targets);
+              }, edited: event.kind == EventKind.streamMessageEdit);
             }
             _handleLiveEvent(event);
           },
@@ -320,6 +318,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         initVersion,
       );
       if (!_isCurrentInit(initVersion)) return;
+      // Legacy history can return an empty result for a refused read.
+      if (_accessDenial != null && !_usingChannelWindow && history.isEmpty) {
+        return;
+      }
       if (!_usingChannelWindow) {
         _legacyHistoryCursor = history.isEmpty
             ? null
@@ -345,7 +347,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       state = AsyncData(merged);
       if (ticket != null && _hasListeners) {
         unawaited(
-          saveChannelPage(
+          saveMessagePage(
             ref,
             cache,
             ticket,
@@ -386,6 +388,15 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     }
   }
 
+  bool get isAccessDenied => _accessDenial != null;
+
+  void denyAccessFromThread(Object error, StackTrace stackTrace) => _denyAccess(
+    error,
+    stackTrace,
+    ref.read(savedMessageStoreProvider),
+    ref.read(savedMessageScopeProvider),
+  );
+
   void _denyAccess(
     Object error,
     StackTrace stackTrace,
@@ -406,7 +417,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     _noticeAux.clear();
     if (scope != null) {
       unawaited(cache.removeChannel(scope, channelId));
-      ref.invalidate(savedChannelPreviewProvider(channelId));
+      invalidateSavedMessagePreviews(ref, channelId);
     }
     final denial = AsyncError<List<NostrEvent>>(error, stackTrace);
     _accessDenial = denial;
@@ -788,6 +799,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     Set<String> scopedTargetIds = const {},
     Set<String> reconciledTargetIds = const {},
   }) {
+    if (_accessDenial != null) return;
     var events = state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
     for (final event in deletions) {
       final targets = event.tags
@@ -881,7 +893,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     Set<String> provisionalReplyIds = const {},
     int? queryVersion,
   }) {
-    if (queryVersion != null && _threadQueryVersions[rootId] != queryVersion) {
+    if (_accessDenial != null ||
+        queryVersion != null && _threadQueryVersions[rootId] != queryVersion) {
       return false;
     }
     final evidenceVersion = queryVersion ?? ++_threadQuerySerial;
@@ -948,6 +961,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   /// Caches confirmed thread replies before their optimistic overlay is cleared.
   /// Thread queries must not invalidate themselves as live relay events do.
   void cacheConfirmedThreadReplies(Iterable<NostrEvent> replies) {
+    if (_accessDenial != null) return;
     _replyOwnership.record(replies);
     var events = state.value ?? _lastKnownMessages ?? const <NostrEvent>[];
     for (final reply in _boundedReplies(replies)) {

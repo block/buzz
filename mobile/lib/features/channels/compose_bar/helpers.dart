@@ -344,7 +344,14 @@ Widget _composerSuggestionPanel({
     ? KeyedSubtree(
         key: const ValueKey('channel-suggestions'),
         child: TextFieldTapRegion(
-          child: _ChannelSuggestions(
+          child: _ComposerSearchSuggestions<Channel>(
+            surfaceKey: const ValueKey('channel-suggestions-popover'),
+            leading: (context, _) => Icon(
+              BuzzIcons.hash,
+              size: 20,
+              color: context.colors.onSurfaceVariant,
+            ),
+            label: (channel) => channel.name,
             suggestions: channelSuggestions,
             onSelect: onChannelSelect,
           ),

@@ -115,17 +115,19 @@ extension ReadStateJournal on ReadStateManager {
     _persistLocalState();
   }
 
-  /// Save the current channel visit's row hints in one batch.
+  /// Save the visit's hints in one batch. The channel cutoff rides the next
+  /// read-state publish or flush without scheduling its own snapshot.
   void markChannelRowSeen(Map<String, int> marks) {
     final floor = readStateFloor(_now());
     var changed = false;
-    var publish = false;
     for (final MapEntry(:key, :value) in marks.entries) {
       if (value <= floor) continue;
-      final sync = !isSeenMessageContext(key);
-      if (_advanceContext(key, value, publishable: sync)) {
+      if (_advanceContext(
+        key,
+        value,
+        publishable: !isSeenMessageContext(key),
+      )) {
         changed = true;
-        publish = publish || sync;
       }
     }
     if (!changed) return;
@@ -136,7 +138,6 @@ extension ReadStateJournal on ReadStateManager {
     );
     _persistLocalState();
     _onChanged();
-    if (publish) _schedulePublish();
   }
 
   /// The journal field that keeps a retained packet for coordinate [key].

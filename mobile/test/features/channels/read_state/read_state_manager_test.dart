@@ -1093,6 +1093,27 @@ void main() {
     return manager;
   }
 
+  test('a row-only visit waits for the next read-state flush', () {
+    fakeAsync((async) {
+      final session = _FakeRelaySession();
+      final relay = _FakeSignedEventRelay();
+      final manager = recoveryManager(async, session, relay);
+
+      manager.markChannelRowSeen({'seen:room': 1990});
+      expect(manager.getEffectiveTimestamp('seen:room'), 1990);
+      expect(manager.getEffectiveTimestamp('room'), isNull);
+      async.elapse(const Duration(seconds: 6));
+      expect(session.fetchCount, 1, reason: 'only the initial snapshot');
+      expect(relay.submitCount, 0);
+
+      manager.flush();
+      async.flushMicrotasks();
+      expect(session.fetchCount, 2);
+      expect(relay.submitCount, 1);
+      manager.dispose(flushPending: false);
+    });
+  });
+
   test('a read that recovers on the same socket sends the marks the retry '
       'would have', () {
     fakeAsync((async) {

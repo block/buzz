@@ -1,5 +1,6 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../../shared/me/me_sync.dart';
 import '../channels_provider.dart';
 import '../../../shared/read_state/read_state_provider.dart';
 import 'observed_unread_event.dart';
@@ -17,6 +18,11 @@ class UnreadBadgeState {
 final unreadBadgeProvider = Provider<UnreadBadgeState>((ref) {
   final channelsAsync = ref.watch(channelsProvider);
   final readState = ref.watch(readStateProvider);
+  final legacySoloIds = ref.watch(
+    meGroupsProvider.select(
+      (groups) => groups.value?.channels ?? const <String>[],
+    ),
+  );
 
   return channelsAsync.when(
     data: (channels) {
@@ -38,8 +44,11 @@ final unreadBadgeProvider = Provider<UnreadBadgeState>((ref) {
         if (!latestObservedByChannel.containsKey(channel.id)) continue;
 
         final observedEvents = observedEventsByChannel[channel.id];
+        // Match Home and Me, which display raw unread for Solo chats.
+        final applyRowMarks =
+            !channel.isDm && !channel.isSoloChat(legacySoloIds);
         int? readAtForObservedEvent(ObservedUnreadEvent event) {
-          if (!channel.isDm &&
+          if (applyRowMarks &&
               rowSawObservedUnreadEvent(
                 event,
                 channel.id,

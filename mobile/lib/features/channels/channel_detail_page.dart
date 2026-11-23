@@ -119,6 +119,7 @@ import '../../shared/read_state/deferred_read_state_update.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 import 'reaction_row.dart';
+import 'saved_channel_page.dart';
 import '../../shared/emoji/recent_emoji_provider.dart';
 import 'send_message_provider.dart';
 import '../profile/user_profile_sheet.dart';
@@ -132,6 +133,7 @@ import 'reading_marks.dart';
 import 'timeline_message.dart';
 
 part 'channel_detail_page/message_list.dart';
+part 'channel_detail_page/initial_thread_route.dart';
 part 'channel_detail_page/jump_to_oldest_unread_button.dart';
 part 'channel_detail_page/row_cache.dart';
 part 'channel_detail_page/placement_route.dart';
@@ -619,10 +621,14 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       });
     }, [channel.id, readState.isReady, openReadActive, openReadTimestamp]);
 
-    // Row hints follow the same active visit as open-read, without changing
-    // any actual read marker. DMs and forums already read on opening.
+    // Row hints follow the same active visit as open-read. DMs, forums and
+    // Solo keep their own unread behavior.
     final rowSeenActive =
-        openReadActive && !resolvedChannel.isDm && !resolvedChannel.isForum;
+        openReadActive &&
+        !resolvedChannel.isDm &&
+        !resolvedChannel.isForum &&
+        !resolvedChannel.isSolo &&
+        !personalChat;
     final observedRevision = ref.watch(
       channelsProvider.select(
         (_) => channelsNotifier.observedUnreadRevisionFor(channel.id),

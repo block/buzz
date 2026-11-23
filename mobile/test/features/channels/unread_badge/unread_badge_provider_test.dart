@@ -4,6 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/shared/me/me_groups.dart';
+import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
@@ -32,12 +34,14 @@ void main() {
     String channelType = 'stream',
     bool isMember = true,
     bool isArchived = false,
+    List<String> labels = const [],
     int? lastMessageAtSeconds,
   }) {
     return Channel(
       id: id,
       name: id,
       channelType: channelType,
+      labels: labels,
       visibility: 'open',
       description: '',
       createdBy: 'creator',
@@ -59,6 +63,7 @@ void main() {
     Map<String, int> readContexts = const {},
     Map<String, String> forcedUnreadContexts = const {},
     bool readStateReady = true,
+    List<String> legacySoloIds = const [],
     Map<String, int> highPriorityMap = const {},
     Map<String, List<ObservedUnreadEvent>>? observedEventsByChannel,
   }) {
@@ -72,6 +77,9 @@ void main() {
     return ProviderContainer(
       overrides: [
         channelsProvider.overrideWith(() => notifier),
+        meGroupsProvider.overrideWith(
+          (ref) => Stream.value(MeGroups(channels: legacySoloIds)),
+        ),
         readStateProvider.overrideWith(
           () => _ReadStateNotifier(
             ReadStateState(
@@ -228,6 +236,35 @@ void main() {
           'seen:msg:p': t30,
         });
         expect(late.highPriorityCount, 1);
+      },
+    );
+
+    test(
+      'the badge uses raw unread for labelled and legacy Solo chats',
+      () async {
+        final container = buildContainer(
+          channels: [
+            makeChannel(id: 'labelled', labels: ['buzz.solo']),
+            makeChannel(id: 'legacy'),
+            makeChannel(id: 'team'),
+          ],
+          legacySoloIds: ['legacy'],
+          readContexts: {
+            'seen:labelled': t20,
+            'seen:legacy': t20,
+            'seen:team': t20,
+          },
+          observedEventsByChannel: {
+            'labelled': [event('labelled-message')],
+            'legacy': [event('legacy-message')],
+            'team': [event('team-message')],
+          },
+        );
+        addTearDown(container.dispose);
+        await container.read(channelsProvider.future);
+        container.listen(meGroupsProvider, (_, _) {});
+        await container.read(meGroupsProvider.future);
+        expect(container.read(unreadBadgeProvider).generalUnreadCount, 2);
       },
     );
 

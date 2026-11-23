@@ -322,6 +322,7 @@ Widget _buildTestable({
   InboxLocalStateNotifier? inboxLocalState,
   _FakeMessagesNotifier? messagesNotifier,
   Future<SavedChannelPreview?>? savedPreview,
+  Future<List<NostrEvent>?>? savedThreadPreview,
 
   /// The channel's own history in a personal chat, which [messagesNotifier]
   /// does not back there.
@@ -412,6 +413,8 @@ Widget _buildTestable({
         savedChannelPreviewProvider(
           _channelId,
         ).overrideWith((ref) => savedPreview),
+      if (savedThreadPreview != null)
+        savedThreadPreviewProvider.overrideWith((ref, _) => savedThreadPreview),
       channelMessagesProvider(_huddleChannelId).overrideWith(
         () => _FakeMessagesNotifier(
           huddleMessages,
@@ -4238,12 +4241,31 @@ void main() {
           channel: solo,
           personalChat: true,
           signingPubkey: 'self',
+          channelsNotifier: _FakeChannelsNotifier(
+            [solo],
+            observedUnread: {
+              _channelId: [
+                makeObservedUnreadEvent(
+                  id: 'observed-only',
+                  createdAt: 1400,
+                  rootId: null,
+                  highPriority: true,
+                  channelType: 'stream',
+                  isThreadedReply: false,
+                ),
+              ],
+            },
+          ),
           channelMessagesNotifier: _FakeMessagesNotifier(messages),
           readStateNotifier: readState,
         ),
       );
       await tester.pump();
 
+      expect(
+        readState.markedContexts,
+        isNot(contains('seen:msg:observed-only')),
+      );
       // No dwell or scrolling needed: opening the Solo chat reads through its
       // newest message, which covers the addressed message off screen.
       expect(readState.markedContexts[_channelId], 1300);
