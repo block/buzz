@@ -95,21 +95,21 @@ struct SettingMenuSelectionTests {
     let grouped = NavigationGlassButtonPlatformView(
       frame: CGRect(x: 0, y: 0, width: 112, height: 56),
       viewIdentifier: 2,
-      arguments: ["deferMenuActions": false, "menu": [
-        ["id": 0, "label": "New chat", "sectionTitle": "Solo", "enabled": true],
-        ["id": 1, "label": "New workspace", "enabled": true],
-        ["id": 2, "label": "New DM", "sectionTitle": "Team", "dividerBefore": true, "enabled": true],
-        ["id": 3, "label": "New channel", "enabled": true],
+      arguments: ["deferMenuActions": false, "fixedMenuOrder": true, "menu": [
+        ["id": 0, "label": "New chat", "symbol": "message.circle", "enabled": true],
+        ["id": 1, "label": "New channel", "symbol": "number", "enabled": true],
+        ["id": 2, "label": "New DM", "symbol": "person.circle", "enabled": true],
+        ["id": 3, "label": "New workspace", "symbol": "folder", "dividerBefore": true, "enabled": true],
       ]], messenger: messenger
     )
     let button = grouped.view().subviews.compactMap { $0 as? NavigationGlassButton }.first!
     precondition(button.preferredMenuElementOrder == .fixed)
     let groups = button.menu!.children.compactMap { $0 as? UIMenu }
-    precondition(groups.map(\.title) == ["Solo", "Team"])
-    precondition(groups.map { $0.children.count } == [2, 2])
-    let teamAction = groups[1].children[0] as! UIAction
-    UIButton(primaryAction: teamAction).sendActions(for: .touchUpInside)
-    precondition(messenger.selections == [2])
+    precondition(groups.map(\.title) == ["", ""])
+    precondition(groups.map { $0.children.count } == [3, 1])
+    let workspaceAction = groups[1].children[0] as! UIAction
+    UIButton(primaryAction: workspaceAction).sendActions(for: .touchUpInside)
+    precondition(messenger.selections == [3])
     print("Native setting menu selection checks passed")
   }
 }
