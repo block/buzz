@@ -21,8 +21,11 @@ extension _RelaySessionBackgroundWork on RelaySessionNotifier {
       return;
     }
     // A return from a brief inactive spell (Control Center) keeps an attempt
-    // a network change just started.
-    if (backgroundedAt == null && _liveness.networkAttempt) return;
+    // a network change just started, or its spread-out wait.
+    if (backgroundedAt == null &&
+        (_liveness.networkAttempt || _liveness.spreadReconnect)) {
+      return;
+    }
 
     // Cancel any in-flight reconnect backoff timer so we reconnect immediately
     // instead of waiting for the (possibly large) exponential delay. This

@@ -337,6 +337,26 @@ void main() {
     });
   }
 
+  test('returning from inactive keeps the spread-out wait', () {
+    fakeAsync((async) {
+      final (:relay, :container) = connect(async);
+      final session = container.read(relaySessionProvider.notifier);
+
+      relay.holdReq();
+      session.onNetworkChanged();
+      async.elapse(pastProbe);
+      expect(relay.sockets.first.isOpen, isFalse);
+      // Closing Control Center before the wait ends: half the spread here.
+      session.onAppResumed();
+      async.elapse(const Duration(milliseconds: 1300));
+      expect(relay.sockets, hasLength(1), reason: 'no early connection');
+      async.elapse(const Duration(milliseconds: 200));
+      expect(relay.sockets, hasLength(2));
+      async.elapse(const Duration(seconds: 5));
+      expect(relay.sockets, hasLength(2));
+    });
+  });
+
   test('returning from inactive keeps an attempt a network change started', () {
     fakeAsync((async) {
       final (:relay, :container) = connect(async);
