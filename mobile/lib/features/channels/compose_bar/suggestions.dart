@@ -244,6 +244,9 @@ List<Channel> filterChannels(List<Channel> channels, String? query) {
 
 typedef _EmojiChoice = ({String code, String text, String? url});
 
+// Enough rows to scroll through without ranking the whole catalog into a list.
+const _emojiSuggestionLimit = 50;
+
 final _emojiToken = RegExp(r'(?:^|[\s(\[{]):([a-zA-Z0-9_+-]{2,64})$');
 
 String? _emojiQuery(TextEditingValue value) {
@@ -252,6 +255,40 @@ String? _emojiQuery(TextEditingValue value) {
     return null;
   }
   return _emojiToken.firstMatch(value.text.substring(0, caret.end))?.group(1);
+}
+
+/// A custom emoji in the suggestion list, drawn only from bytes another
+/// surface already downloaded. Typing a shortcode starts no image request: an
+/// emoji not seen yet shows the placeholder. The row's label already reads
+/// the shortcode, so the preview adds nothing for screen readers.
+class _CachedCustomEmojiPreview extends ConsumerWidget {
+  final String shortcode;
+  final String url;
+  final double size;
+
+  const _CachedCustomEmojiPreview({
+    required this.shortcode,
+    required this.url,
+    required this.size,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final bytes = ref.watch(customEmojiBytesCacheProvider).lookup(url);
+    return ExcludeSemantics(
+      child: bytes == null
+          ? CustomEmojiPlaceholder(shortcode: shortcode, size: size)
+          : Image.memory(
+              bytes,
+              width: size,
+              height: size,
+              cacheWidth: (size * MediaQuery.devicePixelRatioOf(context))
+                  .ceil(),
+              fit: BoxFit.contain,
+              filterQuality: FilterQuality.medium,
+            ),
+    );
+  }
 }
 
 class _ComposerSearchSuggestions<T> extends StatelessWidget {
