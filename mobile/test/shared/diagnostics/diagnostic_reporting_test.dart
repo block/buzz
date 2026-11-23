@@ -310,6 +310,14 @@ void main() {
         '_RecordingPublishRelaySessionNotifier was disposed',
       ),
       ('a failed cast', _failedCast(), 'TypeError', 'is not a subtype of'),
+      // The accepted risk (ADR 0007): a short value any code interpolates is
+      // sent as written when no pattern recognizes it.
+      (
+        'a bad state holding a short value',
+        StateError('no session for hunter2'),
+        'StateError',
+        'no session for hunter2',
+      ),
     ];
     for (final (name, error, type, text) in kept) {
       test('keeps the first line of the text of $name', () async {
