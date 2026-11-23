@@ -466,6 +466,33 @@ void main() {
       await receive(tester, cyan);
       expect(shownSwatch(tester), index('Gray'));
     });
+
+    testWidgets('the open color grid follows a sync until the user taps', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      await pumpPicker(tester, cyan);
+      await tester.tap(
+        find.byKey(const ValueKey('theme-preview-accent-action-button')),
+      );
+      await tester.pumpAndSettle();
+      Finder option(String name) =>
+          find.byKey(ValueKey('accent-option-${index(name)}'));
+      void expectMarked(String name) => expect(
+        tester.getSemantics(option(name)),
+        isSemantics(isSelected: true),
+      );
+      expectMarked('Jade');
+      await receive(tester, indigo);
+      expectMarked('Cobalt');
+      await tester.ensureVisible(option('Gray'));
+      await tester.pumpAndSettle();
+      await tester.tap(option('Gray'));
+      await tester.pumpAndSettle();
+      await receive(tester, cyan);
+      expectMarked('Gray');
+      semantics.dispose();
+    });
   });
 
   for (final brightness in Brightness.values) {

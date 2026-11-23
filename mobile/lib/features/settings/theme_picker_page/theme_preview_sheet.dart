@@ -41,7 +41,7 @@ class _ThemePreviewExperience extends HookConsumerWidget {
     void chooseColor() => showAccentColorPickerSheet(
       context: context,
       colorScheme: selectedBaseScheme,
-      selectedIndex: draftAccent,
+      pickedIndex: pickedAccent.value,
       onSelected: (index) => pickedAccent.value = index,
     );
 
