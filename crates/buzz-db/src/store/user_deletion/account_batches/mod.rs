@@ -438,8 +438,8 @@ async fn validate_stage(
     use crate::store::entity_deletion::{lock_owned, validate_approved_inventory};
     let request = lock_owned(tx, lease).await?;
     validate_approved_inventory(tx, &request).await?;
-    let inputs =
-        super::UserDeletionInventory::read(&request)?.inputs(&request.target, options.community)?;
+    let inputs = super::UserDeletionInventory::read(&request)?
+        .non_owner_inputs(&request.target, options.community)?;
     if request.status != "running"
         || normalize_user_deletion_pubkey(&request.target)? != options.target
     {

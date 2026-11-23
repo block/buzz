@@ -11,8 +11,8 @@ Direct `media-batches` and `content-batches` commands remain available for
 operator-controlled cleanup. Neither command installs or enforces the account
 gate. Protection against concurrent writes by the target or their agents remains
 unimplemented; neither command proves full account erasure. Use a disposable
-database and versioned storage bucket when testing. Owned-community destructive workflow
-execution is unsupported.
+database and versioned storage bucket when testing. Both modes delegate an owned
+community to its own deletion request when the parent reaches that stage.
 
 ## Content batches
 
@@ -191,20 +191,22 @@ parent to `running` in one transaction. A previously started request with no
 current row and no terminal outcome is an error, not permission to create a
 second gate.
 
-The version-1 workflow rules are:
+Newly approved inventories use the same workflow rules in both modes.
 
-| Stage | Allowed outcome | Runtime choice |
-| --- | --- | --- |
-| `gate_user` | `purge_media` | Enter media only after saved gate success; real gate is not implemented |
-| `purge_media` | Enter communities | After saved success, select the first uncovered community |
-| `purge_content` | `purge_agents` or community complete | Real cleanup continues to agent cleanup; demos read saved `result.has_agents` |
-| `purge_agents` | Community complete | Mark this community covered |
+| Completed stage | Next stage |
+| --- | --- |
+| `gate_user` | `purge_media` |
+| `purge_media` | First uncovered community, or `global_cleanup` for an empty inventory |
+| `purge_content` | `purge_account` in the same community |
+| `purge_account` | `purge_profile` in the same community |
+| `purge_profile` or `delete_owned_community` | Next uncovered community, or `global_cleanup` |
+| `global_cleanup` | `remaining_cleanup` |
+| `remaining_cleanup` | Complete the request |
 
-After a community completes, select the first uncovered community in inventory
-order. After all are covered, finish the request. Missing `has_agents` is an
-error, not an implicit skip. The inventory's version selects the currently
-supported rules; future versions must retain the rules needed by active requests.
-No full execution plan is created upfront.
+The approved inventory sets the community order. An owner enters
+`delete_owned_community`; other communities enter `purge_content`. A failed
+handler stays at its current stage. Older requests replay their saved workflow
+rules, including the legacy `purge_agents` branch.
 
 If the real `purge_db` keeps any of the user's messages in a channel, it must
 also keep the user's `channel_members` row for that channel, marked removed. The

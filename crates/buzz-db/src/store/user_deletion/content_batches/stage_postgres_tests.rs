@@ -1,23 +1,19 @@
 //! Workflow callers must use the attribution saved with the ordinary inventory.
 use super::scrub_postgres_tests::{message, options, row, setup};
-use crate::entity_deletion::{NewEntityStage, NextStage, StageTransition};
+use crate::entity_deletion::{
+    EntityLease, EntityRequest, NewEntityStage, NextStage, StageTransition,
+};
 use crate::user_deletion::{ExecutionMode, UserDeletionInventory};
+use crate::{CommunityId, Db};
 use nostr::Keys;
 use std::time::Duration;
 
-#[tokio::test]
-#[ignore = "requires Postgres"]
-async fn leased_content_uses_frozen_inventory_attribution_even_without_batches() {
-    let (db, community, channel, alice, _) = setup().await;
-    let human = alice.public_key().to_hex();
-    let relay = Keys::generate().public_key().to_hex();
-    let other = Keys::generate().public_key().to_hex();
-    let users = db.user_deletion_store();
-    let request = users
-        .submit_with_relay(&human, "operator", None, Some(&relay))
-        .await
-        .unwrap();
-    users
+async fn start_content_stage(
+    db: &Db,
+    request: &EntityRequest,
+    community: CommunityId,
+) -> (EntityLease, uuid::Uuid) {
+    db.user_deletion_store()
         .approve(
             request.id,
             "operator",
@@ -31,9 +27,9 @@ async fn leased_content_uses_frozen_inventory_attribution_even_without_batches()
         .await
         .unwrap()
         .unwrap();
-    let inputs = UserDeletionInventory::read(&request)
+    let inputs = UserDeletionInventory::read(request)
         .unwrap()
-        .inputs(&human, Some(*community.as_uuid()))
+        .inputs(&request.target, Some(*community.as_uuid()))
         .unwrap();
     let NextStage::Stage(stage) = store
         .transition_stage(&lease, None, |_, _| {
@@ -49,6 +45,22 @@ async fn leased_content_uses_frozen_inventory_attribution_even_without_batches()
         panic!("expected content stage")
     };
     store.start_stage(&lease, stage.id).await.unwrap();
+    (lease, stage.id)
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn leased_content_uses_frozen_inventory_attribution_even_without_batches() {
+    let (db, community, channel, alice, _) = setup().await;
+    let human = alice.public_key().to_hex();
+    let relay = Keys::generate().public_key().to_hex();
+    let other = Keys::generate().public_key().to_hex();
+    let users = db.user_deletion_store();
+    let request = users
+        .submit_with_relay(&human, "operator", None, Some(&relay))
+        .await
+        .unwrap();
+    let (lease, stage_id) = start_content_stage(&db, &request, community).await;
     let mut opts = options(community, &alice);
     for with_content in [false, true] {
         let event = if with_content {
@@ -62,7 +74,7 @@ async fn leased_content_uses_frozen_inventory_attribution_even_without_batches()
                 .run_message_batches(
                     &opts,
                     ExecutionMode::Delete,
-                    Some((&lease, stage.id)),
+                    Some((&lease, stage_id)),
                     &mut Vec::new(),
                 )
                 .await
@@ -81,10 +93,47 @@ async fn leased_content_uses_frozen_inventory_attribution_even_without_batches()
         .run_message_batches(
             &opts,
             ExecutionMode::Delete,
-            Some((&lease, stage.id)),
+            Some((&lease, stage_id)),
             &mut Vec::new(),
         )
         .await
         .unwrap();
     assert!(done.items > 0);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn leased_content_cleanup_refuses_an_approved_owner_scope() {
+    let (db, community, channel, alice, _) = setup().await;
+    let human = alice.public_key().to_hex();
+    sqlx::query("INSERT INTO relay_members (community_id, pubkey, role) VALUES ($1, $2, 'owner')")
+        .bind(community.as_uuid())
+        .bind(&human)
+        .execute(db.pool())
+        .await
+        .unwrap();
+    let event = message(&db, community, channel, &alice, "keep owner content", None).await;
+    let users = db.user_deletion_store();
+    let request = users.submit(&human, "operator", None).await.unwrap();
+    let (lease, stage_id) = start_content_stage(&db, &request, community).await;
+
+    let error = users
+        .run_message_batches(
+            &options(community, &alice),
+            ExecutionMode::Delete,
+            Some((&lease, stage_id)),
+            &mut Vec::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("owner inventory requires the community deletion handoff"),
+        "{error}"
+    );
+    assert_eq!(
+        row(&db, community, &event).await["content"],
+        "keep owner content"
+    );
 }

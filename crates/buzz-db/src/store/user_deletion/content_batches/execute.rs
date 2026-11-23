@@ -205,7 +205,7 @@ async fn validate_stage(
         ));
     }
     let expected = crate::user_deletion::UserDeletionInventory::read(&request)?
-        .inputs(&request.target, Some(community))?;
+        .non_owner_inputs(&request.target, Some(community))?;
     let inputs: Option<Value> = sqlx::query_scalar("SELECT metadata_json->'inputs' FROM entity_deletion_stage_history WHERE id=$1 AND request_id=$2 AND stage='purge_content' AND target_community_id=$3 AND is_current AND status='running' FOR UPDATE")
             .bind(stage_id).bind(lease.request_id).bind(community).fetch_optional(&mut *tx).await?;
     if request.target != normalize_user_deletion_pubkey(&options.pubkey)?
