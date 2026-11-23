@@ -5,6 +5,7 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_member_profile_actions.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -67,6 +68,7 @@ Future<ProviderContainer> _pump(
   bool dm = false,
   bool archived = false,
   bool inSheet = false,
+  Map<String, String> owners = const {},
   _Actions? actions,
   Future<List<ChannelMember>> Function()? load,
 }) async {
@@ -81,6 +83,7 @@ Future<ProviderContainer> _pump(
               ? [_member('self', actorRole), _member('alice', targetRole)]
               : await load(),
         ),
+        agentOwnersProvider.overrideWith((ref) async => owners),
         channelActionsProvider.overrideWithValue(actions ?? _Actions()),
       ],
       child: MaterialApp(
@@ -253,6 +256,49 @@ void main() {
     container.invalidate(channelMembersProvider('test'));
     await tester.pumpAndSettle();
     expect(find.text('Make channel admin'), findsOneWidget);
+  });
+  group('in a DM', () {
+    testWidgets('the owner removes their own agent after confirming', (
+      tester,
+    ) async {
+      final actions = _Actions();
+      await _pump(
+        tester,
+        dm: true,
+        actorRole: 'member',
+        targetRole: 'bot',
+        owners: {'alice': 'SELF'},
+        inSheet: true,
+        actions: actions,
+      );
+      expect(find.text('Make channel admin'), findsNothing);
+      expect(find.text('Remove from channel'), findsNothing);
+      await tester.tap(find.text('Remove from DM'));
+      await tester.pumpAndSettle();
+      expect(find.text('Remove from DM?'), findsOneWidget);
+      expect(find.textContaining('from this DM?'), findsOneWidget);
+      await tester.tap(find.text('Remove'));
+      await tester.pumpAndSettle();
+      expect(actions.calls, ['test:alice:remove']);
+      expect(find.byType(ChannelMemberProfileActions), findsNothing);
+    });
+
+    for (final scenario in ['other owner', 'unowned', 'person']) {
+      testWidgets('no Remove for $scenario', (tester) async {
+        await _pump(
+          tester,
+          dm: true,
+          actorRole: 'owner',
+          targetRole: scenario == 'person' ? 'member' : 'bot',
+          owners: {
+            if (scenario == 'other owner') 'alice': 'bob',
+            // A person has no verified owner; even an admin viewer is no use.
+          },
+        );
+        expect(find.text('Remove from DM'), findsNothing);
+        expect(find.text('Remove from channel'), findsNothing);
+      });
+    }
   });
   for (final role in ['member', 'admin', 'guest', 'bot']) {
     testWidgets('management rows for $role', (tester) async {
