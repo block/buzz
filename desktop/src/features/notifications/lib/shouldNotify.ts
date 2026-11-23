@@ -4,8 +4,10 @@ import {
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
 
-/** Workflow message steps may opt out of user notifications without changing
- * mentions, unread state, or the message itself.
+/**
+ * Whether a workflow step opted its message out of user notifications. Only
+ * alerts (toasts, sounds, dock bounce) honour it; unread and activity state
+ * still follow {@link shouldNotifyForEvent}.
  */
 export function hasWorkflowNotificationOptOut(
   tags: readonly (readonly string[])[],
@@ -52,10 +54,6 @@ export function shouldNotifyForEvent(
   currentPubkey: string,
   options: NotifyOptions,
 ): boolean {
-  if (hasWorkflowNotificationOptOut(event.tags)) {
-    return false;
-  }
-
   const {
     participatedRootIds,
     followedRootIds,

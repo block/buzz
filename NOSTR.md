@@ -389,6 +389,8 @@ message with `["buzz:workflow-notify", "false"]`. Clients MUST NOT produce a
 user notification for the marked message, and Buzz's push executor does not
 wake installations for it. The opt-out applies only to that step: it does not
 remove the message, its mention tags, unread state, or agent-direction tags.
+The relay rejects client-submitted events carrying a `buzz:workflow-notify`
+tag, so only relay-signed workflow messages can carry the marker.
 
 ### Workflow Mentions
 

@@ -63,7 +63,6 @@ export function eligibleFeedNotificationItems(
   channels: readonly NotificationChannel[] = [],
 ) {
   const items: FeedItem[] = [];
-  const optedOut = (item: FeedItem) => hasWorkflowNotificationOptOut(item.tags);
 
   // DM notifications are handled by the real-time WebSocket hook, so we
   // exclude DM items here to avoid duplicate toasts. The backend feed emits
@@ -73,15 +72,19 @@ export function eligibleFeedNotificationItems(
     items.push(
       ...feed.feed.mentions
         .map((item) => enrichFeedItemChannel(item, channels))
-        .filter((item) => item.channelType !== "dm" && !optedOut(item)),
+        .filter(
+          (item) =>
+            item.channelType !== "dm" &&
+            !hasWorkflowNotificationOptOut(item.tags),
+        ),
     );
   }
 
   if (options.needsAction) {
     items.push(
-      ...feed.feed.needsAction
-        .map((item) => enrichFeedItemChannel(item, channels))
-        .filter((item) => !optedOut(item)),
+      ...feed.feed.needsAction.map((item) =>
+        enrichFeedItemChannel(item, channels),
+      ),
     );
   }
 

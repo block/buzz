@@ -33,6 +33,16 @@ test("shouldBounceForChannelNotification_allowsBroadcastReplies", () => {
   );
 });
 
+test("shouldBounceForChannelNotification_suppressesWorkflowNotificationOptOut", () => {
+  assert.equal(
+    shouldBounceForChannelNotification([
+      ["h", "channel"],
+      ["buzz:workflow-notify", "false"],
+    ]),
+    false,
+  );
+});
+
 test("notification activation queue preserves click order", async () => {
   const calls = [];
   const resolvers = new Map();

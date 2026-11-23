@@ -296,25 +296,6 @@ test("empty currentPubkey with participated thread still notifies (no mute)", ()
   );
 });
 
-test("workflow step notification opt-out overrides message and mention notification paths", () => {
-  const optOut = ["buzz:workflow-notify", "false"];
-  assert.equal(
-    shouldNotifyForEvent(makeEvent([optOut]), PUBKEY, opts()),
-    false,
-  );
-
-  const addressedQuietMessage = makeEvent([
-    optOut,
-    pTag(PUBKEY),
-    broadcastTag(),
-  ]);
-  assert.equal(
-    shouldNotifyForEvent(addressedQuietMessage, PUBKEY, opts()),
-    false,
-  );
-  assert.equal(isHighPriorityEventForUser(addressedQuietMessage, PUBKEY), true);
-});
-
 test("isHighPriorityEventForUser returns true when p-tag matches currentPubkey", () => {
   const event = makeEvent([replyTag(ROOT_ID), pTag(PUBKEY)]);
   assert.equal(isHighPriorityEventForUser(event, PUBKEY), true);

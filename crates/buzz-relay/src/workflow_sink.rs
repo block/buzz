@@ -1598,6 +1598,27 @@ mod postgres_tests {
             "@Robby do something unsafe",
         )
         .await;
+        let author_bytes = author.public_key().to_bytes();
+        let quiet_event_id_hex = run_workflow(
+            &state,
+            community,
+            channel.id,
+            &author_bytes,
+            serde_json::json!({
+                "name": "quiet-authored-mention",
+                "trigger": {"on": "message_posted"},
+                "steps": [{
+                    "id": "send",
+                    "action": "send_message",
+                    "text": "heads up @Robby",
+                    "notify": false,
+                }],
+                "enabled": true,
+            }),
+            "ignored trigger text",
+            Some(&buzz_db::workflow::RunCause::Event(author_bytes.to_vec())),
+        )
+        .await;
 
         let load_event = |event_id_hex: &str| {
             let state = Arc::clone(&state);
@@ -1617,6 +1638,7 @@ mod postgres_tests {
         };
         let explicit = load_event(&explicit_event_id_hex).await;
         let injected = load_event(&injected_event_id_hex).await;
+        let quiet = load_event(&quiet_event_id_hex).await;
 
         let tag_values = |stored: &buzz_core::StoredEvent, name: &str| -> Vec<String> {
             stored
@@ -1664,6 +1686,17 @@ mod postgres_tests {
             tag_values(&explicit, "buzz:workflow-notify").is_empty(),
             "notify must default to true without adding an opt-out marker"
         );
+        assert_eq!(
+            tag_values(&quiet, "buzz:workflow-notify"),
+            vec!["false".to_owned()],
+            "a notify: false step must mark its message"
+        );
+        assert_eq!(
+            tag_values(&quiet, "buzz:workflow-mention"),
+            vec![agent_hex.clone()],
+            "the opt-out must not withhold the authored mention"
+        );
+        assert!(tag_values(&quiet, "p").contains(&agent_hex));
 
         let injected_p_tags = tag_values(&injected, "p");
         assert!(

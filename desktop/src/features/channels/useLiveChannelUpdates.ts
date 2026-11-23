@@ -341,7 +341,11 @@ export function useLiveChannelUpdates(
         }
       }
 
-      if (shouldNotify && isThreadedReply) {
+      if (
+        shouldNotify &&
+        isThreadedReply &&
+        !hasWorkflowNotificationOptOut(event.tags)
+      ) {
         if (
           !dmChannelMap.has(channelId) &&
           (channelId !== activeChannelId || options.notifyForActiveChannel)

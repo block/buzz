@@ -2617,6 +2617,15 @@ async fn ingest_event_inner(
             "invalid: membership notifications are relay-signed only".into(),
         ));
     }
+    if event
+        .tags
+        .iter()
+        .any(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz:workflow-notify"))
+    {
+        return Err(IngestError::Rejected(
+            "invalid: buzz:workflow-notify is relay-signed only".into(),
+        ));
+    }
 
     // Typing indicators (kind:20002) never reach this gate: the HTTP bridge
     // routes them to `publish_http_typing` before ingest.
@@ -8138,6 +8147,56 @@ mod postgres_tests {
             .await
             .expect("connect test Postgres");
         build_canvas_ingest_state(&db_url, &pool).await
+    }
+
+    /// Clients and the push executor trust `buzz:workflow-notify` from tags
+    /// alone, so only relay-signed workflow messages may carry it.
+    /// Mutation: drop the ingest check → RED (the marked message is stored).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn client_events_cannot_carry_workflow_notification_opt_out() {
+        let state = ingest_state().await;
+        let author = nostr::Keys::generate();
+        let tenant = emoji_tenant(&state, &[&author]).await;
+        let channel = state
+            .db
+            .create_channel(
+                tenant.community(),
+                "quiet",
+                buzz_db::channel::ChannelType::Stream,
+                buzz_db::channel::ChannelVisibility::Open,
+                None,
+                author.public_key().as_bytes(),
+                None,
+            )
+            .await
+            .expect("create channel");
+        let publish = |extra: Option<[&'static str; 2]>| {
+            let mut tags = vec![nostr::Tag::parse(["h", &channel.id.to_string()]).expect("h")];
+            tags.extend(extra.map(|tag| nostr::Tag::parse(tag).expect("extra tag")));
+            let event = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "hi")
+                .tags(tags)
+                .sign_with_keys(&author)
+                .expect("sign message");
+            let auth = IngestAuth::Http {
+                pubkey: author.public_key(),
+                scopes: vec![Scope::MessagesWrite],
+                auth_method: HttpAuthMethod::Nip98,
+            };
+            ingest_event(&state, &tenant, event, auth)
+        };
+
+        match publish(Some(["buzz:workflow-notify", "false"])).await {
+            Err(IngestError::Rejected(msg)) => {
+                assert_eq!(msg, "invalid: buzz:workflow-notify is relay-signed only")
+            }
+            Err(other) => panic!("client-signed opt-out marker must be rejected, got {other:?}"),
+            Ok(_) => panic!("client-signed opt-out marker must be rejected, but it was accepted"),
+        }
+        assert!(
+            publish(None).await.expect("unmarked message").accepted,
+            "the same message without the marker is accepted"
+        );
     }
 
     /// An owner's timeout reaches its agent, and it is enforced before command

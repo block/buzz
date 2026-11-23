@@ -172,19 +172,56 @@ test("live channel stream drives mention, unread and DM callbacks once across re
     const event = message("mention");
     await h.deliver(h.subscriptions[0], event);
     await h.deliver(h.subscriptions[0], event);
-    await h.deliver(
-      h.subscriptions[0],
-      message("quiet-workflow-dm", {
-        tags: [
-          ["h", "channel-0"],
-          ["p", VIEWER],
-          ["buzz:workflow-notify", "false"],
-        ],
-      }),
-    );
-    assert.deepEqual(mentions, ["mention", "mention"]);
+    assert.deepEqual(mentions, ["mention"]);
     assert.deepEqual(unreads, [["channel-0", "mention"]]);
     assert.deepEqual(dms, [["channel-0", "mention"]]);
+  } finally {
+    h.restore();
+  }
+});
+
+test("workflow notification opt-out keeps mention, unread and activity state but raises no alert", async () => {
+  const optOut = ["buzz:workflow-notify", "false"];
+  const mentions = [];
+  const unreads = [];
+  const activity = [];
+  const alerts = [];
+  const h = await mount(channels(2), {
+    onLiveMention: () => mentions.push("mention"),
+    onChannelMessage: (id, event) => unreads.push([id, event.id]),
+    onThreadReplyNotification: (id, event) => activity.push([id, event.id]),
+    onDmMessage: (event) => alerts.push(["dm", event.id]),
+    onThreadReplyDesktopNotification: (_id, event) =>
+      alerts.push(["thread", event.id]),
+    participatedRootIds: new Set(["root"]),
+  });
+  const sub = (id) => h.subscriptions.find((s) => s.filter["#h"].includes(id));
+  const reply = (id, extra = []) =>
+    message(id, {
+      tags: [["h", "channel-1"], ["e", "root", "", "reply"], ...extra],
+    });
+  try {
+    await h.deliver(
+      sub("channel-0"),
+      message("quiet-dm", {
+        tags: [["h", "channel-0"], ["p", VIEWER], optOut],
+      }),
+    );
+    await h.deliver(sub("channel-1"), reply("quiet-reply", [optOut]));
+    await h.deliver(sub("channel-1"), reply("reply"));
+
+    assert.deepEqual(mentions, ["mention"]);
+    assert.deepEqual(unreads, [
+      ["channel-0", "quiet-dm"],
+      ["channel-1", "quiet-reply"],
+      ["channel-1", "reply"],
+    ]);
+    assert.deepEqual(activity, [
+      ["channel-0", "quiet-dm"],
+      ["channel-1", "quiet-reply"],
+      ["channel-1", "reply"],
+    ]);
+    assert.deepEqual(alerts, [["thread", "reply"]]);
   } finally {
     h.restore();
   }
