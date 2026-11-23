@@ -65,6 +65,15 @@ that has completed.
 5. `remaining_cleanup`: print and save the report, then atomically finish the
    request through the existing transition function.
 
+After each completed `purge_content` preview, `user-deletions inspect <request-id>`
+shows the counts for that community in the stage’s `metadata_json.result.content`.
+`delete` counts rows removed entirely. `redact_content` counts rows retained with
+personal fields erased, such as an event kept to preserve its thread. Both groups contain a row total (`rows`), counts by table
+(`by_table`), and counts for the `events` table by Nostr kind (`events_by_kind`).
+The kind counts break down the events already counted under `by_table.events`.
+`excluded_event_kinds` lists events outside the selection. Older completed
+stages retain their original summary.
+
 The last community automatically transitions to global cleanup. With no matched
 communities, media transitions directly to global cleanup. The shared inventory method
 used by `inventory`, ordinary `submit`, and `submit --read-only` saves only communities with target-linked cleanup candidates: memberships,

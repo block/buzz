@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::PgConnection;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use uuid::Uuid;
 
@@ -54,6 +54,17 @@ pub struct ContentBatchOptions {
     pub max_items: u32,
 }
 
+/// Unique planned rows for one action in this community.
+#[derive(Debug, Default, Serialize)]
+pub struct ContentRowCounts {
+    /// Total rows across all affected tables.
+    pub rows: usize,
+    /// Rows grouped by table name.
+    pub by_table: BTreeMap<String, usize>,
+    /// Only rows in the events table, grouped by their Nostr kind.
+    pub events_by_kind: BTreeMap<i64, usize>,
+}
+
 /// Final marker for the declared scope; never claims complete account erasure.
 #[derive(Debug, Serialize)]
 pub struct ContentBatchSummary {
@@ -63,6 +74,10 @@ pub struct ContentBatchSummary {
     pub batches: u64,
     /// Number of unique proposed row operations.
     pub items: usize,
+    /// Rows selected for deletion.
+    pub delete: ContentRowCounts,
+    /// Rows retained after erasing their personal content.
+    pub redact_content: ContentRowCounts,
     /// Operations carrying an active-work or delivery warning.
     pub warnings: usize,
     /// Events retained as erased structural tombstones.
@@ -100,6 +115,8 @@ struct Output<'a, W> {
     repairs: Vec<Value>,
     batches: u64,
     warnings: usize,
+    delete: ContentRowCounts,
+    redact_content: ContentRowCounts,
     collected: Option<Vec<Value>>,
 }
 
@@ -151,6 +168,19 @@ impl<W: Write> Output<'_, W> {
             ));
         }
         self.seen.insert(identity);
+        let counts = match action {
+            "would_delete" => &mut self.delete,
+            "would_scrub" => &mut self.redact_content,
+            _ => return Err(invalid("unknown internal content action")),
+        };
+        counts.rows += 1;
+        *counts.by_table.entry(table.to_owned()).or_default() += 1;
+        if table == "events" {
+            let kind = reason["kind"]
+                .as_i64()
+                .ok_or_else(|| invalid("missing kind for selected event"))?;
+            *counts.events_by_kind.entry(kind).or_default() += 1;
+        }
         self.warnings += usize::from(warning.is_some());
         self.batch.push(json!({
             "table": table, "key": key, "action": action,
@@ -269,6 +299,8 @@ async fn plan(
         repairs: Vec::new(),
         batches: 0,
         warnings: 0,
+        delete: ContentRowCounts::default(),
+        redact_content: ContentRowCounts::default(),
         collected: collect.then(Vec::new),
     };
     owned::plan(conn, &targets, &mut output).await?;
@@ -310,14 +342,12 @@ async fn plan(
     let metadata = retention::metadata(conn, options.community, &selected).await?;
     let selected = retention::children_first(selected, &metadata)?;
     let now = Utc::now();
-    let mut scrubbed_events = 0;
     for page in selected.chunks(PAGE_SIZE as usize) {
         rows::event_rows(conn, page, &mut output).await?;
         for event in page {
             let id = hex::encode(&event.id);
             let scrub = needed.contains(&id)
                 || crate::pins::keeps_replay_record(event.kind, event.created_at, now);
-            scrubbed_events += usize::from(scrub);
             output
                 .repairs
                 .push(json!({"event_id": id, "channel_id": event.channel_id,
@@ -354,7 +384,14 @@ async fn plan(
         batches: output.batches,
         items: output.seen.len(),
         warnings: output.warnings,
-        scrubbed_events,
+        scrubbed_events: output
+            .redact_content
+            .by_table
+            .get("events")
+            .copied()
+            .unwrap_or(0),
+        delete: output.delete,
+        redact_content: output.redact_content,
         excluded_event_kinds: excluded,
     };
     Ok(Plan {
