@@ -602,9 +602,13 @@ void main() {
       speech.preparation!.complete();
       await tester.pumpAndSettle();
       expect(speech.cancelled, isTrue);
-      expect(find.textContaining('Speech was not ready'), findsWidgets);
+      expect(find.byTooltip('Discard transcript'), findsNothing);
       expect(recorder.stops, 0);
       expect(find.byType(VoiceNoteWaveform), findsNothing);
+      speech.preparation = null;
+      final retry = await hold(tester);
+      expect(recorder.starts, 1);
+      await retry.cancel();
       await tester.pumpWidget(const SizedBox());
     },
   );

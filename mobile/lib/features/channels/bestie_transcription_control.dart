@@ -149,11 +149,6 @@ class BestieTranscriptionControl extends HookConsumerWidget {
       if (phase.value != 'Listening') {
         if (phase.value == 'Preparing speech') {
           await cancel();
-          report(
-            StateError(
-              'Speech was not ready. Hold again and wait for Listening before speaking.',
-            ),
-          );
         }
         return;
       }
