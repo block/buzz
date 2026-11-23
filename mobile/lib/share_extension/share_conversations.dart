@@ -9,6 +9,7 @@ class ShareConversation {
     required this.id,
     required this.name,
     required this.isDm,
+    this.isSolo = false,
     required this.recipients,
     required this.lastActivity,
   });
@@ -16,6 +17,9 @@ class ShareConversation {
   final String id;
   final String name;
   final bool isDm;
+
+  /// A Solo chat, shown with the chat icon as in the app.
+  final bool isSolo;
 
   /// Everyone else in a DM, who get `p` tags so they are notified.
   final List<String> recipients;
@@ -117,6 +121,7 @@ Future<ShareDestinations> loadShareDestinations(
               ? recipients.map((p) => names[p] ?? p.substring(0, 8)).join(', ')
               : c.data.name,
           isDm: isDm,
+          isSolo: c.data.labels.contains('buzz.solo'),
           recipients: recipients,
           lastActivity: activity[c.data.id] ?? c.createdAt,
         );

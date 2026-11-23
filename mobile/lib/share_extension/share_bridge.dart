@@ -37,11 +37,12 @@ class ShareBridge {
   /// Signs and submits a message. The same [createdAt] gives a retry the same
   /// event ID, so the relay drops a duplicate whose first answer was lost.
   Future<void> publish({
+    int kind = EventKind.streamMessage,
     required String content,
     required List<List<String>> tags,
     required int createdAt,
   }) => _channel.invokeMethod('publish', {
-    'kind': EventKind.streamMessage,
+    'kind': kind,
     'content': content,
     'tags': tags,
     'createdAt': createdAt,
@@ -49,10 +50,6 @@ class ShareBridge {
 
   Future<void> close() => _channel.invokeMethod('close');
   Future<void> cancel() => _channel.invokeMethod('cancel');
-
-  /// Hands the share to the app, which starts a new Solo chat with it.
-  Future<void> openApp(String note) =>
-      _channel.invokeMethod('openApp', {'note': note});
 }
 
 class SharePayload {

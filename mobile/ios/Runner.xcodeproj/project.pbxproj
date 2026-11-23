@@ -28,6 +28,7 @@
 		BZZ00000000000000000001 /* NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000006 /* NotificationService.swift */; };
 		BZZ00000000000000000031 /* ShareExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000036 /* ShareExtension.swift */; };
 		BZZ00000000000000000050 /* ShareRelayClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000051 /* ShareRelayClient.swift */; };
+		BZZ00000000000000000099 /* MediaSanitizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 331C809A294A618700263BE5 /* MediaSanitizer.swift */; };
 		BZZ00000000000000000052 /* ShareImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000053 /* ShareImage.swift */; };
 		BZZ00000000000000000054 /* BuzzPushKit in Frameworks */ = {isa = PBXBuildFile; productRef = BZZ00000000000000000022 /* BuzzPushKit */; };
 		BZZ00000000000000000002 /* NotificationService.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = BZZ00000000000000000009 /* NotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -730,6 +731,7 @@
 				BZZ00000000000000000031 /* ShareExtension.swift in Sources */,
 				BZZ00000000000000000050 /* ShareRelayClient.swift in Sources */,
 				BZZ00000000000000000052 /* ShareImage.swift in Sources */,
+				BZZ00000000000000000099 /* MediaSanitizer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -1,7 +1,7 @@
 part of '../share_sheet.dart';
 
-/// New Solo chat and the Bestie DM first, then every conversation newest
-/// first, filtered by the search field.
+/// The search field, then New Solo chat and the Bestie DM, then every
+/// conversation newest first, filtered by the search.
 class _DestinationList extends StatelessWidget {
   const _DestinationList({
     required this.loaded,
@@ -9,7 +9,7 @@ class _DestinationList extends StatelessWidget {
     required this.selected,
     required this.enabled,
     required this.onSelect,
-    required this.onNewSoloChat,
+    required this.bestieName,
   });
 
   final AsyncSnapshot<ShareDestinations> loaded;
@@ -17,7 +17,10 @@ class _DestinationList extends StatelessWidget {
   final String? selected;
   final bool enabled;
   final ValueChanged<String> onSelect;
-  final VoidCallback onNewSoloChat;
+
+  /// Who a new Solo chat starts with; null until the app has published the
+  /// Bestie.
+  final String? bestieName;
 
   @override
   Widget build(BuildContext context) {
@@ -31,7 +34,13 @@ class _DestinationList extends StatelessWidget {
     Widget row(ShareConversation c, {String? subtitle}) => ListTile(
       enabled: enabled,
       selected: c.id == selected,
-      leading: Icon(c.isDm ? Icons.person_outline : Icons.tag),
+      leading: Icon(
+        c.isSolo
+            ? BuzzIcons.messageCircle
+            : c.isDm
+            ? Icons.person_outline
+            : Icons.tag,
+      ),
       title: Text(c.name, maxLines: 1, overflow: TextOverflow.ellipsis),
       subtitle: subtitle == null ? null : Text(subtitle),
       trailing: c.id == selected ? const Icon(Icons.check) : null,
@@ -40,14 +49,6 @@ class _DestinationList extends StatelessWidget {
     return ListView(
       keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       children: [
-        ListTile(
-          enabled: enabled,
-          leading: const Icon(Icons.add_comment_outlined),
-          title: const Text('New Solo chat'),
-          subtitle: const Text('Opens Buzz'),
-          onTap: onNewSoloChat,
-        ),
-        if (bestie != null && query.isEmpty) row(bestie, subtitle: 'Bestie'),
         Padding(
           padding: const EdgeInsets.fromLTRB(Grid.xs, Grid.xxs, Grid.xs, 0),
           child: TextField(
@@ -60,6 +61,20 @@ class _DestinationList extends StatelessWidget {
             ),
           ),
         ),
+        ListTile(
+          enabled: enabled && bestieName != null,
+          selected: selected == newSoloChatId,
+          leading: const Icon(Icons.add_comment_outlined),
+          title: const Text('New Solo chat'),
+          subtitle: Text(
+            bestieName == null
+                ? 'Open Buzz once to choose who it starts with'
+                : 'With ${bestieName!.isEmpty ? 'your Bestie' : bestieName}',
+          ),
+          trailing: selected == newSoloChatId ? const Icon(Icons.check) : null,
+          onTap: () => onSelect(newSoloChatId),
+        ),
+        if (bestie != null && query.isEmpty) row(bestie, subtitle: 'Bestie'),
         if (loaded.hasError)
           ListTile(title: Text('Couldn’t load conversations: ${loaded.error}'))
         else if (data == null)

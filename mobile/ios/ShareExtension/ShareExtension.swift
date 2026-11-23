@@ -6,8 +6,7 @@ import UniformTypeIdentifiers
 
 /// Prototype: shows Buzz's Flutter share screen inside the extension and sends
 /// from this process, like a separate device that shares only the identity
-/// (keychain and app group). Picking "New Solo chat" still hands the share to
-/// the app, as before.
+/// (keychain and app group).
 final class ShareViewController: UIViewController {
   private var engine: FlutterEngine?
   private var channel: FlutterMethodChannel?
@@ -94,10 +93,6 @@ final class ShareViewController: UIViewController {
     case "cancel":
       extensionContext?.cancelRequest(withError: NSError(domain: NSCocoaErrorDomain, code: NSUserCancelledError))
       return nil
-    case "openApp":
-      // A new Solo chat needs the app's creation flow, so hand the share over.
-      try await handOff(note: args["note"] as? String)
-      return nil
     default:
       return FlutterMethodNotImplemented
     }
@@ -111,49 +106,6 @@ final class ShareViewController: UIViewController {
       json["pubkey"] == pubkey, let bestie = json["bestie"]
     else { return nil }
     return ["pubkey": bestie, "name": json["name"] ?? ""]
-  }
-
-  private func handOff(note: String?) async throws {
-    let shared = await content.value
-    let shareID = UUID().uuidString
-    guard let root = ShareRelayClient.appGroupURL else { throw ShareError.message("The app group is unavailable.") }
-    let directory = root.appendingPathComponent("PendingShares/\(shareID)", isDirectory: true)
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    var files: [String] = []
-    if let image = shared.image {
-      let name = "\(UUID().uuidString).\(image.url.pathExtension)"
-      try FileManager.default.copyItem(at: image.url, to: directory.appendingPathComponent(name))
-      files.append(name)
-    }
-    let text = note.map { $0.isEmpty ? [] : [$0] } ?? shared.text
-    let manifest: [String: Any] = ["version": 1, "text": text, "files": files, "missed": shared.missed]
-    try JSONSerialization.data(withJSONObject: manifest)
-      .write(to: directory.appendingPathComponent("share.json"), options: .atomic)
-    var components = URLComponents()
-    components.scheme = Bundle.main.object(forInfoDictionaryKey: "BuzzShareURLScheme") as? String
-    components.host = "share"
-    components.queryItems = [URLQueryItem(name: "id", value: shareID)]
-    if !openContainingApp(components.url!) {
-      NSLog("[BuzzShare] no UIApplication in the responder chain; share %@ stays pending", shareID)
-    }
-    extensionContext?.completeRequest(returningItems: nil)
-  }
-
-  /// UIApplication.open is unavailable to extensions, so reach the host
-  /// UIApplication through the responder chain.
-  private func openContainingApp(_ url: URL) -> Bool {
-    let selector = NSSelectorFromString("openURL:options:completionHandler:")
-    var responder: UIResponder? = self
-    while let current = responder {
-      if let app = current as? UIApplication, app.responds(to: selector) {
-        typealias Open = @convention(c) (AnyObject, Selector, NSURL, NSDictionary, AnyObject?) -> Void
-        let open = unsafeBitCast(app.method(for: selector), to: Open.self)
-        open(app, selector, url as NSURL, NSDictionary(), nil)
-        return true
-      }
-      responder = current.next
-    }
-    return false
   }
 }
 

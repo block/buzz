@@ -3,7 +3,13 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:uuid/uuid.dart';
 
+import '../features/channels/channel_management_provider.dart'
+    show buildCreateChannelTags;
+import '../shared/me/me_chat_title.dart';
+
+import '../shared/theme/buzz_icons.dart';
 import '../shared/theme/grid.dart';
 import 'share_bridge.dart';
 import 'share_conversations.dart';
@@ -14,7 +20,7 @@ part 'share_sheet/send.dart';
 const _bridge = ShareBridge();
 
 /// The share extension's screen: a note, a destination and Send. Sending
-/// stays in the extension; only a new Solo chat opens the app.
+/// stays in the extension, including starting a new Solo chat.
 class ShareSheet extends HookConsumerWidget {
   const ShareSheet({super.key});
 
@@ -59,23 +65,37 @@ class _ShareForm extends HookWidget {
     final send = useState<_SendState>(const _SendIdle());
     final upload = useRef<Map<String, Object?>?>(null);
     final createdAt = useRef<int?>(null);
+    final solo = useRef<SoloChatProgress?>(null);
     final all = loaded.data;
     final conversations = [?all?.bestie, ...?all?.recent];
+    final newSolo = selected.value == newSoloChatId;
     final target = conversations
         .where((c) => c.id == selected.value)
         .firstOrNull;
+    final canSend = target != null || (newSolo && payload.bestie != null);
     final busy = send.value is _Sending;
 
     Future<void> submit() async {
-      if (target == null) return;
+      if (!canSend) return;
       // A changed destination or note is a new message, not a retry.
       createdAt.value ??= DateTime.now().millisecondsSinceEpoch ~/ 1000;
       send.value = const _Sending('Sending…');
       try {
+        var destination = target;
+        if (newSolo) {
+          send.value = const _Sending('Starting chat…');
+          destination = await createSoloChat(
+            progress: solo.value ??= SoloChatProgress(),
+            bestie: payload.bestie!,
+            note: note.text,
+            createdAt: createdAt.value!,
+          );
+          send.value = const _Sending('Sending…');
+        }
         await sendShare(
           payload: payload,
           note: note.text,
-          target: target,
+          target: destination!,
           createdAt: createdAt.value!,
           upload: upload,
           onUploading: () => send.value = const _Sending('Uploading photo…'),
@@ -96,7 +116,7 @@ class _ShareForm extends HookWidget {
         title: Text(payload.community!.name),
         actions: [
           TextButton(
-            onPressed: busy || target == null ? null : submit,
+            onPressed: busy || !canSend ? null : submit,
             child: const Text('Send'),
           ),
         ],
@@ -156,11 +176,14 @@ class _ShareForm extends HookWidget {
               search: search,
               selected: selected.value,
               enabled: !busy,
+              bestieName: payload.bestie?.name,
               onSelect: (id) {
-                if (id != selected.value) createdAt.value = null;
+                if (id != selected.value) {
+                  createdAt.value = null;
+                  solo.value = null;
+                }
                 selected.value = id;
               },
-              onNewSoloChat: () => _bridge.openApp(note.text),
             ),
           ),
         ],
