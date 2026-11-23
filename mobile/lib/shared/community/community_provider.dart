@@ -15,7 +15,6 @@ import '../auth/auth_provider.dart';
 import '../channels/channel_list_snapshot.dart';
 import '../channels/saved_message_store.dart';
 import '../diagnostics/diagnostic_reporter.dart';
-import '../hosted/community_entry_requirements.dart';
 import '../profile/profile_snapshot.dart';
 import '../push/dev_push_lease.dart';
 import '../push/push_bridge.dart';
@@ -285,57 +284,6 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     unawaited(_removeOrphanMediaCaches(fallback: communities));
     await syncCommunitySnapshot(ref, communities);
     return communities;
-  }
-
-  /// Add a community. If one with the same relay URL already exists, update
-  /// its credentials instead. Returns the effective community ID.
-  Future<String> addCommunity(Community community) async {
-    final sync = ref.read(knownCommunitySyncProvider);
-    community = await sync?.prepareAddition(community) ?? community;
-    await CommunityEntryRequirements.verify(
-      community,
-      ref.read(builderlabAccountProvider),
-    );
-    final storage = ref.read(communityStorageProvider);
-    final current = state.value ?? [];
-
-    // If a community with the same relay URL exists, update its credentials
-    // instead of creating a duplicate entry.
-    final existingIndex = current.indexWhere(
-      (w) => w.relayUrl == community.relayUrl,
-    );
-    if (existingIndex >= 0) {
-      final existing = current[existingIndex];
-      final updated = existing.copyWith(
-        pubkey: community.pubkey,
-        nsec: community.nsec,
-        accountSyncOwner: community.accountSyncOwner,
-        accountSyncRevision: community.accountSyncRevision,
-      );
-      final identityChanged =
-          _channelSnapshotPubkey(existing)?.toLowerCase() !=
-          _channelSnapshotPubkey(updated)?.toLowerCase();
-      if (identityChanged) await _removeChannelListSnapshot(existing);
-      await storage.save(updated);
-      final updatedList = [...current];
-      updatedList[existingIndex] = updated;
-      state = AsyncData(updatedList);
-      // The new account has its own image cache; drop the previous one's in
-      // the background.
-      if (identityChanged) unawaited(_removeOrphanMediaCaches());
-      await _removeOrphanChannelListSnapshots(updatedList);
-      await syncCommunitySnapshot(ref, updatedList);
-      sync?.trigger();
-      return existing.id;
-    }
-
-    await storage.save(community);
-    final updatedList = [...current, community];
-    state = AsyncData(updatedList);
-    await _removeOrphanChannelListSnapshots(updatedList);
-    await syncCommunitySnapshot(ref, updatedList);
-    sync?.trigger();
-    return community.id;
   }
 
   /// Removes a saved identity without letting awaited cleanup change the account
