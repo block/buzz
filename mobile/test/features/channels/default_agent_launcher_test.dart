@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:buzz/features/channels/bestie_conversation.dart';
+import 'package:buzz/features/channels/bestie_transcription_control.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
@@ -14,6 +15,7 @@ import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -65,6 +67,12 @@ void main() {
       await tester.pumpWidget(app(a));
       await tester.pumpAndSettle();
       final button = find.byType(IconButton);
+      expect(
+        find.byType(BestieTranscriptionControl),
+        defaultTargetPlatform == TargetPlatform.android
+            ? findsNothing
+            : findsOneWidget,
+      );
       final staleAction = tester.widget<IconButton>(button).onPressed!;
       await tester.pumpWidget(app(b));
       await tester.pumpAndSettle();
@@ -92,6 +100,10 @@ void main() {
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
     },
+    variant: TargetPlatformVariant(<TargetPlatform>{
+      TargetPlatform.android,
+      TargetPlatform.iOS,
+    }),
   );
 
   final paneVariant = ValueVariant<bool>({false, true});

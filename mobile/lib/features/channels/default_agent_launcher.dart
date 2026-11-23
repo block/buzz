@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -13,6 +14,7 @@ import '../../shared/me/me_sync.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/agent_navigation_icon.dart';
+import '../../shared/widgets/navigation_button_surface.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/preset_agent_avatar.dart';
 import '../../shared/widgets/buzz_callout.dart';
@@ -102,6 +104,9 @@ class DefaultAgentLauncher extends HookConsumerWidget {
 
     Widget withTranscription(Widget child) {
       if (scope.config.nsec?.isNotEmpty != true) return child;
+      if (defaultTargetPlatform == TargetPlatform.android) {
+        return NavigationButtonSurface(child: child);
+      }
       return BestieTranscriptionControl(
         key: ValueKey('transcription:${scope.cacheKey}'),
         scope: scope.cacheKey,
