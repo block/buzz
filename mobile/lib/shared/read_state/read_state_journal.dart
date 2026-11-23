@@ -8,8 +8,9 @@ extension ReadStateJournal on ReadStateManager {
       (key, value) => MapEntry(key as String, value as int),
     );
     if (journal != null) {
-      // An existing journal, even empty, means this is not a first landing.
-      _initialSeedComplete = true;
+      // An existing journal, even empty, means this is not a first landing,
+      // unless it was saved before the first landing's baseline.
+      _initialSeedComplete = journal['seedPending'] != true;
       _clientId = journal['clientId'] as String;
       _effectiveState.addAll(contexts(journal['observed']));
       _localContexts.addAll(contexts(journal['local']));
@@ -188,6 +189,7 @@ extension ReadStateJournal on ReadStateManager {
               if (_pendingField(key) == field) key: value.toJson(),
           },
         'createdAt': _maxFetchedCreatedAt,
+        if (!_initialSeedComplete) 'seedPending': true,
       });
       final follows = {
         for (final key in threadFollows.keys) key: _followEdits[key] ?? 0,

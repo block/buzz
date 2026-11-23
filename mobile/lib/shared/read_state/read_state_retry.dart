@@ -24,6 +24,11 @@ const _snapshotRetryMax = Duration(minutes: 5);
 /// Failed-sync retry, unpublished-state checks, refused-publish recovery
 /// and acknowledgement.
 extension ReadStateRetry on ReadStateManager {
+  /// Whether synced read state has yet to load: no snapshot has merged
+  /// since this manager started. Local-only read state never waits.
+  bool get loadPending =>
+      _remoteEnabled && _relaySession != null && !_followsLoaded;
+
   /// Retry now after a failed sync: the remote snapshot again if the last one
   /// failed, else any unpublished state. Does nothing while in sync.
   Future<void> retrySync() async {

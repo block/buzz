@@ -97,6 +97,13 @@ class _Reads extends ReadStateNotifier {
     contexts: empty ? {} : {'solo': 10},
     version: 0,
   );
+  void failLoading() => state = ReadStateState(
+    isReady: true,
+    loadPending: true,
+    pubkey: state.pubkey,
+    contexts: state.contexts,
+    version: state.version + 1,
+  );
   void finishLoading() => state = ReadStateState(
     isReady: true,
     pubkey: state.pubkey,
@@ -234,6 +241,29 @@ void main() {
     );
   }
 
+  test('a saved mark still badges Solo after a failed load', () async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final reads = _Reads();
+    final container = ProviderContainer(
+      overrides: [
+        savedPrefsProvider.overrideWithValue(prefs),
+        channelsProvider.overrideWith(_Channels.new),
+        readStateProvider.overrideWith(() => reads),
+        meGroupsProvider.overrideWith((ref) => Stream.value(organization)),
+      ],
+    );
+    addTearDown(container.dispose);
+    container.listen(channelsProvider, (_, _) {});
+    await container.read(channelsProvider.future);
+    container.read(readStateProvider);
+    reads.failLoading();
+    container.listen(meUnreadChannelIdsProvider, (_, _) {});
+    await container.pump();
+    expect(container.read(meUnreadChannelIdsProvider), {'solo'});
+    expect(container.read(readStateProvider).effectiveTimestamp('solo'), 10);
+  });
+
   for (final duringSeed in [false, true]) {
     test(
       'fresh Solo history is gated; new reply during seeding=$duringSeed badges',
@@ -357,6 +387,13 @@ void main() {
             isNull,
           );
           channels.reply();
+          await tester.pumpAndSettle();
+          expect(container.read(meUnreadChannelIdsProvider), isEmpty);
+          expect(
+            container.read(readStateProvider).effectiveTimestamp('solo'),
+            isNull,
+          );
+          reads.failLoading();
           await tester.pumpAndSettle();
           expect(container.read(meUnreadChannelIdsProvider), isEmpty);
           expect(

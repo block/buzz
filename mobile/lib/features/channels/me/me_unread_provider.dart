@@ -42,7 +42,8 @@ class MeUnreadChannelIds extends Notifier<Set<String>> {
     if (!reads.isReady) return const {};
     var disposed = false;
     ref.onDispose(() => disposed = true);
-    if (pending.isNotEmpty) {
+    // After a failed load a missing mark is unknown, not absent: seed later.
+    if (pending.isNotEmpty && !reads.loadPending) {
       scheduleMicrotask(() {
         if (disposed) return;
         final notifier = ref.read(readStateProvider.notifier);

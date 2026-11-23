@@ -293,8 +293,11 @@ class _SliverChannelsList extends HookConsumerWidget {
     final seedCompleteForPubkey =
         seededPubkey.value == readState.pubkey && initialSeedComplete.value;
 
+    // After a failed load a missing mark is unknown, not absent: baselining
+    // then would read every channel.
+    final loaded = readState.isReady && !readState.loadPending;
     useEffect(() {
-      if (!readState.isReady) {
+      if (!loaded) {
         return null;
       }
 
@@ -322,7 +325,7 @@ class _SliverChannelsList extends HookConsumerWidget {
         ref.read(readStateProvider.notifier).seedContextsRead(seeds);
         initialSeedComplete.value = true;
       });
-    }, [readState.isReady, readState.pubkey, visibleChannels]);
+    }, [loaded, readState.pubkey, visibleChannels]);
 
     final highlights = computeChannelListHighlights(
       channels: visibleChannels,

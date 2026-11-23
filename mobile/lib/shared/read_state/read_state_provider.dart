@@ -26,6 +26,10 @@ class ReadStateState {
   /// Retrying cannot help; signing in again or restarting can.
   final bool syncUnsupported;
 
+  /// Whether synced read state has not loaded yet, so a missing mark may
+  /// only be unknown. First-landing baselines wait for it.
+  final bool loadPending;
+
   /// Forced-unread contexts, each mapped to the channel it belongs to so
   /// channel tiles and badges can surface message-level forces: channels
   /// with a live synced manual unread (keyed by the channel id), and this
@@ -58,6 +62,7 @@ class ReadStateState {
     this.failedClears = const {},
     this.syncFailed = false,
     this.syncUnsupported = false,
+    this.loadPending = false,
   });
 
   const ReadStateState.inert()
@@ -68,6 +73,7 @@ class ReadStateState {
       retentionFloor = 0,
       syncFailed = false,
       syncUnsupported = false,
+      loadPending = false,
       forcedUnreadContexts = const {},
       threadFollows = const {},
       threadFollowsIncomplete = true,
@@ -111,6 +117,7 @@ class ReadStateState {
       failedClears: failedClears,
       syncFailed: syncFailed,
       syncUnsupported: syncUnsupported,
+      loadPending: loadPending,
     );
   }
 }
@@ -449,6 +456,7 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
       syncError: manager.syncError,
       syncFailed: manager.syncError != null,
       syncUnsupported: manager.remoteUnsupported,
+      loadPending: manager.loadPending,
       failedClears: manager.failedClears,
     );
   }
