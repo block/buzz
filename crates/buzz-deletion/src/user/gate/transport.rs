@@ -34,19 +34,13 @@ impl IdentityGateConfig {
             !token_file.as_os_str().is_empty(),
             "identity token file is empty"
         );
-        let block_url = endpoint(block_url, "/api/goose/v1/identity/block-user-auth-login")?;
-        let login_url = endpoint(login_url, "/api/goose/v1/identity/delete-user-auth-login")?;
-        let account_url = endpoint(
-            account_url,
-            "/api/goose/v1/identity/delete-builderlab-account",
-        )?;
+        let block_url = endpoint(block_url, "/v1/identity/block-user-auth-login")?;
+        let login_url = endpoint(login_url, "/v1/identity/delete-user-auth-login")?;
+        let account_url = endpoint(account_url, "/v1/identity/delete-builderlab-account")?;
+        let directory = block_url.join(".")?;
         ensure!(
-            block_url.origin() == account_url.origin()
-                && block_url != account_url
-                && login_url.origin() == block_url.origin()
-                && login_url != account_url
-                && login_url != block_url,
-            "identity endpoints must have distinct paths on the same origin"
+            login_url.join(".")? == directory && account_url.join(".")? == directory,
+            "identity endpoints must use the same origin and route prefix"
         );
         let mut builder = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -203,6 +197,9 @@ fn endpoint(value: &str, path: &str) -> Result<Url> {
             && url.fragment().is_none(),
         "identity endpoint requires HTTPS (or a loopback HTTP address) without credentials, query or fragment"
     );
-    ensure!(url.path() == path, "identity endpoint requires path {path}");
+    ensure!(
+        url.path().ends_with(path),
+        "identity endpoint requires route suffix {path}"
+    );
     Ok(url)
 }

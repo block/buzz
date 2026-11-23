@@ -18,13 +18,13 @@ execution is unsupported.
 
 The request-wide `gate_user` handler runs once before any community cleanup.
 Configure the executor with these settings (all URLs belong to the operator's
-identity service):
+identity service and share its configured API prefix):
 
 | Setting | Purpose |
 | --- | --- |
-| `BUZZ_USER_DELETION_IDENTITY_BLOCK_URL` | POST endpoint with path `/api/goose/v1/identity/block-user-auth-login` |
-| `BUZZ_USER_DELETION_IDENTITY_DELETE_LOGIN_URL` | POST endpoint ending in `/api/goose/v1/identity/delete-user-auth-login` |
-| `BUZZ_USER_DELETION_IDENTITY_DELETE_ACCOUNT_URL` | Full POST URL ending in `/api/goose/v1/identity/delete-builderlab-account` on the same origin as the block endpoint |
+| `BUZZ_USER_DELETION_IDENTITY_BLOCK_URL` | POST endpoint with path `<api.pathPrefix>/v1/identity/block-user-auth-login` |
+| `BUZZ_USER_DELETION_IDENTITY_DELETE_LOGIN_URL` | POST endpoint ending in `<api.pathPrefix>/v1/identity/delete-user-auth-login` |
+| `BUZZ_USER_DELETION_IDENTITY_DELETE_ACCOUNT_URL` | Full POST URL ending in `<api.pathPrefix>/v1/identity/delete-builderlab-account` on the same origin as the block endpoint |
 | `BUZZ_USER_DELETION_IDENTITY_TOKEN_FILE` | File containing the service bearer token; read when preparing each request |
 | `BUZZ_USER_DELETION_IDENTITY_TIMEOUT_SECS` | HTTP deadline, default 30 seconds, range 1–120 |
 

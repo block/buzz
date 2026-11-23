@@ -496,9 +496,17 @@ async fn independent_deletions_require_ordered_matching_confirmations() {
 async fn swapped_deletion_routes_are_rejected_before_http() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!(
-        "http://{}/api/goose/v1/identity",
+        "http://{}/custom-prefix/v1/identity",
         listener.local_addr().unwrap()
     );
+    assert!(IdentityGateConfig::new(
+        &format!("{base}/block-user-auth-login"),
+        &format!("{base}/delete-user-auth-login"),
+        &format!("{base}/delete-builderlab-account"),
+        "unused".into(),
+        HTTP_TIMEOUT,
+    )
+    .is_ok());
     assert!(IdentityGateConfig::new(
         &format!("{base}/block-user-auth-login"),
         &format!("{base}/delete-builderlab-account"),
