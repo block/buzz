@@ -2,12 +2,12 @@
 //! There is no timestamp, so freshness comes from dedupe on
 //! `X-GitHub-Delivery` alone.
 use super::MAX_EVENT_TYPE_BYTES;
-use super::{header_str, valid_delivery_id, ProviderAdapter, Verified, VerifyError};
+use super::{
+    any_secret_signs, header_str, valid_delivery_id, ProviderAdapter, Verified, VerifyError,
+};
 use crate::store::Provider;
 use axum::http::HeaderMap;
 use chrono::{DateTime, Duration, Utc};
-use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha256;
 
 const SIGNATURE_HEADER: &str = "x-hub-signature-256";
 const DELIVERY_HEADER: &str = "x-github-delivery";
@@ -64,15 +64,7 @@ impl ProviderAdapter for GitHub {
         {
             return Err(VerifyError::MalformedHeaders);
         }
-        let matched = secrets.iter().any(|secret| {
-            Hmac::<Sha256>::new_from_slice(secret)
-                .map(|mut mac| {
-                    mac.update(body);
-                    mac.verify_slice(&signature).is_ok()
-                })
-                .unwrap_or(false)
-        });
-        if !matched {
+        if !any_secret_signs(secrets, body, &signature) {
             return Err(VerifyError::BadSignature);
         }
         let payload: serde_json::Value =
@@ -103,6 +95,8 @@ impl ProviderAdapter for GitHub {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::Sha256;
 
     pub(crate) fn sign(secret: &[u8], body: &[u8]) -> String {
         let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
