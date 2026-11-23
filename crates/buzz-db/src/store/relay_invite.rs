@@ -1316,7 +1316,23 @@ mod postgres_tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn retention_sweep_never_deletes_a_permanent_invite() {
-        let pool = setup_pool().await;
+        let scratch = ScratchDb::create(
+            &crate::test_support::database_url(),
+            "relay_invite_permanent",
+        )
+        .await;
+        let db = crate::Db::new(&crate::DbConfig {
+            database_url: scratch.url().to_owned(),
+            max_connections: 5,
+            min_connections: 0,
+            ..crate::DbConfig::default()
+        })
+        .await
+        .expect("connect permanent invite database");
+        db.migrate()
+            .await
+            .expect("migrate permanent invite database");
+        let pool = db.pool.clone();
         let community = make_test_community(&pool).await;
         let permanent =
             mint_relay_invite(&pool, community, &test_pubkey(), InviteExpiry::Never, None)
@@ -1336,8 +1352,6 @@ mod postgres_tests {
                 .await
                 .expect("read remaining invites");
         assert_eq!(remaining, vec![permanent.invite_id]);
-
-        delete_test_community(&pool, community).await;
     }
 
     #[tokio::test]
