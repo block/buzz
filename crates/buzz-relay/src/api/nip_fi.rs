@@ -138,17 +138,28 @@ pub async fn disconnect(
             // Issuer-scoped: the deny entry is keyed by (caller_iss, k), so only
             // sessions admitted under caller_iss are closed. [FI-TRACE-DENY-SET]
             // Shadow keeps the deny entry but closes nothing.
+            // The command's scope, widened by any stronger active entry.
+            let scope = state.nip_fi_deny_map.as_ref().map_or(cmd.scope, |map| {
+                map.close_scope(
+                    &cmd.caller_iss,
+                    &cmd.target_pubkey,
+                    cmd.scope,
+                    chrono::Utc::now(),
+                )
+            });
             let closed = if !state.config.nip_fi.mode.observes_only() {
                 state
                     .conn_manager
-                    .disconnect_nip_fi(&cmd.caller_iss, &pubkey_bytes)
-                    + state
-                        .community_connections
-                        .disconnect_nip_fi(&cmd.caller_iss, &pubkey_bytes)
+                    .disconnect_nip_fi(&cmd.caller_iss, &pubkey_bytes, scope)
+                    + state.community_connections.disconnect_nip_fi(
+                        &cmd.caller_iss,
+                        &pubkey_bytes,
+                        scope,
+                    )
             } else {
                 state
                     .nip_fi_shadow_sessions
-                    .would_close(&cmd.caller_iss, &pubkey_bytes);
+                    .would_close(&cmd.caller_iss, &pubkey_bytes, scope);
                 0
             };
             if closed > 0 {
@@ -327,14 +338,15 @@ async fn merge_stored_denies(
                     readable
                 }
             };
-            for (key, until) in entries {
+            for (key, entry) in entries {
                 let message = buzz_pubsub::NipFiDisconnect {
                     issuer: issuer.clone(),
                     pubkey_bytes: key.to_bytes().to_vec(),
-                    until_unix: until.timestamp(),
-                    until_unix_nanos: until.timestamp_subsec_nanos(),
+                    until_unix: entry.until.timestamp(),
+                    until_unix_nanos: entry.until.timestamp_subsec_nanos(),
+                    revoke_through: entry.scope.revoke_through(),
                 };
-                match merge_nip_fi_disconnect(state, &message, now) {
+                match merge_nip_fi_disconnect(state, &message, || now) {
                     NipFiDisconnectApplyResult::Applied(CrossPodMergeResult::Merged) => {
                         changed.push(message)
                     }
@@ -405,7 +417,7 @@ pub async fn run_nip_fi_disconnect_consumer(
                     () = &mut wait => break,
                     msg = rx.recv() => match msg {
                         Ok(msg) => {
-                            if !retained(apply_nip_fi_disconnect(&state, &msg, chrono::Utc::now())) {
+                            if !retained(apply_nip_fi_disconnect(&state, &msg, chrono::Utc::now)) {
                                 continue 'generation;
                             }
                         }
@@ -425,7 +437,7 @@ pub async fn run_nip_fi_disconnect_consumer(
         loop {
             match rx.try_recv() {
                 Ok(msg) => {
-                    if !retained(apply_nip_fi_disconnect(&state, &msg, chrono::Utc::now())) {
+                    if !retained(apply_nip_fi_disconnect(&state, &msg, chrono::Utc::now)) {
                         continue 'generation;
                     }
                 }
@@ -450,7 +462,7 @@ pub async fn run_nip_fi_disconnect_consumer(
             tokio::select! {
                 msg = rx.recv() => match msg {
                     Ok(msg) => {
-                        if !retained(apply_nip_fi_disconnect(&state, &msg, chrono::Utc::now())) {
+                        if !retained(apply_nip_fi_disconnect(&state, &msg, chrono::Utc::now)) {
                             tracing::warn!("NIP-FI deny not retained; closing admission and restoring");
                             continue 'generation;
                         }
@@ -549,6 +561,7 @@ pub fn nip_fi_disconnect_message(cmd: &buzz_auth::CommandResult) -> buzz_pubsub:
         pubkey_bytes: cmd.target_pubkey.to_bytes().to_vec(),
         until_unix: cmd.until.timestamp(),
         until_unix_nanos: cmd.until.timestamp_subsec_nanos(),
+        revoke_through: cmd.scope.revoke_through(),
     }
 }
 
@@ -568,7 +581,7 @@ pub fn nip_fi_disconnect_message(cmd: &buzz_auth::CommandResult) -> buzz_pubsub:
 pub fn apply_nip_fi_disconnect(
     state: &crate::state::AppState,
     message: &buzz_pubsub::NipFiDisconnect,
-    now: chrono::DateTime<chrono::Utc>,
+    now: impl Fn() -> chrono::DateTime<chrono::Utc>,
 ) -> NipFiDisconnectApplyResult {
     let result = merge_nip_fi_disconnect(state, message, now);
     if let NipFiDisconnectApplyResult::Applied(merge) = result {
@@ -581,7 +594,7 @@ pub fn apply_nip_fi_disconnect(
 fn merge_nip_fi_disconnect(
     state: &crate::state::AppState,
     message: &buzz_pubsub::NipFiDisconnect,
-    now: chrono::DateTime<chrono::Utc>,
+    now: impl Fn() -> chrono::DateTime<chrono::Utc>,
 ) -> NipFiDisconnectApplyResult {
     let deny_map = match state.nip_fi_deny_map.as_deref() {
         Some(m) => m,
@@ -623,6 +636,15 @@ fn merge_nip_fi_disconnect(
                 return NipFiDisconnectApplyResult::Rejected;
             }
         };
+    if let Some(c) = message.revoke_through {
+        if chrono::DateTime::from_timestamp(c, 0).is_none() {
+            tracing::warn!(
+                revoke_through = c,
+                "nip-fi cross-pod: unrepresentable revoke_through — rejected"
+            );
+            return NipFiDisconnectApplyResult::Rejected;
+        }
+    }
 
     // Clamp `until` to this pod's ceiling rather than rejecting it.  The origin
     // pod already verified `until` against its own clock and returned 200; a
@@ -630,38 +652,56 @@ fn merge_nip_fi_disconnect(
     // at-ceiling command and leave the target's sessions open.
     let skew = chrono::Duration::seconds(policy.skew_seconds() as i64);
     let max_age = chrono::Duration::seconds(policy.maximum_assertion_age_seconds() as i64);
-    if let Some(ceiling) = now
+    if let Some(ceiling) = now()
         .checked_add_signed(skew)
         .and_then(|t| t.checked_add_signed(max_age))
     {
         until = until.min(ceiling);
     }
 
+    let entry = buzz_auth::DenyEntry {
+        until,
+        scope: buzz_auth::DenyScope::from_revoke_through(message.revoke_through),
+    };
     NipFiDisconnectApplyResult::Applied(deny_map.merge_cross_pod_deny(
         &message.issuer,
         &pubkey,
-        until,
-        now,
+        entry,
+        &now,
     ))
 }
 
-/// Close (or, in shadow, record would-close for) every session of the
-/// message's target.
+/// Close (or, in shadow, record would-close for) the sessions of the
+/// message's target that its scope covers, widened by any stronger active
+/// entry the deny map holds for it.
 fn close_nip_fi_sessions(
     state: &crate::state::AppState,
     message: &buzz_pubsub::NipFiDisconnect,
     reason: &str,
 ) {
+    let command = buzz_auth::DenyScope::from_revoke_through(message.revoke_through);
+    let scope = match (
+        state.nip_fi_deny_map.as_deref(),
+        nostr::PublicKey::from_slice(&message.pubkey_bytes),
+    ) {
+        (Some(deny_map), Ok(pubkey)) => {
+            deny_map.close_scope(&message.issuer, &pubkey, command, chrono::Utc::now())
+        }
+        _ => command,
+    };
     if state.config.nip_fi.mode.observes_only() {
         let sessions = &state.nip_fi_shadow_sessions;
-        return sessions.would_close(&message.issuer, &message.pubkey_bytes);
+        return sessions.would_close(&message.issuer, &message.pubkey_bytes, scope);
     }
-    let closed = state
-        .conn_manager
-        .disconnect_nip_fi(&message.issuer, &message.pubkey_bytes)
-        + state
-            .community_connections
-            .disconnect_nip_fi(&message.issuer, &message.pubkey_bytes);
+    let closed =
+        state
+            .conn_manager
+            .disconnect_nip_fi(&message.issuer, &message.pubkey_bytes, scope)
+            + state.community_connections.disconnect_nip_fi(
+                &message.issuer,
+                &message.pubkey_bytes,
+                scope,
+            );
     if closed > 0 {
         tracing::debug!(closed, reason = reason, "nip-fi cross-pod: closed sessions");
     }
@@ -1542,8 +1582,9 @@ mod route_integration_tests {
             pubkey_bytes: k_a.to_bytes().to_vec(),
             until_unix,
             until_unix_nanos: 0,
+            revoke_through: None,
         };
-        let result_a = apply_nip_fi_disconnect(&state, &msg_a, now);
+        let result_a = apply_nip_fi_disconnect(&state, &msg_a, || now);
         assert_eq!(
             result_a,
             NipFiDisconnectApplyResult::Applied(CrossPodMergeResult::Merged),
@@ -1576,8 +1617,9 @@ mod route_integration_tests {
             pubkey_bytes: k_b.to_bytes().to_vec(),
             until_unix,
             until_unix_nanos: 0,
+            revoke_through: None,
         };
-        let result_b = apply_nip_fi_disconnect(&state, &msg_b, now);
+        let result_b = apply_nip_fi_disconnect(&state, &msg_b, || now);
         assert_eq!(
             result_b,
             NipFiDisconnectApplyResult::Applied(CrossPodMergeResult::CapacityExceeded),
@@ -1773,8 +1815,9 @@ mod route_integration_tests {
             pubkey_bytes: target.to_bytes().to_vec(),
             until_unix,
             until_unix_nanos: 0,
+            revoke_through: None,
         };
-        let result = apply_nip_fi_disconnect(&state, &msg, now);
+        let result = apply_nip_fi_disconnect(&state, &msg, || now);
         assert_eq!(
             result,
             NipFiDisconnectApplyResult::Applied(CrossPodMergeResult::Merged),
@@ -1828,8 +1871,9 @@ mod route_integration_tests {
             pubkey_bytes: filler.to_bytes().to_vec(),
             until_unix,
             until_unix_nanos: 0,
+            revoke_through: None,
         };
-        let fill_result = apply_nip_fi_disconnect(&state, &msg_fill, now);
+        let fill_result = apply_nip_fi_disconnect(&state, &msg_fill, || now);
         assert_eq!(
             fill_result,
             NipFiDisconnectApplyResult::Applied(CrossPodMergeResult::Merged),
@@ -1842,8 +1886,9 @@ mod route_integration_tests {
             pubkey_bytes: target2.to_bytes().to_vec(),
             until_unix,
             until_unix_nanos: 0,
+            revoke_through: None,
         };
-        let result2 = apply_nip_fi_disconnect(&state, &msg2, now);
+        let result2 = apply_nip_fi_disconnect(&state, &msg2, || now);
         assert_eq!(
             result2,
             NipFiDisconnectApplyResult::Applied(CrossPodMergeResult::CapacityExceeded),
@@ -1938,6 +1983,7 @@ mod route_integration_tests {
             caller_sub: TEST_SUB.to_owned(),
             target_pubkey: target,
             until: t_frac,
+            scope: buzz_auth::DenyScope::WholeKey,
         };
 
         // Publisher seam → encode → decode.
@@ -1954,7 +2000,7 @@ mod route_integration_tests {
 
         // Consumer seam: apply with now = t_frac - 1ns (just inside the deadline).
         let now_inside = t_frac - chrono::Duration::nanoseconds(1);
-        let result = apply_nip_fi_disconnect(&state, &decoded, now_inside);
+        let result = apply_nip_fi_disconnect(&state, &decoded, || now_inside);
         assert_eq!(
             result,
             NipFiDisconnectApplyResult::Applied(CrossPodMergeResult::Merged),
@@ -2349,6 +2395,16 @@ mod route_integration_tests {
 
     impl IssuerSessions {
         fn register(state: &crate::state::AppState, issuer: &str, key: &nostr::PublicKey) -> Self {
+            Self::register_issued(state, issuer, key, chrono::Utc::now())
+        }
+
+        /// Sessions admitted by an assertion with verified `iat` `issued_at`.
+        fn register_issued(
+            state: &crate::state::AppState,
+            issuer: &str,
+            key: &nostr::PublicKey,
+            issued_at: chrono::DateTime<chrono::Utc>,
+        ) -> Self {
             use crate::state::CommunityConnectionControl;
             use tokio::sync::mpsc;
             use tokio_util::sync::CancellationToken;
@@ -2371,14 +2427,18 @@ mod route_integration_tests {
             state.conn_manager.set_authenticated_identity(
                 conn_id,
                 key.to_bytes().to_vec(),
-                Some(crate::nip_fi_core::NipFiSession::new(issuer, None)),
+                Some(crate::nip_fi_core::NipFiSession::issued_at(
+                    issuer, None, issued_at,
+                )),
             );
             let audio = CancellationToken::new();
             let ctrl = CommunityConnectionControl::new(audio.clone());
             crate::audio::handler::audio_post_auth_register(
                 &ctrl,
                 key.to_bytes().to_vec(),
-                Some(crate::nip_fi_core::NipFiSession::new(issuer, None)),
+                Some(crate::nip_fi_core::NipFiSession::issued_at(
+                    issuer, None, issued_at,
+                )),
             );
             let _audio_guard =
                 state
@@ -2432,6 +2492,180 @@ mod route_integration_tests {
         under_b.assert_open("issuer B");
     }
 
+    // ── revoke_through: cutoff-scoped close scans ────────────────────────────
+
+    fn at(secs: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(secs, 0).unwrap()
+    }
+
+    fn cutoff_message(key: &nostr::PublicKey, c: i64) -> buzz_pubsub::NipFiDisconnect {
+        buzz_pubsub::NipFiDisconnect {
+            revoke_through: Some(c),
+            ..cross_pod_message(key)
+        }
+    }
+
+    #[tokio::test]
+    async fn route_cutoff_closes_old_sessions_and_keeps_fresh_ones_across_redelivery() {
+        let state = build_test_state(1000).await;
+        let key = nostr::Keys::generate().public_key();
+        let c = chrono::Utc::now().timestamp();
+        let old = IssuerSessions::register_issued(&state, TEST_ISS, &key, at(c));
+        let fresh = IssuerSessions::register_issued(&state, TEST_ISS, &key, at(c + 1));
+
+        let token = mint_token(
+            &key.to_hex(),
+            300,
+            serde_json::json!({ "revoke_through": c }),
+        );
+        let resp = do_request(
+            Arc::clone(&state),
+            "POST",
+            vec![
+                ("Content-Type", "application/json".into()),
+                (CLIENT_ATTACHED_HEADER, format!("Bearer {token}")),
+            ],
+            Some(serde_json::json!({"pubkey": key.to_hex()})),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        old.assert_closed("iat == C");
+        fresh.assert_open("iat > C after the route");
+
+        // The issuer's periodic redelivery, and a restore replaying the same
+        // record, arrive as cross-pod messages: still cutoff-scoped.
+        for _ in 0..3 {
+            apply_nip_fi_disconnect(&state, &cutoff_message(&key, c), chrono::Utc::now);
+        }
+        fresh.assert_open("iat > C after redelivery");
+        let deny_map = state.nip_fi_deny_map.as_ref().unwrap();
+        assert!(deny_map.denies(TEST_ISS, &key, at(c), chrono::Utc::now()));
+        assert!(!deny_map.denies(TEST_ISS, &key, at(c + 1), chrono::Utc::now()));
+    }
+
+    #[tokio::test]
+    async fn cross_pod_cutoff_closes_only_old_sessions_on_another_pod() {
+        let state = cross_pod_state(10).await;
+        let key = nostr::Keys::generate().public_key();
+        let c = chrono::Utc::now().timestamp();
+        let old = IssuerSessions::register_issued(&state, TEST_ISS, &key, at(c - 30));
+        let fresh = IssuerSessions::register_issued(&state, TEST_ISS, &key, at(c + 1));
+        let result = apply_nip_fi_disconnect(&state, &cutoff_message(&key, c), chrono::Utc::now);
+        assert_eq!(
+            result,
+            NipFiDisconnectApplyResult::Applied(buzz_auth::CrossPodMergeResult::Merged)
+        );
+        old.assert_closed("old session");
+        fresh.assert_open("fresh session");
+    }
+
+    #[tokio::test]
+    async fn cutoff_delivery_over_an_active_whole_key_entry_closes_every_session() {
+        let state = cross_pod_state(10).await;
+        let key = nostr::Keys::generate().public_key();
+        let now = chrono::Utc::now();
+        apply_nip_fi_disconnect(&state, &cross_pod_message(&key), || now);
+        let c = now.timestamp();
+        let fresh = IssuerSessions::register_issued(&state, TEST_ISS, &key, at(c + 1));
+        apply_nip_fi_disconnect(&state, &cutoff_message(&key, c), || now);
+        fresh.assert_closed("the stronger merged whole-key deny applies");
+    }
+
+    #[tokio::test]
+    async fn past_until_cutoff_still_closes_its_scope_without_changing_the_deny() {
+        let state = cross_pod_state(10).await;
+        let key = nostr::Keys::generate().public_key();
+        let now = chrono::Utc::now();
+        let c = now.timestamp();
+        let old = IssuerSessions::register_issued(&state, TEST_ISS, &key, at(c));
+        let fresh = IssuerSessions::register_issued(&state, TEST_ISS, &key, at(c + 1));
+        let message = buzz_pubsub::NipFiDisconnect {
+            until_unix: c - 1,
+            ..cutoff_message(&key, c)
+        };
+        apply_nip_fi_disconnect(&state, &message, || now);
+        old.assert_closed("scoped close still runs");
+        fresh.assert_open("fresh session");
+        let deny_map = state.nip_fi_deny_map.as_ref().unwrap();
+        assert!(
+            !deny_map.is_denied(TEST_ISS, &key, now),
+            "no active deny created"
+        );
+    }
+
+    /// The route's published bus message carries the cutoff: another pod
+    /// that decodes it closes only `iat <= C` and keeps the fresh session.
+    #[tokio::test]
+    async fn published_cutoff_reaches_another_pod_cutoff_scoped() {
+        let key = nostr::Keys::generate().public_key();
+        let c = chrono::Utc::now().timestamp();
+        let cmd = buzz_auth::CommandResult {
+            caller_iss: TEST_ISS.to_owned(),
+            caller_sub: TEST_SUB.to_owned(),
+            target_pubkey: key,
+            until: chrono::Utc::now() + chrono::Duration::seconds(300),
+            scope: buzz_auth::DenyScope::IssuedThrough(c),
+        };
+        let encoded = buzz_pubsub::encode_nip_fi_disconnect(&nip_fi_disconnect_message(&cmd))
+            .expect("encode");
+        let decoded = buzz_pubsub::decode_nip_fi_disconnect(&encoded).expect("decode");
+        let other_pod = cross_pod_state(10).await;
+        let old = IssuerSessions::register_issued(&other_pod, TEST_ISS, &key, at(c));
+        let fresh = IssuerSessions::register_issued(&other_pod, TEST_ISS, &key, at(c + 1));
+        apply_nip_fi_disconnect(&other_pod, &decoded, chrono::Utc::now);
+        old.assert_closed("iat == C on the other pod");
+        fresh.assert_open("iat > C on the other pod");
+    }
+
+    /// The route widens its close to a stronger active entry: a cutoff
+    /// command over an active whole-key deny closes a fresh session too.
+    #[tokio::test]
+    async fn route_cutoff_over_an_active_whole_key_entry_closes_every_session() {
+        let state = build_test_state(1000).await;
+        let key = nostr::Keys::generate().public_key();
+        let now = chrono::Utc::now();
+        let c = now.timestamp();
+        state
+            .nip_fi_deny_map
+            .as_ref()
+            .unwrap()
+            .merge_cross_pod_deny(
+                TEST_ISS,
+                &key,
+                buzz_auth::DenyEntry::whole_key(now + chrono::Duration::seconds(300)),
+                || now,
+            );
+        let fresh = IssuerSessions::register_issued(&state, TEST_ISS, &key, at(c + 1));
+        let token = mint_token(
+            &key.to_hex(),
+            300,
+            serde_json::json!({ "revoke_through": c }),
+        );
+        let resp = do_request(
+            Arc::clone(&state),
+            "POST",
+            vec![
+                ("Content-Type", "application/json".into()),
+                (CLIENT_ATTACHED_HEADER, format!("Bearer {token}")),
+            ],
+            Some(serde_json::json!({"pubkey": key.to_hex()})),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        fresh.assert_closed("the stronger active whole-key deny applies on the route");
+    }
+
+    #[test]
+    fn legacy_bus_message_without_revoke_through_is_whole_key() {
+        let json = r#"{"issuer":"i","pubkey_bytes":[],"until_unix":1}"#;
+        let decoded: buzz_pubsub::NipFiDisconnect = serde_json::from_str(json).unwrap();
+        assert_eq!(decoded.revoke_through, None);
+        assert_eq!(
+            buzz_auth::DenyScope::from_revoke_through(decoded.revoke_through),
+            buzz_auth::DenyScope::WholeKey
+        );
+    }
+
     /// State whose registry and deny map know only issuer A (`TEST_ISS`).
     async fn cross_pod_state(capacity: usize) -> Arc<crate::state::AppState> {
         let mut config = crate::config::Config::for_test();
@@ -2480,6 +2714,7 @@ mod route_integration_tests {
             pubkey_bytes: key.to_bytes().to_vec(),
             until_unix: (chrono::Utc::now() + chrono::Duration::seconds(300)).timestamp(),
             until_unix_nanos: 0,
+            revoke_through: None,
         }
     }
 
@@ -2493,7 +2728,7 @@ mod route_integration_tests {
         let under_a = IssuerSessions::register(state, TEST_ISS, &key);
         let under_b = IssuerSessions::register(state, OTHER_ISS, &key);
 
-        let result = apply_nip_fi_disconnect(state, &cross_pod_message(&key), chrono::Utc::now());
+        let result = apply_nip_fi_disconnect(state, &cross_pod_message(&key), chrono::Utc::now);
 
         assert_eq!(result, NipFiDisconnectApplyResult::Applied(expected));
         under_a.assert_closed("issuer A");
@@ -2511,7 +2746,7 @@ mod route_integration_tests {
         let state = cross_pod_state(1).await;
         let filler = nostr::Keys::generate().public_key();
         assert_eq!(
-            apply_nip_fi_disconnect(&state, &cross_pod_message(&filler), chrono::Utc::now()),
+            apply_nip_fi_disconnect(&state, &cross_pod_message(&filler), chrono::Utc::now),
             NipFiDisconnectApplyResult::Applied(buzz_auth::CrossPodMergeResult::Merged),
         );
         assert_cross_pod_closes_only_issuer_a(
@@ -2574,7 +2809,7 @@ mod route_integration_tests {
             let _guard = metrics::set_default_local_recorder(&recorder);
             for state in [&full, &full, &poisoned] {
                 let key = nostr::Keys::generate().public_key();
-                apply_nip_fi_disconnect(state, &cross_pod_message(&key), chrono::Utc::now());
+                apply_nip_fi_disconnect(state, &cross_pod_message(&key), chrono::Utc::now);
             }
             let mut series: Vec<String> = snapshotter
                 .snapshot()
@@ -2613,7 +2848,7 @@ mod route_integration_tests {
         let sessions = IssuerSessions::register(state, TEST_ISS, key);
         let now = cross_pod_now();
 
-        let result = apply_nip_fi_disconnect(state, message, now);
+        let result = apply_nip_fi_disconnect(state, message, || now);
 
         assert_eq!(result, NipFiDisconnectApplyResult::Rejected);
         sessions.assert_open("rejected message");
@@ -2655,6 +2890,19 @@ mod route_integration_tests {
     }
 
     #[tokio::test]
+    async fn cross_pod_unrepresentable_revoke_through_rejected() {
+        let state = cross_pod_state(10).await;
+        for c in [i64::MIN, i64::MAX] {
+            let key = nostr::Keys::generate().public_key();
+            let message = buzz_pubsub::NipFiDisconnect {
+                revoke_through: Some(c),
+                ..cross_pod_message(&key)
+            };
+            assert_cross_pod_rejected(&state, &key, &message);
+        }
+    }
+
+    #[tokio::test]
     async fn cross_pod_without_deny_map_is_disabled() {
         let mut config = crate::config::Config::for_test();
         config.nip_fi.registry.insert(test_issuer_policy());
@@ -2663,7 +2911,7 @@ mod route_integration_tests {
         let key = nostr::Keys::generate().public_key();
         let sessions = IssuerSessions::register(&state, TEST_ISS, &key);
 
-        let result = apply_nip_fi_disconnect(&state, &cross_pod_message(&key), cross_pod_now());
+        let result = apply_nip_fi_disconnect(&state, &cross_pod_message(&key), cross_pod_now);
 
         assert_eq!(result, NipFiDisconnectApplyResult::Disabled);
         sessions.assert_open("disabled consumer");
@@ -2684,7 +2932,7 @@ mod route_integration_tests {
             ..cross_pod_message(&key)
         };
 
-        let result = apply_nip_fi_disconnect(&state, &message, now);
+        let result = apply_nip_fi_disconnect(&state, &message, || now);
 
         assert_eq!(
             result,
@@ -4013,6 +4261,7 @@ mod route_integration_tests {
                 ttl_secs: 60,
                 target,
                 until,
+                scope: buzz_auth::DenyScope::WholeKey,
                 capacity: 10,
                 now: chrono::Utc::now(),
             })
@@ -4024,6 +4273,7 @@ mod route_integration_tests {
             pubkey_bytes: target.to_bytes().to_vec(),
             until_unix: until.timestamp(),
             until_unix_nanos: until.timestamp_subsec_nanos(),
+            revoke_through: None,
         }
     }
 
@@ -4088,7 +4338,7 @@ mod route_integration_tests {
             "a partial load leaves it restoring"
         );
         assert_eq!(
-            merge_nip_fi_disconnect(&pod, &message, chrono::Utc::now()),
+            merge_nip_fi_disconnect(&pod, &message, chrono::Utc::now),
             NipFiDisconnectApplyResult::Applied(buzz_auth::CrossPodMergeResult::Unchanged),
             "the readable record was applied"
         );
@@ -4380,8 +4630,13 @@ mod route_integration_tests {
         let pod = store_pod(10, Arc::clone(&source)).await;
         let map = pod.nip_fi_deny_map.as_deref().unwrap();
         let now = chrono::Utc::now();
-        map.merge_cross_pod_deny(TEST_ISS, held, now + chrono::Duration::hours(1), now);
-        map.merge_cross_pod_deny(TEST_ISS, extended, now + chrono::Duration::seconds(5), now);
+        map.merge_cross_pod_deny(TEST_ISS, held, now + chrono::Duration::hours(1), || now);
+        map.merge_cross_pod_deny(
+            TEST_ISS,
+            extended,
+            now + chrono::Duration::seconds(5),
+            || now,
+        );
         let sessions: Vec<_> = keys
             .iter()
             .map(|k| IssuerSessions::register(&pod, TEST_ISS, k))
@@ -4514,10 +4769,10 @@ mod route_integration_tests {
         pod.nip_fi_deny_map
             .as_deref()
             .unwrap()
-            .merge_cross_pod_deny(TEST_ISS, &key, now + chrono::Duration::hours(1), now);
+            .merge_cross_pod_deny(TEST_ISS, &key, now + chrono::Duration::hours(1), || now);
         let sessions = IssuerSessions::register(&pod, TEST_ISS, &key);
         assert_eq!(
-            apply_nip_fi_disconnect(&pod, &message, now),
+            apply_nip_fi_disconnect(&pod, &message, || now),
             NipFiDisconnectApplyResult::Applied(buzz_auth::CrossPodMergeResult::Unchanged)
         );
         sessions.assert_closed("unchanged live delivery");
@@ -4827,6 +5082,7 @@ mod route_integration_tests {
                 ttl_secs: 60,
                 target: &target,
                 until: chrono::Utc::now() + chrono::Duration::seconds(60),
+                scope: buzz_auth::DenyScope::WholeKey,
                 capacity: 100,
                 now: chrono::Utc::now(),
             };
@@ -4862,6 +5118,7 @@ mod route_integration_tests {
                 ttl_secs: 60,
                 target,
                 until,
+                scope: buzz_auth::DenyScope::WholeKey,
                 capacity,
                 now: chrono::Utc::now(),
             }
@@ -4889,6 +5146,7 @@ mod route_integration_tests {
                 ttl_secs: 60,
                 target,
                 until,
+                scope: buzz_auth::DenyScope::WholeKey,
                 capacity,
                 now,
             };
@@ -4921,7 +5179,8 @@ mod route_integration_tests {
             );
             let mut loaded = store.load_denies(&issuer, t + s(60)).await.unwrap();
             loaded.sort_by_key(|(k, _)| k.to_hex());
-            let mut expected = vec![(*b, t + s(120)), (*c, t + s(90))];
+            let w = buzz_auth::DenyEntry::whole_key;
+            let mut expected = vec![(*b, w(t + s(120))), (*c, w(t + s(90)))];
             expected.sort_by_key(|(k, _)| k.to_hex());
             assert_eq!(loaded, expected, "the longer deny for b survives the prune");
         }
@@ -5041,6 +5300,7 @@ mod route_integration_tests {
                     ttl_secs: 60,
                     target: &revoked,
                     until: now + chrono::Duration::seconds(120),
+                    scope: buzz_auth::DenyScope::WholeKey,
                     capacity: 10,
                     now,
                 })
@@ -5071,7 +5331,7 @@ mod route_integration_tests {
             revoked_session.assert_closed("good record past a bad one");
             bystander_session.assert_open("unrelated key");
             assert_eq!(
-                deny_map.deny_status(TEST_ISS, &bystander, chrono::Utc::now()),
+                deny_map.deny_status(TEST_ISS, &bystander, chrono::Utc::now(), chrono::Utc::now()),
                 buzz_auth::DenyStatus::Unavailable,
                 "admission stays closed while a record is unreadable"
             );
@@ -5087,6 +5347,206 @@ mod route_integration_tests {
             assert!(deny_map.finish_restore(generation));
             assert!(!is_denied(&pod, &bystander), "reopened after the repair");
             assert!(is_denied(&pod, &revoked), "the good record still denies");
+        }
+
+        /// A cutoff a command stores in Redis survives a restart as a cutoff:
+        /// a restored pod refuses an assertion issued at C and admits one
+        /// issued after it, while the exact-`until` hash alone (the whole of
+        /// an older relay's reader) still decodes and reads it as a whole-key
+        /// deny.
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn redis_cutoff_survives_restore_and_old_reader_sees_whole_key() {
+            let url = std::env::var("BUZZ_TEST_REDIS_URL")
+                .or_else(|_| std::env::var("REDIS_URL"))
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+            let mut conn = buzz_pubsub::redis_connection(&url).expect("redis pool");
+            let namespace = test_namespace();
+            let store = redis_guard_in(&namespace);
+            let key = nostr::Keys::generate().public_key();
+            let now = chrono::Utc::now();
+            let until = now + chrono::Duration::seconds(120);
+            let c = now.timestamp();
+            let outcome = store
+                .try_claim(buzz_auth::CommandClaim {
+                    issuer: TEST_ISS,
+                    jti: "cutoff",
+                    ttl_secs: 60,
+                    target: &key,
+                    until,
+                    scope: buzz_auth::DenyScope::IssuedThrough(c),
+                    capacity: 10,
+                    now,
+                })
+                .await
+                .unwrap();
+            assert_eq!(outcome, buzz_auth::ClaimOutcome::Claimed);
+
+            let pod = store_pod(10, Arc::clone(&store)).await;
+            let deny_map = pod.nip_fi_deny_map.as_deref().unwrap();
+            let generation = deny_map.begin_restore();
+            assert_eq!(restore_nip_fi_denies(&pod, &[store]).await, Ok(()));
+            assert!(deny_map.finish_restore(generation));
+            let at = |secs| chrono::DateTime::from_timestamp(secs, 0).unwrap();
+            let fraction = at(c) + chrono::Duration::milliseconds(500);
+            assert!(deny_map.denies(TEST_ISS, &key, at(c), chrono::Utc::now()));
+            assert!(
+                !deny_map.denies(TEST_ISS, &key, fraction, chrono::Utc::now()),
+                "restored as a cutoff, not a whole-key deny"
+            );
+
+            let (_, exact) = buzz_pubsub::nip_fi_command_replay::deny_store_keys(
+                &format!("{namespace}:deny"),
+                TEST_ISS,
+            );
+            let entries: Vec<(String, String)> = redis::cmd("HGETALL")
+                .arg(exact)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            let mut bad = None;
+            let old = buzz_pubsub::nip_fi_command_replay::decode_untils(&entries, now, &mut bad);
+            assert_eq!(bad, None, "the old reader decodes new data");
+            assert_eq!(old, vec![(key, until)], "read as a whole-key deny");
+        }
+
+        /// The Redis merge matches [`buzz_auth::DenyEntry::merge`] in both
+        /// write orders: a whole key beats a cutoff, two cutoffs keep the
+        /// later C even under a shorter `until`, and an expired entry
+        /// contributes no scope.
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn redis_scope_merge_matches_the_deny_map() {
+            use buzz_auth::{DenyEntry, DenyScope};
+            let t = chrono::Utc::now() + chrono::Duration::hours(1);
+            let s = chrono::Duration::seconds;
+            let cut = DenyScope::IssuedThrough;
+            let whole = DenyScope::WholeKey;
+            // (first, second, second's now)
+            let cases = [
+                (
+                    (t + s(60), cut(10)),
+                    (t + s(60), whole),
+                    t,
+                    "whole over cutoff",
+                ),
+                (
+                    (t + s(60), whole),
+                    (t + s(60), cut(10)),
+                    t,
+                    "cutoff over whole",
+                ),
+                (
+                    (t + s(60), cut(10)),
+                    (t + s(30), cut(20)),
+                    t,
+                    "shorter later cutoff",
+                ),
+                (
+                    (t + s(60), cut(20)),
+                    (t + s(90), cut(10)),
+                    t,
+                    "longer earlier cutoff",
+                ),
+                (
+                    (t + s(1), whole),
+                    (t + s(60), cut(10)),
+                    t + s(2),
+                    "expired whole key",
+                ),
+            ];
+            for ((u1, s1), (u2, s2), now2, case) in cases {
+                let store = redis_guard();
+                let key = nostr::Keys::generate().public_key();
+                let claim = |jti, until, scope, now| buzz_auth::CommandClaim {
+                    issuer: TEST_ISS,
+                    jti,
+                    ttl_secs: 60,
+                    target: &key,
+                    until,
+                    scope,
+                    capacity: 10,
+                    now,
+                };
+                store.try_claim(claim("a", u1, s1, t)).await.unwrap();
+                store.try_claim(claim("b", u2, s2, now2)).await.unwrap();
+                let first = DenyEntry {
+                    until: u1,
+                    scope: s1,
+                };
+                let second = DenyEntry {
+                    until: u2,
+                    scope: s2,
+                };
+                let expected = DenyEntry::merge(Some(first), second, now2);
+                let loaded = store.load_denies(TEST_ISS, now2).await.unwrap();
+                assert_eq!(loaded, vec![(key, expected)], "{case}");
+            }
+        }
+
+        /// A cutoff that doesn't decode, or names no stored deny, fails the
+        /// load as unreadable.
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn redis_store_load_fails_on_unreadable_cutoff() {
+            let url = std::env::var("BUZZ_TEST_REDIS_URL")
+                .or_else(|_| std::env::var("REDIS_URL"))
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+            let mut conn = buzz_pubsub::redis_connection(&url).expect("redis pool");
+            let key = nostr::Keys::generate().public_key();
+            let now = chrono::Utc::now();
+            let until = now + chrono::Duration::seconds(120);
+            for (case, field, cutoff) in [
+                ("not a number", key.to_hex(), "soon".to_owned()),
+                ("out of range", key.to_hex(), i64::MAX.to_string()),
+                (
+                    "no deny",
+                    nostr::Keys::generate().public_key().to_hex(),
+                    "10".to_owned(),
+                ),
+            ] {
+                let namespace = test_namespace();
+                let store = redis_guard_in(&namespace);
+                let prefix = format!("{namespace}:deny");
+                let (_, exact) =
+                    buzz_pubsub::nip_fi_command_replay::deny_store_keys(&prefix, TEST_ISS);
+                let cutoffs =
+                    buzz_pubsub::nip_fi_command_replay::revoke_through_key(&prefix, TEST_ISS);
+                let _: () = redis::pipe()
+                    .atomic()
+                    .cmd("HSET")
+                    .arg(&exact)
+                    .arg(key.to_hex())
+                    .arg(format!(
+                        "{}:{}",
+                        until.timestamp(),
+                        until.timestamp_subsec_nanos()
+                    ))
+                    .ignore()
+                    .cmd("HSET")
+                    .arg(&cutoffs)
+                    .arg(field)
+                    .arg(cutoff)
+                    .ignore()
+                    .cmd("EXPIRE")
+                    .arg(&exact)
+                    .arg(60)
+                    .ignore()
+                    .cmd("EXPIRE")
+                    .arg(&cutoffs)
+                    .arg(60)
+                    .ignore()
+                    .query_async(&mut conn)
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(
+                        store.load_denies(TEST_ISS, now).await,
+                        Err(buzz_auth::LoadDeniesError::Unreadable { .. })
+                    ),
+                    "{case}"
+                );
+            }
         }
 
         /// A full revoke clears any cutoff stored for its target, whether the
@@ -5118,6 +5578,7 @@ mod route_integration_tests {
                 ttl_secs: 60,
                 target,
                 until,
+                scope: buzz_auth::DenyScope::WholeKey,
                 capacity: 10,
                 now,
             };
@@ -5250,7 +5711,8 @@ mod route_integration_tests {
                 .await
                 .unwrap();
             loaded.sort_by_key(|(k, _)| k.to_hex());
-            let mut expected = vec![(a, later), (b, later)];
+            let w = buzz_auth::DenyEntry::whole_key;
+            let mut expected = vec![(a, w(later)), (b, w(later))];
             expected.sort_by_key(|(k, _)| k.to_hex());
             assert_eq!(
                 loaded, expected,
@@ -5296,7 +5758,7 @@ mod route_integration_tests {
             let (seen_tx, seen) = tokio::sync::mpsc::unbounded_channel();
             tokio::spawn(async move {
                 while let Ok(msg) = rx.recv().await {
-                    apply_nip_fi_disconnect(&consumer, &msg, chrono::Utc::now());
+                    apply_nip_fi_disconnect(&consumer, &msg, chrono::Utc::now);
                     let _ = seen_tx.send(msg.pubkey_bytes);
                 }
             });

@@ -276,6 +276,11 @@ What this covers, and what it does not:
   (`buzz:nip-fi:shadow-deny-until:…` in shadow mode), with `HGETALL`, then
   `HDEL` that field. The pod retries on its own. Removing the record drops
   that revocation, so send the disconnect again if it is still needed.
+  A disconnect with `revoke_through` stores its cutoff in a second hash,
+  `buzz:nip-fi:deny-revoke-through:<sha256(issuer) hex>`, under the same
+  field. A cutoff that is not an integer, or whose field has no entry in the
+  deny hash, is also unreadable. `HDEL` it from the cutoff hash: the entry
+  then refuses every token for that key until its `until`.
 - **Deny set over capacity on a pod:** if a revocation this pod receives does
   not fit its `deny_set_capacity`, the pod closes admission the same way and
   restores until its active entries fit.

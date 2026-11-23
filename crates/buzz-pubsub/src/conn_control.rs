@@ -68,6 +68,10 @@ pub struct NipFiDisconnect {
     /// the signed command JWT is preserved across pod boundaries.
     #[serde(default)]
     pub until_unix_nanos: u32,
+    /// The command's `revoke_through` cutoff in whole seconds since the Unix
+    /// epoch.  Absent means the deny covers the whole key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoke_through: Option<i64>,
 }
 
 /// State of this pod's NIP-FI disconnect subscription.  Every confirmed
@@ -586,6 +590,7 @@ mod tests {
             pubkey_bytes: vec![0xabu8; 32],
             until_unix: 9_999_999_999,
             until_unix_nanos: 500_000_000,
+            revoke_through: None,
         };
         let json = serde_json::to_string(&cmd).unwrap();
         let decoded: NipFiDisconnect = serde_json::from_str(&json).unwrap();
@@ -623,6 +628,7 @@ mod tests {
             pubkey_bytes: vec![1u8; 32],
             until_unix: 1_000_000,
             until_unix_nanos: 0,
+            revoke_through: None,
         })
         .unwrap();
         assert!(serde_json::from_str::<NipFiDisconnect>(&good).is_ok());

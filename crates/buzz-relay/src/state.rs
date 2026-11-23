@@ -103,10 +103,10 @@ struct ProvenIdentity {
 }
 
 impl ProvenIdentity {
-    fn matches(&self, issuer: &str, pubkey: &[u8]) -> bool {
+    fn matches(&self, issuer: &str, pubkey: &[u8], scope: buzz_auth::DenyScope) -> bool {
         self.nip_fi
             .as_ref()
-            .is_some_and(|session| session.matches(issuer, &self.pubkey, pubkey))
+            .is_some_and(|session| session.matches(issuer, &self.pubkey, pubkey, scope))
     }
 }
 
@@ -555,7 +555,12 @@ impl CommunityConnectionRegistry {
     /// and then runs the deny-set check, so such a socket is rejected there.
     ///
     /// Returns the number of connections closed.
-    pub fn disconnect_nip_fi(&self, issuer: &str, pubkey: &[u8]) -> usize {
+    pub fn disconnect_nip_fi(
+        &self,
+        issuer: &str,
+        pubkey: &[u8],
+        scope: buzz_auth::DenyScope,
+    ) -> usize {
         let mut closed = 0;
         for entry in self.connections.iter() {
             let matches = entry
@@ -564,7 +569,7 @@ impl CommunityConnectionRegistry {
                 .proven_identity
                 .read()
                 .ok()
-                .and_then(|v| v.as_ref().map(|id| id.matches(issuer, pubkey)))
+                .and_then(|v| v.as_ref().map(|id| id.matches(issuer, pubkey, scope)))
                 .unwrap_or(false);
             if matches {
                 let control = &entry.value().1;
@@ -1110,7 +1115,12 @@ impl ConnectionManager {
     /// ordinary control buffer is full.
     ///
     /// Returns the number of connections closed.
-    pub fn disconnect_nip_fi(&self, issuer: &str, pubkey: &[u8]) -> usize {
+    pub fn disconnect_nip_fi(
+        &self,
+        issuer: &str,
+        pubkey: &[u8],
+        scope: buzz_auth::DenyScope,
+    ) -> usize {
         let mut closed = 0usize;
         for entry in self.connections.iter() {
             let matches = entry
@@ -1122,7 +1132,7 @@ impl ConnectionManager {
                         entry.nip_fi.read().is_ok_and(|session| {
                             session
                                 .as_ref()
-                                .is_some_and(|s| s.matches(issuer, proven, pubkey))
+                                .is_some_and(|s| s.matches(issuer, proven, pubkey, scope))
                         })
                     })
                 })
@@ -3229,7 +3239,7 @@ pub(crate) mod tests {
         );
         // No set_authenticated_pubkey — simulates pre-NIP-42 state.
 
-        let closed = mgr.disconnect_nip_fi("test-issuer", &pubkey);
+        let closed = mgr.disconnect_nip_fi("test-issuer", &pubkey, buzz_auth::DenyScope::WholeKey);
 
         assert_eq!(closed, 0, "unproven connection must not be closed");
         assert!(!cancel.is_cancelled(), "unproven connection must stay live");
@@ -3277,7 +3287,14 @@ pub(crate) mod tests {
         let (cancel_b, mut frames_b) = register(Some("https://issuer-b.example"));
         let (cancel_none, mut frames_none) = register(None);
 
-        assert_eq!(mgr.disconnect_nip_fi("https://issuer-a.example", &key), 1);
+        assert_eq!(
+            mgr.disconnect_nip_fi(
+                "https://issuer-a.example",
+                &key,
+                buzz_auth::DenyScope::WholeKey
+            ),
+            1
+        );
 
         assert!(cancel_a.is_cancelled(), "A session must be closed");
         assert!(
@@ -3339,7 +3356,7 @@ pub(crate) mod tests {
             Some(NipFiSession::new("test-issuer", None)),
         );
 
-        let closed = mgr.disconnect_nip_fi("test-issuer", &pubkey);
+        let closed = mgr.disconnect_nip_fi("test-issuer", &pubkey, buzz_auth::DenyScope::WholeKey);
 
         assert_eq!(closed, 1, "one matching connection must be closed");
         assert!(cancel.is_cancelled(), "connection token must be cancelled");
@@ -3383,7 +3400,11 @@ pub(crate) mod tests {
         let (cancel_none, mut frames_none, _gn) = register(None);
 
         assert_eq!(
-            registry.disconnect_nip_fi("https://issuer-a.example", &key),
+            registry.disconnect_nip_fi(
+                "https://issuer-a.example",
+                &key,
+                buzz_auth::DenyScope::WholeKey
+            ),
             1
         );
 
@@ -3425,7 +3446,14 @@ pub(crate) mod tests {
         );
         let _guard = registry.register(Uuid::new_v4(), community, control);
 
-        assert_eq!(registry.disconnect_nip_fi("test-issuer", &target_pubkey), 1);
+        assert_eq!(
+            registry.disconnect_nip_fi(
+                "test-issuer",
+                &target_pubkey,
+                buzz_auth::DenyScope::WholeKey
+            ),
+            1
+        );
         assert!(cancel.is_cancelled(), "audio socket must be cancelled");
         assert_eq!(
             *reason_rx.borrow(),
@@ -3473,8 +3501,14 @@ pub(crate) mod tests {
         audio.set_proven_identity(agent.clone(), owned);
         let _guard = registry.register(Uuid::new_v4(), community, audio);
 
-        assert_eq!(mgr.disconnect_nip_fi("test-issuer", &owner), 1);
-        assert_eq!(registry.disconnect_nip_fi("test-issuer", &owner), 1);
+        assert_eq!(
+            mgr.disconnect_nip_fi("test-issuer", &owner, buzz_auth::DenyScope::WholeKey),
+            1
+        );
+        assert_eq!(
+            registry.disconnect_nip_fi("test-issuer", &owner, buzz_auth::DenyScope::WholeKey),
+            1
+        );
         assert!(root_owned.is_cancelled() && audio_cancel.is_cancelled());
         assert!(!root_other_issuer.is_cancelled());
         assert!(!root_ownerless.is_cancelled());
@@ -3501,7 +3535,14 @@ pub(crate) mod tests {
         peer_control.set_proven_identity(peer_pubkey, Some(NipFiSession::new("test-issuer", None)));
         let _peer_guard = registry.register(Uuid::new_v4(), community, peer_control);
 
-        assert_eq!(registry.disconnect_nip_fi("test-issuer", &target_pubkey), 1);
+        assert_eq!(
+            registry.disconnect_nip_fi(
+                "test-issuer",
+                &target_pubkey,
+                buzz_auth::DenyScope::WholeKey
+            ),
+            1
+        );
         assert!(
             target_cancel.is_cancelled(),
             "target audio socket must be cancelled"
@@ -3526,7 +3567,14 @@ pub(crate) mod tests {
         control.set_proven_identity(other_pubkey, Some(NipFiSession::new("test-issuer", None)));
         let _guard = registry.register(Uuid::new_v4(), community, control);
 
-        assert_eq!(registry.disconnect_nip_fi("test-issuer", &target_pubkey), 0);
+        assert_eq!(
+            registry.disconnect_nip_fi(
+                "test-issuer",
+                &target_pubkey,
+                buzz_auth::DenyScope::WholeKey
+            ),
+            0
+        );
         assert!(
             !cancel.is_cancelled(),
             "different-key socket must not be touched"
@@ -3546,7 +3594,14 @@ pub(crate) mod tests {
         // Intentionally skip set_proven_pubkey — simulates pre-auth state.
         let _guard = registry.register(Uuid::new_v4(), community, control);
 
-        assert_eq!(registry.disconnect_nip_fi("test-issuer", &target_pubkey), 0);
+        assert_eq!(
+            registry.disconnect_nip_fi(
+                "test-issuer",
+                &target_pubkey,
+                buzz_auth::DenyScope::WholeKey
+            ),
+            0
+        );
         assert!(
             !cancel.is_cancelled(),
             "pre-auth socket must not be touched"

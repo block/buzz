@@ -21,6 +21,7 @@ use nostr::PublicKey;
 
 use sha2::{Digest, Sha256};
 
+use super::deny_map::{DenyEntry, DenyScope};
 use crate::error::AuthError;
 
 /// One authenticated command, as presented to the shared store.
@@ -36,6 +37,8 @@ pub struct CommandClaim<'a> {
     pub target: &'a PublicKey,
     /// The signed `until`, exact.
     pub until: DateTime<Utc>,
+    /// The signed scope: the whole key or a `revoke_through` cutoff.
+    pub scope: DenyScope,
     /// This issuer's `deny_set_capacity`, enforced across every pod.
     pub capacity: usize,
     /// Verifier clock: entries with `until <= now` are expired.
@@ -71,14 +74,13 @@ pub trait CommandReplayGuard: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<ClaimOutcome, AuthError>> + Send + 'a>>;
 
     /// Every recorded deny entry for `issuer` with `until > now`, at its exact
-    /// signed `until`.
+    /// merged `until` and scope.
     fn load_denies<'a>(&'a self, issuer: &'a str, now: DateTime<Utc>) -> LoadDenies<'a>;
 }
 
 /// The future [`CommandReplayGuard::load_denies`] returns.
-pub type LoadDenies<'a> = Pin<
-    Box<dyn Future<Output = Result<Vec<(PublicKey, DateTime<Utc>)>, LoadDeniesError>> + Send + 'a>,
->;
+pub type LoadDenies<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<(PublicKey, DenyEntry)>, LoadDeniesError>> + Send + 'a>>;
 
 /// Why [`CommandReplayGuard::load_denies`] failed.
 #[derive(Debug, thiserror::Error)]
@@ -94,7 +96,7 @@ pub enum LoadDeniesError {
         /// The first record that could not be decoded.
         record: String,
         /// The active records that decoded.
-        readable: Vec<(PublicKey, DateTime<Utc>)>,
+        readable: Vec<(PublicKey, DenyEntry)>,
     },
 }
 
@@ -138,7 +140,7 @@ pub struct InMemoryCommandReplayGuard(std::sync::Mutex<InMemoryStore>);
 #[derive(Default)]
 struct InMemoryStore {
     claims: std::collections::HashSet<String>,
-    denies: std::collections::HashMap<String, std::collections::HashMap<PublicKey, DateTime<Utc>>>,
+    denies: std::collections::HashMap<String, std::collections::HashMap<PublicKey, DenyEntry>>,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -154,13 +156,20 @@ impl CommandReplayGuard for InMemoryCommandReplayGuard {
         } else {
             let active = claim.until > claim.now;
             let denies = store.denies.entry(claim.issuer.to_owned()).or_default();
-            denies.retain(|_, until| *until > claim.now);
+            denies.retain(|_, entry| entry.is_active(claim.now));
             if active && !denies.contains_key(claim.target) && denies.len() >= claim.capacity {
                 ClaimOutcome::Full
             } else {
                 if active {
-                    let until = denies.entry(*claim.target).or_insert(claim.until);
-                    *until = (*until).max(claim.until);
+                    let incoming = DenyEntry {
+                        until: claim.until,
+                        scope: claim.scope,
+                    };
+                    let existing = denies.get(claim.target).copied();
+                    denies.insert(
+                        *claim.target,
+                        DenyEntry::merge(existing, incoming, claim.now),
+                    );
                 }
                 store.claims.insert(key);
                 ClaimOutcome::Claimed
@@ -178,8 +187,8 @@ impl CommandReplayGuard for InMemoryCommandReplayGuard {
             .get(issuer)
             .map(|d| {
                 d.iter()
-                    .filter(|(_, u)| **u > now)
-                    .map(|(k, u)| (*k, *u))
+                    .filter(|(_, e)| e.is_active(now))
+                    .map(|(k, e)| (*k, *e))
                     .collect()
             })
             .unwrap_or_default();
