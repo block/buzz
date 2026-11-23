@@ -225,15 +225,12 @@ async fn rehearsals_have_independent_inventory_approval_and_idempotent_submissio
         .unwrap()
         .approvals
         .is_empty());
-    // Destructive intake retains its existing owner restriction and uniqueness.
-    assert!(users.submit(&key, "operator", None).await.is_err());
-    sqlx::query("DELETE FROM relay_members WHERE community_id=$1 AND pubkey=$2")
-        .bind(community)
-        .bind(&key)
-        .execute(&pool)
-        .await
-        .unwrap();
+    // Both modes discover the same owner community and keep separate request identities.
     let deletion = users.submit(&key, "operator", None).await.unwrap();
+    assert_eq!(
+        UserDeletionInventory::read(&deletion).unwrap().communities,
+        UserDeletionInventory::read(&second).unwrap().communities,
+    );
     assert_ne!(first.id, deletion.id);
     assert_eq!(
         users.submit(&key, "operator", None).await.unwrap().id,
