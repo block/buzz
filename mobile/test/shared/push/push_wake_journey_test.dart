@@ -650,9 +650,11 @@ void main() {
       expect(watch.elapsed, lessThan(const Duration(seconds: 2)));
       expect(result.failedCommunityIds, [relay.communityId]);
 
-      // Slow storage and a slow name lookup spend the budget too. Messages
-      // not yet claimed stay unclaimed for the next wake, and those already
-      // claimed are returned, not lost.
+      // Storage that stalls on one claim past the budget doesn't hold the
+      // wake. Messages not yet claimed stay unclaimed for the next wake, and
+      // those already claimed are returned, not lost. A claim that only wins
+      // after the wake answered is recorded as shown but never returned, so
+      // its community is reported incomplete and the caller falls back.
       relay.silent = false;
       final friend = relay.person('Friend');
       final sent = [
@@ -667,21 +669,26 @@ void main() {
         metadata: Duration(seconds: 30),
         total: Duration(milliseconds: 700),
       );
-      final slowStore = SlowShownMessageStore(
+      final heldId = sent[sent.length ~/ 2];
+      final release = Completer<void>();
+      final heldStore = HeldClaimShownMessageStore(
         fixture.openStore(),
-        const Duration(milliseconds: 100),
+        heldId,
+        release.future,
       );
       final stopped = Stopwatch()..start();
-      final partial = await fixture.wake(store: slowStore, timeouts: tight);
+      final partial = await fixture.wake(store: heldStore, timeouts: tight);
       expect(stopped.elapsed, lessThan(const Duration(seconds: 2)));
-      expect(partial.incomplete, isTrue);
-      expect(partial.notifications, isNotEmpty);
-      expect(partial.notifications.length, lessThan(sent.length));
+      release.complete();
+      expect(await heldStore.recorded, isTrue);
+      final partialIds = partial.notifications.map((n) => n.eventId).toList();
+      expect(partialIds, isNot(contains(heldId)));
+      expect(partial.failedCommunityIds, [relay.communityId]);
       final rest = await fixture.wake();
       expect(rest.incomplete, isFalse);
       expect(
-        [...partial.notifications, ...rest.notifications].map((n) => n.eventId),
-        unorderedEquals(sent),
+        [...partialIds, ...rest.notifications.map((n) => n.eventId)]..sort(),
+        [...sent.where((id) => id != heldId)]..sort(),
       );
 
       relay.slowProfiles = true;
