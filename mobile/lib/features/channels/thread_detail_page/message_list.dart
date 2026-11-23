@@ -16,6 +16,7 @@ class _ThreadMessageList extends HookWidget {
   final Set<String> knownAgents;
   final AsyncValue<List<NostrEvent>> relayReplyState;
   final bool showingSavedReplies;
+  final Set<String> savedOnlyIds;
   final bool accessDenied;
   final VoidCallback onRetryReplies;
   final Map<String, DateTime> localSendAnimations;
@@ -51,6 +52,7 @@ class _ThreadMessageList extends HookWidget {
     required this.knownAgents,
     required this.relayReplyState,
     required this.showingSavedReplies,
+    required this.savedOnlyIds,
     required this.accessDenied,
     required this.onRetryReplies,
     required this.localSendAnimations,
@@ -88,12 +90,16 @@ class _ThreadMessageList extends HookWidget {
     return '$count · ${relayReplyState.isLoading ? 'Retrying…' : 'Couldn’t refresh'}';
   }
 
-  Widget _buildHead(BuildContext context) => _ThreadHeadLayout(
-    onHeightChanged: onHeadHeightChanged,
-    child: _buildHeadContent(context),
-  );
+  Widget _buildHead(BuildContext context, List<TimelineMessage> liveMessages) =>
+      _ThreadHeadLayout(
+        onHeightChanged: onHeadHeightChanged,
+        child: _buildHeadContent(context, liveMessages),
+      );
 
-  Widget _buildHeadContent(BuildContext context) {
+  Widget _buildHeadContent(
+    BuildContext context,
+    List<TimelineMessage> liveMessages,
+  ) {
     if (accessDenied) {
       return Padding(
         padding: const EdgeInsets.only(bottom: Grid.xs),
@@ -132,7 +138,9 @@ class _ThreadMessageList extends HookWidget {
             currentPubkey: currentPubkey,
             showAuthor: true,
             isHighlighted: head.id == highlightedMessageId,
-            allMessages: allMessages,
+            allMessages: liveMessages.any((message) => message.id == head.id)
+                ? liveMessages
+                : null,
             isMember: isMember,
             isArchived: isArchived,
             isThreadHead: true,
@@ -180,6 +188,11 @@ class _ThreadMessageList extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
+    final liveMessages = savedOnlyIds.isEmpty
+        ? allMessages
+        : allMessages
+              .where((message) => !savedOnlyIds.contains(message.id))
+              .toList();
     final headLink = useMemoized(LayerLink.new);
     final loadingHeadLink = useMemoized(LayerLink.new);
     final headScrollPosition = useRef<ScrollPosition?>(null);
@@ -302,9 +315,13 @@ class _ThreadMessageList extends HookWidget {
                             nextReply.createdAt - reply.createdAt > 300;
 
                         // Check if this reply itself has children (nested thread).
-                        final nestedChildren = showingSavedReplies
+                        final nestedChildren = savedOnlyIds.contains(reply.id)
                             ? null
-                            : childrenByParent[reply.id];
+                            : childrenByParent[reply.id]
+                                  ?.where(
+                                    (child) => !savedOnlyIds.contains(child.id),
+                                  )
+                                  .toList();
                         final nestedSummary =
                             nestedChildren != null && nestedChildren.isNotEmpty
                             ? _buildNestedSummary(reply.id, nestedChildren)
@@ -355,7 +372,9 @@ class _ThreadMessageList extends HookWidget {
                                     showAvatar: showAvatar,
                                     isHighlighted:
                                         reply.id == highlightedMessageId,
-                                    allMessages: allMessages,
+                                    allMessages: savedOnlyIds.contains(reply.id)
+                                        ? null
+                                        : liveMessages,
                                     isMember: isMember,
                                     isArchived: isArchived,
                                     composerFocusNode: composerFocusNode,
@@ -365,7 +384,7 @@ class _ThreadMessageList extends HookWidget {
                                     _NestedThreadSummaryRow(
                                       summary: nestedSummary,
                                       replyMessage: reply,
-                                      allMessages: allMessages,
+                                      allMessages: liveMessages,
                                       channelId: channelId,
                                       currentPubkey: currentPubkey,
                                       isMember: isMember,
@@ -431,7 +450,7 @@ class _ThreadMessageList extends HookWidget {
                           physics: visible
                               ? const NeverScrollableScrollPhysics()
                               : null,
-                          child: _buildHead(context),
+                          child: _buildHead(context, liveMessages),
                         ),
                       ),
                     ),

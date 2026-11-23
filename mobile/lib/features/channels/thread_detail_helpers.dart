@@ -185,7 +185,7 @@ class _ThreadTailIntent {
   AsyncValue<List<NostrEvent>> relayReplyState,
   List<TimelineMessage> allMsgs,
   TimelineMessage? savedHead,
-  bool showingSavedReplies,
+  Set<String> savedOnlyIds,
   bool accessDenied,
   bool liveDeletionHidesHead,
   bool hasFetchedReplies,
@@ -217,7 +217,7 @@ _watchThreadMessages(
   final savedReplies = relayRepliesAvailable ? null : saved;
   final events = savedReplies == null && replyEvents == null
       ? live
-      : mergeThreadEvents([...?replyEvents, ...?savedReplies], live);
+      : mergeThreadEvents([...?savedReplies, ...?replyEvents], live);
   final observed = accessDenied
       ? const <TimelineMessage>[]
       : formatTimeline(events, currentPubkey: currentPubkey);
@@ -254,7 +254,18 @@ _watchThreadMessages(
             currentPubkey: currentPubkey,
           ).where((message) => message.id == threadHead.id).firstOrNull
         : null,
-    showingSavedReplies: savedReplies != null,
+    savedOnlyIds: savedReplies == null
+        ? const {}
+        : {
+            for (final event in savedReplies)
+              if (EventKind.channelTimelineContentKinds.contains(event.kind))
+                event.id,
+          }.difference({
+            for (final event in live) event.id,
+            for (final event in replyEvents ?? const <NostrEvent>[]) event.id,
+            for (final message in routeSnapshot)
+              if (!headFromSavedPage || message.id != threadHead.id) message.id,
+          }),
     accessDenied: accessDenied,
     liveDeletionHidesHead: headDeleted,
     hasFetchedReplies: replyEvents != null,
@@ -289,4 +300,32 @@ List<TimelineMessage> _provisionalThreadMessages(
     final order = a.createdAtMs.compareTo(b.createdAtMs);
     return order != 0 ? order : a.id.compareTo(b.id);
   });
+}
+
+/// Resolve the leading visible reply by identity before relay rows reindex
+/// the list. This also works when the relay drops the first visible row.
+({int index, double alignment})? _threadPreviewAnchor(
+  Iterable<ItemPosition> positions,
+  List<TimelineMessage> preview,
+  List<TimelineMessage> replies,
+  double top,
+) {
+  final indices = {for (final (i, reply) in replies.indexed) reply.id: i + 1};
+  final visible =
+      positions
+          .where(
+            (position) =>
+                position.index <= preview.length &&
+                position.itemLeadingEdge < 1 &&
+                position.itemTrailingEdge > top,
+          )
+          .toList()
+        ..sort((a, b) => a.index.compareTo(b.index));
+  for (final position in visible) {
+    if (position.index == 0) return null;
+    final index = indices[preview[position.index - 1].id];
+    if (index == null) continue;
+    return (index: index, alignment: position.itemLeadingEdge.clamp(0, 1));
+  }
+  return null;
 }

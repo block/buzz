@@ -48,6 +48,7 @@ class _Relay extends RelaySessionNotifier {
   final channelQuery = Completer<List<NostrEvent>>();
   final subscribed = Completer<void>();
   late void Function(NostrEvent) emit;
+  late void Function(String) closeChannel;
 
   @override
   SessionState build() =>
@@ -79,6 +80,7 @@ class _Relay extends RelaySessionNotifier {
     void Function(String message)? onClosed,
   }) async {
     emit = onEvent;
+    closeChannel = onClosed!;
     subscribed.complete();
     return () {};
   }
@@ -194,6 +196,7 @@ void main() {
     await paint();
 
     final saved = await readSaved();
+    expect(relay.writerFilters, hasLength(2));
     expect(saved, [head, reply, edit]);
     expect(
       formatTimeline(
@@ -203,10 +206,7 @@ void main() {
     );
     expect(relay.writerFilters, hasLength(2));
     expect(relay.writerFilters.first.ids, [head.id]);
-    expect(
-      relay.writerFilters.last.tags['#e'],
-      unorderedEquals([head.id, reply.id]),
-    );
+    expect(relay.writerFilters.last.tags['#e'], [reply.id]);
     for (final filter in relay.writerFilters) {
       expect(filter.tags['#h'], [args.channelId]);
     }
@@ -222,12 +222,76 @@ void main() {
     openThread.close();
     await container.pump();
     relay.threadQueries.add(Future.value([reply, laterReply]));
-    container.listen(replies, (_, _) {});
+    final reopenedThread = container.listen(replies, (_, _) {});
     expect(await container.read(replies.future), [reply, laterReply]);
     await paint();
     expect(relay.writerFilters, hasLength(4));
+    expect(relay.writerFilters.last.tags['#e'], [reply.id]);
     expect(await readSaved(), [head, reply, laterReply, edit]);
+
+    // The writer response is still untrusted. A forged edit cannot make the
+    // already superseded original eligible for the saved page.
+    final forged = NostrEvent.fromJson({...edit.toJson(), 'content': 'Forged'});
+    reopenedThread.close();
+    await container.pump();
+    relay.writerEvents = [head, forged];
+    relay.threadQueries.add(Future.value([reply, laterReply]));
+    container.listen(replies, (_, _) {});
+    expect(await container.read(replies.future), [reply, laterReply]);
+    await paint();
+    expect(await readSaved(), [head, laterReply]);
   });
+
+  test(
+    'a thread with a loaded root and no observed edits needs no extra query',
+    () async {
+      final head = _event('Loaded thread head', isRoot: true);
+      final args = ThreadRepliesArgs(
+        channelId: _args.channelId,
+        rootId: head.id,
+      );
+      final reply = _event('Original reply', args: args);
+      final channel = channelMessagesProvider(args.channelId);
+      container.listen(channel, (_, _) {});
+      relay.connect();
+      await relay.subscribed.future;
+      relay.emit(head);
+      expect(container.read(channel).value, contains(head));
+      relay.threadQueries.add(Future.value([reply]));
+      final replies = threadRepliesProvider(args);
+      container.listen(replies, (_, _) {});
+      expect(await container.read(replies.future), [reply]);
+      await paint();
+      expect(relay.writerFilters, isEmpty);
+      expect(await store.read(store.capture(_scope, args.savedPage)), [
+        head,
+        reply,
+      ]);
+    },
+  );
+
+  test(
+    'an empty thread result cannot clear confirmed channel refusal',
+    () async {
+      final channel = channelMessagesProvider(_args.channelId);
+      container.listen(channel, (_, _) {});
+      relay.connect();
+      await relay.subscribed.future;
+      final response = Completer<List<NostrEvent>>();
+      relay.threadQueries.add(response.future);
+      final replies = threadRepliesProvider(_args);
+      container.listen(replies, (_, _) {});
+      final pending = container.read(replies.future);
+      relay.closeChannel('restricted: not a channel member');
+      expect(container.read(channel).error, isNotNull);
+      response.complete([]);
+      expect(await pending, isEmpty);
+      await paint();
+      expect(container.read(channel).error, isNotNull);
+      expect(relay.writerFilters, isEmpty);
+      expect(await store.read(store.capture(_scope, _args.savedPage)), isNull);
+    },
+  );
 
   test(
     'oversized threads keep complete relay history and skip the writer',

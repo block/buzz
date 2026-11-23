@@ -256,6 +256,15 @@ void threadReplyRefreshTests() {
     'saved replies stay provisional until relay history replaces them',
     (tester) async {
       final query = Completer<List<NostrEvent>>();
+      final liveReply = _textMsg(
+        id: 'live-preview-reply',
+        pubkey: 'carol',
+        content: 'Live preview reply',
+        createdAt: 1002,
+        extraTags: [
+          ['e', args.rootId, '', 'reply'],
+        ],
+      );
       final readState = _SynchronousReadStateNotifier(
         const ReadStateState(
           isReady: true,
@@ -268,6 +277,7 @@ void threadReplyRefreshTests() {
         tester,
         () => query.future,
         savedThreadPreview: Future.value([reply]),
+        messagesNotifier: _FakeMessagesNotifier([root, liveReply]),
         readStateNotifier: readState,
       );
       open(navigator);
@@ -275,14 +285,128 @@ void threadReplyRefreshTests() {
       expect(find.text('Showing saved replies.'), findsOneWidget);
       expect(find.text('1 reply'), findsNothing);
       expect(findRichText('Cached reply'), findsOneWidget);
-      expect(readState.markedContexts, isNot(contains(args.rootId)));
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(readState.markedContexts, contains(msgContextKey(liveReply.id)));
+      expect(
+        readState.markedContexts,
+        isNot(contains(msgContextKey(reply.id))),
+      );
+      expect(
+        readState.markedContexts,
+        isNot(contains(threadContextKey(args.rootId))),
+      );
 
       query.complete([]);
       await tester.pumpAndSettle();
-      expect(find.text('0 replies'), findsOneWidget);
+      expect(find.text('1 reply'), findsOneWidget);
       expect(findRichText('Cached reply'), findsNothing);
     },
   );
+
+  testWidgets(
+    'saved thread opens at Latest and preserves the reading position on handoff',
+    (tester) async {
+      tester.view.physicalSize = const Size(400, 680);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      NostrEvent row(int index) => _textMsg(
+        id: 'handoff-reply-$index',
+        pubkey: 'bob',
+        content: 'Cached reply $index',
+        createdAt: 1100 + index,
+        extraTags: [
+          ['e', args.rootId, '', 'reply'],
+        ],
+      );
+      final preview = List.generate(40, row);
+      final query = Completer<List<NostrEvent>>();
+      final (navigator, _) = await mount(
+        tester,
+        () => query.future,
+        savedThreadPreview: Future.value(preview),
+      );
+      open(navigator);
+      await tester.pumpAndSettle();
+
+      final list = find.byKey(const ValueKey('thread-message-list'));
+      final gate = find.byKey(const ValueKey('thread-initial-viewport-gate'));
+      final latest = find.byKey(
+        const ValueKey('thread-message-group-handoff-reply-39'),
+      );
+      expect(
+        tester.getBottomLeft(latest).dy,
+        lessThanOrEqualTo(
+          tester.getTopLeft(find.byKey(const ValueKey('composer-surface'))).dy,
+        ),
+      );
+      await tester.drag(list, const Offset(0, 480));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('thread-jump-to-latest')),
+        findsOneWidget,
+      );
+      final appBarBottom = frostedAppBarHeight(tester.element(list));
+      final anchor =
+          List.generate(
+            preview.length,
+            (index) => find.byKey(
+              ValueKey('thread-message-group-handoff-reply-$index'),
+            ),
+          ).firstWhere(
+            (row) =>
+                row.evaluate().isNotEmpty &&
+                tester.getBottomLeft(row).dy > appBarBottom,
+          );
+      final before = tester.getTopLeft(anchor).dy;
+      query.complete([row(-2), row(-1), ...preview, row(40)]);
+      await tester.pump();
+      expect(tester.widget<Opacity>(gate).opacity, 1);
+      await tester.pumpAndSettle();
+      expect(tester.widget<Opacity>(gate).opacity, 1);
+      expect(tester.getTopLeft(anchor).dy, closeTo(before, 2));
+    },
+  );
+
+  testWidgets('live nested links stay available beside saved-only replies', (
+    tester,
+  ) async {
+    final parent = _textMsg(
+      id: threadIdParent,
+      pubkey: 'bob',
+      content: 'Live parent',
+      createdAt: 1001,
+      extraTags: [
+        ['e', args.rootId, '', 'reply'],
+      ],
+    );
+    final child = _textMsg(
+      id: 'live-child',
+      pubkey: 'bob',
+      content: 'Live child',
+      createdAt: 1002,
+      extraTags: [
+        ['e', args.rootId, '', 'root'],
+        ['e', parent.id, '', 'reply'],
+      ],
+    );
+    final notifier = _FakeMessagesNotifier([root, parent, child]);
+    final query = Completer<List<NostrEvent>>();
+    final (navigator, _) = await mount(
+      tester,
+      () => query.future,
+      savedThreadPreview: Future.value([reply]),
+      messagesNotifier: notifier,
+    );
+    open(navigator);
+    await tester.pumpAndSettle();
+    expect(find.text('Showing saved replies.'), findsOneWidget);
+    await tester.tap(
+      find.byKey(ValueKey('nested-thread-summary-${parent.id}')),
+    );
+    await tester.pumpAndSettle();
+    expect(findRichText('Live child'), findsOneWidget);
+    expect(find.text('Showing saved replies.'), findsNothing);
+  });
 
   testWidgets(
     'a live deletion hides a saved reply before relay history arrives',
@@ -315,14 +439,12 @@ void threadReplyRefreshTests() {
       ]);
       await tester.pumpAndSettle();
       expect(findRichText('Cached reply'), findsNothing);
-      expect(find.text('Showing saved replies.'), findsOneWidget);
+      expect(find.text('Showing saved replies.'), findsNothing);
+      expect(find.text('Loading replies…'), findsOneWidget);
 
       query.completeError(Exception('offline'));
       await tester.pumpAndSettle();
-      expect(
-        find.text('Showing saved replies. Refresh failed.'),
-        findsOneWidget,
-      );
+      expect(find.text('Couldn’t load replies'), findsOneWidget);
       expect(find.byTooltip('Retry'), findsOneWidget);
     },
   );

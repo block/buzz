@@ -101,6 +101,7 @@ final class SavedMessageStore {
   final _scopeEpochs = <String, int>{};
   final _channelEpochs = <(String, String), int>{};
   final _pendingEventRemovals = <(String, String), Set<String>>{};
+  final _recentMutations = <(String, String, String), bool>{};
   Future<void> _tail = Future.value();
   Future<void> _purgeMarkerTail = Future.value();
   int _activePurgeMarkers = 0;
@@ -122,6 +123,21 @@ final class SavedMessageStore {
       (_scopeEpochs[ticket._scope] ?? 0) == ticket._scopeEpoch &&
       (_channelEpochs[(ticket._scope, ticket._page.channelId)] ?? 0) ==
           ticket._channelEpoch;
+
+  /// Live edits and deletions can be newer than a subsequent replica read.
+  ({Set<String> edited, Set<String> deleted}) threadMutations(
+    SavedMessageTicket ticket,
+    Iterable<String> ids,
+  ) {
+    final edited = <String>{};
+    final deleted = <String>{};
+    for (final id in ids) {
+      final mutation =
+          _recentMutations[(ticket._scope, ticket._page.channelId, id)];
+      if (mutation != null) (mutation ? edited : deleted).add(id);
+    }
+    return (edited: edited, deleted: deleted);
+  }
 
   /// Reads a verified page and records that the conversation was opened.
   Future<List<NostrEvent>?> read(SavedMessageTicket ticket) async {
@@ -154,6 +170,7 @@ final class SavedMessageStore {
     _scopeEpochs.update(key, (epoch) => epoch + 1, ifAbsent: () => 1);
     _channelEpochs.removeWhere((entry, _) => entry.$1 == key);
     _pendingEventRemovals.removeWhere((entry, _) => entry.$1 == key);
+    _recentMutations.removeWhere((entry, _) => entry.$1 == key);
     return _purge((directory) => _sweep(directory, removedScope: key));
   }
 
@@ -167,6 +184,9 @@ final class SavedMessageStore {
     final key = _scopeKey(scope);
     _retireChannel((key, channelId));
     _pendingEventRemovals.remove((key, channelId));
+    _recentMutations.removeWhere(
+      (entry, _) => entry.$1 == key && entry.$2 == channelId,
+    );
     return _purge(
       (directory) => _removeFromDisk(directory, key, channelId),
       deferDisk: deferDisk,
@@ -177,8 +197,9 @@ final class SavedMessageStore {
   void removeChannelEvents(
     SavedMessageScope scope,
     String channelId,
-    Set<String> targets,
-  ) {
+    Set<String> targets, {
+    bool edited = false,
+  }) {
     if (targets.isEmpty) return;
     final key = (_scopeKey(scope), channelId);
     _retireChannel(key);
@@ -187,6 +208,12 @@ final class SavedMessageStore {
     for (final target in targets) {
       if (batch.length > maxPageEvents) break;
       batch.add(target);
+      final targetKey = (key.$1, channelId, target);
+      final previous = _recentMutations.remove(targetKey);
+      _recentMutations[targetKey] = previous == false ? false : edited;
+      if (_recentMutations.length > maxPageEvents) {
+        _recentMutations.remove(_recentMutations.keys.first);
+      }
     }
     if (pending != null) return;
     _pendingEventRemovals[key] = batch;
@@ -354,6 +381,7 @@ final class SavedMessageStore {
     _scopeEpochs.updateAll(
       (key, epoch) => keys.contains(key) ? epoch : epoch + 1,
     );
+    _recentMutations.removeWhere((entry, _) => !keys.contains(entry.$1));
     return _enqueue((directory) => _sweep(directory, retained: keys));
   }
 
@@ -384,6 +412,9 @@ final class SavedMessageStore {
         page: ticket._page,
         events: events,
         relayAuthor: relayAuthor,
+        requiredEdits: ticket._page.rootId.isEmpty
+            ? const {}
+            : threadMutations(ticket, events.map((event) => event.id)).edited,
         payloadBudget: payloadBudget,
         databasePageLimit: databasePageLimit,
       ),

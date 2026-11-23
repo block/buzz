@@ -79,6 +79,15 @@ final threadRepliesProvider = FutureProvider.autoDispose
       final channelMessages = ref.exists(channelProvider)
           ? ref.read(channelProvider.notifier)
           : null;
+      void denyAccess(Object error, StackTrace trace) {
+        if (ref.exists(channelProvider)) {
+          ref.read(channelProvider.notifier).denyAccessFromThread(error, trace);
+        } else if (scope != null) {
+          unawaited(cache.removeChannel(scope, args.channelId));
+          invalidateSavedMessagePreviews(ref, args.channelId);
+        }
+      }
+
       final cachedReplyIds = channelMessages?.cachedThreadReplyIds(args.rootId);
       final unconfirmedIds = channelMessages?.unconfirmedThreadReplyIds(
         args.rootId,
@@ -155,25 +164,54 @@ final threadRepliesProvider = FutureProvider.autoDispose
           }
         }
         final events = [...replies, ...aux];
-        if (current && ticket != null) {
+        if (current &&
+            ticket != null &&
+            channelMessages?.isAccessDenied != true) {
+          final rootPending = ref
+              .read(pendingLocalMessagesProvider(args.channelId))
+              .containsKey(args.rootId);
+          final knownRoot = ref.exists(channelProvider) && !rootPending
+              ? ref
+                    .read(channelProvider)
+                    .value
+                    ?.where((event) => event.id == args.rootId)
+                    .firstOrNull
+              : null;
           unawaited(
             saveMessagePage(
               ref,
               cache,
               ticket,
               events,
-              isCurrent: () => current,
-              refreshEvents: () async => claimSave()
-                  ? _readSavedThreadEvents(session, args, events)
-                  : null,
+              isCurrent: () =>
+                  current && channelMessages?.isAccessDenied != true,
+              refreshEvents: () async {
+                if (!claimSave()) return null;
+                try {
+                  return await _readSavedThreadEvents(
+                    session,
+                    args,
+                    events,
+                    cache,
+                    ticket,
+                    knownRoot,
+                  );
+                } catch (error, trace) {
+                  if (current &&
+                      cache.isCurrent(ticket) &&
+                      isRelayChannelAccessDenied(error)) {
+                    denyAccess(error, trace);
+                  }
+                  rethrow;
+                }
+              },
             ),
           );
         }
         return events;
-      } catch (error) {
-        if (current && scope != null && isRelayChannelAccessDenied(error)) {
-          unawaited(cache.removeChannel(scope, args.channelId));
-          invalidateSavedMessagePreviews(ref, args.channelId);
+      } catch (error, stackTrace) {
+        if (current && isRelayChannelAccessDenied(error)) {
+          denyAccess(error, stackTrace);
         }
         if (current && queryVersion != null) {
           channelMessages?.failThreadQuery(args.rootId, queryVersion);
@@ -186,6 +224,9 @@ Future<List<NostrEvent>> _readSavedThreadEvents(
   RelaySessionNotifier session,
   ThreadRepliesArgs args,
   List<NostrEvent> events,
+  SavedMessageStore store,
+  SavedMessageTicket ticket,
+  NostrEvent? knownRoot,
 ) async {
   if (events.length > SavedMessageStore.maxPageEvents) return const [];
   final targets = {
@@ -197,41 +238,59 @@ Future<List<NostrEvent>> _readSavedThreadEvents(
   // still has complete relay history, but cannot replace its saved page
   // without also verifying its edits.
   if (targets.length > _threadReplyPageSize + 1) return const [];
-  // The thread scan's aux can come from a replica. Read edits from the writer
-  // so a scan that starts after a live edit cannot re-save pre-edit text.
+  final (:edited, :deleted) = store.threadMutations(ticket, {
+    args.rootId,
+    ...events.map((event) => event.id),
+  });
+  final editTargets = targets.intersection(edited);
+  final needsRoot = knownRoot == null && !deleted.contains(args.rootId);
+  // Only ask the writer about targets whose edits already reached this
+  // client. The ordinary relay scan supplies aux for the rest.
   const editLimit = 1000;
   const strong = {'consistency': 'strong'};
-  final current = await session.queryRelay([
-    NostrFilter(
-      kinds: EventKind.channelTimelineContentKinds,
-      ids: [args.rootId],
-      tags: {
-        '#h': [args.channelId],
-      },
-      limit: 1,
-      extensions: strong,
-    ),
-    NostrFilter(
-      kinds: const [EventKind.streamMessageEdit],
-      tags: {
-        '#h': [args.channelId],
-        '#e': targets.toList(),
-      },
-      limit: editLimit,
-      extensions: strong,
-    ),
-  ]);
+  final filters = [
+    if (needsRoot)
+      NostrFilter(
+        kinds: EventKind.channelTimelineContentKinds,
+        ids: [args.rootId],
+        tags: {
+          '#h': [args.channelId],
+        },
+        limit: 1,
+        extensions: strong,
+      ),
+    if (editTargets.isNotEmpty)
+      NostrFilter(
+        kinds: const [EventKind.streamMessageEdit],
+        tags: {
+          '#h': [args.channelId],
+          '#e': editTargets.toList(),
+        },
+        limit: editLimit,
+        extensions: strong,
+      ),
+  ];
+  final current = filters.isEmpty
+      ? const <NostrEvent>[]
+      : await session.queryRelay(filters);
+  final writerEdits = current
+      .where((event) => event.kind == EventKind.streamMessageEdit)
+      .toList();
   // At the limit the response may omit an edit. Clear the whole saved page.
-  if (current
-          .where((event) => event.kind == EventKind.streamMessageEdit)
-          .length >=
-      editLimit) {
-    return const [];
-  }
+  if (writerEdits.length >= editLimit) return const [];
+  String? editTarget(NostrEvent event) => event.tags.reversed
+      .where((tag) => tag.length > 1 && tag[0] == 'e')
+      .firstOrNull?[1];
   return [
-    ...current,
+    if (knownRoot != null && !deleted.contains(knownRoot.id)) knownRoot,
+    for (final event in current)
+      if (event.id == args.rootId && !deleted.contains(event.id)) event,
+    ...writerEdits.where((event) => !deleted.contains(event.id)),
     for (final event in events)
-      if (event.kind != EventKind.streamMessageEdit) event,
+      if (!deleted.contains(event.id) &&
+          !(event.kind == EventKind.streamMessageEdit &&
+              editTargets.contains(editTarget(event))))
+        event,
   ];
 }
 

@@ -18,6 +18,7 @@ final class _DiskRequest {
     this.relayAuthor,
     this.payloadBudget = 0,
     this.targets,
+    this.requiredEdits = const {},
   });
 
   final String path;
@@ -28,6 +29,7 @@ final class _DiskRequest {
   final String? relayAuthor;
   final int payloadBudget;
   final Set<String>? targets;
+  final Set<String> requiredEdits;
 }
 
 final class _DiskResult {
@@ -214,6 +216,8 @@ Map<String, String> _knownWires(Database db, List<NostrEvent> candidates) {
   final page = request.page;
   final selected = <String, String>{};
   final rootIds = <String>{};
+  final edits = <String, String>{};
+  final deleted = <String>{};
   var byteSize = 0;
   for (final event in candidates) {
     if (selected.containsKey(event.id)) continue;
@@ -245,8 +249,31 @@ Map<String, String> _knownWires(Database db, List<NostrEvent> candidates) {
     selected[event.id] = wire;
     if (EventKind.channelTimelineContentKinds.contains(event.kind)) {
       rootIds.add(event.id);
+    } else if (request.requiredEdits.isNotEmpty &&
+        event.kind == EventKind.streamMessageEdit) {
+      final target = event.tags.reversed
+          .where((tag) => tag.length > 1 && tag[0] == 'e')
+          .firstOrNull?[1];
+      if (target != null) edits[event.id] = target;
+    } else if (request.requiredEdits.isNotEmpty &&
+        (event.kind == EventKind.deletion ||
+            event.kind == EventKind.nip29DeleteEvent)) {
+      deleted.addAll(
+        event.tags
+            .where((tag) => tag.length > 1 && tag[0] == 'e')
+            .map((tag) => tag[1]),
+      );
     }
     byteSize += length;
+  }
+  // Never write original text for an observed edit without verified proof.
+  final confirmed = edits.entries
+      .where((edit) => !deleted.contains(edit.key))
+      .map((edit) => edit.value)
+      .toSet();
+  for (final id in request.requiredEdits.difference(confirmed)) {
+    final removed = selected.remove(id);
+    if (removed != null) byteSize -= utf8.encode(removed).length;
   }
   return (selected, byteSize);
 }

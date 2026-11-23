@@ -45,12 +45,13 @@ void pruneSavedMessageTargets(
   Ref ref,
   SavedMessageScope scope,
   String channelId,
-  Set<String> targets,
-) {
+  Set<String> targets, {
+  bool edited = false,
+}) {
   if (targets.isEmpty) return;
   ref
       .read(savedMessageStoreProvider)
-      .removeChannelEvents(scope, channelId, targets);
+      .removeChannelEvents(scope, channelId, targets, edited: edited);
   ref.invalidate(_threadPreviewRevision(channelId));
 }
 
