@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use uuid::Uuid;
 
+mod attribution;
 mod execute;
 mod grouped;
 mod legacy_replies;
@@ -37,7 +38,7 @@ const KINDS: &[i32] = &[
 ];
 const PAGE_SIZE: i64 = 100;
 use super::agent_ownership::MAX_TARGETS;
-const EVENT_COLUMNS: &str = "e.id,e.created_at,e.channel_id,e.kind,e.tags";
+const EVENT_COLUMNS: &str = "e.id,e.created_at,e.channel_id,e.kind,e.tags,e.attributed_pubkey";
 
 /// Scope and bounds for standalone preview or explicitly requested deletion.
 pub struct ContentBatchOptions {
@@ -65,6 +66,22 @@ pub struct ContentRowCounts {
     pub events_by_kind: BTreeMap<i64, usize>,
 }
 
+impl ContentRowCounts {
+    fn add(&mut self, table: &str, kind: Option<i64>) {
+        self.rows += 1;
+        *self.by_table.entry(table.to_owned()).or_default() += 1;
+        if let Some(kind) = kind {
+            *self.events_by_kind.entry(kind).or_default() += 1;
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PlannedAction {
+    Delete,
+    Redact,
+}
+
 /// Final marker for the declared scope; never claims complete account erasure.
 #[derive(Debug, Serialize)]
 pub struct ContentBatchSummary {
@@ -78,6 +95,9 @@ pub struct ContentBatchSummary {
     pub delete: ContentRowCounts,
     /// Rows retained after erasing their personal content.
     pub redact_content: ContentRowCounts,
+    /// Disjoint breakdown of each unique operation, present only in previews.
+    #[serde(flatten)]
+    pub attribution: Option<attribution::ContentAttribution>,
     /// Operations carrying an active-work or delivery warning.
     pub warnings: usize,
     /// Events retained as erased structural tombstones.
@@ -93,6 +113,7 @@ struct Event {
     channel_id: Option<Uuid>,
     kind: i32,
     tags: Value,
+    attributed_pubkey: Vec<u8>,
 }
 
 #[derive(Default, Clone)]
@@ -111,6 +132,7 @@ struct Output<'a, W> {
     limit: usize,
     max_items: usize,
     seen: HashSet<String>,
+    attribution: Option<attribution::AttributionPlan>,
     batch: Vec<Value>,
     repairs: Vec<Value>,
     batches: u64,
@@ -152,34 +174,53 @@ async fn snapshot(pool: &sqlx::PgPool) -> Result<sqlx::Transaction<'_, sqlx::Pos
 impl<W: Write> Output<'_, W> {
     fn add(
         &mut self,
-        table: &str,
+        table: &'static str,
         key: Value,
         action: &str,
         reason: &Value,
         warning: Option<String>,
+        evidence: &[Vec<u8>],
     ) -> Result<()> {
         let identity = format!("{table}:{key}");
-        if self.seen.contains(&identity) {
-            return Ok(());
-        }
-        if self.seen.len() >= self.max_items {
-            return Err(invalid(
-                "preview item limit exceeded; output is incomplete; increase --max-items",
-            ));
-        }
-        self.seen.insert(identity);
-        let counts = match action {
-            "would_delete" => &mut self.delete,
-            "would_scrub" => &mut self.redact_content,
+        let planned_action = match action {
+            "would_delete" => PlannedAction::Delete,
+            "would_scrub" => PlannedAction::Redact,
             _ => return Err(invalid("unknown internal content action")),
         };
-        counts.rows += 1;
-        *counts.by_table.entry(table.to_owned()).or_default() += 1;
-        if table == "events" {
-            let kind = reason["kind"]
-                .as_i64()
-                .ok_or_else(|| invalid("missing kind for selected event"))?;
-            *counts.events_by_kind.entry(kind).or_default() += 1;
+        let kind = if table == "events" {
+            Some(
+                reason["kind"]
+                    .as_i64()
+                    .ok_or_else(|| invalid("missing kind for selected event"))?,
+            )
+        } else {
+            None
+        };
+        if let Some(report) = &mut self.attribution {
+            if !report.insert(
+                identity,
+                table,
+                planned_action,
+                kind,
+                evidence,
+                self.max_items,
+            )? {
+                return Ok(());
+            }
+        } else {
+            if self.seen.contains(&identity) {
+                return Ok(());
+            }
+            if self.seen.len() >= self.max_items {
+                return Err(invalid(
+                    "preview item limit exceeded; output is incomplete; increase --max-items",
+                ));
+            }
+            self.seen.insert(identity);
+        }
+        match planned_action {
+            PlannedAction::Delete => self.delete.add(table, kind),
+            PlannedAction::Redact => self.redact_content.add(table, kind),
         }
         self.warnings += usize::from(warning.is_some());
         self.batch.push(json!({
@@ -295,6 +336,7 @@ async fn plan(
         limit: usize::from(options.batch_size),
         max_items: options.max_items as usize,
         seen: HashSet::new(),
+        attribution: (!collect).then(|| attribution::AttributionPlan::new(&subject, &targets)),
         batch: Vec::new(),
         repairs: Vec::new(),
         batches: 0,
@@ -358,6 +400,7 @@ async fn plan(
                 if scrub { "would_scrub" } else { "would_delete" },
                 &json!({"selection": {"type": "authored_event"}, "kind": event.kind}),
                 None,
+                std::slice::from_ref(&event.attributed_pubkey),
             )?;
         }
     }
@@ -382,7 +425,7 @@ async fn plan(
     let summary = ContentBatchSummary {
         record: "preview_complete",
         batches: output.batches,
-        items: output.seen.len(),
+        items: output.delete.rows + output.redact_content.rows,
         warnings: output.warnings,
         scrubbed_events: output
             .redact_content
@@ -392,6 +435,7 @@ async fn plan(
             .unwrap_or(0),
         delete: output.delete,
         redact_content: output.redact_content,
+        attribution: output.attribution.map(attribution::AttributionPlan::finish),
         excluded_event_kinds: excluded,
     };
     Ok(Plan {

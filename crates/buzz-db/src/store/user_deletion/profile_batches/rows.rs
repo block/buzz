@@ -7,11 +7,13 @@ pub(super) struct Table {
     key: &'static str,
     identity: &'static str,
     pub selector: &'static str,
+    pub source_events: &'static str,
 }
 
 pub(super) struct Operation {
     pub table: &'static Table,
     pub event_kind: Option<i32>,
+    pub subject: Option<usize>,
     pub key: Value,
     pub fingerprint: String,
     pub snapshot: Option<events::Snapshot>,
@@ -35,18 +37,21 @@ pub(super) const EVENTS: Table = Table {
     key: "jsonb_build_object('id',t.id,'created_at',t.created_at)",
     identity: "id=($2->>'id')::bytea AND created_at=($2->>'created_at')::timestamptz",
     selector: "t.id=ANY($3::bytea[])",
+    source_events: "NULL::bytea[]",
 };
 pub(super) const HEADS: Table = Table {
     name: "nip_fi_profile_heads",
     key: "jsonb_build_object('pubkey',t.pubkey)",
     identity: "pubkey=$2->>'pubkey'",
     selector: "t.pubkey=ANY(SELECT encode(k,'hex') FROM unnest($2::bytea[]) k)",
+    source_events: "NULL::bytea[]",
 };
 pub(super) const ARCHIVES: Table = Table {
     name: "archived_identities",
     key: "jsonb_build_object('pubkey',t.pubkey)",
     identity: "pubkey=$2->>'pubkey'",
     selector: HEADS.selector,
+    source_events: "NULL::bytea[]",
 };
 pub(super) const USERS: Table = Table {
     name: "users",
@@ -54,17 +59,18 @@ pub(super) const USERS: Table = Table {
     key: "jsonb_build_object('pubkey',chr(92)||'x'||encode(t.pubkey,'hex'))",
     identity: "pubkey=($2->>'pubkey')::bytea",
     selector: "t.pubkey=ANY($2::bytea[])",
+    source_events: "NULL::bytea[]",
 };
 
 pub(super) const CHILDREN: &[Table] = &[
     Table { name:"event_mentions", key:"jsonb_build_object('pubkey_hex',t.pubkey_hex,'event_id',t.event_id)",
-        identity:"pubkey_hex=$2->>'pubkey_hex' AND event_id=($2->>'event_id')::bytea", selector:"t.event_id=ANY($3::bytea[])" },
+        identity:"pubkey_hex=$2->>'pubkey_hex' AND event_id=($2->>'event_id')::bytea", selector:"t.event_id=ANY($3::bytea[])", source_events:"ARRAY[t.event_id]" },
     Table { name:"reactions", key:"jsonb_build_object('event_created_at',t.event_created_at,'event_id',t.event_id,'pubkey',t.pubkey,'emoji',t.emoji)",
         identity:"event_created_at=($2->>'event_created_at')::timestamptz AND event_id=($2->>'event_id')::bytea AND pubkey=($2->>'pubkey')::bytea AND emoji=$2->>'emoji'",
-        selector:"t.event_id=ANY($3::bytea[]) OR t.reaction_event_id=ANY($3::bytea[])" },
-    Table { name:"push_match_queue", key:"jsonb_build_object('event_id',t.event_id)", identity:"event_id=($2->>'event_id')::bytea", selector:"t.event_id=ANY($3::bytea[])" },
-    Table { name:"push_wake_outbox", key:"jsonb_build_object('id',t.id)", identity:"id=($2->>'id')::uuid", selector:"t.event_id=ANY($3::bytea[])" },
-    Table { name:"operator_listener_outbox", key:"jsonb_build_object('id',t.id)", identity:"id=($2->>'id')::uuid", selector:"t.event_id=ANY($3::bytea[])" },
+        selector:"t.event_id=ANY($3::bytea[]) OR t.reaction_event_id=ANY($3::bytea[])", source_events:"ARRAY[t.event_id,t.reaction_event_id]" },
+    Table { name:"push_match_queue", key:"jsonb_build_object('event_id',t.event_id)", identity:"event_id=($2->>'event_id')::bytea", selector:"t.event_id=ANY($3::bytea[])", source_events:"ARRAY[t.event_id]" },
+    Table { name:"push_wake_outbox", key:"jsonb_build_object('id',t.id)", identity:"id=($2->>'id')::uuid", selector:"t.event_id=ANY($3::bytea[])", source_events:"ARRAY[t.event_id]" },
+    Table { name:"operator_listener_outbox", key:"jsonb_build_object('id',t.id)", identity:"id=($2->>'id')::uuid", selector:"t.event_id=ANY($3::bytea[])", source_events:"ARRAY[t.event_id]" },
 ];
 
 pub(super) async fn collect(
@@ -72,11 +78,12 @@ pub(super) async fn collect(
     plan: &mut Plan,
     table: &'static Table,
     ids: &[Vec<u8>],
+    event_subjects: &HashMap<Vec<u8>, Option<usize>>,
     max: u32,
 ) -> Result<()> {
-    let sql = format!("SELECT {} AS key, encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex') AS fingerprint FROM {} t \
+    let sql = format!("SELECT {} AS key, {} AS source_events, encode(sha256(convert_to(to_jsonb(t)::text,'UTF8')),'hex') AS fingerprint FROM {} t \
         WHERE community_id=$1 AND ({}) AND cardinality($2::bytea[])>=0 AND cardinality($3::bytea[])>=0 \
-        ORDER BY {} LIMIT $4", table.key, table.name, table.selector, table.key);
+        ORDER BY {} LIMIT $4", table.key, table.source_events, table.name, table.selector, table.key);
     let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(plan.scope.community)
         .bind(&plan.scope.bytes)
@@ -85,12 +92,28 @@ pub(super) async fn collect(
         .fetch_all(conn)
         .await?;
     for row in rows {
+        let key: Value = row.try_get("key")?;
+        let source_events: Option<Vec<Option<Vec<u8>>>> = row.try_get("source_events")?;
+        let subject = if let Some(source_events) = source_events {
+            let mut subjects = source_events
+                .iter()
+                .flatten()
+                .filter_map(|id| event_subjects.get(id));
+            let first = subjects.next().copied().flatten();
+            first.filter(|first| subjects.all(|subject| *subject == Some(*first)))
+        } else {
+            key["pubkey"].as_str().and_then(|pubkey| {
+                plan.scope
+                    .target_index(pubkey.strip_prefix("\\x").unwrap_or(pubkey))
+            })
+        };
         push(
             plan,
             Operation {
                 table,
                 event_kind: None,
-                key: row.try_get("key")?,
+                subject,
+                key,
                 fingerprint: row.try_get("fingerprint")?,
                 snapshot: None,
             },

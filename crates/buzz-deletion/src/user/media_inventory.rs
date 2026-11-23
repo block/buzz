@@ -1,9 +1,11 @@
 //! Disposable, bounded in-memory inventory. Never used as a restart journal.
 use anyhow::{bail, Context, Result};
 use buzz_media::{ObjectVersionEntry, ObjectVersionKind};
+use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem::size_of;
 use std::ops::Bound::{Excluded, Included, Unbounded};
+use uuid::Uuid;
 
 pub(super) const PAGE_SIZE: u16 = 500;
 const MAX_BYTES: usize = 128 * 1024 * 1024;
@@ -18,6 +20,14 @@ const TREE_ENTRY_OVERHEAD: usize = 256;
 type VersionKey = (String, i64, i64);
 type Marker = (String, String, String);
 
+#[derive(Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub(super) struct Attribution {
+    pub community_id: Uuid,
+    pub pubkey: String,
+    pub identity: &'static str,
+    pub source: String,
+}
+
 #[derive(Default)]
 struct Candidate {
     shared: bool,
@@ -29,6 +39,7 @@ pub(super) struct Inventory {
     filenames: BTreeSet<(String, String)>,
     versions: BTreeMap<VersionKey, ObjectVersionEntry>,
     markers: BTreeSet<Marker>,
+    attributions: BTreeMap<String, BTreeSet<Attribution>>,
     bytes: usize,
     entries: usize,
     max_bytes: usize,
@@ -47,6 +58,7 @@ impl Inventory {
             filenames: BTreeSet::new(),
             versions: BTreeMap::new(),
             markers: BTreeSet::new(),
+            attributions: BTreeMap::new(),
             bytes: 0,
             entries: 0,
             max_bytes,
@@ -123,6 +135,31 @@ impl Inventory {
             }
         }
         Ok(())
+    }
+
+    pub fn add_attribution(&mut self, hash: &str, evidence: Attribution) -> Result<()> {
+        if !self.candidates.contains_key(hash) {
+            bail!("media attribution is outside the selected inventory");
+        }
+        if self
+            .attributions
+            .get(hash)
+            .is_some_and(|evidence_set| evidence_set.contains(&evidence))
+        {
+            return Ok(());
+        }
+        self.reserve::<(String, Attribution)>(
+            hash.len() + evidence.pubkey.len() + evidence.source.len(),
+        )?;
+        self.attributions
+            .entry(hash.to_owned())
+            .or_default()
+            .insert(evidence);
+        Ok(())
+    }
+
+    pub fn attributions(&self, hash: &str) -> Option<&BTreeSet<Attribution>> {
+        self.attributions.get(hash)
     }
 
     pub async fn add_versions(&mut self, versions: &[(String, ObjectVersionEntry)]) -> Result<()> {

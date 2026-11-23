@@ -123,8 +123,14 @@ async fn capacity_covers_every_retained_collection() {
 
 #[tokio::test]
 async fn duplicates_at_capacity_preserve_classification_without_allocating() {
-    let mut inventory = Inventory::with_limits(usize::MAX, 3);
+    let mut inventory = Inventory::with_limits(usize::MAX, 4);
     let hash = "a".repeat(64);
+    let attribution = |source: &str| Attribution {
+        community_id: Uuid::nil(),
+        pubkey: "b".repeat(64),
+        identity: "human",
+        source: source.to_owned(),
+    };
     inventory
         .add_candidates(std::slice::from_ref(&hash))
         .await
@@ -134,6 +140,9 @@ async fn duplicates_at_capacity_preserve_classification_without_allocating() {
         .remember_marker("prefix", "key", "v1")
         .await
         .unwrap());
+    inventory
+        .add_attribution(&hash, attribution("audit_log"))
+        .unwrap();
     let bytes = inventory.bytes;
     inventory
         .add_classified_candidates(&[(hash.clone(), true)])
@@ -152,9 +161,18 @@ async fn duplicates_at_capacity_preserve_classification_without_allocating() {
         .remember_marker("prefix", "key", "v1")
         .await
         .unwrap());
+    inventory
+        .add_attribution(&hash, attribution("audit_log"))
+        .unwrap();
+    assert!(inventory
+        .add_attribution(&hash, attribution("media_uploaders"))
+        .unwrap_err()
+        .to_string()
+        .contains("capacity exceeded"));
+    assert_eq!(inventory.attributions(&hash).unwrap().len(), 1);
     assert_eq!(inventory.candidates("").await.unwrap(), vec![(hash, true)]);
     assert!(inventory.unchecked_candidates("").await.unwrap().is_empty());
-    assert_eq!((inventory.bytes, inventory.entries), (bytes, 3));
+    assert_eq!((inventory.bytes, inventory.entries), (bytes, 4));
     assert!(inventory.add_candidates(&["b".repeat(64)]).await.is_err());
 }
 

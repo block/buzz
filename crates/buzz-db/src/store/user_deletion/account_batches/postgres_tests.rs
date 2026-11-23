@@ -200,6 +200,18 @@ async fn all_operations_preview_paginate_delete_and_preserve_other_scopes() {
         counts["clear_attribution"]["by_table"]["channel_members"],
         json!({"invited_by":3,"removed_by":2})
     );
+    let targets = counts["targets"].as_array().unwrap();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0]["pubkey"], TARGET);
+    assert_eq!(
+        targets[0]["delete"]["by_table"],
+        counts["delete"]["by_table"]
+    );
+    assert_eq!(targets[0]["clear_attribution"]["fields"], 11);
+    assert_eq!(
+        targets[0]["clear_attribution"]["by_table"],
+        counts["clear_attribution"]["by_table"]
+    );
     let mut keys = BTreeSet::new();
     let mut actions = BTreeSet::new();
     for record in records(&output)

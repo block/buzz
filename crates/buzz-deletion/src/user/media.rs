@@ -1,6 +1,9 @@
 //! User media cleanup. Both modes use the same upload-only inventory.
 use anyhow::{bail, Context, Result};
-use buzz_db::{user_deletion::UserDeletionTargets, Db, DbConfig};
+use buzz_db::{
+    user_deletion::{MediaUploadEvidence, UserDeletionTargets},
+    Db, DbConfig,
+};
 use buzz_media::{
     classify_key, KeyClass, MediaStorage, ObjectVersionEntry, ObjectVersionKind, ObjectVersionRef,
     ObjectVersionsPage, UploadRecord, UPLOAD_RECORD_VERSION,
@@ -14,7 +17,7 @@ mod inventory;
 mod report;
 #[path = "media_stage_report.rs"]
 mod stage_report;
-use inventory::{Inventory, PAGE_SIZE};
+use inventory::{Attribution, Inventory, PAGE_SIZE};
 
 const MAX_STORAGE_PAGES: usize = 100_000;
 
@@ -85,6 +88,12 @@ trait Database {
     ) -> Result<Vec<(String, bool)>>;
     async fn shared(&self, pubkeys: &UserDeletionTargets, hashes: &[String])
         -> Result<Vec<String>>;
+    async fn target_evidence(
+        &self,
+        pubkeys: &UserDeletionTargets,
+        hashes: &[String],
+        after: Option<&MediaUploadEvidence>,
+    ) -> Result<Vec<MediaUploadEvidence>>;
     async fn remove(&self, pubkeys: &UserDeletionTargets, hash: &str) -> Result<u64>;
 }
 impl Database for Db {
@@ -106,6 +115,16 @@ impl Database for Db {
         hashes: &[String],
     ) -> Result<Vec<String>> {
         Ok(self.user_media_shared_hashes(pubkeys, hashes).await?)
+    }
+    async fn target_evidence(
+        &self,
+        pubkeys: &UserDeletionTargets,
+        hashes: &[String],
+        after: Option<&MediaUploadEvidence>,
+    ) -> Result<Vec<MediaUploadEvidence>> {
+        Ok(self
+            .user_media_target_evidence(pubkeys, hashes, after)
+            .await?)
     }
     async fn remove(&self, pubkeys: &UserDeletionTargets, hash: &str) -> Result<u64> {
         Ok(self.remove_user_media_uploader(pubkeys, hash).await?)
@@ -192,6 +211,7 @@ async fn run_handler_with_inventory(
         &mut inventory,
         "_uploads/",
         true,
+        false,
     )
     .await?;
     after.clear();
@@ -215,6 +235,7 @@ async fn run_handler_with_inventory(
             &mut inventory,
             "_uploads/",
             false,
+            !delete,
         )
         .await?;
         scan_storage(
@@ -223,6 +244,7 @@ async fn run_handler_with_inventory(
             &keys_set,
             &mut inventory,
             "_meta/",
+            false,
             false,
         )
         .await?;
@@ -234,6 +256,10 @@ async fn run_handler_with_inventory(
             break;
         };
         after = last.clone();
+        if !delete {
+            let hashes: Vec<_> = page.iter().map(|(hash, _)| hash.clone()).collect();
+            collect_database_attribution(db, &keys, &hashes, &mut inventory).await?;
+        }
         for (hash, _) in page {
             // The dot excludes other hash families while covering all blob
             // extensions, thumbnails, historical versions and delete markers.
@@ -243,6 +269,7 @@ async fn run_handler_with_inventory(
                 &keys_set,
                 &mut inventory,
                 &format!("{hash}."),
+                false,
                 false,
             )
             .await?;
@@ -254,6 +281,45 @@ async fn run_handler_with_inventory(
     Ok(result)
 }
 
+async fn collect_database_attribution(
+    db: &impl Database,
+    targets: &UserDeletionTargets,
+    hashes: &[String],
+    inventory: &mut Inventory,
+) -> Result<()> {
+    let mut after = None;
+    loop {
+        let evidence = db.target_evidence(targets, hashes, after.as_ref()).await?;
+        if evidence.len() > usize::from(PAGE_SIZE)
+            || evidence
+                .first()
+                .is_some_and(|first| after.as_ref().is_some_and(|previous| first <= previous))
+        {
+            bail!("invalid database media attribution page");
+        }
+        let full_page = evidence.len() == usize::from(PAGE_SIZE);
+        after = evidence.last().cloned();
+        for row in evidence {
+            inventory.add_attribution(
+                &row.sha256,
+                Attribution {
+                    community_id: row.community_id,
+                    identity: if row.pubkey == targets.human {
+                        "human"
+                    } else {
+                        "agent"
+                    },
+                    pubkey: row.pubkey,
+                    source: row.source,
+                },
+            )?;
+        }
+        if !full_page {
+            return Ok(());
+        }
+    }
+}
+
 async fn scan_storage(
     media: &impl Storage,
     human: &str,
@@ -261,6 +327,7 @@ async fn scan_storage(
     inventory: &mut Inventory,
     prefix: &str,
     candidates_only: bool,
+    collect_attribution: bool,
 ) -> Result<()> {
     let marker_scope = format!("{candidates_only}:{prefix}");
     let (mut key_marker, mut version_marker) = (None, None);
@@ -312,12 +379,28 @@ async fn scan_storage(
                     let owner = buzz_db::user_deletion::normalize_user_deletion_pubkey(
                         &record.uploader_id,
                     )?;
-                    let targeted = owner == human || keys_set.contains(&(*community, owner));
+                    let uploader = (*community, owner);
+                    let targeted = uploader.1 == human || keys_set.contains(&uploader);
                     if candidates_only && targeted {
                         candidates.push(hash.clone());
                     }
                     if !candidates_only && !targeted {
                         shared.push(hash.clone());
+                    }
+                    if collect_attribution && targeted {
+                        inventory.add_attribution(
+                            hash,
+                            Attribution {
+                                community_id: *community,
+                                identity: if uploader.1 == human {
+                                    "human"
+                                } else {
+                                    "agent"
+                                },
+                                pubkey: uploader.1,
+                                source: "storage_upload_record".into(),
+                            },
+                        )?;
                     }
                 }
             }
@@ -431,6 +514,7 @@ mod tests {
         target_calls: RefCell<usize>,
         candidates: Vec<String>,
         shared: Vec<String>,
+        evidence: Vec<MediaUploadEvidence>,
         checked: RefCell<Vec<String>>,
         removed: RefCell<Vec<String>>,
     }
@@ -470,6 +554,23 @@ mod tests {
             Ok(hashes
                 .iter()
                 .filter(|hash| self.shared.contains(hash))
+                .cloned()
+                .collect())
+        }
+        async fn target_evidence(
+            &self,
+            keys: &UserDeletionTargets,
+            hashes: &[String],
+            after: Option<&MediaUploadEvidence>,
+        ) -> Result<Vec<MediaUploadEvidence>> {
+            assert_eq!(keys.agents, self.targets);
+            Ok(self
+                .evidence
+                .iter()
+                .filter(|row| {
+                    hashes.contains(&row.sha256) && after.is_none_or(|after| *row > after)
+                })
+                .take(usize::from(PAGE_SIZE))
                 .cloned()
                 .collect())
         }
@@ -836,6 +937,9 @@ mod tests {
         assert_eq!(files.len(), 2);
         assert_eq!(files[0]["versions"].as_array().unwrap().len(), 501);
         assert_eq!(files[1]["filename"], Value::Null);
+        assert_eq!(files[1]["attribution_status"], "unattributable");
+        assert_eq!(files[1]["decision"], "delete");
+        assert_eq!(files[1]["target_uploaders"], json!([]));
         assert!(files[1].get("owners").is_none());
         assert_eq!(files[1]["versions"], json!([]));
         assert_eq!(

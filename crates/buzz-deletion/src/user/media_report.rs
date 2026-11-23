@@ -2,6 +2,7 @@
 use super::{Database, Inventory, Storage, UserDeletionTargets};
 use anyhow::Result;
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::io::Write;
 
 pub(super) async fn execute(
@@ -20,6 +21,7 @@ pub(super) async fn execute(
     serde_json::to_writer(&mut *output, &pubkeys.pubkeys())?;
     write!(output, ",\n  \"files\": [")?;
     let (mut selected, mut kept, mut deleted_versions) = (0usize, 0usize, 0usize);
+    let empty_attribution = BTreeSet::new();
     let mut after = String::new();
     loop {
         let page = inventory.candidates(&after).await?;
@@ -31,7 +33,8 @@ pub(super) async fn execute(
                 write!(output, ",")?;
             }
             selected += 1;
-            let fields = json!({
+            let unattributable = !delete && inventory.attributions(&hash).is_none();
+            let mut fields = json!({
                 "filename": inventory.filename(&hash).await?,
                 "original_filename": null,
                 "file_hash": hash,
@@ -40,10 +43,24 @@ pub(super) async fn execute(
                     else { "All known uploaders belong to the target set" },
                 "has_other_uploader": shared,
             });
+            if !delete {
+                fields["attribution_status"] = json!(match (unattributable, shared) {
+                    (true, _) => "unattributable",
+                    (false, true) => "shared",
+                    (false, false) => "attributed",
+                });
+            }
             // Serialize scalar fields normally, then stream potentially large
             // version arrays without collecting them into a Value.
             let fields = serde_json::to_string_pretty(&fields)?;
             write!(output, "\n{}", fields.trim_end_matches('}').trim_end())?;
+            if !delete {
+                write!(output, ",\n  \"target_uploaders\": ")?;
+                serde_json::to_writer(
+                    &mut *output,
+                    inventory.attributions(&hash).unwrap_or(&empty_attribution),
+                )?;
+            }
             write!(output, ",\n  \"versions\": [")?;
             if shared {
                 kept += 1;

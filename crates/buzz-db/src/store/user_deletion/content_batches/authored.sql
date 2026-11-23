@@ -1,8 +1,8 @@
 -- Scope shared by source selection and the excluded-kind inventory.
 -- Relay attribution is opt-in: only the supplied trusted signer may use actor/p.
-SELECT e.* FROM events e
-WHERE e.community_id = $1 AND (e.pubkey = ANY($2::bytea[]) OR e.pubkey = decode($3, 'hex'))
-  AND CASE WHEN e.kind = 30622 THEN
+SELECT e.*, a.attributed_pubkey FROM events e
+CROSS JOIN LATERAL (
+  SELECT CASE WHEN e.kind = 30622 THEN
     -- Hidden-DM state belongs to its viewer, not the relay signer. Require
     -- the producer's unambiguous subject shape; never infer it from actor,
     -- the first of several p tags, or a client-signed lookalike.
@@ -27,6 +27,9 @@ WHERE e.community_id = $1 AND (e.pubkey = ANY($2::bytea[]) OR e.pubkey = decode(
      FROM jsonb_array_elements(e.tags) t WHERE t->>0 = 'actor' AND t->>1 IS NOT NULL LIMIT 1),
     (SELECT decode(t->>1, 'hex') FROM jsonb_array_elements(e.tags) t
      WHERE t->>0 = 'p' AND t->>1 ~ '^[0-9a-fA-F]{64}$' LIMIT 1), e.pubkey)
-    ELSE e.pubkey END = ANY($2::bytea[])
+    ELSE e.pubkey END AS attributed_pubkey
+) a
+WHERE e.community_id = $1 AND (e.pubkey = ANY($2::bytea[]) OR e.pubkey = decode($3, 'hex'))
+  AND a.attributed_pubkey = ANY($2::bytea[])
   -- Only these message kinds and the checked private snapshot support relay attribution.
   AND (e.kind IN (7,9,30622,40001,40002,40003,40004,40005,40006,40007,40008,45001,45002,45003) OR e.pubkey = ANY($2::bytea[]))

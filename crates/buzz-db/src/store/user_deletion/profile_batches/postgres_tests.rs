@@ -113,8 +113,9 @@ impl Fixture {
             .await;
         sqlx::query("INSERT INTO nip_fi_profile_heads(community_id,pubkey,issuer,issued_at,event) VALUES($1,$2,'https://issuer.example.org',1,$3)")
             .bind(self.community).bind(&subject).bind(serde_json::to_value(&event).unwrap()).execute(&self.pool).await.unwrap();
+        // A copy follows its verified profile's subject, not its indexed recipient.
         sqlx::query("INSERT INTO event_mentions(community_id,pubkey_hex,event_id,event_created_at,event_kind) VALUES($1,$2,$3,now(),30382)")
-            .bind(self.community).bind(&subject).bind(event.id.to_bytes().as_slice()).execute(&self.pool).await.unwrap();
+            .bind(self.community).bind(self.other.public_key().to_hex()).bind(event.id.to_bytes().as_slice()).execute(&self.pool).await.unwrap();
         for key in [&self.human, &self.other] {
             sqlx::query("INSERT INTO archived_identities(community_id,pubkey,consent_path,actor,request_event_id) VALUES($1,$2,'self',$2,$3)")
                 .bind(self.community).bind(key.public_key().to_hex()).bind("a".repeat(64)).execute(&self.pool).await.unwrap();
@@ -182,18 +183,35 @@ async fn preview_delete_retry_preserve_other_identities_and_communities() {
         .unwrap();
     let counts = preview.profile.unwrap();
     assert_eq!(counts.targets.len(), 2);
-    for target in &counts.targets {
-        let expected_role = if target.pubkey == f.human.public_key().to_hex() {
-            "human"
-        } else {
-            assert_eq!(target.pubkey, f.agent.public_key().to_hex());
-            "owned_agent"
-        };
-        assert_eq!(target.role, expected_role);
-        assert!(target.delete_users_row);
-    }
+    let human = counts
+        .targets
+        .iter()
+        .find(|target| target.pubkey == f.human.public_key().to_hex())
+        .unwrap();
+    let agent = counts
+        .targets
+        .iter()
+        .find(|target| target.pubkey == f.agent.public_key().to_hex())
+        .unwrap();
+    assert_eq!(human.role, "human");
+    assert_eq!(agent.role, "owned_agent");
+    assert!(human.delete_users_row && agent.delete_users_row);
+    assert_eq!(human.actions.delete.rows, 6);
     assert_eq!(
-        counts.delete.by_table,
+        human.actions.delete.events_by_kind,
+        [(0, 1), (30382, 1)].into()
+    );
+    assert_eq!(human.actions.delete.by_table["event_mentions"], 1);
+    assert_eq!(agent.actions.delete.rows, 3);
+    assert_eq!(
+        agent.actions.delete.events_by_kind,
+        [(10100, 1), (30177, 1)].into()
+    );
+    assert_eq!(human.actions.replace_archive_snapshot.rows, 0);
+    assert_eq!(agent.actions.replace_archive_snapshot.rows, 0);
+    assert_eq!(counts.shared.replace_archive_snapshot.rows, 1);
+    assert_eq!(
+        counts.actions.delete.by_table,
         [
             ("events".into(), 4),
             ("users".into(), 2),
@@ -204,17 +222,17 @@ async fn preview_delete_retry_preserve_other_identities_and_communities() {
         .into()
     );
     assert_eq!(
-        counts.delete.events_by_kind,
+        counts.actions.delete.events_by_kind,
         [(0, 1), (10100, 1), (30177, 1), (30382, 1)].into()
     );
     assert_eq!(
-        counts.replace_archive_snapshot.events_by_kind,
+        counts.actions.replace_archive_snapshot.events_by_kind,
         [(13535, 1)].into()
     );
-    assert_eq!(counts.replace_archive_snapshot.rows, 1);
+    assert_eq!(counts.actions.replace_archive_snapshot.rows, 1);
     assert_eq!(
         preview.items,
-        counts.delete.rows + 2 * counts.replace_archive_snapshot.rows
+        counts.actions.delete.rows + 2 * counts.actions.replace_archive_snapshot.rows
     );
     let mut deletion = Vec::new();
     let actual = f
@@ -301,7 +319,9 @@ async fn preview_delete_retry_preserve_other_identities_and_communities() {
         .unwrap();
     assert_eq!(
         json!(empty)["profile"]["targets"],
-        json!([{"pubkey": f.human.public_key().to_hex(), "role": "human", "delete_users_row": false}])
+        json!([{"pubkey": f.human.public_key().to_hex(), "role": "human", "delete_users_row": false,
+            "delete": {"rows": 0, "by_table": {}, "events_by_kind": {}},
+            "replace_archive_snapshot": {"rows": 0, "by_table": {}, "events_by_kind": {}}}])
     );
     assert_eq!(after, export(&f.pool).await);
 }

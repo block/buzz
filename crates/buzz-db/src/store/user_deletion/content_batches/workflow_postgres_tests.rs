@@ -163,6 +163,46 @@ async fn personal_workflow_cleanup_preserves_history_and_other_subjects_on_retry
         .await
         .unwrap();
     assert_eq!(preview.items, 9);
+    let attribution = preview.attribution.as_ref().unwrap();
+    let human = attribution
+        .targets
+        .iter()
+        .find(|target| target.role == "human")
+        .unwrap();
+    let owned = attribution
+        .targets
+        .iter()
+        .find(|target| target.role == "owned_agent")
+        .unwrap();
+    assert_eq!(human.counts.delete.by_table.get("workflows"), Some(&1));
+    assert_eq!(
+        human.counts.delete.by_table.get("scheduled_workflow_fires"),
+        Some(&1)
+    );
+    assert_eq!(
+        human.counts.redact_content.by_table.get("workflow_runs"),
+        Some(&2)
+    );
+    assert_eq!(
+        owned.counts.redact_content.by_table.get("workflow_runs"),
+        Some(&1)
+    );
+    assert_eq!(
+        human
+            .counts
+            .redact_content
+            .by_table
+            .get("workflow_approvals"),
+        Some(&1)
+    );
+    assert_eq!(
+        owned
+            .counts
+            .redact_content
+            .by_table
+            .get("workflow_approvals"),
+        Some(&1)
+    );
     assert!(!String::from_utf8(output)
         .unwrap()
         .contains("personal approval note"));

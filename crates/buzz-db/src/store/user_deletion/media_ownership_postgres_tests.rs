@@ -53,7 +53,7 @@ async fn community_ownership_controls_candidates_sharing_removal_and_fresh_retry
         sqlx::query("INSERT INTO media_uploaders(community_id, sha256, pubkey) VALUES ($1, $2, decode($3, 'hex'))")
             .bind(communities[community]).bind(&hashes[index]).bind(key).execute(&pool).await.unwrap();
     }
-    for (seq, community, index) in [(1_i64, 0, 6), (2, 1, 5), (3, 1, 2), (4, 2, 1)] {
+    for (seq, community, index) in [(1_i64, 0, 6), (2, 1, 5), (3, 1, 2), (4, 2, 1), (5, 0, 6)] {
         sqlx::query(
             "INSERT INTO audit_log(community_id, seq, hash, action, actor_pubkey, object_id)
             VALUES ($1, $2, decode($3, 'hex'), 'media_uploaded', decode($4, 'hex'), $5)",
@@ -78,6 +78,30 @@ async fn community_ownership_controls_candidates_sharing_removal_and_fresh_retry
             .await
             .unwrap(),
         [0, 1, 2, 4, 5].map(|i| hashes[i].clone())
+    );
+    let evidence = db
+        .user_media_target_evidence(&targets, &hashes, None)
+        .await
+        .unwrap();
+    let expected = [
+        (0, &agent, "media_uploaders"),
+        (1, &agent, "media_uploaders"),
+        (3, &agent, "media_uploaders"),
+        (5, &alice, "media_uploaders"),
+        (6, &agent, "audit_log"),
+    ]
+    .map(|(i, key, source)| MediaUploadEvidence {
+        sha256: hashes[i].clone(),
+        community_id: communities[0],
+        pubkey: key.clone(),
+        source: source.into(),
+    });
+    assert_eq!(evidence, expected);
+    assert_eq!(
+        db.user_media_target_evidence(&targets, &hashes, evidence.first())
+            .await
+            .unwrap(),
+        expected[1..]
     );
     for index in [0, 1] {
         assert_eq!(

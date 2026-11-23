@@ -4,6 +4,19 @@ use uuid::Uuid;
 
 use super::agent_ownership::{self, UserDeletionTargets, MAX_TARGETS};
 
+/// A distinct database source for a target's upload of a selected hash.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, sqlx::FromRow)]
+pub struct MediaUploadEvidence {
+    /// Upload hash used to join the file report.
+    pub sha256: String,
+    /// Community where the upload was recorded.
+    pub community_id: Uuid,
+    /// Canonical hex key of the recorded uploader.
+    pub pubkey: String,
+    /// Database table that records the upload.
+    pub source: String,
+}
+
 impl UserDeletionTargets {
     fn communities(&self) -> Vec<Uuid> {
         self.agents
@@ -138,6 +151,59 @@ impl Db {
         .await?;
         tx.commit().await?;
         Ok(shared)
+    }
+
+    /// Read up to 500 distinct target attributions for a page of selected hashes.
+    /// Pass the last returned row to continue. Identities outside the requested
+    /// ownership scope are excluded even when they use a target agent's key.
+    pub async fn user_media_target_evidence(
+        &self,
+        targets: &UserDeletionTargets,
+        hashes: &[String],
+        after: Option<&MediaUploadEvidence>,
+    ) -> Result<Vec<MediaUploadEvidence>> {
+        if hashes.is_empty() || hashes.len() > 500 {
+            return Err(DbError::InvalidData(
+                "media evidence page must contain 1..=500 hashes".into(),
+            ));
+        }
+        for hash in hashes {
+            validate_hash(hash)?;
+        }
+        let mut tx = self.pool().begin().await?;
+        sqlx::query("SET LOCAL statement_timeout = '120s'")
+            .execute(&mut *tx)
+            .await?;
+        let evidence = sqlx::query_as(
+            r#"WITH owned AS MATERIALIZED (
+                SELECT * FROM unnest($3::uuid[], $4::bytea[]) AS o(community_id, pubkey)
+             ), evidence AS (
+                SELECT sha256 COLLATE "C" AS sha256, community_id,
+                       encode(pubkey,'hex') COLLATE "C" AS pubkey, 'media_uploaders' AS source
+                FROM media_uploaders m WHERE sha256 = ANY($2::text[])
+                  AND (pubkey = $1 OR (community_id, pubkey) IN (SELECT * FROM owned))
+                UNION ALL
+                SELECT DISTINCT object_id COLLATE "C", community_id,
+                        encode(actor_pubkey,'hex') COLLATE "C", 'audit_log'
+                FROM audit_log a WHERE action = 'media_uploaded' AND object_id = ANY($2::text[])
+                  AND (actor_pubkey = $1 OR (community_id, actor_pubkey) IN (SELECT * FROM owned))
+             )
+             SELECT sha256, community_id, pubkey, source FROM evidence
+             WHERE ($5::text IS NULL OR (sha256, community_id, pubkey, source) > ($5, $6, $7, $8))
+             ORDER BY sha256, community_id, pubkey, source LIMIT 500"#,
+        )
+        .bind(decode_key(&targets.human)?)
+        .bind(hashes)
+        .bind(targets.communities())
+        .bind(targets.agent_keys()?)
+        .bind(after.map(|row| row.sha256.as_str()))
+        .bind(after.map(|row| row.community_id))
+        .bind(after.map(|row| row.pubkey.as_str()))
+        .bind(after.map(|row| row.source.as_str()))
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(evidence)
     }
 
     /// Remove the target set's ownership rows only after storage cleanup succeeds.

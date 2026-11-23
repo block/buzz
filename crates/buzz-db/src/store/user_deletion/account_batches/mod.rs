@@ -404,9 +404,23 @@ fn invalid(message: impl Into<String>) -> DbError {
 }
 
 fn line(writer: &mut impl Write, value: &impl Serialize) -> Result<()> {
+    write_line(
+        writer,
+        value,
+        256 * 1024,
+        "batch output exceeds 256 KiB; reduce batch-size",
+    )
+}
+
+fn write_line(
+    writer: &mut impl Write,
+    value: &impl Serialize,
+    max_bytes: usize,
+    over_budget: &'static str,
+) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
-    if bytes.len() > 256 * 1024 {
-        return Err(invalid("batch output exceeds 256 KiB; reduce batch-size"));
+    if bytes.len() > max_bytes {
+        return Err(invalid(over_budget));
     }
     writer
         .write_all(&bytes)

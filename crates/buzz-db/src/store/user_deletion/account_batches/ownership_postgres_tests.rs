@@ -20,10 +20,22 @@ async fn ownership_changes_stop_batches_and_retry_fetches_current_agents() {
         let before = f.snapshot().await;
         let mut preview = Vec::new();
         let summary = f.run(ExecutionMode::ReadOnly, &mut preview).await.unwrap();
-        let owned_rows = json!(summary)["account"]["delete"]["by_subject"]["owned_agents"]
+        let summary = json!(summary);
+        let owned_rows = summary["account"]["delete"]["by_subject"]["owned_agents"]
             .as_u64()
             .unwrap();
         assert_eq!(owned_rows > 0, initial == Some(TARGET));
+        let targets = summary["account"]["targets"].as_array().unwrap();
+        let human = targets.iter().find(|row| row["pubkey"] == TARGET).unwrap();
+        let agent = targets.iter().find(|row| row["pubkey"] == AGENT);
+        assert_eq!(human["role"], "human");
+        if initial == Some(TARGET) {
+            let agent = agent.unwrap();
+            assert_eq!(agent["role"], "owned_agent");
+            assert_eq!(agent["delete"]["rows"], owned_rows);
+        } else {
+            assert!(agent.is_none());
+        }
         assert_eq!(f.snapshot().await, before);
         let targets = records(&preview)
             .into_iter()
@@ -94,5 +106,14 @@ async fn ownership_changes_stop_batches_and_retry_fetches_current_agents() {
         assert_eq!(summary.items, 1);
         assert!(!summary.supported_scope_exhausted);
         assert_eq!(records(&output)[0]["agent_count"], 4001);
+        if mode == ExecutionMode::ReadOnly {
+            let summary = json!(summary);
+            let counts = summary["account"]["targets"].as_array().unwrap();
+            assert_eq!(counts.len(), 4002);
+            let agent = counts.iter().find(|row| row["pubkey"] == AGENT).unwrap();
+            assert_eq!(agent["role"], "owned_agent");
+            assert_eq!(agent["delete"]["rows"], 0);
+            assert_eq!(agent["clear_attribution"]["fields"], 0);
+        }
     }
 }

@@ -52,6 +52,13 @@ pub struct ProfileBatchSummary {
 #[derive(Debug, Default, Serialize)]
 struct ProfileCounts {
     targets: Vec<ProfileTarget>,
+    #[serde(flatten)]
+    actions: ProfileActions,
+    shared: ProfileActions,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct ProfileActions {
     delete: ContentRowCounts,
     replace_archive_snapshot: ContentRowCounts,
 }
@@ -61,42 +68,56 @@ struct ProfileTarget {
     pubkey: String,
     role: &'static str,
     delete_users_row: bool,
+    #[serde(flatten)]
+    actions: ProfileActions,
 }
 
 impl ProfileCounts {
     fn from_plan(plan: &Plan) -> Self {
-        let mut counts = Self::default();
-        let mut selected_users = std::collections::HashSet::new();
+        let mut counts = Self {
+            targets: plan
+                .scope
+                .targets
+                .iter()
+                .map(|key| ProfileTarget {
+                    pubkey: key.clone(),
+                    role: if key == &plan.scope.human {
+                        "human"
+                    } else {
+                        "owned_agent"
+                    },
+                    delete_users_row: false,
+                    actions: ProfileActions::default(),
+                })
+                .collect(),
+            ..Self::default()
+        };
         for op in &plan.ops {
-            if op.table.name == "users" {
-                selected_users.insert(&op.key["pubkey"]);
-            }
-            let group = if op.snapshot.is_some() {
-                &mut counts.replace_archive_snapshot
+            counts.actions.record(op);
+            if let Some(index) = op.subject {
+                let target = &mut counts.targets[index];
+                target.delete_users_row |= op.table.name == "users";
+                target.actions.record(op);
             } else {
-                &mut counts.delete
-            };
-            group.rows += 1;
-            *group.by_table.entry(op.table.name.to_owned()).or_default() += 1;
-            if let Some(kind) = op.event_kind {
-                *group.events_by_kind.entry(i64::from(kind)).or_default() += 1;
+                counts.shared.record(op);
             }
         }
-        counts.targets = plan
-            .scope
-            .targets
-            .iter()
-            .map(|key| ProfileTarget {
-                pubkey: key.clone(),
-                role: if key == &plan.scope.human {
-                    "human"
-                } else {
-                    "owned_agent"
-                },
-                delete_users_row: selected_users.contains(&Value::String(format!("\\x{key}"))),
-            })
-            .collect();
         counts
+    }
+}
+
+impl ProfileActions {
+    fn record(&mut self, op: &rows::Operation) {
+        let group = if op.snapshot.is_some() {
+            &mut self.replace_archive_snapshot
+        } else {
+            &mut self.delete
+        };
+        group.rows += 1;
+        *group.by_table.entry(op.table.name.to_owned()).or_default() += 1;
+        if let Some(kind) = op.event_kind {
+            *group.events_by_kind.entry(i64::from(kind)).or_default() += 1;
+        }
     }
 }
 
@@ -107,6 +128,14 @@ struct Scope {
     targets: Vec<String>,
     bytes: Vec<Vec<u8>>,
     relays: Vec<String>,
+}
+
+impl Scope {
+    fn target_index(&self, key: &str) -> Option<usize> {
+        self.targets
+            .binary_search_by(|target| target.as_str().cmp(key))
+            .ok()
+    }
 }
 
 struct Plan {
@@ -309,7 +338,16 @@ impl UserDeletionStore {
             account_erasure_complete: false,
             prerequisites: plan.blockers,
         };
-        line(writer, &summary)?;
+        if report_prerequisites {
+            write_line(
+                writer,
+                &summary,
+                16 * 1024 * 1024,
+                "profile summary exceeds 16 MiB",
+            )?;
+        } else {
+            line(writer, &summary)?;
+        }
         conn.close().await?;
         Ok(summary)
     }
@@ -340,9 +378,23 @@ fn invalid(message: impl Into<String>) -> DbError {
     DbError::DeletionSafety(message.into())
 }
 fn line(writer: &mut impl Write, value: &impl Serialize) -> Result<()> {
+    write_line(
+        writer,
+        value,
+        2 * 1024 * 1024,
+        "output exceeds 2 MiB; reduce batch-size",
+    )
+}
+
+fn write_line(
+    writer: &mut impl Write,
+    value: &impl Serialize,
+    max_bytes: usize,
+    over_budget: &'static str,
+) -> Result<()> {
     let bytes = serde_json::to_vec(value)?;
-    if bytes.len() > 2 * 1024 * 1024 {
-        return Err(invalid("output exceeds 2 MiB; reduce batch-size"));
+    if bytes.len() > max_bytes {
+        return Err(invalid(over_budget));
     }
     writer
         .write_all(&bytes)

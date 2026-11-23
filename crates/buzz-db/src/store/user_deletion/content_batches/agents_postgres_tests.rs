@@ -221,6 +221,13 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
             }
         }
     }
+    // Cross-identity evidence can arrive on the same select or from two selectors.
+    sqlx::query("INSERT INTO push_wake_outbox (community_id,author,installation_id,lease_generation,endpoint_hash,event_id,class,expires_at,state) VALUES ($1,$2,'shared',1,$2,$3,'silent',0,'delivered')")
+        .bind(a.as_uuid()).bind(alice.public_key().as_bytes().as_slice()).bind(&first_ids[1])
+        .execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO operator_listener_outbox (community_id,listener_pubkey,target_pubkey,event_id,event_kind,event_created_at) VALUES ($1,$2,$3,$4,9,to_timestamp($5))")
+        .bind(a.as_uuid()).bind(alice.public_key().as_bytes().as_slice()).bind(agent.public_key().as_bytes().as_slice())
+        .bind(&first_ids[3]).bind(timestamp.as_secs() as f64).execute(&pool).await.unwrap();
     let tables = [
         "events",
         "event_mentions",
@@ -255,6 +262,43 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
     let mut targets = vec![alice.public_key().to_hex(), agent.public_key().to_hex()];
     targets.sort();
     assert_eq!(records[0]["target_pubkeys"], json!(targets));
+    let report = records.last().unwrap();
+    let target_reports = report["targets"].as_array().unwrap();
+    assert_eq!(target_reports.len(), 2);
+    for (key, role, messages, mentions) in
+        [(&alice, "human", 105, 1), (&agent, "owned_agent", 106, 2)]
+    {
+        let target = target_reports
+            .iter()
+            .find(|entry| entry["pubkey"] == key.public_key().to_hex())
+            .unwrap();
+        assert_eq!(target["role"], role);
+        assert_eq!(target["delete"]["events_by_kind"]["9"], messages);
+        assert_eq!(target["delete"]["by_table"]["event_mentions"], mentions);
+        assert_eq!(target["delete"]["by_table"]["push_leases"], 1);
+    }
+    assert_eq!(report["shared"]["delete"]["rows"], 2);
+    assert_eq!(
+        report["shared"]["delete"]["by_table"]["push_wake_outbox"],
+        1
+    );
+    assert_eq!(
+        report["shared"]["delete"]["by_table"]["operator_listener_outbox"],
+        1
+    );
+    assert_eq!(report["unattributed"]["delete"]["rows"], 0);
+    for action in ["delete", "redact_content"] {
+        let by_target = target_reports
+            .iter()
+            .map(|target| target[action]["rows"].as_u64().unwrap())
+            .sum::<u64>();
+        assert_eq!(
+            by_target
+                + report["shared"][action]["rows"].as_u64().unwrap()
+                + report["unattributed"][action]["rows"].as_u64().unwrap(),
+            report[action]["rows"].as_u64().unwrap(),
+        );
+    }
     assert_eq!(
         records[0]["excluded_agents"],
         json!([{
@@ -329,6 +373,7 @@ async fn owned_agents_share_bounded_batches_and_preserve_other_owners_and_commun
         .await
         .unwrap();
     assert_eq!(result.items, summary.items);
+    assert!(json!(result).get("targets").is_none());
     for (index, table) in tables.into_iter().enumerate() {
         assert_eq!(
             snapshot_rows(&pool, b, table).await,
