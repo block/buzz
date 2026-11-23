@@ -385,7 +385,35 @@ void main() {
       final firstPass = await index.getObjectsOverCapacity(100);
       expect(firstPass.map((o) => o.url), ['url-1', 'url-0']);
       expect(morePasses, 1);
+      // A retired index's pass in progress records no deletions.
+      final ids = [for (final o in await index.getAllObjects()) o.id!];
+      index.retire();
+      await index.deleteAll(ids);
+      expect(await index.getAllObjects(), hasLength(5));
       await index.close();
+
+      // Once closed, the index saves nothing more. A read that marks a file
+      // used, or an eviction pass that finishes late, would otherwise save
+      // it over the index a reopened cache wrote since.
+      final indexFile = File(p.join(indexDirectory.path, 'index.json'));
+      final reopenedIndex = MediaCacheIndex(indexFile, indexDirectory, 100);
+      await reopenedIndex.open();
+      await reopenedIndex.insert(
+        CacheObject(
+          'newer',
+          relativePath: 'file-newer',
+          validTill: epoch,
+          length: 1,
+        ),
+      );
+      await reopenedIndex.close();
+      final written = indexFile.readAsStringSync();
+      await index.updateOrInsert(
+        CacheObject('late-read', relativePath: 'file-0', validTill: epoch),
+      );
+      await index.deleteAll(ids);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(indexFile.readAsStringSync(), written);
 
       // So a large save into a cache full of small files evicts them over
       // several passes, with no later reads to schedule them, until the
@@ -424,13 +452,36 @@ void main() {
           ..writeAsBytesSync(Uint8List(4))
           ..setLastModifiedSync(earlier);
       }
+      // Closing waits for the sweep, so the next cache to open the directory
+      // starts after it.
+      final manyDirectory = MediaDiskCache.directoryFor(root, 'many', 's')
+        ..createSync(recursive: true);
+      for (var i = 0; i < 300; i++) {
+        File(p.join(manyDirectory.path, 'orphan-$i.file'))
+          ..writeAsBytesSync(Uint8List(1))
+          ..setLastModifiedSync(earlier);
+      }
+      final manyIndex = MediaCacheIndex(
+        File(p.join(manyDirectory.path, 'index.json')),
+        manyDirectory,
+        100,
+      );
+      await manyIndex.open();
+      await manyIndex.close();
+      expect(filesIn(manyDirectory), isEmpty);
+
       // The sweep runs in the background, and a save made while it runs
       // stays.
+      // A part written just now may belong to a save in progress, so it
+      // stays too.
+      final fresh = File(p.join(sweptDirectory.path, 'fresh.file.part'))
+        ..writeAsBytesSync(Uint8List(4));
       final relaunched = MediaDiskCache.open(sweptDirectory);
       await relaunched.write('during', Uint8List(4), immutable: true);
       expect(await relaunched.read('kept'), isNotNull);
-      await _until(() async => filesIn(sweptDirectory).length == 2);
+      await _until(() async => filesIn(sweptDirectory).length == 3);
       expect(await relaunched.read('during'), isNotNull);
+      expect(fresh.existsSync(), isTrue);
       await relaunched.dispose();
 
       // A disposed cache's scheduled eviction pass, running after the
@@ -462,9 +513,19 @@ void main() {
       // another.
       await retired.write('large', Uint8List(24), immutable: true);
       await _until(() async => await rows() == 6);
-      await retired.dispose();
+      // As the provider does, the old cache is disposed with a save and a
+      // read in progress, and not awaited before the reopen.
+      final inFlight = retired.write(
+        'in-flight',
+        Uint8List(4),
+        immutable: true,
+      );
+      final reading = retired.read('prior-3');
+      await Future<void>.delayed(Duration.zero);
+      final closing = retired.dispose();
       final reopened = MediaDiskCache.open(retiredDirectory, byteBudget: 80);
       await reopened.write('newer', Uint8List(4), immutable: true);
+      await Future.wait([inFlight, reading, closing]);
       await reopened.dispose();
       await Future<void>.delayed(passDelay * 3);
       final relaunchedAgain = MediaDiskCache.open(
@@ -472,6 +533,9 @@ void main() {
         byteBudget: 80,
       );
       expect(await relaunchedAgain.read('newer'), isNotNull);
+      expect(await relaunchedAgain.read('in-flight'), isNotNull);
+      // The old cache's next eviction would have taken it.
+      expect(await relaunchedAgain.read('prior-1'), isNotNull);
       await relaunchedAgain.dispose();
 
       // Reads during refreshes see the old bytes or the new ones in full,

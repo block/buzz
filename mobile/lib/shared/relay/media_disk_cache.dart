@@ -53,11 +53,16 @@ class MediaDiskCache {
           // A cache on this directory that is still closing, after a switch
           // away and back, may hold saves its index has not recorded yet.
           // Opening after it keeps this one's sweep from deleting them.
+          // If it never finishes, both would write one index, so go without
+          // the disk instead.
+          var closed = true;
           await _closing[directory.path]?.timeout(
             _openTimeout,
-            onTimeout: () {},
+            onTimeout: () {
+              closed = false;
+            },
           );
-          if (isClosed) return null;
+          if (!closed || isClosed) return null;
           _path = directory.path;
           final (manager, index) = _openManager(
             directory,
@@ -363,6 +368,11 @@ class MediaCacheIndex extends JsonCacheInfoRepository {
   /// Saves still finishing are recorded.
   void retire() => _retired = true;
 
+  /// Set once closing starts. A later change, such as a read marking a file
+  /// used after the cache was disposed, would save this index over one a
+  /// newer cache wrote, so it is dropped.
+  bool _closed = false;
+
   /// Deletes files the index doesn't track, once, after it opens: a save
   /// interrupted by a full disk or the app exiting, or one whose index entry
   /// was not yet saved. Eviction sees only indexed files. The sweep runs in
@@ -382,6 +392,7 @@ class MediaCacheIndex extends JsonCacheInfoRepository {
   @override
   Future<bool> close() async {
     await _sweep;
+    _closed = true;
     return super.close();
   }
 
@@ -439,19 +450,20 @@ class MediaCacheIndex extends JsonCacheInfoRepository {
   }
 
   @override
-  Future<List<CacheObject>> getOldObjects(Duration maxAge) async =>
-      _retired ? [] : super.getOldObjects(maxAge);
+  Future<int> deleteAll(Iterable<int> ids) async =>
+      _retired || _closed ? 0 : super.deleteAll(ids);
 
   @override
-  Future<int> deleteAll(Iterable<int> ids) async =>
-      _retired ? 0 : super.deleteAll(ids);
+  Future<int> delete(int id) async => _closed ? 0 : super.delete(id);
 
   /// `putFile` records no length, and replacing a file's bytes keeps the old
   /// one, so measure the file on every write.
   @override
   Future<dynamic> updateOrInsert(CacheObject cacheObject) async {
+    if (_closed) return cacheObject;
     final file = File(p.join(_directory.path, cacheObject.relativePath));
     final length = await file.exists() ? await file.length() : 0;
+    if (_closed) return cacheObject;
     return super.updateOrInsert(cacheObject.copyWith(length: length));
   }
 }
@@ -473,7 +485,9 @@ class _DirectoryFileSystem implements FileSystem {
   /// Writes [bytes] beside [name], then renames them over it, so readers
   /// never see a partial file. A failed write leaves no file behind.
   Future<void> replace(String name, Uint8List bytes) async {
-    final part = await createFile('$name.part');
+    // A name of its own, so a sweep that found an earlier save's abandoned
+    // part cannot delete this one.
+    final part = await createFile('$name.${const Uuid().v4()}.part');
     try {
       await part.writeAsBytes(bytes);
       await part.rename(_directory.childFile(name).path);
