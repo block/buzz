@@ -5,9 +5,11 @@ import 'dart:io';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
 import 'package:buzz/features/channels/saved_channel_page.dart';
 import 'package:buzz/features/channels/thread_replies_provider.dart';
+import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/shared/channels/saved_message_store.dart';
 import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/relay/relay_author_provider.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -22,6 +24,7 @@ NostrEvent _event(
   ThreadRepliesArgs args = _args,
   int kind = EventKind.streamMessage,
   String? deletionTarget,
+  bool isRoot = false,
 }) => NostrEvent.fromJson(
   signNostrEvent(
     secretKey:
@@ -30,16 +33,18 @@ NostrEvent _event(
     content: content,
     tags: [
       ['h', args.channelId],
-      if (deletionTarget == null)
-        ['e', args.rootId, '', 'reply']
-      else
-        ['e', deletionTarget],
+      if (deletionTarget != null)
+        ['e', deletionTarget]
+      else if (!isRoot)
+        ['e', args.rootId, '', 'reply'],
     ],
   ).toMap(),
 );
 
 class _Relay extends RelaySessionNotifier {
   final threadQueries = Queue<Future<List<NostrEvent>>>();
+  List<NostrEvent> writerEvents = const [];
+  final writerFilters = <NostrFilter>[];
   final channelQuery = Completer<List<NostrEvent>>();
   final subscribed = Completer<void>();
   late void Function(NostrEvent) emit;
@@ -54,9 +59,18 @@ class _Relay extends RelaySessionNotifier {
   Future<List<NostrEvent>> queryRelay(
     List<NostrFilter> filters, {
     Duration timeout = const Duration(seconds: 8),
-  }) => filters.single.extensions.containsKey('thread_cursor')
-      ? threadQueries.removeFirst()
-      : channelQuery.future;
+  }) async {
+    if (filters.first.extensions.containsKey('thread_cursor')) {
+      return threadQueries.removeFirst();
+    }
+    if (filters.every(
+      (filter) => filter.extensions['consistency'] == 'strong',
+    )) {
+      writerFilters.addAll(filters);
+      return writerEvents;
+    }
+    return channelQuery.future;
+  }
 
   @override
   Future<void Function()> subscribe(
@@ -84,6 +98,7 @@ void main() {
       retry: (_, _) => null,
       overrides: [
         relaySessionProvider.overrideWith(() => relay),
+        relayAuthorProvider.overrideWith((ref, url) => null),
         savedMessageScopeProvider.overrideWithValue(_scope),
         savedMessageRootProvider.overrideWith((ref) async => root),
       ],
@@ -148,6 +163,54 @@ void main() {
       },
     );
   }
+
+  test('a new scan saves the signed root and edits from the writer', () async {
+    final head = _event('Older thread head', isRoot: true);
+    final args = ThreadRepliesArgs(channelId: _args.channelId, rootId: head.id);
+    final reply = _event('Original reply', args: args);
+    final edit = _event(
+      'Edited reply',
+      args: args,
+      kind: EventKind.streamMessageEdit,
+      deletionTarget: reply.id,
+    );
+    Future<List<NostrEvent>?> readSaved() =>
+        store.read(store.capture(_scope, args.savedPage));
+
+    await store.save(store.capture(_scope, args.savedPage), [
+      reply,
+    ], relayAuthor: null);
+    container.listen(channelMessagesProvider(args.channelId), (_, _) {});
+    relay.connect();
+    await relay.subscribed.future;
+    relay.emit(edit);
+    expect(await readSaved(), isNull);
+
+    relay.threadQueries.add(Future.value([reply]));
+    relay.writerEvents = [head, edit];
+    final replies = threadRepliesProvider(args);
+    container.listen(replies, (_, _) {});
+    expect(await container.read(replies.future), [reply]);
+    await paint();
+
+    final saved = await readSaved();
+    expect(saved, [head, reply, edit]);
+    expect(
+      formatTimeline(
+        saved!,
+      ).singleWhere((event) => event.id == reply.id).content,
+      'Edited reply',
+    );
+    expect(relay.writerFilters, hasLength(2));
+    expect(relay.writerFilters.first.ids, [head.id]);
+    expect(
+      relay.writerFilters.last.tags['#e'],
+      unorderedEquals([head.id, reply.id]),
+    );
+    for (final filter in relay.writerFilters) {
+      expect(filter.tags['#h'], [args.channelId]);
+    }
+  });
 
   test('a live deletion retires an already displayed thread preview', () async {
     final removed = _event('Deleted while history is pending');

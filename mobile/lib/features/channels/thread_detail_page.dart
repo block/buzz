@@ -94,6 +94,7 @@ const _landingHighlightOpacity = 0.12;
 /// the thread, and a compose bar for replying.
 class ThreadDetailPage extends HookConsumerWidget {
   final TimelineMessage threadHead;
+  final bool headFromSavedPage;
   final List<TimelineMessage> allMessages;
   final String channelId;
   final String? currentPubkey;
@@ -108,6 +109,7 @@ class ThreadDetailPage extends HookConsumerWidget {
   const ThreadDetailPage({
     super.key,
     required this.threadHead,
+    this.headFromSavedPage = false,
     required this.allMessages,
     required this.channelId,
     required this.currentPubkey,
@@ -156,6 +158,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     final (
       :relayReplyState,
       :allMsgs,
+      :savedHead,
       :showingSavedReplies,
       :accessDenied,
       :liveDeletionHidesHead,
@@ -167,6 +170,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       threadHead,
       allMessages,
       currentPubkey,
+      headFromSavedPage: headFromSavedPage,
     );
     final relayRepliesAvailable = relayReplyState.value != null;
     final routeAnimation = ModalRoute.of(context)?.animation;
@@ -243,7 +247,9 @@ class ThreadDetailPage extends HookConsumerWidget {
 
     final replies = childrenByParent[threadHead.id] ?? const [];
     final liveHead =
-        allMsgs.where((m) => m.id == threadHead.id).firstOrNull ?? threadHead;
+        allMsgs.where((m) => m.id == threadHead.id).firstOrNull ??
+        savedHead ??
+        (headFromSavedPage ? null : threadHead);
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final listViewport = useMemoized(LaidOutViewport.new);
@@ -299,7 +305,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     int indexForReply(int chronologicalIndex) => chronologicalIndex + 1;
     final tailAnchorIndex = replies.length + 1;
     final stickyDateIndex = _ThreadStickyDateIndex(
-      head: liveHead,
+      head: liveHead ?? threadHead,
       replies: replies,
     );
 
@@ -469,7 +475,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       [
         itemPositionsListener,
         replies.length,
-        liveHead.createdAt,
+        liveHead?.createdAt,
         viewportHeight,
       ],
     );
@@ -736,7 +742,9 @@ class ThreadDetailPage extends HookConsumerWidget {
         // link or a notification, may be the only place it is seen.
         final replyIndex = position.index - indexForReply(0);
         final message = position.index == headIndex
-            ? (liveDeletionHidesHead ? null : liveHead)
+            ? (liveDeletionHidesHead || identical(liveHead, savedHead)
+                  ? null
+                  : liveHead)
             : replyIndex < 0 || replyIndex >= replies.length
             ? null
             : replies[replyIndex];
@@ -1043,6 +1051,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                     localSendAnimations: localSendAnimations,
                     trackActiveScrollPosition: trackActiveScrollPosition,
                     headIsDeleted: liveDeletionHidesHead,
+                    headId: threadHead.id,
                     head: liveHead,
                     stickyDayTimestamp: stickyDayTimestamp,
                     channelNames: channelNamesMap,
@@ -1082,7 +1091,8 @@ class ThreadDetailPage extends HookConsumerWidget {
                         prefillScopeMessages: channel?.isDm ?? true
                             ? null
                             : [
-                                if (!liveDeletionHidesHead) liveHead,
+                                if (!liveDeletionHidesHead && liveHead != null)
+                                  liveHead,
                                 ...replies,
                               ],
                         onFocusRequested: followThreadTailFromComposer,

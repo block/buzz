@@ -184,6 +184,7 @@ class _ThreadTailIntent {
 ({
   AsyncValue<List<NostrEvent>> relayReplyState,
   List<TimelineMessage> allMsgs,
+  TimelineMessage? savedHead,
   bool showingSavedReplies,
   bool accessDenied,
   bool liveDeletionHidesHead,
@@ -195,8 +196,9 @@ _watchThreadMessages(
   ThreadRepliesArgs args,
   TimelineMessage threadHead,
   List<TimelineMessage> routeSnapshot,
-  String? currentPubkey,
-) {
+  String? currentPubkey, {
+  required bool headFromSavedPage,
+}) {
   final relayReplyState = ref.watch(threadRepliesProvider(args));
   final replyEvents = ref.watch(threadRepliesWithLocalProvider(args)).value;
   final channelState = ref.watch(channelMessagesProvider(args.channelId));
@@ -205,16 +207,17 @@ _watchThreadMessages(
     channelState.error,
   ].any((error) => error != null && isRelayChannelAccessDenied(error));
   final relayRepliesAvailable = relayReplyState.hasValue;
-  final preview = relayRepliesAvailable || accessDenied
+  final preview = accessDenied || (relayRepliesAvailable && !headFromSavedPage)
       ? null
       : ref.watch(savedThreadPreviewProvider(args.savedPage));
   final saved = preview?.isLoading == false ? preview?.value : null;
   final live = channelState.value ?? const <NostrEvent>[];
   // The relay query carries the aux it observed. Fold in later live changes
   // before formatting so a deletion can suppress a reply from either source.
-  final events = saved == null && replyEvents == null
+  final savedReplies = relayRepliesAvailable ? null : saved;
+  final events = savedReplies == null && replyEvents == null
       ? live
-      : mergeThreadEvents([...?replyEvents, ...?saved], live);
+      : mergeThreadEvents([...?replyEvents, ...?savedReplies], live);
   final observed = accessDenied
       ? const <TimelineMessage>[]
       : formatTimeline(events, currentPubkey: currentPubkey);
@@ -224,7 +227,8 @@ _watchThreadMessages(
       : !relayRepliesAvailable
       ? _provisionalThreadMessages(routeSnapshot, observed, events)
       : [
-          if (!headDeleted &&
+          if (!headFromSavedPage &&
+              !headDeleted &&
               !observed.any((message) => message.id == threadHead.id))
             threadHead,
           ...observed,
@@ -232,7 +236,25 @@ _watchThreadMessages(
   return (
     relayReplyState: relayReplyState,
     allMsgs: allMsgs,
-    showingSavedReplies: saved != null,
+    // Relay history can replace the saved replies before the channel's
+    // separate exact-ID lookup finds a head outside its normal history.
+    savedHead:
+        relayRepliesAvailable &&
+            saved != null &&
+            !allMsgs.any((message) => message.id == threadHead.id)
+        ? formatTimeline(
+            mergeThreadEvents(
+              saved.where(
+                (event) =>
+                    event.id == threadHead.id ||
+                    EventKind.channelAuxEventKinds.contains(event.kind),
+              ),
+              events,
+            ),
+            currentPubkey: currentPubkey,
+          ).where((message) => message.id == threadHead.id).firstOrNull
+        : null,
+    showingSavedReplies: savedReplies != null,
     accessDenied: accessDenied,
     liveDeletionHidesHead: headDeleted,
     hasFetchedReplies: replyEvents != null,

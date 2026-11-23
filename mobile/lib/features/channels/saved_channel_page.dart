@@ -129,6 +129,7 @@ Future<void> saveMessagePage(
   SavedMessageTicket ticket,
   List<NostrEvent> events, {
   required bool Function() isCurrent,
+  Future<List<NostrEvent>> Function()? refreshEvents,
 }) async {
   try {
     final root = await ref.read(savedMessageRootProvider.future);
@@ -136,11 +137,15 @@ Future<void> saveMessagePage(
     // Let the relay timeline paint before copying the page to the worker.
     await SchedulerBinding.instance.endOfFrame;
     if (!isCurrent() || !store.isCurrent(ticket)) return;
-    final author = events.isEmpty
+    final currentEvents = refreshEvents == null
+        ? events
+        : await refreshEvents();
+    if (!isCurrent() || !store.isCurrent(ticket)) return;
+    final author = currentEvents.isEmpty
         ? null
         : await ref.read(_savedMessageRelayAuthorProvider.future);
     if (!isCurrent() || !store.isCurrent(ticket)) return;
-    await store.save(ticket, events, relayAuthor: author);
+    await store.save(ticket, currentEvents, relayAuthor: author);
   } catch (_) {
     // Disk readiness and relay discovery are outside the live timeline path.
   }

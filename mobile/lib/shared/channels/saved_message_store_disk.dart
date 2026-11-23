@@ -5,7 +5,6 @@ const _version = 3;
 // page plus its record headers, even if the process exits during a write.
 const _maxDatabasePages = 11520; // 45 MiB at 4 KiB per page.
 const _maxWindowBytes = 2 * 1024 * 1024;
-const _maxWindowEvents = 2101; // 50 rows, their summaries and two aux hops.
 
 enum _DiskAction { read, touch, save, removeChannel }
 
@@ -58,7 +57,7 @@ _DiskResult _accessDatabase(_DiskRequest request) {
     }
     final candidates =
         request.action == _DiskAction.save &&
-            request.events.length <= _maxWindowEvents
+            request.events.length <= SavedMessageStore.maxPageEvents
         ? _cacheCandidates(request.events, request.page).toList()
         : const <NostrEvent>[];
     var knownWires = const <String, String>{};

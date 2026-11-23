@@ -81,6 +81,8 @@ final savedMessageStoreProvider = Provider<SavedMessageStore>((ref) {
 
 /// A bounded, disposable store of previously opened conversations.
 final class SavedMessageStore {
+  static const maxPageEvents = 2101; // 50 rows, summaries and two aux hops.
+
   SavedMessageStore({
     required Future<Directory?> Function() root,
     required DiagnosticReporter diagnostics,
@@ -183,7 +185,7 @@ final class SavedMessageStore {
     final pending = _pendingEventRemovals[key];
     final batch = pending ?? <String>{};
     for (final target in targets) {
-      if (batch.length > _maxWindowEvents) break;
+      if (batch.length > maxPageEvents) break;
       batch.add(target);
     }
     if (pending != null) return;
@@ -194,7 +196,7 @@ final class SavedMessageStore {
           directory,
           key.$1,
           key.$2,
-          targets: batch.length > _maxWindowEvents ? null : batch,
+          targets: batch.length > maxPageEvents ? null : batch,
         ),
         shouldRun: () {
           if (!identical(_pendingEventRemovals[key], batch)) return false;

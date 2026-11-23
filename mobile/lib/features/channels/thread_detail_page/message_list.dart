@@ -21,7 +21,8 @@ class _ThreadMessageList extends HookWidget {
   final Map<String, DateTime> localSendAnimations;
   final Widget Function(Widget child) trackActiveScrollPosition;
   final bool headIsDeleted;
-  final TimelineMessage head;
+  final String headId;
+  final TimelineMessage? head;
   final ValueNotifier<int?> stickyDayTimestamp;
   final Map<String, String> channelNames;
   final String channelId;
@@ -55,6 +56,7 @@ class _ThreadMessageList extends HookWidget {
     required this.localSendAnimations,
     required this.trackActiveScrollPosition,
     required this.headIsDeleted,
+    required this.headId,
     required this.head,
     required this.stickyDayTimestamp,
     required this.channelNames,
@@ -108,6 +110,8 @@ class _ThreadMessageList extends HookWidget {
         child: Text('This message was deleted'),
       );
     }
+    final head = this.head;
+    if (head == null) return const Text('This message is unavailable');
     return Padding(
       key: ValueKey('thread-message-group-${head.id}'),
       padding: const EdgeInsets.only(bottom: Grid.xs),
@@ -269,10 +273,12 @@ class _ThreadMessageList extends HookWidget {
                             ? replies[chronologicalIndex - 1]
                             : null;
                         final previousMessage = previousReply ?? head;
-                        final showDayDivider = !isSameDay(
-                          previousMessage.createdAt,
-                          reply.createdAt,
-                        );
+                        final showDayDivider =
+                            previousMessage == null ||
+                            !isSameDay(
+                              previousMessage.createdAt,
+                              reply.createdAt,
+                            );
                         final showAuthor =
                             reply.hasAttachments ||
                             previousReply?.hasAttachments == true ||
@@ -308,7 +314,7 @@ class _ThreadMessageList extends HookWidget {
                           LocalMessageSendTransition(
                             messageId: reply.id,
                             channelId: channelId,
-                            threadHeadId: head.id,
+                            threadHeadId: headId,
                             key: ValueKey('thread-message-send-${reply.id}'),
                             animate: isRecentLocalMessageSendAnimation(
                               localSendAnimations,

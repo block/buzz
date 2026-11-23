@@ -63,6 +63,55 @@ void threadReplyRefreshTests() {
     );
   }
 
+  testWidgets('an offline link opens a saved root outside channel history', (
+    tester,
+  ) async {
+    final preview = Completer<List<NostrEvent>?>();
+    var offline = true;
+    final fresh = _textMsg(
+      id: 'fresh-reply',
+      pubkey: 'bob',
+      content: 'Fresh relay reply',
+      createdAt: 1002,
+      extraTags: [
+        ['e', args.rootId, '', 'reply'],
+      ],
+    );
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: const [],
+        savedThreadPreview: preview.future,
+        initialThreadRootId: args.rootId,
+        initialMessageId: reply.id,
+        disableRetries: true,
+        threadReplyLoaders: {
+          args.rootId: () async {
+            if (offline) throw const SocketException('Offline');
+            return [fresh];
+          },
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(ThreadDetailPage), findsNothing);
+
+    preview.complete([root, reply]);
+    await tester.pumpAndSettle();
+    final route = find.byType(ThreadDetailPage);
+    expect(route, findsOneWidget);
+    expect(find.text(root.content), findsOneWidget);
+    expect(find.text(reply.content), findsOneWidget);
+    expect(tester.widget<ThreadDetailPage>(route).initialMessageId, reply.id);
+
+    final container = ProviderScope.containerOf(tester.element(route));
+    offline = false;
+    container.invalidate(threadRepliesProvider(args));
+    await tester.pumpAndSettle();
+    expect(find.text(root.content), findsOneWidget);
+    expect(find.text(reply.content), findsNothing);
+    expect(find.text(fresh.content), findsOneWidget);
+  });
+
   testWidgets(
     'thread refresh keeps cached replies through retry and recovery',
     (tester) async {

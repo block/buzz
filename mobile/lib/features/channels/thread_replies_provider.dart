@@ -147,6 +147,8 @@ final threadRepliesProvider = FutureProvider.autoDispose
               ticket,
               events,
               isCurrent: () => current,
+              refreshEvents: () =>
+                  _readSavedThreadEvents(session, args, events),
             ),
           );
         }
@@ -162,6 +164,55 @@ final threadRepliesProvider = FutureProvider.autoDispose
         rethrow;
       }
     });
+
+Future<List<NostrEvent>> _readSavedThreadEvents(
+  RelaySessionNotifier session,
+  ThreadRepliesArgs args,
+  List<NostrEvent> events,
+) async {
+  if (events.length > SavedMessageStore.maxPageEvents) return const [];
+  final targets = {
+    args.rootId,
+    for (final event in events)
+      if (EventKind.channelTimelineContentKinds.contains(event.kind)) event.id,
+  };
+  // The thread scan's aux can come from a replica. Read edits from the writer
+  // so a scan that starts after a live edit cannot re-save pre-edit text.
+  const editLimit = 1000;
+  const strong = {'consistency': 'strong'};
+  final current = await session.queryRelay([
+    NostrFilter(
+      kinds: EventKind.channelTimelineContentKinds,
+      ids: [args.rootId],
+      tags: {
+        '#h': [args.channelId],
+      },
+      limit: 1,
+      extensions: strong,
+    ),
+    NostrFilter(
+      kinds: const [EventKind.streamMessageEdit],
+      tags: {
+        '#h': [args.channelId],
+        '#e': targets.toList(),
+      },
+      limit: editLimit,
+      extensions: strong,
+    ),
+  ]);
+  // At the limit the response may omit an edit. Clear the whole saved page.
+  if (current
+          .where((event) => event.kind == EventKind.streamMessageEdit)
+          .length >=
+      editLimit) {
+    return const [];
+  }
+  return [
+    ...current,
+    for (final event in events)
+      if (event.kind != EventKind.streamMessageEdit) event,
+  ];
+}
 
 /// Exhaustively scans a thread using insertion-complete cursor pages.
 /// [isCurrent] lets a background refresh stop between pages after disposal.
