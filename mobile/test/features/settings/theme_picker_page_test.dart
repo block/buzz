@@ -297,6 +297,77 @@ void main() {
     expect(container.read(communityThemeProvider), synced);
   });
 
+  group('a legacy chat color', () {
+    // Desktop's legacy Cyan and Indigo have no swatch of their own: Cyan
+    // shows as Jade and Indigo as Cobalt.
+    const cyan = CommunityThemePreference(
+      theme: buzzDarkThemeName,
+      accent: '#06b6d4',
+      followSystem: false,
+    );
+    const indigo = CommunityThemePreference(
+      theme: buzzDarkThemeName,
+      accent: '#6366f1',
+      followSystem: false,
+    );
+    String swatch(String name) =>
+        chatColorChoices.firstWhere((color) => color.name == name).wireValue;
+
+    Future<void> tapSwatch(WidgetTester tester, String name) async {
+      final index = chatColorChoices.indexWhere((color) => color.name == name);
+      final option = find.byKey(ValueKey('accent-option-$index'));
+      await tester.tap(
+        find.byKey(const ValueKey('theme-preview-accent-action-button')),
+      );
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(option);
+      await tester.pumpAndSettle();
+      await tester.tap(option);
+      await tester.pumpAndSettle();
+      Navigator.of(tester.element(option)).pop();
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> cycleModeAndSet(WidgetTester tester) async {
+      await tester.tap(
+        find.byKey(const ValueKey('theme-preview-appearance-action-button')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('theme-preview-set')));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('publishes the swatch it maps to when the user taps it', (
+      tester,
+    ) async {
+      final notifier = _RecordingCommunityThemeNotifier(cyan);
+      await _pumpPicker(tester, themeNotifier: () => notifier);
+      await tapSwatch(tester, 'Jade');
+      await tester.tap(find.byKey(const ValueKey('theme-preview-set')));
+      await tester.pumpAndSettle();
+      expect(notifier.lastPreference?.accent, swatch('Jade'));
+    });
+
+    testWidgets('keeps a tapped swatch when a sync lands under the picker', (
+      tester,
+    ) async {
+      final notifier = _RecordingCommunityThemeNotifier(cyan);
+      await _pumpPicker(tester, themeNotifier: () => notifier);
+      await tapSwatch(tester, 'Cobalt');
+      notifier.receiveSynced(indigo);
+      await cycleModeAndSet(tester);
+      expect(notifier.lastPreference?.accent, swatch('Cobalt'));
+    });
+
+    testWidgets('keeps a synced color on a mode-only Set', (tester) async {
+      final notifier = _RecordingCommunityThemeNotifier(cyan);
+      await _pumpPicker(tester, themeNotifier: () => notifier);
+      notifier.receiveSynced(indigo);
+      await cycleModeAndSet(tester);
+      expect(notifier.lastPreference?.accent, indigo.accent);
+    });
+  });
+
   for (final brightness in Brightness.values) {
     testWidgets('${brightness.name} chat preview follows draft colors only', (
       tester,
@@ -402,11 +473,17 @@ void main() {
 }
 
 class _RecordingCommunityThemeNotifier extends CommunityThemeNotifier {
+  _RecordingCommunityThemeNotifier([this.initial = defaultCommunityTheme]);
+
+  final CommunityThemePreference initial;
   int preferenceWrites = 0;
   CommunityThemePreference? lastPreference;
 
   @override
-  CommunityThemePreference build() => defaultCommunityTheme;
+  CommunityThemePreference build() => initial;
+
+  /// A preference synced from another device while the picker is open.
+  void receiveSynced(CommunityThemePreference preference) => state = preference;
 
   @override
   void setPreference(CommunityThemePreference preference) {

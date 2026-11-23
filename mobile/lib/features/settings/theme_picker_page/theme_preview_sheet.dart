@@ -12,8 +12,8 @@ class _ThemePreviewExperience extends HookConsumerWidget {
     final inRail = DuoToolbarScope.maybeOf(context)?.strip != null;
     final stored = ref.read(communityThemeProvider);
     final draftMode = useState(ref.read(appearanceModeProvider));
-    final storedAccentIndex = chatColorIndex(stored.accent);
-    final draftAccent = useState(storedAccentIndex);
+    final draftAccent = useState(chatColorIndex(stored.accent));
+    final pickedAccent = useState<int?>(null);
     final platformBrightness = MediaQuery.platformBrightnessOf(context);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     final brightness = switch (draftMode.value) {
@@ -38,25 +38,29 @@ class _ThemePreviewExperience extends HookConsumerWidget {
       context: context,
       colorScheme: selectedBaseScheme,
       selectedIndex: draftAccent.value,
-      onSelected: (index) => draftAccent.value = index,
+      onSelected: (index) {
+        draftAccent.value = index;
+        pickedAccent.value = index;
+      },
     );
 
     void applySelection() {
       unawaited(HapticFeedback.mediumImpact());
       ref.read(appearanceModeProvider.notifier).setMode(draftMode.value);
       // Only the chat color syncs. The synced theme and followSystem stay as
-      // they are, so this device's mode never changes other devices. An
-      // unchanged color keeps its saved value, so a legacy color that only
-      // maps to a swatch is not republished as that swatch.
+      // they are, so this device's mode never changes other devices. A color
+      // the user did not tap keeps its saved value, so a legacy color that
+      // only maps to a swatch is not republished as that swatch.
       final current = ref.read(communityThemeProvider);
       ref
           .read(communityThemeProvider.notifier)
           .setPreference(
             CommunityThemePreference(
               theme: current.theme,
-              accent: draftAccent.value == storedAccentIndex
-                  ? current.accent
-                  : chatColorChoices[draftAccent.value].wireValue,
+              accent: switch (pickedAccent.value) {
+                final index? => chatColorChoices[index].wireValue,
+                null => current.accent,
+              },
               followSystem: current.followSystem,
             ),
           );
