@@ -44,7 +44,7 @@ class _QuickReactionRow extends ConsumerWidget {
         if (onToggleReaction != null) {
           onToggleReaction!(value);
         } else {
-          toggleReaction(pageRef, message, value);
+          toggleReaction(pageContext, pageRef, message, value);
         }
         return;
       }
@@ -58,7 +58,13 @@ class _QuickReactionRow extends ConsumerWidget {
       if (onToggleReaction != null) {
         onToggleReaction!(value);
       } else {
-        pageRef.read(channelActionsProvider).addReaction(message.id, value);
+        reportReactionFailure(
+          pageContext,
+          pageRef
+              .read(channelActionsProvider)
+              .addReaction(message.id, value, targetAuthor: message.pubkey),
+          adding: true,
+        );
       }
     }
 

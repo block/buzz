@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:clock/clock.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -27,8 +28,14 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
     super.key,
     required this.onCancel,
     required this.onRecorded,
+    this.isDictation = false,
+    this.onStopping,
+    this.onStopFailed,
   });
 
+  final bool isDictation;
+  final VoidCallback? onStopping;
+  final VoidCallback? onStopFailed;
   final VoidCallback onCancel;
   final ValueChanged<VoiceNoteRecording> onRecorded;
 
@@ -64,24 +71,39 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
       return subscription.close;
     }, [recorder, onCancel]);
 
-    final route = ModalRoute.of(context);
+    // A root presentation covers nested composers without pushing on their
+    // local navigator. Observe every enclosing route so either path cancels.
+    final routes = <ModalRoute<dynamic>>[];
+    BuildContext? routeContext = context;
+    while (routeContext != null) {
+      final route = ModalRoute.of(routeContext);
+      if (route != null) routes.add(route);
+      routeContext = routeContext
+          .findAncestorStateOfType<NavigatorState>()
+          ?.context;
+    }
     useEffect(() {
-      if (route != null) voiceNoteRouteObserver.subscribe(routeAware, route);
+      for (final route in routes) {
+        voiceNoteRouteObserver.subscribe(routeAware, route);
+      }
       return () => voiceNoteRouteObserver.unsubscribe(routeAware);
-    }, [routeAware, route]);
+    }, [routeAware, ...routes]);
 
     Future<void> finish() async {
       if (!isStarted.value || isStopping.value || error.value != null) return;
       isStopping.value = true;
+      onStopping?.call();
       unawaited(HapticFeedback.mediumImpact());
       try {
         final recording = await recorder.stop();
-        if (context.mounted) {
+        if (context.mounted || isDictation) {
+          // Dictation completion owns recovery independently of this recorder.
           onRecorded(recording);
         } else {
           await deleteDroppedVoiceNoteRecording(recording.file.path);
         }
       } catch (_) {
+        onStopFailed?.call();
         if (context.mounted) {
           error.value = 'Buzz could not finish the voice note.';
           isStopping.value = false;
@@ -102,14 +124,16 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
       final timer = Timer.periodic(const Duration(milliseconds: 200), (_) {
         final started = startedAt.value;
         if (!active || started == null) return;
-        elapsed.value = DateTime.now().difference(started);
-        if (elapsed.value >= voiceNoteMaxDuration) unawaited(finish());
+        elapsed.value = clock.now().difference(started);
+        if (!isDictation && elapsed.value >= voiceNoteMaxDuration) {
+          unawaited(finish());
+        }
       });
       unawaited(() async {
         try {
           await recorder.start();
           if (active) {
-            startedAt.value = DateTime.now();
+            startedAt.value = clock.now();
             isStarted.value = true;
           }
         } on StateError catch (recordingError) {
@@ -158,16 +182,18 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
             ),
           )
         else ...[
-          Text(
-            '${formatVoiceNoteDuration(elapsed.value)} / '
-            '${formatVoiceNoteDuration(voiceNoteMaxDuration)}',
-            key: const ValueKey('voice-note-recorder-duration'),
-            style: context.textTheme.labelSmall?.copyWith(
-              color: context.colors.onSurfaceVariant,
-              fontFeatures: const [FontFeature.tabularFigures()],
+          if (!isDictation) ...[
+            Text(
+              '${formatVoiceNoteDuration(elapsed.value)} / '
+              '${formatVoiceNoteDuration(voiceNoteMaxDuration)}',
+              key: const ValueKey('voice-note-recorder-duration'),
+              style: context.textTheme.labelSmall?.copyWith(
+                color: context.colors.onSurfaceVariant,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
             ),
-          ),
-          const SizedBox(width: Grid.half),
+            const SizedBox(width: Grid.half),
+          ],
           Expanded(
             child: LayoutBuilder(
               builder: (context, constraints) {
@@ -214,8 +240,10 @@ class VoiceNoteComposerRecorder extends HookConsumerWidget {
           key: const ValueKey('voice-note-recorder-stop'),
           tooltip: 'Stop recording',
           icon: BuzzIcons.square,
-          foreground: Colors.white,
-          background: context.colors.error,
+          foreground: isDictation ? context.colors.onPrimary : Colors.white,
+          background: isDictation
+              ? context.colors.primary
+              : context.colors.error,
           onPressed: error.value == null && isStarted.value && !isStopping.value
               ? finish
               : null,

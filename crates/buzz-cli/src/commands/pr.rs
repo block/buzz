@@ -59,7 +59,7 @@ pub async fn cmd_open_pr(
     let builder = with_git_provenance(
         buzz_sdk::build_git_pull_request(&repo, &content, &meta).map_err(sdk_err)?,
     )?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let event_id = event.id.to_hex();
     let resp = client.submit_event(event).await?;
     // `link` renders as a rich preview card in Buzz Desktop when included in
@@ -107,7 +107,7 @@ pub async fn cmd_update_pr(
     let builder = with_git_provenance(
         buzz_sdk::build_git_pr_update(&repo, &content, &meta).map_err(sdk_err)?,
     )?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");
     Ok(())
@@ -217,7 +217,7 @@ pub async fn cmd_pr_status(
 
     let builder =
         with_git_provenance(buzz_sdk::build_git_status(status, &content, &meta).map_err(sdk_err)?)?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");
     Ok(())

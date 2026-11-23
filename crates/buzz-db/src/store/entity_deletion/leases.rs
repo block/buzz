@@ -105,9 +105,8 @@ impl EntityDeletionStore {
     /// can be renewed only while nobody has reclaimed it.
     ///
     /// One autocommit statement: the worker drops this future whenever its
-    /// stage handler finishes first, and sqlx 0.9 queues no `ROLLBACK` for a
-    /// `begin()` dropped while its `BEGIN` is in flight, so the pooled
-    /// connection would carry an open transaction into the next write.
+    /// stage handler finishes first, so the renewal leaves no transaction
+    /// to roll back.
     pub async fn heartbeat(&self, lease: &EntityLease, duration: Duration) -> Result<()> {
         let millis = duration_millis(duration)?;
         // `lock_owned`'s predicate. After a row-lock wait, Postgres re-checks it
@@ -159,7 +158,7 @@ impl EntityDeletionStore {
 }
 
 pub(in crate::store) async fn lock_owned(
-    tx: &mut Tx<'_>,
+    tx: &mut sqlx::PgConnection,
     lease: &EntityLease,
 ) -> Result<EntityRequest> {
     // Lock by id first, then check expiry after any wait for that lock. An old
@@ -169,7 +168,7 @@ pub(in crate::store) async fn lock_owned(
          FROM entity_deletion_requests WHERE id = $1 FOR UPDATE",
     )))
     .bind(lease.request_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| stale_lease(lease))?;
     let owned: bool = sqlx::query_scalar(
@@ -180,7 +179,7 @@ pub(in crate::store) async fn lock_owned(
     .bind(lease.request_id)
     .bind(&lease.owner)
     .bind(lease.generation)
-    .fetch_one(&mut **tx)
+    .fetch_one(&mut *tx)
     .await?;
     if !owned {
         return Err(stale_lease(lease));
@@ -189,7 +188,7 @@ pub(in crate::store) async fn lock_owned(
 }
 
 pub(in crate::store) async fn validate_approved_inventory(
-    tx: &mut Tx<'_>,
+    tx: &mut sqlx::PgConnection,
     request: &EntityRequest,
 ) -> Result<()> {
     let digest = validated_inventory_digest(request)?;
@@ -199,7 +198,7 @@ pub(in crate::store) async fn validate_approved_inventory(
     )
     .bind(request.id)
     .bind(digest)
-    .fetch_one(&mut **tx)
+    .fetch_one(&mut *tx)
     .await?;
     if !approved {
         return Err(DbError::DeletionSafety(

@@ -7,6 +7,9 @@ use tokio::process::Command;
 use url::Url;
 use uuid::Uuid;
 
+mod user_inventory_support;
+use user_inventory_support::{real_workflow_stops_at_gate, workflow_cli};
+
 fn admin_binary() -> std::ffi::OsString {
     // Nextest relocates binaries when extracting an archive. Cargo's build-time
     // path remains the fallback for local cargo test runs.
@@ -71,7 +74,7 @@ async fn cluster_global_inventory_cli_uses_only_existing_membership_tables() {
     for target in [community, participant_community] {
         for _ in 0..2 {
             let channel = Uuid::new_v4();
-            sqlx::query("INSERT INTO channels (community_id, id, name, created_by) VALUES ($1, $2, 'inventory-test', decode($3, 'hex'))")
+            sqlx::query("INSERT INTO channels (community_id, id, name, created_by) VALUES ($1, $2, 'inventory-test-' || $2::uuid::text, decode($3, 'hex'))")
                 .bind(target).bind(channel).bind(pubkey).execute(&mut *tx).await.unwrap();
             sqlx::query("INSERT INTO channel_members (community_id, channel_id, pubkey) VALUES ($1, $2, decode($3, 'hex'))")
                 .bind(target).bind(channel).bind(pubkey).execute(&mut *tx).await.unwrap();
@@ -193,36 +196,9 @@ fn invalid_inventory_key_fails_before_database_connection() {
         .contains("expected a 64-character hex public key or an npub"));
 }
 
-async fn workflow_cli(url: &str, args: &[&str], success: bool) -> Value {
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        Command::new(admin_binary())
-            .arg("user-deletions")
-            .args(args)
-            .env("DATABASE_URL", url)
-            .env("BUZZ_DB_POOL_SIZE", "1")
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(
-        output.status.success(),
-        success,
-        "{args:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    if success {
-        serde_json::from_slice(&output.stdout).unwrap()
-    } else {
-        Value::Null
-    }
-}
-
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn inventory_submission_runs_demo_and_public_key_workflows_end_to_end() {
+async fn inventory_submission_completes_demo_but_refuses_unfinished_real_workflow() {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap();
     let pool = PgPool::connect(&url).await.unwrap();
     let key = "ab".repeat(32);
@@ -292,17 +268,22 @@ async fn inventory_submission_runs_demo_and_public_key_workflows_end_to_end() {
         )
         .await;
         assert!(approved["stage_history"].as_array().unwrap().is_empty());
-        let stepped = workflow_cli(&url, &["run", id, "--next-step"], true).await;
-        assert_eq!(stepped["stage_history"][0]["status"], "completed");
-        let first_id = stepped["stage_history"][0]["id"].clone();
-        let done = workflow_cli(&url, &["run", id], true).await;
-        assert_eq!(done["status"], "completed");
-        assert_eq!(done["stage_history"][0]["id"], first_id);
-        let stages = done["stage_history"].as_array().unwrap();
-        assert_eq!(stages.len(), if subject == "demo" { 5 } else { 3 });
-        assert!(stages
-            .iter()
-            .all(|s| s["status"] == "completed" && s["is_current"] == false));
+        let done = if subject == "demo" {
+            let stepped = workflow_cli(&url, &["run", id, "--next-step"], true).await;
+            assert_eq!(stepped["stage_history"][0]["status"], "completed");
+            let first_id = stepped["stage_history"][0]["id"].clone();
+            let done = workflow_cli(&url, &["run", id], true).await;
+            assert_eq!(done["status"], "completed");
+            assert_eq!(done["stage_history"][0]["id"], first_id);
+            let stages = done["stage_history"].as_array().unwrap();
+            assert_eq!(stages.len(), 6);
+            assert!(stages
+                .iter()
+                .all(|s| s["status"] == "completed" && s["is_current"] == false));
+            done
+        } else {
+            real_workflow_stops_at_gate(&url, id).await
+        };
         let inspected = workflow_cli(&url, &["inspect", id], true).await;
         assert_eq!(inspected, done);
         // Hex and npub converge on the same saved request without rediscovery.
@@ -334,7 +315,7 @@ async fn inventory_submission_runs_demo_and_public_key_workflows_end_to_end() {
         )
         .await;
     }
-    // Real membership data remains unchanged after all dummy handlers execute.
+    // Demo completion and refusal of the real workflow both preserve membership.
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM channel_members WHERE community_id = $1 AND pubkey = decode($2, 'hex')")
         .bind(community).bind(&key).fetch_one(&pool).await.unwrap();
     assert_eq!(count, 1);
@@ -380,15 +361,11 @@ async fn inventory_approval_and_resume_use_saved_account_identity_without_resolu
         true,
     )
     .await;
-    let stepped = workflow_cli(&url, &["run", id, "--next-step"], true).await;
-    let first_stage = stepped["stage_history"][0]["id"].clone();
-    let completed = workflow_cli(&url, &["run", id], true).await;
-    assert_eq!(completed["target"], account);
-    assert_eq!(completed["inventory_manifest"], saved["inventory_manifest"]);
-    assert_eq!(completed["status"], "completed");
-    assert_eq!(completed["stage_history"][0]["id"], first_stage);
-    for stage in completed["stage_history"].as_array().unwrap() {
+    let stopped = real_workflow_stops_at_gate(&url, id).await;
+    assert_eq!(stopped["target"], account);
+    assert_eq!(stopped["inventory_manifest"], saved["inventory_manifest"]);
+    for stage in stopped["stage_history"].as_array().unwrap() {
         assert_eq!(stage["metadata_json"]["inputs"]["target"], account);
-        assert_eq!(stage["status"], "completed");
+        assert_eq!(stage["status"], "pending");
     }
 }

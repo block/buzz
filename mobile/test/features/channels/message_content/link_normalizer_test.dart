@@ -11,6 +11,58 @@ void main() {
     );
   });
 
+  test('leaves link reference definitions, but not lazy lines, as written', () {
+    const site = 'https://example.com';
+    for (final (markdown, expected) in [
+      ('[a]: $site', '[a]: $site'),
+      (
+        'See [a]\n\n[a]: $site\n[b]: $site "B"',
+        'See [a]\n\n[a]: $site\n[b]: $site "B"',
+      ),
+      ('look at this\n[note]: $site', 'look at this\n[note]: [$site]($site)'),
+      (
+        'look at `this`\n[note]: $site',
+        'look at `this`\n[note]: [$site]($site)',
+      ),
+      ('\n[a]: $site', '\n[a]: $site'),
+      ('`code` [x]: $site', '`code` [x]: [$site]($site)'),
+      ('`x`\n\n[a]: $site', '`x`\n\n[a]: $site'),
+      // A title holding code doesn't end the definition run.
+      (
+        '[a]: $site "`code`"\n[b]: $site\n\n[b]',
+        '[a]: $site "`code`"\n[b]: $site\n\n[b]',
+      ),
+      (
+        '[a]: $site "`code` [fake]: x"\n[b]: $site\n\n[b]',
+        '[a]: $site "`code` [fake]: x"\n[b]: $site\n\n[b]',
+      ),
+      (
+        'text\n[a]: $site\n[b]: $site',
+        'text\n[a]: [$site]($site)\n[b]: [$site]($site)',
+      ),
+    ]) {
+      expect(normalizeBareLinks(markdown), expected, reason: markdown);
+    }
+  });
+
+  test('a long run of definitions takes linear time', () {
+    // Rechecking every earlier definition for each one took seconds here.
+    final body = [
+      for (var i = 0; i < 4000; i++) '[d$i]: https://example.com/$i',
+    ].join('\n');
+    final timer = Stopwatch()..start();
+    expect(normalizeBareLinks(body), body);
+    expect(timer.elapsedMilliseconds, lessThan(500));
+  });
+
+  test('a long paragraph of unpaired backticks takes linear time', () {
+    // Walking to the paragraph end for every opener took seconds at 64 KB.
+    final body = 'a `\n` b' * (64 * 1024 ~/ 7);
+    final timer = Stopwatch()..start();
+    expect(mapMarkdownProse(body, (prose) => prose), body);
+    expect(timer.elapsedMilliseconds, lessThan(500));
+  });
+
   test('keeps punctuation and open Markdown delimiters outside links', () {
     expect(
       normalizeBareLinks('**open $url**. and **_${url}_**!'),
@@ -182,6 +234,61 @@ void main() {
         expected: '```\n$url ``` still code\n```\n[$url]($url)',
       ),
       (
+        name: 'tilde fence indented three spaces',
+        input: '   ~~~\n$url\n   ~~~\n$url',
+        expected: '   ~~~\n$url\n   ~~~\n[$url]($url)',
+      ),
+      (
+        name: 'fence opens after deeper indentation',
+        input: '    ~~~\n$url',
+        expected: '    ~~~\n$url',
+      ),
+      (
+        name: 'unclosed fence inside a quote',
+        input: '> ```sh\n> $url',
+        expected: '> ```sh\n> $url',
+      ),
+      (
+        name: 'unclosed quoted fence ends with its quote',
+        input: '> ```sh\n> $url\n\n$url',
+        expected: '> ```sh\n> $url\n\n[$url]($url)',
+      ),
+      (
+        name: 'quoted fence ends at a lazy line',
+        input: '> ```sh\n> $url\n$url',
+        expected: '> ```sh\n> $url\n[$url]($url)',
+      ),
+      (
+        name: 'top-level fence does not close on a quoted fence',
+        input: '```md\n> ```\n$url\n```\n$url',
+        expected: '```md\n> ```\n$url\n```\n[$url]($url)',
+      ),
+      (
+        name: 'quoted fence closes inside the quote',
+        input: '> ~~~\n> $url\n> ~~~\n$url',
+        expected: '> ~~~\n> $url\n> ~~~\n[$url]($url)',
+      ),
+      (
+        name: 'fence closer must end its line',
+        input: '~~~\n$url\n~~~ x\n~~~\n$url',
+        expected: '~~~\n$url\n~~~ x\n~~~\n[$url]($url)',
+      ),
+      (
+        name: 'unmatched backtick does not pair across a block quote',
+        input: 'plain `\n> $url `code`',
+        expected: 'plain `\n> [$url]($url) `code`',
+      ),
+      (
+        name: 'unmatched backtick does not pair into a nested quote',
+        input: '> plain `\n> > $url `code`',
+        expected: '> plain `\n> > [$url]($url) `code`',
+      ),
+      (
+        name: 'quoted code span continues on the next quoted line',
+        input: '> `$url\n> more` $url',
+        expected: '> `$url\n> more` [$url]($url)',
+      ),
+      (
         name: 'unclosed backticks remain prose',
         input: '$url then `$url',
         expected: '[$url]($url) then `[$url]($url)',
@@ -193,6 +300,46 @@ void main() {
         expect(normalizeBareLinks(testCase.input), testCase.expected);
       });
     }
+
+    test('bare links leave a trailing backslash outside the destination', () {
+      expect(
+        normalizeBareLinks(r'see https://example.com/a\'),
+        r'see [https://example.com/a](https://example.com/a)\',
+      );
+      expect(
+        normalizeBareLinks(r'*https://example.com/a\**'),
+        r'*[https://example.com/a](https://example.com/a)\**',
+      );
+    });
+
+    test('a literal backslash before a bare link stays literal', () {
+      expect(
+        normalizeBareLinks(r'see \https://example.com/a'),
+        r'see \\[https://example.com/a](https://example.com/a)',
+      );
+      expect(
+        normalizeBareLinks(r'see \\https://example.com/a'),
+        r'see \\[https://example.com/a](https://example.com/a)',
+      );
+    });
+
+    test('near-limit fence-like runs on one line complete linearly', () {
+      // Each run checks only its own indentation and the rest of its line up
+      // to the next character, so a long line of runs is not rescanned.
+      for (final input in [
+        'x~~~' * (256 * 1024 ~/ 4),
+        '~~~\n${' ~~~' * (256 * 1024 ~/ 4)}',
+        '```\n${' ```' * (256 * 1024 ~/ 4)}',
+        '>' * (256 * 1024 - 3) + '~~~',
+        '> ~~~' * (256 * 1024 ~/ 5),
+      ]) {
+        final watch = Stopwatch()..start();
+        final result = normalizeBareLinks(input);
+        watch.stop();
+        expect(result == input, isTrue);
+        expect(watch.elapsed, lessThan(const Duration(seconds: 2)));
+      }
+    });
   });
 
   test(

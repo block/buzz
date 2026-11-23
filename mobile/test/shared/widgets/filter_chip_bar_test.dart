@@ -7,7 +7,7 @@ void main() {
   testWidgets('selected chip resolves the accent (scheme.primary) as fill', (
     tester,
   ) async {
-    final accented = applyAccent(darkColorScheme, 0); // Blue accent
+    final accented = darkColorScheme.copyWith(primary: const Color(0xFF3B82F6));
     final accent = accented.primary;
 
     await tester.pumpWidget(

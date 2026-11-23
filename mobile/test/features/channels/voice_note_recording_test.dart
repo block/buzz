@@ -197,7 +197,7 @@ class _CoordinatedPlayer extends VoiceNotePlayerController {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) async {}
 
@@ -988,11 +988,15 @@ void main() {
     );
     addTearDown(player.dispose);
     var authGeneration = 0;
+    Completer<Map<String, String>>? renewal = Completer();
 
     await player.loadRemote(
       'https://example.com/voice-note.mp4',
-      headers: () => {
-        'Authorization': 'Nostr signed-event-${authGeneration++}',
+      headers: () {
+        final generation = authGeneration++;
+        final pending = renewal;
+        if (pending != null) return pending.future;
+        return {'Authorization': 'Nostr signed-event-$generation'};
       },
       fallbackDuration: const Duration(seconds: 7),
     );
@@ -1000,12 +1004,25 @@ void main() {
     expect(authGeneration, 0);
     expect(audioPlayer.loadedUrls, isEmpty);
 
+    // Cancelling while a slow assertion renews never starts the stale load.
+    final renewing = player.toggle();
+    await Future<void>.delayed(Duration.zero);
+    expect(player.state.canCancelLoading, isTrue);
+    final cancel = player.toggle();
+    await Future<void>.delayed(Duration.zero);
+    renewal.complete({'Authorization': 'Nostr stale'});
+    renewal = null;
+    await Future.wait([renewing, cancel]);
+    expect(audioPlayer.loadedUrls, isEmpty);
+    expect(audioPlayer.playCount, 0);
+    expect(player.state.isLoading, isFalse);
+
     await player.toggle();
 
-    expect(authGeneration, 1);
+    expect(authGeneration, 2);
     expect(
       audioPlayer.loadedUrlHeaders.single?['Authorization'],
-      'Nostr signed-event-0',
+      'Nostr signed-event-1',
     );
     expect(audioPlayer.playCount, 1);
   });

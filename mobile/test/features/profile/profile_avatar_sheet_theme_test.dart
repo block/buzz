@@ -1,7 +1,6 @@
+import 'dart:convert';
+
 import 'package:buzz/features/profile/profile_avatar_sheet_app.dart';
-import 'package:buzz/shared/emoji/emoji_avatar.dart';
-import 'package:buzz/shared/emoji/emoji_data_provider.dart';
-import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -14,14 +13,19 @@ void main() {
     SharedPreferences.setMockInitialValues({});
     const sheet = MethodChannel('buzz/profile_avatar_sheet');
     final messenger = tester.binding.defaultBinaryMessenger;
-    final url = emojiAvatarDataUrl('🐝', 0xFFFFE75C);
+    final draft = {
+      'type': 'image',
+      'bytes': base64Decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+      ),
+    };
     Map? finished;
     final controls = <Map>[];
     messenger.setMockMethodCallHandler(sheet, (call) async {
       if (call.method == 'initial') {
         return {
           'dark': false,
-          'draft': {'type': 'url', 'url': url},
+          'draft': draft,
           'previewRect': {
             'x': 90.0,
             'y': 200.0,
@@ -37,10 +41,6 @@ void main() {
     addTearDown(() => messenger.setMockMethodCallHandler(sheet, null));
     await tester.runAsync(profileAvatarEditorMain);
     await tester.pump();
-    final container = ProviderScope.containerOf(
-      tester.element(find.byType(MaterialApp)),
-    );
-    await tester.runAsync(() => container.read(emojiDatasetProvider.future));
     await tester.pumpAndSettle();
     for (final dark in [true, false]) {
       await messenger.handlePlatformMessage(
@@ -55,7 +55,10 @@ void main() {
         tester.widget<MaterialApp>(find.byType(MaterialApp)).themeMode,
         dark ? ThemeMode.dark : ThemeMode.light,
       );
-      expect(find.text('🐝'), findsWidgets);
+      expect(
+        find.byKey(const ValueKey('avatar-editor-fixed-preview')),
+        findsOneWidget,
+      );
     }
     final navigator = tester.state<NavigatorState>(
       find.byType(Navigator).first,
@@ -79,7 +82,7 @@ void main() {
       (_) {},
     );
     await tester.pumpAndSettle();
-    expect(finished, {'type': 'url', 'url': url});
+    expect(finished, draft);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 }

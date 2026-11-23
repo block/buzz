@@ -365,7 +365,7 @@ impl Db {
                 RoutePredicate::Bounded,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             RouteDecision::Replica(mut tx, _entry, reason) => match crate::feed::query_mentions_on(
                 &mut tx,
@@ -390,6 +390,9 @@ impl Db {
                 Err(e) => {
                     tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                     Self::record_route(path, "writer", "replica_error");
+                    // Release the reader and its history permit before the
+                    // writer re-run, so a replica-error burst can't fill the cap.
+                    drop(tx);
                     crate::feed::query_mentions(
                         &self.pool,
                         community,
@@ -455,7 +458,7 @@ impl Db {
                 RoutePredicate::Bounded,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             RouteDecision::Replica(mut tx, _entry, reason) => {
                 match crate::feed::query_needs_action_on(
@@ -481,6 +484,9 @@ impl Db {
                     Err(e) => {
                         tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                         Self::record_route(path, "writer", "replica_error");
+                        // Release the reader and its history permit before the
+                        // writer re-run, so a replica-error burst can't fill the cap.
+                        drop(tx);
                         crate::feed::query_needs_action(
                             &self.pool,
                             community,
@@ -538,7 +544,7 @@ impl Db {
                 RoutePredicate::Bounded,
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             RouteDecision::Replica(mut tx, _entry, reason) => match crate::feed::query_activity_on(
                 &mut tx,
@@ -562,6 +568,9 @@ impl Db {
                 Err(e) => {
                     tracing::warn!(path, "replica read failed; re-running on writer: {e}");
                     Self::record_route(path, "writer", "replica_error");
+                    // Release the reader and its history permit before the
+                    // writer re-run, so a replica-error burst can't fill the cap.
+                    drop(tx);
                     crate::feed::query_activity(
                         &self.pool,
                         community,

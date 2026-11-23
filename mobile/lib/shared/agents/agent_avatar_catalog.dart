@@ -1,5 +1,155 @@
-/// Avatar artwork shared with the desktop catalog (20260925T154625166Z).
+/// Avatar artwork shared with the desktop catalog, including Buzzies.
 const agentAvatarCatalog = <({String name, String url})>[
+  (
+    name: 'Buzzies 1',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-1.png',
+  ),
+  (
+    name: 'Buzzies 2',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-2.png',
+  ),
+  (
+    name: 'Buzzies 3',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-3.png',
+  ),
+  (
+    name: 'Buzzies 4',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-4.png',
+  ),
+  (
+    name: 'Buzzies 5',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-5.png',
+  ),
+  (
+    name: 'Buzzies 6',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-6.png',
+  ),
+  (
+    name: 'Buzzies 7',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-7.png',
+  ),
+  (
+    name: 'Buzzies 8',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-8.png',
+  ),
+  (
+    name: 'Buzzies 9',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-9.png',
+  ),
+  (
+    name: 'Buzzies 10',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-10.png',
+  ),
+  (
+    name: 'Buzzies 11',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-11.png',
+  ),
+  (
+    name: 'Buzzies 12',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-12.png',
+  ),
+  (
+    name: 'Buzzies 13',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-13.png',
+  ),
+  (
+    name: 'Buzzies 14',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-14.png',
+  ),
+  (
+    name: 'Buzzies 15',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-15.png',
+  ),
+  (
+    name: 'Buzzies 16',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-16.png',
+  ),
+  (
+    name: 'Buzzies 17',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-17.png',
+  ),
+  (
+    name: 'Buzzies 18',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-18.png',
+  ),
+  (
+    name: 'Buzzies 19',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-19.png',
+  ),
+  (
+    name: 'Buzzies 20',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-20.png',
+  ),
+  (
+    name: 'Buzzies 21',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-21.png',
+  ),
+  (
+    name: 'Buzzies 22',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-22.png',
+  ),
+  (
+    name: 'Buzzies 23',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-23.png',
+  ),
+  (
+    name: 'Buzzies 24',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-24.png',
+  ),
+  (
+    name: 'Buzzies 25',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-25.png',
+  ),
+  (
+    name: 'Buzzies 26',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-26.png',
+  ),
+  (
+    name: 'Buzzies 27',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-27.png',
+  ),
+  (
+    name: 'Buzzies 28',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-28.png',
+  ),
+  (
+    name: 'Buzzies 32',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-32.png',
+  ),
+  (
+    name: 'Buzzies 33',
+    url:
+        'https://dwwgwmfqqjotj.cloudfront.net/avatars/20261030T174937230Z/poster/buzzies/buzzies-33.png',
+  ),
   (
     name: 'Fuzzies 1',
     url:
@@ -246,3 +396,19 @@ const agentAvatarCatalog = <({String name, String url})>[
         'https://dwwgwmfqqjotj.cloudfront.net/avatars/20260925T154625166Z/poster/pollies/pollies-25.png',
   ),
 ];
+
+/// Character collections in desktop display order.
+enum AgentAvatarPack {
+  buzzies('Buzzies'),
+  fuzzies('Fuzzies'),
+  gloopies('Gloopies'),
+  figgies('Figgies');
+
+  const AgentAvatarPack(this.label);
+  final String label;
+
+  List<int> get indices => [
+    for (var i = 0; i < agentAvatarCatalog.length; i++)
+      if (agentAvatarCatalog[i].name.startsWith('$label ')) i,
+  ];
+}

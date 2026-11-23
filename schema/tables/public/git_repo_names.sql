@@ -1,7 +1,7 @@
 -- ── Additive tenant tables represented in migrations 0002/0007/0017 ──────────
 -- Keep desired-state schema parity with the embedded SQLx migration path.
 CREATE TABLE git_repo_names (
-    community_id  UUID NOT NULL REFERENCES communities(id),
+    community_id  UUID NOT NULL,
     repo_id       TEXT NOT NULL,
     owner_pubkey  TEXT NOT NULL,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),

@@ -1,15 +1,13 @@
 //! Reversible whole-community lifecycle commands.
 
 use anyhow::{Context, Result};
-use buzz_core::tenant::{normalize_host, relay_url_authority, TenantContext};
+use buzz_core::tenant::{normalize_host, relay_url_authority, TenantContext, MAX_HOST_LEN};
 use buzz_db::{ArchivedCommunityRecord, UnarchivedCommunityRecord};
 use buzz_pubsub::conn_control::ConnControl;
 use buzz_pubsub::PubSubManager;
 use clap::Subcommand;
 use serde_json::{json, Value};
 use url::{Host, Url};
-
-const MAX_HOST_LEN: usize = 255;
 
 /// Reversible community lifecycle actions.
 #[derive(Debug, Subcommand)]
@@ -154,9 +152,8 @@ async fn unarchive(
 
 async fn publish_disconnect(tenant: &TenantContext, command: &ConnControl) -> Result<i64> {
     let redis_url = std::env::var("REDIS_URL").context("REDIS_URL is required")?;
-    let redis_pool = deadpool_redis::Config::from_url(&redis_url)
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .context("Redis pool creation failed")?;
+    let redis_pool =
+        buzz_pubsub::redis_connection(&redis_url).context("Redis connection setup failed")?;
     let pubsub = PubSubManager::new(&redis_url, redis_pool)
         .await
         .context("PubSub init failed")?;

@@ -3,7 +3,7 @@ import UIKit
 import CoreText
 
 /// Profile draft presentation; persistence and the existing avatar editor stay in Dart.
-final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationControllerDelegate {
+final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationControllerDelegate, UIViewControllerTransitioningDelegate {
   private let channel: FlutterMethodChannel
   private var navigation: UINavigationController?
   private var pending: FlutterResult?
@@ -81,6 +81,7 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
       }
       let nav = UINavigationController(rootViewController: controller)
       nav.modalPresentationStyle = .overFullScreen
+      nav.transitioningDelegate = self
       nav.overrideUserInterfaceStyle = args["dark"] as? Bool == true ? .dark : .light
       self.pending = result; self.session = session; self.navigation = nav
       controller.loadViewIfNeeded()
@@ -181,9 +182,9 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
     let messenger = engine.binaryMessenger
     engine.registrar(forPlugin: "BuzzNavigationGlassButton")?.register(NavigationGlassButtonFactory(messenger: messenger), withId: "buzz/navigation_glass")
     engine.registrar(forPlugin: "BuzzNativeSegmentedControl")?.register(NativeSegmentedControlFactory(messenger: messenger), withId: "buzz/native_segmented_control")
-    engine.registrar(forPlugin: "BuzzNativeSkinToneControl")?.register(NativeSkinToneControlFactory(messenger: messenger), withId: "buzz/native_skin_tone_control")
     let editor = FlutterViewController(engine: engine, nibName: nil, bundle: nil)
     avatarController = editor
+    engine.registrar(forPlugin: "BuzzToastLayer")?.register(ToastLayerFactory(), withId: "buzz/toast_layer")
     engine.registrar(forPlugin: "BuzzIosNavigationBar")?.register(IosNavigationBarFactory(messenger: messenger, parent: editor), withId: "buzz/ios_navigation_bar")
     editor.isViewOpaque = false
     editor.view.backgroundColor = .clear
@@ -257,6 +258,50 @@ final class NativeProfileSetupCoordinator: NSObject, UIAdaptivePresentationContr
     result?(action)
   }
   func presentationControllerDidDismiss(_ presentationController: UIPresentationController) { complete("skip") }
+
+  func animationController(forPresented presented: UIViewController, presenting: UIViewController,
+                           source: UIViewController) -> UIViewControllerAnimatedTransitioning? {
+    ProfileSetupPageTransition(presenting: true)
+  }
+
+  func animationController(forDismissed dismissed: UIViewController) -> UIViewControllerAnimatedTransitioning? {
+    ProfileSetupPageTransition(presenting: false)
+  }
+}
+
+/// Matches the horizontal forward/backward motion of the Flutter onboarding pages.
+private final class ProfileSetupPageTransition: NSObject, UIViewControllerAnimatedTransitioning {
+  let presenting: Bool
+  init(presenting: Bool) { self.presenting = presenting }
+
+  func transitionDuration(using context: UIViewControllerContextTransitioning?) -> TimeInterval { 0.25 }
+
+  func animateTransition(using context: UIViewControllerContextTransitioning) {
+    let key: UITransitionContextViewControllerKey = presenting ? .to : .from
+    guard let controller = context.viewController(forKey: key) else {
+      context.completeTransition(false)
+      return
+    }
+    guard let view = context.view(forKey: presenting ? .to : .from) ?? controller.view else {
+      context.completeTransition(false)
+      return
+    }
+    let distance = context.containerView.bounds.width
+    if presenting {
+      view.frame = context.finalFrame(for: controller)
+      context.containerView.addSubview(view)
+      view.transform = CGAffineTransform(translationX: distance, y: 0)
+    }
+    UIView.animate(withDuration: transitionDuration(using: context), delay: 0,
+                   options: [.curveEaseOut, .beginFromCurrentState]) {
+      view.transform = self.presenting ? .identity : CGAffineTransform(translationX: distance, y: 0)
+    } completion: { _ in
+      let completed = !context.transitionWasCancelled
+      if !self.presenting && completed { view.removeFromSuperview() }
+      view.transform = .identity
+      context.completeTransition(completed)
+    }
+  }
 }
 
 private final class NativeProfileSetupController: UIViewController, UITextFieldDelegate {
@@ -296,11 +341,21 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
     view.tintColor = UIColor(red: CGFloat((argb >> 16) & 255) / 255, green: CGFloat((argb >> 8) & 255) / 255, blue: CGFloat(argb & 255) / 255, alpha: 1)
     let stack = UIStackView(); stack.axis = .vertical; stack.spacing = 16; stack.translatesAutoresizingMaskIntoConstraints = false
     let scroll = UIScrollView(); scroll.translatesAutoresizingMaskIntoConstraints = false
+    NavigationTopEdge.configure(scroll, item: navigationItem)
+    if #available(iOS 15.0, *) { setContentScrollView(scroll) }
     view.addSubview(scroll); scroll.addSubview(stack)
+    // Content keeps its original keyboard-aware height while the scroll view
+    // extends beneath navigation for the system soft edge.
+    let contentViewport = UILayoutGuide()
+    view.addLayoutGuide(contentViewport)
     NSLayoutConstraint.activate([
-      scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor), scroll.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
+      contentViewport.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+      contentViewport.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
+      contentViewport.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      contentViewport.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      scroll.topAnchor.constraint(equalTo: view.topAnchor), scroll.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
       scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-      stack.heightAnchor.constraint(greaterThanOrEqualTo: scroll.frameLayoutGuide.heightAnchor, constant: -48),
+      stack.heightAnchor.constraint(greaterThanOrEqualTo: contentViewport.heightAnchor, constant: -48),
       stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor, constant: 24), stack.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor, constant: -24),
       stack.leadingAnchor.constraint(equalTo: scroll.frameLayoutGuide.leadingAnchor, constant: 24), stack.trailingAnchor.constraint(equalTo: scroll.frameLayoutGuide.trailingAnchor, constant: -24)
     ])
@@ -506,13 +561,6 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
       hasAvatar = true
       avatar.setImage(avatarPreview(image: image), for: .normal); avatar.imageView?.contentMode = .scaleAspectFit
       avatar.clipsToBounds = false; avatar.layer.cornerRadius = 0
-    } else if let emoji = args["emoji"] as? String {
-      hasAvatar = true
-      let argb = (args["emojiColor"] as? NSNumber)?.uint32Value ?? 0xFFFFFFFF
-      let background = UIColor(red: CGFloat((argb >> 16) & 255) / 255, green: CGFloat((argb >> 8) & 255) / 255, blue: CGFloat(argb & 255) / 255, alpha: 1)
-      avatar.setImage(avatarPreview(emoji: emoji, background: background), for: .normal)
-      avatar.imageView?.contentMode = .scaleAspectFit
-      avatar.clipsToBounds = false; avatar.layer.cornerRadius = 0
     } else {
       avatar.setImage(tablerPlusImage(), for: .normal)
       let ring = CAShapeLayer(); ring.path = UIBezierPath(ovalIn: CGRect(x: 2, y: 2, width: avatarSize - 4, height: avatarSize - 4)).cgPath
@@ -531,29 +579,13 @@ private final class NativeProfileSetupController: UIViewController, UITextFieldD
   }
 
   /// Mirrors Flutter's 220-point preview and AvatarBadgeMaskGeometry.badge.
-  private func avatarPreview(image: UIImage? = nil, emoji: String? = nil, background: UIColor = .clear) -> UIImage {
+  private func avatarPreview(image: UIImage) -> UIImage {
     UIGraphicsImageRenderer(size: CGSize(width: avatarSize, height: avatarSize)).image { renderer in
-      let bounds = CGRect(x: 0, y: 0, width: avatarSize, height: avatarSize)
       renderer.cgContext.saveGState()
       avatarBadgePath().addClip()
-      background.setFill(); UIRectFill(bounds)
-      if let image {
-        let scale = max(avatarSize / image.size.width, avatarSize / image.size.height)
-        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
-        image.draw(in: CGRect(x: (avatarSize - size.width) / 2, y: (avatarSize - size.height) / 2, width: size.width, height: size.height))
-      }
-      if let emoji {
-        // Same font/optical box ratio as _EmojiAvatarPreview, including wide sequences.
-        let box = avatarSize * 258 / 512
-        let text = NSAttributedString(string: emoji, attributes: [.font: UIFont.systemFont(ofSize: box)])
-        let size = text.size()
-        let scale = min(1, box / size.width)
-        renderer.cgContext.saveGState()
-        renderer.cgContext.translateBy(x: (avatarSize - size.width * scale) / 2, y: (avatarSize - size.height * scale) / 2 - 1)
-        renderer.cgContext.scaleBy(x: scale, y: scale)
-        text.draw(at: .zero)
-        renderer.cgContext.restoreGState()
-      }
+      let scale = max(avatarSize / image.size.width, avatarSize / image.size.height)
+      let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+      image.draw(in: CGRect(x: (avatarSize - size.width) / 2, y: (avatarSize - size.height) / 2, width: size.width, height: size.height))
       renderer.cgContext.restoreGState()
       let diameter = avatarSize * 54 / 192
       let center = avatarSize * 165 / 192

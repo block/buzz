@@ -1,3 +1,5 @@
+import { sidebarFlagTimeMillis } from "./sidebarFlagTime";
+
 const STORAGE_KEY_PREFIX = "buzz-channel-stars.v1";
 export const MAX_CHANNEL_STAR_ENTRIES = 500;
 
@@ -77,8 +79,10 @@ export function boundStarStore(
   if (entries.length + (preservedEntry ? 1 : 0) <= MAX_CHANNEL_STAR_ENTRIES)
     return store;
   entries.sort(([leftId, left], [rightId, right]) => {
-    if (left.updatedAt !== right.updatedAt)
-      return left.updatedAt - right.updatedAt;
+    const age =
+      sidebarFlagTimeMillis(left.updatedAt) -
+      sidebarFlagTimeMillis(right.updatedAt);
+    if (age !== 0) return age;
     return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
   });
   const retainedEntries = entries.slice(
@@ -121,7 +125,10 @@ export function mergeStores(
     const l = local.channels[id];
     const r = remote.channels[id];
     if (l && r) {
-      merged[id] = l.updatedAt >= r.updatedAt ? l : r;
+      merged[id] =
+        sidebarFlagTimeMillis(l.updatedAt) >= sidebarFlagTimeMillis(r.updatedAt)
+          ? l
+          : r;
     } else {
       merged[id] = (l ?? r) as ChannelStarEntry;
     }

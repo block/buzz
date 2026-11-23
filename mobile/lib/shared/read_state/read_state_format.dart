@@ -1,12 +1,30 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 
 import '../relay/nostr_models.dart';
 
 const readStateDTagPrefix = 'read-state:';
+
+/// The isolated version-2 record for whole-channel manual unread (NIP-RS,
+/// Expiring unread state). Read positions stay in the `read-state:` record.
+const readStateUnreadDTagPrefix = 'read-state-unread-v2:';
+const readStateUnreadTag = 'read-state-unread-v2';
+
+/// A mark stays live at most this long after its set stamp.
+const overrideLifetimeSeconds = 30 * 24 * 60 * 60;
+
+/// A dead group is kept this much longer than the lifetime before discard.
+const overrideDiscardGuardSeconds = 600;
+
+/// A group stamped further ahead than this is deferred, not merged.
+const overrideFutureLimitSeconds = 660;
+
+/// An action stamp may run at most this far ahead of the local clock.
+const overrideAllocationAheadSeconds = 60;
 const readStateFetchLimit = 500;
-const readStateHorizonSeconds = 7 * 24 * 60 * 60;
+const readStateHorizonSeconds = 30 * 24 * 60 * 60;
 const _maxContexts = 10000;
 const msgContextPrefix = 'msg:';
 const threadContextPrefix = 'thread:';
@@ -14,16 +32,18 @@ const threadContextPrefix = 'thread:';
 String msgContextKey(String messageId) => '$msgContextPrefix$messageId';
 String threadContextKey(String rootId) => '$threadContextPrefix$rootId';
 
-/// Catch-up marks, written by the web and desktop app (`buzz-app`) when the
-/// reader reaches the bottom of a channel or thread. `activity:<channel>`
-/// reads ordinary top-level messages up to its time; `thread-activity:<root>`
-/// reads that thread's replies. Neither reads mentions, broadcasts or DMs
-/// in the channel, so neither is a channel marker.
+/// Legacy catch-up marks. Catch-up now advances the channel or `thread:`
+/// frontier, so these are only read, never written: older installations may
+/// still write them. `activity:<channel>` reads ordinary top-level messages
+/// up to its time; `thread-activity:<root>` reads that thread's replies.
+/// Neither reads mentions, broadcasts or DMs in the channel.
 String activityContextKey(String channelId) => 'activity:$channelId';
 String threadActivityContextKey(String rootId) => 'thread-activity:$rootId';
 
 /// Whether `activity:<channel>` reads a message: an ordinary top-level
-/// message, not a reply, mention, broadcast or DM.
+/// message, not a reply, mention, broadcast or DM. Callers pass a message
+/// with the broadcast tag as [isReply], with or without a parent:
+/// [highPriority] means only a mention of the reader.
 bool readByChannelCatchUp({
   required bool isDm,
   required bool isReply,
@@ -34,50 +54,26 @@ bool readByChannelCatchUp({
 /// (`buzz-app`) uses the same limit, well under NIP-44's 64 KiB maximum.
 const readStatePlaintextBytes = 40 * 1024;
 
-/// The most `msg:` and `thread:` marks this device saves. The desktop app
-/// uses the same limit.
-const localMaxPrunableContexts = 1000;
+/// The implicit read frontier: timestamps at or below it are read even
+/// when no device has retained an explicit mark.
+int readStateFloor(int nowUnixSeconds) =>
+    (nowUnixSeconds - readStateHorizonSeconds).clamp(0, 4294967295);
 
-bool _isPrunableContext(String contextId) =>
-    contextId.startsWith(msgContextPrefix) ||
-    contextId.startsWith(threadContextPrefix);
-
-/// The marks from [contexts] that this device saves, following the desktop
-/// app's `pruneStaleContexts`. It drops `msg:` and `thread:` marks older
-/// than the fetch horizon, then keeps the newest [localMaxPrunableContexts]
-/// of them. Each automatic read writes a `msg:` mark, so without this bound
-/// the saved state, and the time to save it, would grow with every read.
-/// Channel and catch-up marks are kept: there is one per channel or thread,
-/// and losing one would show read messages as unread again.
+/// Retain recent hints without count-based eviction. Override registers are
+/// permanent; their co-located frontiers are retained by the owner as well.
 Map<String, int> pruneStaleContexts(
   Map<String, int> contexts, {
   required int nowUnixSeconds,
-}) {
-  final cutoff = nowUnixSeconds - readStateHorizonSeconds;
-  final kept = <String, int>{};
-  final prunable = <MapEntry<String, int>>[];
-  for (final entry in contexts.entries) {
-    if (!_isPrunableContext(entry.key)) {
-      kept[entry.key] = entry.value;
-    } else if (entry.value >= cutoff) {
-      prunable.add(entry);
-    }
-  }
-  prunable.sort((a, b) {
-    final byTime = b.value.compareTo(a.value);
-    return byTime != 0 ? byTime : a.key.compareTo(b.key);
-  });
-  for (final entry in prunable.take(localMaxPrunableContexts)) {
-    kept[entry.key] = entry.value;
-  }
-  return kept;
-}
+}) => {
+  for (final entry in contexts.entries)
+    if (isOverrideContext(entry.key) ||
+        entry.value >= readStateFloor(nowUnixSeconds))
+      entry.key: entry.value,
+};
 
-/// Whether [contextId] belongs to the web app's manual-unread overrides
-/// (`ov_s:`, `ov_c:`, `ov_b:`) or their escaped frontiers (`esc:`). This app
-/// does not read overrides. It does not take them from other slots, but it
-/// carries the ones already in its own slot unchanged: NIP-RS forbids
-/// dropping them, and an old version of this app copied them there.
+/// Whether [contextId] is a manual-unread override counter (`ov_s:`,
+/// `ov_c:`, `ov_b:`) or an escaped frontier (`esc:`). Counters are handled
+/// as whole groups, never as frontiers.
 bool isOverrideContext(String contextId) =>
     contextId.startsWith('ov_') || contextId.startsWith('esc:');
 
@@ -120,6 +116,91 @@ Map<String, Map<String, int>> _overrideGroups(Map<String, int> contexts) {
   };
 }
 
+/// Whether an override group for [target] is synchronized state. Only
+/// whole-channel groups are: a `msg:` or `thread:` group, or any other
+/// prefixed context, is ignored on read and never published.
+bool isChannelOverrideTarget(String target) => !target.contains(':');
+
+/// One merged manual-unread register: set counter, clear counter, baseline.
+typedef OverrideRegister = ({int s, int c, int b});
+
+/// The channel override registers carried by [contexts], from groups that
+/// are complete and travel with their frontier. A tombstone reads as
+/// `(0, C, 0)`.
+Map<String, OverrideRegister> channelOverrideRegisters(
+  Map<String, int> contexts,
+) {
+  final groups = completeOverrideGroups(contexts);
+  return {
+    for (final target in _overrideGroups(groups).keys)
+      if (isChannelOverrideTarget(target))
+        target: (
+          s: groups['ov_s:$target'] ?? 0,
+          c: groups['ov_c:$target'] ?? 0,
+          b: groups['ov_b:$target'] ?? 0,
+        ),
+  };
+}
+
+/// NIP-RS's register merge: componentwise `max()`.
+OverrideRegister mergeOverrideRegisters(
+  OverrideRegister a,
+  OverrideRegister b,
+) => (s: max(a.s, b.s), c: max(a.c, b.c), b: max(a.b, b.b));
+
+/// NIP-RS's Liveness Predicate against the merged frontier [frontier], at
+/// expiry clock [now]: a mark expires [overrideLifetimeSeconds] after its set.
+bool isOverrideActive(
+  OverrideRegister register,
+  int frontier, {
+  required int now,
+}) =>
+    register.s > 0 &&
+    frontier <= register.b &&
+    register.s > register.c &&
+    register.s >= now - overrideLifetimeSeconds;
+
+/// The greatest action stamp of [register]: its canonical floor K once dead.
+int overrideStamp(OverrideRegister register) => max(register.s, register.c);
+
+/// Whether a received group is a replay too old to merge.
+bool isOverrideExpired(OverrideRegister register, {required int now}) =>
+    overrideStamp(register) < now - overrideLifetimeSeconds;
+
+/// Whether a dead group, its ceiling and its paired frontier may be dropped.
+bool isOverrideDiscardable(OverrideRegister register, {required int now}) =>
+    overrideStamp(register) <
+    now - overrideLifetimeSeconds - overrideDiscardGuardSeconds;
+
+/// The canonical wire keys of [registers]: a live group publishes all three
+/// counters, a dead one only its tombstone floor `ov_c: = max(S, C)`.
+/// The stamp an action on [register] takes (NIP-RS Expiring unread state),
+/// or null when it would pass uint32 or run more than 60 seconds ahead.
+int? allocateOverrideStamp(OverrideRegister register, {required int now}) {
+  final stamp = max(now, overrideStamp(register) + 1);
+  return stamp > 4294967295 || stamp > now + overrideAllocationAheadSeconds
+      ? null
+      : stamp;
+}
+
+/// Whether a received group is too far ahead to merge yet.
+bool isOverrideDeferred(OverrideRegister register, {required int now}) =>
+    overrideStamp(register) > now + overrideFutureLimitSeconds;
+
+Map<String, int> canonicalOverrideEntries(
+  Map<String, OverrideRegister> registers,
+  int Function(String target) frontierOf, {
+  required int now,
+}) => {
+  for (final MapEntry(key: target, value: r) in registers.entries)
+    if (isOverrideActive(r, frontierOf(target), now: now)) ...{
+      'ov_s:$target': r.s,
+      'ov_c:$target': r.c,
+      'ov_b:$target': r.b,
+    } else
+      'ov_c:$target': max(r.s, r.c),
+};
+
 /// The override keys of [contexts] that this app may carry. NIP-RS accepts
 /// an override group only whole (see [_isOverrideShape]), and a group must
 /// travel with its frontier, found in [contexts] or [frontiers]. Any other
@@ -145,128 +226,6 @@ Map<String, int> completeOverrideGroups(
   return kept;
 }
 
-/// The frontier keys that must travel with the override groups in
-/// [contexts] (NIP-RS's co-location rule).
-Set<String> overrideGroupFrontierKeys(Map<String, int> contexts) => {
-  for (final target in _overrideGroups(contexts).keys)
-    overrideFrontierKey(target),
-};
-
-/// Whether this device republishes a mark it merged from another device's
-/// slot. Message marks are not republished: each covers one message, and the
-/// web app prunes them once a catch-up mark reads the message. Broad marks
-/// are republished so they outlive the fetch horizon of the slot that wrote
-/// them.
-bool republishesMergedContext(String contextId) =>
-    !contextId.startsWith(msgContextPrefix) && !isOverrideContext(contextId);
-
-/// Keep order for a slot that is over budget, following `buzz-app`'s
-/// retention: channel marks first, then thread marks, then catch-up marks,
-/// then message marks.
-int _retentionScope(String key) {
-  if (!key.contains(':')) return 0;
-  if (key.startsWith(threadContextPrefix)) return 1;
-  if (key.startsWith('activity:') || key.startsWith('thread-activity:')) {
-    return 2;
-  }
-  return 3;
-}
-
-/// The share of the budget that broad marks may fill before recent use
-/// decides. The rest always goes to the most recently written marks, so a
-/// new read is never left out because old channel or thread marks fill the
-/// budget. `buzz-app` uses the same share.
-const _scopedShare = 0.75;
-
-/// The marks from [contexts] that fit one read-state slot for [clientId]
-/// within [maxBytes] of plaintext, following `buzz-app`'s retention.
-///
-/// Up to three quarters of the budget goes to broad marks first: channel
-/// marks, then thread marks, then catch-up marks, then message marks. The
-/// rest goes by [recent], the time each mark was last written, newest first,
-/// so reading old history still syncs. A slot over NIP-44's limit cannot be
-/// encrypted, so without this cap sync would stop.
-///
-/// [carried] override groups are kept whole, ahead of every mark, together
-/// with each group's frontier from [contexts]: NIP-RS requires a context's
-/// frontier and its override keys in the same event. Incomplete groups are
-/// left out (see [completeOverrideGroups]). If the groups do not fit, this
-/// returns null, and the caller must leave the slot as it is instead of
-/// publishing part of a group.
-Map<String, int>? retainReadStateContexts(
-  Map<String, int> contexts, {
-  required String clientId,
-  Map<String, int> recent = const {},
-  Map<String, int> carried = const {},
-  int maxBytes = readStatePlaintextBytes,
-}) {
-  // JSON-encoded bytes, so escaped characters are counted as published.
-  int bytesOf(Object? value) => utf8.encode(jsonEncode(value)).length;
-  final groups = completeOverrideGroups(carried, frontiers: contexts);
-  final reserved = <String, int>{...groups};
-  for (final key in overrideGroupFrontierKeys(groups)) {
-    final frontier = contexts[key];
-    if (frontier != null && frontier > (reserved[key] ?? -1)) {
-      reserved[key] = frontier;
-    }
-  }
-  final fixedBytes = bytesOf(
-    ReadStateBlob(clientId: clientId, contexts: reserved).toJson(),
-  );
-  if (fixedBytes > maxBytes || reserved.length > _maxContexts) return null;
-  // Marks share what the carried keys leave.
-  final markBytes = maxBytes - fixedBytes;
-  final markCount = _maxContexts - reserved.length;
-  var used = 0;
-  var count = 0;
-  bool take(MapEntry<String, int> entry, double share) {
-    // A key, its colon, its value and one separating comma.
-    final cost = bytesOf(entry.key) + 2 + '${entry.value}'.length;
-    if (used + cost > markBytes * share || count >= markCount * share) {
-      return false;
-    }
-    used += cost;
-    count++;
-    return true;
-  }
-
-  int byUse(MapEntry<String, int> a, MapEntry<String, int> b) {
-    final byRecent = (recent[b.key] ?? 0).compareTo(recent[a.key] ?? 0);
-    if (byRecent != 0) return byRecent;
-    final byTime = b.value.compareTo(a.value);
-    return byTime != 0 ? byTime : a.key.compareTo(b.key);
-  }
-
-  final retained = <String, int>{...reserved};
-  final scoped =
-      contexts.entries
-          .where((entry) => !reserved.containsKey(entry.key))
-          .toList()
-        ..sort((a, b) {
-          final byScope = _retentionScope(
-            a.key,
-          ).compareTo(_retentionScope(b.key));
-          return byScope != 0 ? byScope : byUse(a, b);
-        });
-  for (final entry in scoped) {
-    // Stop at the first broad mark that does not fit, so a narrower mark
-    // never takes the share ahead of it.
-    if (!take(entry, _scopedShare)) break;
-    retained[entry.key] = entry.value;
-  }
-  final byRecent =
-      contexts.entries
-          .where((entry) => !reserved.containsKey(entry.key))
-          .toList()
-        ..sort(byUse);
-  for (final entry in byRecent) {
-    if (!retained.containsKey(entry.key) && take(entry, 1)) {
-      retained[entry.key] = entry.value;
-    }
-  }
-  return retained;
-}
-
 int? maxReadAt(Iterable<int?> markers) {
   int? latest;
   for (final marker in markers) {
@@ -284,11 +243,17 @@ class ReadStateBlob {
   final String clientId;
   final Map<String, int> contexts;
 
-  ReadStateBlob({required this.clientId, required Map<String, int> contexts})
-    : contexts = Map.unmodifiable(contexts);
+  /// 1 for read positions, 2 for the expiring unread record.
+  final int version;
+
+  ReadStateBlob({
+    required this.clientId,
+    required Map<String, int> contexts,
+    this.version = 1,
+  }) : contexts = Map.unmodifiable(contexts);
 
   Map<String, dynamic> toJson() => {
-    'v': 1,
+    'v': version,
     'client_id': clientId,
     'contexts': contexts,
   };
@@ -316,12 +281,15 @@ Map<String, Object?>? asStringObjectMap(Object? value) {
   return (value as Map).cast<String, Object?>();
 }
 
-bool isValidReadStateDTag(String? value) {
-  if (value == null || !value.startsWith(readStateDTagPrefix)) {
+bool isValidReadStateDTag(String? value, {bool unread = false}) {
+  final prefix = unread ? readStateUnreadDTagPrefix : readStateDTagPrefix;
+  if (value == null || !value.startsWith(prefix)) {
     return false;
   }
 
-  final slotId = value.substring(readStateDTagPrefix.length);
+  final slotId = value.substring(prefix.length);
+  // Version 2 admits only the 32 lowercase hex slots it publishes.
+  if (unread) return RegExp(r'^[0-9a-f]{32}$').hasMatch(slotId);
   if (slotId.isEmpty || slotId.length > 64) {
     return false;
   }
@@ -334,23 +302,28 @@ bool isValidReadStateDTag(String? value) {
   return true;
 }
 
-bool hasValidReadStateTags(NostrEvent event) {
+/// Whether [event] carries the version-2 unread record's tags.
+bool hasValidUnreadStateTags(NostrEvent event) =>
+    hasValidReadStateTags(event, unread: true);
+
+bool hasValidReadStateTags(NostrEvent event, {bool unread = false}) {
   final dTags = event.tags.where((tag) => tag.isNotEmpty && tag[0] == 'd');
   if (dTags.length != 1) {
     return false;
   }
   final dTag = dTags.single;
-  if (dTag.length < 2 || !isValidReadStateDTag(dTag[1])) {
+  if (dTag.length < 2 || !isValidReadStateDTag(dTag[1], unread: unread)) {
     return false;
   }
 
+  final tag = unread ? readStateUnreadTag : 'read-state';
   final tTags = event.tags.where(
-    (tag) => tag.length >= 2 && tag[0] == 't' && tag[1] == 'read-state',
+    (t) => t.length >= 2 && t[0] == 't' && t[1] == tag,
   );
   return tTags.length == 1;
 }
 
-ReadStateBlob? decodeReadStateBlob(String plaintext) {
+ReadStateBlob? decodeReadStateBlob(String plaintext, {int version = 1}) {
   final Object? parsed;
   try {
     parsed = jsonDecode(plaintext);
@@ -361,7 +334,7 @@ ReadStateBlob? decodeReadStateBlob(String plaintext) {
   final record = asStringObjectMap(parsed);
   if (record == null) return null;
 
-  if (record['v'] != 1) return null;
+  if (record['v'] != version) return null;
 
   final clientId = record['client_id'];
   if (clientId is! String || clientId.isEmpty || clientId.runes.length > 64) {
@@ -373,9 +346,18 @@ ReadStateBlob? decodeReadStateBlob(String plaintext) {
     return null;
   }
 
+  final sanitized = sanitizeReadStateContexts(contexts);
   return ReadStateBlob(
     clientId: clientId,
-    contexts: sanitizeReadStateContexts(contexts),
+    version: version,
+    // Version 1 override keys are never v2 intent (no import); version 2
+    // carries only channel groups and their paired frontiers.
+    contexts: version == 1
+        ? {
+            for (final entry in sanitized.entries)
+              if (!entry.key.startsWith('ov_')) entry.key: entry.value,
+          }
+        : _unreadContexts(sanitized),
   );
 }
 
@@ -414,6 +396,20 @@ Map<String, int> sanitizeReadStateContexts(Map<String, Object?> contexts) {
   return sanitized;
 }
 
+/// A version-2 record's complete channel groups with their paired frontiers.
+Map<String, int> _unreadContexts(Map<String, int> contexts) {
+  final groups = completeOverrideGroups(contexts);
+  return {
+    for (final MapEntry(key: target, value: group) in _overrideGroups(
+      groups,
+    ).entries)
+      if (isChannelOverrideTarget(target)) ...{
+        ...group,
+        overrideFrontierKey(target): contexts[overrideFrontierKey(target)]!,
+      },
+  };
+}
+
 DecodedReadStateEvent? decodeReadStateEvent(
   NostrEvent event, {
   required String pubkey,
@@ -422,7 +418,8 @@ DecodedReadStateEvent? decodeReadStateEvent(
   if (event.pubkey.toLowerCase() != pubkey.toLowerCase()) {
     return null;
   }
-  if (!hasValidReadStateTags(event)) {
+  final unread = hasValidUnreadStateTags(event);
+  if (!unread && !hasValidReadStateTags(event)) {
     return null;
   }
 
@@ -440,7 +437,7 @@ DecodedReadStateEvent? decodeReadStateEvent(
     return null;
   }
 
-  final blob = decodeReadStateBlob(plaintext);
+  final blob = decodeReadStateBlob(plaintext, version: unread ? 2 : 1);
   if (blob == null) {
     debugPrint(
       '[ReadStateManager] blob decode failed for event ${event.id.substring(0, 8)}…',

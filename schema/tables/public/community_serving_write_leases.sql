@@ -1,6 +1,6 @@
 CREATE TABLE community_serving_write_leases (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    community_id UUID NOT NULL REFERENCES communities(id),
+    community_id UUID NOT NULL,
     operation TEXT NOT NULL,
     owner TEXT NOT NULL,
     generation BIGINT NOT NULL DEFAULT 1 CHECK (generation > 0),

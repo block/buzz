@@ -2,6 +2,9 @@
 //!
 //! Label values come only from the closed enums in this module. Callers must
 //! never derive labels from tenant data, events, SQL text, or query identifiers.
+//! The one exception is the advisory-lock `kind` label: the event kind of the
+//! locked coordinate, bounded by the kind registry
+//! (`buzz_core::kind::registered_kind_label`).
 
 use std::future::Future;
 use std::sync::Mutex;
@@ -28,7 +31,6 @@ enum PoolOperation {
     ReaderSubscriptionHistory,
     WriterEventWrite,
     WriterMaintenance,
-    ReaderMaintenance,
 }
 
 /// Writer-pool operations. Reader-only combinations cannot be constructed.
@@ -77,17 +79,14 @@ pub(crate) enum ReaderOperation {
     Bootstrap,
     Authorization,
     SubscriptionHistory,
-    /// Leader-only background reads such as fleet usage telemetry.
-    Maintenance,
 }
 
 impl ReaderOperation {
     #[cfg(test)]
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 3] = [
         Self::Bootstrap,
         Self::Authorization,
         Self::SubscriptionHistory,
-        Self::Maintenance,
     ];
 
     const fn pair(self) -> PoolOperation {
@@ -95,26 +94,12 @@ impl ReaderOperation {
             Self::Bootstrap => PoolOperation::ReaderBootstrap,
             Self::Authorization => PoolOperation::ReaderAuthorization,
             Self::SubscriptionHistory => PoolOperation::ReaderSubscriptionHistory,
-            Self::Maintenance => PoolOperation::ReaderMaintenance,
         }
-    }
-
-    /// Whether a dropped checkout must close the connection under SQLx's
-    /// bounded `close_on_drop` instead of returning it to the pool.
-    ///
-    /// Maintenance reads run under relay-side deadlines that drop them
-    /// mid-query when a reader goes dark, and the reader pool is shared with
-    /// serving reads. The pool's release check is bounded, but SQLx's own
-    /// release ping after it is not, so a returned connection whose reader
-    /// goes silent in that window still strands its slot. Close-on-drop
-    /// bounds the whole release. Serving reads keep pooled reuse.
-    pub(crate) const fn bounded_release(self) -> bool {
-        matches!(self, Self::Maintenance)
     }
 }
 
 impl PoolOperation {
-    pub(crate) const ALL: [Self; 12] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::WriterBootstrap,
         Self::ReaderBootstrap,
         Self::WriterReadiness,
@@ -126,15 +111,13 @@ impl PoolOperation {
         Self::ReaderSubscriptionHistory,
         Self::WriterEventWrite,
         Self::WriterMaintenance,
-        Self::ReaderMaintenance,
     ];
 
     pub(crate) const fn pool_role(self) -> &'static str {
         match self {
-            Self::ReaderBootstrap
-            | Self::ReaderAuthorization
-            | Self::ReaderSubscriptionHistory
-            | Self::ReaderMaintenance => DbPoolRole::Reader.as_str(),
+            Self::ReaderBootstrap | Self::ReaderAuthorization | Self::ReaderSubscriptionHistory => {
+                DbPoolRole::Reader.as_str()
+            }
             _ => DbPoolRole::Writer.as_str(),
         }
     }
@@ -150,7 +133,7 @@ impl PoolOperation {
                 "subscription_history"
             }
             Self::WriterEventWrite => "event_write",
-            Self::WriterMaintenance | Self::ReaderMaintenance => "maintenance",
+            Self::WriterMaintenance => "maintenance",
         }
     }
 
@@ -159,7 +142,7 @@ impl PoolOperation {
     }
 }
 
-pub(crate) const POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 12] = [
+pub(crate) const POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 11] = [
     (DbPoolRole::Writer.as_str(), "bootstrap"),
     (DbPoolRole::Reader.as_str(), "bootstrap"),
     (DbPoolRole::Writer.as_str(), "readiness"),
@@ -171,10 +154,9 @@ pub(crate) const POOL_ACQUIRE_VALID_PAIRS: [(&str, &str); 12] = [
     (DbPoolRole::Reader.as_str(), "subscription_history"),
     (DbPoolRole::Writer.as_str(), "event_write"),
     (DbPoolRole::Writer.as_str(), "maintenance"),
-    (DbPoolRole::Reader.as_str(), "maintenance"),
 ];
 
-/// Twelve valid pairs × (12 histogram series + 1 start counter + 4 outcome counters + 1 gauge).
+/// Eleven valid pairs × (12 histogram series + 1 start counter + 4 outcome counters + 1 gauge).
 pub(crate) const POOL_ACQUIRE_RAW_SERIES_PER_POD: usize = POOL_ACQUIRE_VALID_PAIRS.len() * 18;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -313,17 +295,21 @@ fn record_pool_acquire(
 ) {
     // Preserve the original observed population for existing dashboards.
     // Newly instrumented raw-pool seams must not create a deployment-time
-    // discontinuity in these compatibility families.
+    // discontinuity in these compatibility families. They carry `operation`
+    // so a breakdown by it attributes every sample instead of reporting it
+    // as unlabelled; summing over `operation` gives the original series.
     if emit_legacy && outcome != Outcome::Cancelled {
         metrics::histogram!(
             "buzz_db_pool_acquire_wait_seconds",
             "pool_role" => pair.pool_role(),
+            "operation" => pair.operation(),
             "outcome" => outcome.as_str(),
         )
         .record(elapsed.as_secs_f64());
         metrics::counter!(
             "buzz_db_pool_acquisitions_total",
             "pool_role" => pair.pool_role(),
+            "operation" => pair.operation(),
             "outcome" => outcome.as_str(),
         )
         .increment(1);
@@ -556,7 +542,47 @@ pub(crate) async fn begin_transaction(
     Ok((transaction, TransactionTimer::start(operation)))
 }
 
+/// `kind` label of an advisory lock that no event kind keys.
+const UNKEYED_LOCK_KIND: &str = "none";
+
+/// Observe an advisory-lock wait whose key has no event kind; it records
+/// `kind="none"`. Locks keyed by an event coordinate, including every
+/// replacement lock, use [`observe_event_lock`].
 pub(crate) async fn observe_advisory_lock<T, F>(lock_type: LockType, future: F) -> sqlx::Result<T>
+where
+    F: Future<Output = sqlx::Result<T>>,
+{
+    debug_assert_ne!(
+        lock_type,
+        LockType::Replacement,
+        "replacement locks carry an event kind; use observe_event_lock"
+    );
+    observe_lock(lock_type, UNKEYED_LOCK_KIND.into(), future).await
+}
+
+/// Observe an advisory-lock wait on a coordinate of event `kind`. The `kind`
+/// label is the registered kind, or `other` for an unregistered one.
+pub(crate) async fn observe_event_lock<T, F>(
+    lock_type: LockType,
+    kind: i32,
+    future: F,
+) -> sqlx::Result<T>
+where
+    F: Future<Output = sqlx::Result<T>>,
+{
+    observe_lock(
+        lock_type,
+        buzz_core::kind::registered_kind_label(kind).into(),
+        future,
+    )
+    .await
+}
+
+async fn observe_lock<T, F>(
+    lock_type: LockType,
+    kind: metrics::SharedString,
+    future: F,
+) -> sqlx::Result<T>
 where
     F: Future<Output = sqlx::Result<T>>,
 {
@@ -569,12 +595,14 @@ where
     metrics::histogram!(
         "buzz_db_advisory_lock_wait_seconds",
         "lock_type" => lock_type.as_str(),
+        "kind" => kind.clone(),
         "outcome" => outcome.as_str(),
     )
     .record(started.elapsed().as_secs_f64());
     metrics::counter!(
         "buzz_db_advisory_lock_acquisitions_total",
         "lock_type" => lock_type.as_str(),
+        "kind" => kind,
         "outcome" => outcome.as_str(),
     )
     .increment(1);
@@ -623,9 +651,9 @@ impl Drop for TransactionTimer {
 mod tests {
     use super::{
         acquire_reader_with_legacy_metrics, acquire_writer, acquire_writer_with_legacy_metrics,
-        begin_transaction, observe_advisory_lock, record_pool_acquire, refresh_pool_waiters,
-        LockType, Outcome, PoolAcquireAttempt, PoolOperation, ReaderOperation,
-        TransactionOperation, TransactionTimer, WriterOperation,
+        begin_transaction, observe_advisory_lock, observe_event_lock, record_pool_acquire,
+        refresh_pool_waiters, LockType, Outcome, PoolAcquireAttempt, PoolOperation,
+        ReaderOperation, TransactionOperation, TransactionTimer, WriterOperation,
     };
     use metrics_util::debugging::{DebugValue, DebuggingRecorder};
     use std::collections::{BTreeMap, BTreeSet};
@@ -657,10 +685,9 @@ mod tests {
                 PoolOperation::ReaderBootstrap,
                 PoolOperation::ReaderAuthorization,
                 PoolOperation::ReaderSubscriptionHistory,
-                PoolOperation::ReaderMaintenance,
             ]
         );
-        assert_eq!(super::POOL_ACQUIRE_RAW_SERIES_PER_POD, 216);
+        assert_eq!(super::POOL_ACQUIRE_RAW_SERIES_PER_POD, 198);
         assert_eq!(
             LockType::ALL.map(LockType::as_str),
             [
@@ -754,9 +781,18 @@ mod tests {
             Duration::from_millis(34),
             true,
         );
-        let lock_ok: sqlx::Result<()> =
-            observe_advisory_lock(LockType::Replacement, async { Ok(()) }).await;
+        let lock_ok: sqlx::Result<()> = observe_event_lock(
+            LockType::Replacement,
+            buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32,
+            async { Ok(()) },
+        )
+        .await;
         assert!(lock_ok.is_ok());
+        let unregistered_ok: sqlx::Result<()> =
+            observe_event_lock(LockType::Replacement, 30999, async { Ok(()) }).await;
+        assert!(unregistered_ok.is_ok());
+        // The fallback label lives in buzz-core; this file never names it.
+        let unregistered_kind = buzz_core::kind::registered_kind_label(30999);
         let lock_error: sqlx::Result<()> =
             observe_advisory_lock(LockType::Membership, async { Err(sqlx::Error::PoolClosed) })
                 .await;
@@ -786,41 +822,82 @@ mod tests {
             })
             .collect::<BTreeSet<_>>();
 
+        for name in [
+            "buzz_db_pool_acquire_wait_seconds",
+            "buzz_db_pool_acquisitions_total",
+        ] {
+            let labels = [
+                ("operation", "subscription_history"),
+                ("outcome", "timeout"),
+                ("pool_role", "reader"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect::<BTreeMap<_, _>>();
+            assert!(
+                keys.contains(&(name.to_owned(), labels)),
+                "legacy family {name} must carry the operation label; got {keys:?}"
+            );
+        }
         for expected in [
             (
-                "buzz_db_pool_acquire_wait_seconds",
-                [("outcome", "timeout"), ("pool_role", "reader")],
-            ),
-            (
-                "buzz_db_pool_acquisitions_total",
-                [("outcome", "timeout"), ("pool_role", "reader")],
+                "buzz_db_advisory_lock_wait_seconds",
+                &[
+                    ("lock_type", "replacement"),
+                    ("kind", "13534"),
+                    ("outcome", "success"),
+                ][..],
             ),
             (
                 "buzz_db_advisory_lock_wait_seconds",
-                [("lock_type", "replacement"), ("outcome", "success")],
+                &[
+                    ("lock_type", "replacement"),
+                    ("kind", unregistered_kind.as_str()),
+                    ("outcome", "success"),
+                ],
             ),
             (
                 "buzz_db_advisory_lock_wait_seconds",
-                [("lock_type", "membership"), ("outcome", "error")],
+                &[
+                    ("lock_type", "membership"),
+                    ("kind", "none"),
+                    ("outcome", "error"),
+                ],
             ),
             (
                 "buzz_db_advisory_lock_acquisitions_total",
-                [("lock_type", "replacement"), ("outcome", "success")],
+                &[
+                    ("lock_type", "replacement"),
+                    ("kind", "13534"),
+                    ("outcome", "success"),
+                ],
             ),
             (
                 "buzz_db_advisory_lock_acquisitions_total",
-                [("lock_type", "membership"), ("outcome", "error")],
+                &[
+                    ("lock_type", "replacement"),
+                    ("kind", unregistered_kind.as_str()),
+                    ("outcome", "success"),
+                ],
+            ),
+            (
+                "buzz_db_advisory_lock_acquisitions_total",
+                &[
+                    ("lock_type", "membership"),
+                    ("kind", "none"),
+                    ("outcome", "error"),
+                ],
             ),
             (
                 "buzz_db_transaction_duration_seconds",
-                [
+                &[
                     ("operation", "replace_parameterized_event"),
                     ("outcome", "success"),
                 ],
             ),
             (
                 "buzz_db_transaction_duration_seconds",
-                [
+                &[
                     ("operation", "accept_push_lease_event"),
                     ("outcome", "error"),
                 ],
@@ -828,8 +905,8 @@ mod tests {
         ] {
             let expected_labels = expected
                 .1
-                .into_iter()
-                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .iter()
+                .map(|&(key, value)| (key.to_owned(), value.to_owned()))
                 .collect::<BTreeMap<_, _>>();
             assert!(
                 keys.contains(&(expected.0.to_owned(), expected_labels)),
@@ -841,15 +918,8 @@ mod tests {
             "buzz_db_pool_acquisitions_total",
         ] {
             assert!(
-                !keys.contains(&(
-                    name.to_owned(),
-                    [
-                        ("outcome".to_owned(), "success".to_owned()),
-                        ("pool_role".to_owned(), "writer".to_owned()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                )),
+                !keys.iter().any(|(key, labels)| key == name
+                    && labels.get("pool_role").map(String::as_str) == Some("writer")),
                 "newly instrumented seams must not expand legacy metric population"
             );
         }
@@ -1472,11 +1542,17 @@ mod tests {
         let test_scope = CommunityId::from_uuid(Uuid::new_v4());
         let query = crate::EventQuery::for_community(test_scope);
 
-        routed_db.read_pool_boot_ping_for_tests().await;
-        routed_db
-            .verify_replica_fence_at_boot()
+        writer_db
+            .ensure_configured_community_for_bootstrap(
+                &format!(
+                    "pool-operation-bootstrap-{}.invalid",
+                    Uuid::new_v4().simple()
+                ),
+                &[],
+            )
             .await
-            .expect("real startup fence verification succeeds");
+            .expect("real community bootstrap succeeds");
+        routed_db.read_pool_boot_ping_for_tests().await;
         let _ = crate::replica_fence::probe_once(&writer_pool, routed_db.fence()).await;
         routed_db.fence().force_open_for_tests(Utc::now());
         assert_eq!(
@@ -1566,7 +1642,6 @@ mod tests {
         let _ = writer_db
             .with_inactive_community_fence(test_scope, |_| ())
             .await;
-        let _ = writer_db.usage_community_count().await;
         let _ = writer_db.reap_expired_ephemeral_channels().await;
         let deletion_store = writer_db.deletion_store();
         let _ = deletion_store.reap_expired_serving_write_leases(1).await;
@@ -1575,7 +1650,6 @@ mod tests {
         let _ = routed_db
             .query_events_routed("pool_operation_matrix_reader", &query)
             .await;
-        let _ = routed_db.usage_fleet_stock_snapshot().await;
         routed_db.refresh_pool_waiter_metrics();
 
         let snapshot = snapshotter.snapshot().into_vec();
@@ -1779,8 +1853,9 @@ mod tests {
         let _guard = metrics::set_default_local_recorder(&recorder);
 
         let mut success_tx = pool.begin().await.expect("begin success transaction");
-        observe_advisory_lock(
+        observe_event_lock(
             LockType::Replacement,
+            buzz_core::kind::KIND_NIP29_GROUP_MEMBERS as i32,
             sqlx::query("SELECT pg_advisory_xact_lock($1)")
                 .bind(0x62757a7a6f627331_i64)
                 .execute(&mut *success_tx),
@@ -1906,6 +1981,16 @@ mod tests {
             contention.iter().any(|sample| *sample >= 0.04),
             "lock timer must include the holder wait: {contention:?}"
         );
+    }
+
+    /// A replacement lock must carry its kind. Mutation: drop the guard in
+    /// `observe_advisory_lock` → RED.
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    #[should_panic(expected = "replacement locks carry an event kind")]
+    async fn kindless_observer_rejects_replacement_locks() {
+        let _: sqlx::Result<()> =
+            observe_advisory_lock(LockType::Replacement, async { Ok(()) }).await;
     }
 
     mod postgres_tests {

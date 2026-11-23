@@ -13,6 +13,7 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../relay/relay.dart';
 import '../theme/theme.dart';
+import '../widgets/avatar_shape.dart';
 import '../widgets/buzz_loading_indicator.dart';
 import '../widgets/ios_glass_navigation_button.dart';
 import 'camera_disposal_barrier.dart';
@@ -53,6 +54,7 @@ class ImageAvatarCapture extends HookConsumerWidget {
     required this.onAccepted,
     required this.onClosed,
     this.initialPreview,
+    this.isAgent = false,
     this.initialCapturedBytes,
     this.loadCameras = availableCameras,
     this.disposalBarrier,
@@ -67,8 +69,11 @@ class ImageAvatarCapture extends HookConsumerWidget {
   /// Leaves camera mode without changing the current avatar draft.
   final VoidCallback onClosed;
 
-  /// The existing avatar shown while the same circular cutout becomes a camera.
+  /// The existing avatar shown while the same cutout becomes a camera.
   final Widget? initialPreview;
+
+  /// Whether the cutout uses the agent avatar shape instead of a circle.
+  final bool isAgent;
 
   /// Seeds the captured-photo review state in focused widget tests.
   @visibleForTesting
@@ -414,7 +419,8 @@ class ImageAvatarCapture extends HookConsumerWidget {
                   curve: Curves.easeOutCubic,
                   width: previewSize,
                   height: previewSize,
-                  child: ClipOval(
+                  child: AvatarClip(
+                    isAgent: isAgent,
                     child: ColoredBox(
                       color: Colors.black,
                       child: captured != null

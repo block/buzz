@@ -19,6 +19,8 @@ import os.log
     accessGroup: Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup") as? String
   )
   private var enrollmentTask: Task<Void, Never>?
+  private lazy var notificationReplyBridge = BuzzNotificationReplyBridge(
+    appGroupIdentifier: appGroupIdentifier)
   var appGroupIdentifier: String? {
     Bundle.main.object(forInfoDictionaryKey: "BuzzAppGroupIdentifier") as? String
   }
@@ -33,6 +35,11 @@ import os.log
   private var communityKeyboardChannel: FlutterMethodChannel?
   private var communityKeyboardObserver: NSObjectProtocol?
   private var hapticsChannel: FlutterMethodChannel?
+  private let voiceStartFeedback = UIImpactFeedbackGenerator(style: .medium)
+  private let voiceCancelFeedback = UIImpactFeedbackGenerator(style: .rigid)
+  private var appGroupChannel: FlutterMethodChannel?
+  private var diagnosticsChannel: FlutterMethodChannel?
+  private var shareSuggestions: ShareSuggestions?
   private var qrScannerChannel: FlutterMethodChannel?
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
   private var ageSignalChannel: FlutterMethodChannel?
@@ -42,17 +49,21 @@ import os.log
   private var ageSignalRequestID: UUID?
   private var ageSignalResult: FlutterResult?
   private var concentricSheetSurfaceChannel: FlutterMethodChannel?
+  private var nativePhotoZoomCoordinator: NativePhotoZoomCoordinator?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
   private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
+  private var nativeCreateChannelSheetCoordinator: NativeCreateChannelSheetCoordinator?
+  private var nativeChannelActionsSheetCoordinator: NativeChannelActionsSheetCoordinator?
   private var nativeAddMembersSheetCoordinator: NativeAddMembersSheetCoordinator?
   private var nativeConfirmationDialogCoordinator: NativeConfirmationDialogCoordinator?
   private var nativeProfileSetupCoordinator: NativeProfileSetupCoordinator?
   private var nativeCommunityEntryCoordinator: NativeCommunityEntryCoordinator?
   private var nativeProfileTextEditorCoordinator: NativeProfileTextEditorCoordinator?
-  private var nativeMessageActionSurfaceSupportChannel: FlutterMethodChannel?
   private var identityFilePlugin: IdentityFilePlugin?
+  private var photoLibrarySaver: PhotoLibrarySaver?
   private var hostedHpkeChannel: FlutterMethodChannel?
   private var browserAuthBridge: BuzzBrowserAuthBridge?
+  private var deviceTranscriptionPlugin: DeviceTranscriptionPlugin?
   private var huddleMediaPlugin: HuddleMediaPlugin?
 
   override func application(
@@ -62,11 +73,14 @@ import os.log
     // Age checking and notification restoration run asynchronously from
     // Flutter. No age-related storage or platform request may delay launch.
     UNUserNotificationCenter.current().delegate = self
+    BuzzNotificationReplyBridge.registerCategory()
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    engineBridge.pluginRegistry.registrar(forPlugin: "BuzzToastLayer")?.register(
+      ToastLayerFactory(), withId: "buzz/toast_layer")
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "BuzzIosMediaCarousel") {
       registrar.register(IosMediaCarouselFactory(messenger: registrar.messenger()), withId: "buzz/ios_media_carousel")
     }
@@ -87,9 +101,22 @@ import os.log
       }
     }
     identityFilePlugin = IdentityFilePlugin(messenger: messenger)
+    photoLibrarySaver = PhotoLibrarySaver(messenger: messenger)
+    HomeScreenShortcuts.shared.attach(messenger: messenger)
+    shareSuggestions = ShareSuggestions { [weak self] in
+      self?.appGroupIdentifier.flatMap {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0)
+      }
+    }
+    shareSuggestions?.attach(messenger: messenger)
+    QuickSendBridge.shared.attach(messenger: messenger)
     browserAuthBridge = BuzzBrowserAuthBridge(messenger: messenger)
     hostedHpkeChannel = FlutterMethodChannel(name: "buzz/hosted_hpke", binaryMessenger: messenger)
     hostedHpkeChannel?.setMethodCallHandler { call, result in
+      if call.method == "isSupported" {
+        if #available(iOS 17.0, *) { result(true) } else { result(false) }
+        return
+      }
       guard call.method == "seal" else { result(FlutterMethodNotImplemented); return }
       guard #available(iOS 17.0, *) else {
         result(FlutterError(code: "unsupported", message: "Backup requires iOS 17 or later", details: nil)); return
@@ -107,6 +134,7 @@ import os.log
         result(FlutterError(code: "backup_unavailable", message: nil, details: nil))
       }
     }
+    deviceTranscriptionPlugin = DeviceTranscriptionPlugin(messenger: messenger)
     huddleMediaPlugin = HuddleMediaPlugin(messenger: messenger)
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "BuzzIosNavigationBar") {
       registrar.register(IosNavigationBarFactory(messenger: messenger, parent: registrar.viewController), withId: "buzz/ios_navigation_bar")
@@ -128,18 +156,67 @@ import os.log
     apnsRegistrationBuffer.attach { [weak self] update in
       self?.pushChannel?.invokeMethod(update.method, arguments: update.arguments)
     }
+    notificationReplyBridge.notifyFlutter = { [weak self] in
+      self?.pushChannel?.invokeMethod("notificationReplyAvailable", arguments: nil)
+    }
+    appGroupChannel = FlutterMethodChannel(
+      name: "buzz/app_group",
+      binaryMessenger: messenger
+    )
+    appGroupChannel?.setMethodCallHandler { [weak self] call, result in
+      let container = self?.appGroupIdentifier.flatMap {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0)
+      }
+      switch call.method {
+      case "cachesDirectory":
+        // Caches the app's extensions can read too. The OS may purge it.
+        result(container?.appendingPathComponent("Library/Caches", isDirectory: true).path)
+      case "pendingSharesDirectory":
+        // Where the share extension leaves items for the app to pick up.
+        result(container?.appendingPathComponent("PendingShares", isDirectory: true).path)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+    diagnosticsChannel = FlutterMethodChannel(
+      name: "buzz/diagnostics",
+      binaryMessenger: messenger
+    )
+    diagnosticsChannel?.setMethodCallHandler { call, result in
+      guard call.method == "installIdDirectory" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      result(Self.diagnosticsInstallIdDirectory())
+    }
     hapticsChannel = FlutterMethodChannel(
       name: "buzz/haptics",
       binaryMessenger: messenger
     )
-    hapticsChannel?.setMethodCallHandler { call, result in
-      guard call.method == "success" || call.method == "error" else {
+    hapticsChannel?.setMethodCallHandler { [weak self] call, result in
+      guard let self else {
         result(FlutterMethodNotImplemented)
         return
       }
-      let generator = UINotificationFeedbackGenerator()
-      generator.prepare()
-      generator.notificationOccurred(call.method == "error" ? .error : .success)
+      switch call.method {
+      case "voicePrepareStart":
+        self.voiceStartFeedback.prepare()
+      case "voicePrepareCancel":
+        self.voiceCancelFeedback.prepare()
+      case "voiceStart":
+        self.voiceStartFeedback.impactOccurred(intensity: 1)
+        self.voiceCancelFeedback.prepare()
+      case "voiceCancel":
+        self.voiceCancelFeedback.impactOccurred(intensity: 1)
+        self.voiceCancelFeedback.prepare()
+      case "success", "error":
+        let generator = UINotificationFeedbackGenerator()
+        generator.prepare()
+        generator.notificationOccurred(call.method == "error" ? .error : .success)
+      default:
+        result(FlutterMethodNotImplemented)
+        return
+      }
       result(nil)
     }
     qrScannerChannel = FlutterMethodChannel(
@@ -243,12 +320,12 @@ import os.log
       )
     }
 
-    if let skinToneRegistrar = engineBridge.pluginRegistry.registrar(
-      forPlugin: "BuzzNativeSkinToneControl"
+    if let toolStripRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzComposerToolStripGlass"
     ) {
-      skinToneRegistrar.register(
-        NativeSkinToneControlFactory(messenger: messenger),
-        withId: "buzz/native_skin_tone_control"
+      toolStripRegistrar.register(
+        ComposerToolStripGlassFactory(messenger: toolStripRegistrar.messenger()),
+        withId: "buzz/composer_tool_strip_glass"
       )
     }
 
@@ -276,6 +353,13 @@ import os.log
       )?.viewController
     )
 
+    nativePhotoZoomCoordinator = NativePhotoZoomCoordinator(
+      messenger: messenger,
+      parentViewController: engineBridge.pluginRegistry.registrar(
+        forPlugin: "BuzzNativePhotoZoom"
+      )?.viewController
+    )
+
     let nativeAttachmentRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzNativeAttachmentPopover"
     )
@@ -294,6 +378,18 @@ import os.log
 
     engineBridge.pluginRegistry.registrar(forPlugin: "BuzzNativePresenceMenu")?.register(
       NativePresenceMenuFactory(messenger: messenger), withId: "buzz/presence_menu"
+    )
+
+    nativeCreateChannelSheetCoordinator = NativeCreateChannelSheetCoordinator(
+      messenger: messenger,
+      parentViewController: engineBridge.pluginRegistry.registrar(
+        forPlugin: "BuzzNativeCreateChannelSheet"
+      )?.viewController
+    )
+
+    nativeChannelActionsSheetCoordinator = NativeChannelActionsSheetCoordinator(
+      messenger: messenger,
+      parentViewController: engineBridge.pluginRegistry.registrar(forPlugin: "BuzzNativeChannelActionsSheet")?.viewController
     )
 
     nativeAddMembersSheetCoordinator = NativeAddMembersSheetCoordinator(
@@ -323,27 +419,6 @@ import os.log
       messenger: messenger,
       parentViewController: nativeProfileTextEditorRegistrar?.viewController
     )
-    if #available(iOS 16.0, *),
-      let nativeMessageActionsRegistrar = engineBridge.pluginRegistry.registrar(
-        forPlugin: "BuzzNativeMessageActionSurface"
-      )
-    {
-      nativeMessageActionsRegistrar.register(
-        NativeMessageActionSurfaceFactory(messenger: messenger),
-        withId: "buzz/native_message_action_surface"
-      )
-      nativeMessageActionSurfaceSupportChannel = FlutterMethodChannel(
-        name: "buzz/native_message_action_surface",
-        binaryMessenger: messenger
-      )
-      nativeMessageActionSurfaceSupportChannel?.setMethodCallHandler { call, result in
-        guard call.method == "isSupported" else {
-          result(FlutterMethodNotImplemented)
-          return
-        }
-        result(true)
-      }
-    }
   }
 
   func handleAgeSignalMethodCall(
@@ -443,12 +518,101 @@ import os.log
     "ageUpper": NSNull(),
   ]
 
+  /// Where diagnostic reporting keeps this installation's ID: Application
+  /// Support, which the system never purges, excluded from backups so a
+  /// phone restored from another gets its own ID. Nil if it can't be made.
+  private static func diagnosticsInstallIdDirectory() -> String? {
+    guard
+      var directory = FileManager.default.urls(
+        for: .applicationSupportDirectory, in: .userDomainMask
+      ).first?.appendingPathComponent("Diagnostics", isDirectory: true)
+    else { return nil }
+    do {
+      try FileManager.default.createDirectory(
+        at: directory, withIntermediateDirectories: true)
+      var values = URLResourceValues()
+      values.isExcludedFromBackup = true
+      try directory.setResourceValues(values)
+      return directory.path
+    } catch {
+      return nil
+    }
+  }
+
   private static func handleQrScannerMethodCall(
     _ call: FlutterMethodCall,
     result: @escaping FlutterResult
   ) {
     switch call.method {
+    case "cameraCutoutFrame":
+      #if canImport(UIKit, _version: 9127.0.85)
+      if #available(iOS 27.1, *),
+         let scene = UIApplication.shared.connectedScenes
+           .compactMap({ $0 as? UIWindowScene })
+           .first(where: { $0.activationState == .foregroundActive }),
+         let window = scene.windows.first(where: { $0.isKeyWindow }) {
+        if window.reservedRegions(kind: .division).contains(where: { $0.isActive }) {
+          result(nil)
+          return
+        }
+        let bounds = window.bounds
+        // Closed Duo displays may omit Flutter display features. UIKit still
+        // owns the physical occlusion; remove its interactive clearance.
+        for region in window.reservedRegions(kind: .occlusion) where region.isActive {
+          let rect = region.frame.inset(by: region.margins)
+          let isCamera = abs(rect.width - rect.height) < 1
+            && rect.minX > 0 && rect.minY > 0
+            && rect.maxX < bounds.width && rect.maxY < bounds.height
+            && rect.width < bounds.width / 4
+          guard rect.width > 0, rect.height > 0, isCamera else { continue }
+          let values: [Double] = [
+            Double(rect.minX), Double(rect.minY), Double(rect.width),
+            Double(rect.height), Double(bounds.width), Double(bounds.height)
+          ]
+          result(values)
+          return
+        }
+      }
+      #endif
+      result(nil)
+    case "previewRotationQuarterTurns":
+      // The plugin reads connectedScenes.first, which can be the inactive
+      // cover scene on Duo. Resolve the angle against the visible preview host.
+      if #available(iOS 17.0, *),
+         let scene = UIApplication.shared.connectedScenes
+           .compactMap({ $0 as? UIWindowScene })
+           .first(where: { $0.activationState == .foregroundActive }),
+         let window = scene.windows.first(where: { $0.isKeyWindow }),
+         let camera = AVCaptureDevice.DiscoverySession(
+           deviceTypes: [.builtInTripleCamera, .builtInDualCamera, .builtInWideAngleCamera],
+           mediaType: .video, position: .back
+         ).devices.first {
+        let coordinator = AVCaptureDevice.RotationCoordinator(device: camera, previewLayer: window.layer)
+        let angle = coordinator.videoRotationAngleForHorizonLevelPreview
+        let orientation = call.arguments as? String
+        let legacyAngle: CGFloat
+        switch orientation {
+        case "landscapeLeft": legacyAngle = 180
+        case "landscapeRight": legacyAngle = 0
+        case "portraitDown": legacyAngle = 270
+        default: legacyAngle = 90
+        }
+        result(Int(((angle - legacyAngle) / 90).rounded()))
+        return
+      }
+      result(0)
     case "usesDynamicIslandQrScannerPortal":
+      #if canImport(UIKit, _version: 9127.0.85)
+      if #available(iOS 27.1, *),
+         let scene = UIApplication.shared.connectedScenes
+           .compactMap({ $0 as? UIWindowScene })
+           .first(where: { $0.activationState == .foregroundActive }),
+         let window = scene.windows.first(where: { $0.isKeyWindow }),
+         window.reservedRegions(kind: .division).contains(where: { $0.isActive }) {
+        result(false)
+        return
+      }
+      #endif
       result(
         UIDevice.current.userInterfaceIdiom == .phone
           && usesDynamicIslandQrScannerPortal(
@@ -520,6 +684,9 @@ import os.log
     didReceive response: UNNotificationResponse,
     withCompletionHandler completionHandler: @escaping () -> Void
   ) {
+    if notificationReplyBridge.handle(response, center: center, completion: completionHandler) {
+      return
+    }
     BuzzPushNotificationResponseCoordinator.handle(
       actionIdentifier: response.actionIdentifier,
       userInfo: response.notification.request.content.userInfo,
@@ -564,7 +731,9 @@ import os.log
     _ call: FlutterMethodCall,
     result: @escaping FlutterResult
   ) {
-    if pushSnapshotBridge.handle(call, result: result) {
+    if pushSnapshotBridge.handle(call, result: result)
+      || notificationReplyBridge.handle(call, result: result)
+    {
       return
     }
     switch call.method {
@@ -572,14 +741,6 @@ import os.log
       startPushRegistration(result: result)
     case "takePendingNotificationResponse":
       result(pushNavigationBuffer.take()?.flutterArguments)
-    case "notificationAuthorizationStatus":
-      UNUserNotificationCenter.current().getNotificationSettings { settings in
-        DispatchQueue.main.async {
-          result(Self.pushAuthorizationStatusName(settings.authorizationStatus))
-        }
-      }
-    case "openNotificationSettings":
-      openNotificationSettings(result: result)
     case "endpointGrants":
       do {
         guard let arguments = call.arguments as? [String: Any],
@@ -605,41 +766,6 @@ import os.log
       handleDevPushEnrollment(call, result: result)
     default:
       result(FlutterMethodNotImplemented)
-    }
-  }
-
-  static func pushAuthorizationStatusName(_ status: UNAuthorizationStatus) -> String {
-    switch status {
-    case .notDetermined:
-      return "notDetermined"
-    case .denied:
-      return "denied"
-    case .authorized:
-      return "authorized"
-    case .provisional:
-      return "provisional"
-    case .ephemeral:
-      return "ephemeral"
-    @unknown default:
-      return "unknown"
-    }
-  }
-
-  private func openNotificationSettings(result: @escaping FlutterResult) {
-    let settingsURLString: String
-    if #available(iOS 16.0, *) {
-      settingsURLString = UIApplication.openNotificationSettingsURLString
-    } else {
-      settingsURLString = UIApplication.openSettingsURLString
-    }
-    guard let url = URL(string: settingsURLString) else {
-      result(false)
-      return
-    }
-    UIApplication.shared.open(url, options: [:]) { opened in
-      DispatchQueue.main.async {
-        result(opened)
-      }
     }
   }
 
@@ -726,6 +852,19 @@ import os.log
             relayURL: relayURL
           )
           await MainActor.run { result(record.flutterArguments) }
+        } catch BuzzDevPushEnrollmentError.invalidGatewayResponse(let route) {
+          // Its own code, with no text from the reply, so Dart can report
+          // contract drift without parsing messages. The details are only the
+          // fixed route label, so local logs still tell the routes apart.
+          await MainActor.run {
+            result(
+              FlutterError(
+                code: "gateway_response_invalid",
+                message: "The push gateway sent a response the app cannot read.",
+                details: route
+              )
+            )
+          }
         } catch {
           await MainActor.run {
             result(
@@ -1127,17 +1266,5 @@ import os.log
         }
       }
     }
-  }
-}
-
-extension BuzzPushNavigationTarget {
-  var flutterArguments: [String: String] {
-    var arguments = [
-      "eventId": eventID,
-      "communityId": communityID,
-      "channelId": channelID,
-    ]
-    arguments["threadRootId"] = threadRootID
-    return arguments
   }
 }

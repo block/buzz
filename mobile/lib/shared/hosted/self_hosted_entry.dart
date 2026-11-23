@@ -5,11 +5,13 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../community/community.dart';
+import '../relay/relay_provider.dart';
 import '../relay/relay_socket.dart';
 import '../storage/secure_storage.dart';
 import 'account_identity_store.dart';
 import 'community_entry_requirements.dart';
 import 'device_identity_source.dart';
+import '../diagnostics/diagnostic_reporter.dart';
 
 /// A self-hosted attempt keeps its key before any network operation. Retrying
 /// after a refused connection or process death never rotates that identity.
@@ -85,7 +87,11 @@ class SelfHostedEntry {
       final key = _pendingKey(relay);
       final retained = await _storage.read(key: key);
       String? candidate = nsec;
-      if (savedPubkey != null) {
+      // A retained key for this exact identity is the one an interrupted
+      // attempt chose; it may exist nowhere else yet.
+      if (savedPubkey != null &&
+          (retained == null ||
+              AccountIdentityStore.publicKeyForNsec(retained) != savedPubkey)) {
         // Selection is explicit: resolve the exact key without requiring a
         // complete inventory of unrelated account slots.
         try {
@@ -157,7 +163,12 @@ class SelfHostedEntry {
   });
 
   /// Authentication must succeed before a new community becomes active.
-  static Future<void> probeRelay(Community community) async {
+  /// [headers] go on the upgrade, for a relay that requires an assertion.
+  static Future<void> probeRelay(
+    Community community, [
+    Map<String, String> headers = const {},
+    DiagnosticReporter diagnostics = const NoopDiagnosticReporter(),
+  ]) async {
     final socket = RelaySocket(
       wsUrl: community.relayUrl,
       nsec: community.nsec,
@@ -166,6 +177,12 @@ class SelfHostedEntry {
       onDisconnected: (_) {},
     );
     try {
+      socket.headers = headers;
+      // Until the joining identity is active, reports name another member.
+      socket.diagnostics = SignerDiagnosticReporter(
+        diagnostics,
+        signer: pubkeyFromNsec(community.nsec),
+      );
       await socket.connect().timeout(const Duration(seconds: 20));
       if (socket.state != SocketState.connected) {
         throw StateError('Community refused entry');

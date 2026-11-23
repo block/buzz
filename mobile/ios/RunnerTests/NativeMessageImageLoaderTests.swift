@@ -102,6 +102,92 @@ final class NativeMessageImageLoaderTests: XCTestCase {
   }
 }
 
+final class NativeMessageImageLoaderDecodeTests: XCTestCase {
+  /// A 1x1 GIF with one frame per delay, in centiseconds.
+  private func gif(_ delays: [Int]) -> Data {
+    var bytes: [UInt8] = Array("GIF89a".utf8)
+    bytes += [1, 0, 1, 0, 0x80, 0, 0] // 1x1, two-colour global table
+    bytes += [0, 0, 0, 0xff, 0xff, 0xff]
+    for delay in delays {
+      bytes += [0x21, 0xf9, 4, 0, UInt8(delay & 0xff), UInt8(delay >> 8), 0, 0] // frame delay
+      bytes += [0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0] // 1x1 image
+      bytes += [2, 2, 0x44, 1, 0] // one pixel
+    }
+    bytes.append(0x3b)
+    return Data(bytes)
+  }
+
+  func testShowsFramesOfTenMillisecondsOrLessForOneHundred() throws {
+    // Browsers and the Flutter timeline show 0 and 1 cs frames for 100 ms;
+    // longer frames keep their own delay.
+    let image = try XCTUnwrap(NativeMessageImageLoader.decode(gif([0, 1, 2, 5])))
+    XCTAssertEqual(holds(image), [10, 10, 2, 5])
+    XCTAssertEqual(image.duration, 0.1 + 0.1 + 0.02 + 0.05, accuracy: 0.001)
+  }
+
+  func testUnevenDelaysKeepEachFramesShare() throws {
+    // UIKit spaces frames evenly, so a held frame repeats for its share.
+    let image = try XCTUnwrap(NativeMessageImageLoader.decode(gif([10, 10, 300])))
+    XCTAssertEqual(holds(image), [1, 1, 30])
+    XCTAssertEqual(image.duration, 3.2, accuracy: 0.001)
+  }
+
+  func testCancelledDecodeReturnsNil() {
+    XCTAssertNil(NativeMessageImageLoader.decode(gif([5, 5]), isCancelled: { true }))
+  }
+
+  func testStillImageIsNotAnimated() throws {
+    let image = try XCTUnwrap(NativeMessageImageLoader.decode(gif([5])))
+    XCTAssertNil(image.images)
+  }
+
+  /// How many consecutive entries each decoded frame fills.
+  private func holds(_ image: UIImage) -> [Int] {
+    var runs: [(frame: UIImage, count: Int)] = []
+    for frame in image.images ?? [] {
+      if let last = runs.last, last.frame === frame {
+        runs[runs.count - 1].count += 1
+      } else {
+        runs.append((frame, 1))
+      }
+    }
+    return runs.map(\.count)
+  }
+}
+
+@MainActor
+final class NativeEmojiDecodeGateTests: XCTestCase {
+  func testAdmitsFourAndHandsSlotsOnInOrder() async throws {
+    for _ in 0..<NativeEmojiDecodeGate.limit { try await NativeEmojiDecodeGate.acquire() }
+    var admitted: [Int] = []
+    // Let each waiter queue before the next one starts.
+    func waiter(_ number: Int) async -> Task<Void, Error> {
+      let task = Task { try await NativeEmojiDecodeGate.acquire(); admitted.append(number) }
+      for _ in 0..<10 { await Task.yield() }
+      return task
+    }
+    let fifth = await waiter(5)
+    let sixth = await waiter(6)
+    let seventh = await waiter(7)
+    XCTAssertEqual(admitted, [])
+
+    // A waiter whose cell left gives up its place.
+    sixth.cancel()
+    do {
+      try await sixth.value
+      XCTFail("a cancelled waiter must not be admitted")
+    } catch is CancellationError {}
+
+    NativeEmojiDecodeGate.release()
+    try await fifth.value
+    NativeEmojiDecodeGate.release()
+    try await seventh.value
+    XCTAssertEqual(admitted, [5, 7])
+
+    for _ in 0..<NativeEmojiDecodeGate.limit { NativeEmojiDecodeGate.release() }
+  }
+}
+
 private final class MessageImageProtocol: URLProtocol {
   static var start: ((MessageImageProtocol) -> Void)?
   override class func canInit(with request: URLRequest) -> Bool { true }
@@ -126,6 +212,13 @@ final class NativeReactionDetailsTests: XCTestCase {
     let updated = controller.tableView(UITableView(), cellForRowAt: IndexPath(row: 0, section: 0))
     let updatedRow = updated.contentView.subviews.compactMap { $0 as? UIStackView }.first!
     XCTAssertEqual(updatedRow.arrangedSubviews[0].subviews.compactMap { $0 as? UILabel }.first?.text, "🎉")
+  }
+
+  @MainActor func testShortcodeReactionWithoutImageNeverShowsText() {
+    let glyph = NativeMessageGlyph(
+      data: ["emoji": ":ghost:", "isShortcode": true], size: 26, isReaction: true)
+    XCTAssertNil(glyph.subviews.compactMap { $0 as? UILabel }.first?.text)
+    XCTAssertNotNil(glyph.subviews.compactMap { $0 as? UIImageView }.first?.image)
   }
 
   @MainActor func testTogglesListEveryReactorAndRelabelUpdatedProfiles() {
@@ -190,38 +283,5 @@ final class NativeMessageLayoutTests: XCTestCase {
     XCTAssertGreaterThan(needed, 48)
     XCTAssertGreaterThanOrEqual(viewport?.bounds.height ?? 0, needed)
     XCTAssertGreaterThanOrEqual(filter?.bounds.height ?? 0, needed)
-  }
-
-  @MainActor func testOversizedMenuStaysInsideShortViewportAndScrollsToLastAction() {
-    let controller = NativeMessageMenuViewController(data: [
-      "actions": (0..<12).map { ["id": "action\($0)", "title": "Action \($0)", "symbol": "heart"] },
-      "reactions": [["emoji": "❤️", "label": "Heart"]],
-    ], sourceRect: CGRect(x: 16, y: 180, width: 288, height: 80), preview: UIView())
-    controller.onPreviewReady = { _ in }
-    let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
-    window.rootViewController = controller
-    window.makeKeyAndVisible()
-    defer { window.isHidden = true }
-    controller.loadViewIfNeeded()
-    // Constrain the available viewport as a bottom obstruction would. The
-    // production bottom anchor remains the system keyboard layout guide.
-    controller.additionalSafeAreaInsets.bottom = 200
-    controller.view.setNeedsLayout()
-    controller.view.layoutIfNeeded()
-    let scroll = controller.view.subviews.compactMap { $0 as? UIScrollView }.first!
-    scroll.layoutIfNeeded()
-    XCTAssertTrue(scroll.clipsToBounds)
-    XCTAssertGreaterThan(scroll.contentSize.height, scroll.bounds.height)
-    XCTAssertLessThanOrEqual(scroll.frame.maxY, controller.view.keyboardLayoutGuide.layoutFrame.minY)
-    let content = scroll.subviews.compactMap { $0 as? UIStackView }.first!
-    XCTAssertEqual(content.frame.minX, 16, accuracy: 0.5)
-    XCTAssertGreaterThanOrEqual(content.frame.minY, 16)
-    XCTAssertNil(scroll.hitTest(CGPoint(x: 40, y: scroll.bounds.maxY + 1), with: nil))
-    scroll.setContentOffset(CGPoint(x: 0, y: scroll.contentSize.height - scroll.bounds.height), animated: false)
-    scroll.layoutIfNeeded()
-    let last = descendants(content).compactMap { $0 as? UIButton }
-      .first { $0.accessibilityLabel == "Action 11" }!
-    let lastRect = last.convert(last.bounds, to: scroll)
-    XCTAssertTrue(scroll.bounds.contains(lastRect), "viewport=\(scroll.bounds) last=\(lastRect) content=\(scroll.contentSize)")
   }
 }

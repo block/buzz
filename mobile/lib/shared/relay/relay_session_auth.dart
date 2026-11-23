@@ -1,5 +1,12 @@
 part of 'relay_session.dart';
 
+/// The auth fields the session depends on: sign-in status and identity.
+/// Watching only these keeps an auth reload, such as an invalidation that
+/// re-reads the same community, from dropping the socket and subscriptions.
+({AuthStatus? status, String? pubkey}) _sessionAuthKey(
+  AsyncValue<AuthState> auth,
+) => (status: auth.value?.status, pubkey: auth.value?.community?.pubkey);
+
 /// Pass the signer's hex [pubkey] when it is already known: deriving it from
 /// the key costs about a third of a signature, on the UI isolate.
 String buildNip98AuthHeader({
@@ -16,10 +23,7 @@ String buildNip98AuthHeader({
   if (privkeyHex.isEmpty) {
     throw Exception('Invalid nsec');
   }
-  final payloadHash = SHA256Digest()
-      .process(Uint8List.fromList(bodyBytes))
-      .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
-      .join();
+  final payloadHash = crypto.sha256.convert(bodyBytes).toString();
   final event = signNostrEvent(
     kind: 27235,
     content: '',

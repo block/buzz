@@ -1,3 +1,4 @@
+import 'package:buzz/features/channels/channel_ids_by_name_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/message_mention_pill.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
@@ -9,11 +10,17 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+class _ChannelNames extends ChannelIdsByName {
+  @override
+  Map<String, String> build() => const {'general': 'ch-general'};
+}
+
 const _alice =
     'a11ce00000000000000000000000000000000000000000000000000000000000';
 
 Widget _testable(Widget child) => ProviderScope(
   overrides: [
+    channelIdsByNameProvider.overrideWith(_ChannelNames.new),
     customEmojiListProvider.overrideWithValue([
       const CustomEmoji(shortcode: 'wave', url: 'https://example.com/w.png'),
     ]),
@@ -49,6 +56,31 @@ void main() {
     expect(text.overflow, TextOverflow.ellipsis);
     expect(_plainText(tester), startsWith('Hi '));
     expect(_plainText(tester), isNot(contains('**')));
+  });
+
+  testWidgets('signed names that fold alike leave a plain mention as text', (
+    tester,
+  ) async {
+    const sam =
+        'd000000000000000000000000000000000000000000000000000000000000000';
+    for (final names in [
+      {sam: 'Sam', _alice: 'ſam'},
+      {_alice: 'ſam', sam: 'Sam'},
+    ]) {
+      await tester.pumpWidget(
+        _testable(
+          MessagePreview(
+            content: 'hi @Sam',
+            mentionNames: names,
+            tags: [
+              for (final key in names.keys) ['p', key],
+            ],
+          ),
+        ),
+      );
+      expect(find.byType(MessageMentionPill), findsNothing, reason: '$names');
+      expect(_plainText(tester), 'hi @Sam');
+    }
   });
 
   testWidgets('labels media by kind', (tester) async {

@@ -117,6 +117,7 @@ impl fmt::Debug for RevalidationDependencies {
 #[derive(Clone, PartialEq, Eq)]
 pub struct VerifiedAssertion {
     identity: FederatedIdentity,
+    profile_assertion: Option<super::public_profile::ProfileAssertion>,
     asserted_key: Option<PublicKey>,
     owner: Option<PublicKey>,
     capabilities: CanonicalCapabilities,
@@ -147,6 +148,7 @@ impl VerifiedAssertion {
         );
         Self {
             identity: FederatedIdentity { issuer, subject },
+            profile_assertion: None,
             asserted_key,
             owner,
             capabilities,
@@ -155,6 +157,19 @@ impl VerifiedAssertion {
             transport_contract_id,
             revalidation_dependencies,
         }
+    }
+
+    /// Optional output-only evidence; absent for OAuth client-subject assertions.
+    pub fn profile_assertion(&self) -> Option<&super::public_profile::ProfileAssertion> {
+        self.profile_assertion.as_ref()
+    }
+
+    pub(super) fn with_profile_assertion(
+        mut self,
+        value: Option<super::public_profile::ProfileAssertion>,
+    ) -> Self {
+        self.profile_assertion = value;
+        self
     }
 
     /// The issuer-qualified identity.
@@ -268,6 +283,7 @@ impl VerifiedAssertion {
                 subject: "test-subject".to_string(),
             },
             asserted_key,
+            profile_assertion: None,
             owner: None,
             capabilities: CanonicalCapabilities::from_pairs(vec![]),
             authority_deadlines,

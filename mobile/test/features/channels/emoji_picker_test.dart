@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
-import 'package:buzz/features/channels/emoji_picker.dart';
-import 'package:buzz/features/channels/recent_emoji_provider.dart';
+import 'package:buzz/shared/emoji/emoji_picker.dart';
+import 'package:buzz/shared/emoji/recent_emoji_provider.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/emoji/emoji_data.dart';
@@ -12,6 +14,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -135,6 +138,28 @@ const _relayCustomEmoji = [
     url: 'https://relay.example/media/buzzbee.png',
   ),
 ];
+
+/// A 1x1 PNG, so loads pass the decode check.
+final _pngBytes = base64Decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAA'
+  'AAYAAjCB0C8AAAAASUVORK5CYII=',
+);
+
+/// Media downloads that answer at once with [_pngBytes], except `slow` ones,
+/// which wait until the caller aborts them.
+class _MediaClient extends http.BaseClient {
+  final requests = <http.BaseRequest>[];
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    requests.add(request);
+    if (request.url.path.contains('slow')) {
+      await (request as http.AbortableRequest).abortTrigger;
+      throw http.RequestAbortedException(request.url);
+    }
+    return http.StreamedResponse(Stream.value(_pngBytes), 200);
+  }
+}
 
 class _FakeCustomEmojiPaletteNotifier extends CustomEmojiPaletteNotifier {
   _FakeCustomEmojiPaletteNotifier(this.palette);
@@ -708,6 +733,20 @@ void main() {
         baseUrl: 'https://relay.example',
         nsec: nostr.Keys.generate().nsec,
       );
+      final mediaClient = _MediaClient();
+      final diskDirectory = (await tester.runAsync(
+        () => Directory.systemTemp.createTemp('emoji_picker_test'),
+      ))!;
+      // The cache's own I/O and timers need the real event loop.
+      final diskCache = (await tester.runAsync(
+        () async => MediaDiskCache.open(diskDirectory),
+      ))!;
+      addTearDown(
+        () => tester.runAsync(() async {
+          await diskCache.dispose();
+          await diskDirectory.delete(recursive: true);
+        }),
+      );
       MethodCall? presentation;
       final selected = <String>[];
       var dismissals = 0;
@@ -728,6 +767,8 @@ void main() {
                 ),
               ),
               mediaGetAuthServiceProvider.overrideWithValue(mediaAuth),
+              mediaHttpClientProvider.overrideWithValue(mediaClient),
+              mediaDiskCacheProvider.overrideWithValue(diskCache),
             ],
             child: MaterialApp(
               theme: AppTheme.light(),
@@ -766,21 +807,88 @@ void main() {
         ]);
         expect(find.byType(EmojiPickerSheet), findsNothing);
 
-        final externalHeaders = await _sendNativeEmojiPickerCall(
-          tester,
-          'mediaHeaders',
-          'https://example.test/parrot.gif',
-        );
-        expect(externalHeaders, <String, String>{});
-        final relayHeaders = await _sendNativeEmojiPickerCall(
-          tester,
-          'mediaHeaders',
-          'https://relay.example/media/buzzbee.png',
-        );
-        expect(
-          (relayHeaders as Map<Object?, Object?>)['Authorization'],
-          startsWith('Nostr '),
-        );
+        // The sheet loads custom emoji bytes through Flutter's media path:
+        // signed per request, then remembered by URL so reopening the sheet
+        // does not download them again.
+        // Media loads run real timers and I/O.
+        await tester.runAsync(() async {
+          final relayBytes = await _sendNativeEmojiPickerCall(
+            tester,
+            'mediaBytes',
+            {'id': 1, 'url': 'https://relay.example/media/buzzbee.png'},
+          );
+          expect(relayBytes, _pngBytes);
+          expect(
+            mediaClient.requests.single.headers['Authorization'],
+            startsWith('Nostr '),
+          );
+          await _sendNativeEmojiPickerCall(tester, 'mediaBytes', {
+            'id': 2,
+            'url': 'https://relay.example/media/buzzbee.png',
+          });
+          expect(mediaClient.requests, hasLength(1));
+
+          // A cell that scrolls away cancels its download.
+          final slow = _sendNativeEmojiPickerCall(tester, 'mediaBytes', {
+            'id': 3,
+            'url': 'https://example.test/slow.png',
+          });
+          await tester.pump();
+          await _sendNativeEmojiPickerCall(tester, 'cancelMediaBytes', 3);
+          await expectLater(slow, throwsA(isA<PlatformException>()));
+          expect(mediaClient.requests, hasLength(2));
+
+          // At most four loads run at once; a queued load cancelled before
+          // its turn never downloads.
+          mediaClient.requests.clear();
+          final running = [
+            for (var id = 10; id < 14; id++)
+              expectLater(
+                _sendNativeEmojiPickerCall(tester, 'mediaBytes', {
+                  'id': id,
+                  'url': 'https://example.test/slow-$id.png',
+                }),
+                throwsA(isA<PlatformException>()),
+              ),
+          ];
+          final queued = expectLater(
+            _sendNativeEmojiPickerCall(tester, 'mediaBytes', {
+              'id': 14,
+              'url': 'https://example.test/queued.png',
+            }),
+            throwsA(isA<PlatformException>()),
+          );
+          // Each load checks the disk cache first, so wait for the four to
+          // reach the network rather than for a fixed time.
+          final deadline = DateTime.now().add(const Duration(seconds: 10));
+          while (mediaClient.requests.length < 4) {
+            if (DateTime.now().isAfter(deadline)) fail('loads never started');
+            await Future<void>.delayed(const Duration(milliseconds: 10));
+          }
+          // An emoji already saved on disk does not wait for a slot. Its own
+          // disk round trips also give the queued load time to start, were
+          // it not waiting for a slot.
+          await diskCache.write(
+            'https://example.test/saved.png',
+            _pngBytes,
+            immutable: false,
+          );
+          expect(
+            await _sendNativeEmojiPickerCall(tester, 'mediaBytes', {
+              'id': 15,
+              'url': 'https://example.test/saved.png',
+            }),
+            _pngBytes,
+          );
+          expect(mediaClient.requests, hasLength(4));
+          await _sendNativeEmojiPickerCall(tester, 'cancelMediaBytes', 14);
+          await queued;
+          for (var id = 10; id < 14; id++) {
+            await _sendNativeEmojiPickerCall(tester, 'cancelMediaBytes', id);
+          }
+          await Future.wait(running);
+          expect(mediaClient.requests, hasLength(4));
+        });
 
         await _sendNativeEmojiPickerCall(tester, 'skinToneChanged', 4);
         await _sendNativeEmojiPickerCall(tester, 'selected', '\u{1F525}');
@@ -788,6 +896,57 @@ void main() {
         expect(selected, ['\u{1F525}']);
         expect(dismissals, 1);
         expect(prefs.getInt('buzz.emoji-picker.skin-tone.v1'), 4);
+      } finally {
+        _setMockNativeEmojiPickerHandler(null);
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('avatar picker excludes custom emoji from native sheet', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final prefs = await _prefs();
+      MethodCall? presentation;
+      _setMockNativeEmojiPickerHandler((call) async {
+        presentation = call;
+        return true;
+      });
+      try {
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
+              myPubkeyProvider.overrideWithValue('self'),
+              customEmojiPaletteProvider.overrideWith(
+                () => _FakeCustomEmojiPaletteNotifier(
+                  Completer<List<CustomEmoji>>().future,
+                ),
+              ),
+            ],
+            child: MaterialApp(
+              theme: AppTheme.light(),
+              home: Builder(
+                builder: (context) => FilledButton(
+                  onPressed: () => showEmojiPicker(
+                    context: context,
+                    nativeEmojiOnly: true,
+                    onSelect: (_) {},
+                  ),
+                  child: const Text('Open avatar picker'),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.tap(find.text('Open avatar picker'));
+        await tester.pump();
+        expect(presentation?.method, 'present');
+        final arguments = presentation?.arguments as Map<Object?, Object?>;
+        expect(arguments['customEmoji'], isEmpty);
+        expect(arguments['largeEmoji'], isTrue);
+        await _sendNativeEmojiPickerCall(tester, 'dismissed');
       } finally {
         _setMockNativeEmojiPickerHandler(null);
         debugDefaultTargetPlatformOverride = previousPlatform;
@@ -1023,6 +1182,90 @@ void main() {
           await tester.pumpWidget(const SizedBox.shrink());
           _setMockNativeEmojiPickerHandler(null);
           debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
+
+    testWidgets(
+      'an open from an unmounted context does not block later opens',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        final prefs = await _prefs();
+        var presents = 0;
+        _setMockNativeEmojiPickerHandler((call) async {
+          if (call.method == 'present') presents += 1;
+          return true;
+        });
+
+        final showStaleRow = ValueNotifier(true);
+        late BuildContext staleContext;
+        var staleDismissals = 0;
+
+        try {
+          await tester.pumpWidget(
+            ProviderScope(
+              overrides: [
+                savedPrefsProvider.overrideWithValue(prefs),
+                myPubkeyProvider.overrideWithValue('self'),
+                customEmojiPaletteProvider.overrideWith(
+                  () => _FakeCustomEmojiPaletteNotifier(
+                    Future.value(_customEmoji),
+                  ),
+                ),
+              ],
+              child: MaterialApp(
+                theme: AppTheme.light(),
+                home: Scaffold(
+                  body: ValueListenableBuilder<bool>(
+                    valueListenable: showStaleRow,
+                    builder: (context, show, _) => Column(
+                      children: [
+                        if (show)
+                          Builder(
+                            builder: (rowContext) {
+                              staleContext = rowContext;
+                              return const SizedBox.shrink();
+                            },
+                          ),
+                        FilledButton(
+                          onPressed: () => showEmojiPicker(
+                            context: context,
+                            onSelect: (_) {},
+                          ),
+                          child: const Text('Open live'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+
+          // The message row an actions sheet captured is rebuilt away before
+          // its "+" opens the picker.
+          showStaleRow.value = false;
+          await tester.pumpAndSettle();
+          expect(staleContext.mounted, isFalse);
+
+          showEmojiPicker(
+            context: staleContext,
+            onSelect: (_) {},
+            onDismiss: () => staleDismissals += 1,
+          );
+          await tester.pumpAndSettle();
+          expect(staleDismissals, 1);
+          expect(presents, 0);
+
+          await tester.tap(find.text('Open live'));
+          await tester.pumpAndSettle();
+          expect(presents, 1);
+          await _sendNativeEmojiPickerCall(tester, 'dismissed');
+        } finally {
+          _setMockNativeEmojiPickerHandler(null);
+          debugDefaultTargetPlatformOverride = previousPlatform;
+          showStaleRow.dispose();
         }
       },
     );

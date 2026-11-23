@@ -11,7 +11,15 @@ import '../../shared/widgets/app_list_card_item.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/native_message_presentation.dart';
-import '../../shared/relay/media_auth.dart';
+import '../../shared/hosted/builderlab_account.dart';
+import '../../shared/hosted/hosted_relay_auth.dart';
+import '../../shared/hosted/native_media_headers.dart';
+import '../../shared/relay/relay_provider.dart';
+import '../../shared/relay/relay_session_types.dart';
+import '../../shared/relay/relay_socket.dart';
+import '../../shared/widgets/buzz_toast.dart';
+import '../../shared/custom_emoji/custom_emoji.dart';
+import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../../shared/emoji/emoji_burst.dart';
 import '../../shared/emoji/emoji_avatar.dart';
@@ -22,8 +30,8 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
-import 'emoji_picker.dart';
-import 'recent_emoji_provider.dart';
+import '../../shared/emoji/emoji_picker.dart';
+import '../../shared/emoji/recent_emoji_provider.dart';
 import 'message_long_press_region.dart';
 import 'timeline_message.dart';
 
@@ -48,18 +56,94 @@ const _pillGlyphSize = 16.0;
 ///
 /// Used by channel detail, thread detail, and system message rows to avoid
 /// duplicating the toggle wiring.
-void toggleReaction(WidgetRef ref, TimelineMessage message, String emoji) {
+void toggleReaction(
+  BuildContext context,
+  WidgetRef ref,
+  TimelineMessage message,
+  String emoji,
+) {
   final reaction = message.reactions.where((r) => r.emoji == emoji).firstOrNull;
   if (reaction == null) return;
   final actions = ref.read(channelActionsProvider);
   if (reaction.reactedByCurrentUser && reaction.currentUserReactionId != null) {
-    actions.removeReaction(reaction.currentUserReactionId!, emoji);
+    reportReactionFailure(
+      context,
+      actions.removeReaction(reaction.currentUserReactionId!, emoji),
+      adding: false,
+    );
   } else {
     // Only adding counts as a use — removing a reaction shouldn't promote the
     // emoji in the frequently-used ranking.
     ref.read(recentEmojiProvider.notifier).record(emoji);
-    actions.addReaction(message.id, emoji);
+    reportReactionFailure(
+      context,
+      actions.addReaction(message.id, emoji, targetAuthor: message.pubkey),
+      adding: true,
+    );
   }
+}
+
+/// Tells the user when a reaction they just added or removed didn't reach the
+/// relay. Reaction taps don't wait for the publish, so every caller hands its
+/// publish here; otherwise a failure (most often tapping while offline) is an
+/// uncaught error and the pill just doesn't change.
+///
+/// Only the relay's own outcomes are handled here. Anything else, such as the
+/// signer failing before the event goes out, still escapes as an uncaught
+/// error after its toast, so diagnostics see it with its stack.
+void reportReactionFailure(
+  BuildContext context,
+  Future<void> publish, {
+  required bool adding,
+}) {
+  // An async catch rather than `catchError`: a grouped removal's
+  // `Future.wait` is a `Future<List<void>>` at runtime, whose `catchError`
+  // handler would have to return a list.
+  unawaited(() async {
+    try {
+      await publish;
+    } catch (error, stackTrace) {
+      final message = _reactionFailureMessage(error, adding: adding);
+      if (message != null) {
+        // The native reaction sheet covers Flutter's overlay, so it shows the
+        // notice itself; otherwise a toast shows above any route or sheet.
+        final shown = await NativeMessagePresentation.showNotice(message);
+        if (!shown && context.mounted) {
+          showBuzzToast(context, message, kind: ToastKind.error);
+        }
+      }
+      if (!_isRelayOutcome(error)) {
+        Error.throwWithStackTrace(error, stackTrace);
+      }
+    }
+  }());
+}
+
+bool _isRelayOutcome(Object error) =>
+    error is RelayNotConnectedError ||
+    error is RelayAckTimeoutError ||
+    error is RelayAckLostError ||
+    error is RelayEventRejectedException;
+
+/// What to tell the user about a failed reaction publish, or null when it
+/// isn't a failure. A lost or late acknowledgement may follow the relay
+/// accepting it, so those say "not confirmed": "Try again" there could have
+/// the user undo a reaction that landed.
+String? _reactionFailureMessage(Object error, {required bool adding}) {
+  final verb = adding ? 'add' : 'remove';
+  final action = adding ? 'Reaction' : 'Removal';
+  return switch (error) {
+    // The relay already has this exact reaction, as after a double tap or
+    // re-picking one of your reactions from the picker.
+    RelayEventRejectedException(:final message)
+        when message.startsWith('duplicate:') =>
+      null,
+    RelayNotConnectedError() => 'Couldn’t $verb reaction. No connection.',
+    RelayAckTimeoutError() =>
+      "$action not confirmed. The relay didn't respond.",
+    RelayAckLostError() => '$action not confirmed. Connection lost.',
+    _ => 'Couldn’t $verb reaction. Try again.',
+  };
 }
 
 /// Arm a burst for a reaction that is about to be added from somewhere the pill
@@ -91,7 +175,13 @@ void showAddReactionPicker({
     onSelect: (emoji) {
       ref.read(recentEmojiProvider.notifier).record(emoji);
       armReactionBurst(ref, message, emoji);
-      ref.read(channelActionsProvider).addReaction(message.id, emoji);
+      reportReactionFailure(
+        context,
+        ref
+            .read(channelActionsProvider)
+            .addReaction(message.id, emoji, targetAuthor: message.pubkey),
+        adding: true,
+      );
     },
   );
 }
@@ -420,16 +510,40 @@ class _AddReactionPill extends StatelessWidget {
   }
 }
 
-class _ReactionEmoji extends StatelessWidget {
+/// A `:shortcode:` reaction body, as opposed to a unicode emoji.
+bool _isShortcodeReaction(String emoji) =>
+    emoji.length > 2 &&
+    emoji.startsWith(':') &&
+    emoji.endsWith(':') &&
+    normalizeShortcode(emoji) != null;
+
+/// The image behind [reaction]: the NIP-30 `emoji` tag on its event, else, for
+/// a tagless `:shortcode:` (an agent's reaction, say), the community palette
+/// entry. Null for a unicode emoji or a shortcode nothing resolves.
+String? _reactionImageUrl(
+  TimelineReaction reaction,
+  List<CustomEmoji> palette,
+) {
+  final tagged = reaction.emojiUrl;
+  if (tagged != null && tagged.isNotEmpty) return tagged;
+  if (!_isShortcodeReaction(reaction.emoji)) return null;
+  return reactionEmojiUrl(reaction.emoji, palette);
+}
+
+/// A reaction slot never shows shortcode text: a custom emoji is its image, and
+/// a shortcode with no image (unknown, or one that fails to load) is the
+/// neutral [CustomEmojiPlaceholder].
+class _ReactionEmoji extends ConsumerWidget {
   final TimelineReaction reaction;
   final double size;
 
   const _ReactionEmoji({required this.reaction, required this.size});
 
   @override
-  Widget build(BuildContext context) {
-    final emojiUrl = reaction.emojiUrl;
-    if (emojiUrl == null || emojiUrl.isEmpty) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hasTag = reaction.emojiUrl?.isNotEmpty ?? false;
+    final isShortcode = _isShortcodeReaction(reaction.emoji);
+    if (!hasTag && !isShortcode) {
       return NativeEmojiGlyph(
         emoji: reaction.emoji,
         size: size,
@@ -437,16 +551,27 @@ class _ReactionEmoji extends StatelessWidget {
         centerInOpticalBox: true,
       );
     }
-    final shortcode = reaction.emoji.substring(1, reaction.emoji.length - 1);
+    final url = _reactionImageUrl(
+      reaction,
+      // Only a tagless shortcode needs the palette; other pills don't rebuild
+      // when it loads.
+      hasTag ? const [] : ref.watch(customEmojiListProvider),
+    );
+    final shortcode = isShortcode
+        ? reaction.emoji.substring(1, reaction.emoji.length - 1)
+        : reaction.emoji;
     return SizedBox.square(
       dimension: size,
       child: FittedBox(
         fit: BoxFit.scaleDown,
-        child: CustomEmojiImage(
-          shortcode: shortcode,
-          url: emojiUrl,
-          size: size,
-        ),
+        child: url == null
+            ? CustomEmojiPlaceholder(shortcode: shortcode, size: size)
+            : CustomEmojiImage(
+                shortcode: shortcode,
+                url: url,
+                size: size,
+                compact: true,
+              ),
       ),
     );
   }
@@ -725,6 +850,9 @@ Future<bool> _showNativeReactionDetails(
   var addRequested = false;
   final handled = await NativeMessagePresentation.withLease(() async {
     final container = ProviderScope.containerOf(context, listen: false);
+    final theme = Theme.of(context);
+    if (reactions.value.isEmpty) return true;
+    final nativeMediaHeaders = container.read(nativeMediaHeadersProvider);
     final requestId = DateTime.now().microsecondsSinceEpoch.toString();
     List<String> pubkeys() =>
         reactions.value.expand((r) => r.userPubkeys).toSet().toList();
@@ -757,9 +885,7 @@ Future<bool> _showNativeReactionDetails(
             'avatarColor': avatar.colorValue,
           } else if (url != null && !url.startsWith('data:')) ...{
             'url': url,
-            'headers': container
-                .read(mediaGetAuthServiceProvider)
-                .headersFor(url),
+            'headers': nativeMediaHeaders(url),
           },
         };
       }
@@ -807,6 +933,7 @@ Future<bool> _showNativeReactionDetails(
       (_, _) => scheduleProfiles(),
     );
     final dataset = container.read(emojiDatasetOrEmptyProvider);
+    final emojiBytes = container.read(customEmojiBytesCacheProvider);
     List<Map<String, Object?>> reactionData() => [
       for (final reaction in reactions.value)
         {
@@ -816,11 +943,19 @@ Future<bool> _showNativeReactionDetails(
           'selected': reaction.reactedByCurrentUser,
           'burst': isPositiveEmojiParticle(reaction.emoji),
           'users': reaction.userPubkeys.toSet().toList(),
-          if (reaction.emojiUrl case final String url) ...{
+          // `isShortcode` tells the native glyph never to print the text.
+          if (_isShortcodeReaction(reaction.emoji)) 'isShortcode': true,
+          if (_reactionImageUrl(
+                reaction,
+                container.read(customEmojiListProvider),
+              )
+              case final String url) ...{
             'url': url,
-            'headers': container
-                .read(mediaGetAuthServiceProvider)
-                .headersFor(url),
+            'headers': nativeMediaHeaders(url),
+            // The timeline usually downloaded this emoji already; reuse it so
+            // the sheet never depends on a second fetch succeeding.
+            if (emojiBytes.lookup(url) case final Uint8List bytes)
+              'bytes': bytes,
           },
         },
     ];
@@ -839,18 +974,41 @@ Future<bool> _showNativeReactionDetails(
     }
 
     reactions.addListener(updateReactions);
+    // A tagless shortcode shows the placeholder until the palette arrives.
+    final paletteSubscription = container.listen(
+      customEmojiListProvider,
+      (_, _) => updateReactions(),
+    );
+    // Native headers read the cached assertion synchronously, and that cache
+    // reads as empty inside its refresh margin while the live socket is still
+    // valid. Present at once with what is cached, refresh in the background,
+    // and resend the media rows if the refresh produced a new assertion, so a
+    // stalled issuer never delays the sheet.
+    final config = container.read(relayConfigProvider);
+    final auth = container.read(hostedRelayAuthProvider);
+    final cachedAuth = auth.cachedHeaders(config);
+    unawaited(() async {
+      try {
+        await auth.headers(config);
+      } on AccountFailure {
+        // Send without the assertion; the relay decides, and sign-in is
+        // offered elsewhere.
+        return;
+      }
+      if (disposed || mapEquals(auth.cachedHeaders(config), cachedAuth)) return;
+      sent.clear();
+      updateReactions();
+    }());
     try {
-      final sheetColors = utilitySurfaceThemeData(
-        Theme.of(context),
-      ).colorScheme;
+      final sheetColors = utilitySurfaceThemeData(theme).colorScheme;
       final pending = NativeMessagePresentation.present('reactions', {
         'requestId': requestId,
         'sheetColor': sheetColors.surface.toARGB32(),
         'foregroundColor': sheetColors.primary.toARGB32(),
-        'outlineColor': Theme.of(
-          context,
-        ).colorScheme.onSurface.withValues(alpha: 0.25).toARGB32(),
-        'dark': Theme.of(context).brightness == Brightness.dark,
+        'outlineColor': theme.colorScheme.onSurface
+            .withValues(alpha: 0.25)
+            .toARGB32(),
+        'dark': theme.brightness == Brightness.dark,
         'canAddReaction': onAddReaction != null,
         'addReactionIconCodePoint': BuzzIcons.smilePlus.codePoint,
         'profiles': profiles(),
@@ -866,6 +1024,7 @@ Future<bool> _showNativeReactionDetails(
       timer?.cancel();
       subscription.close();
       namesSubscription.close();
+      paletteSubscription.close();
     }
   });
   if (addRequested && context.mounted) onAddReaction?.call();

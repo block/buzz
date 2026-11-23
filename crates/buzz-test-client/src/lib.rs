@@ -14,6 +14,9 @@ use tracing::debug;
 use buzz_ws_client::NostrWsConnection;
 pub use buzz_ws_client::{parse_relay_message, OkResponse, RelayMessage, WsClientError};
 
+/// Relay acceptance probe behind the `buzz-acceptance` binary.
+pub mod acceptance;
+
 /// Scenario-driven load generator behind the `buzz-loadgen` binary.
 /// The scenario schema is documented in `perf/LOADGEN.md`.
 #[allow(missing_docs)]
@@ -71,7 +74,10 @@ impl From<WsClientError> for TestClientError {
             WsClientError::EventBuilder(s) => TestClientError::EventBuilder(s),
             WsClientError::Url(s) => TestClientError::Url(s),
             WsClientError::Timeout => TestClientError::Timeout,
-            WsClientError::ConnectionClosed => TestClientError::ConnectionClosed,
+            // Relay e2e tests treat a policy close as a close.
+            WsClientError::ConnectionClosed | WsClientError::PolicyClose(_) => {
+                TestClientError::ConnectionClosed
+            }
             WsClientError::UnexpectedMessage(s) => TestClientError::UnexpectedMessage(s),
             WsClientError::AuthFailed(s) => TestClientError::AuthFailed(s),
             WsClientError::EventRejected(s) => TestClientError::EventRejected(s),

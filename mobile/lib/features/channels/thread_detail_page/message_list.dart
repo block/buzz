@@ -1,6 +1,7 @@
 part of '../thread_detail_page.dart';
 
 class _ThreadMessageList extends HookWidget {
+  final DateHeaderScrollActivity dateScrollActivity;
   final double headHeight;
   final ValueChanged<double> onHeadHeightChanged;
   final LaidOutViewport viewport;
@@ -11,6 +12,8 @@ class _ThreadMessageList extends HookWidget {
   final ItemPositionsListener itemPositionsListener;
   final double bottomInset;
   final List<TimelineMessage> replies;
+  final List<TypingEntry> inlineTyping;
+  final Set<String> knownAgents;
   final AsyncValue<List<NostrEvent>> relayReplyState;
   final VoidCallback onRetryReplies;
   final Map<String, DateTime> localSendAnimations;
@@ -30,6 +33,7 @@ class _ThreadMessageList extends HookWidget {
   final Map<String, List<TimelineMessage>> childrenByParent;
 
   const _ThreadMessageList({
+    required this.dateScrollActivity,
     required this.headHeight,
     required this.onHeadHeightChanged,
     required this.viewport,
@@ -40,6 +44,8 @@ class _ThreadMessageList extends HookWidget {
     required this.itemPositionsListener,
     required this.bottomInset,
     required this.replies,
+    required this.inlineTyping,
+    required this.knownAgents,
     required this.relayReplyState,
     required this.onRetryReplies,
     required this.localSendAnimations,
@@ -94,6 +100,7 @@ class _ThreadMessageList extends HookWidget {
             label: formatDayHeading(head.createdAt),
             dayTimestamp: head.createdAt,
             stickyDayTimestamp: stickyDayTimestamp,
+            scrollVisible: dateScrollActivity,
           ),
           _ThreadMessage(
             message: head,
@@ -138,6 +145,12 @@ class _ThreadMessageList extends HookWidget {
               ],
             ),
           ),
+          if (replies.isEmpty && inlineTyping.isNotEmpty)
+            InlineAgentTyping(
+              channelId: channelId,
+              entries: inlineTyping,
+              knownAgents: knownAgents,
+            ),
         ],
       ),
     );
@@ -172,7 +185,7 @@ class _ThreadMessageList extends HookWidget {
       }
     });
 
-    return LaidOutViewportReporter(
+    final content = LaidOutViewportReporter(
       viewport: viewport,
       child: KeyboardDismissOnDrag(
         onUserScrollStart: onUserScrollStart,
@@ -298,6 +311,7 @@ class _ThreadMessageList extends HookWidget {
                                       label: formatDayHeading(reply.createdAt),
                                       dayTimestamp: reply.createdAt,
                                       stickyDayTimestamp: stickyDayTimestamp,
+                                      scrollVisible: dateScrollActivity,
                                     ),
                                   _ThreadMessage(
                                     message: reply,
@@ -330,6 +344,13 @@ class _ThreadMessageList extends HookWidget {
                                       currentPubkey: currentPubkey,
                                       isMember: isMember,
                                       isArchived: isArchived,
+                                    ),
+                                  if (nextReply == null &&
+                                      inlineTyping.isNotEmpty)
+                                    InlineAgentTyping(
+                                      channelId: channelId,
+                                      entries: inlineTyping,
+                                      knownAgents: knownAgents,
                                     ),
                                 ],
                               ),
@@ -395,6 +416,10 @@ class _ThreadMessageList extends HookWidget {
           ),
         ),
       ),
+    );
+    return NotificationListener<ScrollNotification>(
+      onNotification: dateScrollActivity.onNotification,
+      child: content,
     );
   }
 }

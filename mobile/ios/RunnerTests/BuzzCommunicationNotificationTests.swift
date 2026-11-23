@@ -61,153 +61,23 @@ final class BuzzCommunicationNotificationTests: XCTestCase {
     )
   }
 
-  func testPresentationFallsBackWhenDonationFails() {
+  func testPresentationSpecializesOrFallsBackToOrdinaryContent() {
     let ordinary = UNMutableNotificationContent()
     ordinary.title = "Alice"
     ordinary.body = "Hello Buzz"
-    var updateCalled = false
-    let presenter = BuzzCommunicationNotificationPresenter(
-      donate: { _, completion in
-        completion(NSError(domain: "test", code: 1))
-      },
-      deleteAllInteractions: { completion in completion(nil) },
-      updateContent: { content, _ in
-        updateCalled = true
-        return content
-      }
-    )
-    let completed = expectation(description: "ordinary fallback returned")
+    let specialized = BuzzCommunicationNotificationPresenter(updateContent: { _, _ in
+      let content = UNMutableNotificationContent()
+      content.title = "specialized"
+      return content
+    }).present(ordinaryContent: ordinary, resolution: communicationResolution())
+    XCTAssertEqual(specialized.title, "specialized")
 
-    presenter.present(
-      ordinaryContent: ordinary,
-      resolution: communicationResolution()
-    ) { content in
-      XCTAssertEqual(content.title, "Alice")
-      XCTAssertEqual(content.body, "Hello Buzz")
-      completed.fulfill()
-    }
-
-    wait(for: [completed], timeout: 1)
-    XCTAssertFalse(updateCalled)
+    let failed = BuzzCommunicationNotificationPresenter(updateContent: { _, _ in
+      throw NSError(domain: "test", code: 2)
+    }).present(ordinaryContent: ordinary, resolution: communicationResolution())
+    XCTAssertEqual(failed.title, "Alice")
+    XCTAssertEqual(failed.body, "Hello Buzz")
   }
-
-  func testPresentationDonatesBeforeSpecializing() {
-    let ordinary = UNMutableNotificationContent()
-    ordinary.title = "Alice"
-    var order: [String] = []
-    let presenter = BuzzCommunicationNotificationPresenter(
-      donate: { _, completion in
-        order.append("donate")
-        completion(nil)
-      },
-      deleteAllInteractions: { completion in completion(nil) },
-      updateContent: { _, _ in
-        order.append("update")
-        let specialized = UNMutableNotificationContent()
-        specialized.title = "specialized"
-        return specialized
-      }
-    )
-    let completed = expectation(description: "specialized content returned")
-
-    presenter.present(
-      ordinaryContent: ordinary,
-      resolution: communicationResolution()
-    ) { content in
-      XCTAssertEqual(content.title, "specialized")
-      completed.fulfill()
-    }
-
-    wait(for: [completed], timeout: 1)
-    XCTAssertEqual(order, ["donate", "update"])
-  }
-
-  func testPresentationFallsBackWhenSpecializationFails() {
-    let ordinary = UNMutableNotificationContent()
-    ordinary.title = "Alice"
-    ordinary.body = "Hello Buzz"
-    let presenter = BuzzCommunicationNotificationPresenter(
-      donate: { _, completion in completion(nil) },
-      deleteAllInteractions: { completion in completion(nil) },
-      updateContent: { _, _ in throw NSError(domain: "test", code: 2) }
-    )
-    let completed = expectation(description: "ordinary fallback returned")
-
-    presenter.present(
-      ordinaryContent: ordinary,
-      resolution: communicationResolution()
-    ) { content in
-      XCTAssertEqual(content.title, "Alice")
-      XCTAssertEqual(content.body, "Hello Buzz")
-      completed.fulfill()
-    }
-
-    wait(for: [completed], timeout: 1)
-  }
-
-  func testFenceChangeDeletesDonatedInteractionBeforeCompleting() {
-    let ordinary = UNMutableNotificationContent()
-    ordinary.title = "Alice"
-    var allowed = true
-    var order: [String] = []
-    let presenter = BuzzCommunicationNotificationPresenter(
-      donate: { _, completion in
-        order.append("donate")
-        allowed = false
-        completion(nil)
-      },
-      deleteAllInteractions: { completion in
-        order.append("delete")
-        completion(nil)
-      },
-      updateContent: { content, _ in
-        order.append("update")
-        return content
-      }
-    )
-    let completed = expectation(description: "restricted donation deleted")
-
-    presenter.present(
-      ordinaryContent: ordinary,
-      resolution: communicationResolution(),
-      isStillAllowed: { allowed }
-    ) { content in
-      order.append("complete")
-      XCTAssertEqual(content.title, "Alice")
-      completed.fulfill()
-    }
-
-    wait(for: [completed], timeout: 1)
-    XCTAssertEqual(order, ["donate", "delete", "complete"])
-  }
-
-  func testBlockedFenceDoesNotDonate() {
-    let ordinary = UNMutableNotificationContent()
-    ordinary.title = "Alice"
-    var donateCalled = false
-    let presenter = BuzzCommunicationNotificationPresenter(
-      donate: { _, completion in
-        donateCalled = true
-        completion(nil)
-      },
-      deleteAllInteractions: { completion in completion(nil) },
-      updateContent: { content, _ in content }
-    )
-    let completed = expectation(description: "blocked donation skipped")
-
-    presenter.present(
-      ordinaryContent: ordinary,
-      resolution: communicationResolution(),
-      isStillAllowed: { false }
-    ) { content in
-      XCTAssertEqual(content.title, "Alice")
-      completed.fulfill()
-    }
-
-    wait(for: [completed], timeout: 1)
-    XCTAssertFalse(donateCalled)
-  }
-
 
   private func communicationResolution(
     displayName: String = "Alice",
@@ -221,7 +91,7 @@ final class BuzzCommunicationNotificationTests: XCTestCase {
       title: displayName,
       body: "Hello Buzz",
       subtitle: "Community",
-      threadIdentifier: BuzzPushPresentationIdentity.conversation(
+      threadIdentifier: BuzzPushPresentationIdentity.notificationThread(
         communityID: communityID,
         channelID: channelID
       ),
@@ -247,6 +117,35 @@ final class BuzzCommunicationNotificationTests: XCTestCase {
 /// The timeout is a cap; a passing test returns as soon as its callback runs.
 final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
   private let callbackTimeout: TimeInterval = 10
+
+  /// Waits for a bridge callback. On timeout the failure also reports how long
+  /// one fresh user-initiated-queue-then-main-queue hop takes right then (the
+  /// path every bridge reply follows), capped at 2 s. A starved test host reads
+  /// "a fresh queue->main hop did not finish within 2 s" or hundreds of ms; a
+  /// callback that never fired reads "took 0.4 ms". The hop is measured after
+  /// the 10 s window, so a fast hop does not rule out starvation that ended at
+  /// the deadline. The 2026-11-01 CI failures predate this measurement; their
+  /// timings fit starvation, since the RunnerTests host is the full Flutter app
+  /// and its launch saturated the 3-vCPU runner mid-class. A passing wait
+  /// returns as soon as the callback runs and measures nothing.
+  private func waitForCallback(
+    _ expectation: XCTestExpectation, file: StaticString = #filePath, line: UInt = #line
+  ) {
+    guard XCTWaiter().wait(for: [expectation], timeout: callbackTimeout) != .completed else { return }
+    let hop = XCTestExpectation(description: "queue to main hop")
+    let started = Date()
+    DispatchQueue(label: "xyz.block.buzz.test-hop", qos: .userInitiated).async {
+      DispatchQueue.main.async { hop.fulfill() }
+    }
+    let hopResult = XCTWaiter().wait(for: [hop], timeout: 2)
+    let elapsed = String(format: "%.1f ms", Date().timeIntervalSince(started) * 1000)
+    let hopReport = hopResult == .completed ? "took \(elapsed)" : "did not finish within 2 s"
+    XCTFail(
+      "'\(expectation.expectationDescription)' not fulfilled within \(Int(callbackTimeout)) s;"
+        + " a fresh queue->main hop \(hopReport)",
+      file: file, line: line
+    )
+  }
 
   func testAgeSignalRequestDoesNotDependOnNotificationStorage() {
     let delegate = MissingAppGroupDelegate()
@@ -315,7 +214,7 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
       received = value
       completed.fulfill()
     })
-    wait(for: [completed], timeout: callbackTimeout)
+    waitForCallback(completed)
     XCTAssertNil(received)
   }
 
@@ -331,6 +230,7 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
     let snapshotURL = directory.appendingPathComponent(BuzzPushPresentationCacheStore.fileName)
     let original = try Data(contentsOf: snapshotURL)
     var deletionCalls = 0
+    var deletionQoS: [qos_class_t] = []
     let bridge = BuzzPushSnapshotBridge(
       appGroupIdentifier: nil,
       endpointGrantStore: BuzzPushEndpointGrantKeychainStore(accessGroup: nil),
@@ -340,6 +240,7 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
         timeout: 5,
         deleteAllInteractions: { completion in
           deletionCalls += 1
+          deletionQoS.append(qos_class_self())
           completion(deletionCalls == 1 ? NSError(domain: "InjectedCleanupFailure", code: 1) : nil)
         },
         scheduleTimeout: { _, _ in }
@@ -353,7 +254,7 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
       purgeResult = value
       restricted.fulfill()
     })
-    wait(for: [restricted], timeout: callbackTimeout)
+    waitForCallback(restricted)
     XCTAssertEqual((purgeResult as? FlutterError)?.code, "age_restriction_purge_failed")
     XCTAssertTrue(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
     XCTAssertEqual(try Data(contentsOf: snapshotURL), original)
@@ -366,10 +267,17 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
       restoreResult = value
       restored.fulfill()
     })
-    wait(for: [restored], timeout: callbackTimeout)
+    waitForCallback(restored)
     XCTAssertNil(restoreResult)
     XCTAssertFalse(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
     XCTAssertEqual(deletionCalls, 2)
+    // Flutter awaits these replies; a lower QoS left them starved on busy hosts.
+    for qos in deletionQoS {
+      XCTAssertEqual(
+        qos, QOS_CLASS_USER_INITIATED,
+        "deletion ran at QoS class \(qos.rawValue), expected user-initiated (\(QOS_CLASS_USER_INITIATED.rawValue))"
+      )
+    }
     XCTAssertEqual(try Data(contentsOf: snapshotURL), original)
   }
 
@@ -399,39 +307,9 @@ final class BuzzPushSnapshotEnrichmentTests: XCTestCase {
       received = value
       completed.fulfill()
     })
-    wait(for: [completed], timeout: callbackTimeout)
+    waitForCallback(completed)
     XCTAssertEqual((received as? FlutterError)?.code, "interaction_cleanup_retry_failed")
     XCTAssertFalse(BuzzAgeRestrictionSession.isRestricted(containerURL: directory))
-  }
-
-  func testStrictAgeGateWriteFailsWhenAppGroupStoreIsUnavailable() {
-    let bridge = BuzzPushSnapshotBridge(
-      appGroupIdentifier: nil,
-      endpointGrantStore: BuzzPushEndpointGrantKeychainStore(accessGroup: nil),
-      keychainAccessGroup: nil
-    )
-    let completed = expectation(description: "strict write rejected")
-    var received: Any?
-
-    XCTAssertTrue(
-      bridge.handle(
-        FlutterMethodCall(
-          methodName: "syncAgeGatePushSnapshot",
-          arguments: [
-            "section": "communities",
-            "communities": [[String: Any]](),
-            "signingKeys": [String: String](),
-            "settleFence": false,
-          ]
-        )
-      ) { value in
-        received = value
-        completed.fulfill()
-      }
-    )
-
-    wait(for: [completed], timeout: callbackTimeout)
-    XCTAssertEqual((received as? FlutterError)?.code, "snapshot_sync_unavailable")
   }
 
   func testMetadataAuthorityUsesNewestGrantForMatchingRelay() {

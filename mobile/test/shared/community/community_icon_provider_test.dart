@@ -31,7 +31,9 @@ void main() {
     final container = ProviderContainer(
       overrides: [
         savedPrefsProvider.overrideWithValue(prefs),
-        communityIconHttpClientProvider.overrideWithValue(MockClient(handler)),
+        communityIconHttpClientProvider.overrideWith(
+          (ref, _) => MockClient(handler),
+        ),
       ],
     );
     addTearDown(container.dispose);
@@ -246,7 +248,7 @@ void main() {
       final container = ProviderContainer(
         overrides: [
           savedPrefsProvider.overrideWithValue(prefs),
-          communityIconHttpClientProvider.overrideWithValue(client),
+          communityIconHttpClientProvider.overrideWith((ref, _) => client),
         ],
       );
       addTearDown(container.dispose);
@@ -485,7 +487,7 @@ void main() {
         final container = ProviderContainer(
           overrides: [
             savedPrefsProvider.overrideWithValue(prefs),
-            communityIconHttpClientProvider.overrideWithValue(client),
+            communityIconHttpClientProvider.overrideWith((ref, _) => client),
           ],
         );
         addTearDown(container.dispose);

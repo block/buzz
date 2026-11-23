@@ -1,8 +1,14 @@
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
+import 'package:buzz/shared/hosted/known_community_sync.dart';
+import '../community/community_storage_test.dart' show FakeSecureStorage;
 import 'dart:async';
+
 import 'hosted_http_fixture.dart';
+
 import 'dart:convert';
 
 import 'package:buzz/shared/hosted/builderlab_account.dart';
+import 'package:buzz/shared/storage/serial_queue.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -16,6 +22,70 @@ void main() {
       .toIso8601String();
   final verifier = List.filled(43, 'a').join();
   setUp(() => FlutterSecureStorage.setMockInitialValues({}));
+
+  test(
+    'same-subject setup completion resumes a parked account removal',
+    () async {
+      var needsSetup = true;
+      var removals = 0;
+      final client = BuilderlabAccountClient(
+        storage: FakeSecureStorage(),
+        httpClient: MockClient((request) async {
+          if (request.url.path.endsWith('/exchange')) {
+            return http.Response(
+              jsonEncode({
+                'session_credential': 'same-credential',
+                'expires_at': expiry,
+              }),
+              200,
+            );
+          }
+          if (request.url.path.endsWith('/me')) {
+            return http.Response(
+              jsonEncode({
+                'subject': 'same-owner',
+                'expires_at': expiry,
+                'account_status': needsSetup
+                    ? 'ACCOUNT_STATUS_NEEDS_DETAILS'
+                    : 'ACCOUNT_STATUS_ACTIVE',
+              }),
+              200,
+            );
+          }
+          removals++;
+          return http.Response('{}', needsSetup ? 403 : 200);
+        }),
+      );
+      await client.exchange(code: 'first', verifier: verifier);
+      final sync = KnownCommunitySync(
+        account: client,
+        storage: FakeSecureStorage(),
+        localCommunities: () async => [],
+      );
+      addTearDown(() {
+        sync.dispose();
+        client.dispose();
+      });
+      await sync.remove('wss://team.example');
+      await sync.synchronize();
+      expect(sync.failure, AccountFailure.accountSetupRequired);
+      expect(removals, 1);
+      await client.restore();
+      await sync.synchronize();
+      expect(
+        removals,
+        1,
+        reason: 'ordinary restore must not bypass the parked session',
+      );
+      needsSetup = false;
+      await client.exchange(code: 'setup-completed', verifier: verifier);
+      await sync.synchronize();
+      expect(client.account!.subject, 'same-owner');
+      expect(removals, 2);
+      expect(await sync.pendingRemovals('same-owner'), isEmpty);
+      expect(sync.failure, isNull);
+    },
+  );
 
   test(
     'real client exchanges PKCE code, verifies, persists and restores session',
@@ -42,23 +112,119 @@ void main() {
         }
         expect(request.headers['X-BB-Session-Credential'], 'secret');
         return http.Response(
-          jsonEncode({'subject': 'account-1', 'expires_at': expiry}),
+          jsonEncode({
+            'subject': 'account-1',
+            'email': 'owner@example.com',
+            'expires_at': expiry,
+          }),
           200,
         );
       });
-      final client = BuilderlabAccountClient(httpClient: transport);
+      // The notification extension's copy follows every adopt and clear.
+      final shared = <String?>[];
+      var unshareFails = false;
+      var shareFails = true;
+      Future<void> share(String? credential) async {
+        if (credential == null && unshareFails) throw StateError('keychain');
+        if (credential != null && shareFails) throw StateError('keychain');
+        shared.add(credential);
+      }
+
+      final storage = _SessionStorage();
+      final client = BuilderlabAccountClient(
+        httpClient: transport,
+        storage: storage,
+        onSessionChanged: share,
+      );
       expect(
         (await client.exchange(code: 'one-use', verifier: verifier)).subject,
         'account-1',
       );
-      final restored = BuilderlabAccountClient(httpClient: transport);
-      expect((await restored.restore())!.subject, 'account-1');
-      expect(requests.length, 3);
+      // A failed share never blocks sign-in, and the next request retries it.
+      await Future<void>.delayed(Duration.zero);
+      expect(shared, isEmpty);
+      shareFails = false;
+      await client.post('/v1/buzz/known-communities/list', {});
+      await Future<void>.delayed(Duration.zero);
+      expect(shared, ['secret']);
+      await client.post('/v1/buzz/known-communities/list', {});
+      await Future<void>.delayed(Duration.zero);
+      expect(shared, ['secret']);
+      final restored = BuilderlabAccountClient(
+        httpClient: transport,
+        storage: storage,
+        onSessionChanged: share,
+      );
+      final restoredAccount = (await restored.restore())!;
+      expect(restoredAccount.subject, 'account-1');
+      expect(restoredAccount.email, 'owner@example.com');
+      expect(requests.length, 5);
+      await Future<void>.delayed(Duration.zero);
+      expect(shared, ['secret', 'secret']);
+      // A failed local deletion fails the sign-out and keeps the account
+      // signed in, so the extension gets its copy back after the removal.
+      storage.failDelete = true;
+      await expectLater(
+        restored.clearLocalSession(),
+        throwsA(AccountFailure.storage),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(restored.account?.subject, 'account-1');
+      expect(shared, ['secret', 'secret', null, 'secret']);
+      expect(await client.restore(), isNotNull);
+      storage.failDelete = false;
+      // A failed removal fails the sign-out instead of leaving it shared, and
+      // the next restore retries it.
+      unshareFails = true;
+      await expectLater(
+        restored.clearLocalSession(),
+        throwsA(AccountFailure.storage),
+      );
+      unshareFails = false;
+      expect(
+        await BuilderlabAccountClient(
+          httpClient: transport,
+          onSessionChanged: share,
+        ).restore(),
+        isNull,
+      );
+      expect(shared.last, isNull);
       await restored.clearLocalSession();
+      expect(shared.last, isNull);
+      expect(restored.account, isNull);
       expect(
         await BuilderlabAccountClient(httpClient: transport).restore(),
         isNull,
       );
+      // A credential adopted while an earlier share is in flight is shared
+      // once that write completes.
+      final gate = Completer<void>();
+      final delayed = <String?>[];
+      var issued = 0;
+      final rotating = BuilderlabAccountClient(
+        httpClient: MockClient(
+          (request) async => http.Response(
+            jsonEncode(
+              request.url.path.endsWith('/exchange')
+                  ? {
+                      'session_credential': 'next-${++issued}',
+                      'expires_at': expiry,
+                    }
+                  : {'subject': 'account-1', 'expires_at': expiry},
+            ),
+            200,
+          ),
+        ),
+        onSessionChanged: (credential) async {
+          await gate.future;
+          delayed.add(credential);
+        },
+      );
+      await rotating.exchange(code: 'one-use', verifier: verifier);
+      await rotating.exchange(code: 'two-use', verifier: verifier);
+      gate.complete();
+      await pumpEventQueue();
+      expect(delayed, ['next-1', 'next-2']);
     },
   );
 
@@ -87,7 +253,8 @@ void main() {
             onError: (Object error) => failure = error,
           ),
     );
-    unawaited(client.clearLocalSession().then((_) => cleared = true));
+    // Any queued account request waits for the deadline.
+    unawaited(client.restore().then((_) => cleared = true));
     await tester.pump();
     await tester.pump(const Duration(seconds: 20));
     await tester.pump(const Duration(seconds: 5));
@@ -103,6 +270,61 @@ void main() {
     await tester.pump();
     expect((await retry).subject, 'account-1');
   });
+
+  for (final (name, body) in [
+    ('a body that is not JSON', '{"oops"'),
+    ('a body that is not an object', '[]'),
+  ]) {
+    test('$name is reported as an account response error', () async {
+      final reporter = _RecordingDiagnostics();
+      final client = BuilderlabAccountClient(
+        httpClient: MockClient((_) async => http.Response(body, 200)),
+        diagnostics: reporter,
+      );
+      await expectLater(
+        client.exchange(code: 'code', verifier: verifier),
+        throwsA(AccountFailure.invalidResponse),
+      );
+      expect(reporter.errors, [
+        (FormatException, DiagnosticOperation.accountResponse),
+      ]);
+    });
+  }
+
+  // 200 responses that parse but lack what the client requires.
+  for (final (name, exchange, me) in <(String, Object, Object)>[
+    ('an exchange with no credential', <String, Object>{}, <String, Object>{}),
+    (
+      'a session with no subject',
+      {'session_credential': 'secret', 'expires_at': expiry},
+      {'expires_at': expiry},
+    ),
+    (
+      'a session with an unreadable expiry',
+      {'session_credential': 'secret', 'expires_at': expiry},
+      {'subject': 'account-1', 'expires_at': 'soon'},
+    ),
+  ]) {
+    test('$name is reported as an account response error', () async {
+      final reporter = _RecordingDiagnostics();
+      final client = BuilderlabAccountClient(
+        httpClient: MockClient(
+          (request) async => http.Response(
+            jsonEncode(request.url.path.endsWith('/exchange') ? exchange : me),
+            200,
+          ),
+        ),
+        diagnostics: reporter,
+      );
+      await expectLater(
+        client.exchange(code: 'code', verifier: verifier),
+        throwsA(AccountFailure.invalidResponse),
+      );
+      expect(reporter.errors, [
+        (FormatException, DiagnosticOperation.accountResponse),
+      ]);
+    });
+  }
 
   test('invalid verification cannot persist an exchanged credential', () async {
     final transport = MockClient(
@@ -184,6 +406,166 @@ void main() {
     expect((await restoring)!.subject, 'account-1');
     expect((await exchanging).subject, 'account-1');
     expect(jsonDecode((await stored())!)['credential'], 'new');
+  });
+
+  test('concurrent restores share one adopted account', () async {
+    FlutterSecureStorage.setMockInitialValues({
+      storageKey: record('account-1', 'old'),
+    });
+    var verifications = 0;
+    final client = BuilderlabAccountClient(
+      httpClient: MockClient((request) async {
+        verifications++;
+        return http.Response(
+          jsonEncode({'subject': 'account-1', 'expires_at': expiry}),
+          200,
+        );
+      }),
+    );
+    final first = client.restore();
+    final second = client.restore();
+    final adopted = await first;
+    expect(await second, same(adopted));
+    expect(client.account, same(adopted));
+    expect(verifications, 1);
+    // A later restore still re-verifies, so expiry is detected on retry.
+    await client.restore();
+    expect(verifications, 2);
+  });
+
+  test('a sign-out is never undone by a pending session check', () async {
+    FlutterSecureStorage.setMockInitialValues({
+      storageKey: record('account-1', 'old'),
+    });
+    final storage = _SessionStorage();
+    var check = Completer<void>();
+    final client = BuilderlabAccountClient(
+      storage: storage,
+      httpClient: MockClient((request) async {
+        await check.future;
+        return http.Response(
+          jsonEncode({'subject': 'account-1', 'expires_at': expiry}),
+          200,
+        );
+      }),
+    );
+    // A check already pending when sign-out starts doesn't hold it up.
+    final early = client.restore();
+    await pumpEventQueue();
+    await client.clearLocalSession();
+    check.complete();
+    expect(await early, isNull);
+    expect(client.account, isNull);
+
+    // Nor does a check that starts while the session is being deleted.
+    FlutterSecureStorage.setMockInitialValues({
+      storageKey: record('account-1', 'old'),
+    });
+    check = Completer<void>();
+    final deleted = Completer<void>();
+    storage.holdDelete = deleted.future;
+    final clearing = client.clearLocalSession();
+    final late = client.restore();
+    await pumpEventQueue();
+    deleted.complete();
+    await clearing;
+    check.complete();
+    expect(await late, isNull);
+    expect(client.account, isNull);
+    expect(await stored(), isNull);
+  });
+
+  test('an exchange queued before a sign-out cannot sign back in', () async {
+    FlutterSecureStorage.setMockInitialValues({
+      storageKey: record('account-1', 'old'),
+    });
+    final entered = Completer<void>();
+    final release = Completer<void>();
+    final client = BuilderlabAccountClient(
+      httpClient: MockClient((request) async {
+        if (request.url.path.endsWith('/exchange')) {
+          return http.Response(
+            jsonEncode({'session_credential': 'new', 'expires_at': expiry}),
+            200,
+          );
+        }
+        if (request.headers['X-BB-Session-Credential'] == 'old') {
+          if (!entered.isCompleted) entered.complete();
+          await release.future;
+        }
+        return http.Response(
+          jsonEncode({'subject': 'account-1', 'expires_at': expiry}),
+          200,
+        );
+      }),
+    );
+    addTearDown(() {
+      if (!release.isCompleted) release.complete();
+      client.dispose();
+    });
+    final restoring = client.restore();
+    await entered.future;
+    final exchanging = client
+        .exchange(code: 'code', verifier: verifier)
+        .then<Object?>((value) => value, onError: (Object error) => error);
+    await client.clearLocalSession();
+    release.complete();
+    await restoring;
+    expect(await exchanging, AccountFailure.unavailable);
+    expect(client.account, isNull);
+    expect(await stored(), isNull);
+  });
+
+  test('signing out leaves the extension without the session', () async {
+    FlutterSecureStorage.setMockInitialValues({
+      storageKey: record('account-1', 'old'),
+    });
+    // Extension writes land in call order, as the iOS bridge does.
+    final writes = SerialQueue();
+    var shareFails = true;
+    String? shared = 'old';
+    final unshareStarted = Completer<void>();
+    final releaseUnshare = Completer<void>();
+    final client = BuilderlabAccountClient(
+      httpClient: MockClient(
+        (request) async => http.Response(
+          jsonEncode({'subject': 'account-1', 'expires_at': expiry}),
+          200,
+        ),
+      ),
+      onSessionChanged: (credential) => writes.run(() async {
+        if (credential == null) {
+          if (!unshareStarted.isCompleted) unshareStarted.complete();
+          await releaseUnshare.future;
+        } else if (shareFails) {
+          throw StateError('keychain unavailable');
+        }
+        shared = credential;
+      }),
+    );
+    addTearDown(() {
+      if (!releaseUnshare.isCompleted) releaseUnshare.complete();
+      client.dispose();
+    });
+    // The first share fails, so the credential waits to be shared again.
+    await client.restore();
+    await pumpEventQueue();
+    shareFails = false;
+    final clearing = client.clearLocalSession();
+    await unshareStarted.future;
+    // An account request arriving mid-removal must not share it again.
+    final request = client.currentIdentity().then<Object?>(
+      (value) => value,
+      onError: (Object error) => error,
+    );
+    await pumpEventQueue();
+    releaseUnshare.complete();
+    await clearing;
+    await request;
+    await writes.run(() async {});
+    expect(client.account, isNull);
+    expect(await stored(), isNull);
+    expect(shared, isNull);
   });
 
   test('login for another account keeps the existing session', () async {
@@ -285,6 +667,34 @@ void main() {
     expect(await stored(), isNull);
   });
 
+  test('only agent listings may exceed the default response bound', () async {
+    // 100 KB: past the 64 KB default, as a few full-length instructions are.
+    final large = jsonEncode({'status': 1, 'padding': 'x' * 100000});
+    final client = BuilderlabAccountClient(
+      httpClient: MockClient((request) async {
+        if (request.url.path.endsWith('/exchange')) {
+          return http.Response(
+            jsonEncode({'session_credential': 'secret', 'expires_at': expiry}),
+            200,
+          );
+        }
+        if (request.url.path.contains('/beekeeper/')) {
+          return http.Response(large, 200);
+        }
+        return http.Response(
+          jsonEncode({'subject': 'account-1', 'expires_at': expiry}),
+          200,
+        );
+      }),
+    );
+    await client.exchange(code: 'one-use', verifier: verifier);
+    expect((await client.post('/v3/beekeeper/list-agents', {}))['status'], 1);
+    await expectLater(
+      client.post('/v3/beekeeper/get-model-catalog', {}),
+      throwsA(anything),
+    );
+  });
+
   test('authenticated post accepts only Buzz account routes', () async {
     final client = BuilderlabAccountClient(
       httpClient: MockClient((_) async => fail('no request expected')),
@@ -304,4 +714,35 @@ void main() {
       throwsA(AccountFailure.signedOut),
     );
   });
+}
+
+class _SessionStorage extends FlutterSecureStorage {
+  bool failDelete = false;
+  Future<void>? holdDelete;
+
+  @override
+  Future<void> delete({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    if (failDelete) throw StateError('storage unavailable');
+    await holdDelete;
+    await super.delete(key: key);
+  }
+}
+
+class _RecordingDiagnostics extends NoopDiagnosticReporter {
+  final errors = <(Type, DiagnosticOperation)>[];
+
+  @override
+  void reportError(
+    Object error,
+    StackTrace? stackTrace, {
+    required DiagnosticOperation operation,
+  }) => errors.add((error.runtimeType, operation));
 }

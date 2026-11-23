@@ -102,7 +102,7 @@ async fn channel_memberships_discover_participants_deduplicate_and_preserve_owne
         // Reuse channel IDs across communities to exercise community-scoped identity.
         // Two hidden channel memberships still count as one participating community.
         for channel in [Uuid::from_u128(1), Uuid::from_u128(2)] {
-            sqlx::query("INSERT INTO channels (community_id, id, name, created_by) VALUES ($1, $2, 'inventory-test', decode($3, 'hex'))")
+            sqlx::query("INSERT INTO channels (community_id, id, name, created_by) VALUES ($1, $2, 'inventory-test-' || $2::uuid::text, decode($3, 'hex'))")
                 .bind(community).bind(channel).bind(&key)
                 .execute(&pool).await.unwrap();
             sqlx::query("INSERT INTO channel_members (community_id, channel_id, pubkey, removed_at, hidden_at) VALUES ($1, $2, decode($3, 'hex'), CASE WHEN $4 THEN now() END, now())")

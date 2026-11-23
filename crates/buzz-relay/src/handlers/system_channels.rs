@@ -31,6 +31,7 @@ use uuid::Uuid;
 use buzz_core::CommunityId;
 
 use crate::state::AppState;
+use crate::subscription::SubscriptionScope;
 
 /// The named-only channels a request may add to a filter's scope: the
 /// readable channels of non-legacy types, and which of them are system
@@ -45,35 +46,45 @@ pub(crate) struct NamedOnlyChannels {
 }
 
 impl NamedOnlyChannels {
-    /// From `(id, channel_type)` rows of non-legacy channels.
-    pub(crate) fn from_typed(rows: impl IntoIterator<Item = (Uuid, String)>) -> Self {
-        let mut channels = Self::default();
-        for (id, channel_type) in rows {
-            channels.insert(id, &channel_type);
-        }
-        channels
+    /// From `(id, channel_type)` rows of non-legacy channels. A repeated
+    /// channel is kept once.
+    pub(crate) fn from_typed<S: AsRef<str>>(rows: impl IntoIterator<Item = (Uuid, S)>) -> Self {
+        Self::from_rows(
+            rows.into_iter()
+                .map(|(id, channel_type)| (id, channel_type, true)),
+        )
     }
 
     /// From [`buzz_db::channel_members::get_readable_named_only_channels`],
     /// which says which channels the opt-in may add.
     pub(crate) fn from_readable(
-        rows: impl IntoIterator<Item = buzz_db::channel_members::ReadableNamedOnlyChannel>,
+        rows: &[buzz_db::channel_members::ReadableNamedOnlyChannel],
     ) -> Self {
+        Self::from_rows(
+            rows.iter()
+                .map(|row| (row.id, row.channel_type.as_str(), row.opt_in)),
+        )
+    }
+
+    /// `(id, channel_type, opt_in)` rows; the first row for a channel wins.
+    fn from_rows<S: AsRef<str>>(rows: impl IntoIterator<Item = (Uuid, S, bool)>) -> Self {
         let mut channels = Self::default();
-        for row in rows {
-            channels.insert_with_opt_in(row.id, &row.channel_type, row.opt_in);
+        let mut seen = HashSet::new();
+        for (id, channel_type, opt_in) in rows {
+            if seen.insert(id) {
+                channels.push(id, channel_type.as_ref(), opt_in);
+            }
         }
         channels
     }
 
     fn insert(&mut self, id: Uuid, channel_type: &str) {
-        self.insert_with_opt_in(id, channel_type, true);
+        if !self.ids.contains(&id) {
+            self.push(id, channel_type, true);
+        }
     }
 
-    fn insert_with_opt_in(&mut self, id: Uuid, channel_type: &str, opt_in: bool) {
-        if self.ids.contains(&id) {
-            return;
-        }
+    fn push(&mut self, id: Uuid, channel_type: &str, opt_in: bool) {
         self.ids.push(id);
         if opt_in && channel_type == buzz_core::channel::ChannelType::System.as_str() {
             self.system.push(id);
@@ -124,6 +135,55 @@ fn named_channels(filter: &Filter) -> impl Iterator<Item = Uuid> + '_ {
         .chain(d)
         .flatten()
         .filter_map(|value| value.parse::<Uuid>().ok())
+}
+
+/// Channel IDs that `filter` names with `#h`. Malformed values are skipped.
+fn h_named_channels(filter: &Filter) -> impl Iterator<Item = Uuid> + '_ {
+    filter
+        .generic_tags
+        .get(&SingleLetterTag::lowercase(Alphabet::H))
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.parse::<Uuid>().ok())
+}
+
+/// Which channel names enter a request's membership confirmation and its
+/// filters' live scopes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveNames {
+    /// `#h`, and group-state `#d` (see [`named_channels`]).
+    All,
+    /// `#h` only. A request whose names exceed the explicit-channel limit
+    /// only because of group-state `#d` keeps the behavior from before `#d`
+    /// routed live: its `#d` channels are served from the cached access set
+    /// in history, and its group-state filters route community-global only.
+    HOnly,
+}
+
+/// Every distinct channel the filters name under `names`, in request order,
+/// plus the [`LiveNames`] to use. `#d` names are dropped, rather than the
+/// request refused, when counting them would pass `limit`; callers bound
+/// `#h` names separately.
+pub(crate) fn channels_named_by_filters(
+    filters: &[Filter],
+    limit: usize,
+) -> (Vec<Uuid>, LiveNames) {
+    let mut seen = HashSet::new();
+    let all: Vec<Uuid> = filters
+        .iter()
+        .flat_map(named_channels)
+        .filter(|id| seen.insert(*id))
+        .collect();
+    if all.len() <= limit {
+        return (all, LiveNames::All);
+    }
+    let mut seen = HashSet::new();
+    let h_only = filters
+        .iter()
+        .flat_map(h_named_channels)
+        .filter(|id| seen.insert(*id))
+        .collect();
+    (h_only, LiveNames::HOnly)
 }
 
 /// Whether `filter` opts in to every readable system channel: its kinds are
@@ -197,16 +257,63 @@ pub(crate) fn filter_channel_scope<'a>(
     Cow::Owned(scope)
 }
 
-/// Load the named-only channels the reader can read, narrowed to the token's
+/// The live routing scope of `filter`: the channels it names (see
+/// [`named_channels`]) that it may read, plus the community-global topic when
+/// it has no `#h`.
+///
+/// Live routing follows the filter's own names, never a sibling's. A filter
+/// without `#h` receives community-global events, as before. A group-state
+/// filter also receives later replacements for the channels its `#d` names.
+/// A filter that reaches a channel only through the implicit set or a system
+/// opt-in does not receive that channel's live events; its history read is
+/// unchanged. With [`LiveNames::HOnly`], `#d` does not name channels.
+pub(crate) fn filter_live_scope(
+    filter: &Filter,
+    implicit: &[Uuid],
+    named_only: &NamedOnlyChannels,
+    names: LiveNames,
+) -> SubscriptionScope {
+    let readable: HashSet<Uuid> = filter_channel_scope(filter, implicit, named_only)
+        .iter()
+        .copied()
+        .collect();
+    let named: Vec<Uuid> = match names {
+        LiveNames::All => named_channels(filter).collect(),
+        LiveNames::HOnly => h_named_channels(filter).collect(),
+    };
+    let scope = SubscriptionScope::channels(named.into_iter().filter(|id| readable.contains(id)));
+    if filter
+        .generic_tags
+        .contains_key(&SingleLetterTag::lowercase(Alphabet::H))
+    {
+        scope
+    } else {
+        scope.with_global()
+    }
+}
+
+/// The named-only channels the reader can read, narrowed to the token's
 /// channel scope, when at least one filter could use them. Returns an empty
-/// set, without a database read, when no filter opts in or names a channel
-/// outside the implicit set.
+/// set when no filter opts in or names a channel outside the implicit set.
+///
+/// `cached` is the reader's access from
+/// [`AppState::get_channel_access_cached`], read with `implicit`. Its
+/// named-only channels are the non-legacy ones the reader is a member of
+/// and the listed open ones. It answers
+/// the opt-in, which needs exactly those, and every name it holds. Only a
+/// request that names a channel outside both sets, such as an unlisted open
+/// channel, reads the database, so a fleet reconnect costs no extra read per
+/// client.
+///
+/// `None` reads the database regardless, for a request that must see the
+/// caller's own just-accepted write (a strong read).
 pub(crate) async fn readable_named_only_channels_for_filters(
     state: &AppState,
     community: CommunityId,
     pubkey: &[u8],
     filters: &[Filter],
     implicit: &[Uuid],
+    cached: Option<&crate::state::ChannelAccess>,
     token_channel_ids: Option<&[Uuid]>,
 ) -> Result<NamedOnlyChannels, buzz_db::DbError> {
     if !filters
@@ -216,12 +323,26 @@ pub(crate) async fn readable_named_only_channels_for_filters(
         return Ok(NamedOnlyChannels::default());
     }
     let named = named_outside(filters, implicit);
-    let mut readable = NamedOnlyChannels::from_readable(
-        state
-            .db
-            .get_readable_named_only_channels(community, pubkey, &named)
-            .await?,
-    );
+    let cached = cached.filter(|cached| {
+        let ids: HashSet<Uuid> = cached.named_only().map(|(id, _)| *id).collect();
+        named.iter().all(|id| ids.contains(id))
+    });
+    let mut readable = if let Some(cached) = cached {
+        metrics::counter!("buzz_named_only_channel_reads_total", "source" => "cache").increment(1);
+        NamedOnlyChannels::from_typed(
+            cached
+                .named_only()
+                .map(|(id, channel_type)| (*id, channel_type.as_str())),
+        )
+    } else {
+        metrics::counter!("buzz_named_only_channel_reads_total", "source" => "db").increment(1);
+        NamedOnlyChannels::from_readable(
+            &state
+                .db
+                .get_readable_named_only_channels(community, pubkey, &named)
+                .await?,
+        )
+    };
     if let Some(allowed) = token_channel_ids {
         readable.retain(allowed);
     }
@@ -332,6 +453,75 @@ mod tests {
         assert_eq!(
             filter_channel_scope(&other, &implicit, &readable).as_ref(),
             &[open]
+        );
+    }
+
+    #[test]
+    fn group_state_names_past_the_limit_drop_out_instead_of_refusing() {
+        let h = Uuid::new_v4();
+        let d: Vec<String> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
+        let filters = [
+            filter(serde_json::json!({"kinds": [9], "#h": [h.to_string()]})),
+            filter(serde_json::json!({"kinds": [39000], "#d": d})),
+        ];
+        let (named, names) = channels_named_by_filters(&filters, 4);
+        assert_eq!((named.len(), names), (4, LiveNames::All));
+        assert_eq!(
+            channels_named_by_filters(&filters, 3),
+            (vec![h], LiveNames::HOnly)
+        );
+
+        // With `#h` names only, a group-state `#d` filter routes as it did
+        // before `#d` routed live: community-global, no named channels.
+        let open = Uuid::new_v4();
+        let readable = of_type("system", &[]);
+        let by_d = filter(serde_json::json!({"kinds": [39000], "#d": [open.to_string()]}));
+        assert_eq!(
+            filter_live_scope(&by_d, &[open], &readable, LiveNames::HOnly),
+            SubscriptionScope::global()
+        );
+        let by_h = filter(serde_json::json!({"kinds": [9], "#h": [open.to_string()]}));
+        assert_eq!(
+            filter_live_scope(&by_h, &[open], &readable, LiveNames::HOnly),
+            SubscriptionScope::channels([open])
+        );
+    }
+
+    #[test]
+    fn live_scope_holds_only_the_readable_channels_a_filter_names() {
+        let open = Uuid::new_v4();
+        let private_outside = Uuid::new_v4();
+        let system = Uuid::new_v4();
+        let implicit = vec![open];
+        let readable = of_type("system", &[system]);
+        let live = |json| filter_live_scope(&filter(json), &implicit, &readable, LiveNames::All);
+
+        // #h: own readable channels, no global topic.
+        assert_eq!(
+            live(serde_json::json!({"#h": [open.to_string(), private_outside.to_string()]})),
+            SubscriptionScope::channels([open])
+        );
+        // Group-state #d: named readable channels plus the global topic.
+        assert_eq!(
+            live(serde_json::json!({
+                "kinds": [39000],
+                "#d": [open.to_string(), system.to_string(), private_outside.to_string()]
+            })),
+            SubscriptionScope::channels([open, system]).with_global()
+        );
+        // #d names nothing on other kinds.
+        assert_eq!(
+            live(serde_json::json!({"kinds": [39000, 1], "#d": [open.to_string()]})),
+            SubscriptionScope::global()
+        );
+        // The system opt-in and the implicit set widen history, not live routing.
+        assert_eq!(
+            live(serde_json::json!({"kinds": [39000], "#t": ["system"]})),
+            SubscriptionScope::global()
+        );
+        assert_eq!(
+            live(serde_json::json!({"kinds": [9]})),
+            SubscriptionScope::global()
         );
     }
 
@@ -466,5 +656,101 @@ mod tests {
             &filter(serde_json::json!({"kinds": [1], "#d": [Uuid::new_v4().to_string()]})),
             &implicit
         ));
+    }
+
+    /// A request whose named-only needs the cached access sets cover reads
+    /// no database: the connect-time system discovery (`#t:["system"]`) and a
+    /// name of a cached system channel. A name outside both sets still reads
+    /// the database. The database is unreachable, so any read fails.
+    /// Mutation: always take the database branch, or drop either cached
+    /// half from `get_channel_access_cached` → RED.
+    #[tokio::test]
+    async fn cached_access_answers_named_only_needs_without_a_database_read() {
+        let state = crate::state::tests::test_state_with_unreachable_database_url(
+            "postgres://buzz@127.0.0.1:1/buzz",
+        )
+        .await;
+        let community = CommunityId::from_uuid(Uuid::new_v4());
+        let reader = Keys::generate().public_key().to_bytes().to_vec();
+        let [stream, member_system, listed_system, unknown] = [(); 4].map(|()| Uuid::new_v4());
+        state.seed_member_channels(
+            (community, reader.clone()),
+            buzz_db::channel_members::ChannelSet {
+                implicit: vec![stream],
+                // A member of a listed system channel has it in both halves.
+                named_only: vec![
+                    (member_system, "system".to_owned()),
+                    (listed_system, "system".to_owned()),
+                ],
+            },
+        );
+        state.open_channels_cache.insert(
+            community,
+            std::sync::Arc::new(crate::state::OpenChannels {
+                ids: Vec::new(),
+                named_only: vec![(listed_system, "system".to_owned())],
+                read_at: std::time::Instant::now(),
+            }),
+        );
+        let access = state
+            .get_channel_access_cached(community, &reader)
+            .await
+            .expect("both halves are cached");
+        assert_eq!(access.implicit, [stream]);
+
+        let read_with = |filters: Vec<Filter>, token: Option<Vec<Uuid>>, cached: bool| {
+            let state = state.clone();
+            let reader = reader.clone();
+            let access = access.clone();
+            async move {
+                readable_named_only_channels_for_filters(
+                    &state,
+                    community,
+                    &reader,
+                    &filters,
+                    &access.implicit,
+                    cached.then_some(&access),
+                    token.as_deref(),
+                )
+                .await
+            }
+        };
+        let read = |filters: Vec<Filter>, token: Option<Vec<Uuid>>| read_with(filters, token, true);
+        let discovery = filter(serde_json::json!({
+            "kinds": [39002], "#p": [hex::encode(&reader)], "#t": ["system"]
+        }));
+        let named = read(vec![discovery.clone()], None)
+            .await
+            .expect("discovery is served from the cache");
+        assert_eq!(named.ids(), &[member_system, listed_system], "each once");
+        assert_eq!(
+            filter_channel_scope(&discovery, &access.implicit, &named).as_ref(),
+            &[stream, member_system, listed_system]
+        );
+
+        let by_h = filter(serde_json::json!({"kinds": [9], "#h": [member_system.to_string()]}));
+        let named = read(vec![by_h.clone()], None)
+            .await
+            .expect("a cached name is served from the cache");
+        assert_eq!(
+            filter_channel_scope(&by_h, &access.implicit, &named).as_ref(),
+            &[stream, member_system]
+        );
+
+        // The token scope still narrows a cached answer.
+        let scoped = read(vec![discovery.clone()], Some(vec![stream, listed_system]))
+            .await
+            .expect("discovery is served from the cache");
+        assert_eq!(scoped.ids(), &[listed_system]);
+
+        let outside = filter(serde_json::json!({"kinds": [9], "#h": [unknown.to_string()]}));
+        assert!(
+            read(vec![discovery.clone(), outside], None).await.is_err(),
+            "a name outside the cached sets reads the database"
+        );
+        assert!(
+            read_with(vec![discovery], None, false).await.is_err(),
+            "without the cache, discovery reads the database"
+        );
     }
 }

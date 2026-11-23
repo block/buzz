@@ -19,6 +19,31 @@ pub struct ApplicationConfig {
     pub apns_environment: ApnsEnvironment,
 }
 
+/// The Android application and its Firebase Cloud Messaging identity. All four
+/// settings are supplied together or not at all; without them the gateway
+/// accepts no Android enrollment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AndroidConfig {
+    /// Exact Android application package the attestation must name.
+    pub package_name: String,
+    /// Accepted SHA-256 digests of the app's signing certificate.
+    pub signing_cert_digests: Vec<[u8; 32]>,
+    /// Firebase project that owns the app's FCM registration tokens.
+    pub fcm_project_id: String,
+    /// Mounted Google credential JSON (service account key or AWS workload
+    /// identity federation config) the gateway uses to call FCM HTTP v1.
+    pub fcm_credentials_path: PathBuf,
+    /// Verified boot keys (SHA-256 digests) accepted when the hardware reports
+    /// a SelfSigned boot state. Empty, the default, accepts stock Android only.
+    pub boot_key_digests: Vec<[u8; 32]>,
+    /// PEM bundle of attestation roots that replaces Google's built-in
+    /// defaults, for a reviewed root rollout ahead of a release.
+    pub attestation_roots_path: Option<PathBuf>,
+    /// How long the attestation status list may go without a successful
+    /// refresh before Android enrollment fails closed.
+    pub revocation_grace_seconds: i64,
+}
+
 /// Apple App Attest environment, independent of the APNs transport environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppAttestEnvironment {
@@ -43,8 +68,14 @@ pub struct Config {
     pub max_installation_lifetime_seconds: i64,
     pub endpoint_quota_window_seconds: i64,
     pub endpoint_quota_max_deliveries: i64,
+    /// Window of the per-attested-key limit on signed installation calls.
+    pub signed_call_window_seconds: i64,
+    /// Signed installation calls one attested key may make per window.
+    pub signed_call_max_calls: i64,
     /// Server-owned application identity and APNs transport.
     pub application: ApplicationConfig,
+    /// Android identity and FCM credentials, when this gateway serves Android.
+    pub android: Option<AndroidConfig>,
     pub database_url: String,
     pub app_attest_root_cert_path: PathBuf,
     /// Ordered current key first, followed by decrypt-only predecessors.
@@ -144,6 +175,99 @@ fn parse_application(e: &HashMap<String, String>) -> Result<ApplicationConfig, C
     })
 }
 
+const ANDROID_SETTINGS: [&str; 4] = [
+    "BUZZ_PUSH_ANDROID_PACKAGE_NAME",
+    "BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS",
+    "BUZZ_PUSH_FCM_PROJECT_ID",
+    "BUZZ_PUSH_FCM_CREDENTIALS_PATH",
+];
+
+const ANDROID_OPTIONAL_SETTINGS: [&str; 3] = [
+    "BUZZ_PUSH_ANDROID_BOOT_KEY_DIGESTS",
+    "BUZZ_PUSH_ANDROID_ATTESTATION_ROOTS_PATH",
+    "BUZZ_PUSH_ANDROID_REVOCATION_GRACE_SECONDS",
+];
+
+/// A comma-separated list of SHA-256 digests in hex. Empty means none.
+fn parse_digests(value: &str, key: &'static str) -> Result<Vec<[u8; 32]>, ConfigError> {
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(',')
+        .map(|digest| {
+            hex::decode(digest)
+                .ok()
+                .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+                .ok_or(ConfigError::Invalid(key))
+        })
+        .collect()
+}
+
+fn valid_android_package_name(name: &str) -> bool {
+    let segments: Vec<&str> = name.split('.').collect();
+    segments.len() >= 2
+        && segments.iter().all(|segment| {
+            segment
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
+fn parse_android(e: &HashMap<String, String>) -> Result<Option<AndroidConfig>, ConfigError> {
+    // A partial configuration is a mistake, not a request to disable Android.
+    if ANDROID_SETTINGS
+        .iter()
+        .chain(&ANDROID_OPTIONAL_SETTINGS)
+        .all(|key| !e.contains_key(*key))
+    {
+        return Ok(None);
+    }
+    let required = |key: &'static str| {
+        e.get(key)
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or(ConfigError::Missing(key))
+    };
+    let package_key = ANDROID_SETTINGS[0];
+    let digests_key = ANDROID_SETTINGS[1];
+    let package_name = required(package_key)?;
+    if !valid_android_package_name(package_name) {
+        return Err(ConfigError::Invalid(package_key));
+    }
+    let signing_cert_digests = parse_digests(required(digests_key)?, digests_key)?;
+    let boot_key_key = ANDROID_OPTIONAL_SETTINGS[0];
+    let boot_key_digests = parse_digests(
+        e.get(boot_key_key).map(String::as_str).unwrap_or(""),
+        boot_key_key,
+    )?;
+    let grace_key = ANDROID_OPTIONAL_SETTINGS[2];
+    let revocation_grace_seconds = match e.get(grace_key) {
+        None => 604_800,
+        Some(value) => value
+            .parse::<i64>()
+            .ok()
+            .filter(|seconds| (3600..=31_536_000).contains(seconds))
+            .ok_or(ConfigError::Invalid(grace_key))?,
+    };
+    Ok(Some(AndroidConfig {
+        package_name: package_name.to_owned(),
+        signing_cert_digests,
+        fcm_project_id: required(ANDROID_SETTINGS[2])?.to_owned(),
+        fcm_credentials_path: PathBuf::from(required(ANDROID_SETTINGS[3])?),
+        boot_key_digests,
+        attestation_roots_path: e
+            .get(ANDROID_OPTIONAL_SETTINGS[1])
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from),
+        revocation_grace_seconds,
+    }))
+}
+
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_map(&std::env::vars().collect())
@@ -196,7 +320,12 @@ impl Config {
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS", 10, 86_400)?;
         let endpoint_quota_max_deliveries =
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES", 10, 10_000)?;
+        let signed_call_window_seconds =
+            bounded_positive("BUZZ_PUSH_SIGNED_CALL_WINDOW_SECONDS", 60, 86_400)?;
+        let signed_call_max_calls =
+            bounded_positive("BUZZ_PUSH_SIGNED_CALL_MAX_CALLS", 30, 10_000)?;
         let application = parse_application(e)?;
+        let android = parse_android(e)?;
         let bind_addr = e
             .get("BUZZ_PUSH_BIND_ADDR")
             .map(String::as_str)
@@ -216,7 +345,10 @@ impl Config {
             max_installation_lifetime_seconds,
             endpoint_quota_window_seconds,
             endpoint_quota_max_deliveries,
+            signed_call_window_seconds,
+            signed_call_max_calls,
             application,
+            android,
             database_url: req(e, "DATABASE_URL")?.to_owned(),
             app_attest_root_cert_path: req(e, "BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH")?.into(),
             grant_keys,
@@ -402,6 +534,100 @@ mod tests {
                 expected.to_string(),
                 "{label} must render decimal integer text"
             );
+        }
+    }
+
+    fn android_env() -> HashMap<String, String> {
+        let mut env = base();
+        env.extend([
+            (
+                "BUZZ_PUSH_ANDROID_PACKAGE_NAME".into(),
+                "com.example.buzz".into(),
+            ),
+            (
+                "BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS".into(),
+                format!("{},{}", "ab".repeat(32), "CD".repeat(32)),
+            ),
+            ("BUZZ_PUSH_FCM_PROJECT_ID".into(), "example-project".into()),
+            (
+                "BUZZ_PUSH_FCM_CREDENTIALS_PATH".into(),
+                "/fcm/credentials.json".into(),
+            ),
+        ]);
+        env
+    }
+
+    #[test]
+    fn android_is_disabled_unless_fully_configured() {
+        assert_eq!(Config::from_map(&base()).unwrap().android, None);
+        let android = Config::from_map(&android_env()).unwrap().android.unwrap();
+        assert_eq!(android.package_name, "com.example.buzz");
+        assert_eq!(android.signing_cert_digests, vec![[0xab; 32], [0xcd; 32]]);
+        assert_eq!(android.fcm_project_id, "example-project");
+        assert!(android.boot_key_digests.is_empty());
+        assert_eq!(android.attestation_roots_path, None);
+        assert_eq!(android.revocation_grace_seconds, 604_800);
+        let mut env = android_env();
+        env.extend([
+            (
+                "BUZZ_PUSH_ANDROID_BOOT_KEY_DIGESTS".to_owned(),
+                format!("{},{}", "01".repeat(32), "02".repeat(32)),
+            ),
+            (
+                "BUZZ_PUSH_ANDROID_ATTESTATION_ROOTS_PATH".to_owned(),
+                "/roots.pem".to_owned(),
+            ),
+            (
+                "BUZZ_PUSH_ANDROID_REVOCATION_GRACE_SECONDS".to_owned(),
+                "7200".to_owned(),
+            ),
+        ]);
+        let android = Config::from_map(&env).unwrap().android.unwrap();
+        assert_eq!(android.boot_key_digests, vec![[1; 32], [2; 32]]);
+        assert_eq!(android.attestation_roots_path, Some("/roots.pem".into()));
+        assert_eq!(android.revocation_grace_seconds, 7200);
+        // An empty boot-key list is the default, as Helm renders it.
+        env.insert("BUZZ_PUSH_ANDROID_BOOT_KEY_DIGESTS".into(), String::new());
+        assert!(Config::from_map(&env)
+            .unwrap()
+            .android
+            .unwrap()
+            .boot_key_digests
+            .is_empty());
+        // An Android option without the required settings is a mistake.
+        let mut env = base();
+        env.insert("BUZZ_PUSH_ANDROID_BOOT_KEY_DIGESTS".into(), String::new());
+        assert!(Config::from_map(&env).is_err());
+        for variable in ANDROID_SETTINGS {
+            let mut env = android_env();
+            env.remove(variable);
+            assert!(
+                matches!(Config::from_map(&env), Err(ConfigError::Missing(key)) if key == variable),
+                "accepted partial Android configuration without {variable}"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_android_configuration_fails_startup() {
+        for (key, value) in [
+            ("BUZZ_PUSH_ANDROID_PACKAGE_NAME", "buzz"),
+            ("BUZZ_PUSH_ANDROID_PACKAGE_NAME", "com..buzz"),
+            ("BUZZ_PUSH_ANDROID_PACKAGE_NAME", "com.1buzz"),
+            ("BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS", ""),
+            ("BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS", "abcd"),
+            ("BUZZ_PUSH_ANDROID_SIGNING_CERT_DIGESTS", "zz"),
+            ("BUZZ_PUSH_FCM_PROJECT_ID", ""),
+            ("BUZZ_PUSH_ANDROID_BOOT_KEY_DIGESTS", "abcd"),
+            ("BUZZ_PUSH_ANDROID_BOOT_KEY_DIGESTS", "zz"),
+            ("BUZZ_PUSH_ANDROID_REVOCATION_GRACE_SECONDS", "0"),
+            ("BUZZ_PUSH_ANDROID_REVOCATION_GRACE_SECONDS", "soon"),
+            ("BUZZ_PUSH_SIGNED_CALL_MAX_CALLS", "0"),
+            ("BUZZ_PUSH_SIGNED_CALL_WINDOW_SECONDS", "x"),
+        ] {
+            let mut env = android_env();
+            env.insert(key.into(), value.into());
+            assert!(Config::from_map(&env).is_err(), "accepted {key}={value}");
         }
     }
 

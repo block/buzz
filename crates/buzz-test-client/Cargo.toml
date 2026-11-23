@@ -24,7 +24,7 @@ uuid = { workspace = true }
 url = { workspace = true }
 rustls = "0.23"
 base64 = { workspace = true }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 hex = { workspace = true }
 reqwest = { workspace = true }
 sha2 = { workspace = true }
@@ -43,6 +43,7 @@ sqlx = { workspace = true }
 chrono = { workspace = true }
 s3 = { version = "0.37", package = "rust-s3", default-features = false, features = ["tokio-rustls-tls", "fail-on-err", "tags"] }
 buzz-media = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["png", "webp"] }
 buzz-sdk = { workspace = true }
 
 [[bin]]
@@ -52,3 +53,7 @@ path = "src/main.rs"
 [[bin]]
 name = "buzz-loadgen"
 path = "src/bin/loadgen.rs"
+
+[[bin]]
+name = "buzz-acceptance"
+path = "src/bin/acceptance.rs"

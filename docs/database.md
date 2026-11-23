@@ -17,8 +17,8 @@ PostgreSQL stores data. The application owns behavior.
 |---|---|---|
 | Schema source of truth | Two parallel sources: ordered sqlx migrations in `migrations/` and the desired-state manifest in `schema/` | The declarative desired state in `schema/tables/public/` is the source of truth. Deployments that apply schema out of band plan each change from it, with the tool of their choice. `migrations/` stays, because auto-migration stays supported (next row). Each app owns its own migrations and declarative schema: the relay's copies of the push gateway's tables are debt to remove (Rule 4). |
 | Who applies DDL | Startup migrations when `BUZZ_AUTO_MIGRATE` is on (binary default off, Helm chart default on), `buzz-admin migrate`, the push gateway's pre-upgrade Helm Job, and partition creation at relay startup and on a schedule | Both modes stay supported. Deployments at scale, including Block's hosted deployment, apply schema changes out of band through a reviewed workflow before deploying, and their serving relay runs no DDL. Smaller and self-hosted deployments MAY keep auto-migration on. Still open: how the two modes share one schema source, how auto-migration orders a release whose expand, backfill, and contract steps arrive in one upgrade, and how an operator recovers after a contract migration fails at boot (Rule 5). Monthly partition creation is planned to move out of the relay. Changes to partitioned tables (`events`, `delivery_log`) are outside the out-of-band envelope (Rule 6): attaching a partition to a live parent and building an index on a partitioned parent need their own reviewed procedure. |
-| Integrity between tables | Some foreign keys, including `ON DELETE CASCADE` and `ON DELETE SET NULL` | None in the database. The owning application transaction checks references and performs deletes explicitly. |
-| Guards and follow-up writes | Triggers and PL/pgSQL functions (`schema/functions/`, `schema/triggers/`) | None in the database. Guards run in the owning writer's transaction; follow-up work is recorded in the same transaction and processed as durable, retryable application work. |
+| Integrity between tables | None in the database (migrations `0102`-`0104` dropped the last foreign keys) | None in the database. The owning application transaction checks references and performs deletes explicitly. |
+| Guards and follow-up writes | None in the database. Earlier migrations dropped the last triggers and functions | None in the database. Guards run in the owning writer's transaction; follow-up work is recorded in the same transaction and processed as durable, retryable application work. |
 | Data repair | Some historical repair embedded in migrations | Backfill definitions in application code, run by the durable framework in [data-backfills.md](data-backfills.md). |
 | Rollout | Effectively schema and code together | Expand, then deploy, then backfill, then contract. Each step is applied and verified on its own. |
 
@@ -47,11 +47,9 @@ adds to them moves away from the target.
   unbounded, in one transaction, while holding locks, with no checkpoint, pause,
   or recovery. The backfill framework exists to provide those properties.
 
-The move to declarative, out-of-band schema changes is in progress. Until it
-finishes, existing triggers, functions, and foreign keys stay in place as
-backstops. They are removed one at a time, after their application replacement
-has shipped and been verified. They are not removed early, and new ones are not
-added.
+The move to declarative, out-of-band schema changes is in progress. The last
+triggers, functions, and foreign keys are already dropped. Rules 1 and 2 keep
+new ones out, and CI enforces both.
 
 ## Rules for changes now
 
@@ -76,9 +74,20 @@ transaction that owns the write:
 Dropping or narrowing an existing trigger or function is welcome. Follow the
 retirement sequence below.
 
-**No exception for the community write fence.** A new table MUST NOT get a
-fence trigger, including by calling the existing helper
-`attach_community_write_fence`. Writers of a new tenant-owned table MUST be
+**Enforcement.** `migrations_after_retirement_add_no_triggers_functions_or_foreign_keys`
+in `crates/buzz-db/src/runtime/migration.rs` fails CI when a migration numbered
+after `0104` contains `CREATE FUNCTION`, `CREATE PROCEDURE`, `CREATE TRIGGER`,
+`CREATE RULE` (each with or without `OR REPLACE`), `CREATE CONSTRAINT TRIGGER`,
+`CREATE EVENT TRIGGER`, `REFERENCES`, or `FOREIGN KEY`. It names the file and
+line. Comments, quoted identifiers, and string values are skipped; a string
+passed to `EXECUTE` or `format(` is checked as SQL. The desired-state layout
+test applies the same check to every file under `schema/`.
+`admin_schema_parity_between_desired_state_and_migrations` asserts that both
+bootstrap paths leave no trigger, function, rule, or foreign key.
+
+**No exception for the community write fence.** Migration 0090 dropped the
+universal fence triggers and their helper functions; a new table MUST NOT bring
+a fence trigger back. Writers of a new tenant-owned table MUST be
 fenced in the application instead, by community admission. New serving work,
 including fleet sweeps (one community at a time), is admitted by
 `DeletionStore::guard_transaction`, which takes the shared community deletion
@@ -93,42 +102,39 @@ a write that finishes under an already-admitted serving lease
 complete while the community is `quiescing`. Keep it.
 
 Helpers that take `&mut AdmittedTx` reject a raw transaction at compile time,
-but crate code can still bypass the type, so the fence triggers remain the
-database backstop until they are dropped (ARCHITECTURE.md § *Supported Writer
-Contract*). A table without a trigger has no database backstop. Every serving
-writer of a fenced table already goes through admission. The remaining
-fence-retirement work drops the fence triggers and functions, and MUST also
-update ARCHITECTURE.md § *Dual enforcement*.
+but crate code can still bypass the type, and no table has a database fence
+backstop (ARCHITECTURE.md § *Supported Writer Contract*). Every serving writer
+of a tenant table goes through admission.
 
 **New tenant-owned tables use application admission.** Startup and deletion validation
 no longer require a fence on any table; they pass with every universal fence
 object dropped (`migration_schema_fence_objects_are_optional_for_serving_and_deletion`
-in `crates/buzz-db/src/store/deletion.rs`). Two things still matter:
+in `crates/buzz-db/src/store/deletion.rs`). Deletion's catalog check is an
+exact set: a `community_id` table missing from `EXPECTED_SCOPED_TABLES` fails it
+(`community deletion catalog drift (missing=…, unknown=…)`), and deletion fails
+closed for every community, not only the new table's. Listing the table passes
+once its release is deployed; a relay deployed before the migration needs the
+table in `PENDING_SCOPED_TABLES` (see the checklist).
 
-- Deletion's catalog check is an exact set. A `community_id` table missing from
-  `EXPECTED_SCOPED_TABLES`, fenced or not, fails it
-  (`community deletion catalog drift (missing=…, unknown=…)`), and deletion
-  fails closed for every community, not only the new table's. Listing the
-  table is enough to pass.
-- Desired-state bootstraps install only the legacy fences explicitly listed
-  under `schema/triggers/`. They do not discover and fence new tables.
-  Keep those existing backstops until their own retirement is verified;
-  new tables receive no fence in either schema path.
-
-The blanket desired-state fence attachment has been removed. A feature may
-add a tenant-owned `community_id` table when it follows the checklist below.
-Do not add a trigger, or an entry in
-`community_write_fence_excluded_table` for a table the community owns.
+A feature may add a tenant-owned `community_id` table when it follows the
+checklist below. Do not add a trigger, or an entry in `EXCLUDED_SCOPED_TABLES`
+(`crates/buzz-db/src/store/deletion.rs`) for a table the community owns.
 
 #### Checklist: adding a tenant-owned `community_id` table
 
-All in the same PR:
+First, ship a release that lists the table in `PENDING_SCOPED_TABLES` and
+`APPROVAL_FORWARD_TABLES`, and deploy it to every relay, deletion executor and
+operator CLI before the migration runs. Deletion then keeps working across the
+migration, a mixed fleet and a rollback (see *What breaks the old relay*).
 
+Then, all in the same PR:
+
+- [ ] The table moved from `PENDING_SCOPED_TABLES` to the required catalog
+      below, and kept in `APPROVAL_FORWARD_TABLES`.
 - [ ] Every writer of the table goes through community admission
       (`begin_community_write_transaction` or another constructor that returns
       `AdmittedTx`). Nothing writes the table outside it.
-- [ ] No fence trigger: no `attach_community_write_fence` call in the
-      migration and no `schema/triggers/` file.
+- [ ] No fence trigger in the migration.
 - [ ] The table in `EXPECTED_SCOPED_TABLES` (`crates/buzz-db/src/store/deletion.rs`).
 - [ ] The table in `PURGE_SCOPED_TABLES` in the same file, ordered child
       before parent. A table missing here keeps its rows after the purge, and
@@ -141,6 +147,30 @@ All in the same PR:
       [crates/buzz-db/TESTING.md](../crates/buzz-db/TESTING.md)). Most tests
       use desired state, which builds the catalog differently.
 
+An approved deletion binds the structural catalog frozen in its inventory. The
+executor refuses, before fencing, an approval whose frozen tables are no longer
+all live, or whose live catalog gained a table the approval did not freeze.
+`APPROVAL_FORWARD_TABLES` is the one bounded exception: a live table outside
+the frozen set is accepted only if it is on that list, which names only tables
+the binary purges and verifies. The frozen manifest and digest are never
+rewritten. An approval made before the expand migration therefore still
+executes after it, and still purges the new table's rows. A table that is not
+on the list is not covered by an older approval, even when it is in
+`EXPECTED_SCOPED_TABLES`.
+
+#### Retiring a tenant-owned table
+
+Before a contract migration drops a table with a `community_id` column, ship a
+release that removes every reader and writer of it and moves it from
+`EXPECTED_SCOPED_TABLES` and `PURGE_SCOPED_TABLES` to
+`RETIRING_SCOPED_TABLES` (`crates/buzz-db/src/store/deletion.rs`), and deploy it
+to every relay, deletion executor and operator CLI. The catalog then accepts
+the table present or absent, the purge deletes its rows only while it exists,
+and an approval that froze it still executes after the drop
+(`validate_approved_schema` tolerates a frozen `RETIRING_SCOPED_TABLES` entry
+that is gone, and nothing else). Run the drop migration after that release
+is everywhere, and remove the entry once no pre-drop approval remains.
+
 #### Checklist: adding a provenance-only table
 
 A table whose `community_id` only records which community a row came from, and
@@ -148,11 +178,10 @@ whose rows must stay writable while that community is being deleted, is not
 owned by that community and is not fenced. The existing ones (the deletion
 control plane, `product_feedback`, `rate_limit_violations`, and
 `operator_listener_outbox`) predate this rule and are listed in
-`community_write_fence_excluded_table`. A new one MUST name its column
-something other than `community_id`, as
-`relay_admin_actions.report_community_id` does, so the catalog does not treat
-the table as scoped. Adding a case to the exclusion function would widen an
-existing function, which Rule 1 forbids. Renaming the
+`EXCLUDED_SCOPED_TABLES`. A new one MUST name its column something other than
+`community_id`, as `relay_admin_actions.report_community_id` does, so the
+catalog does not treat the table as scoped. Do not grow the exclusion list for
+a new table. Renaming the
 column also removes the table from every automatic deletion surface, so rows
 that name a deleted community survive deletion and no check fails, unless the
 PR follows this checklist. All in the same PR:
@@ -205,9 +234,10 @@ deletes to ship first, then the constraint drop as a separate contract step.
 ### 3. Backfills are not migrations
 
 A migration MUST contain schema changes only. It MUST NOT `UPDATE`, `INSERT`,
-or `DELETE` existing rows, and MUST NOT scan or rewrite a table while holding a
-write-blocking lock. Scans that do not block writes, such as
-`VALIDATE CONSTRAINT` or a bounded concurrent index build, are allowed (Rule 6).
+or `DELETE` existing rows, and MUST NOT scan or rewrite a large table while
+holding a write-blocking lock. Scans that do not block writes, such as
+`VALIDATE CONSTRAINT` or a concurrent index build, are allowed, as is a plain
+`CREATE INDEX` under Rule 6's lock and statement budgets (Rule 6).
 
 - Historical data repair MUST be a backfill definition that conforms to
   [data-backfills.md](data-backfills.md): stable ID, finite upper bound,
@@ -223,17 +253,19 @@ write-blocking lock. Scans that do not block writes, such as
 - A repair script MUST respect community deletion, as
   [ARCHITECTURE.md](../ARCHITECTURE.md) § *Supported Writer Contract*
   requires of operator maintenance. Each batch MUST take
-  `pg_advisory_xact_lock_shared(community_deletion_lock_key(<community>))` for
-  every community it touches. After taking the lock, in the same
+  `pg_advisory_xact_lock_shared(hashtextextended('buzz-community-deletion:' || <community>::text, 0))`
+  for every community it touches (the key `deletion::community_deletion_lock_key`
+  builds). After taking the lock, in the same
   transaction, it MUST read the community's state and touch only rows whose
   community has `deletion_state = 'active'` and `deleted_at IS NULL`, as
   `DeletionStore::guard_transaction` does. Selecting active communities
   before taking the lock races with deletion.
 - A repair script that writes a channel-bearing `events` row older than the
   floor (inserting one, moving `created_at` backward, or setting `channel_id`
-  on an old row) is outside the replica-floor proof: an
-  operator session does not set `buzz.created_at_floor`, so the commit-time
-  floor guard lets it through (`migrations/0021`). Its PR MUST document a
+  on an old row) is outside the replica-floor proof: only the relay's
+  app-side floor check (`replica_fence::guard_event_created_at_floor`)
+  enforces the floor, and an operator session runs none of it, so nothing
+  in the database stops the write. Its PR MUST document a
   reviewed procedure that keeps replica routing closed from before the first
   batch until its WAL has replayed on every replica.
 - A script MUST NOT disable triggers or set `session_replication_role`.
@@ -258,9 +290,9 @@ apply:
 | `migrations/NNNN_<name>.sql` | The forward migration for existing databases. Use the next free number; rebase and renumber on a collision. Never edit a merged migration: its checksum changes, and relays that run the migrator fail with sqlx `VersionMismatch`. Fix forward in a new migration. |
 | `schema/tables/public/<table>.sql` | The table's final `CREATE TABLE` and its `CREATE INDEX` statements, one table per file. This is the declarative schema source. |
 | `schema/schema.sql` | An `\i` line for each new file, after the tables it depends on. |
-| `schema/types/`, `schema/partitions/`, `schema/seeds/` | The matching non-table objects. The layout test permits nothing else here. Rule 1 forbids any addition to `functions/` and `triggers/`. |
+| `schema/types/`, `schema/partitions/`, `schema/seeds/` | The matching non-table objects. The layout test permits nothing else here. `schema/` has no `functions/` or `triggers/` directory, and Rule 1 forbids adding one. |
 | `scripts/reconcile-schema-after-pgschema.sql` | Idempotent convergence, plus a live assertion, for anything `pgschema` does not preserve: seed rows, some storage parameters, partition attachment, and the shapes listed in AGENTS.md *Common Gotchas* #7. |
-| `crates/buzz-push-gateway/migrations/` **and** the relay copies | The six `push_gateway_*` tables have two homes. The gateway applies its own migration history to its own database, through a pre-install/pre-upgrade Helm Job ([push-gateway-deployment.md](push-gateway-deployment.md)). The relay schema also defines them: `migrations/` (`0015`, `0043`, `0045`, `0060`), `schema/tables/public/push_gateway_*.sql`, and `schema/seeds/push_gateway_*.sql`. Until the duplication is removed, a gateway schema change goes in both, as relay `0060` mirrors gateway `0006`. Every rule here applies to both. The target is for the gateway to own its tables alone, in its own migrations and declarative schema; do not add new gateway tables to the relay schema. |
+| `crates/buzz-push-gateway/migrations/`, `crates/buzz-push-gateway/schema/`, **and** the relay copies | The six `push_gateway_*` tables have two homes. The gateway applies its own migration history to its own database, through a pre-install/pre-upgrade Helm Job ([push-gateway-deployment.md](push-gateway-deployment.md)). `crates/buzz-push-gateway/schema/tables/public/` holds the gateway's declarative end state, one table per file; its parity test fails when it drifts from the gateway migrations. The relay schema also defines them: `migrations/` (`0015`, `0043`, `0045`, `0060`), `schema/tables/public/push_gateway_*.sql`, and `schema/seeds/push_gateway_*.sql`. Until the duplication is removed, a gateway schema change goes in both, as relay `0060` mirrors gateway `0006`. Every rule here applies to both. The target is for the gateway to own its tables alone, in its own migrations and declarative schema; do not add new gateway tables to the relay schema. |
 
 A fresh desired-state database and a migrated database MUST converge on the
 same live catalog. The desired-state layout test in
@@ -294,8 +326,8 @@ Every migration MUST be safe for the currently deployed release to read and
 write against.
 
 The relay has no general schema-version compatibility check. It verifies only
-specific catalog surfaces, such as the deletion serving fence and the replica
-floor guard, so the ordering below is the main protection. When
+specific catalog surfaces, such as the deletion serving fence, so the ordering
+below is the main protection. When
 `BUZZ_AUTO_MIGRATE` is on, an older binary refuses a database that has
 migrations it does not know (sqlx `VersionMissing`), so `helm rollback` with
 auto-migration on fails at startup, and so does any old pod that restarts
@@ -362,7 +394,7 @@ before the contract have already committed, so an old pod that restarts hits
 | Add `CHECK`, `UNIQUE`, or a narrower index | Old writes violate it, or an old `ON CONFLICT` target no longer matches an index | Deploy writers that satisfy it, backfill, then add it. Add a `CHECK` as `NOT VALID`, then `VALIDATE CONSTRAINT` in a later step. Keep every index an old `ON CONFLICT` names until no deployed code uses it |
 | Add an enum value that new code writes | Old code fails to decode the unknown variant | Deploy readers that accept the value, then deploy writers that produce it |
 | Drop a column, table, index, trigger, function, or FK | Old code reads it or relies on its side effect | Contract step only, after the release that stops relying on it is fully deployed |
-| Add a table with a `community_id` column | The old relay's exact-set deletion catalog check (`EXPECTED_SCOPED_TABLES`) sees an unknown table, so community deletion fails closed until the new release deploys. Serving is unaffected, apart from the auto-migration restart case in Rule 5 | Allowed. For a tenant-owned table, only after the desired-state change in Rule 1. Keep the gap between expand and deploy short, and do not run community deletion during it |
+| Add a table with a `community_id` column | The old relay's exact-set deletion catalog check (`EXPECTED_SCOPED_TABLES`) sees an unknown table, so community deletion fails closed for every community until the new release deploys, and again after any rollback to it. Serving is unaffected, apart from the auto-migration restart case in Rule 5 | First ship a release that lists the table in `PENDING_SCOPED_TABLES` and deploy it everywhere; that release deletes communities with the table absent or present. Then migrate, then deploy the release that moves the table to `EXPECTED_SCOPED_TABLES`. The pending release becomes the rollback floor once the migration runs. For a tenant-owned table, only after the desired-state change in Rule 1 |
 | `SELECT *` or `RETURNING *` decoded by position | Column order differs between desired-state and migrated databases and changes when columns are added | Select named columns |
 
 #### Adding `NOT NULL` to a populated table
@@ -404,17 +436,38 @@ parity assertion on the table for that window.
 3. Removing a guard requires a falsifiable test showing that the application
    path enforces what the guard enforced.
 
+pgschema cannot drop a trigger or foreign key from a partitioned table: it
+plans a drop for each partition's copy, which PostgreSQL refuses (`2BP01`) or
+which the parent's drop already removed (`42704`). A deployment that applies
+`schema/` with pgschema applies the dropping migration first, under that
+migration's lock budgets, then runs pgschema. For the trigger drops see
+[trigger-retirement-deployment.md](trigger-retirement-deployment.md); for the
+foreign keys on `events` and `delivery_log`, apply `0104`.
+
 ### 6. Bound every lock and statement
 
 - Every migration MUST start with `SET LOCAL lock_timeout`, and SHOULD set
   `SET LOCAL statement_timeout` when a statement can scan. A migration that
   cannot get its lock fails and is retried. It MUST NOT queue behind
   traffic on a hot table.
-- In `migrations/`, an index on an existing populated table MUST be built
-  with `CREATE INDEX CONCURRENTLY`, because auto-migrating deployments have no
-  online schema change tool to build it for them. CONCURRENTLY cannot run
-  inside the migration transaction, so follow the prebuild-then-verify
-  procedure in [thread-window-deployment.md](thread-window-deployment.md).
+- With `BUZZ_AUTO_MIGRATE` on, migrations are the whole upgrade procedure, so
+  every migration MUST apply its own change on a database that holds data. A
+  migration MUST NOT refuse to run because a table has rows: every
+  auto-migrating relay with data would crash-loop on that version until
+  someone intervened by hand.
+- In `migrations/`, a new index on an existing table is built by the
+  migration itself. Skip `CREATE INDEX` when `to_regclass` finds the index,
+  otherwise build it inline under the migration's lock and statement budgets,
+  then verify its definition and flags, as `0049` does. A deployment too
+  large for those budgets runs with auto-migration off and applies migrations
+  out of band; only such a deployment prebuilds the exact index with
+  `CREATE INDEX CONCURRENTLY` (procedure in
+  [thread-window-deployment.md](thread-window-deployment.md)) before applying
+  the migration, which then verifies it. Frozen migrations `0076`, `0078` and
+  `0081` predate this rule; the startup runner builds their indexes first
+  (`INLINE_INDEX_BUILDS` in `crates/buzz-db/src/runtime/migration.rs`). A
+  source test rejects any other migration that raises `'prebuild …'`; it
+  matches that wording only, so review must catch other refusals.
   Partitioned parents need per-partition concurrent builds attached to an
   `ON ONLY` parent index.
 - The declarative schema source declares indexes with plain `CREATE INDEX`.
@@ -456,8 +509,8 @@ description:
       test for each changed table and index.
 - [ ] That the currently deployed relay works against the new schema, and how
       that was checked.
-- [ ] Lock and statement timeouts, concurrent index builds in `migrations/`,
-      and any operator prebuild step.
+- [ ] Lock and statement timeouts, how each new index is built inline, and
+      any prebuild step for deployments that apply migrations out of band.
 
 ## Related documents
 

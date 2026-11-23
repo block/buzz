@@ -458,6 +458,45 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
             return Err(VerifierError::StatusWitnessUnavailable);
         }
 
+        // This optional evidence has no effect on admission or capabilities.
+        // Agents carry no profile, OAuth client subjects carry no evidence.
+        let profile_eligible = match policy.token_class() {
+            TokenClass::DedicatedNipFi => true,
+            TokenClass::AccessTokenAtJwt { subject_class } => {
+                subject_class.classify(
+                    claims
+                        .get(subject_class.marker_claim())
+                        .and_then(Value::as_str),
+                ) == Some(SubjectClass::ResourceOwner)
+            }
+        };
+        let profile_assertion = if profile_eligible {
+            Some(super::public_profile::ProfileAssertion {
+                issued_at: parse_numeric_date(&claims["iat"])?,
+                profile: if owner.is_some() {
+                    None
+                } else {
+                    token
+                        .split('.')
+                        .nth(1)
+                        .and_then(|segment| base64url_decode(segment).ok())
+                        .and_then(|bytes| {
+                            serde_json::from_slice::<
+                                std::collections::HashMap<String, Box<serde_json::value::RawValue>>,
+                            >(&bytes)
+                            .ok()
+                        })
+                        .and_then(|raw| {
+                            raw.get("nostr_public_profile").and_then(|value| {
+                                super::public_profile::PublicProfile::from_json(value.get())
+                            })
+                        })
+                },
+            })
+        } else {
+            None
+        };
+
         Ok(VerifiedAssertion::seal(
             policy.issuer().to_owned(),
             subject,
@@ -473,7 +512,8 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
                 key_set.hard_deadline,
                 token.to_owned(),
             ),
-        ))
+        )
+        .with_profile_assertion(profile_assertion))
     }
 
     fn unverified_issuer(&self, token: &str) -> Result<String, VerifierError> {

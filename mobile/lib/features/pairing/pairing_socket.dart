@@ -66,7 +66,15 @@ class PairingSocket {
     }
     final channel = _channelFactory(Uri.parse(_wsUrl));
     _channel = channel;
-    await Future.any([channel.ready, _closed.future]);
+    try {
+      await Future.any([
+        channel.ready,
+        _closed.future,
+      ]).timeout(const Duration(seconds: 10));
+    } catch (_) {
+      dispose();
+      rethrow;
+    }
     if (_closed.isCompleted) {
       throw const PairingAuthException('Pairing connection cancelled');
     }

@@ -78,8 +78,10 @@ import {
 } from "@/shared/api/relayAuthPolicy";
 import { createRelayInboundBuffer } from "@/shared/api/relayInboundBuffer";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
+import { RelayEntryRequirements } from "./relayEntryRequirements";
 type UserStatusInput = { text: string; emoji: string; expiresAt?: number };
 export class RelayClient {
+  readonly entryRequirements = new RelayEntryRequirements();
   private wsId: number | null = null;
   private relayUrl: string | null = null;
   private connectPromise: Promise<number> | null = null;
@@ -119,6 +121,7 @@ export class RelayClient {
     this.visibleChannelId = id;
   }
   disconnect() {
+    this.entryRequirements.reset();
     const error = new Error("Relay disconnected for community switch.");
 
     if (this.reconnectTimeout) {
@@ -561,18 +564,12 @@ export class RelayClient {
       inbound.receive(delivery),
     );
     try {
-      if (!this.relayUrl) {
-        this.relayUrl = await getRelayWsUrl();
-      }
-      const wsId = await invoke<number>("plugin:websocket|connect", {
-        url: this.relayUrl,
-        onMessage: this.onMessageChannel,
-        config: {},
-      });
-      if (generation !== this.connectionGeneration) {
-        void closeWebSocket(wsId, "stale connection attempt");
-        throw new Error("Relay connection attempt was superseded.");
-      }
+      const { relayUrl, wsId } = await this.entryRequirements.connect(
+        this.relayUrl,
+        this.onMessageChannel,
+        () => generation === this.connectionGeneration,
+      );
+      this.relayUrl = relayUrl;
       this.wsId = wsId;
 
       const authentication = armRelayAuthentication(
@@ -607,7 +604,9 @@ export class RelayClient {
         "Failed to connect to relay.",
       );
       if (generation === this.connectionGeneration) {
-        this.resetConnection(connectionError);
+        this.resetConnection(connectionError, {
+          reconnect: !RelayEntryRequirements.isUpgradeRequired(error),
+        });
       }
       throw connectionError;
     }

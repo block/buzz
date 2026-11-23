@@ -5,6 +5,10 @@ A deployment that provisions communities under one host suffix, for example
 each community in `community_nip_fi_issuers`. The relay writes these rows when
 it creates a community; `buzz-admin nip-fi` backfills and edits them.
 
+To make an existing community require federated sign-in, use the separate
+[community policy management command](operator-nip-fi-upgrade.md).
+An issuer binding alone does not change that community's required policy.
+
 A host may hold a binding only when it is exactly one DNS label under the
 suffix, has no port, and is not *reserved*. A host is reserved when
 `https://<host>` is a `command_audiences` entry of any issuer in
@@ -12,6 +16,12 @@ suffix, has no port, and is not *reserved*. A host is reserved when
 assertion audience. The relay refuses to start while a reserved host holds a
 binding, and the operator lookup route reports no issuers for a host that is not
 bindable or for an issuer that is not configured.
+
+A community with durable `requires_nip_fi=true` always retains its last issuer.
+The internal `allow_last` exception for unbindable hosts cannot override this
+policy. Bind a replacement first, or archive/delete the community for containment.
+Bulk backfill skips required communities whose bindings are missing; its closing
+report still counts them as unbound. Repair those bindings with an explicit bind.
 
 ## Configuration
 
@@ -58,6 +68,36 @@ fail. Open WebSocket sessions are not rechecked when a binding is removed;
 they end at their own session deadline. Alert on
 `time() - buzz_nip_fi_binding_snapshot_loaded_timestamp_seconds > 120` and on
 `absent(buzz_nip_fi_binding_snapshot_loaded_timestamp_seconds)`.
+
+## Initial policy on operator creation
+
+A trusted NIP-98 operator may send `initial_requires_nip_fi: true` with
+`create_only: true` to `POST /operator/communities`. The community, owner,
+issuer bindings and required policy (generation 1) commit in one transaction.
+Omitted, null or false creates an optional community at generation 0. A non-null
+policy field without `create_only: true` returns 400
+`initial_policy_requires_create_only`.
+
+Required insertion needs an effective provision binding for the host; otherwise
+400 `nip_fi_binding_required` leaves no row. Reserved hosts retain the existing
+`reserved_host` refusal. The successful response includes the stored
+`requires_nip_fi` and `status: "created"` for insertion or `"existed"` for a
+same-owner replay. A replay changes neither policy nor bindings, including after
+an operator disable or a change in issuer configuration. A different owner
+retains the existing conflict. Legacy ensure and deployment bootstrap remain
+optional and do not accept an explicit initial policy.
+
+This policy is independent of `BUZZ_NIP_FI_CHANGES`. Mode `off` stores
+it but bypasses enforcement. The production creation paths are operator
+create-only, legacy operator ensure, and deployment bootstrap; only create-only
+accepts this choice.
+
+Upgrade the **whole serving relay fleet** before callers request true. Older
+writers may ignore the unknown field and insert an optional row. Checking the
+created response for stored true detects that incompatible writer, but cannot
+undo its insertion; a later existing-row lookup remains read-only. Turn caller
+targeting off before rolling back the relay. Turning it off affects future
+insertions only; it does not clear existing policy.
 
 ## Commands
 

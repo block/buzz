@@ -41,15 +41,60 @@ private final class JumpToLatestGlassButton: UIButton {
 }
 
 final class NavigationGlassButton: UIButton {
+  var opensMenuAbove = false
   var hitTargetInsets = UIEdgeInsets.zero
-  var pendingMenuAction: (() -> Void)?
+  private static weak var visibleMenuButton: NavigationGlassButton?
+  private var pendingMenuAction: (() -> Void)?
+  private var menuVisible = false
+  private var menuDismissing = false
+
+  func afterMenuDismissal(_ action: @escaping () -> Void) {
+    if menuVisible || menuDismissing {
+      pendingMenuAction = action
+    } else {
+      DispatchQueue.main.async(execute: action)
+    }
+  }
+
+  private func finishMenuDismissal() {
+    if !menuVisible && Self.visibleMenuButton === self { Self.visibleMenuButton = nil }
+    menuDismissing = false
+    let action = pendingMenuAction
+    pendingMenuAction = nil
+    action?()
+  }
+  var menuVisibilityChanged: ((Bool) -> Void)?
+  var animateMenu: ((Bool, UIContextMenuInteractionAnimating?) -> Void)?
+  weak var glassPreview: UIView?
+  var onHighlightChanged: ((Bool) -> Void)?
+
+  override func menuAttachmentPoint(for configuration: UIContextMenuConfiguration) -> CGPoint {
+    guard opensMenuAbove else {
+      return super.menuAttachmentPoint(for: configuration)
+    }
+    return CGPoint(x: bounds.midX, y: bounds.minY)
+  }
+
+  override var isHighlighted: Bool {
+    didSet {
+      if oldValue != isHighlighted { onHighlightChanged?(isHighlighted) }
+    }
+  }
 
   override func contextMenuInteraction(
     _ interaction: UIContextMenuInteraction,
     willDisplayMenuFor configuration: UIContextMenuConfiguration,
     animator: UIContextMenuInteractionAnimating?
   ) {
+    menuVisible = true
+    pendingMenuAction = nil
     super.contextMenuInteraction(interaction, willDisplayMenuFor: configuration, animator: animator)
+    if let previous = Self.visibleMenuButton, previous !== self, previous.window === window {
+      previous.contextMenuInteraction?.dismissMenu()
+    }
+    Self.visibleMenuButton = self
+    animateMenu?(true, animator)
+    menuVisibilityChanged?(true)
     UIImpactFeedbackGenerator(style: .light).impactOccurred()
   }
 
@@ -58,16 +103,28 @@ final class NavigationGlassButton: UIButton {
     willEndFor configuration: UIContextMenuConfiguration,
     animator: UIContextMenuInteractionAnimating?
   ) {
+    menuVisible = false
+    menuDismissing = true
     super.contextMenuInteraction(interaction, willEndFor: configuration, animator: animator)
-    let action = pendingMenuAction
-    pendingMenuAction = nil
+    animateMenu?(false, animator)
+    menuVisibilityChanged?(false)
     // Flutter routes must start after UIKit removes the glass menu and its
     // source-button preview from the window's overlay hierarchy.
     if let animator {
-      animator.addCompletion { action?() }
+      animator.addCompletion { [weak self] in self?.finishMenuDismissal() }
     } else {
-      action?()
+      DispatchQueue.main.async { [weak self] in self?.finishMenuDismissal() }
     }
+  }
+
+  override func contextMenuInteraction(
+    _ interaction: UIContextMenuInteraction,
+    previewForHighlightingMenuWithConfiguration configuration: UIContextMenuConfiguration
+  ) -> UITargetedPreview? {
+    guard let glassPreview else {
+      return super.contextMenuInteraction(interaction, previewForHighlightingMenuWithConfiguration: configuration)
+    }
+    return UITargetedPreview(view: glassPreview)
   }
 
   override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
@@ -195,8 +252,10 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private let containerView: UIView
   private let channel: FlutterMethodChannel
   private let button = NavigationGlassButton(type: .system)
+  private var navigationGlass: MergingNavigationGlass?
   private let activityIndicator = UIActivityIndicatorView(style: .medium)
   private let swatchView = UIView()
+  private let composerGlyph = ComposerActionGlyph()
   private var labelForegroundColor: UIColor?
   private var showIconWithLabel = false
   private var labelFontSize: CGFloat?
@@ -206,6 +265,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
   private var buttonImage: UIImage?
   private var isBusy = false
   private var controlSize: CGFloat = 40
+  private var isFilledBackground = false
 
   init(
     frame: CGRect,
@@ -220,6 +280,9 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     )
     super.init()
 
+    button.menuVisibilityChanged = { [weak self] visible in
+      self?.channel.invokeMethod("menuVisibilityChanged", arguments: visible)
+    }
     containerView.backgroundColor = .clear
     containerView.isOpaque = false
     let arguments = args as? [String: Any]
@@ -242,9 +305,12 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       configuration = .gray()
       configuration.baseBackgroundColor = UIColor.secondarySystemBackground
     }
-    if arguments?["plain"] as? Bool == true { configuration = .plain() }
+    if arguments?["plain"] as? Bool == true || arguments?["mergingNavigation"] as? Bool == true { configuration = .plain() }
     configuration.cornerStyle = .capsule
     button.configuration = configuration
+    button.onHighlightChanged = { [weak self] highlighted in
+      self?.channel.invokeMethod("highlighted", arguments: highlighted)
+    }
     applyContent(from: arguments)
     button.titleLabel?.numberOfLines = 1
     button.titleLabel?.lineBreakMode = .byClipping
@@ -254,6 +320,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       bottom: max(0, (hitTargetHeight - controlSize) / 2),
       right: max(0, hitTargetWidth - buttonCenterX - controlWidth / 2)
     )
+    containerView.accessibilityElementsHidden = arguments?["accessibilityHidden"] as? Bool ?? false
     button.accessibilityLabel = arguments?["accessibilityLabel"] as? String ?? "Back"
     button.translatesAutoresizingMaskIntoConstraints = false
     button.addAction(
@@ -288,8 +355,23 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     ])
     swatchView.layer.cornerRadius = swatchSize / 2
 
+    composerGlyph.translatesAutoresizingMaskIntoConstraints = false
+    composerGlyph.isUserInteractionEnabled = false
+    composerGlyph.isAccessibilityElement = false
+    button.addSubview(composerGlyph)
+    NSLayoutConstraint.activate([
+      composerGlyph.centerXAnchor.constraint(equalTo: button.centerXAnchor),
+      composerGlyph.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+      composerGlyph.widthAnchor.constraint(equalToConstant: 24),
+      composerGlyph.heightAnchor.constraint(equalToConstant: 24),
+    ])
     applyAppearance(from: args)
     channel.setMethodCallHandler { [weak self] call, result in
+      if call.method == "setArtworkPressed" {
+        self?.button.isHighlighted = call.arguments as? Bool ?? false
+        result(nil)
+        return
+      }
       if call.method == "setContent" {
         self?.setContent(from: call.arguments)
         result(nil)
@@ -303,6 +385,26 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       result(nil)
     }
 
+    if arguments?["mergingNavigation"] as? Bool == true {
+      let glass = MergingNavigationGlass(frame: containerView.bounds)
+      glass.vertical = arguments?["verticalNavigation"] as? Bool ?? false
+      glass.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+      containerView.addSubview(glass)
+      navigationGlass = glass
+      glass.centerSurface.contentView.addSubview(button)
+      button.opensMenuAbove = !glass.vertical && arguments?["menuAbove"] as? Bool == true
+      button.glassPreview = glass.centerSurface
+      button.animateMenu = { [weak glass] visible, animator in
+        glass?.setMenuOpen(visible, animator: animator)
+      }
+      NSLayoutConstraint.activate([
+        button.leadingAnchor.constraint(equalTo: glass.centerSurface.contentView.leadingAnchor),
+        button.trailingAnchor.constraint(equalTo: glass.centerSurface.contentView.trailingAnchor),
+        button.topAnchor.constraint(equalTo: glass.centerSurface.contentView.topAnchor),
+        button.bottomAnchor.constraint(equalTo: glass.centerSurface.contentView.bottomAnchor),
+      ])
+      return
+    }
     containerView.addSubview(button)
     NSLayoutConstraint.activate([
       button.centerYAnchor.constraint(equalTo: containerView.centerYAnchor),
@@ -379,6 +481,31 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     let interfaceStyle: UIUserInterfaceStyle = brightness == "dark" ? .dark : .light
     let colorValue = (arguments?["foregroundColor"] as? NSNumber)?.uint32Value
     let foregroundColor = colorValue.map(Self.color(from:))
+    let backgroundColor = (arguments?["backgroundColor"] as? NSNumber)
+      .map { Self.color(from: $0.uint32Value) }
+    if #available(iOS 26.0, *), arguments?.keys.contains("backgroundColor") == true {
+      let filled = backgroundColor?.cgColor.alpha ?? 0 > 0
+      // Replace the configuration only when the fill kind flips, and keep the
+      // content styling applyContent installed; appearance-only updates
+      // (selection, enabled, busy) must not reset it.
+      if filled != isFilledBackground, let previous = button.configuration {
+        var configuration = filled
+          ? UIButton.Configuration.filled() : UIButton.Configuration.glass()
+        configuration.cornerStyle = .capsule
+        configuration.image = previous.image
+        configuration.contentInsets = previous.contentInsets
+        configuration.titleTextAttributesTransformer =
+          previous.titleTextAttributesTransformer
+        configuration.titleLineBreakMode = previous.titleLineBreakMode
+        configuration.imagePadding = previous.imagePadding
+        configuration.imagePlacement = previous.imagePlacement
+        button.configuration = configuration
+        isFilledBackground = filled
+      }
+      if filled {
+        button.configuration?.baseBackgroundColor = backgroundColor
+      }
+    }
     let enabled = arguments?["enabled"] as? Bool ?? true
     let busy = arguments?["busy"] as? Bool ?? false
     let selected = arguments?["selected"] as? Bool ?? false
@@ -387,10 +514,10 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     containerView.overrideUserInterfaceStyle = interfaceStyle
     button.overrideUserInterfaceStyle = interfaceStyle
     button.isEnabled = enabled
-    button.isSelected = selected
+    button.isSelected = selected && (arguments?["tintsSelection"] as? Bool ?? true)
     // Resolve label contrast explicitly on the first selected frame as well as
     // later selections; UIKit may retain the initial glass title foreground.
-    labelForegroundColor = selected
+    labelForegroundColor = button.isSelected
       ? (interfaceStyle == .dark ? .black : .white)
       : foregroundColor
     isBusy = busy
@@ -420,7 +547,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     button.setNeedsUpdateConfiguration()
   }
 
-  private func applyContent(from value: Any?) {
+  private func applyContent(from value: Any?, animateComposerGlyph: Bool = false) {
     let arguments = value as? [String: Any]
     let icon = arguments?["icon"] as? String
     contentIcon = icon ?? "back"
@@ -428,35 +555,61 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     labelFontSize = (arguments?["labelFontSize"] as? NSNumber).map { CGFloat(truncating: $0) }
     showIconWithLabel = arguments?["showIconWithLabel"] as? Bool == true
     button.configuration?.imagePadding = showIconWithLabel ? 8 : 0
+    button.configuration?.imagePlacement = icon == "chevronDown" ? .trailing : .leading
     if let accessibilityLabel = arguments?["accessibilityLabel"] as? String {
       button.accessibilityLabel = accessibilityLabel
     }
     if let menu = arguments?["menu"] as? [[String: Any]] {
+      // Keep titled sections in reading order even above a bottom-bar trigger.
+      let hasImages = menu.contains { !(($0["symbol"] as? String) ?? "").isEmpty }
+      button.preferredMenuElementOrder = !hasImages || menu.contains { $0["sectionTitle"] is String } ? .fixed : .automatic
       var groups: [[UIMenuElement]] = [[]]
+      var groupTitles = [""]
       for item in menu {
-        if item["dividerBefore"] as? Bool == true, !groups[groups.count - 1].isEmpty {
+        if item["dividerBefore"] as? Bool == true || item["sectionTitle"] is String,
+           !groups[groups.count - 1].isEmpty {
           groups.append([])
+          groupTitles.append("")
         }
-        let symbol = (item["symbol"] as? String).flatMap {
+        if let title = item["sectionTitle"] as? String {
+          groupTitles[groupTitles.count - 1] = title
+        }
+        let symbol = (hasImages ? item["symbol"] as? String : nil).flatMap {
           // A transparent image keeps the native menu's icon column aligned.
           $0.isEmpty
             ? UIGraphicsImageRenderer(size: CGSize(width: 24, height: 24)).image { _ in }
             : NativeTabler.image($0, size: 24)
         }
+        var attributes: UIMenuElement.Attributes = []
+        if item["enabled"] as? Bool != true { attributes.insert(.disabled) }
+        if item["destructive"] as? Bool == true { attributes.insert(.destructive) }
         let action = UIAction(title: item["label"] as? String ?? "", image: symbol,
-                        attributes: item["enabled"] as? Bool == true ? [] : [.disabled]) { [weak self] _ in
-          self?.button.pendingMenuAction = { [weak self] in
+                        attributes: attributes,
+                        state: item["checked"] as? Bool == true ? .on : .off) { [weak self] _ in
+          let select = { [weak self] in
             self?.channel.invokeMethod("menuAction", arguments: item["id"])
+          }
+          if arguments?["deferMenuActions"] as? Bool == false {
+            // Value changes do not navigate. Deliver them directly: UIKit may
+            // begin dismissing the menu before invoking its selected UIAction.
+            select()
+          } else {
+            self?.button.afterMenuDismissal { select() }
           }
         }
         groups[groups.count - 1].append(action)
       }
-      button.menu = UIMenu(children: groups.map { UIMenu(options: .displayInline, children: $0) })
+      button.menu = UIMenu(children: groups.enumerated().map { index, children in
+        UIMenu(title: groupTitles[index], options: .displayInline, children: children)
+      })
       button.showsMenuAsPrimaryAction = !menu.isEmpty
     }
     switch icon {
     case "plus": buttonIconName = "plus"
+    case "send": buttonIconName = "arrow.up"
+    case "microphone": buttonIconName = "mic"
     case "close": buttonIconName = "xmark"
+    case "check": buttonIconName = "checkmark"
     case "camera": buttonIconName = "camera"
     case "photoLibrary": buttonIconName = "photo.on.rectangle.angled"
     case "palette": buttonIconName = "paintpalette"
@@ -469,7 +622,9 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     case "sun": buttonIconName = "sun.max"
     case "moon": buttonIconName = "moon"
     case "trash": buttonIconName = "trash"
+    case "bell": buttonIconName = "bell"
     case "more": buttonIconName = "ellipsis"
+    case "chevronDown": buttonIconName = "chevron.down"
     case "reply": buttonIconName = "arrowshape.turn.up.left"
     case "systemAppearance": buttonIconName = "circle.lefthalf.filled"
     case "colorSwatch": buttonIconName = "circle.fill"
@@ -510,7 +665,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       )
       let pointSize: CGFloat = icon == "shutter"
         ? controlSize * Self.shutterIconRatio
-        : 24
+        : (arguments?["iconSize"] as? NSNumber)?.doubleValue ?? 24
       if icon == "shutter" {
         // The shutter is a solid disc, not Tabler's outlined circle glyph.
         buttonImage = UIGraphicsImageRenderer(size: CGSize(width: pointSize, height: pointSize)).image { _ in
@@ -529,7 +684,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       }.withRenderingMode(.alwaysOriginal)
       button.configuration?.contentInsets = .zero
     }
-    updateDisplayedContent()
+    updateDisplayedContent(animateComposerGlyph: animateComposerGlyph)
     button.setNeedsUpdateConfiguration()
   }
 
@@ -541,6 +696,10 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       applyContent(from: value)
       return
     }
+    if Set([contentIcon, nextIcon]) == Set(["microphone", "send"]) {
+      applyContent(from: value, animateComposerGlyph: true)
+      return
+    }
     let duration = UIAccessibility.isReduceMotionEnabled ? 0 : 0.12
     UIView.transition(
       with: button,
@@ -550,7 +709,13 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     )
   }
 
-  private func updateDisplayedContent() {
+  private func updateDisplayedContent(animateComposerGlyph: Bool = false) {
+    let usesComposerGlyph = contentIcon == "microphone" || contentIcon == "send"
+    composerGlyph.isHidden = !usesComposerGlyph || isBusy
+    if usesComposerGlyph {
+      composerGlyph.setIcon(contentIcon, image: buttonImage,
+        tint: labelForegroundColor ?? .label, animated: animateComposerGlyph)
+    }
     if isBusy {
       button.configuration?.title = nil
       button.configuration?.image = nil
@@ -562,7 +727,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       let image = button.isSelected
         ? buttonImage?.withTintColor(labelForegroundColor ?? .label, renderingMode: .alwaysOriginal)
         : buttonImage
-      button.configuration?.image = displaysSwatch || (buttonLabel != nil && !showIconWithLabel) ? nil : image
+      button.configuration?.image = usesComposerGlyph || displaysSwatch || (buttonLabel != nil && !showIconWithLabel) ? nil : image
       swatchView.isHidden = !displaysSwatch
       activityIndicator.stopAnimating()
     }
@@ -678,5 +843,153 @@ final class NativeSegmentedControlPlatformView: NSObject, FlutterPlatformView {
 
   deinit {
     channel.setMethodCallHandler(nil)
+  }
+}
+
+/// Three native glass elements share a compositor so their surfaces merge.
+final class MergingNavigationGlass: UIView {
+  var vertical = false
+  let leftSurface: UIVisualEffectView
+  let centerSurface: UIVisualEffectView
+  let rightSurface: UIVisualEffectView
+  private let group: UIVisualEffectView
+  private var movementAnimator: UIViewPropertyAnimator?
+
+  override init(frame: CGRect) {
+    if #available(iOS 26.0, *) {
+      let container = UIGlassContainerEffect()
+      container.spacing = 12
+      group = UIVisualEffectView(effect: container)
+      leftSurface = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
+      centerSurface = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
+      rightSurface = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
+    } else {
+      group = UIVisualEffectView(effect: nil)
+      leftSurface = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
+      centerSurface = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
+      rightSurface = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
+    }
+    super.init(frame: frame)
+    group.frame = bounds
+    group.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    addSubview(group)
+    for surface in [leftSurface, rightSurface, centerSurface] {
+      if #available(iOS 26.0, *) {
+        surface.cornerConfiguration = .capsule()
+      } else {
+        surface.layer.cornerRadius = 28
+        surface.clipsToBounds = true
+      }
+      group.contentView.addSubview(surface)
+    }
+    leftSurface.isUserInteractionEnabled = false
+    rightSurface.isUserInteractionEnabled = false
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    // Use bounds/center rather than frame: side views may be transformed.
+    leftSurface.bounds = CGRect(x: 0, y: 0, width: 56, height: 56)
+    rightSurface.bounds = leftSurface.bounds
+    centerSurface.bounds = CGRect(x: 0, y: 0, width: vertical ? 56 : 112, height: 56)
+    leftSurface.center = vertical ? CGPoint(x: bounds.midX, y: 28) : CGPoint(x: 28, y: bounds.midY)
+    rightSurface.center = vertical ? CGPoint(x: bounds.midX, y: bounds.height - 28) : CGPoint(x: bounds.width - 28, y: bounds.midY)
+    centerSurface.center = CGPoint(x: bounds.midX, y: bounds.midY)
+  }
+
+  func setMenuOpen(_ open: Bool, animator: UIContextMenuInteractionAnimating?) {
+    layoutIfNeeded()
+    let movement = (vertical ? bounds.midY : bounds.midX) - 28
+    let dx = vertical ? 0 : movement
+    let dy = vertical ? movement : 0
+    let changes = { [weak self] in
+      guard let self else { return }
+      self.leftSurface.transform = open
+        ? CGAffineTransform(translationX: dx, y: dy).scaledBy(x: 0.9, y: 0.9) : .identity
+      self.rightSurface.transform = open
+        ? CGAffineTransform(translationX: -dx, y: -dy).scaledBy(x: 0.9, y: 0.9) : .identity
+    }
+    let opacity = { [weak self] in
+      self?.leftSurface.alpha = open ? 0 : 1
+      self?.rightSurface.alpha = open ? 0 : 1
+    }
+    // The live Flutter artwork uses this same 180 ms easeOutCubic curve.
+    // UIKit's menu animator has different timing, which makes the glass outrun
+    // its artwork. Start both from the visibility callback instead.
+    if let movementAnimator, movementAnimator.state == .active {
+      movementAnimator.stopAnimation(false)
+      movementAnimator.finishAnimation(at: .current)
+    }
+    movementAnimator = nil
+    if UIAccessibility.isReduceMotionEnabled {
+      UIView.performWithoutAnimation {
+        changes()
+        opacity()
+      }
+    } else {
+      let timing = UICubicTimingParameters(
+        controlPoint1: CGPoint(x: 0.215, y: 0.61),
+        controlPoint2: CGPoint(x: 0.355, y: 1)
+      )
+      let movement = UIViewPropertyAnimator(duration: 0.18, timingParameters: timing)
+      movement.addAnimations(changes)
+      movement.addAnimations(opacity, delayFactor: open ? 0.5 : 0)
+      movementAnimator = movement
+      movement.startAnimation()
+    }
+  }
+}
+
+/// Stable image views keep UIKit configuration updates out of the icon exchange.
+private final class ComposerActionGlyph: UIView {
+  private let microphone = UIImageView()
+  private let send = UIImageView()
+  private var icon: String?
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    microphone.accessibilityIdentifier = "composer-microphone-glyph"
+    send.accessibilityIdentifier = "composer-send-glyph"
+    for view in [microphone, send] {
+      view.contentMode = .center
+      view.alpha = 0
+      view.transform = CGAffineTransform(scaleX: 0.55, y: 0.55)
+      addSubview(view)
+    }
+  }
+  required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    for view in [microphone, send] {
+      view.bounds = bounds
+      view.center = CGPoint(x: bounds.midX, y: bounds.midY)
+    }
+  }
+
+  func setIcon(_ next: String, image: UIImage?, tint: UIColor, animated: Bool) {
+    let incoming = next == "send" ? send : microphone
+    let outgoing = next == "send" ? microphone : send
+    incoming.image = image
+    incoming.tintColor = tint
+    guard icon != next else { return }
+    let hadIcon = icon != nil
+    icon = next
+    let changes = {
+      incoming.alpha = 1
+      incoming.transform = CGAffineTransform.identity
+      outgoing.alpha = 0
+      outgoing.transform = CGAffineTransform(scaleX: 0.55, y: 0.55)
+    }
+    if animated && hadIcon && !UIAccessibility.isReduceMotionEnabled {
+      UIView.animate(withDuration: 0.22, delay: 0,
+        usingSpringWithDamping: 0.86, initialSpringVelocity: 0,
+        options: [.beginFromCurrentState, .allowUserInteraction], animations: changes)
+    } else {
+      microphone.layer.removeAllAnimations()
+      send.layer.removeAllAnimations()
+      UIView.performWithoutAnimation(changes)
+    }
   }
 }

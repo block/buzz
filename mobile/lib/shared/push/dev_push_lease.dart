@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
 import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/http/app_http_client.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../crypto/nip44.dart';
@@ -48,12 +50,14 @@ class BuzzPushLeaseDescriptor {
   factory BuzzPushLeaseDescriptor.fromRelayInformation(
     Map<String, dynamic> information,
   ) {
-    final extensions = _stringList(
-      information['supported_extensions'],
-      name: 'supported_extensions',
-    );
+    // NIP-11 makes the list optional: a relay may leave it out or send none.
+    final advertised = information['supported_extensions'];
+    if (advertised == null || (advertised is List && advertised.isEmpty)) {
+      throw const BuzzPushNotAdvertised();
+    }
+    final extensions = _stringList(advertised, name: 'supported_extensions');
     if (!extensions.contains('buzz-push-v1')) {
-      throw const FormatException('NIP-11 does not advertise buzz-push-v1');
+      throw const BuzzPushNotAdvertised();
     }
 
     final push = _stringMap(information['push'], name: 'push');
@@ -204,6 +208,12 @@ class BuzzPushLeaseDescriptor {
   }
 }
 
+/// The relay does not offer Buzz push: an expected answer, not a fault.
+class BuzzPushNotAdvertised extends FormatException {
+  const BuzzPushNotAdvertised()
+    : super('NIP-11 does not advertise buzz-push-v1');
+}
+
 /// The desired lease requires channel IDs that this relay cannot accept yet.
 class BuzzPushChannelGrammarException implements Exception {
   const BuzzPushChannelGrammarException();
@@ -243,10 +253,18 @@ Future<BuzzPushLeaseDescriptor> fetchBuzzPushLeaseDescriptor(
     throw FormatException('Invalid relay HTTP URL: $relayBaseUrl');
   }
   final requestUri = uri.resolve('/');
-  final ownedClient = client ?? http.Client();
+  final ownedClient = client ?? newAppHttpClient();
+  // Closing a client does not stop a request on a shared session.
+  final abort = Completer<void>();
+  final request = http.AbortableRequest(
+    'GET',
+    requestUri,
+    abortTrigger: abort.future,
+  )..headers['Accept'] = 'application/nostr+json';
   try {
     final response = await ownedClient
-        .get(requestUri, headers: const {'Accept': 'application/nostr+json'})
+        .send(request)
+        .then(http.Response.fromStream)
         .timeout(timeout);
     if (response.statusCode != 200) {
       throw StateError(
@@ -258,7 +276,11 @@ Future<BuzzPushLeaseDescriptor> fetchBuzzPushLeaseDescriptor(
       throw const FormatException('NIP-11 response must be a JSON object');
     }
     return BuzzPushLeaseDescriptor.fromRelayInformation(decoded);
+  } on TimeoutException {
+    noteHttpDeadline(request);
+    rethrow;
   } finally {
+    abort.complete();
     if (client == null) ownedClient.close();
   }
 }
@@ -474,24 +496,6 @@ Future<BuzzPushLeasePublication> publishBuzzPushLeaseTombstone({
     plaintext: plaintext,
   );
 }
-
-Future<BuzzPushLeasePublication> publishBuzzPushLeaseTombstoneThroughRelay({
-  required BuzzPushLeaseDescriptor descriptor,
-  required String installationId,
-  required int generation,
-  required String nsec,
-  required String memberPubkey,
-  required SignedEventRelay relay,
-  DateTime Function() now = DateTime.now,
-}) => publishBuzzPushLeaseTombstone(
-  descriptor: descriptor,
-  installationId: installationId,
-  generation: generation,
-  nsec: nsec,
-  memberPubkey: memberPubkey,
-  submit: relay.submit,
-  now: now,
-);
 
 void _validateGrant(
   BuzzPushEndpointGrant grant,

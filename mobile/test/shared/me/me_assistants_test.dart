@@ -1,7 +1,9 @@
 import 'dart:convert';
+import 'package:buzz/features/channels/dm_voice_agent_provider.dart';
 import 'dart:typed_data';
+import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/me/me_assistants.dart';
-import 'package:buzz/shared/me/me_archived_agents.dart';
+import 'package:buzz/shared/identity_archives/identity_archives.dart';
 import 'package:buzz/shared/me/me_agent_inventory.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
@@ -11,6 +13,19 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 
 class _Relay extends RelaySessionNotifier {
+  void Function(NostrEvent)? onInventory;
+  @override
+  Future<void Function()> subscribe(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String)? onClosed,
+  }) async {
+    onInventory = onEvent;
+    return () {
+      onInventory = null;
+    };
+  }
+
   final List<List<NostrEvent>> pages;
   List<NostrEvent>? inventory;
   List<List<NostrEvent>>? inventoryPages;
@@ -82,6 +97,7 @@ void main() {
   NostrEvent listing(
     String pubkey, {
     String name = 'Saved agent',
+    String? runtime,
     int time = 1,
     String? content,
   }) => NostrEvent.fromJson(
@@ -98,11 +114,16 @@ void main() {
       createdAt: time,
       tags: [
         ['d', pubkey],
+        if (runtime != null) ['runtime', runtime],
       ],
     ).toMap(),
   );
 
-  ProviderContainer setup(_Relay relay, {Set<String> archived = const {}}) {
+  ProviderContainer setup(
+    _Relay relay, {
+    Set<String> archived = const {},
+    String? viewer,
+  }) {
     relay.inventory ??= [listing(agent.public)];
     final sync = MeSync(
       relay,
@@ -118,12 +139,50 @@ void main() {
       overrides: [
         relaySessionProvider.overrideWith(() => relay),
         meSyncProvider.overrideWithValue(sync),
-        meArchivedAgentsProvider.overrideWith((ref) async => archived),
+        identityArchivesProvider.overrideWith((ref) async => archived),
+        if (viewer != null) myPubkeyProvider.overrideWithValue(viewer),
       ],
     );
     addTearDown(container.dispose);
     return container;
   }
+
+  test(
+    'voice discovery follows desktop add, runtime change and removal without reconnect',
+    () async {
+      final relay = _Relay([
+        [profile(agent, ownedBy: owner)],
+      ], inventory: []);
+      final container = setup(relay, viewer: owner.public);
+      int inventoryReads() => relay.requestedTags
+          .where((filter) => (filter['kinds'] as List).contains(30177))
+          .length;
+      final sub = container.listen(ownedCodexVoiceAgentsProvider, (_, _) {});
+      addTearDown(sub.close);
+      expect(
+        await container.read(ownedCodexVoiceAgentsProvider.future),
+        isEmpty,
+      );
+      // Voice shares the directory mentions already load for the DM.
+      await container.read(ownedAgentDirectoryProvider.future);
+      expect(inventoryReads(), 1);
+      for (final record in [
+        listing(agent.public, runtime: 'buzz.codex/codex', time: 2),
+        listing(agent.public, runtime: 'other/runtime', time: 3),
+        listing(agent.public, runtime: 'buzz.codex/codex', time: 4),
+        listing(agent.public, content: '', time: 5),
+      ]) {
+        relay.inventory = [record];
+        relay.onInventory!(record);
+        await container.pump();
+        final keys = await container.read(ownedCodexVoiceAgentsProvider.future);
+        expect(
+          keys.contains(agent.public),
+          record.createdAt == 2 || record.createdAt == 4,
+        );
+      }
+    },
+  );
 
   test(
     'lists current inventory with verified ownership, name and artwork',

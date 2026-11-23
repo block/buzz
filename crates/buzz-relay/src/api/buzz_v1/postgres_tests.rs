@@ -438,11 +438,17 @@ async fn accessory_write_revocation_is_terminal_before_persistence() {
             .parse()
             .unwrap(),
     );
-    let principal =
-        super::auth::authorize(&state, &headers, &path.parse().unwrap(), "POST", Some(body))
-            .await
-            .ok()
-            .expect("admitted before revoke");
+    let principal = super::auth::authorize(
+        &state,
+        &crate::access::AccessSlot::default(),
+        &headers,
+        &path.parse().unwrap(),
+        "POST",
+        Some(body),
+    )
+    .await
+    .ok()
+    .expect("admitted before revoke");
     state
         .db
         .remove_relay_member(
@@ -497,6 +503,14 @@ async fn accessory_discovery_is_host_bound_and_opt_in() {
                     )
                     .await
                     .unwrap();
+                if !known_host {
+                    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+                    assert_eq!(
+                        response.headers()[axum::http::header::CACHE_CONTROL],
+                        "no-store"
+                    );
+                    continue;
+                }
                 assert_eq!(response.status(), StatusCode::OK);
                 let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
                 let doc: Value = serde_json::from_slice(&bytes).unwrap();

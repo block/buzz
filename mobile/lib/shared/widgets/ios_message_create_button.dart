@@ -5,12 +5,16 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../relay/relay.dart';
 import '../theme/theme.dart';
 import 'avatar_image.dart';
+import 'duo_toolbar.dart';
+import 'native_route_controls.dart';
 
 /// The four desktop creation destinations, presented by UIKit on iOS.
-class IosMessageCreateButton extends HookWidget {
+class IosMessageCreateButton extends HookConsumerWidget {
   const IosMessageCreateButton({
     super.key,
     required this.actions,
@@ -19,37 +23,78 @@ class IosMessageCreateButton extends HookWidget {
     this.avatarUrl,
     this.avatarInitial,
     this.dividerBefore = const {},
+    this.destructiveIndices = const {},
+    this.sectionTitles = const {},
     this.icon = 'plus',
+    this.iconSize,
+    this.trailingIconSlotWidth,
+    this.foregroundColor,
     this.accessibilityLabel = 'Create',
     this.width = 64,
     this.height = 48,
     this.plain = true,
+    this.fillWidth = false,
+    this.enabled = true,
+    this.selectedIndex,
+    this.eagerGestures = true,
+    this.deferMenuActions = true,
     this.showIconWithLabel = false,
+    this.onMenuVisibilityChanged,
+    this.mergingNavigation = false,
+    this.navigationAxis = Axis.horizontal,
   });
 
   final Set<int> dividerBefore;
+  final Set<int> destructiveIndices;
+  final Map<int, String> sectionTitles;
   final String? label;
   final double? labelFontSize;
   final String? avatarUrl, avatarInitial;
   final String icon;
+  final double? iconSize;
+
+  /// Right-aligned visual slot inside the unchanged full-width hit target.
+  final double? trailingIconSlotWidth;
+  final Color? foregroundColor;
   final String accessibilityLabel;
   final double width, height;
   final bool plain;
+  final bool fillWidth;
+
+  /// Whether the native trigger and its actions are interactive.
+  final bool enabled;
+
+  /// Option marked with the native menu selection checkmark.
+  final int? selectedIndex;
+
+  /// Capture gestures immediately; disable for rows inside a scroll view.
+  final bool eagerGestures;
+
+  /// Wait for menu dismissal before actions that navigate to another route.
+  final bool deferMenuActions;
   final bool showIconWithLabel;
+  final ValueChanged<bool>? onMenuVisibilityChanged;
+
+  /// Hosts the Search/New/Bestie glass surfaces in one native container.
+  final bool mergingNavigation;
+
+  /// Direction of the merged navigation surfaces.
+  final Axis navigationAxis;
 
   final List<({String label, String symbol, VoidCallback? onPressed})> actions;
 
   @override
-  Widget build(BuildContext context) {
-    final route = ModalRoute.of(context);
-    final coveringProgress = useAnimation(
-      route?.secondaryAnimation ?? kAlwaysDismissedAnimation,
-    );
-    final nativeControlsVisible =
-        (route?.isCurrent ?? true) && coveringProgress == 0;
+  Widget build(BuildContext context, WidgetRef ref) {
+    final nativeControlsVisible = useNativeRouteControlsVisible(context);
 
-    final brightness = context.theme.brightness;
-    final foreground = context.colors.onSurface.toARGB32();
+    // Only an avatar trigger fetches media, so only it depends on the relay.
+    final media = avatarInitial == null
+        ? null
+        : (
+            auth: ref.watch(mediaGetAuthServiceProvider),
+            client: ref.watch(mediaHttpClientProvider),
+            diskCache: ref.watch(mediaDiskCacheProvider),
+          );
     final avatarFuture = useMemoized(
       () => avatarInitial == null
           ? null
@@ -59,45 +104,74 @@ class IosMessageCreateButton extends HookWidget {
               circular: true,
               background: context.colors.primaryContainer,
               foreground: context.colors.onPrimaryContainer,
-              networkImage: NetworkImage.new,
+              networkImages: (url) => smallMediaImageProviders(
+                url: url,
+                auth: media!.auth,
+                client: media.client,
+                diskCache: media.diskCache,
+              ),
             ),
       [
         avatarUrl,
+        media,
         avatarInitial,
         context.colors.primaryContainer,
         context.colors.onPrimaryContainer,
       ],
     );
     final avatar = useFuture(avatarFuture, preserveState: false).data;
+    if (!nativeControlsVisible) {
+      return SizedBox(width: width, height: height);
+    }
+    return HookBuilder(builder: (context) => _buildNative(context, avatar));
+  }
+
+  Widget _buildNative(BuildContext context, Uint8List? avatar) {
+    final brightness = context.theme.brightness;
+    final foreground = (foregroundColor ?? context.colors.onSurface).toARGB32();
     final channel = useState<MethodChannel?>(null);
     final latest = useRef(actions)..value = actions;
+    final latestVisibility = useRef(onMenuVisibilityChanged)
+      ..value = onMenuVisibilityChanged;
+    final latestEnabled = useRef(enabled)..value = enabled;
     final menu = [
       for (var i = 0; i < actions.length; i++)
         {
           'id': i,
           'dividerBefore': dividerBefore.contains(i),
+          'destructive': destructiveIndices.contains(i),
+          'sectionTitle': ?sectionTitles[i],
           'label': actions[i].label,
           'symbol': actions[i].symbol,
-          'enabled': actions[i].onPressed != null,
+          'enabled': enabled && actions[i].onPressed != null,
+          'checked': i == selectedIndex,
         },
     ];
     final content = <String, Object>{
       'icon': icon,
+      'iconSize': ?iconSize,
       'imageBytes': ?avatar,
       'label': ?label,
       'labelFontSize': ?labelFontSize,
       'showIconWithLabel': showIconWithLabel,
       'accessibilityLabel': accessibilityLabel,
       'menu': menu,
+      'deferMenuActions': deferMenuActions,
     };
+    // Keep one handler per channel. Replacing this effect on enabled changes
+    // would let the old hook cleanup clear the newly installed handler.
     useEffect(() {
       final current = channel.value;
       if (current == null) return null;
       current.setMethodCallHandler((call) async {
+        if (call.method == 'menuVisibilityChanged') {
+          latestVisibility.value?.call(call.arguments as bool);
+          return;
+        }
         if (call.method != 'menuAction') return;
         final index = call.arguments as int;
         if (index >= 0 && index < latest.value.length) {
-          latest.value[index].onPressed?.call();
+          if (latestEnabled.value) latest.value[index].onPressed?.call();
         }
       });
       return () => current.setMethodCallHandler(null);
@@ -111,7 +185,7 @@ class IosMessageCreateButton extends HookWidget {
             current.invokeMethod<void>('setAppearance', {
               'brightness': brightness.name,
               'foregroundColor': foreground,
-              'enabled': true,
+              'enabled': enabled,
             }),
           );
         }
@@ -121,38 +195,53 @@ class IosMessageCreateButton extends HookWidget {
         channel.value,
         avatar,
         icon,
+        iconSize,
         label,
         labelFontSize,
         accessibilityLabel,
-        ...actions.map((a) => a.onPressed != null),
+        enabled,
+        selectedIndex,
+        deferMenuActions,
+        showIconWithLabel,
+        ...dividerBefore,
+        ...destructiveIndices,
+        ...sectionTitles.entries.expand((e) => [e.key, e.value]),
+        ...actions.expand((a) => [a.label, a.symbol, a.onPressed != null]),
         brightness,
         foreground,
       ],
     );
-    // UIKit glass layers can float above the incoming Flutter route during
-    // its transition. Remove the covered route's platform view immediately.
-    if (!nativeControlsVisible) {
-      return SizedBox(width: width, height: height);
-    }
     return SizedBox(
       width: width,
       height: height,
       child: UiKitView(
         viewType: 'buzz/navigation_glass',
         gestureRecognizers: {
-          Factory<EagerGestureRecognizer>(EagerGestureRecognizer.new),
+          if (eagerGestures)
+            Factory<EagerGestureRecognizer>(EagerGestureRecognizer.new),
         },
         creationParams: {
           ...content,
           'plain': plain,
-          'buttonCenterX': width / 2,
-          'controlWidth': width,
-          'controlSize': height,
+          'fillWidth': fillWidth,
+          'buttonCenterX': trailingIconSlotWidth == null
+              ? width / 2
+              : width - trailingIconSlotWidth! / 2,
+          'controlWidth': mergingNavigation && navigationAxis == Axis.horizontal
+              ? 112.0
+              : trailingIconSlotWidth ?? width,
+          'mergingNavigation': mergingNavigation,
+          'menuAbove':
+              mergingNavigation &&
+              navigationAxis == Axis.horizontal &&
+              DuoToolbarScope.maybeOf(context)?.strip != null,
+          'verticalNavigation': navigationAxis == Axis.vertical,
+          'controlSize': mergingNavigation ? 56.0 : height,
           'hitTargetWidth': width,
           'hitTargetHeight': height,
           'brightness': brightness.name,
           'foregroundColor': foreground,
-          'enabled': true,
+          'enabled': enabled,
         },
         creationParamsCodec: const StandardMessageCodec(),
         onPlatformViewCreated: (id) =>

@@ -15,24 +15,25 @@ use buzz_core::kind::{
     is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
     KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
     KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
-    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
-    KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-    KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
-    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
-    KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
-    KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
-    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
-    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
-    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
-    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+    KIND_EMOJI_ENTRY, KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET,
+    KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE,
+    KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
+    KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
+    KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES,
+    KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED,
+    KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
+    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PIN_MESSAGE, KIND_PRESENCE_UPDATE, KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK,
+    KIND_PROFILE, KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT, KIND_SOLO_MEMBER_ROLE,
+    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
+    KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
+    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE,
+    KIND_UNPIN_MESSAGE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
     RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
@@ -153,6 +154,51 @@ fn validate_custom_emoji_tags(event: &Event) -> Result<(), IngestError> {
         })?;
         buzz_sdk::normalize_custom_emoji_shortcode(shortcode)
             .map_err(|err| IngestError::Rejected(format!("invalid: {err}")))?;
+    }
+    Ok(())
+}
+
+/// Validate a kind:30180 custom emoji entry (see `docs/nips/NIP-CE.md`).
+///
+/// Requires exactly one `d` tag, exactly one `emoji` tag, no `h` tag, a `d` equal
+/// to the normalized shortcode in the `emoji` tag, an `http(s)` image URL, and
+/// `content` equal to [`buzz_sdk::emoji_entry_search_text`] of that shortcode.
+fn validate_emoji_entry(event: &Event) -> Result<(), IngestError> {
+    let reject = |message: &str| IngestError::Rejected(format!("invalid: {message}"));
+    let mut d_tags = Vec::new();
+    let mut emoji_tags = Vec::new();
+    for tag in event.tags.iter() {
+        match tag.as_slice().first().map(String::as_str) {
+            Some("h") => return Err(reject("emoji entry must not carry an h tag")),
+            Some("d") => d_tags.push(tag.as_slice()),
+            Some("emoji") => emoji_tags.push(tag.as_slice()),
+            _ => {}
+        }
+    }
+    let [d_tag] = d_tags.as_slice() else {
+        return Err(reject("emoji entry must have exactly one d tag"));
+    };
+    let [emoji_tag] = emoji_tags.as_slice() else {
+        return Err(reject("emoji entry must have exactly one emoji tag"));
+    };
+    let (Some(d), Some(shortcode), Some(url)) = (d_tag.get(1), emoji_tag.get(1), emoji_tag.get(2))
+    else {
+        return Err(reject(
+            "emoji entry emoji tag must be [emoji, shortcode, url]",
+        ));
+    };
+    let normalized = buzz_sdk::normalize_custom_emoji_shortcode(shortcode)
+        .map_err(|err| reject(&err.to_string()))?;
+    if *d != normalized || *shortcode != normalized {
+        return Err(reject(
+            "emoji entry d tag and emoji shortcode must equal the normalized shortcode",
+        ));
+    }
+    buzz_sdk::check_custom_emoji_url(url).map_err(|err| reject(&err.to_string()))?;
+    if event.content != buzz_sdk::emoji_entry_search_text(&normalized) {
+        return Err(reject(
+            "emoji entry content must equal the shortcode with _ and - replaced by spaces",
+        ));
     }
     Ok(())
 }
@@ -466,10 +512,17 @@ pub enum IngestError {
 /// Which admission outcome an [`IngestError::Ban`] carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BanRefusal {
-    /// The principal or its owner is banned.
-    Banned,
+    /// The principal is banned; the source says whose row decided it.
+    Banned(crate::handlers::auth::BanSource),
     /// The restriction lookup failed, so no ban decision could be made.
     Unavailable,
+}
+
+impl BanRefusal {
+    /// The ban refusal for a banned restriction snapshot.
+    pub(crate) fn banned(restriction: &buzz_db::moderation::RestrictionState) -> Self {
+        Self::Banned(crate::handlers::auth::BanSource::of(restriction))
+    }
 }
 
 impl IngestError {
@@ -517,8 +570,8 @@ fn map_relay_admin_error(error: super::relay_admin::RelayAdminError) -> IngestEr
     match error {
         // Same wire prefix and HTTP status (403) as every other durable
         // restriction refusal — see the write-path gate below and `auth.rs`.
-        RelayAdminError::Banned => IngestError::ban(
-            BanRefusal::Banned,
+        RelayAdminError::Banned(source) => IngestError::ban(
+            BanRefusal::Banned(source),
             IngestError::AuthFailed("blocked: you are banned from this community".to_string()),
         ),
         RelayAdminError::Rejected(reason) => IngestError::Rejected(format!("invalid: {reason}")),
@@ -574,6 +627,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // palette is the client-side union of every member's own set.
         | KIND_EMOJI_SET
         | KIND_EMOJI_LIST
+        // One entry per emoji (30180), keyed by (pubkey, kind, d_tag).
+        | KIND_EMOJI_ENTRY
         | KIND_AGENT_PROFILE => Ok(Scope::UsersWrite),
         KIND_DELETION
         | KIND_REACTION
@@ -587,10 +642,13 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_STREAM_MESSAGE_SCHEDULED
         | KIND_STREAM_REMINDER
         | KIND_STREAM_MESSAGE_DIFF
+        | KIND_PIN_MESSAGE
+        | KIND_UNPIN_MESSAGE
         | KIND_FORUM_POST
         | KIND_FORUM_VOTE
         | KIND_FORUM_COMMENT => Ok(Scope::MessagesWrite),
-        KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_DELETE_GROUP => {
+        KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_DELETE_GROUP
+        | KIND_SOLO_MEMBER_ROLE => {
             Ok(Scope::AdminChannels)
         }
         // NIP-43: relay membership admin commands (9030–9032) + Buzz
@@ -612,12 +670,13 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // profile-publishing user already holds.
         KIND_IA_ARCHIVE_REQUEST | KIND_IA_UNARCHIVE_REQUEST => Ok(Scope::UsersWrite),
         KIND_NIP29_EDIT_METADATA => {
-            // kind:9002 scope split: archived tag → AdminChannels, else ChannelsWrite
-            let has_archived = event
-                .tags
-                .iter()
-                .any(|t| t.kind().to_string() == "archived");
-            if has_archived {
+            // kind:9002 scope split: archived or auto_join tag → AdminChannels,
+            // else ChannelsWrite
+            let has_admin_tag = event.tags.iter().any(|t| {
+                let k = t.kind().to_string();
+                k == "archived" || k == "auto_join"
+            });
+            if has_admin_tag {
                 Ok(Scope::AdminChannels)
             } else {
                 Ok(Scope::ChannelsWrite)
@@ -762,6 +821,8 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // keyed by (pubkey, kind[, d_tag]). A stray `h` tag must not channel-scope them.
             | KIND_EMOJI_SET
             | KIND_EMOJI_LIST
+            // Custom emoji entry (30180): same ownership shape, never channel-scoped.
+            | KIND_EMOJI_ENTRY
             // NIP-AE agent engrams are addressed by (pubkey_a, kind, d_tag); never channel-scoped.
             | KIND_AGENT_ENGRAM
             // NIP-ER event reminders are addressed by (pubkey, kind, d_tag); never channel-scoped.
@@ -834,6 +895,8 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_STREAM_MESSAGE_SCHEDULED
             | KIND_STREAM_REMINDER
             | KIND_STREAM_MESSAGE_DIFF
+            | KIND_PIN_MESSAGE
+            | KIND_UNPIN_MESSAGE
             | KIND_CANVAS
             | KIND_FORUM_POST
             | KIND_FORUM_VOTE
@@ -845,6 +908,7 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_NIP29_DELETE_EVENT
             | KIND_NIP29_DELETE_GROUP
             | KIND_NIP29_LEAVE_REQUEST
+            | KIND_SOLO_MEMBER_ROLE
             // Huddle lifecycle events + guidelines
             | KIND_HUDDLE_STARTED
             | KIND_HUDDLE_PARTICIPANT_JOINED
@@ -862,7 +926,7 @@ pub(crate) enum ChannelWrite {
     /// post ([`buzz_db::channel::MemberRole::can_post`]), never guests; and
     /// non-members only in an open channel with `join_role = member`.
     Post,
-    /// Membership changes (kind:9000 put-user, 9001 remove-user, 9022 leave).
+    /// Membership changes (put-user, remove-user, leave, Solo member role).
     /// Members, or anyone in an open channel. The role table does not apply
     /// here: a guest must still be able to leave, and `decide_put_user` owns
     /// who may add whom.
@@ -873,9 +937,10 @@ impl ChannelWrite {
     /// The rule for an event kind that passes the generic channel gate.
     pub(crate) fn for_kind(kind: u32) -> Self {
         match kind {
-            KIND_NIP29_PUT_USER | KIND_NIP29_REMOVE_USER | KIND_NIP29_LEAVE_REQUEST => {
-                Self::Membership
-            }
+            KIND_NIP29_PUT_USER
+            | KIND_NIP29_REMOVE_USER
+            | KIND_NIP29_LEAVE_REQUEST
+            | KIND_SOLO_MEMBER_ROLE => Self::Membership,
             _ => Self::Post,
         }
     }
@@ -1063,12 +1128,19 @@ impl ThreadMetadataOwned {
 /// Whether `target` is in `channel_id` and readable by `reader`. Write paths
 /// that reference an event reject a target failing this exactly as a missing
 /// one, so the rejection never reveals whether, or where, the target exists.
+///
+/// A NIP-PM pin or unpin command is never such a target. Account erasure
+/// removes a command without keeping it as a thread ancestor.
 fn target_readable_in_channel(
     target: &buzz_core::StoredEvent,
     channel_id: Uuid,
     reader: &[u8],
 ) -> bool {
     target.channel_id == Some(channel_id)
+        && !matches!(
+            event_kind_u32(&target.event),
+            KIND_PIN_MESSAGE | KIND_UNPIN_MESSAGE
+        )
         && super::req::event_visible_to_reader(&target.event, reader)
 }
 
@@ -1403,26 +1475,8 @@ async fn validate_edit_ownership(
     event: &Event,
     state: &AppState,
 ) -> Result<(), String> {
-    let target_hex = event
-        .tags
-        .iter()
-        .find_map(|t| {
-            if t.kind().to_string() == "e" {
-                t.content().and_then(|v| {
-                    if v.len() == 64 && v.chars().all(|c| c.is_ascii_hexdigit()) {
-                        Some(v.to_string())
-                    } else {
-                        None
-                    }
-                })
-            } else {
-                None
-            }
-        })
+    let target_bytes = buzz_core::media::first_edit_target(event)
         .ok_or_else(|| "missing e tag for edit target".to_string())?;
-
-    let target_bytes =
-        hex::decode(&target_hex).map_err(|_| "invalid target event ID".to_string())?;
     // Kind 40003 skips the generic membership gate, so this validator is the
     // only authority: a target outside the edit's `h` channel, unreadable, or
     // not the actor's to edit is denied exactly like a missing one.
@@ -2350,7 +2404,7 @@ fn write_restriction_denial(
 ) -> Option<IngestError> {
     if restriction.banned {
         return Some(IngestError::ban(
-            BanRefusal::Banned,
+            BanRefusal::banned(restriction),
             IngestError::AuthFailed("blocked: you are banned from this community".to_string()),
         ));
     }
@@ -2373,35 +2427,14 @@ fn write_restriction_denial(
 /// by its owner's (`users.agent_owner_pubkey`). A ban is normally enforced by
 /// the auth seam and the live disconnect; this gate is the durable backstop
 /// for a missed disconnect and for HTTP writes. A timeout has no auth-seam
-/// presence, so this is where it is enforced. Fails closed on a DB error.
+/// presence, so this is where it is enforced. It runs per write, so it reads
+/// through [`AppState::restriction_state_cached`]: a restriction change takes
+/// effect when its write invalidates the cache, or within
+/// [`crate::state::RESTRICTION_CACHE_MAX_AGE`] on a pod that misses that
+/// notification. The verdict is
+/// still taken at `now`, so a cached timeout lifts on time. Fails closed on a
+/// DB error.
 pub(crate) async fn enforce_write_restriction(
-    state: &AppState,
-    tenant: &TenantContext,
-    kind: u32,
-    pubkey: &nostr::PublicKey,
-) -> Result<(), IngestError> {
-    #[cfg(test)]
-    crate::nip_fi_test_hooks::before_write_ban_check(tenant.community()).await;
-    let restriction = state
-        .db
-        .moderation_restriction_state(tenant.community(), pubkey.as_bytes())
-        .await
-        .map_err(|e| {
-            IngestError::ban(
-                BanRefusal::Unavailable,
-                IngestError::Internal(format!(
-                    "error: internal error checking restriction state: {e}"
-                )),
-            )
-        })?;
-    write_restriction_denial(kind, &restriction, Utc::now()).map_or(Ok(()), Err)
-}
-
-/// [`enforce_write_restriction`] over a 30-second cached restriction row, for
-/// the WebSocket ephemeral and observer paths. Those run per typing pulse and
-/// observer frame; persistent ingest keeps the uncached read. The verdict is
-/// still taken at `now`, so a cached timeout lifts on time.
-pub(crate) async fn enforce_cached_write_restriction(
     state: &AppState,
     tenant: &TenantContext,
     kind: u32,
@@ -2528,6 +2561,28 @@ struct ChannelCreateRequest {
     labels: Vec<String>,
     unlisted: bool,
     members: Vec<Vec<u8>>,
+}
+
+async fn validate_event_imeta(
+    tenant: &TenantContext,
+    state: &AppState,
+    event: &Event,
+    tenant_media_base: &str,
+) -> Result<(), IngestError> {
+    let imeta_tags: Vec<Vec<String>> = event
+        .tags
+        .iter()
+        .filter(|t| t.kind().to_string() == "imeta")
+        .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
+        .collect();
+    if !imeta_tags.is_empty() {
+        crate::api::validate_imeta_tags(&imeta_tags, tenant_media_base)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+        crate::api::verify_imeta_blobs(tenant, &imeta_tags, &state.media_storage)
+            .await
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+    Ok(())
 }
 
 async fn ingest_event_inner(
@@ -2660,6 +2715,7 @@ async fn ingest_event_inner(
         ));
     }
 
+    let pin_command = matches!(kind_u32, KIND_PIN_MESSAGE | KIND_UNPIN_MESSAGE);
     let required = match required_scope_for_kind(kind_u32, &event) {
         Ok(scope) => scope,
         Err(msg) => return Err(IngestError::Rejected(msg.into())),
@@ -2690,6 +2746,8 @@ async fn ingest_event_inner(
     // Ban / timeout write-block. Runs before every kind-specific branch below
     // (commands, feedback, reports, moderation) so no write returns ahead of it.
     enforce_write_restriction(state, tenant, kind_u32, auth.pubkey()).await?;
+
+    super::media_access::validate_media_references(tenant, state, &event).await?;
 
     // Command kinds are routed AFTER signature verification, timestamp check,
     // pubkey/auth match, and scope validation — never before.
@@ -2847,7 +2905,7 @@ async fn ingest_event_inner(
         // Channel-scoped tokens cannot publish global events — that would bypass
         // the token's channel restriction. This covers kind:1 (global text notes),
         // kind:3 (contact lists), kind:0 (profiles), and kind:9007 (create-group
-        // without an h-tag, which would auto-assign a server UUID).
+        // without an h-tag, which the create path also refuses).
         return Err(IngestError::AuthFailed(
             "restricted: channel-scoped tokens cannot publish global events".into(),
         ));
@@ -3096,15 +3154,16 @@ async fn ingest_event_inner(
     }
 
     if channel_id.is_some() {
-        // kind:9002 is not checked here: its atomic write decides the
+        // Metadata edits and Solo member role changes decide the
         // archive state under the channel row lock, after its duplicate
         // check, so a resend that races the first commit is a duplicate.
-        let is_edit_metadata = kind_u32 == KIND_NIP29_EDIT_METADATA;
+        let checks_archive_in_write =
+            matches!(kind_u32, KIND_NIP29_EDIT_METADATA | KIND_SOLO_MEMBER_ROLE);
 
         // A member may still leave an archived channel by themselves.
         let is_self_departure = crate::handlers::side_effects::is_self_departure(&event);
 
-        if !is_edit_metadata && !is_self_departure {
+        if !checks_archive_in_write && !is_self_departure {
             if let Some(channel) = &channel_row {
                 if channel.archived_at.is_some() {
                     return Err(match target_denial {
@@ -3116,9 +3175,33 @@ async fn ingest_event_inner(
         }
     }
 
+    // An event that takes its channel from its target is stored in that
+    // channel, but every read and fan-out matches its own `h` tags. One whose
+    // `h` names another channel would never be delivered, yet it would use a
+    // slot under the channel's history LIMIT, so a replay cut by the limit
+    // could look complete. Refuse it with the kind's not-found denial. This
+    // runs after the token, membership and archive gates: an earlier refusal
+    // would skip their reads, and its timing would show a sender who cannot
+    // read the target's channel whether a guessed `h` names it.
+    if let (Some(reason), Some(target_channel)) = (target_denial, channel_id) {
+        let target_channel = target_channel.to_string();
+        let mut h_tags = event
+            .tags
+            .iter()
+            .filter(|t| t.kind().to_string() == "h")
+            .peekable();
+        if h_tags.peek().is_some() && !h_tags.any(|t| t.content() == Some(target_channel.as_str()))
+        {
+            return Err(target_denied(reason));
+        }
+    }
+
     // Artifact revisions passed the same home-channel write gates as kind 9
     // above; they are stored and published without conversation side effects.
     if kind_u32 == buzz_core::kind::KIND_ARTIFACT {
+        let base =
+            crate::api::media::media_base_url_for_tenant(&state.config.relay_url, tenant.host());
+        validate_event_imeta(tenant, state, &event, &base).await?;
         let result = super::artifact::accept(state, tenant, &event, &auth).await?;
         if let Some(ch_id) = channel_id {
             emit(
@@ -3212,8 +3295,9 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    // A kind:9007 with an `h` tag creates its channel when it is stored, in the
-    // same transaction (see the storage dispatch below).
+    // A kind:9007 must carry the new channel's id in its `h` tag. It creates
+    // its channel when it is stored, in the same transaction (see the storage
+    // dispatch below).
     let mut channel_create: Option<ChannelCreateRequest> = None;
 
     if kind_u32 == KIND_NIP29_CREATE_GROUP {
@@ -3290,6 +3374,12 @@ async fn ingest_event_inner(
                 unlisted,
                 members,
             });
+        } else {
+            // The channel is created in the same commit as its event, so a
+            // refused create (a taken name, for example) reaches the client.
+            return Err(IngestError::Rejected(
+                "invalid: create-group must include an h tag with the new channel id".into(),
+            ));
         }
     }
 
@@ -3370,21 +3460,13 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
-    let imeta_tags: Vec<Vec<String>> = event
-        .tags
-        .iter()
-        .filter(|t| t.kind().to_string() == "imeta")
-        .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
-        .collect();
-    if !imeta_tags.is_empty() {
-        crate::api::validate_imeta_tags(&imeta_tags, &tenant_media_base)
-            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
-        crate::api::verify_imeta_blobs(tenant, &imeta_tags, &state.media_storage)
-            .await
-            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
-    }
+    validate_event_imeta(tenant, state, &event, &tenant_media_base).await?;
 
-    let thread_meta = if requires_h_channel_scope(kind_u32) {
+    // A pin command's `e` tag names its target, not a thread parent.
+    let thread_meta = if kind_u32 != KIND_SOLO_MEMBER_ROLE
+        && !pin_command
+        && requires_h_channel_scope(kind_u32)
+    {
         if let Some(ch_id) = channel_id {
             resolve_nip10_thread_meta(tenant.community(), &event, ch_id, state)
                 .await
@@ -3408,6 +3490,9 @@ async fn ingest_event_inner(
 
     if kind_u32 == KIND_EMOJI_SET || kind_u32 == KIND_EMOJI_LIST {
         validate_custom_emoji_tags(&event)?;
+    }
+    if kind_u32 == KIND_EMOJI_ENTRY {
+        validate_emoji_entry(&event)?;
     }
 
     // Resolve the target reference, then use one DB transaction to upsert the
@@ -3466,7 +3551,7 @@ async fn ingest_event_inner(
                 emoji,
             )
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?
         {
             buzz_db::ReactionEventInsertOutcome::TargetMissing => {
                 return Err(IngestError::Rejected(format!(
@@ -3522,7 +3607,6 @@ async fn ingest_event_inner(
         )
         .await;
 
-        info!(event_id = %event_id_hex, kind = kind_u32, "Event ingested via pipeline");
         return Ok(IngestResult {
             event_id: event_id_hex,
             accepted: true,
@@ -3540,6 +3624,21 @@ async fn ingest_event_inner(
     };
 
     let workflow_deletion = crate::handlers::side_effects::is_workflow_deletion(&event);
+    let atomic_deletion = crate::handlers::side_effects::is_atomic_deletion(kind_u32, &event);
+    // A new message in a DM resurfaces it for members who hid it.
+    let dm_message = match (channel_id, &channel_row) {
+        (Some(ch_id), Some(channel))
+            if channel.channel_type == "dm"
+                && matches!(
+                    kind_u32,
+                    KIND_STREAM_MESSAGE | KIND_STREAM_MESSAGE_V2 | KIND_STREAM_MESSAGE_DIFF
+                ) =>
+        {
+            Some(ch_id)
+        }
+        _ => None,
+    };
+    let mut dm_snapshots = Vec::new();
     let mut message = String::new();
     let (stored_event, was_inserted) = if let Some(create) = channel_create.as_ref() {
         let creator = event.pubkey.to_bytes();
@@ -3558,8 +3657,12 @@ async fn ingest_event_inner(
             .db
             .create_channel_with_event(tenant.community(), create.channel_id, channel, &event)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
-        {
+            .map_err(|e| match e {
+                buzz_db::DbError::ChannelNameTaken(_) => {
+                    IngestError::Rejected(format!("invalid: {e}"))
+                }
+                _ => IngestError::Internal(format!("error: {}", e.kind())),
+            })? {
             buzz_db::channel::ChannelCreate::Created(stored) => {
                 metrics::counter!(
                     "buzz_channels_created_total",
@@ -3591,6 +3694,20 @@ async fn ingest_event_inner(
         crate::handlers::side_effects::persist_workflow_deletion(tenant, &event, state)
             .await
             .map_err(|e| IngestError::Internal(format!("error: workflow deletion failed: {e}")))?
+    } else if atomic_deletion {
+        // One commit stores the deletion and soft-deletes its targets, so an
+        // accepted deletion never leaves its target live. Failure stores
+        // nothing; the client is told and can resend.
+        let thread_params = thread_meta.as_ref().map(|m| m.as_params());
+        crate::handlers::side_effects::persist_deletion(
+            tenant,
+            &event,
+            state,
+            channel_id,
+            thread_params,
+        )
+        .await
+        .map_err(|e| IngestError::Internal(format!("error: deletion failed: {e}")))?
     } else if let Some(plan) = put_user {
         // One commit stores the event and applies its membership changes. A
         // failure stores nothing, so the client is told and can resend it.
@@ -3613,6 +3730,23 @@ async fn ingest_event_inner(
         })?;
         message = ok_message;
         (stored, inserted)
+    } else if kind_u32 == KIND_SOLO_MEMBER_ROLE {
+        super::solo_member_role::persist(tenant, state, &event).await?
+    } else if pin_command {
+        super::pins::persist(tenant, state, &event).await?
+    } else if kind_u32 == KIND_NIP29_REMOVE_USER {
+        let thread_params = thread_meta.as_ref().map(|m| m.as_params());
+        crate::handlers::side_effects::persist_remove_user(tenant, &event, state, thread_params)
+            .await
+            .map_err(|e| match e.downcast_ref::<buzz_db::DbError>() {
+                Some(buzz_db::DbError::AccessDenied(reason)) => {
+                    IngestError::Rejected(format!("invalid: {reason}"))
+                }
+                Some(missing @ buzz_db::DbError::MemberNotFound(_)) => {
+                    IngestError::Rejected(format!("invalid: {missing}"))
+                }
+                _ => IngestError::Internal(format!("error: membership removal failed: {e}")),
+            })?
     } else if kind_u32 == KIND_NIP29_EDIT_METADATA {
         // One commit stores the event and applies its channel changes. A
         // failure stores nothing, so the client is told and can resend it.
@@ -3624,6 +3758,9 @@ async fn ingest_event_inner(
                 Some(buzz_db::DbError::AccessDenied(reason)) => {
                     IngestError::Rejected(format!("invalid: {reason}"))
                 }
+                Some(taken @ buzz_db::DbError::ChannelNameTaken(_)) => {
+                    IngestError::Rejected(format!("invalid: {taken}"))
+                }
                 _ => IngestError::Internal(format!("error: channel update failed: {e}")),
             })?
     } else if buzz_core::kind::is_replaceable(kind_u32) {
@@ -3633,7 +3770,7 @@ async fn ingest_event_inner(
             .db
             .replace_addressable_event(tenant.community(), &event, channel_id)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?
     } else if is_parameterized_replaceable(kind_u32) {
         // NIP-33 parameterized replaceable — keyed by (kind, pubkey, d_tag).
         let d_tag = buzz_db::event::extract_d_tag(&event).unwrap_or_default();
@@ -3648,7 +3785,7 @@ async fn ingest_event_inner(
             .db
             .replace_parameterized_event(tenant.community(), &event, &d_tag, channel_id)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?
     } else if let Some(spec) = canvas_revision_spec.as_ref() {
         // Canvas write carrying an optimistic-concurrency precondition. Plain
         // canvas writes (no `expected-revision` tag) fall through to the generic
@@ -3665,7 +3802,7 @@ async fn ingest_event_inner(
             .db
             .insert_canvas_head_checked(tenant.community(), &event, channel, precondition)
             .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
+            .map_err(|e| IngestError::Internal(format!("error: {}", e.kind())))?;
         match status {
             buzz_db::ChannelHeadWriteStatus::RevisionMissing => {
                 return Err(IngestError::CanvasConflict(
@@ -3685,6 +3822,30 @@ async fn ingest_event_inner(
             buzz_db::ChannelHeadWriteStatus::Inserted => (stored_event, true),
             buzz_db::ChannelHeadWriteStatus::Duplicate => (stored_event, false),
         }
+    } else if let Some(dm) = dm_message {
+        // One commit stores the message and resurfaces the DM, so a failure
+        // stores neither and the client's resend is not a duplicate.
+        let thread_params = thread_meta.as_ref().map(|m| m.as_params());
+        let (stored_event, inserted, snapshots) =
+            crate::handlers::side_effects::persist_dm_message(
+                tenant,
+                state,
+                &event,
+                dm,
+                thread_params,
+            )
+            .await
+            .map_err(|e| {
+                error!(event_id = %event_id_hex, "DM message write failed: {e}");
+                match e.downcast_ref::<buzz_db::DbError>() {
+                    Some(db) => {
+                        IngestError::Internal(format!("error: database error: {}", db.kind()))
+                    }
+                    None => IngestError::Internal("error: database error".into()),
+                }
+            })?;
+        dm_snapshots = snapshots;
+        (stored_event, inserted)
     } else {
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
         match state
@@ -3703,7 +3864,9 @@ async fn ingest_event_inner(
                     buzz_db::DbError::AuthEventRejected => {
                         IngestError::Rejected("invalid: AUTH events cannot be stored".into())
                     }
-                    other => IngestError::Internal(format!("error: database error: {other}")),
+                    other => {
+                        IngestError::Internal(format!("error: database error: {}", other.kind()))
+                    }
                 });
             }
         }
@@ -3717,11 +3880,13 @@ async fn ingest_event_inner(
         });
     }
 
-    // Workflow deletion, kind:9000 and kind:9002 applied their changes in the
-    // insert's own transaction above.
+    // These commands applied their changes in the insert's own transaction.
     let persisted_atomically = workflow_deletion
+        || atomic_deletion
         || kind_u32 == KIND_NIP29_PUT_USER
-        || kind_u32 == KIND_NIP29_EDIT_METADATA;
+        || kind_u32 == KIND_NIP29_REMOVE_USER
+        || kind_u32 == KIND_NIP29_EDIT_METADATA
+        || kind_u32 == KIND_SOLO_MEMBER_ROLE;
     if !persisted_atomically && crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
         if let Err(e) =
             crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
@@ -3748,6 +3913,13 @@ async fn ingest_event_inner(
             meta.channel_id,
             meta.root_event_id.clone(),
         );
+    }
+
+    // The DM's resurfacing snapshots committed with the message, so a read
+    // made on the message already sees the DM. Live subscribers get them too.
+    for snapshot in &dm_snapshots {
+        crate::handlers::side_effects::dispatch_dm_visibility_snapshot(tenant, state, snapshot)
+            .await;
     }
 
     let pubkey_hex = auth.pubkey().to_hex();
@@ -3780,6 +3952,10 @@ async fn ingest_event_inner(
         };
         emit(tracer, action, state_for_request(tenant, auth.pubkey()));
     }
+    #[cfg(test)]
+    if let Some(dm) = dm_message {
+        crate::handlers::side_effects::notice_barrier::reached(dm, &event.pubkey.to_bytes()).await;
+    }
     dispatch_persistent_event(
         tenant,
         state,
@@ -3789,8 +3965,6 @@ async fn ingest_event_inner(
         threaded_visibility.clone(),
     )
     .await;
-
-    info!(event_id = %event_id_hex, kind = kind_u32, "Event ingested via pipeline");
 
     Ok(IngestResult {
         event_id: event_id_hex,
@@ -3826,7 +4000,7 @@ mod postgres_tests {
         let tenant = TenantContext::resolved(community, "archive.test");
         let keys = nostr::Keys::generate();
         let channel_id = Uuid::new_v4();
-        state.membership_cache.insert(
+        state.membership_cache.seed_member(
             (community, channel_id, keys.public_key().to_bytes().to_vec()),
             true,
         );
@@ -3980,6 +4154,350 @@ mod postgres_tests {
         ));
     }
 
+    fn emoji_entry_event(tags: &[&[&str]], content: &str) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(KIND_EMOJI_ENTRY as u16), content)
+            .tags(
+                tags.iter()
+                    .map(|t| nostr::Tag::parse(t.iter().copied()).expect("tag")),
+            )
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign emoji entry")
+    }
+
+    #[test]
+    fn emoji_entry_validation_table() {
+        const URL: &str = "https://example.com/p.gif";
+        let ok_tags: &[&[&str]] = &[&["d", "party_parrot"], &["emoji", "party_parrot", URL]];
+        assert!(validate_emoji_entry(&emoji_entry_event(ok_tags, "party parrot")).is_ok());
+        let dashed_tags: &[&[&str]] =
+            &[&["d", "party-parrot-2"], &["emoji", "party-parrot-2", URL]];
+        assert!(validate_emoji_entry(&emoji_entry_event(dashed_tags, "party parrot 2")).is_ok());
+        let max_shortcode = "a".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN);
+        let max_tags: &[&[&str]] = &[&["d", &max_shortcode], &["emoji", &max_shortcode, URL]];
+        assert!(validate_emoji_entry(&emoji_entry_event(max_tags, &max_shortcode)).is_ok());
+
+        let cases: Vec<(&str, Vec<&[&str]>, &str, &str)> = vec![
+            ("no d", vec![&["emoji", "a", URL]], "", "exactly one d tag"),
+            (
+                "two d",
+                vec![&["d", "a"], &["d", "a"], &["emoji", "a", URL]],
+                "",
+                "exactly one d tag",
+            ),
+            ("no emoji", vec![&["d", "a"]], "", "exactly one emoji tag"),
+            (
+                "two emoji",
+                vec![&["d", "a"], &["emoji", "a", URL], &["emoji", "b", URL]],
+                "",
+                "exactly one emoji tag",
+            ),
+            (
+                "h tag",
+                vec![&["d", "a"], &["emoji", "a", URL], &["h", "chan"]],
+                "",
+                "must not carry an h tag",
+            ),
+            (
+                "emoji tag without url",
+                vec![&["d", "a"], &["emoji", "a"]],
+                "",
+                "[emoji, shortcode, url]",
+            ),
+            (
+                "bad shortcode",
+                vec![&["d", "bad name"], &["emoji", "bad name", URL]],
+                "",
+                "may only contain",
+            ),
+            (
+                "d differs from shortcode",
+                vec![&["d", "other"], &["emoji", "a", URL]],
+                "",
+                "must equal the normalized shortcode",
+            ),
+            (
+                "uppercase shortcode",
+                vec![&["d", "a"], &["emoji", "A", URL]],
+                "",
+                "must equal the normalized shortcode",
+            ),
+            (
+                "non-http url",
+                vec![&["d", "a"], &["emoji", "a", "ftp://example.com/a.gif"]],
+                "",
+                "http:// or https://",
+            ),
+            (
+                "arbitrary content",
+                vec![&["d", "a"], &["emoji", "a", URL]],
+                "x",
+                "content must equal",
+            ),
+            (
+                "empty content",
+                vec![&["d", "party_parrot"], &["emoji", "party_parrot", URL]],
+                "",
+                "content must equal",
+            ),
+            (
+                "keyword-stuffed content",
+                vec![&["d", "party_parrot"], &["emoji", "party_parrot", URL]],
+                "party parrot cat dog",
+                "content must equal",
+            ),
+            (
+                "content keeps underscores",
+                vec![&["d", "party_parrot"], &["emoji", "party_parrot", URL]],
+                "party_parrot",
+                "content must equal",
+            ),
+        ];
+        for (name, tags, content, needle) in cases {
+            match validate_emoji_entry(&emoji_entry_event(&tags, content)) {
+                Err(IngestError::Rejected(msg)) => assert!(
+                    msg.starts_with("invalid: ") && msg.contains(needle),
+                    "{name}: unexpected rejection {msg:?}"
+                ),
+                other => panic!("{name}: expected rejection, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn emoji_entry_is_a_global_users_write_kind() {
+        assert!(is_global_only_kind(KIND_EMOJI_ENTRY));
+        assert!(!requires_h_channel_scope(KIND_EMOJI_ENTRY));
+        let event = emoji_entry_event(&[], "");
+        assert_eq!(
+            required_scope_for_kind(KIND_EMOJI_ENTRY, &event).ok(),
+            Some(Scope::UsersWrite)
+        );
+    }
+
+    async fn publish_emoji_entry(
+        state: &Arc<crate::state::AppState>,
+        tenant: &TenantContext,
+        keys: &nostr::Keys,
+        tags: &[&[&str]],
+        content: &str,
+        created_at: u64,
+    ) -> Result<IngestResult, IngestError> {
+        let event = EventBuilder::new(Kind::Custom(KIND_EMOJI_ENTRY as u16), content)
+            .tags(
+                tags.iter()
+                    .map(|t| nostr::Tag::parse(t.iter().copied()).expect("tag")),
+            )
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .expect("sign emoji entry");
+        let auth = IngestAuth::Http {
+            pubkey: keys.public_key(),
+            scopes: vec![Scope::UsersWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        ingest_event(state, tenant, event, auth).await
+    }
+
+    async fn publish_built_emoji_entry(
+        state: &Arc<crate::state::AppState>,
+        tenant: &TenantContext,
+        keys: &nostr::Keys,
+        shortcode: &str,
+        url: &str,
+        created_at: u64,
+    ) -> Result<IngestResult, IngestError> {
+        let event = buzz_sdk::build_emoji_entry(shortcode, url)
+            .expect("build emoji entry")
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .expect("sign emoji entry");
+        let auth = IngestAuth::Http {
+            pubkey: keys.public_key(),
+            scopes: vec![Scope::UsersWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        ingest_event(state, tenant, event, auth).await
+    }
+
+    async fn emoji_tenant(
+        state: &Arc<crate::state::AppState>,
+        keys: &[&nostr::Keys],
+    ) -> TenantContext {
+        let host = format!("emoji-entry-{}.test", Uuid::new_v4().simple());
+        let community = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+        for k in keys {
+            state
+                .db
+                .ensure_user(community, k.public_key().as_bytes())
+                .await
+                .expect("ensure user");
+        }
+        TenantContext::resolved(community, &host)
+    }
+
+    /// Production-path regression for kind:30180: invalid entries are refused by
+    /// `ingest_event` and never stored; a valid entry is stored; a second publish
+    /// under the same `d` leaves one live event (the newer one).
+    /// Mutations: drop the `validate_emoji_entry` call, the `KIND_EMOJI_ENTRY`
+    /// scope arm, or the replace path → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn emoji_entry_ingest_validates_and_replaces() {
+        let state = ingest_state().await;
+        let author = nostr::Keys::generate();
+        let tenant = emoji_tenant(&state, &[&author]).await;
+        let now = chrono::Utc::now().timestamp() as u64;
+        const URL: &str = "https://example.com/p.gif";
+        let url = URL;
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect test Postgres");
+        let live_count = |d: &'static str| {
+            let pool = pool.clone();
+            let community = *tenant.community().as_uuid();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM events WHERE community_id = $1 AND kind = $2 \
+                     AND d_tag = $3 AND deleted_at IS NULL",
+                )
+                .bind(community)
+                .bind(KIND_EMOJI_ENTRY as i32)
+                .bind(d)
+                .fetch_one(&pool)
+                .await
+                .expect("count")
+            }
+        };
+
+        let rejected: Vec<(&str, Vec<&[&str]>)> = vec![
+            (
+                "bad shortcode",
+                vec![&["d", "bad name"], &["emoji", "bad name", URL]],
+            ),
+            (
+                "d != shortcode",
+                vec![&["d", "other"], &["emoji", "party_parrot", URL]],
+            ),
+            (
+                "h tag",
+                vec![
+                    &["d", "party_parrot"],
+                    &["emoji", "party_parrot", URL],
+                    &["h", "11111111-1111-1111-1111-111111111111"],
+                ],
+            ),
+            (
+                "non-http url",
+                vec![
+                    &["d", "party_parrot"],
+                    &["emoji", "party_parrot", "javascript:alert(1)"],
+                ],
+            ),
+        ];
+        for (name, tags) in rejected {
+            match publish_emoji_entry(&state, &tenant, &author, &tags, "party parrot", now).await {
+                Err(IngestError::Rejected(msg)) => {
+                    assert!(msg.starts_with("invalid: "), "{name}: {msg}")
+                }
+                Err(other) => panic!("{name}: expected Rejected, got {other:?}"),
+                Ok(_) => panic!("{name}: must be rejected"),
+            }
+        }
+        assert_eq!(
+            live_count("party_parrot").await,
+            0,
+            "rejected entries are not stored"
+        );
+
+        let first =
+            publish_built_emoji_entry(&state, &tenant, &author, "party_parrot", url, now - 10)
+                .await
+                .expect("first publish");
+        assert!(first.accepted, "{}", first.message);
+        assert_eq!(live_count("party_parrot").await, 1);
+
+        let url2 = "https://example.com/p2.gif";
+        let second = publish_built_emoji_entry(&state, &tenant, &author, "Party_Parrot", url2, now)
+            .await
+            .expect("second publish");
+        assert!(second.accepted, "{}", second.message);
+        assert_eq!(
+            live_count("party_parrot").await,
+            1,
+            "same d keeps one live event"
+        );
+        let surviving: Vec<u8> = sqlx::query_scalar(
+            "SELECT id FROM events WHERE community_id = $1 AND kind = $2 \
+             AND d_tag = 'party_parrot' AND deleted_at IS NULL",
+        )
+        .bind(tenant.community().as_uuid())
+        .bind(KIND_EMOJI_ENTRY as i32)
+        .fetch_one(&pool)
+        .await
+        .expect("surviving id");
+        assert_eq!(hex::encode(surviving), second.event_id);
+    }
+
+    /// Prefix search over kind:30180 content finds "party parrot" for "parr", and
+    /// matches words at any position.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn emoji_entry_prefix_search_finds_by_word_prefix() {
+        let state = ingest_state().await;
+        let author = nostr::Keys::generate();
+        let tenant = emoji_tenant(&state, &[&author]).await;
+        let now = chrono::Utc::now().timestamp() as u64;
+        let url = "https://example.com/p.gif";
+        for shortcode in ["party_parrot", "sad-parrot", "bufo_joy", "cloud_nine"] {
+            publish_built_emoji_entry(&state, &tenant, &author, shortcode, url, now)
+                .await
+                .unwrap_or_else(|e| panic!("publish {shortcode}: {e:?}"));
+        }
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .expect("connect test Postgres");
+        let indexed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE community_id = $1 AND kind = $2 \
+             AND search_tsv IS NOT NULL",
+        )
+        .bind(tenant.community().as_uuid())
+        .bind(KIND_EMOJI_ENTRY as i32)
+        .fetch_one(&pool)
+        .await
+        .expect("count indexed entries");
+        assert_eq!(
+            indexed, 4,
+            "events.search_tsv does not index kind 30180: this database uses the \
+             positive FTS allowlist (migration 0008); run against the desired-state lane"
+        );
+        let search = |q: &str| {
+            let service = buzz_search::SearchService::new(pool.clone());
+            let query = buzz_search::SearchQuery {
+                community: tenant.community(),
+                q: q.to_owned(),
+                channel_scope: buzz_search::ChannelScope::Any,
+                kinds: Some(vec![KIND_EMOJI_ENTRY as i32]),
+                authors: None,
+                since: None,
+                until: None,
+                page: 1,
+                per_page: 50,
+                mode: buzz_search::SearchMode::Prefix,
+                sort: buzz_search::SearchSort::Relevance,
+            };
+            async move { service.search(&query).await.expect("search").hits.len() }
+        };
+        assert_eq!(search("parr").await, 2, "word-prefix finds both parrots");
+        assert_eq!(search("party par").await, 1, "earlier words are exact");
+        assert_eq!(search("joy").await, 1, "any word position matches");
+        assert_eq!(search("zzz").await, 0);
+    }
+
     /// A banned relay admin must be refused with the same wire prefix and
     /// transport status as every other durable-restriction refusal:
     /// `blocked:` and (via `bridge.rs`'s `AuthFailed` arm) HTTP 403 — never
@@ -3987,11 +4505,13 @@ mod postgres_tests {
     /// client retry-loop against an authorization decision.
     #[test]
     fn relay_admin_ban_maps_to_blocked_auth_failure() {
-        let mapped = map_relay_admin_error(super::super::relay_admin::RelayAdminError::Banned);
+        let mapped = map_relay_admin_error(super::super::relay_admin::RelayAdminError::Banned(
+            crate::handlers::auth::BanSource::Own,
+        ));
         assert!(matches!(
             mapped,
             IngestError::Ban {
-                refusal: BanRefusal::Banned,
+                refusal: BanRefusal::Banned(crate::handlers::auth::BanSource::Own),
                 ..
             }
         ));
@@ -4267,7 +4787,8 @@ mod postgres_tests {
 
     #[test]
     fn create_group_does_not_require_h_tag() {
-        // kind:9007 creates the channel — h-tag is optional (client-chosen UUID)
+        // kind:9007 names its new channel in h, but the create path checks that
+        // itself (it refuses a create without one), not requires_h_channel_scope
         assert!(!requires_h_channel_scope(KIND_NIP29_CREATE_GROUP));
     }
 
@@ -4470,6 +4991,7 @@ mod postgres_tests {
             KIND_BOOKMARK_SET,
             KIND_EMOJI_SET,
             KIND_EMOJI_LIST,
+            KIND_EMOJI_ENTRY,
             KIND_AGENT_ENGRAM,
             KIND_AGENT_PROFILE,
             KIND_PERSONA,
@@ -6225,9 +6747,8 @@ mod postgres_tests {
 
         // ── AppState ─────────────────────────────────────────────────────────
         // Redis is lazy and never actually contacted on this rejection path.
-        let redis_pool = deadpool_redis::Config::from_url(FAKE_REDIS_URL)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("deadpool redis pool");
+        let redis_pool =
+            buzz_pubsub::redis_connection(FAKE_REDIS_URL).expect("lazy redis connection");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(FAKE_REDIS_URL, redis_pool.clone())
                 .await
@@ -6508,9 +7029,8 @@ mod postgres_tests {
 
         const FAKE_REDIS_URL: &str = "redis://127.0.0.1:1"; // never contacted
         let db = buzz_db::Db::from_pool(pool.clone());
-        let redis_pool = deadpool_redis::Config::from_url(FAKE_REDIS_URL)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("deadpool redis pool");
+        let redis_pool =
+            buzz_pubsub::redis_connection(FAKE_REDIS_URL).expect("lazy redis connection");
         let pubsub = Arc::new(
             buzz_pubsub::PubSubManager::new(FAKE_REDIS_URL, redis_pool.clone())
                 .await
@@ -6694,12 +7214,14 @@ mod postgres_tests {
             );
 
             // Control: a working lookup reaches the archive gate.
-            healthy.membership_cache.insert(member_key.clone(), true);
+            healthy
+                .membership_cache
+                .seed_member(member_key.clone(), true);
             let control =
                 ingest_event_inner(&healthy, &tracer, &tenant, post("control"), auth()).await;
 
             // Only the channel lookup fails: the post must be denied and not stored.
-            failing.membership_cache.insert(member_key, true);
+            failing.membership_cache.seed_member(member_key, true);
             let event = post("lookup fails");
             let event_id = event.id.to_bytes().to_vec();
             let denied = ingest_event_inner(&failing, &tracer, &tenant, event, auth()).await;
@@ -6816,7 +7338,7 @@ mod postgres_tests {
                 scopes: vec![Scope::MessagesWrite],
                 auth_method: HttpAuthMethod::Nip98,
             };
-            failing.membership_cache.insert(
+            failing.membership_cache.seed_member(
                 (community, source, author.public_key().to_bytes().to_vec()),
                 true,
             );
@@ -7146,12 +7668,109 @@ mod postgres_tests {
         assert_eq!(stored.channel_id, Some(channels[0]));
     }
 
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn subject_cannot_delete_relay_verified_profile() {
+        use buzz_core::kind::KIND_VERIFIED_PROFILE;
+        use buzz_db::verified_profiles::ProfileAdmission;
+        use nostr::Tag;
+        let f = ScopedTargetFixture::new("verified-profile-deletion").await;
+        let subject = f.author.public_key().to_hex();
+        let now = Utc::now();
+        let profile = f
+            .state
+            .db
+            .publish_verified_profile(
+                ProfileAdmission {
+                    community: f.tenant.community(),
+                    issuer: "https://issuer.test",
+                    pubkey: &subject,
+                    issued_at: now,
+                    admitted_at: now,
+                    display_name: "Alice",
+                    username: "alice",
+                    full_name: Some("Alice Example"),
+                    label: "Example",
+                    refresh_seconds: 3600,
+                    membership_required: false,
+                },
+                &f.state.relay_keypair,
+            )
+            .await
+            .unwrap()
+            .expect("publish relay-owned profile");
+        let auth = || IngestAuth::Http {
+            pubkey: f.author.public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        let deletion = |tag: Tag| {
+            EventBuilder::new(Kind::Custom(KIND_DELETION as u16), "")
+                .tags([tag])
+                .sign_with_keys(&f.author)
+                .unwrap()
+        };
+        let coordinate = |author: String| {
+            Tag::parse([
+                "a".to_owned(),
+                format!("{KIND_VERIFIED_PROFILE}:{author}:{subject}"),
+            ])
+            .unwrap()
+        };
+        for tag in [
+            Tag::parse(["e", &profile.id.to_hex()]).unwrap(),
+            coordinate(profile.pubkey.to_hex()),
+            // Even a subject-authored coordinate cannot request deletion of this kind.
+            coordinate(subject.clone()),
+        ] {
+            let event = deletion(tag);
+            let id = event.id;
+            let result = f.submit(event, auth()).await;
+            assert!(
+                matches!(&result, Err(IngestError::Rejected(message))
+                    if message == "invalid: deletion target not found or not deletable by you"),
+                "profile deletion must be denied, got {:?}",
+                result.err()
+            );
+            assert!(f
+                .state
+                .db
+                .get_event_by_id(f.tenant.community(), id.as_bytes())
+                .await
+                .unwrap()
+                .is_none());
+            let stored = f
+                .state
+                .db
+                .get_event_by_id(f.tenant.community(), profile.id.as_bytes())
+                .await
+                .unwrap()
+                .expect("profile remains readable");
+            assert_eq!(stored.event, profile);
+        }
+
+        f.submit(
+            deletion(Tag::parse(["e", &f.global.id.to_hex()]).unwrap()),
+            auth(),
+        )
+        .await
+        .expect("ordinary author-owned note remains deletable");
+        assert!(f
+            .state
+            .db
+            .get_event_by_id(f.tenant.community(), f.global.id.as_bytes())
+            .await
+            .unwrap()
+            .is_none());
+    }
+
     /// A community with `author`'s live message in an open channel, an
     /// author global note, and a second open channel for out-of-scope tokens.
     struct ScopedTargetFixture {
         state: Arc<crate::state::AppState>,
         tenant: TenantContext,
         tracer: Arc<dyn buzz_conformance::Tracer>,
+        trace: Arc<VecTracer>,
         author: nostr::Keys,
         sender: nostr::Keys,
         target_channel: Uuid,
@@ -7172,7 +7791,8 @@ mod postgres_tests {
                 .expect("ensure community")
                 .id;
             let tenant = TenantContext::resolved(community, &host);
-            let tracer: Arc<dyn buzz_conformance::Tracer> = Arc::new(VecTracer::default());
+            let trace = Arc::new(VecTracer::default());
+            let tracer: Arc<dyn buzz_conformance::Tracer> = trace.clone();
             let (author, sender) = (nostr::Keys::generate(), nostr::Keys::generate());
             let mut channels = Vec::new();
             for creator in [&author, &sender] {
@@ -7218,6 +7838,7 @@ mod postgres_tests {
                 state,
                 tenant,
                 tracer,
+                trace,
                 author,
                 sender,
                 target_channel: channels[0],
@@ -7312,6 +7933,169 @@ mod postgres_tests {
         f.submit(react(f.live.id.to_hex()), f.scoped(f.target_channel))
             .await
             .expect("in-scope token reacts to the message");
+    }
+
+    /// A reaction, or a deletion of one, is stored in its target's channel. An
+    /// `h` tag naming only another channel is refused like a missing target,
+    /// and nothing is stored: such an event would never be delivered, yet it
+    /// would use a slot under the channel's history LIMIT. No `h` tag, or the
+    /// target's own among them, is accepted, and so is any `h` on a reaction
+    /// to a global event. A sender's guess still passes the membership gate
+    /// before the refusal, so its cost does not show whether it was right.
+    /// Mutations: drop the `h` check → RED; move it before the membership
+    /// gate → RED (no AuthCheck for the guess).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reaction_and_deletion_h_must_name_the_target_channel() {
+        let f = ScopedTargetFixture::new("stray-h").await;
+        // The author is a member of the target's channel, so only the h check
+        // can refuse its events. Each reaction has its own emoji: a repeated
+        // one is a duplicate the relay accepts without storing.
+        let send = |keys: &nostr::Keys, kind: u32, content: &str, target_id: &str, h: &[&Uuid]| {
+            let mut tags = vec![nostr::Tag::parse(["e", target_id]).unwrap()];
+            tags.extend(
+                h.iter()
+                    .map(|h| nostr::Tag::parse(["h", &h.to_string()]).unwrap()),
+            );
+            let event = EventBuilder::new(Kind::Custom(kind as u16), content)
+                .tags(tags)
+                .sign_with_keys(keys)
+                .expect("sign");
+            let auth = IngestAuth::Nip42 {
+                pubkey: keys.public_key(),
+                scopes: vec![Scope::MessagesWrite],
+                channel_ids: None,
+                conn_id: Uuid::new_v4(),
+            };
+            (event.id.to_hex(), f.submit(event, auth))
+        };
+        let refused = |result: Result<IngestResult, IngestError>, expected: &str| match result {
+            Err(IngestError::Rejected(msg)) => assert_eq!(msg, format!("invalid: {expected}")),
+            Err(other) => panic!("expected refusal, got {other:?}"),
+            Ok(result) => panic!("expected refusal, accepted: {}", result.message),
+        };
+        async fn stored(f: &ScopedTargetFixture, id: String) -> bool {
+            f.state
+                .db
+                .get_event_by_id_including_deleted_for_event_write(
+                    f.tenant.community(),
+                    &hex::decode(id).expect("hex id"),
+                )
+                .await
+                .expect("read event")
+                .is_some()
+        }
+        let (target, other) = (&f.target_channel, &f.other_channel);
+        let (live, global) = (f.live.id.to_hex(), f.global.id.to_hex());
+        let a = &f.author;
+
+        let (id, result) = send(a, KIND_REACTION, "+", &live, &[other]);
+        refused(result.await, REACTION_TARGET_NOT_FOUND);
+        assert!(!stored(&f, id).await, "a refused reaction is not stored");
+        let (plain, result) = send(a, KIND_REACTION, "+", &live, &[]);
+        result.await.expect("a reaction with no h is accepted");
+        let (reaction, result) = send(a, KIND_REACTION, "-", &live, &[other, target]);
+        result
+            .await
+            .expect("a reaction with the target's channel among its h tags is accepted");
+        send(a, KIND_REACTION, "+", &global, &[other])
+            .1
+            .await
+            .expect("a reaction to a global event keeps any h");
+
+        let (id, result) = send(a, KIND_DELETION, "", &reaction, &[other]);
+        refused(
+            result.await,
+            crate::handlers::side_effects::DELETION_TARGET_DENIED,
+        );
+        assert!(!stored(&f, id).await, "a refused deletion is not stored");
+        send(a, KIND_DELETION, "", &reaction, &[target])
+            .1
+            .await
+            .expect("a deletion whose h names the target's channel is accepted");
+        send(a, KIND_DELETION, "", &plain, &[])
+            .1
+            .await
+            .expect("a deletion with no h is accepted");
+
+        // The sender is not a member of the target's channel. Its guess at the
+        // wrong channel must still reach the membership gate.
+        f.trace.steps.lock().expect("trace lock").clear();
+        refused(
+            send(&f.sender, KIND_REACTION, "+", &live, &[other]).1.await,
+            REACTION_TARGET_NOT_FOUND,
+        );
+        assert!(
+            f.trace
+                .steps
+                .lock()
+                .expect("trace lock")
+                .iter()
+                .any(|step| matches!(step.action, TraceAction::AuthCheck { .. })),
+            "a wrong h must not be refused before the membership gate"
+        );
+
+        // In a private channel the sender cannot read, a right guess and a
+        // wrong guess both end at the same membership denial.
+        let private = Uuid::new_v4();
+        f.state
+            .db
+            .create_channel_with_id(
+                f.tenant.community(),
+                private,
+                &format!("stray-h-private-{}", private.simple()),
+                buzz_db::channel::ChannelType::Stream,
+                buzz_db::channel::ChannelVisibility::Private,
+                None,
+                a.public_key().to_bytes().as_slice(),
+                None,
+            )
+            .await
+            .expect("create private channel");
+        // The direct insert bypasses the membership cache, which still holds
+        // the author's snapshot from before this channel existed.
+        f.state.invalidate_membership_local(
+            f.tenant.community(),
+            private,
+            &a.public_key().to_bytes(),
+        );
+        let hidden = EventBuilder::new(Kind::Custom(9), "hidden")
+            .tags([nostr::Tag::parse(["h", &private.to_string()]).unwrap()])
+            .sign_with_keys(a)
+            .expect("sign");
+        let auth = IngestAuth::Http {
+            pubkey: a.public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        ingest_event_inner(&f.state, &f.tracer, &f.tenant, hidden.clone(), auth)
+            .await
+            .expect("store private target");
+        let hidden = hidden.id.to_hex();
+        for guess in [&private, other] {
+            f.trace.steps.lock().expect("trace lock").clear();
+            refused(
+                send(&f.sender, KIND_REACTION, "+", &hidden, &[guess])
+                    .1
+                    .await,
+                REACTION_TARGET_NOT_FOUND,
+            );
+            assert!(
+                f.trace
+                    .steps
+                    .lock()
+                    .expect("trace lock")
+                    .iter()
+                    .any(|step| matches!(
+                        step.action,
+                        TraceAction::AuthCheck {
+                            verdict: Verdict::Deny,
+                            ..
+                        }
+                    )),
+                "a guess at a private channel must end at the membership denial"
+            );
+        }
     }
 
     // ── Owner-aware ban/timeout coverage ─────────────────────────────────────
@@ -7429,7 +8213,7 @@ mod postgres_tests {
         match enforce_write_restriction(&state, &tenant, KIND_REPORT, &agent.public_key()).await {
             Err(
                 err @ IngestError::Ban {
-                    refusal: BanRefusal::Banned,
+                    refusal: BanRefusal::Banned(crate::handlers::auth::BanSource::Owner),
                     ..
                 },
             ) => match err.into_legacy() {
@@ -7446,6 +8230,9 @@ mod postgres_tests {
             .unban_community_member(tenant.community(), &owner_bytes, &owner_bytes)
             .await
             .expect("unban owner");
+        // As the unban command does: drops the community's rows, the
+        // agent's (which carries the owner's ban) included.
+        state.invalidate_restrictions_local(tenant.community());
         enforce_write_restriction(&state, &tenant, KIND_REACTION, &agent.public_key())
             .await
             .expect("unbanning the owner restores the agent");
@@ -7467,7 +8254,7 @@ mod postgres_tests {
             .expect("ban owner");
 
         for keys in [&owner, &agent] {
-            let crate::api::relay_members::MembershipRefusal::Api((status, body)) =
+            let crate::api::relay_members::MembershipRefusal::Api(reason, (status, body)) =
                 crate::api::relay_members::enforce_relay_membership(
                     &state,
                     &tenant,
@@ -7481,6 +8268,7 @@ mod postgres_tests {
             else {
                 panic!("without a token the relay's own refusal is returned");
             };
+            assert_eq!(reason, crate::access::AuthReason::Banned);
             assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
             assert_eq!(
                 body.0["error"],
@@ -7493,6 +8281,8 @@ mod postgres_tests {
             .unban_community_member(tenant.community(), &owner_bytes, &owner_bytes)
             .await
             .expect("unban owner");
+        // As the unban command does on its own pod.
+        state.invalidate_restrictions_local(tenant.community());
         crate::api::relay_members::enforce_relay_membership(
             &state,
             &tenant,
@@ -7560,10 +8350,10 @@ mod postgres_tests {
         .map_err(|refusal| {
             let status = refusal.status();
             let body = match refusal {
-                crate::api::relay_members::MembershipRefusal::Api((_, body)) => {
+                crate::api::relay_members::MembershipRefusal::Api(_, (_, body)) => {
                     body.0["error"].as_str().unwrap_or("").to_owned()
                 }
-                crate::api::relay_members::MembershipRefusal::NipFi(class) => {
+                crate::api::relay_members::MembershipRefusal::NipFi(_, class) => {
                     class.http_body().to_owned()
                 }
             };
@@ -7618,6 +8408,41 @@ mod postgres_tests {
                 "authorization denied\n".to_owned()
             ))
         );
+    }
+
+    /// Recording an agent's owner drops the agent's cached restriction row.
+    /// HTTP admission caches the agent's row before it links the token
+    /// owner, and only checks bans, so the owner's timeout must still reach
+    /// the agent's first write.
+    /// Mutation: drop `invalidate_restrictions` from
+    /// `disconnect_unowned_agent_clusterwide` → RED.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn owner_link_drops_the_agents_cached_restriction_row() {
+        let state = ingest_state().await;
+        let (tenant, owner, agent) = token_owner_fixture(&state, "owner-link-timeout").await;
+        state
+            .db
+            .timeout_community_member(
+                tenant.community(),
+                owner.public_key().as_bytes(),
+                owner.public_key().as_bytes(),
+                Utc::now() + chrono::Duration::hours(1),
+                None,
+            )
+            .await
+            .expect("timeout owner");
+
+        http_membership(&state, &tenant, &agent, Some(owner.public_key()))
+            .await
+            .expect("a timeout does not refuse HTTP admission");
+        match enforce_write_restriction(&state, &tenant, KIND_REACTION, &agent.public_key()).await {
+            Err(IngestError::AuthFailed(msg)) => assert!(
+                msg.starts_with("restricted: you are timed out until "),
+                "got {msg:?}"
+            ),
+            other => panic!("a timed-out owner's newly linked agent must not write: {other:?}"),
+        }
     }
 
     /// The token owner's ban reaches an agent that is itself a member, on a
@@ -7764,9 +8589,7 @@ mod postgres_tests {
              CREATE TABLE {schema}.users (LIKE public.users INCLUDING ALL); \
              CREATE TABLE {schema}.relay_invites (LIKE public.relay_invites INCLUDING ALL); \
              CREATE TABLE {schema}.community_bans (LIKE public.community_bans INCLUDING ALL); \
-             CREATE TABLE {schema}.communities (LIKE public.communities INCLUDING ALL); \
-             CREATE FUNCTION {schema}.community_deletion_lock_key(target UUID) RETURNS BIGINT \
-             LANGUAGE SQL IMMUTABLE STRICT AS 'SELECT public.community_deletion_lock_key(target)';"
+             CREATE TABLE {schema}.communities (LIKE public.communities INCLUDING ALL);"
         )))
         .execute(&admin)
         .await

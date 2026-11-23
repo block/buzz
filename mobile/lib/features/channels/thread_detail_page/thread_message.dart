@@ -40,11 +40,18 @@ class _ThreadMessage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final startsThreads = ref.watch(channelStartsThreadsProvider(channelId));
     final messageSnapshotKey = useMemoized(GlobalKey.new, const []);
     final swipeContentKey = useMemoized(GlobalKey.new, const []);
     final mediaOffset = useMessageMediaOffset(message.content, message.tags);
     final pk = message.pubkey.toLowerCase();
     final ownMessage = currentPubkey?.toLowerCase() == pk;
+    final showSenderIdentity = showMessageAuthorName(
+      ref,
+      channelId,
+      message.pubkey,
+      currentPubkey,
+    );
     final profile =
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
@@ -160,6 +167,8 @@ class _ThreadMessage extends HookConsumerWidget {
               borderRadius: BorderRadius.circular(Radii.md),
               highlightColor: context.colors.primary.withValues(alpha: 0.1),
               snapshotKey: messageSnapshotKey,
+              // Empty row space beside the message's parts is not the message.
+              targetsOnly: true,
               child: Padding(
                 padding: EdgeInsets.only(
                   bottom: endsDay
@@ -177,24 +186,30 @@ class _ThreadMessage extends HookConsumerWidget {
                           child: Padding(
                             padding: EdgeInsets.only(
                               right: ownMessage ? Grid.xxs : 0,
-                              left: ownMessage
+                              left: ownMessage || !showSenderIdentity
                                   ? 0
                                   : messageAvatarSize +
                                         messageAvatarContentGap +
                                         Grid.xxs,
                             ),
-                            child: ReactionRow(
-                              combined: true,
-                              messageId: message.id,
-                              channelId: channelId,
-                              reactions: message.reactions,
-                              onToggle: (emoji) =>
-                                  toggleReaction(ref, message, emoji),
-                              showAddButton: isMember && !isArchived,
-                              onAddReaction: () => showAddReactionPicker(
-                                context: context,
-                                ref: ref,
-                                message: message,
+                            child: MessageLongPressTarget(
+                              child: ReactionRow(
+                                combined: true,
+                                messageId: message.id,
+                                channelId: channelId,
+                                reactions: message.reactions,
+                                onToggle: (emoji) => toggleReaction(
+                                  context,
+                                  ref,
+                                  message,
+                                  emoji,
+                                ),
+                                showAddButton: isMember && !isArchived,
+                                onAddReaction: () => showAddReactionPicker(
+                                  context: context,
+                                  ref: ref,
+                                  message: message,
+                                ),
                               ),
                             ),
                           ),
@@ -211,9 +226,9 @@ class _ThreadMessage extends HookConsumerWidget {
                               : TextDirection.ltr,
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
-                            if (!ownMessage)
+                            if (!ownMessage && showSenderIdentity)
                               const SizedBox(width: messageAvatarSize),
-                            if (!ownMessage)
+                            if (!ownMessage && showSenderIdentity)
                               const SizedBox(width: messageAvatarContentGap),
                             Expanded(
                               child: Padding(
@@ -232,157 +247,167 @@ class _ThreadMessage extends HookConsumerWidget {
                                           left: ownMessage ? 0 : Grid.xs,
                                           right: ownMessage ? Grid.xs : 0,
                                         ),
-                                        child: Row(
-                                          children: [
-                                            Expanded(
-                                              child: MessageAuthorMeta(
-                                                showTimestamp: true,
-                                                reversed: false,
-                                                alignment: ownMessage
-                                                    ? MainAxisAlignment.end
-                                                    : MainAxisAlignment.start,
-                                                nameStyle:
-                                                    messageUsernameTextStyle
-                                                        .copyWith(
-                                                          fontSize: 13.1,
-                                                          height: 17 / 13.1,
-                                                        ),
-                                                metadataStyle:
-                                                    messageMetadataTextStyle
-                                                        .copyWith(
-                                                          fontSize: 13.1,
-                                                          height: 17 / 13.1,
-                                                        ),
-                                                timestampStyle:
-                                                    messageTimestampTextStyle
-                                                        .copyWith(
-                                                          fontSize: 11,
-                                                          height: 17 / 11,
-                                                        ),
-                                                displayName: displayName,
-                                                username: messageUsernameLabel(
-                                                  profile,
+                                        child: MessageLongPressTarget(
+                                          child: MessageAuthorMeta(
+                                            mainAxisSize: MainAxisSize.min,
+                                            timestampGap: Grid.half,
+                                            showIdentity: showSenderIdentity,
+                                            showTimestamp: true,
+                                            reversed: false,
+                                            alignment: ownMessage
+                                                ? MainAxisAlignment.end
+                                                : MainAxisAlignment.start,
+                                            nameStyle: messageUsernameTextStyle
+                                                .copyWith(
+                                                  fontWeight: FontWeight.w500,
+                                                  fontSize: 11,
+                                                  height: 17 / 11,
                                                 ),
-                                                timestamp: formatMessageTime(
-                                                  message.createdAt,
-                                                ),
-                                                nameColor:
-                                                    context.colors.onSurface,
-                                                metadataColor: context
-                                                    .colors
-                                                    .onSurfaceVariant,
-                                                onAuthorTap: () =>
-                                                    showUserProfileSheet(
-                                                      context,
-                                                      message.pubkey,
-                                                      names:
-                                                          channelIdentityNamesProvider(
-                                                            channelId,
-                                                          ),
+                                            metadataStyle:
+                                                messageMetadataTextStyle
+                                                    .copyWith(
+                                                      fontSize: 11,
+                                                      height: 17 / 11,
                                                     ),
-                                                displayNameKey: ValueKey(
-                                                  'thread-message-author-${message.id}',
-                                                ),
-                                                usernameKey: ValueKey(
-                                                  'thread-message-username-${message.id}',
-                                                ),
-                                                timestampKey: ValueKey(
-                                                  'thread-message-timestamp-${message.id}',
-                                                ),
-                                              ),
+                                            timestampStyle:
+                                                messageTimestampTextStyle
+                                                    .copyWith(
+                                                      fontSize: 11,
+                                                      height: 17 / 11,
+                                                    ),
+                                            displayName: ownMessage
+                                                ? 'You'
+                                                : displayName,
+                                            username: ownMessage
+                                                ? null
+                                                : messageUsernameLabel(profile),
+                                            timestamp: formatMessageTime(
+                                              message.createdAt,
                                             ),
-                                            if (message.edited) ...[
-                                              const SizedBox(width: Grid.half),
-                                              Text(
-                                                '(edited)',
-                                                style: context
-                                                    .textTheme
-                                                    .labelSmall
-                                                    ?.copyWith(
-                                                      color: context
-                                                          .colors
-                                                          .onSurfaceVariant,
-                                                      fontStyle:
-                                                          FontStyle.italic,
-                                                    ),
-                                              ),
-                                            ],
-                                          ],
-                                        ),
-                                      ),
-                                    MessageContent(
-                                      key: swipeContentKey,
-                                      content: message.content,
-                                      bubble: true,
-                                      hasReactions:
-                                          message.reactions.isNotEmpty,
-                                      bubbleEnd: showAvatar,
-                                      bubbleStart: showAuthor,
-                                      ownMessage: ownMessage,
-                                      trimTrailingSpacing: endsDay,
-                                      mentionNames: resolvedMentionNames,
-                                      mentionLabels: mentionLabels,
-                                      agentMentionPubkeys: agentMentionPubkeys,
-                                      channelNames: channelNames,
-                                      tags: message.tags,
-                                      baseStyle: messageBodyTextStyle.copyWith(
-                                        color: context.colors.onSurface,
-                                      ),
-                                      scaleEmojiOnly: true,
-                                      mediaCarouselTrailingOverflow:
-                                          Grid.gutter,
-                                      onMediaReply: allMessages == null
-                                          ? null
-                                          : () {
-                                              if (!context.mounted) return;
-                                              Navigator.of(context).push(
-                                                MaterialPageRoute<void>(
-                                                  builder: (_) =>
-                                                      ThreadDetailPage(
-                                                        threadHead: message,
-                                                        allMessages:
-                                                            allMessages!,
-                                                        channelId: channelId,
-                                                        currentPubkey:
-                                                            currentPubkey,
-                                                        isMember: isMember,
-                                                        isArchived: isArchived,
+                                            nameColor:
+                                                context.tertiaryTextColor,
+                                            metadataColor:
+                                                context.tertiaryTextColor,
+                                            onAuthorTap: () =>
+                                                showUserProfileSheet(
+                                                  context,
+                                                  message.pubkey,
+                                                  names:
+                                                      channelIdentityNamesProvider(
+                                                        channelId,
                                                       ),
                                                 ),
-                                              );
-                                            },
-                                      onMediaMore: (viewerContext, imageUrl) =>
-                                          showImageActions(
-                                            context: viewerContext,
-                                            ref: ref,
-                                            message: message,
-                                            channelId: channelId,
-                                            imageUrl: imageUrl,
-                                            canManageMessage: canManageMessage,
-                                            onDeleted: () {
-                                              if (viewerContext.mounted) {
-                                                Navigator.of(
-                                                  viewerContext,
-                                                ).maybePop();
-                                              }
-                                            },
-                                          ),
-                                      onChannelTap: (targetChannelId) {
-                                        openChannelLink(
-                                          context: context,
-                                          ref: ref,
-                                          channelId: targetChannelId,
-                                          currentChannelId: channelId,
-                                        );
-                                      },
-                                      onMentionTap: (pubkey) =>
-                                          showUserProfileSheet(
-                                            context,
-                                            pubkey,
-                                            names: channelIdentityNamesProvider(
-                                              channelId,
+                                            displayNameKey: ValueKey(
+                                              'thread-message-author-${message.id}',
+                                            ),
+                                            usernameKey: ValueKey(
+                                              'thread-message-username-${message.id}',
+                                            ),
+                                            timestampKey: ValueKey(
+                                              'thread-message-timestamp-${message.id}',
                                             ),
                                           ),
+                                        ),
+                                      ),
+                                    IdentityLinkChannel(
+                                      channelId: channelId,
+                                      child: MessageContent(
+                                        key: swipeContentKey,
+                                        content: message.content,
+                                        edited: message.edited,
+                                        bubble: true,
+                                        additionalTextWidth:
+                                            !ownMessage && !showSenderIdentity
+                                            ? messageAvatarSize +
+                                                  messageAvatarContentGap
+                                            : 0,
+                                        hasReactions:
+                                            message.reactions.isNotEmpty,
+                                        bubbleEnd: showAvatar,
+                                        bubbleStart: showAuthor,
+                                        ownMessage: ownMessage,
+                                        trimTrailingSpacing: true,
+                                        mentionNames: resolvedMentionNames,
+                                        mentionLabels: mentionLabels,
+                                        agentMentionPubkeys:
+                                            agentMentionPubkeys,
+                                        channelNames: channelNames,
+                                        tags: message.tags,
+                                        baseStyle: messageBodyTextStyle
+                                            .copyWith(
+                                              color: context.colors.onSurface,
+                                            ),
+                                        scaleEmojiOnly: true,
+                                        mediaCarouselTrailingOverflow:
+                                            Grid.gutter,
+                                        onMediaReply:
+                                            allMessages == null ||
+                                                !startsThreads
+                                            ? null
+                                            : () {
+                                                if (!context.mounted) return;
+                                                Navigator.of(context).push(
+                                                  MaterialPageRoute<void>(
+                                                    builder: (_) =>
+                                                        ThreadDetailPage(
+                                                          threadHead: message,
+                                                          allMessages:
+                                                              allMessages!,
+                                                          channelId: channelId,
+                                                          currentPubkey:
+                                                              currentPubkey,
+                                                          isMember: isMember,
+                                                          isArchived:
+                                                              isArchived,
+                                                        ),
+                                                  ),
+                                                );
+                                              },
+                                        nativePhotoActions: nativeImageActions(
+                                          context: context,
+                                          ref: ref,
+                                          message: message,
+                                          channelId: channelId,
+                                          canManageMessage: canManageMessage,
+                                        ),
+                                        onMediaMore:
+                                            (viewerContext, imageUrl) =>
+                                                showImageActions(
+                                                  context: viewerContext,
+                                                  ref: ref,
+                                                  message: message,
+                                                  channelId: channelId,
+                                                  imageUrl: imageUrl,
+                                                  canManageMessage:
+                                                      canManageMessage,
+                                                  onDeleted: () {
+                                                    if (viewerContext.mounted) {
+                                                      Navigator.of(
+                                                        viewerContext,
+                                                      ).maybePop();
+                                                    }
+                                                  },
+                                                ),
+                                        onChannelTap: (targetChannelId) {
+                                          unawaited(
+                                            openChannelLink(
+                                              context: context,
+                                              ref: ref,
+                                              channelId: targetChannelId,
+                                              currentChannelId: channelId,
+                                            ),
+                                          );
+                                        },
+                                        onMentionTap: (pubkey) =>
+                                            showUserProfileSheet(
+                                              context,
+                                              pubkey,
+                                              names:
+                                                  channelIdentityNamesProvider(
+                                                    channelId,
+                                                  ),
+                                            ),
+                                      ),
                                     ),
                                   ],
                                 ),
@@ -390,26 +415,19 @@ class _ThreadMessage extends HookConsumerWidget {
                             ),
                           ],
                         ),
-                        if (showAvatar && !ownMessage)
+                        if (showAvatar && !ownMessage && showSenderIdentity)
                           Positioned(
                             left: ownMessage ? null : 0,
                             right: ownMessage ? 0 : null,
                             bottom: 0,
                             child: MessageMediaAvatar(
                               offset: mediaOffset,
-                              child: Semantics(
-                                container: true,
-                                label: 'Open $displayName profile',
-                                button: true,
-                                excludeSemantics: true,
-                                onTap: () => showUserProfileSheet(
-                                  context,
-                                  message.pubkey,
-                                  names: channelIdentityNamesProvider(
-                                    channelId,
-                                  ),
-                                ),
-                                child: GestureDetector(
+                              child: MessageLongPressTarget(
+                                child: Semantics(
+                                  container: true,
+                                  label: 'Open $displayName profile',
+                                  button: true,
+                                  excludeSemantics: true,
                                   onTap: () => showUserProfileSheet(
                                     context,
                                     message.pubkey,
@@ -417,10 +435,19 @@ class _ThreadMessage extends HookConsumerWidget {
                                       channelId,
                                     ),
                                   ),
-                                  child: _Avatar(
-                                    profile: profile,
-                                    pubkey: message.pubkey,
-                                    isAgent: isAgent,
+                                  child: GestureDetector(
+                                    onTap: () => showUserProfileSheet(
+                                      context,
+                                      message.pubkey,
+                                      names: channelIdentityNamesProvider(
+                                        channelId,
+                                      ),
+                                    ),
+                                    child: _Avatar(
+                                      profile: profile,
+                                      pubkey: message.pubkey,
+                                      isAgent: isAgent,
+                                    ),
                                   ),
                                 ),
                               ),

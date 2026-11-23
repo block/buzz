@@ -25,6 +25,7 @@ use buzz_media::{
     is_tenant_owned_key, tenant_prefixes, BulkDeleteOutcome, MediaStorage, ObjectVersionKind,
     ObjectVersionRef,
 };
+use buzz_pubsub::{redis_connection, RedisConnection};
 use clap::Subcommand;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -340,7 +341,7 @@ impl LoopMode {
 struct Services {
     store: DeletionStore,
     media: Arc<MediaStorage>,
-    redis: deadpool_redis::Pool,
+    redis: RedisConnection,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -612,14 +613,7 @@ async fn connect_services_with_store(store: DeletionStore) -> Result<Services> {
     };
     let media = Arc::new(MediaStorage::new(&media_config)?);
     let redis_url = required_env("REDIS_URL")?;
-    let mut redis_config = deadpool_redis::Config::from_url(&redis_url);
-    redis_config.pool = Some(deadpool_redis::PoolConfig::new(env_parse(
-        "BUZZ_REDIS_POOL_SIZE",
-        16,
-    )));
-    let redis = redis_config
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .context("create deletion Redis pool")?;
+    let redis = redis_connection(&redis_url).context("create deletion Redis connection")?;
     Ok(Services {
         store,
         media,
@@ -1427,7 +1421,28 @@ fn validate_approved_schema(
     live: &buzz_db::deletion::SchemaManifest,
     frozen: &FrozenInventory,
 ) -> Result<()> {
-    if live.scoped_tables != frozen.schema.scoped_tables {
+    // The approved catalog binds exactly, with two bounded exceptions. An
+    // expand migration between approval and execution may add a table listed
+    // in APPROVAL_FORWARD_TABLES, which this binary purges and verifies. A
+    // contract migration may drop a table listed in RETIRING_SCOPED_TABLES, which
+    // this binary purges and verifies only while it exists. The frozen manifest
+    // and its digest are never rewritten.
+    let frozen_tables = frozen
+        .schema
+        .scoped_tables
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let live_tables = live
+        .scoped_tables
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let removed = frozen_tables
+        .difference(&live_tables)
+        .any(|table| !buzz_db::deletion::RETIRING_SCOPED_TABLES.contains(&table.as_str()));
+    let unlisted_addition = live_tables
+        .difference(&frozen_tables)
+        .any(|table| !buzz_db::deletion::APPROVAL_FORWARD_TABLES.contains(&table.as_str()));
+    if removed || unlisted_addition {
         return Err(permanent(
             "approved structural catalog drifted before fencing",
         ));
@@ -1689,24 +1704,24 @@ async fn verify_storage_absence(services: &Services, request: &DeletionRequest) 
 }
 
 async fn publish_disconnect_community(
-    pool: &deadpool_redis::Pool,
+    pool: &RedisConnection,
     community: buzz_core::CommunityId,
 ) -> Result<()> {
-    let mut connection = pool.get().await?;
+    let mut connection = pool.clone();
     let channel = format!("buzz:{community}:conn-control");
     let _: u64 = redis::cmd("PUBLISH")
         .arg(channel)
         .arg(r#"{"op":"DisconnectCommunity"}"#)
-        .query_async(&mut *connection)
+        .query_async(&mut connection)
         .await?;
     Ok(())
 }
 
 async fn purge_redis_namespace(
-    pool: &deadpool_redis::Pool,
+    pool: &RedisConnection,
     community: buzz_core::CommunityId,
 ) -> Result<u64> {
-    let mut connection = pool.get().await?;
+    let mut connection = pool.clone();
     let pattern = format!("buzz:{community}:*");
     let mut cursor = 0u64;
     let mut deleted = 0u64;
@@ -1717,12 +1732,12 @@ async fn purge_redis_namespace(
             .arg(&pattern)
             .arg("COUNT")
             .arg(1000)
-            .query_async(&mut *connection)
+            .query_async(&mut connection)
             .await?;
         if !keys.is_empty() {
             let count: u64 = redis::cmd("UNLINK")
                 .arg(&keys)
-                .query_async(&mut *connection)
+                .query_async(&mut connection)
                 .await?;
             deleted = deleted.saturating_add(count);
         }
@@ -1740,7 +1755,7 @@ fn scan_proves_absence(pages: &[(u64, Vec<String>)]) -> bool {
 }
 
 async fn scan_redis_namespace(
-    connection: &mut deadpool_redis::Connection,
+    connection: &mut RedisConnection,
     pattern: &str,
 ) -> Result<Vec<(u64, Vec<String>)>> {
     let mut cursor = 0u64;
@@ -1752,7 +1767,7 @@ async fn scan_redis_namespace(
             .arg(pattern)
             .arg("COUNT")
             .arg(1000)
-            .query_async(&mut **connection)
+            .query_async(connection)
             .await?;
         cursor = page.0;
         pages.push(page);
@@ -1763,10 +1778,10 @@ async fn scan_redis_namespace(
 }
 
 async fn verify_redis_absence(
-    pool: &deadpool_redis::Pool,
+    pool: &RedisConnection,
     community: buzz_core::CommunityId,
 ) -> Result<()> {
-    let mut connection = pool.get().await?;
+    let mut connection = pool.clone();
     let pattern = format!("buzz:{community}:*");
     // SCAN is weakly consistent. Two complete empty passes ensure a cursor
     // rollover or concurrent expiry cannot make one sparse pass look absent.
@@ -1880,6 +1895,69 @@ mod postgres_tests {
         assert!(resolve_submit_host(None, Some("not a URL")).is_err());
     }
 
+    /// An approved catalog tolerates a retiring table vanishing before
+    /// execution, and nothing else: any other frozen table that is gone, or a
+    /// table added after approval and not forward-listed, is still drift.
+    #[test]
+    fn approved_schema_tolerates_only_retiring_tables_vanishing() {
+        use buzz_db::deletion::{SchemaManifest, EXPECTED_SCOPED_TABLES, RETIRING_SCOPED_TABLES};
+
+        let manifest = |tables: &[String]| SchemaManifest {
+            scoped_tables: tables.to_vec(),
+            row_counts: std::collections::BTreeMap::new(),
+            fenced_tables: Vec::new(),
+        };
+        let required: Vec<String> = EXPECTED_SCOPED_TABLES
+            .iter()
+            .map(|table| (*table).to_owned())
+            .collect();
+        let mut with_retiring = required.clone();
+        with_retiring.extend(
+            RETIRING_SCOPED_TABLES
+                .iter()
+                .map(|table| (*table).to_owned()),
+        );
+        let frozen = FrozenInventory {
+            schema: manifest(&with_retiring),
+            storage: empty_storage_manifest(buzz_core::CommunityId::from_uuid(Uuid::new_v4())),
+        };
+
+        validate_approved_schema(&manifest(&with_retiring), &frozen)
+            .expect("retiring tables still live");
+        validate_approved_schema(&manifest(&required), &frozen)
+            .expect("every retiring table dropped after approval");
+        for kept in RETIRING_SCOPED_TABLES {
+            let partial: Vec<String> = with_retiring
+                .iter()
+                .filter(|table| table.as_str() != *kept)
+                .cloned()
+                .collect();
+            validate_approved_schema(&manifest(&partial), &frozen)
+                .expect("one retiring table dropped after approval");
+        }
+
+        // A required table that is gone is drift, with or without the
+        // retiring tables beside it.
+        for live in [&with_retiring, &required] {
+            let missing: Vec<String> = live
+                .iter()
+                .filter(|table| table.as_str() != "workflows")
+                .cloned()
+                .collect();
+            assert!(validate_approved_schema(&manifest(&missing), &frozen).is_err());
+        }
+        // An unlisted addition is drift, and a retiring table is not exempt
+        // from that when the approval never froze it.
+        let mut unknown = required.clone();
+        unknown.push("unknown_tenant_table".to_owned());
+        assert!(validate_approved_schema(&manifest(&unknown), &frozen).is_err());
+        let without_retiring = FrozenInventory {
+            schema: manifest(&required),
+            storage: frozen.storage.clone(),
+        };
+        assert!(validate_approved_schema(&manifest(&with_retiring), &without_retiring).is_err());
+    }
+
     fn empty_storage_manifest(community: buzz_core::CommunityId) -> StorageManifest {
         StorageManifest {
             version: 4,
@@ -1895,17 +1973,60 @@ mod postgres_tests {
         }
     }
 
-    async fn claimed_test_deletion(prefix: &str) -> (Db, Services, ClaimedDeletion) {
-        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+    fn test_database_url() -> String {
+        std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
-            .expect("BUZZ_TEST_DATABASE_URL or DATABASE_URL is required");
-        let pool = sqlx::PgPool::connect(&database_url)
+            .expect("BUZZ_TEST_DATABASE_URL or DATABASE_URL is required")
+    }
+
+    async fn claimed_test_deletion(prefix: &str) -> (Db, Services, ClaimedDeletion) {
+        let pool = sqlx::PgPool::connect(&test_database_url())
             .await
             .expect("connect deletion engine test DB");
         let db = Db::from_pool(pool);
         if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
             db.migrate().await.expect("migrate deletion engine test DB");
         }
+        claimed_test_deletion_in(db, prefix).await
+    }
+
+    /// A migrated database of its own, named `{prefix}_{uuid}`, for a test
+    /// that changes the catalog: other tests would see the change as drift.
+    /// Drop it with [`drop_scratch_test_db`].
+    async fn scratch_test_db(prefix: &str) -> (Db, String) {
+        let base_url = test_database_url();
+        let name = format!("{prefix}_{}", Uuid::new_v4().simple());
+        let admin = sqlx::PgPool::connect(&base_url)
+            .await
+            .expect("connect admin database");
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+            .execute(&admin)
+            .await
+            .expect("create scratch database");
+        admin.close().await;
+        let base = &base_url[..base_url.rfind('/').expect("db url has a path segment")];
+        let pool = sqlx::PgPool::connect(&format!("{base}/{name}"))
+            .await
+            .expect("connect scratch database");
+        let db = Db::from_pool(pool);
+        db.migrate().await.expect("migrate scratch database");
+        (db, name)
+    }
+
+    async fn drop_scratch_test_db(db: Db, name: &str) {
+        db.pool().close().await;
+        let admin = sqlx::PgPool::connect(&test_database_url())
+            .await
+            .expect("connect admin database");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await
+        .expect("drop scratch database");
+    }
+
+    async fn claimed_test_deletion_in(db: Db, prefix: &str) -> (Db, Services, ClaimedDeletion) {
         let store = db.deletion_store();
         let host = format!("{prefix}-{}.example", Uuid::new_v4().simple());
         let community = db
@@ -1957,9 +2078,8 @@ mod postgres_tests {
                 })
                 .expect("construct unused media service"),
             ),
-            redis: deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("construct unused Redis pool"),
+            redis: redis_connection("redis://127.0.0.1:1")
+                .expect("construct unused Redis connection"),
         };
         (db, services, claim)
     }
@@ -2028,9 +2148,8 @@ mod postgres_tests {
                 })
                 .expect("construct unused media service"),
             ),
-            redis: deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-                .expect("construct unused Redis pool"),
+            redis: redis_connection("redis://127.0.0.1:1")
+                .expect("construct unused Redis connection"),
         };
         (db, services, *request, inventory)
     }
@@ -2465,6 +2584,38 @@ mod postgres_tests {
         validate_approved_schema(&live, &decoded)
             .expect("legacy fence list is no longer structural");
 
+        // A retiring table the approval froze may be dropped before execution.
+        let mut dropped = live.clone();
+        dropped
+            .scoped_tables
+            .retain(|table| !buzz_db::deletion::RETIRING_SCOPED_TABLES.contains(&table.as_str()));
+        assert!(dropped.scoped_tables.len() < live.scoped_tables.len());
+        validate_approved_schema(&dropped, &decoded)
+            .expect("a dropped retiring table is not drift");
+
+        // Only a listed forward table may appear after approval. A required
+        // table the approval lacks is drift, and so is a removed frozen table.
+        let forward = buzz_db::deletion::APPROVAL_FORWARD_TABLES[0];
+        let mut expanded = live.clone();
+        expanded.scoped_tables.retain(|table| table != forward);
+        expanded.scoped_tables.push(forward.to_owned());
+        let mut approved_before_expand = decoded.clone();
+        approved_before_expand
+            .schema
+            .scoped_tables
+            .retain(|table| table != forward);
+        validate_approved_schema(&expanded, &approved_before_expand)
+            .expect("a listed forward table added after approval is not drift");
+        let mut lacks_required = decoded.clone();
+        lacks_required
+            .schema
+            .scoped_tables
+            .retain(|table| table != "workflows");
+        assert!(validate_approved_schema(&live, &lacks_required).is_err());
+        let mut removed = live.clone();
+        removed.scoped_tables.retain(|table| table != "workflows");
+        assert!(validate_approved_schema(&removed, &decoded).is_err());
+
         live.scoped_tables.push("unknown_tenant_table".to_string());
         assert!(validate_approved_schema(&live, &decoded).is_err());
     }
@@ -2771,7 +2922,194 @@ mod postgres_tests {
             .expect("empty tenant prefixes verify clean");
     }
 
+    /// A request approved before an expand migration adds the forward tables
+    /// runs to completion through the executor: the target's rows in the added
+    /// tables are purged and verified and a bystander's survive. A table added
+    /// after approval that is not listed still stops the request before fencing.
+    /// A retiring table dropped after approval does not stop it.
+    async fn approval_before_an_expand_migration_completes() {
+        let redis_url = std::env::var("BUZZ_TEST_REDIS_URL")
+            .or_else(|_| std::env::var("REDIS_URL"))
+            .expect("BUZZ_TEST_REDIS_URL or REDIS_URL is required");
+        let services_with_infra = |mut services: Services| {
+            services.media = deletion_test_media_storage();
+            services.redis = redis_connection(&redis_url).expect("connect Redis");
+            services
+        };
+
+        // Each step changes the catalog, which a shared database would see.
+        let (scratch, scratch_name) = scratch_test_db("deletion_expand").await;
+
+        // An unlisted addition fails before fencing.
+        let (db, services, claim) =
+            claimed_test_deletion_in(scratch.clone(), "deletion-unlisted").await;
+        let services = services_with_infra(services);
+        let request_id = claim.request.id;
+        sqlx::query("CREATE TABLE deletion_unlisted_scoped (community_id UUID NOT NULL)")
+            .execute(db.pool())
+            .await
+            .expect("create unlisted table");
+        let outcome =
+            execute_claim(&services, LoopMode::Run, claim, &CancellationToken::new()).await;
+        sqlx::query("DROP TABLE deletion_unlisted_scoped")
+            .execute(db.pool())
+            .await
+            .expect("drop unlisted table");
+        // The catalog check blocks it before the approval comparison runs.
+        let output = outcome.expect("run records the failure");
+        assert_eq!(output.stage, DeletionStage::Approved);
+        let blocked = output
+            .blocked_reason
+            .expect("an unlisted addition blocks the request");
+        assert!(
+            blocked.contains("unknown=deletion_unlisted_scoped"),
+            "{blocked}"
+        );
+        let request = db
+            .deletion_store()
+            .get(request_id)
+            .await
+            .expect("load request");
+        assert!(request.fence_generation.is_none());
+
+        // The forward tables appear after approval, with rows for the target
+        // and for a bystander.
+        let (db, services, claim) =
+            claimed_test_deletion_in(scratch.clone(), "deletion-straddle").await;
+        let services = services_with_infra(services);
+        let target = *claim.request.community_id.as_uuid();
+        let bystander = *db
+            .ensure_configured_community(&format!(
+                "deletion-bystander-{}.example",
+                Uuid::new_v4().simple()
+            ))
+            .await
+            .expect("bystander community")
+            .id
+            .as_uuid();
+        for table in buzz_db::deletion::PENDING_SCOPED_TABLES {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "CREATE TABLE {table} (community_id UUID NOT NULL)"
+            )))
+            .execute(db.pool())
+            .await
+            .expect("create forward table");
+            for community in [target, bystander] {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "INSERT INTO {table} (community_id) VALUES ($1)"
+                )))
+                .bind(community)
+                .execute(db.pool())
+                .await
+                .expect("seed forward table");
+            }
+        }
+        let output = execute_claim(&services, LoopMode::Run, claim, &CancellationToken::new())
+            .await
+            .expect("execute deletion");
+        assert_eq!(
+            output.stage,
+            DeletionStage::RetentionPending,
+            "{:?}",
+            output.blocked_reason.or(output.last_error)
+        );
+        for table in buzz_db::deletion::PENDING_SCOPED_TABLES {
+            for (community, expected) in [(target, 0_i64), (bystander, 1)] {
+                let rows: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                    "SELECT count(*) FROM {table} WHERE community_id = $1"
+                )))
+                .bind(community)
+                .fetch_one(db.pool())
+                .await
+                .expect("count forward rows");
+                assert_eq!(rows, expected, "{table} {community}");
+            }
+        }
+
+        // An approval that froze the forward tables fails before fencing
+        // once they are gone.
+        let (db, services, claim) =
+            claimed_test_deletion_in(scratch.clone(), "deletion-removed").await;
+        let services = services_with_infra(services);
+        let request_id = claim.request.id;
+        for table in buzz_db::deletion::PENDING_SCOPED_TABLES {
+            sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE {table}")))
+                .execute(db.pool())
+                .await
+                .expect("drop forward table");
+        }
+        let output = execute_claim(&services, LoopMode::Run, claim, &CancellationToken::new())
+            .await
+            .expect("run records the failure");
+        assert_eq!(output.stage, DeletionStage::Approved);
+        let blocked = output
+            .blocked_reason
+            .expect("a removed frozen table blocks the request");
+        assert!(
+            blocked.contains("approved structural catalog drifted"),
+            "{blocked}"
+        );
+        let request = db
+            .deletion_store()
+            .get(request_id)
+            .await
+            .expect("load request");
+        assert!(request.fence_generation.is_none());
+
+        // A retiring table the approval froze may be dropped before execution.
+        // The request is inventoried and approved while `delivery_log` and
+        // `subscriptions` exist, then the contract migration drops them, and
+        // the executor still advances through the Approved stage on the
+        // original digest.
+        let (db, services, claim) =
+            claimed_test_deletion_in(scratch.clone(), "deletion-retired").await;
+        let services = services_with_infra(services);
+        let request_id = claim.request.id;
+        let approved_digest = claim
+            .request
+            .inventory_digest
+            .clone()
+            .expect("approval froze an inventory digest");
+        let frozen = validate_frozen_inventory(&claim.request).expect("frozen inventory");
+        for table in buzz_db::deletion::RETIRING_SCOPED_TABLES {
+            assert!(
+                frozen
+                    .schema
+                    .scoped_tables
+                    .iter()
+                    .any(|t| t.as_str() == *table),
+                "approval froze {table}"
+            );
+            sqlx::query(sqlx::AssertSqlSafe(format!("DROP TABLE {table}")))
+                .execute(db.pool())
+                .await
+                .expect("drop retiring table");
+        }
+        let output = execute_claim(&services, LoopMode::Run, claim, &CancellationToken::new())
+            .await
+            .expect("execute deletion");
+        assert_eq!(
+            output.stage,
+            DeletionStage::RetentionPending,
+            "{:?}",
+            output.blocked_reason.or(output.last_error)
+        );
+        let request = db
+            .deletion_store()
+            .get(request_id)
+            .await
+            .expect("load request");
+        assert_eq!(request.inventory_digest.as_deref(), Some(&*approved_digest));
+        drop_scratch_test_db(scratch, &scratch_name).await;
+    }
+
     mod external_infra_s3_tests {
+        #[tokio::test]
+        #[ignore = "requires Postgres, Redis and S3-compatible storage"]
+        async fn approval_before_an_expand_migration_completes() {
+            super::approval_before_an_expand_migration_completes().await;
+        }
+
         #[tokio::test]
         #[ignore = "requires Postgres and S3-compatible storage"]
         async fn approved_stage_allows_post_inventory_row_churn_before_fencing() {

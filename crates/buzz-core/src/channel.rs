@@ -41,6 +41,9 @@ pub const MAX_CHANNEL_LABELS: usize = 8;
 /// Maximum length of one channel label, in bytes.
 pub const MAX_CHANNEL_LABEL_LEN: usize = 64;
 
+/// Maximum number of messages one channel can pin (NIP-PM).
+pub const MAX_CHANNEL_PINS: usize = 250;
+
 /// Names a label may not take, because the channel type uses the same `t`
 /// tag. A label equal to one of these could make a channel look like
 /// another type. The list includes types that a later relay may add.
@@ -288,6 +291,8 @@ pub enum MemberPutDenial {
     NotAMember,
     /// A non-elevated actor asked for owner or admin.
     ElevatedRoleGrant,
+    /// Only an owner may grant ownership or change an owner's role.
+    OwnershipChange,
     /// A guest, or a non-member where joining does not give `member`, tried
     /// to add someone else. Adding people is a write.
     GuestCannotAdd,
@@ -302,7 +307,8 @@ pub enum MemberPutDenial {
 /// This is the one definition of the admission rules: a guest never adds
 /// anyone; a non-member adds others only where joining gives `member`; a
 /// joiner gets `join_role` or a lower role it asks for; only owners and admins
-/// grant elevated roles; and an active role changes only as
+/// grant admin, only owners grant ownership or change an owner's role;
+/// and an active role changes only as
 /// [`MemberRole::may_change_role`] allows. With no `role` tag, an active member
 /// keeps their role and a new member gets `join_role`.
 ///
@@ -338,6 +344,15 @@ pub fn decide_member_put(put: MemberPut<'_>) -> Result<MemberRole, MemberPutDeni
         if !may_add {
             return Err(MemberPutDenial::GuestCannotAdd);
         }
+    }
+
+    if put.actor_role != Some(MemberRole::Owner)
+        && put.requested.is_some_and(|requested| {
+            put.target_role != Some(requested.as_str())
+                && (put.target_role == Some("owner") || requested == MemberRole::Owner)
+        })
+    {
+        return Err(MemberPutDenial::OwnershipChange);
     }
 
     let Some(current) = put.target_role else {
@@ -482,8 +497,9 @@ impl MemberRole {
     /// Whether an actor whose active role is `actor` may change another
     /// active member's role from `current` to `requested`.
     ///
-    /// Owners and admins may make any change (the last-owner rule is checked
-    /// separately). Any other active member who may post may make a guest a
+    /// Owners may make any change (the last-owner rule is checked separately).
+    /// Admins may change roles other than owner, but cannot grant ownership.
+    /// Any other active member who may post may make a guest a
     /// member: the same authority they have to add a new member. This holds
     /// for agents too; a later restricted-agent level may limit it. Nobody
     /// else may change a role; a guest cannot promote anyone, including
@@ -496,7 +512,8 @@ impl MemberRole {
         let Some(actor) = actor else {
             return false;
         };
-        actor.is_elevated()
+        actor == Self::Owner
+            || (actor == Self::Admin && current != Self::Owner && requested != Self::Owner)
             || (actor.can_post()
                 && current == Self::Guest
                 && matches!(requested, Self::Member | Self::Bot))
@@ -549,8 +566,9 @@ impl FromStr for MemberRole {
 mod tests {
     use super::{
         canonical_channel_name, channel_name_error, channel_type_from_group_state_tags,
-        group_state_identity_tags, parse_channel_labels, ChannelJoinRole, ChannelLabelError,
-        ChannelType, MemberRole, LEGACY_CHANNEL_TYPES, MAX_CHANNEL_LABELS, RESERVED_CHANNEL_LABELS,
+        decide_member_put, group_state_identity_tags, parse_channel_labels, ChannelJoinRole,
+        ChannelLabelError, ChannelType, MemberPut, MemberPutDenial, MemberRole,
+        LEGACY_CHANNEL_TYPES, MAX_CHANNEL_LABELS, RESERVED_CHANNEL_LABELS,
     };
 
     #[test]
@@ -773,13 +791,17 @@ mod tests {
     }
 
     #[test]
-    fn only_elevated_roles_change_roles_except_promoting_a_guest() {
+    fn role_changes_respect_owner_precedence_and_guest_promotion() {
         use MemberRole::*;
         const ALL: [MemberRole; 5] = [Owner, Admin, Member, Guest, Bot];
         for actor in [Owner, Admin] {
             for current in ALL {
                 for requested in ALL {
-                    assert!(MemberRole::may_change_role(Some(actor), current, requested));
+                    assert_eq!(
+                        MemberRole::may_change_role(Some(actor), current, requested),
+                        actor == Owner || (current != Owner && requested != Owner),
+                        "{actor}: {current} -> {requested}"
+                    );
                 }
             }
         }
@@ -801,6 +823,60 @@ mod tests {
                     assert!(!MemberRole::may_change_role(actor, current, requested));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn admins_cannot_acquire_or_change_ownership_through_member_put() {
+        use MemberRole::*;
+        // New members, existing members (including self), and unknown stored
+        // roles must all use the same ownership boundary. Unchanged roles are
+        // still idempotent, and omitting the role still preserves it.
+        for target_role in [None, Some("member"), Some("admin"), Some("future_role")] {
+            for target_is_actor in [false, true] {
+                let put = MemberPut {
+                    private: true,
+                    join_role: ChannelJoinRole::Member,
+                    actor_role: Some(Admin),
+                    target_is_actor,
+                    target_role,
+                    requested: Some(Owner),
+                };
+                assert_eq!(
+                    decide_member_put(put),
+                    Err(MemberPutDenial::OwnershipChange)
+                );
+                assert_eq!(
+                    decide_member_put(MemberPut {
+                        actor_role: Some(Owner),
+                        ..put
+                    }),
+                    Ok(Owner)
+                );
+            }
+        }
+        for requested in [
+            Some(Admin),
+            Some(Member),
+            Some(Bot),
+            Some(Guest),
+            Some(Owner),
+            None,
+        ] {
+            let result = decide_member_put(MemberPut {
+                private: true,
+                join_role: ChannelJoinRole::Member,
+                actor_role: Some(Admin),
+                target_is_actor: false,
+                target_role: Some("owner"),
+                requested,
+            });
+            let expected = if requested.is_none() || requested == Some(Owner) {
+                Ok(Owner)
+            } else {
+                Err(MemberPutDenial::OwnershipChange)
+            };
+            assert_eq!(result, expected, "requested {requested:?}");
         }
     }
 

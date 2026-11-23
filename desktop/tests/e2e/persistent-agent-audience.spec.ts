@@ -90,6 +90,23 @@ function threadComposer(page: Page) {
   return page.getByTestId("thread-composer-overlay");
 }
 
+/**
+ * Returns the thread composer's editor once the app has finished placing
+ * focus on its own. Opening a thread by URL mounts the channel and thread
+ * composers, and whichever mounts first autofocuses itself a frame later
+ * (TipTap's `focus()` is deferred). A click that lands before that frame is
+ * undone by the late autofocus, which blurs the editor the test just typed in
+ * and unmounts its focus-gated mention menu.
+ */
+async function readyThreadComposerInput(page: Page) {
+  const input = threadComposer(page).getByTestId("message-input");
+  await expect(input).toHaveAttribute("contenteditable", "true");
+  await expect(page.locator('[data-testid="message-input"]:focus')).toHaveCount(
+    1,
+  );
+  return input;
+}
+
 async function readComposerCaret(input: Locator) {
   return input.evaluate((element) => {
     const selection = window.getSelection();
@@ -833,7 +850,7 @@ test("the mention setting is reachable and operable by keyboard", async ({
   await openThread(page);
 
   const mainComposer = threadComposer(page);
-  const mainInput = mainComposer.getByTestId("message-input");
+  const mainInput = await readyThreadComposerInput(page);
   await mainInput.click();
   await mainInput.fill("@Mor");
   const list = mainComposer.getByTestId("mention-autocomplete");
@@ -934,7 +951,7 @@ test("a manual mention persists when automatic mentions are enabled", async ({
   await openThread(page);
 
   const composer = threadComposer(page);
-  const input = composer.getByTestId("message-input");
+  const input = await readyThreadComposerInput(page);
   await input.fill("@Mor");
   await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
   await input.press("Tab");
@@ -986,6 +1003,18 @@ test("a manual mention persists when automatic mentions are enabled", async ({
 
   await input.type("hello");
   await input.press("Enter");
+
+  // The editor locks one frame after Enter (isSending disables it, blurring
+  // it) and unlocks when the delayed send settles. Wait for that whole cycle
+  // before asserting on the editor; its focus and editability checks all hold
+  // vacuously in the frame before the lock lands.
+  const composerForm = composer.getByTestId("message-composer");
+  await expect(composerForm).toHaveAttribute("data-submit-locked", "true");
+  await expect(input).toHaveAttribute("contenteditable", "false");
+  await expect(composerForm).toHaveAttribute("data-submit-locked", "false", {
+    timeout: 5_000,
+  });
+  await expect(input).toHaveAttribute("contenteditable", "true");
 
   await expect(input).toHaveText("@Morgarita ", { timeout: 2_500 });
   await expect(input.locator("[data-placeholder]")).toHaveCount(0);

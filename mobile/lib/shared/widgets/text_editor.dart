@@ -1,3 +1,4 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -17,6 +18,7 @@ Future<void> showTextEditor({
   required String hintText,
   required Future<void> Function(String value) onSave,
   bool multiline = false,
+  bool requireNonEmpty = false,
   String keyPrefix = 'text-editor',
   bool Function(Object error)? shouldRetryOnError,
 }) async {
@@ -28,6 +30,7 @@ Future<void> showTextEditor({
         initialValue: initialValue,
         placeholder: hintText,
         multiline: multiline,
+        requireNonEmpty: requireNonEmpty,
         brightness: sheetTheme.brightness,
         pageBackgroundColor: sheetTheme.colorScheme.surface,
         containerBackgroundColor:
@@ -60,6 +63,7 @@ Future<void> showTextEditor({
       initialValue: initialValue,
       hintText: hintText,
       multiline: multiline,
+      requireNonEmpty: requireNonEmpty,
       onSave: onSave,
       shouldRetryOnError: shouldRetryOnError,
       keyPrefix: keyPrefix,
@@ -68,8 +72,9 @@ Future<void> showTextEditor({
 }
 
 void _showSaveError(BuildContext context) {
-  ScaffoldMessenger.of(context).showSnackBar(
-    const SnackBar(content: Text("We couldn't save this change. Try again.")),
+  ScaffoldMessenger.of(context).showFeedbackSnackBar(
+    const SnackBar(content: Text('Couldn’t save changes')),
+    kind: ToastKind.error,
   );
 }
 
@@ -78,6 +83,7 @@ class _TextEditSheet extends HookWidget {
     required this.initialValue,
     required this.hintText,
     required this.multiline,
+    required this.requireNonEmpty,
     required this.onSave,
     this.shouldRetryOnError,
     required this.keyPrefix,
@@ -87,6 +93,7 @@ class _TextEditSheet extends HookWidget {
   final String initialValue;
   final String hintText;
   final bool multiline;
+  final bool requireNonEmpty;
   final Future<void> Function(String value) onSave;
   final bool Function(Object error)? shouldRetryOnError;
 
@@ -96,7 +103,10 @@ class _TextEditSheet extends HookWidget {
     useListenable(controller);
     final isSaving = useState(false);
     final error = useState<String?>(null);
-    final hasChanges = controller.text.trim() != initialValue.trim();
+    final trimmed = controller.text.trim();
+    final hasChanges =
+        trimmed != initialValue.trim() &&
+        (!requireNonEmpty || trimmed.isNotEmpty);
 
     Future<void> save() async {
       if (!hasChanges || isSaving.value) return;
@@ -111,7 +121,7 @@ class _TextEditSheet extends HookWidget {
           Navigator.of(context).pop();
           return;
         }
-        error.value = "We couldn't save this change. Try again.";
+        error.value = 'Couldn’t save changes';
       } finally {
         if (context.mounted) isSaving.value = false;
       }

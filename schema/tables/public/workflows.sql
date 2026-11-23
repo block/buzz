@@ -3,7 +3,7 @@
 -- community fixed at create from req.community; runs/approvals inherit it.
 
 CREATE TABLE workflows (
-    community_id    UUID NOT NULL REFERENCES communities(id),
+    community_id    UUID NOT NULL,
     id              UUID NOT NULL DEFAULT gen_random_uuid(),
     name            VARCHAR(255) NOT NULL,
     owner_pubkey    BYTEA NOT NULL,
@@ -14,9 +14,7 @@ CREATE TABLE workflows (
     enabled         BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (community_id, id),
-    FOREIGN KEY (community_id, owner_pubkey) REFERENCES users (community_id, pubkey),
-    FOREIGN KEY (community_id, channel_id) REFERENCES channels (community_id, id)
+    PRIMARY KEY (community_id, id)
 );
 
 CREATE INDEX idx_workflows_channel_active ON workflows (community_id, channel_id, status, enabled);

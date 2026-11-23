@@ -244,9 +244,8 @@ impl MeshHandle {
         }
 
         let transport: Arc<dyn RelayPeerTransport> = Arc::new(NoopTransport);
-        let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1") // never dialed
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("for_test_only: noop redis pool");
+        let pool = buzz_pubsub::redis_connection("redis://127.0.0.1:1") // never dialed
+            .expect("for_test_only: lazy redis connection");
 
         MeshHandle {
             directory: SessionDirectory::new(pool),
@@ -533,7 +532,7 @@ fn advertise_addrs(endpoint: &MeshEndpoint) -> Vec<String> {
 /// default tenant.
 pub async fn boot_mesh(
     config: &Config,
-    redis_pool: deadpool_redis::Pool,
+    redis_pool: buzz_pubsub::RedisConnection,
     db: buzz_db::Db,
     relay_keypair: &nostr::Keys,
     shutting_down: Arc<AtomicBool>,
@@ -665,8 +664,7 @@ mod tests {
     async fn mesh_off_boots_nothing() {
         let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
         config.mesh.enabled = false;
-        let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1") // unroutable
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        let pool = buzz_pubsub::redis_connection("redis://127.0.0.1:1") // unroutable
             .unwrap();
         let keys = nostr::Keys::generate();
         let db = buzz_db::Db::from_pool(
@@ -705,8 +703,7 @@ mod tests {
                     let mut config = crate::config::Config::for_test(); // [FI-TRACE-ENV-RACE]
                     config.mesh.enabled = true;
                     config.mesh.bind_addr = "127.0.0.1:0".parse().unwrap();
-                    let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1") // refused
-                        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                    let pool = buzz_pubsub::redis_connection("redis://127.0.0.1:1") // refused
                         .unwrap();
                     let db = buzz_db::Db::from_pool(
                         sqlx::postgres::PgPoolOptions::new()
@@ -814,9 +811,7 @@ mod tests {
     /// Returning to recv_frame after a tick loses that state and closes the stream.
     #[tokio::test(start_paused = true)]
     async fn demo_echo_retains_pending_receive_across_housekeeping_ticks() {
-        let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("test pool");
+        let pool = buzz_pubsub::redis_connection("redis://127.0.0.1:1").expect("test pool");
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -978,8 +973,7 @@ mod tests {
 
         let dispatcher = MeshInboundDispatcher::default();
         let fence = Arc::new(crate::audio::mesh::GenerationFloor::new());
-        let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1") // never dialed
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+        let pool = buzz_pubsub::redis_connection("redis://127.0.0.1:1") // never dialed
             .unwrap();
         wire_mesh_consumers(
             &dispatcher,

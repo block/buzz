@@ -2,11 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/agents/owned_agent_directory.dart';
 import '../../shared/agents/remote_agents.dart';
 import '../../shared/community/community_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/app_list.dart';
+import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/buzz_navigation_metrics.dart';
 import '../../shared/theme/buzz_icons.dart';
@@ -16,15 +19,18 @@ class DeleteAgentAction extends HookConsumerWidget {
   const DeleteAgentAction({
     required this.controller,
     required this.pubkey,
+    this.asSettingsRow = false,
     super.key,
   });
 
   final RemoteAgentController controller;
   final String pubkey;
+  final bool asSettingsRow;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     useListenable(controller);
+    final deleting = useState(false);
     final community = ref.watch(activeCommunityProvider).asData?.value;
     final agent = controller.agents
         .where((row) => row['agent_pubkey'] == pubkey)
@@ -60,16 +66,24 @@ class DeleteAgentAction extends HookConsumerWidget {
         ),
       );
       if (confirmed != true || !context.mounted) return;
-      final success = await controller.deleteAgent(
-        pubkey: pubkey,
-        community: community,
-        isCurrent: () =>
-            context.mounted &&
-            ref.read(activeCommunityProvider).asData?.value?.id == community.id,
-        fetch: ref.read(relaySessionProvider.notifier).fetchHistory,
-      );
+      deleting.value = true;
+      bool success;
+      try {
+        success = await controller.deleteAgent(
+          pubkey: pubkey,
+          community: community,
+          isCurrent: () =>
+              context.mounted &&
+              ref.read(activeCommunityProvider).asData?.value?.id ==
+                  community.id,
+          fetch: ref.read(relaySessionProvider.notifier).fetchHistory,
+        );
+      } finally {
+        if (context.mounted) deleting.value = false;
+      }
       if (!context.mounted) return;
       ref.invalidate(agentDirectoryProvider);
+      ref.invalidate(ownedAgentDirectoryProvider);
       if (success) {
         Navigator.of(context).pop();
       } else {
@@ -89,6 +103,18 @@ class DeleteAgentAction extends HookConsumerWidget {
       }
     }
 
+    if (asSettingsRow) {
+      return SheetActionSection(
+        children: [
+          AppListRow(
+            onTap: controller.busy ? null : remove,
+            titleColor: context.colors.error,
+            icon: BuzzIcons.trash2,
+            title: deleting.value ? 'Deleting…' : 'Delete agent',
+          ),
+        ],
+      );
+    }
     if (Theme.of(context).platform == TargetPlatform.iOS) {
       return IosGlassNavigationButton(
         icon: IosGlassNavigationIcon.trash,

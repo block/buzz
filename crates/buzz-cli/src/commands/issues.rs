@@ -255,7 +255,7 @@ pub async fn cmd_create_issue(
     let builder = with_git_provenance(
         buzz_sdk::build_git_issue(&repo, subject, &body, &meta).map_err(sdk_err)?,
     )?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let event_id = event.id.to_hex();
     let resp = client.submit_event(event).await?;
     // `link` renders as a rich preview card in Buzz Desktop when included in
@@ -366,7 +366,7 @@ async fn publish_issue_assignment_operation(
         owner: repo_owner.to_string(),
         id: repo_id.to_string(),
     };
-    let signer = client.keys().public_key().to_hex();
+    let signer = client.public_key().to_hex();
     let is_self_service = assignees.len() == 1
         && assignees[0].eq_ignore_ascii_case(&signer)
         && !signer.eq_ignore_ascii_case(repo_owner);
@@ -398,7 +398,7 @@ async fn publish_issue_assignment_operation(
         }
     }
     .map(|builder| builder.custom_created_at(Timestamp::from_secs(context.created_at)));
-    let event = client.sign_event(builder.map_err(sdk_err)?)?;
+    let event = client.sign_event(builder.map_err(sdk_err)?).await?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");
     Ok(())
@@ -583,7 +583,7 @@ pub async fn cmd_issue_status(
 
     let builder =
         with_git_provenance(buzz_sdk::build_git_status(status, &body, &meta).map_err(sdk_err)?)?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{resp}");
     Ok(())

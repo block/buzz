@@ -223,7 +223,7 @@ impl Db {
                 RoutePredicate::from_channel_cursor(request.channel, &cursor),
                 crate::observability::ReaderOperation::SubscriptionHistory,
             )
-            .await
+            .await?
         {
             let result = async {
                 set_deadline(&mut tx).await?;

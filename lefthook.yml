@@ -14,8 +14,9 @@
 # they diverge and CI remains the authoritative gate for that ref.
 # Deliberate deviations:
 # - The `.github/workflows/ci.yml` path CI adds to its `rust`/`desktop`/`mobile`
-#   filters, and `scripts/ci-apt-retry.sh` in `rust`/`desktop`, are omitted;
-#   a CI-plumbing-only edit doesn't need a local test run.
+#   filters, `scripts/ci-apt-retry.sh` in `rust`/`desktop`, and
+#   `scripts/ci-hermit-retry.sh` in `rust`/`mobile`, are omitted; a
+#   CI-plumbing-only edit doesn't need a local test run.
 # - `desktop-test` doesn't trigger on `crates/**` changes, though CI's Desktop
 #   JS job does: a few node:test cases read relay/DB crate sources to pin shared
 #   constants. Running the full desktop suite on every crate push would be
