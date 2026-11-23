@@ -409,18 +409,28 @@ pub(crate) async fn authorize_approval_decision(
 /// credential: authorization rests on [`authorize_approval_decision`].
 pub async fn decide_approval(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     Path((workflow_id, run_id, approval_ref)): Path<(Uuid, Uuid, String)>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    decide_approval_inner(state, workflow_id, run_id, approval_ref, headers, body)
-        .await
-        .into_response()
+    decide_approval_inner(
+        state,
+        slot,
+        workflow_id,
+        run_id,
+        approval_ref,
+        headers,
+        body,
+    )
+    .await
+    .into_response()
 }
 
 #[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn decide_approval_inner(
     state: Arc<AppState>,
+    slot: crate::access::AccessSlot,
     workflow_id: Uuid,
     run_id: Uuid,
     approval_ref: String,
@@ -432,7 +442,7 @@ async fn decide_approval_inner(
     // cannot be replayed with the decision flipped.
     let path = format!("/workflows/{workflow_id}/runs/{run_id}/approvals/{approval_ref}/decide");
     let (tenant, requester) =
-        bridge::authenticate_member_post(&state, &headers, &path, &body).await?;
+        bridge::authenticate_member_post(&state, &slot, &headers, &path, &body).await?;
     let community = tenant.community();
     require_readable_workflow(&state, &tenant, &requester.to_bytes(), workflow_id).await?;
 

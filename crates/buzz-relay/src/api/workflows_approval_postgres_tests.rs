@@ -150,7 +150,13 @@ async fn start_run(f: &Fixture, definition_json: &str) -> (Uuid, Uuid) {
     let run = f
         .state
         .db
-        .create_workflow_run(community, workflow, None, Some(&trigger_json))
+        .create_workflow_run(
+            community,
+            workflow,
+            None,
+            Some(&trigger_json),
+            &buzz_db::workflow::RunCause::Manual(f.initiator.public_key().to_bytes().to_vec()),
+        )
         .await
         .expect("create run");
     let def: buzz_workflow::WorkflowDef = serde_json::from_str(definition_json).unwrap();
