@@ -88,38 +88,15 @@ class SendMessage {
           )
         : explicitMentions;
 
-    // Normalize mentions: lowercase, deduplicate, exclude self (matching
-    // the desktop's normalizeMentionPubkeys).
-    final selfLower = authorPubkey?.toLowerCase();
-    final seenMentions = <String>{?selfLower};
-    final normalizedMentions = <String>[
-      for (final pk in resolvedMentions)
-        if (seenMentions.add(pk.toLowerCase())) pk,
-    ];
-
-    // Two-field `mention` tags are references; they go through the same
-    // writer as recipients so a bad key rejects the message.
-    bool isReference(List<String> tag) =>
-        tag.length == 2 && tag[0] == 'mention';
-    final references = [
-      for (final tag in mediaTags)
-        if (isReference(tag)) tag[1],
-    ];
-    final mentionTags = writeMentionTags(
-      recipients: normalizedMentions,
-      references: references,
-      members: normalizedMentions.isEmpty
-          ? const {}
-          : await _recipientMembers(channelId, dmRecipientPubkeys, selfLower),
+    final tags = await _outgoingTags(
+      channelId: channelId,
+      parentEventId: parentEventId,
+      rootEventId: rootEventId,
+      recipients: resolvedMentions,
+      additionalTags: mediaTags,
+      authorPubkey: authorPubkey,
+      dmRecipientPubkeys: dmRecipientPubkeys,
     );
-
-    final tags = <List<String>>[
-      ['h', channelId],
-      if (parentEventId != null) ..._buildReplyTags(parentEventId, rootEventId),
-      ...mentionTags,
-      for (final tag in mediaTags)
-        if (!isReference(tag)) tag,
-    ];
 
     _ensureDeliveryValid();
     NostrEvent? localMessage;
@@ -145,6 +122,49 @@ class SendMessage {
       if (event != null) _removeLocalMessage(channelId, event.id);
       rethrow;
     }
+  }
+
+  Future<List<List<String>>> _outgoingTags({
+    required String channelId,
+    required String? parentEventId,
+    required String? rootEventId,
+    required List<String> recipients,
+    required List<List<String>> additionalTags,
+    required String? authorPubkey,
+    Set<String>? dmRecipientPubkeys,
+  }) async {
+    // Normalize mentions: lowercase, deduplicate, exclude self (matching
+    // the desktop's normalizeMentionPubkeys).
+    final selfLower = authorPubkey?.toLowerCase();
+    final seenMentions = <String>{?selfLower};
+    final normalizedMentions = <String>[
+      for (final pk in recipients)
+        if (seenMentions.add(pk.toLowerCase())) pk,
+    ];
+
+    // Two-field `mention` tags are references; they go through the same
+    // writer as recipients so a bad key rejects the message.
+    bool isReference(List<String> tag) =>
+        tag.length == 2 && tag[0] == 'mention';
+    final references = [
+      for (final tag in additionalTags)
+        if (isReference(tag)) tag[1],
+    ];
+    final mentionTags = writeMentionTags(
+      recipients: normalizedMentions,
+      references: references,
+      members: normalizedMentions.isEmpty
+          ? const {}
+          : await _recipientMembers(channelId, dmRecipientPubkeys, selfLower),
+    );
+
+    return <List<String>>[
+      ['h', channelId],
+      if (parentEventId != null) ..._buildReplyTags(parentEventId, rootEventId),
+      ...mentionTags,
+      for (final tag in additionalTags)
+        if (!isReference(tag)) tag,
+    ];
   }
 
   /// Resolve every identity that is actually a current member of this DM.
@@ -266,6 +286,54 @@ class SendMessage {
       ['e', root, '', 'root'],
       ['e', parentEventId, '', 'reply'],
     ];
+  }
+}
+
+/// Uses the normal text sender for durable sends.
+extension QueuedTextSender on SendMessage {
+  /// Signs a queued message using only the composer’s resolved addressing.
+  Future<NostrEvent> signQueued({
+    required String id,
+    required String channelId,
+    required String content,
+    required String? parentEventId,
+    required String? rootEventId,
+    required List<String> recipients,
+    required List<List<String>> tags,
+    required int Function() nowMilliseconds,
+    required bool Function() isCurrent,
+  }) async {
+    final outgoing = await _outgoingTags(
+      channelId: channelId,
+      parentEventId: parentEventId,
+      rootEventId: rootEventId,
+      recipients: recipients,
+      additionalTags: tags,
+      authorPubkey: _signedEventRelay.pubkey,
+    );
+    _ensureDeliveryValid();
+    if (!isCurrent()) {
+      throw ActiveCommunityChangedError('Queued send changed communities.');
+    }
+    final milliseconds = nowMilliseconds();
+    return _signedEventRelay.sign(
+      kind: EventKind.streamMessage,
+      content: content,
+      tags: [
+        ...outgoing,
+        ['client-id', id],
+        ['ms', '${milliseconds % 1000}'],
+      ],
+      createdAt: milliseconds ~/ 1000,
+    );
+  }
+
+  /// Adds an already accepted event to the existing timeline immediately.
+  void showQueuedAccepted(String channelId, NostrEvent event) {
+    _ensureDeliveryValid();
+    _markLocalMessageForAnimation(channelId, event.id);
+    _addLocalMessage(channelId, event);
+    _completeLocalMessage(channelId, event.id);
   }
 }
 

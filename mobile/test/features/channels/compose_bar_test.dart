@@ -231,6 +231,7 @@ Widget _buildComposeBar({
   String? hintText,
   required MediaUploadService uploadService,
   required ComposeBarOnSend onSend,
+  ComposeBarOnQueueText? onQueueText,
   List<ChannelMember>? draftMembers,
   ValueChanged<bool>? onSendingChanged,
   List<ChannelMember> members = const <ChannelMember>[],
@@ -282,6 +283,7 @@ Widget _buildComposeBar({
               onFocusRequested: onFocusRequested,
               prefillScopeMessages: prefillScopeMessages,
               onSend: onSend,
+              onQueueText: onQueueText,
             );
             if (viewPadding == null) return composeBar;
             return MediaQuery(
@@ -1422,6 +1424,119 @@ void main() {
 
       delivery.complete();
       await tester.pumpAndSettle();
+    });
+
+    testWidgets('queued text clears only after a durable commit', (
+      tester,
+    ) async {
+      var write = Completer<void>();
+      final ids = <String>[];
+      final viewer = 'f' * 64;
+      final agent = 'a' * 64;
+      var scope = <TimelineMessage>[];
+      ComposeDraft? savedDraft() =>
+          ProviderScope.containerOf(tester.element(find.byType(ComposeBar)))
+              .read(composeDraftsProvider.notifier)
+              .draftFor(composeDraftKey('channel-1'));
+      Widget composeBar() => _buildComposeBar(
+        currentPubkey: viewer,
+        channels: [_makeCurrentChannel()],
+        members: [
+          ChannelMember(
+            pubkey: agent,
+            displayName: 'Scout',
+            role: 'bot',
+            joinedAt: DateTime(2025),
+          ),
+        ],
+        prefillScopeMessages: scope,
+        uploadService: _testUploadService(nostr.Keys.generate().nsec),
+        onSend: (_, _, {mediaTags = const []}) async {
+          fail('Plain text should use the queue.');
+        },
+        onQueueText: (id, text, content, recipients, tags) {
+          expect(text, scope.isEmpty ? 'keep this draft' : '@Scout ');
+          expect(content, text.trim());
+          expect(recipients, scope.isEmpty ? isEmpty : [agent]);
+          expect(savedDraft()?.outboxId, id);
+          expect(
+            savedDraft()?.mentions.map((mention) => mention.pubkey),
+            scope.isEmpty ? isEmpty : [agent],
+          );
+          expect(tags, isEmpty);
+          ids.add(id);
+          return write.future;
+        },
+      );
+      await tester.pumpWidget(composeBar());
+      await _expandComposer(tester);
+      final field = find.byType(TextField);
+      await tester.enterText(field, 'keep this draft');
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pump();
+      await tester.pump();
+      expect(ids, hasLength(1));
+      expect(
+        tester.widget<TextField>(field).controller!.text,
+        'keep this draft',
+      );
+
+      write.completeError(StateError('local storage unavailable'));
+      await tester.pumpAndSettle();
+      expect(
+        tester.widget<TextField>(field).controller!.text,
+        'keep this draft',
+      );
+
+      final messenger = tester.state<ScaffoldMessengerState>(
+        find.byType(ScaffoldMessenger),
+      );
+      messenger.removeCurrentSnackBar();
+      await tester.pumpAndSettle();
+      write = Completer<void>();
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pump();
+      await tester.pump();
+      expect(ids, [ids.first, ids.first]);
+      write.complete();
+      await tester.pumpAndSettle();
+      expect(tester.widget<TextField>(field).controller!.text, isEmpty);
+
+      // A prefill appears without saving a draft when opening a conversation.
+      scope = [
+        TimelineMessage(
+          id: 'latest',
+          pubkey: viewer,
+          createdAt: 20,
+          content: '@Scout',
+          tags: [
+            const ['h', 'channel-1'],
+            ['p', agent],
+          ],
+        ),
+      ];
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpWidget(composeBar());
+      await tester.pumpAndSettle();
+      expect(savedDraft(), isNull);
+      await tester.tap(find.text('@Scout'));
+      await tester.pumpAndSettle();
+      expect(tester.widget<TextField>(field).controller!.text, '@Scout ');
+      expect(savedDraft(), isNull);
+
+      write = Completer<void>();
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pump();
+      await tester.pump();
+      expect(ids, hasLength(3));
+      expect(ids.last, isNot(ids.first));
+      expect(tester.widget<TextField>(field).controller!.text, '@Scout ');
+      write.complete();
+      await tester.pumpAndSettle();
+      expect(tester.widget<TextField>(field).controller!.text, isEmpty);
+      expect(ids, hasLength(3));
+      expect(savedDraft(), isNull);
     });
 
     testWidgets('a failed send restores an untouched cleared draft', (

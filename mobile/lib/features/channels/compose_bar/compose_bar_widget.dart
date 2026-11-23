@@ -5,6 +5,7 @@ class ComposeBar extends HookConsumerWidget {
   final String channelName;
   final String? hintText;
   final ComposeBarOnSend onSend;
+  final ComposeBarOnQueueText? onQueueText;
 
   /// Temporarily freezes composition while its destination is being changed.
   final bool interactionLocked;
@@ -47,6 +48,7 @@ class ComposeBar extends HookConsumerWidget {
     this.onFocusRequested,
     this.prefillScopeMessages,
     required this.onSend,
+    this.onQueueText,
   });
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -141,7 +143,7 @@ class ComposeBar extends HookConsumerWidget {
       () => controller.mentions,
     );
     final prefillText = useRef<String?>(null);
-    _useComposeDraftLifecycle(
+    final claimOutboxSend = _useComposeDraftLifecycle(
       context: context,
       voiceNote: voiceNoteRef,
       prefillText: prefillText,
@@ -654,6 +656,7 @@ class ComposeBar extends HookConsumerWidget {
         messenger: messenger,
       );
 
+      if (!context.mounted || isSending.value) return;
       isSending.value = true;
       try {
         if (queuedAttachments.isEmpty) {
@@ -663,6 +666,7 @@ class ComposeBar extends HookConsumerWidget {
             controller: controller,
             draftRevision: draftRevision,
             submittedDraftRevision: submittedDraftRevision,
+            submittedText: draft,
             focusNode: focusNode,
             clearComposer: clearComposer,
             addMentionedNonMembers: addMentionedNonMembers,
@@ -673,6 +677,8 @@ class ComposeBar extends HookConsumerWidget {
             ),
             outgoing: outgoing,
             onSend: sendWithOrigin,
+            onQueueText: onQueueText,
+            claimOutboxSend: claimOutboxSend,
             messenger: messenger,
           );
           return;

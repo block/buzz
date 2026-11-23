@@ -1,3 +1,6 @@
+import 'dart:developer' as developer;
+
+import '../outbox/text_outbox_store.dart';
 import '../hosted/known_community_sync_provider.dart';
 import '../hosted/hosted_relay_auth.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -29,6 +32,7 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     final storage = ref.read(communityStorageProvider);
     final communities = await storage.loadAll();
     if (communities.isEmpty) {
+      await _removeOutboxOrphans(communities);
       await syncCommunitySnapshot(ref, communities);
       return const AuthState(status: AuthStatus.unauthenticated);
     }
@@ -42,6 +46,7 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
       await storage.saveActiveId(active.id);
 
       if (_hasValidNsec(active.nsec)) {
+        await _removeOutboxOrphans(communities);
         await syncCommunitySnapshot(ref, communities);
         return AuthState(status: AuthStatus.authenticated, community: active);
       }
@@ -54,8 +59,24 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     }
 
     await storage.clearActiveId();
+    await _removeOutboxOrphans(communities);
     await syncCommunitySnapshot(ref, communities);
     return const AuthState(status: AuthStatus.unauthenticated);
+  }
+
+  Future<void> _removeOutboxOrphans(List<Community> communities) async {
+    try {
+      await ref.read(textOutboxStoreProvider).removeOrphans({
+        for (final community in communities)
+          if (pubkeyFromNsec(community.nsec) case final pubkey?)
+            (communityId: community.id, pubkey: pubkey),
+      });
+    } catch (error) {
+      developer.log(
+        'Message outbox could not be reconciled: ${error.runtimeType}',
+        name: 'buzz.auth',
+      );
+    }
   }
 
   /// Authenticate with a community. Saves it and switches to it.

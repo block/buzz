@@ -3,6 +3,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../community/community.dart';
 import '../community/community_provider.dart';
+import '../outbox/text_outbox_store.dart';
 import 'account_identity_store.dart';
 import 'hosted_environment.dart';
 import 'hosted_flow_provider.dart';
@@ -23,12 +24,17 @@ Future<void> confirmSignOut(BuildContext context, WidgetRef ref) async {
     final communities = await ref.read(communityListProvider.future);
     final active = await ref.read(activeCommunityProvider.future);
     if (communities.isEmpty || !context.mounted) return;
+    final warn = await ref
+        .read(textOutboxStoreProvider)
+        .shouldWarnBeforeRemoval();
+    if (!context.mounted) return;
     final confirmed = await showDestructiveConfirmation(
       context: context,
       title: 'Sign out?',
       message:
           'You’ll need to sign in again to use Buzz on this device. '
-          'Your identities stay saved on this device.',
+          'Your identities stay saved on this device.'
+          '${warn ? ' Any saved unsent messages will be discarded.' : ''}',
       confirmLabel: 'Sign out',
     );
     if (!confirmed || !context.mounted) return;

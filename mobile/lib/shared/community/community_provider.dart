@@ -16,6 +16,7 @@ import '../channels/channel_list_snapshot.dart';
 import '../channels/saved_message_store.dart';
 import '../diagnostics/diagnostic_reporter.dart';
 import '../profile/profile_snapshot.dart';
+import '../outbox/text_outbox_store.dart';
 import '../push/dev_push_lease.dart';
 import '../push/push_bridge.dart';
 import '../push/push_lease_revocation_outbox.dart';
@@ -331,16 +332,32 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
           await account.localEditSubject() != subject) {
         throw AccountFailure.differentAccount;
       }
-      await storage.remove(
-        id,
-        accountSyncOwner: subject == null
-            ? null
-            : '${account.accountOrigin.origin}\n$subject',
-      );
+      final updatedList = current.where((w) => w.id != id).toList();
+      final outbox = ref.read(textOutboxStoreProvider);
+      outbox.beginRemoval(id);
+      try {
+        await storage.remove(
+          id,
+          accountSyncOwner: subject == null
+              ? null
+              : '${account.accountOrigin.origin}\n$subject',
+        );
+        state = AsyncData(updatedList);
+        try {
+          await outbox.removeCommunity(id);
+        } catch (error) {
+          // Membership is already gone. Startup retries orphan deletion before
+          // the outbox can replay under another identity.
+          developer.log(
+            'Message outbox cleanup failed: ${error.runtimeType}',
+            name: 'buzz.community',
+          );
+        }
+      } finally {
+        outbox.endRemoval(id);
+      }
       ref.read(knownCommunitySyncProvider)?.trigger();
 
-      final updatedList = current.where((w) => w.id != id).toList();
-      state = AsyncData(updatedList);
       await _removeOrphanChannelListSnapshots(updatedList);
       await syncCommunitySnapshot(ref, updatedList);
 

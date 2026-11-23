@@ -39,6 +39,7 @@ import os.log
   private let voiceCancelFeedback = UIImpactFeedbackGenerator(style: .rigid)
   private var appGroupChannel: FlutterMethodChannel?
   private var diagnosticsChannel: FlutterMethodChannel?
+  private var privateStorageChannel: FlutterMethodChannel?
   private var shareSuggestions: ShareSuggestions?
   private var qrScannerChannel: FlutterMethodChannel?
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
@@ -187,7 +188,17 @@ import os.log
         result(FlutterMethodNotImplemented)
         return
       }
-      result(Self.diagnosticsInstallIdDirectory())
+      result(Self.backupExcludedSupportDirectory("Diagnostics"))
+    }
+    privateStorageChannel = FlutterMethodChannel(
+      name: "buzz/private_storage", binaryMessenger: messenger
+    )
+    privateStorageChannel?.setMethodCallHandler { call, result in
+      guard call.method == "messageOutboxDirectory" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      result(Self.backupExcludedSupportDirectory("message-outbox"))
     }
     hapticsChannel = FlutterMethodChannel(
       name: "buzz/haptics",
@@ -518,14 +529,12 @@ import os.log
     "ageUpper": NSNull(),
   ]
 
-  /// Where diagnostic reporting keeps this installation's ID: Application
-  /// Support, which the system never purges, excluded from backups so a
-  /// phone restored from another gets its own ID. Nil if it can't be made.
-  private static func diagnosticsInstallIdDirectory() -> String? {
+  /// A durable Application Support directory excluded from device backups.
+  private static func backupExcludedSupportDirectory(_ name: String) -> String? {
     guard
       var directory = FileManager.default.urls(
         for: .applicationSupportDirectory, in: .userDomainMask
-      ).first?.appendingPathComponent("Diagnostics", isDirectory: true)
+      ).first?.appendingPathComponent(name, isDirectory: true)
     else { return nil }
     do {
       try FileManager.default.createDirectory(

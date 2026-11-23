@@ -77,11 +77,13 @@ class _PendingEvent {
   final Completer<NostrEvent> completer;
   final Timer timeout;
   final DateTime startedAt;
+  final NostrEvent? queuedEvent;
 
   _PendingEvent({
     required this.completer,
     required this.timeout,
     required this.startedAt,
+    this.queuedEvent,
   });
 }
 

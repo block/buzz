@@ -1,3 +1,5 @@
+import 'text_outbox_provider.dart';
+import 'text_outbox_rows.dart';
 import 'package:duo_kit/duo_kit.dart';
 import '../../shared/widgets/ios_navigation_bar.dart';
 import 'bestie_transcription_status.dart';
@@ -239,6 +241,10 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     final sendMessage = ref.read(
       personalChat ? meSendMessageProvider : sendMessageProvider,
     );
+    final outboxSupported = ref.watch(textOutboxSupportedProvider);
+    final outboxScope = outboxSupported
+        ? ref.watch(textOutboxScopeProvider)
+        : null;
     final relayMessagesState = ref.watch(messagesProvider);
     final workspace = useMeWorkspace(
       context,
@@ -708,6 +714,13 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
     // changes. Format only when the events themselves change: the notifier
     // publishes a new list for every event change.
     final events = messagesState.value ?? const <NostrEvent>[];
+    final outboxRows = outboxScope == null || resolvedChannel.isForum
+        ? null
+        : TextOutboxRows(
+            scope: outboxScope,
+            channelId: channel.id,
+            visibleEventIds: events.map((event) => event.id),
+          );
     final timelineMessages = useMemoized(
       () => resolvedChannel.isForum
           ? <TimelineMessage>[]
@@ -965,7 +978,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                         ),
                       ),
               ),
-              if (!showsComposer) ?refreshNotice,
+              if (!showsComposer) ...[?refreshNotice, ?outboxRows],
               if (!resolvedChannel.isForum &&
                   (!resolvedChannel.isMember ||
                       resolvedChannel.isArchived)) ...[
@@ -990,6 +1003,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                       ?refreshNotice,
                       BestieTranscriptionStatus(channelId: channel.id),
                       ?assistant.pendingNotice,
+                      ?outboxRows,
                       ComposeBar(
                         channelId: channel.id,
                         focusNode: composerFocusNode,
@@ -1005,6 +1019,50 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
                         channelName: resolvedChannel.isDm
                             ? ''
                             : resolvedChannel.name,
+                        onQueueText: outboxSupported
+                            ? (id, text, content, recipients, tags) {
+                                if (!placementKnown) {
+                                  ref.invalidate(meGroupsProvider);
+                                  throw StateError(
+                                    'Reconnect to verify this chat before sending.',
+                                  );
+                                }
+                                String? implicitAgent;
+                                if (personalChat) {
+                                  if (!resolvedChannel.isPersonalChat(
+                                    ref.read(myPubkeyProvider),
+                                    mePlacement?.asData?.value.channels ??
+                                        const [],
+                                  )) {
+                                    throw StateError(
+                                      'Refresh Solo before sending to this chat.',
+                                    );
+                                  }
+                                  if (recipients.isEmpty) {
+                                    implicitAgent = assistant.selected;
+                                    if (implicitAgent == null) {
+                                      throw StateError(
+                                        'Choose an agent in the chat header before sending.',
+                                      );
+                                    }
+                                    recipients = [implicitAgent];
+                                  }
+                                }
+                                return queueConversationText(
+                                  ref,
+                                  scope: outboxScope,
+                                  id: id,
+                                  channelId: channel.id,
+                                  channel: resolvedChannel,
+                                  text: text,
+                                  content: content,
+                                  recipients: recipients,
+                                  tags: tags,
+                                  personal: personalChat,
+                                  implicitSoloAgent: implicitAgent,
+                                );
+                              }
+                            : null,
                         onSend:
                             (
                               content,

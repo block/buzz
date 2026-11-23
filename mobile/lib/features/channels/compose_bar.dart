@@ -108,6 +108,16 @@ part 'compose_bar/compose_bar_widget.dart';
 part 'compose_bar/message_edit_sheet.dart';
 
 /// Callback used by channels and threads to submit composer content.
+/// Commits the resolved text and tags before the composer clears its draft.
+typedef ComposeBarOnQueueText =
+    Future<void> Function(
+      String id,
+      String text,
+      String content,
+      List<String> recipients,
+      List<List<String>> tags,
+    );
+
 typedef ComposeBarOnSend =
     Future<void> Function(
       String content,
