@@ -34,9 +34,12 @@ impl IdentityGateConfig {
             !token_file.as_os_str().is_empty(),
             "identity token file is empty"
         );
-        let block_url = endpoint(block_url)?;
-        let login_url = endpoint(login_url)?;
-        let account_url = endpoint(account_url)?;
+        let block_url = endpoint(block_url, "/api/goose/v1/identity/block-user-auth-login")?;
+        let login_url = endpoint(login_url, "/api/goose/v1/identity/delete-user-auth-login")?;
+        let account_url = endpoint(
+            account_url,
+            "/api/goose/v1/identity/delete-builderlab-account",
+        )?;
         ensure!(
             block_url.origin() == account_url.origin()
                 && block_url != account_url
@@ -100,19 +103,25 @@ impl IdentityGateConfig {
         )?))
     }
 
-    pub(super) async fn block(&self, body: &Value) -> Result<Value> {
-        self.post(&self.block_url, body).await
+    pub(super) async fn prepare_block(&self, body: &Value) -> Result<reqwest::Request> {
+        self.prepare(&self.block_url, body).await
     }
 
-    pub(in crate::user) async fn delete_login(&self, body: &Value) -> Result<Value> {
-        self.post(&self.login_url, body).await
+    pub(in crate::user) async fn prepare_delete_login(
+        &self,
+        body: &Value,
+    ) -> Result<reqwest::Request> {
+        self.prepare(&self.login_url, body).await
     }
 
-    pub(in crate::user) async fn delete_account(&self, body: &Value) -> Result<Value> {
-        self.post(&self.account_url, body).await
+    pub(in crate::user) async fn prepare_delete_account(
+        &self,
+        body: &Value,
+    ) -> Result<reqwest::Request> {
+        self.prepare(&self.account_url, body).await
     }
 
-    async fn post(&self, endpoint: &Url, body: &Value) -> Result<Value> {
+    async fn prepare(&self, endpoint: &Url, body: &Value) -> Result<reqwest::Request> {
         let body = serde_json::to_vec(body)?;
         ensure!(
             body.len() <= MAX_BYTES,
@@ -140,13 +149,19 @@ impl IdentityGateConfig {
         let mut auth = HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|_| anyhow::anyhow!("invalid identity bearer token"))?;
         auth.set_sensitive(true);
-        let mut response = self
-            .client
+        self.client
             .post(endpoint.clone())
             .header(reqwest::header::AUTHORIZATION, auth)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body)
-            .send()
+            .build()
+            .context("could not prepare identity request")
+    }
+
+    pub(in crate::user) async fn send(&self, request: reqwest::Request) -> Result<Value> {
+        let mut response = self
+            .client
+            .execute(request)
             .await
             .map_err(|_| anyhow::anyhow!("identity request failed; outcome unconfirmed"))?;
         ensure!(
@@ -171,7 +186,7 @@ impl IdentityGateConfig {
     }
 }
 
-fn endpoint(value: &str) -> Result<Url> {
+fn endpoint(value: &str, path: &str) -> Result<Url> {
     let url = Url::parse(value).map_err(|_| anyhow::anyhow!("invalid identity endpoint URL"))?;
     let local_http = url.scheme() == "http"
         && url.host_str().is_some_and(|host| {
@@ -188,5 +203,6 @@ fn endpoint(value: &str) -> Result<Url> {
             && url.fragment().is_none(),
         "identity endpoint requires HTTPS (or a loopback HTTP address) without credentials, query or fragment"
     );
+    ensure!(url.path() == path, "identity endpoint requires path {path}");
     Ok(url)
 }

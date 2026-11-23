@@ -22,10 +22,10 @@ identity service):
 
 | Setting | Purpose |
 | --- | --- |
-| `BUZZ_USER_DELETION_IDENTITY_BLOCK_URL` | POST endpoint that blocks login and revokes existing access |
+| `BUZZ_USER_DELETION_IDENTITY_BLOCK_URL` | POST endpoint with path `/api/goose/v1/identity/block-user-auth-login` |
 | `BUZZ_USER_DELETION_IDENTITY_DELETE_LOGIN_URL` | POST endpoint ending in `/api/goose/v1/identity/delete-user-auth-login` |
 | `BUZZ_USER_DELETION_IDENTITY_DELETE_ACCOUNT_URL` | Full POST URL ending in `/api/goose/v1/identity/delete-builderlab-account` on the same origin as the block endpoint |
-| `BUZZ_USER_DELETION_IDENTITY_TOKEN_FILE` | File containing the service bearer token; reread for each call to allow rotation |
+| `BUZZ_USER_DELETION_IDENTITY_TOKEN_FILE` | File containing the service bearer token; read when preparing each request |
 | `BUZZ_USER_DELETION_IDENTITY_TIMEOUT_SECS` | HTTP deadline, default 30 seconds, range 1–120 |
 
 Endpoints require HTTPS; numeric loopback HTTP addresses are accepted for local
@@ -41,17 +41,14 @@ identities. No separate resolution request or caller-supplied target is needed.
 
 The response must contain the same `request_id` and canonical hex `pubkey`,
 plus `identity_blocked: true`, `identity_revoked: true` and an RFC3339 `revoked_at` timestamp. The endpoint
-must return HTTP 200 with valid JSON; 202 is not completion. Additional fields,
-such as a human-readable `message` and
-`blocked_login: {"provider":"example","subject":"example-login"}`, are preserved
-in the receipt but do not determine success.
+must return HTTP 200 with valid JSON; 202 is not completion. The worker saves only the five validated fields in
+`metadata_json.waiting.identity_receipt`. It discards the login subject and free-form message.
 
-A validated receipt is saved as `metadata_json.waiting.identity_receipt`.
-Subsequent invocations validate and reuse it without another HTTP call. If a
-response is lost before a receipt is saved, the executor retries the same
-request ID and public key. Each repeated block call executes again and may return a newer revocation time. HTTP errors use the workflow's existing retry deadline. An operator or
-external runner must invoke the command again: this change adds no polling API
-or automatic retry daemon.
+The worker validates the routes and prepares credentials before recording an attempt.
+Immediately before sending the block request it saves `inspect_block_outcome`.
+If that marker survives a crash, HTTP error or lost response, check the account and
+revocation state with the identity service operator before any further block call.
+Subsequent invocations reuse a validated receipt or stop at the inspection marker.
 
 **A revocation receipt does not complete the gate.** The handler leaves it
 running/current with reason `awaiting_access_enforcement_and_writer_drain`,
@@ -266,9 +263,10 @@ The version-1 workflow rules are:
 | `purge_media` | Enter communities | After saved success, select the first uncovered community |
 | `purge_content` | `purge_agents` or community complete | Real cleanup continues to agent cleanup; demos read saved `result.has_agents` |
 | `purge_agents` | Community complete | Mark this community covered |
+| `purge_builderlab` | Request complete | After verified cleanup, require separate login and account deletion receipts in order |
 
 After a community completes, select the first uncovered community in inventory
-order. After all are covered, finish the request. Missing `has_agents` is an
+order. After all are covered (including an empty inventory), real requests enter `purge_builderlab` and demos finish. Missing `has_agents` is an
 error, not an implicit skip. The inventory's version selects the currently
 supported rules; future versions must retain the rules needed by active requests.
 No full execution plan is created upfront.
@@ -338,8 +336,7 @@ INVENTORY_DIGEST=$(printf '%s\n' "$REQUEST_JSON" | jq -r '.inventory_digest')
 Approval creates no stages. A real run requires `--delete` and the identity
 configuration above. Without configuration the gate remains pending. With a
 validated receipt it remains running/current while waiting for readiness
-evidence. Repeating the run reuses the saved receipt, or retries the same request
-if none was saved. Use `--target demo:example` instead of `--pubkey` at submission to exercise the full synthetic workflow without deletion.
+evidence. Repeating the run reuses a saved receipt. An unresolved block attempt requires operator inspection. Use `--target demo:example` instead of `--pubkey` at submission to exercise the full synthetic workflow without deletion.
 
 The routing requires saved gate success before media, and saved media success
 before community cleanup. A media failure keeps the same stage current; resume

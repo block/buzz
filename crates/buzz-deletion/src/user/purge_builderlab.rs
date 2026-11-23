@@ -50,8 +50,10 @@ pub(super) async fn handle(
         .identity
         .as_ref()
         .context("finalization requires configured identity URLs and token file")?;
-    store.start_stage(lease, row.id).await?;
     let body = json!({"request_id":request.id,"pubkey":request.target,"cleanup_verified":true});
+    let login_request = identity.prepare_delete_login(&body).await?;
+    let account_request = identity.prepare_delete_account(&body).await?;
+    store.start_stage(lease, row.id).await?;
     store
         .save_stage_waiting(
             lease,
@@ -59,7 +61,7 @@ pub(super) async fn handle(
             json!({"reason":"inspect_login_deletion_outcome"}),
         )
         .await?;
-    let login = identity.delete_login(&body).await?;
+    let login = identity.send(login_request).await?;
     ensure!(
         matches_receipt(&login, request.id, &request.target, "auth0_deleted"),
         "login deletion unconfirmed; inspect the external login"
@@ -71,7 +73,7 @@ pub(super) async fn handle(
             json!({"reason":"inspect_account_deletion_outcome","login_receipt":login}),
         )
         .await?;
-    let account = identity.delete_account(&body).await?;
+    let account = identity.send(account_request).await?;
     ensure!(
         matches_receipt(&account, request.id, &request.target, "account_deleted"),
         "account deletion unconfirmed; inspect the local account"
@@ -87,12 +89,23 @@ pub(super) async fn handle(
 }
 
 pub(super) fn confirmed(receipt: &Value, id: uuid::Uuid, target: &str) -> bool {
-    // Previously completed jobs have one combined receipt.
-    (matches_receipt(receipt, id, target, "account_deleted") && receipt["auth0_deleted"] == true)
-        || (matches_receipt(&receipt["login_receipt"], id, target, "auth0_deleted")
-            && matches_receipt(&receipt["account_receipt"], id, target, "account_deleted"))
+    matches_receipt(&receipt["login_receipt"], id, target, "auth0_deleted")
+        && matches_receipt(&receipt["account_receipt"], id, target, "account_deleted")
 }
 
 fn matches_receipt(receipt: &Value, id: uuid::Uuid, target: &str, flag: &str) -> bool {
     receipt["request_id"] == json!(id) && receipt["pubkey"] == target && receipt[flag] == true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn combined_receipt_cannot_complete_separate_deletions() {
+        let id = uuid::Uuid::new_v4();
+        let combined =
+            json!({"request_id":id,"pubkey":"user","auth0_deleted":true,"account_deleted":true});
+        assert!(!confirmed(&combined, id, "user"));
+    }
 }

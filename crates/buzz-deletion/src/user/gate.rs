@@ -1,7 +1,7 @@
 //! Request-wide identity revocation with a durable success receipt.
 
 use anyhow::{ensure, Context, Result};
-use buzz_db::entity_deletion::{EntityDeletionStore, EntityLease, EntityStage};
+use buzz_db::entity_deletion::{EntityDeletionStore, EntityLease, EntityRequest, EntityStage};
 use buzz_db::user_deletion::UserDeletionInventory;
 use chrono::{DateTime, FixedOffset};
 use serde::Deserialize;
@@ -9,12 +9,11 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::worker::RunOptions;
-use crate::RETRY_DELAY;
 
 mod transport;
 pub(super) use transport::IdentityGateConfig;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 struct Receipt {
     request_id: Uuid,
     pubkey: String,
@@ -23,7 +22,7 @@ struct Receipt {
     revoked_at: DateTime<FixedOffset>,
 }
 
-fn receipt(value: &Value, request_id: Uuid, pubkey: &str) -> Result<()> {
+fn receipt(value: &Value, request_id: Uuid, pubkey: &str) -> Result<Receipt> {
     let receipt: Receipt = serde_json::from_value(value.clone())
         .map_err(|_| anyhow::anyhow!("invalid identity revocation receipt"))?;
     ensure!(
@@ -34,48 +33,18 @@ fn receipt(value: &Value, request_id: Uuid, pubkey: &str) -> Result<()> {
         "identity revocation receipt does not match this request"
     );
     // Parsing the timestamp validates the protocol; it is not cleanup readiness.
-    let _ = receipt.revoked_at;
-    Ok(())
+    Ok(receipt)
 }
 
 pub(super) async fn handle(
     store: &EntityDeletionStore,
     lease: &EntityLease,
     row: &EntityStage,
+    request: &EntityRequest,
     options: &RunOptions,
 ) -> Result<()> {
     ensure!(options.delete, "real workflow execution requires --delete");
-    // Keep missing configuration a preflight error, without starting a stage.
-    if row.metadata_json.get("waiting").is_none() {
-        options
-            .identity
-            .as_ref()
-            .context("identity gate requires configured identity URLs and token file")?;
-    }
-    let row = store.start_stage(lease, row.id).await?;
-    let result = execute(store, lease, &row, options).await;
-    if let Err(error) = result {
-        if let Err(persist_error) = store
-            .fail_stage(lease, row.id, &format!("{error:#}"), RETRY_DELAY)
-            .await
-        {
-            return Err(error.context(format!(
-                "identity gate failed; also failed to record retry: {persist_error}"
-            )));
-        }
-        return Err(error);
-    }
-    Ok(())
-}
-
-async fn execute(
-    store: &EntityDeletionStore,
-    lease: &EntityLease,
-    row: &EntityStage,
-    options: &RunOptions,
-) -> Result<()> {
-    let request = store.get(lease.request_id).await?;
-    let inventory = UserDeletionInventory::read(&request)?;
+    let inventory = UserDeletionInventory::read(request)?;
     ensure!(
         row.request_id == request.id
             && row.stage == "gate_user"
@@ -84,25 +53,32 @@ async fn execute(
         "identity gate differs from approved request-wide inventory"
     );
     if let Some(saved) = row.metadata_json.get("waiting") {
+        ensure!(
+            saved["reason"] != "inspect_block_outcome",
+            "inspect the previous block outcome before proceeding"
+        );
         let saved_receipt = saved
             .get("identity_receipt")
             .context("missing saved identity receipt")?;
         receipt(saved_receipt, request.id, &request.target)?;
         return Ok(());
     }
+    ensure!(
+        row.status == "pending",
+        "inspect the previous block outcome before proceeding"
+    );
     let config = options
         .identity
         .as_ref()
-        .context("missing identity gate configuration")?;
-    // Check the lease again immediately before the external mutation.
-    store.start_stage(lease, row.id).await?;
-    let revoked = config
-        .block(&json!({
-            "request_id": request.id,
-            "pubkey": request.target,
-        }))
+        .context("identity gate requires configured identity URLs and token file")?;
+    let outbound = config
+        .prepare_block(&json!({"request_id":request.id,"pubkey":request.target}))
         .await?;
-    receipt(&revoked, request.id, &request.target)?;
+    store.start_stage(lease, row.id).await?;
+    store
+        .save_stage_waiting(lease, row.id, json!({"reason":"inspect_block_outcome"}))
+        .await?;
+    let revoked = receipt(&config.send(outbound).await?, request.id, &request.target)?;
     store
         .save_stage_waiting(
             lease,

@@ -22,10 +22,12 @@ pub(super) async fn dispatch(
     row: &EntityStage,
     options: &RunOptions,
 ) -> Result<DispatchOutcome> {
-    let request = store.get(lease.request_id).await?;
-    if !request.target.starts_with("demo:") && row.stage == "gate_user" {
-        super::gate::handle(store, lease, row, options).await?;
-        return Ok(DispatchOutcome::Waiting);
+    if row.stage == "gate_user" {
+        let request = store.get(lease.request_id).await?;
+        if !request.target.starts_with("demo:") {
+            super::gate::handle(store, lease, row, &request, options).await?;
+            return Ok(DispatchOutcome::Waiting);
+        }
     }
     if row.stage == "purge_builderlab" {
         return super::purge_builderlab::handle(store, lease, row, options).await;
