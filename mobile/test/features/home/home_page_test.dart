@@ -576,31 +576,32 @@ void main() {
       await tester.tap(find.byTooltip('New'));
       await tester.pumpAndSettle();
       expect(find.text('New workspace'), findsOneWidget);
-      final menuBounds = tester.getRect(
-        find
-            .ancestor(
-              of: find.text('New workspace'),
-              matching: find.byType(Material),
-            )
-            .first,
-      );
+      final menu = find
+          .ancestor(
+            of: find.text('New workspace'),
+            matching: find.byType(Material),
+          )
+          .first;
+      final menuBounds = tester.getRect(menu);
       expect(menuBounds.left, closeTo(controlsBounds.left, .01));
       expect(menuBounds.right, closeTo(controlsBounds.right, .01));
       expect(menuBounds.bottom, closeTo(controlsBounds.bottom, .01));
-      expect(
-        tester.getTopLeft(find.text('Solo').last).dy,
-        lessThan(tester.getTopLeft(find.text('New chat')).dy),
+      final rows = ['New chat', 'New channel', 'New DM', 'New workspace'];
+      final positions = rows.map(
+        (label) => tester.getCenter(find.text(label)).dy,
       );
+      expect(positions, orderedEquals(positions.toList()..sort()));
+      final divider = find.descendant(of: menu, matching: find.byType(Divider));
       expect(
-        tester.getTopLeft(find.text('Team').last).dy,
-        greaterThan(tester.getBottomLeft(find.text('New workspace')).dy),
+        tester.getCenter(divider).dy,
+        inExclusiveRange(positions.elementAt(2), positions.last),
       );
-      expect(
-        tester.getTopLeft(find.text('Team').last).dy,
-        lessThan(tester.getTopLeft(find.text('New DM')).dy),
-      );
-      expect(find.text('New DM'), findsOneWidget);
-      expect(find.text('New channel'), findsOneWidget);
+      for (final heading in ['Solo', 'Team']) {
+        expect(
+          find.descendant(of: menu, matching: find.text(heading)),
+          findsNothing,
+        );
+      }
       await tester.tap(find.text('New chat'));
       await tester.pumpAndSettle();
       expect(created, 1);
@@ -994,7 +995,7 @@ void main() {
             )
             .actions
             .map((a) => a.label),
-        ['New chat', 'New workspace', 'New DM', 'New channel'],
+        ['New chat', 'New channel', 'New DM', 'New workspace'],
       );
       final creationMenu = tester.widget<IosMessageCreateButton>(
         find.byWidgetPredicate(
@@ -1002,12 +1003,20 @@ void main() {
         ),
       );
       final search = find.byTooltip('Search');
+      final shortcuts = [search, find.byType(DefaultAgentLauncher)];
+      Iterable<double> shortcutOpacities() => shortcuts.map((shortcut) {
+        final fade = find
+            .ancestor(of: shortcut, matching: find.byType(FadeTransition))
+            .first;
+        return tester.widget<FadeTransition>(fade).opacity.value;
+      });
       final initialX = tester.getCenter(search).dx;
       final initialWidth =
           (tester.getTopRight(search).dx - tester.getTopLeft(search).dx);
       creationMenu.onMenuVisibilityChanged!(true);
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 90));
+      expect(shortcutOpacities(), everyElement(inExclusiveRange(0, 1)));
       final midwayX = tester.getCenter(search).dx;
       expect(midwayX, greaterThan(initialX + 50));
       expect(midwayX, lessThan(initialX + 100));
@@ -1017,6 +1026,7 @@ void main() {
         (tester.getTopRight(search).dx - tester.getTopLeft(search).dx),
         closeTo(initialWidth * .9, .01),
       );
+      expect(shortcutOpacities(), [0.0, 0.0]);
       expect(search.hitTestable(), findsNothing);
       creationMenu.onMenuVisibilityChanged!(false);
       await tester.pumpAndSettle();
@@ -1025,7 +1035,22 @@ void main() {
         (tester.getTopRight(search).dx - tester.getTopLeft(search).dx),
         closeTo(initialWidth, .01),
       );
+      expect(shortcutOpacities(), [1.0, 1.0]);
       expect(search.hitTestable(), findsOneWidget);
+      final dispatcher = tester.platformDispatcher;
+      dispatcher.accessibilityFeaturesTestValue =
+          const FakeAccessibilityFeatures(reduceMotion: true);
+      addTearDown(dispatcher.clearAccessibilityFeaturesTestValue);
+      expect(MediaQuery.disableAnimationsOf(tester.element(search)), isFalse);
+      for (final open in [true, false]) {
+        creationMenu.onMenuVisibilityChanged!(open);
+        await tester.pump();
+        expect(shortcutOpacities(), everyElement(open ? 0.0 : 1.0));
+        expect(
+          tester.getCenter(search).dx,
+          closeTo(initialX + (open ? 100 : 0), .01),
+        );
+      }
       final inbox = find.byWidgetPredicate(
         (w) => w is IosGlassNavigationButton && w.semanticLabel == 'Activity',
       );

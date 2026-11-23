@@ -241,10 +241,13 @@ void main() {
       diagnostics: diagnostics,
     );
     final original = cache.capture(_identity, _channel);
+    final threadPage = (channelId: _channel.channelId, rootId: 'outer-root');
+    final thread = cache.capture(_identity, threadPage);
     final first = _message(_channel, 'first removed row');
     final second = _message(_channel, 'second removed row');
     final retained = _message(_channel, 'unchanged');
     await cache.save(original, [first, second, retained], relayAuthor: null);
+    await cache.save(thread, [first, second, retained], relayAuthor: null);
     final file = Directory(
       '${temp.path}/saved_messages',
     ).listSync().whereType<File>().single;
@@ -258,7 +261,8 @@ void main() {
     cache.removeChannelEvents(_identity, _channel.channelId, {second.id});
 
     expect(cache.isCurrent(original), isFalse);
-    expect(await cache.read(cache.capture(_identity, _channel)), [retained]);
+    expect(cache.isCurrent(thread), isFalse);
+    expect(await cache.read(cache.capture(_identity, threadPage)), [retained]);
     expect(
       latin1.decode(file.readAsBytesSync()).contains(first.content),
       isFalse,
@@ -325,6 +329,65 @@ void main() {
     expect(await store.read(ticket), [message]);
     expect(diagnostics.operations, [DiagnosticOperation.storedData]);
   });
+
+  for (final threadPage in [false, true]) {
+    test(
+      'prunes a full cache without discarding other pages (thread: $threadPage)',
+      () async {
+        final page = (
+          channelId: _channel.channelId,
+          rootId: threadPage ? 'thread' : '',
+        );
+        final target = _message(page, 'pruned message');
+        final keep = _message(_otherChannel, 'unrelated page');
+        if (threadPage) {
+          await store.save(store.capture(_identity, _thirdChannel), [
+            _message(_thirdChannel, 'x' * 48000),
+          ], relayAuthor: null);
+        }
+        await store.save(store.capture(_identity, page), [
+          target,
+        ], relayAuthor: null);
+        await store.save(store.capture(_identity, _otherChannel), [
+          keep,
+        ], relayAuthor: null);
+        final file = Directory(
+          '${temp.path}/saved_messages',
+        ).listSync().whereType<File>().single;
+        final db = sqlite3.open(file.path, mode: OpenMode.readOnly);
+        late final int pageLimit;
+        try {
+          expect(db.select('PRAGMA freelist_count').single.values.single, 0);
+          pageLimit =
+              db.select('PRAGMA page_count').single.values.single as int;
+        } finally {
+          db.close();
+        }
+        final full = SavedMessageStore(
+          root: () async => temp,
+          diagnostics: diagnostics,
+          databasePageLimit: pageLimit,
+        );
+        full.removeChannelEvents(_identity, page.channelId, {
+          target.id,
+        }, edited: true);
+        expect(await full.read(full.capture(_identity, page)), isNull);
+        expect(await full.read(full.capture(_identity, _otherChannel)), [keep]);
+        if (threadPage) {
+          expect(
+            (await full.inspectThread(full.capture(_identity, page)))?.pruned,
+            {target.id: true},
+          );
+          expect(
+            await full.read(full.capture(_identity, _thirdChannel)),
+            isNull,
+          );
+        }
+        expect(diagnostics.operations, isEmpty);
+        expect(file.lengthSync(), lessThanOrEqualTo(pageLimit * 4096));
+      },
+    );
+  }
 
   test('omits a page that cannot fit its verified relay events', () async {
     final ticket = store.capture(_identity, _channel);

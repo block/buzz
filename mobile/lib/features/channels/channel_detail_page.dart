@@ -119,6 +119,7 @@ import '../../shared/read_state/deferred_read_state_update.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 import 'reaction_row.dart';
+import 'saved_channel_page.dart';
 import '../../shared/emoji/recent_emoji_provider.dart';
 import 'send_message_provider.dart';
 import '../profile/user_profile_sheet.dart';
@@ -132,6 +133,7 @@ import 'reading_marks.dart';
 import 'timeline_message.dart';
 
 part 'channel_detail_page/message_list.dart';
+part 'channel_detail_page/initial_thread_route.dart';
 part 'channel_detail_page/jump_to_oldest_unread_button.dart';
 part 'channel_detail_page/row_cache.dart';
 part 'channel_detail_page/placement_route.dart';

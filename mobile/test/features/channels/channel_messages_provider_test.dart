@@ -126,7 +126,7 @@ void main() {
       (channelId: _channelId, rootId: ''),
     );
     final save = Provider(
-      (ref) => saveChannelPage(ref, store, ticket, [], isCurrent: () => true),
+      (ref) => saveMessagePage(ref, store, ticket, [], isCurrent: () => true),
     );
 
     final saved = container.read(save);
