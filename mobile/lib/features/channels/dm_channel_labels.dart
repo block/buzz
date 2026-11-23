@@ -75,7 +75,7 @@ String resolveDmChannelDisplayLabel(
       .where(
         (participant) =>
             participant.pubkey == null ||
-            names?.factFor(participant.pubkey!)?.isAgent != true,
+            participantNames?.isAgent(participant.pubkey!) != true,
       )
       .toList();
   final displayParticipants = people.isNotEmpty ? people : others;
