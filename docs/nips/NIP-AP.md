@@ -337,13 +337,14 @@ How a relay advertises each one is defined by the specification of that feature.
 | Channel | One per | Created by | Family label | Subject label |
 | --- | --- | --- | --- | --- |
 | Agent config channel | agent | the agent's owner | `agent-config` | the agent's 64-character lowercase hex pubkey |
+| Agent attention channel | agent | the agent's owner | `agent-attention` | the agent's 64-character lowercase hex pubkey |
 | Team config channel | team | the team's owner | `team-config` | `team-` followed by the first 59 lowercase hex characters of the SHA-256 hash of the team id's UTF-8 bytes |
 
 The owner creates a config channel with a kind:9007 that carries `["channel_type", "system"]`, both labels as `t` tags, and no `visibility` or `ttl` tag. A config channel MUST be private and MUST NOT have a TTL. The owner MUST NOT change a config channel's labels.
 
 Both subject labels are 64 characters. A team id can contain characters a label cannot, so the team label is derived from a hash; the team id itself is stored on the `buzz.team` artifact (see "Config artifacts").
 
-An agent config channel's members are the owner, the agent, and any others the owner adds. A team config channel holds the owner and the team's members, and can hold others who are not members (see "Membership").
+An agent config channel's and an agent attention channel's members are the owner, the agent, and any others the owner adds. The owner's client creates the attention channel when the owner turns on relay storage for the agent's Attention ([NIP-AT](NIP-AT.md)), and adds the agent with the `member` role; the owner is the attention channel's only member with the `owner` role. The agent MUST NOT create, delete or archive either channel, or change its roster. An agent whose owner the relay has not verified has no attention channel. A team config channel holds the owner and the team's members, and can hold others who are not members (see "Membership").
 
 ### Discovery
 
@@ -362,7 +363,7 @@ To find the teams an agent is on, the agent's client queries the channels the ag
 
 then reads those channels' kind:39000 by `#d`.
 
-In every case the client keeps only channels whose type is `system`, whose labels include the family label, and whose `P` is the expected owner. It MUST NOT put the family label in the same `#t` filter, because values in one filter combine with OR. When more than one channel remains for one agent or team, the client uses the oldest, by NIP-CL's "Choosing one channel" rule. A client creates a config channel only when this query returns none. A client MUST NOT delete or archive a config channel because it was not selected.
+In every case the client keeps only channels whose type is `system`, whose visibility is `private`, whose labels include the family label, and whose `P` is the expected owner. It MUST NOT put the family label in the same `#t` filter, because values in one filter combine with OR. When more than one channel remains for one agent or team, the client uses the oldest, by NIP-CL's "Choosing one channel" rule. A client creates a config channel only when this query returns none. A client MUST NOT delete or archive a config channel because it was not selected.
 
 ### Config artifacts
 
@@ -373,6 +374,8 @@ In every case the client keeps only channels whose type is `system`, whose label
 | `buzz.team` | team config | the team name | `["team", "<team-id>"]` | `{"version": 1, "name": "<string>", "instructions": "<string>"}` |
 
 A config channel holds at most one artifact of each of its types. Its `d` is the UUIDv5 of the type name in the namespace of the channel's UUID, so two clients creating the same artifact collide on `d` and one create fails. The client whose create fails fetches the current revision and edits it; it MUST NOT choose a different `d`. A client accepts a config artifact only when its `d`, `type`, and `h` match the config channel it was read from. A `buzz.team` artifact has no member list; members come from the channel (see "Membership").
+
+The agent attention channel is the exception to this section: it holds one `buzz.agent-attention` artifact for each object, and NIP-AT defines their `d`, content and rules.
 
 **Team id.** A `buzz.team` artifact carries exactly one `team` tag, whose value is the team id. A client MUST check that the team id's subject label equals the channel's subject label, and MUST treat the artifact as invalid otherwise.
 
@@ -404,7 +407,9 @@ Only an absent artifact lets a client fall back to another source (see "Launch c
 
 ### Editing
 
-Every channel member who is not a guest can edit the channel's artifacts. This includes members who are not on the team, such as humans and agents with another owner. On a relay whose guest roles are read-only, guests can only read them, and the owner can make an agent read-only for a config channel by giving it the guest role there.
+Every channel member who is not a guest can edit the channel's artifacts. This includes members who are not on the team, such as humans and agents with another owner. On a relay whose guest roles are read-only, guests can only read them, and the owner can make an agent read-only for a config channel by giving it the guest role there. Roles are set per channel: an agent can be a guest in its agent config channel and a member of its attention channel, so that its instructions are locked and it still keeps its own Attention.
+
+A person who manages an agent with its owner is a member, not a guest, of both agent channels. A client that adds or removes a manager does so in both channels in one action. Every member of the attention channel can read what the agent writes there, so adding one is a disclosure decision for the owner.
 
 Every edit is a new NIP-AR revision and names the current revision in `prev`. On conflict, the client reconciles with the current revision as NIP-AR requires. An edit MUST keep any JSON fields and tags the client does not recognise. The one exception: an edit of `buzz.agent.settings` that changes `agentType` MAY drop the fields inside `settings`, because they belong to the old type.
 

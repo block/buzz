@@ -6,7 +6,7 @@ Agent Attention
 
 `draft` `optional`
 
-An agent's **Attention** is what makes it act when nobody mentions it: its **Interests** (standing instructions), **event watches** (relay events that start a task), **timers** (tasks on a schedule) and **source watches** (outputs of a producer that its host runs). This NIP stores each of these objects as one [NIP-AR](NIP-AR.md) artifact in a private [NIP-CL](NIP-CL.md) system channel, the agent's **attention channel**. So any runtime that can sign in as the agent, on a device or in the cloud, reads the same Attention, and the agent's owner can read and change it from any client.
+An agent's **Attention** is what makes it act when nobody mentions it: its **Interests** (standing instructions), **event watches** (relay events that start a task), **timers** (tasks on a schedule) and **source watches** (outputs of a producer that its host runs). This NIP stores each of these objects as one [NIP-AR](NIP-AR.md) artifact in the agent's **attention channel**, a private [NIP-AP](NIP-AP.md) config channel. So any runtime that can sign in as the agent, on a device or in the cloud, reads the same Attention, and the agent's owner can read and change it from any client.
 
 This NIP defines no new kind and no relay behavior. It is a profile: it names a channel label, an artifact type and a content format, and gives the rules that writers and readers follow so that they agree.
 
@@ -16,66 +16,43 @@ It replaces an earlier draft of NIP-AT that defined `kind:30183` encrypted addre
 
 - **agent:** the key that the Attention belongs to. Its runtime runs the watches and timers.
 - **agent owner:** the key the relay records as the agent's owner, from its [NIP-OA](NIP-OA.md) attestation. It is usually a human.
-- **channel owner:** a member with the `owner` role in the attention channel. By default the agent and its agent owner are both channel owners.
+- **member:** a member of the attention channel whose role is not `guest`. Every member can write records. The agent owner is the only member with the `owner` role.
 - **runtime:** a process that runs the agent's Attention. A runtime signs as the agent.
-- **writer:** a client that changes a record: the agent's own tools, its runtime, or a client of the agent owner.
+- **writer:** a client that changes a record: the agent's own tools, its runtime, or a client of the agent owner or of another member.
 - **reader:** a client that reads the set: a runtime, or a client that shows the agent's Attention.
 
 ## Relay support
 
-A client stores Attention on a relay only when the relay's [NIP-11](11.md) document shows that it supports NIP-CL system channels and labels, and NIP-AR artifacts with sync and the `head` view. How a relay advertises each one is defined by that NIP. On any other relay, the client keeps Attention local and MUST NOT create an attention channel.
+A client stores Attention on a relay only when the relay's [NIP-11](11.md) document shows that it supports NIP-CL system channels and labels, and NIP-AR artifacts with sync and the `head` view. How a relay advertises each one is defined by that NIP. Its sync `max_events` (NIP-AR) MUST be at least the head limit (see "Limits"), or a full set could not be read. On any other relay, the client keeps Attention local and MUST NOT create an attention channel.
 
 ## Attention channel
 
-| Setting | Value |
-| --- | --- |
-| Channel type | `system` |
-| Visibility | `private` |
-| Label | `agent-attention`, as a `t` tag |
-| Creator (`P`) | the agent |
-| Members | the agent and its agent owner, both with the `owner` role |
+The attention channel is the NIP-AP agent attention channel. NIP-AP defines its labels, its roster, how a client creates it and how a client finds it. In short:
+
+- The agent owner's client creates it when the agent owner turns on relay storage for the agent's Attention, and adds the agent with the `member` role. The agent owner is the only channel owner.
+- A client finds it with NIP-AP Discovery, from the agent owner that the agent's [NIP-OA](NIP-OA.md) attestation names. Discovery keeps only private channels. When more than one remains, every client uses the oldest, and no client deletes the others.
+- An agent with no recorded agent owner has no attention channel. Its Attention stays local.
+- The agent MUST NOT create, delete or archive an attention channel, or change its roster.
 
 A private channel lets only its members read its artifacts, and NIP-AR lets only members with a writing role (`owner`, `admin` or `member`) write them. A member with the `guest` role can read but not write.
-
-### Find
-
-A client finds the attention channel with:
-
-```
-{"kinds": [39000], "#P": [<agent>], "#t": ["agent-attention"]}
-```
-
-`#P` asks for system channels (NIP-CL, "Asking for system channels"). The client keeps only events that the relay key signed, whose channel type is `system`, whose creator is the agent and whose labels include `agent-attention`. When more than one channel remains, every client uses the oldest one (NIP-CL, "Choosing one channel").
-
-### Create
-
-Only the agent creates its attention channel. A reader trusts a channel only when the agent created it, so a client of the agent owner MUST NOT create one. When Find returns nothing, the client of the agent owner shows that the agent's runtime has not started on this relay.
-
-A runtime ensures the channel when it starts, and before the agent's first write. When Find returns nothing, the agent:
-
-1. sends a kind:9007 with a new random channel ID, `["channel_type", "system"]`, `["visibility", "private"]` and `["t", "agent-attention"]`, and MAY add a `name` tag (the reference client sends `["name", "Attention"]`); then
-2. sends a kind:9000 that adds its agent owner (see "Roles": the key that owns the agent, usually a human) with `["role", "owner"]`.
-
-The creator gets the `owner` role from the relay. An agent with no agent owner has a channel with only itself as a member.
-
-If step 2 did not complete, a later ensure finds a channel whose only member is the agent. It then sends step 2 again. It changes the roster in no other case: after Create, the roster belongs to the channel owners.
-
-If two processes of the agent both create a channel, every client uses the oldest, and the agent deletes the others (kind:9008) when it finds them.
-
-The channel ID is random, not derived from the agent key. A derived ID is known in advance, so another key could create a channel with that ID first; readers would not trust that channel, and the agent could not create its own.
 
 ### Roster and trust
 
 A reader does not check who signed a record. The relay accepts a write only from a member with a writing role, and the reader trusts that gate. So the roster decides whose records apply. Each roster change is a signed kind:9000 or kind:9001, so the channel's history shows who could write at each time.
 
-Either channel owner can add or remove members and change roles, as long as a channel owner remains. For example, the agent owner can make the agent a `guest`, so that only the agent owner changes the agent's Attention. A profile that needs a stricter rule, such as "only the agent owner's records apply", adds its own check on top of this one.
+The agent owner decides who writes. To make the agent's Attention read-only to the agent, the agent owner gives it the `guest` role in the attention channel; its role in its agent config channel is separate. A person who manages the agent with the agent owner is a member (NIP-AP, "Editing"). The agent cannot remove the agent owner or change roles, because only a channel owner or admin can. As a member it can add another key as a member or guest (NIP-AP, "Membership"); the roster shows that key, and the agent owner can remove it.
 
-### Lifecycle
+### Lost access
 
-These follow NIP-AR, "Home channel lifecycle":
+The runtime runs no watches or timers from the channel, and reports why, when:
 
-- **Archived:** writes fail with the archive reason. Readers keep reading, and runtimes keep running the set.
-- **Deleted:** its records leave every read. The runtime runs no watches or timers. The agent's next ensure creates a new channel.
+- Discovery finds no channel;
+- the agent is no longer a member;
+- the channel is deleted, or is no longer private.
+
+The runtime does not create another channel or repair the roster. Each of these is the agent owner's decision.
+
+An archived channel stays readable: writes fail with the archive reason, and runtimes keep running the set (NIP-AR, "Home channel lifecycle").
 
 ## Records
 
@@ -102,7 +79,7 @@ Each object is one artifact of type `buzz.agent-attention` in the attention chan
 - **Slug.** `interest/<id>` for an Interest, `watch/<id>` for an event watch, timer or source watch. `<id>` matches `^[!-~]{1,64}$`. All watches share the `watch/` space. A later object family uses a new prefix and a new `schema`.
 - **`d`.** NIP-AR's standard derivation (NIP-AR, "Deterministic identity and the ensure flow") with `h` = the attention channel, `type` = `buzz.agent-attention` and `key` = the slug. Two writers that add the same slug use the same `d`.
 - **Title.** The slug. Only channel members can read it.
-- **Content.** A UTF-8 JSON object with exactly the fields `schema`, `slug` and `value`, at most 65,535 bytes. `schema` is `agent-attention/v1`.
+- **Content.** A UTF-8 JSON object with exactly the fields `schema`, `slug` and `value`, at most 65,535 bytes. `schema` is `agent-attention/v1`. NIP-AP config artifacts carry an integer `version`; attention carries a `schema` string instead, because one artifact type holds several object families and each family can change its format on its own.
 - **Deletion.** A `delete` revision has empty content and no `title`, and keeps the head's `root`, as NIP-AR defines.
 - **Other tags.** This NIP defines none. Readers ignore tags they do not know, and editors keep them, as NIP-AR requires. Tags that a signer sets for itself, such as NIP-OA `auth`, are not among them: they belong to the revision's signer, and the relay checks `auth` against that signer. An editor never copies them from another revision.
 - **Modified time.** The revision's `created_at`, for display only.
@@ -181,6 +158,8 @@ A source watch names a producer that the runtime's host offers. The runtime star
 
 Providers are host capabilities: each host offers its own set. A runtime runs only providers that its host offers. A source watch for any other provider is still a valid record, not a skipped one: the runtime does not run it, and reports that its provider is not available here. It MUST NOT delete the record, so the source runs again on a host that offers it.
 
+`provider` is a name, not an identity. A host maps it only to a producer that its owner installed and enabled there; a record cannot make a host run code that it did not already trust. The same name can map to different producers on two hosts. Namespaces SHOULD be the id of the plugin that provides the producer.
+
 ### Destination
 
 | Field | Type | Meaning |
@@ -207,9 +186,9 @@ The runtime asks a model for the probability that each question is true for the 
 
 ## Limits
 
-- A set holds at most 100 Interests, and at most 100 watches (event, timer and source together). A writer refuses a change over a limit.
-- A reader that finds more valid objects than a limit allows sorts that group by slug, applies the first 100 and reports the rest as skipped.
-- A NIP-AR sync fails when the set is larger than the relay's `max_events`, and it counts every head of the type, valid or not. So a writer also refuses to create a record while the channel holds 200 heads of type `buzz.agent-attention`.
+- A set holds at most 250 Interests, and at most 250 watches (event, timer and source together). A writer refuses a change over a limit.
+- A reader that finds more valid objects than a limit allows sorts that group by slug, applies the first 250 and reports the rest as skipped.
+- A NIP-AR sync fails when the set is larger than the relay's `max_events`, and it counts every head of the type, valid or not, deletions included. So a writer also refuses to create a record while the channel holds 500 heads of type `buzz.agent-attention`, and a relay qualifies only when its `max_events` is at least 500 (see "Relay support").
 - A writer MAY add lower limits on its own writes. For example, the reference client refuses a timer interval under 60 seconds from the agent's own tools.
 
 ## Writing
@@ -245,10 +224,11 @@ Within each step, by slug.
 
 | Write | Signer |
 | --- | --- |
-| Ensure the channel (kind:9007, kind:9000, kind:9008) | the agent |
+| Create the attention channel and add the agent (kind:9007, kind:9000) | the agent owner |
 | The agent's Attention tools | the agent |
 | Runtime writes (see "Runtime writes") | the agent |
 | Changes from the agent owner's client | the agent owner |
+| Changes from another member's client | that member |
 | Moving local Attention to the relay, and removals the agent owner confirms | the agent owner |
 
 ## Reading
@@ -273,9 +253,11 @@ Within each step, by slug.
 
 A reader shows skipped records to the agent owner, by slug and problem, so that the agent owner can remove them. A runtime does not run them.
 
-A watch or timer can name an Interest that does not exist, for example after another writer removed it. The runtime still starts the task, with the event or the timer's `prompt`, and a note that the Interest was not found.
+A watch or timer can name an Interest that does not exist, for example after another writer removed it. For an event watch or a timer, the runtime still starts the task, with the event or the timer's `prompt`, and a note that the Interest was not found. A source watch whose Interest does not exist does not start its producer; the runtime reports it.
 
 ## Running
+
+The agent's settings and instructions ([NIP-AP](NIP-AP.md)) bound its Attention. A runtime does not run a record that needs a provider, tool or channel that the agent's settings do not allow; it reports the record as skipped. Interest instructions reach the agent as task text, after the agent's own instructions, and do not replace them.
 
 ### Event watch matching
 
@@ -355,7 +337,8 @@ The writer publishes `interest/reviews` first, then `watch/review-requests`. To 
 
 ## Security considerations
 
-- **Readers trust the roster, not signers.** Any member with a writing role can add a watch that wakes the agent, or change its instructions. Keep the roster to the agent and its agent owner unless more writers are intended.
+- **Readers trust the roster, not signers.** Any member with a writing role can add a watch that wakes the agent, or change its instructions. Keep the roster to the agent, its agent owner and the people who manage the agent. The agent can add a key as a member; the agent owner sees it in the roster and can remove it.
+- **Members can read what the agent writes.** The agent can copy what it read elsewhere into an Interest. Adding a member to the attention channel lets that member read it, so it is a disclosure decision for the agent owner.
 - **Instructions are untrusted input** to the agent, like any message. Writing a record grants no permission that the agent's runtime does not already give.
 - **Titles and content are not encrypted.** The channel is private, so only members and the relay can read them. Put no secrets in Attention; a source's `config` names commands and paths, not credentials.
 - **A destination grants nothing.** The runtime still checks the agent's membership in the destination channel.
@@ -366,4 +349,4 @@ The writer publishes `interest/reviews` first, then `watch/review-requests`. To 
 - [NIP-AR](NIP-AR.md): records, revisions, sync, the `head` view and the standard `d`.
 - [NIP-CL](NIP-CL.md): the system channel, its label and the rule that picks one channel.
 - [NIP-OA](NIP-OA.md): who the agent owner is.
-- [NIP-AP](NIP-AP.md): agent and team config use the same pattern in their own config channels. Attention has its own channel, so its roster can differ from the agent config channel's.
+- [NIP-AP](NIP-AP.md): the attention channel, its roster and Discovery; the agent's settings and instructions.
