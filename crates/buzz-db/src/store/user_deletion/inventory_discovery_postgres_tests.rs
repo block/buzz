@@ -22,7 +22,7 @@ async fn event(pool: &PgPool, community: Uuid, author: &str, kind: i32, tags: Va
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn rehearsal_discovers_residue_and_scoped_agents_without_unrelated_communities() {
+async fn shared_inventory_discovers_residue_and_scoped_agents_without_unrelated_communities() {
     let pool = PgPool::connect(&crate::test_support::database_url())
         .await
         .unwrap();
@@ -36,7 +36,7 @@ async fn rehearsal_discovers_residue_and_scoped_agents_without_unrelated_communi
     // Each community has only one source of attribution: no users/membership
     // row can accidentally mask a missing historical-data predicate.
     for (sql, role) in [
-        ("INSERT INTO relay_members(community_id,pubkey,role) VALUES($1,$2,'owner')", "owner"),
+        ("INSERT INTO relay_members(community_id,pubkey,role) VALUES($1,$2,'admin')", "participant"),
         ("INSERT INTO relay_members(community_id,pubkey,role) VALUES($1,$2,'member')", "participant"),
         ("INSERT INTO channel_members(community_id,channel_id,pubkey) VALUES($1,gen_random_uuid(),decode($2,'hex'))", "participant"),
         ("INSERT INTO channel_members(community_id,channel_id,pubkey,removed_at) VALUES($1,gen_random_uuid(),decode($2,'hex'),now())", "past_participant"),
@@ -135,14 +135,43 @@ async fn rehearsal_discovers_residue_and_scoped_agents_without_unrelated_communi
     assert!(saved.approvals.is_empty());
     assert!(saved.stage_history.is_empty());
 
-    // Ordinary inventory remains membership-only. Saved rehearsals remain frozen.
+    // Preview and both submission modes share selection and frozen attribution.
+    let preview = store
+        .generate_inventory_with_relay(&human, Some(&relay))
+        .await
+        .unwrap();
+    let deletion = store
+        .submit_with_relay(&human, "operator", None, Some(&relay))
+        .await
+        .unwrap();
+    assert_eq!(deletion.inventory_manifest.as_ref().unwrap(), &preview);
+    let mut rehearsal_inventory = first.inventory_manifest.clone().unwrap();
+    for field in ["execution_mode", "run_id", "workflow_version"] {
+        rehearsal_inventory.as_object_mut().unwrap().remove(field);
+    }
+    assert_eq!(rehearsal_inventory, preview);
+    // No-relay inputs are also shared and exclude relay-only historical attribution.
+    let keyless = store
+        .submit_rehearsal(&human, "operator", None, Uuid::new_v4())
+        .await
+        .unwrap();
+    let keyless_preview = store.generate_inventory(&human).await.unwrap();
     assert_eq!(
-        store.generate_inventory(&human).await.unwrap()["communities"]
-            .as_array()
-            .unwrap()
-            .len(),
-        3
+        keyless.inventory_manifest.as_ref().unwrap()["communities"],
+        keyless_preview["communities"]
     );
+    assert_eq!(
+        keyless_preview["communities"].as_array().unwrap().len(),
+        expected.len() - 3
+    );
+    assert!(store
+        .generate_inventory_with_relay(&human, Some(&human))
+        .await
+        .is_err());
+    assert!(store
+        .submit_with_relay(&human, "operator", None, Some(&human))
+        .await
+        .is_err());
     sqlx::query("INSERT INTO users(community_id,pubkey) VALUES($1,decode($2,'hex'))")
         .bind(retained)
         .bind(&human)
@@ -160,6 +189,21 @@ async fn rehearsal_discovers_residue_and_scoped_agents_without_unrelated_communi
         .submit_rehearsal_with_relay(&human, "operator", None, run, Some(&other))
         .await
         .is_err());
+    let deletion_retry = store
+        .submit_with_relay(&human, "operator", None, Some(&relay.to_uppercase()))
+        .await
+        .unwrap();
+    assert_eq!(
+        deletion_retry.inventory_manifest,
+        deletion.inventory_manifest
+    );
+    assert_eq!(deletion_retry.inventory_digest, deletion.inventory_digest);
+    for relay_input in [None, Some(other.as_str())] {
+        assert!(store
+            .submit_with_relay(&human, "operator", None, relay_input)
+            .await
+            .is_err());
+    }
     let fresh = store
         .submit_rehearsal_with_relay(&human, "operator", None, Uuid::new_v4(), Some(&relay))
         .await
@@ -175,7 +219,7 @@ async fn rehearsal_discovers_residue_and_scoped_agents_without_unrelated_communi
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn rehearsal_limit_counts_only_matched_communities_and_errors_leave_no_request() {
+async fn shared_inventory_limit_counts_only_matched_communities_and_errors_leave_no_request() {
     let pool = PgPool::connect(&crate::test_support::database_url())
         .await
         .unwrap();
@@ -217,7 +261,9 @@ async fn rehearsal_limit_counts_only_matched_communities_and_errors_leave_no_req
         .await
         .unwrap_err()
         .to_string()
-        .contains("community limit exceeded"));
+        .contains("no partial inventory returned"));
+    assert!(store.generate_inventory(&human).await.is_err());
+    assert!(store.submit(&human, "operator", None).await.is_err());
     sqlx::query("ALTER TABLE api_tokens RENAME TO unavailable_api_tokens")
         .execute(&pool)
         .await
@@ -226,6 +272,8 @@ async fn rehearsal_limit_counts_only_matched_communities_and_errors_leave_no_req
         .submit_rehearsal(&human, "operator", None, Uuid::new_v4())
         .await
         .is_err());
+    assert!(store.generate_inventory(&human).await.is_err());
+    assert!(store.submit(&human, "operator", None).await.is_err());
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM entity_deletion_requests")
         .fetch_one(&pool)
         .await

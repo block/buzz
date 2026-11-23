@@ -37,7 +37,12 @@ Supply a verified `--relay-pubkey` at submission to include historical
 relay-attributed content. Execution reuses the saved key; an explicit override
 must match it. Without a submission key, discovery uses direct records
 and profile candidates; ordinary messages mentioning the target do not select
-their communities. The supplied discovery key is saved in the inventory.
+their communities. The supplied discovery key is saved in the inventory. The same option is accepted
+by `inventory` and ordinary `submit`; identical subject and relay inputs select
+identical communities in both modes. Rehearsal mode adds only its run metadata
+to the inventory. The existing ordinary-submission restriction on owner cleanup remains:
+the shared selector reports owners, then ordinary submission refuses the unsupported
+scope and rolls back its request. It never silently drops owner communities.
 
 The request target is `rehearsal:<run-uuid>:<canonical-pubkey>`, preserving the
 existing database uniqueness constraint without a migration. Approval binds its
@@ -61,8 +66,8 @@ that has completed.
    request through the existing transition function.
 
 The last community automatically transitions to global cleanup. With no matched
-communities, media transitions directly to global cleanup. Rehearsal discovery
-saves only communities with target-linked cleanup candidates: memberships,
+communities, media transitions directly to global cleanup. The shared inventory method
+used by `inventory`, ordinary `submit`, and `submit --read-only` saves only communities with target-linked cleanup candidates: memberships,
 owned agents (including inactive ones), or residual content, account, media or
 profile records. It includes former-member residue and excludes unrelated
 communities. Agent ownership is scoped to each community. Historical relay
@@ -70,7 +75,7 @@ attribution and profile subjects remain candidates until the handlers validate
 them; inventory inclusion does not authorize deleting their rows. The community
 limit applies after filtering. Existing requests keep their saved inventory;
 a new run discovers the current scope. Standalone `account-scope` is unchanged.
-New rehearsal inventories label current non-owner members `participant` and
+New inventories label current non-owner members `participant` and
 matched communities without current membership `past_participant`. The latter
 includes communities with only owned-agent data; it does not assert that the
 human previously joined. Both use the same content, account and profile previews.

@@ -22,11 +22,14 @@ pub enum Command {
         #[arg(long, value_parser = inventory::parse_subject)]
         pubkey: String,
     },
-    /// Print real current memberships as JSON; does not save or execute a request.
+    /// Print communities with cleanup candidates as JSON; does not save or execute a request.
     Inventory {
-        /// Demo fixture (default), hex public key, or npub. Current memberships only.
+        /// Demo fixture (default), hex public key, or npub.
         #[arg(long, default_value = "demo", value_parser = inventory::parse_subject)]
         pubkey: String,
+        /// Trusted relay public key for historical content attribution in the inventory.
+        #[arg(long, value_parser = content_batches::parse_pubkey)]
+        relay_pubkey: Option<String>,
     },
     /// Save a request; read-only submissions start independent rehearsals.
     Submit {
@@ -42,7 +45,7 @@ pub enum Command {
         #[arg(long, requires = "read_only")]
         run_id: Option<Uuid>,
         /// Trusted relay public key for historical content attribution in the inventory.
-        #[arg(long, requires = "read_only")]
+        #[arg(long, value_parser = content_batches::parse_pubkey)]
         relay_pubkey: Option<String>,
         /// Optional demo request label, for example demo:alice. Conflicts with --pubkey.
         #[arg(long, conflicts_with = "pubkey")]
@@ -196,8 +199,11 @@ pub async fn run(command: Command) -> Result<i32> {
                     .await?,
             )?;
         }
-        Command::Inventory { pubkey } => {
-            crate::print_json(&inventory::generate(&db, &pubkey).await?)?;
+        Command::Inventory {
+            pubkey,
+            relay_pubkey,
+        } => {
+            crate::print_json(&inventory::generate(&db, &pubkey, relay_pubkey.as_deref()).await?)?;
         }
         Command::Submit {
             read_only,
@@ -228,7 +234,12 @@ pub async fn run(command: Command) -> Result<i32> {
                     .await?
             } else {
                 users
-                    .submit(&target, &requested_by, reason.as_deref())
+                    .submit_with_relay(
+                        &target,
+                        &requested_by,
+                        reason.as_deref(),
+                        relay_pubkey.as_deref(),
+                    )
                     .await?
             };
             crate::print_json(&request)?;
@@ -260,7 +271,7 @@ pub async fn run(command: Command) -> Result<i32> {
             demo_no_agents_in,
         } => {
             let request = store.get(id).await?;
-            let relay_pubkey = inventory::rehearsal_relay_key(
+            let relay_pubkey = inventory::saved_relay_key(
                 request.inventory_manifest.as_ref(),
                 relay_pubkey.as_deref(),
             )?;
@@ -375,7 +386,7 @@ mod rehearsal_cli_tests {
             key
         ]))
         .is_ok());
-        assert!(Cli::try_parse_from(submit.into_iter().chain(["--relay-pubkey", key])).is_err());
+        assert!(Cli::try_parse_from(submit.into_iter().chain(["--relay-pubkey", key])).is_ok());
         let run = ["user-deletions", "run", id];
         for mode in ["--read-only", "--print-only", "--delete"] {
             assert!(Cli::try_parse_from(run.into_iter().chain([mode, "--next-step"])).is_ok());

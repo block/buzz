@@ -109,8 +109,15 @@ async fn channel_memberships_discover_participants_deduplicate_and_preserve_owne
                 .bind(community).bind(channel).bind(&key).bind(removed)
                 .execute(&pool).await.unwrap();
         }
-        if !removed && !unrelated {
-            expected.push((community, relay_role));
+        if !unrelated {
+            expected.push((
+                community,
+                if removed {
+                    Some("past_participant")
+                } else {
+                    relay_role
+                },
+            ));
         }
     }
     expected.sort_by_key(|(community, _)| *community);
@@ -124,6 +131,8 @@ async fn channel_memberships_discover_participants_deduplicate_and_preserve_owne
             actual["relationship"],
             if role == Some("owner") {
                 "owner"
+            } else if role == Some("past_participant") {
+                "past_participant"
             } else {
                 "participant"
             }
@@ -215,6 +224,7 @@ async fn current_inventory_includes_all_lifecycle_states_and_excludes_removed_me
         inventory,
         json!({
             "communities": expected,
+            "scope": "affected_communities",
         })
     );
     let npub = nostr::PublicKey::parse(PUBKEY)

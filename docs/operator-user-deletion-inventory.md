@@ -23,8 +23,8 @@ request row in the database where it ran.
 cargo build -p buzz-admin
 ```
 
-Set `DATABASE_URL` explicitly. Preview needs SELECT on `communities`,
-`relay_members`, and `channel_members`. The complete workflow also needs write
+Set `DATABASE_URL` explicitly. Preview needs SELECT on the community, content, account, media and profile
+source tables read by `crates/buzz-db/src/store/user_deletion/inventory_discovery.sql`. The complete workflow also needs write
 access to the `entity_deletion_*` tables. A production read-only account cannot
 submit, approve, or checkpoint a run.
 
@@ -35,7 +35,8 @@ docker run --detach --name buzz-user-inventory \
   --publish 127.0.0.1:55435:5432 \
   --env POSTGRES_USER=buzz --env POSTGRES_PASSWORD=buzz-local-demo \
   --env POSTGRES_DB=buzz postgres:17-alpine
-export DATABASE_URL=postgres://buzz:buzz-local-demo@127.0.0.1:55435/buzz
+export PGPASSWORD=buzz-local-demo
+export DATABASE_URL=postgres://buzz@127.0.0.1:55435/buzz
 # Wait until pg_isready reports accepting connections.
 docker exec buzz-user-inventory pg_isready -U buzz -d buzz
 ./target/debug/buzz-admin migrate
@@ -60,7 +61,7 @@ SUBJECT=<your-hex-key-or-npub>
 
 Hex and npub are two encodings of the same public key. They normalize to the
 same lowercase hex target and therefore the same request. No private key is
-needed. Discovery only sees memberships in the database selected by
+needed. Discovery only sees cleanup candidates in the database selected by
 `DATABASE_URL`; a fresh local database will return no communities for your key.
 The optional local fixture below exercises discovery using that key without
 connecting to production.
@@ -192,27 +193,39 @@ inventory is not regenerated on resubmission.
 
 ## Discovery and limits
 
-1. Normalize the hex key or npub.
-2. Find explicit `relay_members` rows by the normalized hex key.
-3. Find `channel_members` rows using the byte-form key and `removed_at IS NULL`.
-   Hidden memberships count, including token-authenticated participants without
-   an explicit relay membership row.
-4. Combine community IDs, deduplicate, and join `communities` for each host.
-   Include archived and deleting communities when membership evidence exists.
-5. Preserve an explicit relay owner relationship; otherwise use participant.
-6. Return communities once each, ordered by UUID.
+`inventory`, ordinary `submit`, and `submit --read-only` call one inventory
+method. For the same public key, trusted relay key and database snapshot, all
+three select the same communities and relationships. Rehearsals add their
+execution mode, run ID and workflow version after selection.
+
+Selection includes current community/channel membership, owned agents (including
+inactive ones), and remaining content, account, media or profile records.
+Agent ownership is community-local. Unrelated communities and ordinary messages
+mentioning the subject do not enter the inventory. A current non-owner membership
+is `participant`; remaining data without current membership is `past_participant`.
+That label also covers agent-only data and does not imply the human previously joined.
+Owners retain `owner`.
+
+Supply the same optional `--relay-pubkey <trusted-relay-key>` to preview and
+submission to include historical relay-attributed content. The inventory freezes
+this key; execution reuses it and rejects a conflicting override. Without it,
+only direct records and profile candidates are selected. Inclusion identifies
+work to inspect; handlers still validate authority over individual rows.
 
 Discovery uses one statement snapshot, a 30-second timeout, and a 1,000-community
-cap. Errors and oversized results fail rather than return partial inventories.
-A failed discovery during submission rolls back the request too.
-Preview uses a read-only transaction and needs no workflow tables or migrations.
+cap applied after filtering. Errors and oversized results fail rather than return
+partial inventories; failed submission rolls back the request too. Preview uses
+a read-only transaction and needs no deletion-workflow tables. It cannot find
+communities in other databases. Saved requests keep their inventories and digests
+on retry, even after source data changes.
 
-This covers current memberships only. It does not discover past participation,
-other keys owned by the person, or communities in other databases. Owners are
-reported by discovery, but submission rejects owner inventories and rolls back
-the request until owned-community execution is implemented. Approval also rejects
-previously saved owner inventories. Both report "owned-community execution is not
-supported yet". The dummy fixture's former participant is synthetic.
+The common selector reports owner communities. Ordinary submission, approval
+and execution retain the existing refusal: "owned-community execution is not
+supported yet". Ordinary submission rolls back rather than saving a request
+that cannot proceed. Rehearsals can save and inspect that scope; neither mode
+silently drops owners from the selected inventory.
+See [the rehearsal guide](operator-user-deletion-rehearsal.md) for the current
+read-only workflow and its limits.
 
 ## Schema and compatibility
 

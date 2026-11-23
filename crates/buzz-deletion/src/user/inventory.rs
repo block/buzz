@@ -1,8 +1,15 @@
 //! Inventory preview and shared subject parsing for preview and submission.
 use anyhow::Result;
 
-pub(super) async fn generate(db: &buzz_db::Db, pubkey: &str) -> Result<serde_json::Value> {
-    Ok(db.user_deletion_store().generate_inventory(pubkey).await?)
+pub(super) async fn generate(
+    db: &buzz_db::Db,
+    pubkey: &str,
+    relay_pubkey: Option<&str>,
+) -> Result<serde_json::Value> {
+    Ok(db
+        .user_deletion_store()
+        .generate_inventory_with_relay(pubkey, relay_pubkey)
+        .await?)
 }
 
 pub(super) fn parse_subject(input: &str) -> std::result::Result<String, String> {
@@ -14,30 +21,11 @@ pub(super) fn parse_subject(input: &str) -> std::result::Result<String, String> 
 
 // Filtered discovery and execution must use the same attribution boundary.
 // Older all-community manifests retain their existing runtime configuration.
-pub(super) fn rehearsal_relay_key(
+pub(super) fn saved_relay_key(
     manifest: Option<&serde_json::Value>,
     supplied: Option<&str>,
 ) -> Result<Option<String>> {
-    let Some(manifest) = manifest.filter(|m| m["scope"] == "affected_communities") else {
-        return Ok(supplied.map(str::to_owned));
-    };
-    let supplied = supplied
-        .map(buzz_db::user_deletion::normalize_user_deletion_pubkey)
-        .transpose()?;
-    let saved = manifest
-        .get("discovery_relay_pubkey")
-        .map(|v| {
-            v.as_str()
-                .ok_or_else(|| anyhow::anyhow!("invalid discovery relay key"))
-        })
-        .transpose()?
-        .map(buzz_db::user_deletion::normalize_user_deletion_pubkey)
-        .transpose()?;
-    anyhow::ensure!(
-        supplied.is_none() || supplied == saved,
-        "relay key differs from filtered inventory; submit a new rehearsal with that key"
-    );
-    Ok(saved)
+    Ok(buzz_db::user_deletion::UserDeletionInventory::resolve_relay_pubkey(manifest, supplied)?)
 }
 
 #[cfg(test)]
@@ -51,20 +39,20 @@ mod tests {
         let other = nostr::Keys::generate().public_key().to_hex();
         let saved = json!({"scope":"affected_communities", "discovery_relay_pubkey":key});
         assert_eq!(
-            rehearsal_relay_key(Some(&saved), None).unwrap(),
+            saved_relay_key(Some(&saved), None).unwrap(),
             Some(key.clone())
         );
         assert_eq!(
-            rehearsal_relay_key(Some(&saved), Some(&key.to_uppercase())).unwrap(),
+            saved_relay_key(Some(&saved), Some(&key.to_uppercase())).unwrap(),
             Some(key.clone())
         );
-        assert!(rehearsal_relay_key(Some(&saved), Some(&other)).is_err());
+        assert!(saved_relay_key(Some(&saved), Some(&other)).is_err());
         let keyless = json!({"scope":"affected_communities"});
-        assert_eq!(rehearsal_relay_key(Some(&keyless), None).unwrap(), None);
-        assert!(rehearsal_relay_key(Some(&keyless), Some(&key)).is_err());
+        assert_eq!(saved_relay_key(Some(&keyless), None).unwrap(), None);
+        assert!(saved_relay_key(Some(&keyless), Some(&key)).is_err());
         let legacy = json!({"scope":"all_stored_communities"});
         assert_eq!(
-            rehearsal_relay_key(Some(&legacy), Some(&key)).unwrap(),
+            saved_relay_key(Some(&legacy), Some(&key)).unwrap(),
             Some(key)
         );
     }

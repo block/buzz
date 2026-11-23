@@ -1,4 +1,4 @@
--- Submission only: discover candidate communities, never authorize row deletion.
+-- Preview and both submission modes: discover candidate communities, never authorize row deletion.
 -- Include inactive agents and removed memberships. A current owned-agent profile
 -- already selects its community; do not carry its key into another community.
 -- Keep all predicates inside the limit so unrelated tenants cannot exhaust it.

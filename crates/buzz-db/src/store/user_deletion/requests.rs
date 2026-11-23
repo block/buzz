@@ -18,7 +18,20 @@ impl UserDeletionStore {
         requested_by: &str,
         reason: Option<&str>,
     ) -> Result<EntityRequest> {
-        self.submit_mode(target, requested_by, reason, None, None)
+        self.submit_with_relay(target, requested_by, reason, None)
+            .await
+    }
+
+    /// Save an ordinary request using the shared inventory and trusted relay input.
+    /// Attribution is frozen with the inventory and must match on resubmission.
+    pub async fn submit_with_relay(
+        &self,
+        target: &str,
+        requested_by: &str,
+        reason: Option<&str>,
+        relay_pubkey: Option<&str>,
+    ) -> Result<EntityRequest> {
+        self.submit_mode(target, requested_by, reason, None, relay_pubkey)
             .await
     }
 
@@ -46,23 +59,9 @@ impl UserDeletionStore {
         run_id: uuid::Uuid,
         relay_pubkey: Option<&str>,
     ) -> Result<EntityRequest> {
-        let subject = super::normalize_user_deletion_pubkey(target)?;
-        let relay_pubkey = relay_pubkey
-            .map(super::normalize_user_deletion_pubkey)
-            .transpose()?;
-        if relay_pubkey.as_deref() == Some(&subject) {
-            return Err(DbError::DeletionSafety(
-                "the human and trusted relay public keys must differ".into(),
-            ));
-        }
-        self.submit_mode(
-            target,
-            requested_by,
-            reason,
-            Some(run_id),
-            relay_pubkey.as_deref(),
-        )
-        .await
+        super::normalize_user_deletion_pubkey(target)?;
+        self.submit_mode(target, requested_by, reason, Some(run_id), relay_pubkey)
+            .await
     }
 
     async fn submit_mode(
@@ -74,6 +73,8 @@ impl UserDeletionStore {
         relay_pubkey: Option<&str>,
     ) -> Result<EntityRequest> {
         let subject = normalize_target(subject)?;
+        let relay_pubkey = super::discovery::normalize_relay(&subject, relay_pubkey)?;
+        let relay_pubkey = relay_pubkey.as_deref();
         let target = match run_id {
             Some(id) => format!("rehearsal:{id}:{subject}"),
             None => subject.clone(),
@@ -106,19 +107,12 @@ impl UserDeletionStore {
             )));
         }
         if request.status == "submitted" {
-            let mut inventory = if run_id.is_some() {
-                super::discovery::generate_rehearsal_inventory_on(&mut tx, &subject, relay_pubkey)
-                    .await?
-            } else {
-                super::discovery::generate_inventory_on(&mut tx, &subject).await?
-            };
+            let mut inventory =
+                super::discovery::generate_inventory_on(&mut tx, &subject, relay_pubkey).await?;
             if let Some(id) = run_id {
                 inventory["execution_mode"] = "rehearsal".into();
                 inventory["run_id"] = id.to_string().into();
                 inventory["workflow_version"] = 2.into();
-                if let Some(key) = relay_pubkey {
-                    inventory["discovery_relay_pubkey"] = key.into();
-                }
             }
             let digest = inventory_digest(&inventory)?;
             request = sqlx::query_as(sqlx::AssertSqlSafe(format!(
@@ -133,20 +127,19 @@ impl UserDeletionStore {
             .bind(digest)
             .fetch_one(&mut *tx)
             .await?;
-            // Use the approval validator before committing either the request
-            // or inventory, so unsupported scopes leave no new request behind.
+            // Validate shape and supported scope before committing either the
+            // inventory or request. Unsupported execution fails, never filters.
             super::UserDeletionInventory::read(&request)?;
         }
-        if run_id.is_some()
-            && request
-                .inventory_manifest
-                .as_ref()
-                .and_then(|m| m.get("discovery_relay_pubkey"))
-                .and_then(serde_json::Value::as_str)
-                != relay_pubkey
+        if request
+            .inventory_manifest
+            .as_ref()
+            .and_then(|m| m.get("discovery_relay_pubkey"))
+            .and_then(serde_json::Value::as_str)
+            != relay_pubkey
         {
             return Err(DbError::DeletionSafety(
-                "rehearsal discovery relay differs from saved inventory; use a new run ID".into(),
+                "discovery relay differs from saved inventory; inspect the saved request".into(),
             ));
         }
         tx.commit().await?;

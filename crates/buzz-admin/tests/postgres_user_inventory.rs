@@ -19,7 +19,7 @@ fn admin_binary() -> std::ffi::OsString {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn cluster_global_inventory_cli_uses_only_existing_membership_tables() {
+async fn cluster_global_inventory_cli_uses_select_only_source_tables_without_workflow_tables() {
     let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
         .unwrap();
@@ -51,6 +51,36 @@ async fn cluster_global_inventory_cli_uses_only_existing_membership_tables() {
         include_str!("../../../schema/tables/public/channel_members.sql"),
     ] {
         sqlx::raw_sql(schema).execute(&mut *tx).await.unwrap();
+    }
+    // The common selector also reads remaining-data tables, never workflow journals.
+    for table in [
+        "users",
+        "api_tokens",
+        "relay_invites",
+        "product_feedback",
+        "join_policy_acceptances",
+        "pubkey_allowlist",
+        "personal_read_frontiers",
+        "personal_read_accounts",
+        "nip_fi_profile_heads",
+        "archived_identities",
+        "reactions",
+        "push_leases",
+        "push_wake_outbox",
+        "operator_listener_outbox",
+        "media_uploaders",
+        "audit_log",
+        "workflow_runs",
+        "workflow_approvals",
+        "workflows",
+        "events",
+    ] {
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "CREATE TABLE {name}.{table} (LIKE public.{table} INCLUDING DEFAULTS)"
+        )))
+        .execute(&mut *tx)
+        .await
+        .unwrap();
     }
     let pubkey = "5e4083a7a793d02575876eaf47932b4835999f5af2653d26250a909b450da7c9";
     let community = Uuid::new_v4();
@@ -160,7 +190,8 @@ async fn cluster_global_inventory_cli_uses_only_existing_membership_tables() {
         })
     );
     let inventory = &inventories[0];
-    assert_eq!(inventory.as_object().unwrap().len(), 1);
+    assert_eq!(inventory.as_object().unwrap().len(), 2);
+    assert_eq!(inventory["scope"], "affected_communities");
     assert_eq!(demo.as_object().unwrap().len(), 1);
     let communities = inventory["communities"].as_array().unwrap();
     assert_eq!(communities.len(), 2);

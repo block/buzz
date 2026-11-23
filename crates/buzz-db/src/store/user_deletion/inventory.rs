@@ -85,11 +85,7 @@ impl UserDeletionInventory {
         let mut seen = HashSet::new();
         let mut communities = Vec::new();
         for row in rows {
-            if matches!(
-                row["relationship"].as_str(),
-                Some("stored_community" | "past_participant")
-            ) && !rehearsal
-            {
+            if matches!(row["relationship"].as_str(), Some("stored_community")) && !rehearsal {
                 return Err(invalid(
                     "all-community inspection is only supported for rehearsals",
                 ));
@@ -120,6 +116,35 @@ impl UserDeletionInventory {
             communities.push((id, row.clone()));
         }
         Ok(Self { communities })
+    }
+
+    /// Resolve frozen attribution for a filtered inventory. Legacy inventories
+    /// without that scope retain their existing runtime relay configuration.
+    pub fn resolve_relay_pubkey(
+        manifest: Option<&Value>,
+        supplied: Option<&str>,
+    ) -> Result<Option<String>> {
+        let Some(manifest) = manifest.filter(|m| m["scope"] == "affected_communities") else {
+            return Ok(supplied.map(str::to_owned));
+        };
+        let supplied = supplied
+            .map(super::normalize_user_deletion_pubkey)
+            .transpose()?;
+        let saved = manifest
+            .get("discovery_relay_pubkey")
+            .map(|v| {
+                v.as_str()
+                    .ok_or_else(|| invalid("invalid discovery relay key"))
+            })
+            .transpose()?
+            .map(super::normalize_user_deletion_pubkey)
+            .transpose()?;
+        if supplied.is_some() && supplied != saved {
+            return Err(invalid(
+                "relay key differs from filtered inventory; use the saved attribution key",
+            ));
+        }
+        Ok(saved)
     }
 
     /// Build handler inputs for a request-wide or community-scoped stage.

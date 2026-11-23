@@ -51,7 +51,7 @@ mod postgres_tests;
 mod discovery_postgres_tests;
 
 #[cfg(test)]
-mod rehearsal_discovery_postgres_tests;
+mod inventory_discovery_postgres_tests;
 
 impl UserDeletionStore {
     /// Configure the deployment's existing relay key for atomic account roster repair.
