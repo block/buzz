@@ -10,7 +10,7 @@ This NIP defines how an author writes a message now and has the relay post it la
 
 The relay never holds the author's key, and it releases the message inside the timestamp window it already enforces, so the signer rule and the timestamp rule stay as they are. Readers get an ordinary event and cannot tell that it was sent later.
 
-Recurring sends, forum posts and [NIP-17](17.md) gift wraps are out of scope. There is no time lock: the relay can read a message as soon as it accepts the instruction. The rules for operating a relay with send later are in the [deployment guide](../send-later-deployment.md).
+Recurring sends, forum posts and [NIP-17](17.md) gift wraps are out of scope. There is no time lock: the relay can read a message as soon as it accepts the instruction.
 
 ## Kinds
 
@@ -152,7 +152,7 @@ When a send ends for any reason other than the author's own cancel, the relay pu
 | `cancelled` | `banned` | The author or the author's owner is banned in the community |
 | `cancelled` | `disconnected` | A NIP-FI disconnect applies to the author or the author's owner ([Federated identity](#federated-identity)) |
 | `cancelled` | `channel_deleted` | The channel is deleted |
-| `cancelled` | `withdrawn` | The relay operator withdraws the send ([deployment guide](../send-later-deployment.md#rolling-back)) |
+| `cancelled` | `withdrawn` | The relay operator ends the send before a version change that could not keep it |
 
 The relay cancels in the atomic change that records the ban, the disconnect or the channel deletion, and for a disconnect before it answers the issuer. It MUST apply the `banned` and `channel_deleted` rows again at release, which catches an instruction that was being accepted while the event was recorded. An owner is the owner of the author's key in that community (NIP-OA, and "Agent keys" in [NIP-FI](NIP-FI.md)). A cancelled send stays cancelled: lifting a ban or restoring access MUST NOT make it pending again. Deleting an account or a community removes its sends with the other data, and no status is published.
 
