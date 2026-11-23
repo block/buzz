@@ -356,7 +356,6 @@ class MediaCacheIndex extends JsonCacheInfoRepository {
   /// Called when more files are over capacity than one pass returns.
   void Function()? onMoreToEvict;
 
-  bool _swept = false;
   bool _retired = false;
 
   /// Stops eviction for good, once its cache is disposed: a pass still
@@ -364,38 +363,59 @@ class MediaCacheIndex extends JsonCacheInfoRepository {
   /// Saves still finishing are recorded.
   void retire() => _retired = true;
 
-  /// Deletes files the index doesn't track, once, before the first use: a
-  /// save interrupted by a full disk or the app exiting, or one whose index
-  /// entry was not yet saved. Eviction sees only indexed files.
+  /// Deletes files the index doesn't track, once, after it opens: a save
+  /// interrupted by a full disk or the app exiting, or one whose index entry
+  /// was not yet saved. Eviction sees only indexed files. The sweep runs in
+  /// the background, since listing a full directory would delay the first
+  /// image.
   @override
   Future<bool> open() async {
     final opened = await super.open();
-    if (!_swept) {
-      _swept = true;
-      await _deleteUntrackedFiles();
-    }
+    _sweep ??= _deleteUntrackedFiles();
     return opened;
   }
 
+  Future<void>? _sweep;
+
+  /// Waits for the sweep, so a cache opening this directory next starts
+  /// after it.
+  @override
+  Future<bool> close() async {
+    await _sweep;
+    return super.close();
+  }
+
+  /// How far a file's modification time may trail the clock, on file
+  /// systems that record it coarsely.
+  static const _mtimeSlack = Duration(seconds: 5);
+
   Future<void> _deleteUntrackedFiles() async {
     // A save that starts while this runs is newer, so it is kept.
-    final started = DateTime.now();
+    final cutoff = DateTime.now().subtract(_mtimeSlack);
+    final Set<String> tracked;
+    final List<FileSystemEntity> entries;
     try {
       if (!await _directory.exists()) return;
-      final tracked = {for (final o in await getAllObjects()) o.relativePath};
-      await for (final entry in _directory.list()) {
-        final name = p.basename(entry.path);
-        if (entry is! File ||
-            name.startsWith('index.json') ||
-            tracked.contains(name)) {
-          continue;
-        }
-        if ((await entry.lastModified()).isBefore(started)) {
-          await entry.delete();
-        }
-      }
+      tracked = {for (final o in await getAllObjects()) o.relativePath};
+      entries = await _directory.list().toList();
     } on FileSystemException catch (error) {
       debugPrint('[MediaDiskCache] sweep failed: $error');
+      return;
+    }
+    for (final entry in entries) {
+      final name = p.basename(entry.path);
+      if (entry is! File ||
+          name.startsWith('index.json') ||
+          tracked.contains(name)) {
+        continue;
+      }
+      try {
+        if ((await entry.lastModified()).isBefore(cutoff)) {
+          await entry.delete();
+        }
+      } on FileSystemException {
+        // Renamed or deleted since the listing.
+      }
     }
   }
 

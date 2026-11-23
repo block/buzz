@@ -424,9 +424,13 @@ void main() {
           ..writeAsBytesSync(Uint8List(4))
           ..setLastModifiedSync(earlier);
       }
+      // The sweep runs in the background, and a save made while it runs
+      // stays.
       final relaunched = MediaDiskCache.open(sweptDirectory);
+      await relaunched.write('during', Uint8List(4), immutable: true);
       expect(await relaunched.read('kept'), isNotNull);
-      expect(filesIn(sweptDirectory), hasLength(1));
+      await _until(() async => filesIn(sweptDirectory).length == 2);
+      expect(await relaunched.read('during'), isNotNull);
       await relaunched.dispose();
 
       // A disposed cache's scheduled eviction pass, running after the
