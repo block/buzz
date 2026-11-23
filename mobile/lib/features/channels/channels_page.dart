@@ -150,6 +150,7 @@ class ChannelsPage extends HookConsumerWidget {
     required this.settingsPageBuilder,
     this.onSearch,
     this.messagesActionsBuilder,
+    this.messagesNativeActionsBuilder,
     this.soloSliver,
     this.newChannelAction,
     this.newDmAction,
@@ -166,6 +167,11 @@ class ChannelsPage extends HookConsumerWidget {
   /// standalone Channels header.
   final List<Widget> Function(VoidCallback openSwitcher, GlobalKey avatarKey)?
   messagesActionsBuilder;
+
+  /// Builds the same Messages header actions as native controls, which Duo
+  /// projects into its rail instead of the header.
+  final List<IosNavigationAction> Function(VoidCallback openSwitcher)?
+  messagesNativeActionsBuilder;
   final Widget? soloSliver;
   final ValueNotifier<VoidCallback?>? newChannelAction;
   final ValueNotifier<VoidCallback?>? newDmAction;
@@ -210,6 +216,10 @@ class ChannelsPage extends HookConsumerWidget {
         (DuoToolbarScope.maybeStripOf(context) ??
                 FoldGeometry.of(context).strip) !=
             null;
+    // Duo keeps the Flutter Messages header, with its leading title, and
+    // moves only the header's actions into the rail as native controls.
+    final duoRailActions =
+        nativeDuoTitle && messagesNativeActionsBuilder != null;
     final topSectionHeight = frostedAppBarHeight(
       context,
       titleStyle: headerTitleStyle,
@@ -723,7 +733,9 @@ class ChannelsPage extends HookConsumerWidget {
                   child: Text('Messages', style: headerTitleStyle),
                 )
               : const SizedBox.shrink(),
-          actions: messages
+          actions: duoRailActions
+              ? const []
+              : messages
               ? messagesActionsBuilder?.call(
                       openCommunityGrid,
                       communityAvatarKey,
@@ -738,7 +750,14 @@ class ChannelsPage extends HookConsumerWidget {
           bottomHeight: _kTopSectionBottomPadding,
           bottom: const SizedBox.expand(),
         ),
-        body: child!,
+        body: messages
+            ? _DuoRailActions(
+                actions: duoRailActions
+                    ? messagesNativeActionsBuilder!(openCommunityGrid)
+                    : const [],
+                child: child!,
+              )
+            : child!,
       ),
     );
     return _RouteCurrencySync(
@@ -865,4 +884,29 @@ BoxConstraints _quickActionSheetConstraints(BuildContext context) {
   return BoxConstraints(
     maxHeight: mediaQuery.size.height - mediaQuery.viewPadding.top,
   );
+}
+
+/// Projects Home's Messages actions into Duo's rail while the page is current.
+/// Its own build reads the pane state, so route changes do not rebuild the
+/// page.
+class _DuoRailActions extends StatelessWidget {
+  const _DuoRailActions({required this.actions, required this.child});
+
+  final List<IosNavigationAction> actions;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final toolbarScope = DuoToolbarScope.maybeOf(context);
+    return DuoToolbarPortal(
+      strip: toolbarScope == null
+          ? FoldGeometry.of(context).strip
+          : toolbarScope.strip,
+      active:
+          (toolbarScope?.active ?? true) &&
+          (ModalRoute.isCurrentOf(context) ?? true),
+      actions: actions,
+      child: child,
+    );
+  }
 }
