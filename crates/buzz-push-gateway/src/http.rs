@@ -1298,6 +1298,23 @@ mod transcript_vector_tests {
     }
 
     #[test]
+    fn android_enroll_transcript_vector() {
+        let t = AndroidEnrollTranscript {
+            v: 1,
+            audience: "https://push.buzz.xyz/v1/installations",
+            challenge_id: CHALLENGE_ID,
+            challenge: CHALLENGE,
+            endpoint: ENDPOINT,
+            endpoint_epoch: 1,
+            expires_at: 1_752_624_000,
+        };
+        assert_vector(
+            "enroll_android",
+            &transcript(ANDROID_ENROLL_DOMAIN, &t).unwrap(),
+        );
+    }
+
+    #[test]
     fn delegate_transcript_vector() {
         let t = DelegateTranscript {
             v: 1,

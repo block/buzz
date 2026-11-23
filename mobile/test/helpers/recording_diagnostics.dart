@@ -4,6 +4,8 @@ import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 /// was given.
 class RecordingDiagnostics extends NoopDiagnosticReporter {
   final counts = <({NetworkEvent event, String? member})>[];
+
+  /// The networking breadcrumbs left, in order.
   final breadcrumbs = <NetworkEvent>[];
   final errors = <(Type, DiagnosticOperation)>[];
   String? _member;
@@ -39,8 +41,9 @@ class RecordingDiagnostics extends NoopDiagnosticReporter {
       counts.add((event: event, member: _member));
 
   @override
-  void leaveBreadcrumb(DiagnosticBreadcrumb breadcrumb) =>
-      breadcrumbs.add(breadcrumb.event);
+  void leaveBreadcrumb(DiagnosticBreadcrumb breadcrumb) {
+    if (breadcrumb case NetworkBreadcrumb(:final event)) breadcrumbs.add(event);
+  }
 
   @override
   void reportError(

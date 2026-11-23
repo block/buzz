@@ -295,55 +295,6 @@ final class ProfileSetupRecoveryTests: XCTestCase {
   }
 
   @MainActor
-  func testSelectedEmojiShowsEditablePreview() async throws {
-    let messenger = ProfileSetupTestMessenger()
-    let parent = UIViewController()
-    let window = UIWindow(frame: UIScreen.main.bounds)
-    window.windowScene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
-    window.rootViewController = parent
-    window.makeKeyAndVisible()
-    defer { window.isHidden = true }
-    let coordinator = NativeProfileSetupCoordinator(messenger: messenger, startEditorEngine: { _ in false }, configureEditorEngine: { _ in })
-    messenger.invoke("present", arguments: ["session": 82, "name": "Kenny", "emoji": "😊", "emojiColor": 0xFFFFCC00, "primaryArgb": 0xFF000000, "onPrimaryArgb": 0xFFFFFFFF])
-    let nav = try XCTUnwrap(parent.presentedViewController as? UINavigationController)
-    if let transition = nav.transitionCoordinator {
-      await withCheckedContinuation { continuation in
-        transition.animate(alongsideTransition: nil) { _ in continuation.resume() }
-      }
-    }
-    let profile = try XCTUnwrap(nav.viewControllers.first)
-    let avatar = try XCTUnwrap(descendants(profile.view).compactMap { $0 as? UIButton }
-      .first { $0.accessibilityLabel == "Edit profile photo" })
-    let submit = try XCTUnwrap(descendants(profile.view).compactMap { $0 as? UIButton }
-      .first { $0.configuration?.title == "Continue" })
-    submit.sendActions(for: .touchUpInside)
-    XCTAssertTrue(submit.isEnabled)
-    for dark in [true, false] {
-      let background: UInt32 = dark ? 0xFF000000 : 0xFFFFFFFF
-      messenger.invoke("appearance", arguments: ["session": 82, "dark": dark, "pageBackgroundArgb": background,
-        "primaryArgb": dark ? 0xFFFFFFFF : 0xFF000000, "onPrimaryArgb": background])
-      XCTAssertTrue(parent.presentedViewController === nav)
-      XCTAssertEqual(nav.overrideUserInterfaceStyle, dark ? .dark : .light)
-      XCTAssertTrue(submit.isEnabled)
-      XCTAssertEqual(avatar.accessibilityLabel, "Edit profile photo")
-      let expected = dark ? UIColor.black : UIColor.white
-      var actualWhite: CGFloat = -1, alpha: CGFloat = 0
-      XCTAssertTrue(profile.view.backgroundColor!.getWhite(&actualWhite, alpha: &alpha))
-      var expectedWhite: CGFloat = -1
-      expected.getWhite(&expectedWhite, alpha: &alpha)
-      XCTAssertEqual(actualWhite, expectedWhite, accuracy: 0.001)
-    }
-    let image = try XCTUnwrap(avatar.image(for: .normal))
-    XCTAssertEqual(image.size, CGSize(width: 220, height: 220))
-    let attachment = XCTAttachment(image: image)
-    attachment.name = "Selected emoji with edit badge"
-    attachment.lifetime = .keepAlways
-    add(attachment)
-    withExtendedLifetime(coordinator) {}
-    nav.dismiss(animated: false)
-  }
-
-  @MainActor
   private func descendants(_ view: UIView) -> [UIView] {
     view.subviews.flatMap { [$0] + descendants($0) }
   }

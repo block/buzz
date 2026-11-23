@@ -123,6 +123,11 @@ void main() {
       }
     }
   });
+  late SharedPreferences emptyPrefs;
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    emptyPrefs = await SharedPreferences.getInstance();
+  });
   Widget buildTestable({
     required List<Override> overrides,
     Brightness brightness = Brightness.light,
@@ -139,6 +144,7 @@ void main() {
     bool realHome = false,
     Widget? soloSliver,
     ConversationPaneController? pane,
+    SharedPreferences? prefs,
   }) {
     final channelsPage = ChannelsPage(
       settingsPageBuilder: _buildSettingsPage,
@@ -164,6 +170,7 @@ void main() {
           return communityIcons[relayUrl];
         }),
         appLifecycleProvider.overrideWith(() => _CommunitySettingsLifecycle()),
+        savedPrefsProvider.overrideWithValue(prefs ?? emptyPrefs),
         ...overrides,
       ],
       child: MaterialApp(
@@ -1148,8 +1155,6 @@ void main() {
   testWidgets('Home keeps header blur after returning from search', (
     tester,
   ) async {
-    SharedPreferences.setMockInitialValues({});
-    final prefs = await SharedPreferences.getInstance();
     tester.view.physicalSize = const Size(320, 320);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
@@ -1160,7 +1165,6 @@ void main() {
           colors: [Colors.yellow, Colors.blue],
         ),
         overrides: [
-          savedPrefsProvider.overrideWithValue(prefs),
           channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
         ],
       ),
@@ -1378,13 +1382,10 @@ void main() {
   testWidgets(
     'section options preserve management actions and Duo quick sort',
     (tester) async {
-      SharedPreferences.setMockInitialValues({});
-      final prefs = await SharedPreferences.getInstance();
       await tester.pumpWidget(
         buildTestable(
           overrides: [
             myPubkeyProvider.overrideWithValue('aabb'),
-            savedPrefsProvider.overrideWithValue(prefs),
             channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
             channelSectionsProvider.overrideWith(
               () => _FakeChannelSectionsNotifier(
@@ -1485,8 +1486,6 @@ void main() {
         tester.view.viewPadding = const FakeViewPadding(right: 76);
         addTearDown(tester.view.reset);
         await tester.pumpWidget(const SizedBox.shrink());
-        SharedPreferences.setMockInitialValues({});
-        final duoPrefs = await SharedPreferences.getInstance();
         final sections = _FakeChannelSectionsNotifier(
           const ChannelSectionStore(
             sections: [
@@ -1499,7 +1498,6 @@ void main() {
             realHome: true,
             overrides: [
               myPubkeyProvider.overrideWithValue('aabb'),
-              savedPrefsProvider.overrideWithValue(duoPrefs),
               channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
               channelSectionsProvider.overrideWith(() => sections),
             ],
@@ -5088,6 +5086,7 @@ class _PendingDmActions implements ChannelActions {
   Future<Channel> openDm({
     required List<String> pubkeys,
     bool waitForChannelList = true,
+    bool includeHistory = false,
   }) {
     waits.add(waitForChannelList);
     return Completer<Channel>().future;

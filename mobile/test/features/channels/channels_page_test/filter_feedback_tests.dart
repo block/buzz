@@ -1,7 +1,11 @@
 part of '../channels_page_test.dart';
 
 void _filterFeedbackTests(
-  Widget Function({required List<Override> overrides, bool realHome})
+  Widget Function({
+    required List<Override> overrides,
+    bool realHome,
+    SharedPreferences? prefs,
+  })
   buildTestable,
 ) {
   for (final coverMessages in [true, false]) {
@@ -41,9 +45,9 @@ void _filterFeedbackTests(
         const ids = ['failed', 'loaded'];
         await tester.pumpWidget(
           buildTestable(
+            prefs: prefs,
             realHome: coverMessages,
             overrides: [
-              savedPrefsProvider.overrideWithValue(prefs),
               channelsProvider.overrideWith(
                 () => _FakeNotifier([
                   for (final id in ids)
@@ -160,6 +164,7 @@ void _filterFeedbackTests(
       final manager = _filterTestManager(onPublish: () => publications++);
       await tester.pumpWidget(
         buildTestable(
+          prefs: prefs,
           overrides: [
             channelsProvider.overrideWith(
               () => _FakeNotifier([
@@ -186,7 +191,6 @@ void _filterFeedbackTests(
                 initialStatus: SessionStatus.disconnected,
               ),
             ),
-            savedPrefsProvider.overrideWithValue(prefs),
             channelFilterProvider.overrideWithValue(manager),
           ],
         ),
@@ -330,11 +334,19 @@ void _filterFeedbackTests(
         nsec: keys.nsec,
         pubkey: keys.public,
       );
+      final other = Community.create(
+        name: 'Other community',
+        relayUrl: 'https://other.example',
+        nsec: keys.nsec,
+        pubkey: keys.public,
+      );
       await storage.save(community);
+      await storage.save(other);
       await storage.saveActiveId(community.id);
       final relay = _FilterJourneyRelay();
       await tester.pumpWidget(
         buildTestable(
+          prefs: prefs,
           overrides: [
             channelsProvider.overrideWith(
               () => _FakeNotifier([
@@ -363,7 +375,6 @@ void _filterFeedbackTests(
             ),
             communityStorageProvider.overrideWithValue(storage),
             communitySnapshotWriterProvider.overrideWithValue((_) async {}),
-            savedPrefsProvider.overrideWithValue(prefs),
             relaySessionProvider.overrideWith(() => relay),
           ],
         ),
@@ -465,13 +476,6 @@ void _filterFeedbackTests(
       // Switching community still abandons the sheet.
       await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
-      final other = Community.create(
-        name: 'Other community',
-        relayUrl: 'https://other.example',
-        nsec: keys.nsec,
-        pubkey: keys.public,
-      );
-      await communities.addCommunity(other);
       await communities.switchCommunity(other.id);
       await tester.pumpAndSettle();
       expect(find.text(reopen), findsOneWidget);

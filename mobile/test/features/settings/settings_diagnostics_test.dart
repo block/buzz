@@ -1,5 +1,7 @@
+import 'package:buzz/diagnostic_screens.dart';
 import 'package:buzz/features/settings/settings_page.dart';
 import 'package:buzz/shared/community/community_membership_provider.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_navigation_observer.dart';
 import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
@@ -33,6 +35,9 @@ void main() {
             const AsyncData<CommunityMemberRole?>(CommunityMemberRole.member),
           ),
           diagnosticReporterProvider.overrideWithValue(reporter),
+          diagnosticScreenClassifierProvider.overrideWithValue(
+            diagnosticScreenOf,
+          ),
         ],
         child: MaterialApp(
           theme: AppTheme.light(),

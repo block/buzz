@@ -67,9 +67,27 @@ void main() {
         null,
       ),
       (
-        'a navigation breadcrumb is dropped',
+        'a navigation breadcrumb that names no app screen is dropped',
         () async => crumb(Breadcrumb(category: 'navigation', message: 'Chat')),
         null,
+      ),
+      (
+        'a navigation breadcrumb with an unlisted screen name is dropped',
+        () async => crumb(
+          Breadcrumb(category: 'navigation', data: {'screen': 'secret-room'}),
+        ),
+        null,
+      ),
+      (
+        'a navigation breadcrumb keeps only its screen name',
+        () async => crumb(
+          Breadcrumb(
+            category: 'navigation',
+            message: 'secret-room',
+            data: {'screen': 'channel', 'route': '/channels/secret-id'},
+          ),
+        )?.data,
+        {'screen': 'channel'},
       ),
       (
         'a lifecycle breadcrumb is kept',
