@@ -124,6 +124,7 @@ struct Case {
     pusher: git_land::KeyFacts,
     granted: bool,
     updates: Vec<RefUpdate>,
+    authors: Vec<Option<Vec<String>>>,
     scan: gate::Scan,
     rows: Vec<EvidenceRow>,
     approvers: HashMap<String, git_land::KeyFacts>,
@@ -136,6 +137,7 @@ impl Case {
             pusher: person("member"),
             granted: false,
             updates: vec![ff()],
+            authors: vec![Some(Vec::new())],
             scan: gate::Scan::Clean,
             rows: Vec::new(),
             approvers: [ALICE, BOB, CI, PUSHER]
@@ -145,6 +147,9 @@ impl Case {
         }
     }
     fn decide(&self) -> Decision {
+        // Refs a case adds have no authors unless it says so.
+        let mut authors = self.authors.clone();
+        authors.resize(self.updates.len(), Some(Vec::new()));
         let pusher = Principal {
             key: PUSHER.into(),
             facts: &self.pusher,
@@ -155,6 +160,7 @@ impl Case {
             &repo(),
             &pusher,
             &self.updates,
+            &authors,
             self.scan,
             &self.rows,
             &self.approvers,
@@ -543,4 +549,48 @@ fn receipts_exclude_candidates_that_did_not_count() {
         ..ff()
     });
     assert_eq!(c.decide().counted["refs/heads/other"], Counted::default());
+}
+
+/// Seed authors-unrecorded: an approver who first landed a commit the change
+/// brings did its work and fills no slot, though someone else pushed it.
+#[test]
+fn an_approver_who_landed_a_brought_commit_does_not_count() {
+    let mut c = Case::new(policy(vec![rule(&[MAIN], vec![review(1)])], vec![]));
+    c.rows = vec![approve(1, ALICE)];
+    assert!(c.lands(), "control: Alice did none of the work");
+    c.authors = vec![Some(vec![ALICE.into()])];
+    assert!(!c.lands(), "Alice landed a commit Bob's push brings");
+    assert!(c.decide().counted[MAIN].evidence.is_empty());
+    c.rows.push(approve(2, BOB));
+    assert!(c.lands(), "an independent reviewer still counts");
+    assert_eq!(
+        c.decide().counted[MAIN].evidence,
+        BTreeSet::from(["2".to_string()])
+    );
+}
+
+/// Authors past the attribution limit refuse that ref, saying why, even
+/// with no rule, and count nothing; the push's other refs are judged as
+/// usual. (Only a ref with an approval reaches here unknown: see
+/// `gate::authors`.)
+#[test]
+fn a_ref_whose_authors_are_unknown_refuses_only_where_approvals_could_count() {
+    let mut c = Case::new(policy(vec![], vec![]));
+    c.updates.push(RefUpdate {
+        ref_name: "refs/heads/release".into(),
+        ..ff()
+    });
+    c.authors = vec![None, Some(Vec::new())];
+    c.rows = vec![approve(1, ALICE)];
+    let decision = c.decide();
+    assert_eq!(
+        decision
+            .verdict
+            .unwrap_err()
+            .iter()
+            .map(|d| (d.ref_name.as_str(), d.reason.as_str()))
+            .collect::<Vec<_>>(),
+        [(MAIN, TOO_MANY_TO_ATTRIBUTE)]
+    );
+    assert!(decision.counted[MAIN].evidence.is_empty());
 }

@@ -3,7 +3,7 @@
 //!
 //! ```text
 //!   prepare   packs + manifest into the object store (content-addressed, inert)
-//!   land      hold ─► read authority ─► decide ─► swap the row ─► receipt ─► commit
+//!   land      hold ─► read authority ─► decide ─► swap the row ─► landers ─► receipt ─► commit
 //!   cache     pointer CAS to the committed manifest
 //! ```
 //!
@@ -89,6 +89,9 @@ pub(super) struct Change<'a> {
     pub new: &'a str,
     /// The ref changes it makes.
     pub updates: &'a [RefUpdate],
+    /// The commits it brings that no tip in force reached
+    /// (`super::landers`), recorded as landed by the actor's principal.
+    pub incoming: &'a [String],
 }
 
 /// How a land ended.
@@ -142,6 +145,17 @@ pub(super) async fn land(
                 .await
                 .map_err(unavailable)?;
                 trace.land(swapped.as_ref());
+                if swapped.is_some() {
+                    // An agent's work is its owner's.
+                    let principal = authority
+                        .facts
+                        .owner
+                        .as_ref()
+                        .map_or(change.actor, |(owner, _)| owner.as_slice());
+                    git_land::record_landers(&mut tx, change.repo, principal, change.incoming)
+                        .await
+                        .map_err(unavailable)?;
+                }
                 match swapped {
                     Some(swapped) => (Verdict::Landed, authority.role, Some(swapped.version)),
                     None => (Verdict::Superseded, authority.role, Some(version)),

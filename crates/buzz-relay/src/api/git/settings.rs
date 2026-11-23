@@ -192,6 +192,7 @@ impl DefaultBranchSnapshot {
                 seen: Some(&self.digest),
                 new: &digest,
                 updates: &[],
+                incoming: &[],
             },
             async |_tx, authority| {
                 Ok(super::gate::Decision {

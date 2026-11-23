@@ -292,6 +292,7 @@ gcheck owner-replaceable         OwnerPinned                   authority  owner-
 gcheck no-receipt-on-refusal     ReceiptsMatchDecisions        authority  no-receipt-on-refusal
 gcheck agent-is-own-principal    LandsUnderCurrentAuthority    review     agent-is-own-principal
 gcheck self-approval             LandsUnderCurrentAuthority    review     self-approval
+gcheck authors-unrecorded        LandsUnderCurrentAuthority    review     authors-unrecorded
 gcheck agent-approves            LandsUnderCurrentAuthority    review     agent-approves
 gcheck ci-as-human               LandsUnderCurrentAuthority    review     ci-as-human
 gcheck stale-approval            LandsUnderCurrentAuthority    review     stale-approval
@@ -327,7 +328,6 @@ gcheck freshness-window-only     CommandsApplyOnceWhereMeant   governance freshn
 gcheck command-unbound           CommandsApplyOnceWhereMeant   governance command-unbound
 gcheck unrecorded-governance     EveryGovernanceChangeRecorded governance unrecorded-governance
 gcheck role-change-uncapped      RoleChangesByCurrentAuthority roles      role-change-uncapped
-gcheck pusher-of-new-only        LandsUnderCurrentAuthority    repush     pusher-of-new-only
 gcheck receipt-omits-evidence    ReceiptsMatchDecisions        review     receipt-omits-evidence
 gcheck receipt-omits-checks      ReceiptsMatchDecisions        check      receipt-omits-checks
 gcheck receipt-at-accept         ReceiptsMatchDecisions        fence      receipt-at-accept

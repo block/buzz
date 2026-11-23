@@ -1433,6 +1433,7 @@ mod postgres_tests {
                 seen: None,
                 new: "review-manifest",
                 updates: &[],
+                incoming: &[],
             },
             async |_tx, authority| {
                 assert_eq!(
@@ -1778,6 +1779,14 @@ mod external_infra {
             let scan =
                 super::super::super::scan::push(push.path(), &parent.parent.refs, &workspace.refs)
                     .await;
+            let brought = super::super::super::landers::read(
+                push.path(),
+                &parent.parent.refs,
+                &workspace.refs,
+                &updates,
+            )
+            .await
+            .unwrap();
             let serving_write = buzz_deletion::acquire_serving_write(
                 &self.state.db,
                 self.tenant.community(),
@@ -1801,6 +1810,7 @@ mod external_infra {
                     seen: parent.parent_digest.as_deref(),
                     new: prepared.digest(),
                     updates: &updates,
+                    incoming: &brought.incoming,
                 },
                 async |tx, authority| {
                     super::super::super::gate::push(
@@ -1809,6 +1819,7 @@ mod external_infra {
                         &repo,
                         &pusher,
                         &updates,
+                        &brought.brings,
                         scan,
                         !self.state.config.require_relay_membership,
                     )
@@ -2004,8 +2015,8 @@ mod external_infra {
     fn limits(parent_hydrated_bytes: u64) -> super::super::super::cas_publish::PublishLimits {
         super::super::super::cas_publish::PublishLimits {
             parent_hydrated_bytes,
-            max_pack_bytes: 1024 * 1024,
-            max_repo_bytes: 2 * 1024 * 1024,
+            max_pack_bytes: 4 * 1024 * 1024,
+            max_repo_bytes: 8 * 1024 * 1024,
         }
     }
 
@@ -3153,6 +3164,7 @@ mod external_infra {
                 seen: before.as_deref(),
                 new: "expired-candidate",
                 updates: &[],
+                incoming: &[],
             },
             async |_tx, authority| {
                 assert!(
@@ -3742,6 +3754,321 @@ mod external_infra {
             .err()
             .unwrap();
         assert_eq!(refused.status(), StatusCode::CONFLICT);
+    }
+
+    /// #1 on real Postgres and MinIO: a commit's first lander is an author of
+    /// every change that brings it, so their approval of that change does not
+    /// count, an agent's commits are its owner's, refused lands record no
+    /// lander, a commit with no lander row (landed before the relay recorded
+    /// them) that comes back is credited to the push that brings it back, and
+    /// a change too large to attribute is refused only where an approval of it
+    /// could count.
+    #[tokio::test]
+    #[ignore = "requires isolated Postgres, Redis and MinIO"]
+    async fn a_commits_first_lander_cannot_approve_the_change_that_brings_it() {
+        use super::super::super::gate::TOO_MANY_TO_ATTRIBUTE;
+        use super::super::super::land::{coordinate, Verdict};
+        use buzz_core::governance::{Evidence, EvidenceBody};
+        let f = Fixture::new().await;
+        let owner = f.owner.public_key().to_hex();
+        let repo = coordinate(&owner, &f.repo);
+        let community = f.tenant.community();
+        let auth = |keys: &Keys| crate::handlers::ingest::IngestAuth::Http {
+            pubkey: keys.public_key(),
+            scopes: vec![buzz_auth::Scope::ReposWrite],
+            auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
+        };
+        let agent = Keys::generate();
+        f.add(&agent).await;
+        assert!(f
+            .state
+            .db
+            .set_agent_owner(
+                community,
+                agent.public_key().as_bytes(),
+                f.owner.public_key().as_bytes()
+            )
+            .await
+            .unwrap());
+        f.floor().await;
+        let rules = r#"{"version":1,"body":{"type":"rules","rules":[{"id":"review","refs":["refs/heads/main"],"labels":{},"require":[{"type":"review","count":1,"group":null}]}]}}"#;
+        f.govern(
+            &f.owner,
+            &format!("rules:{repo}"),
+            &buzz_core::governance::ExpectedHead::Absent,
+            rules,
+        )
+        .await;
+        let _ = f.snapshot().await;
+        let (f, owner, repo) = (&f, &owner, &repo);
+
+        let hydrate = || async {
+            super::super::super::hydrate::hydrate_for_write(
+                &f.state.git_store,
+                &f.tenant,
+                owner,
+                &f.repo,
+                super::super::super::hydrate::HydrationOptions {
+                    pack_cache: &f.state.git_pack_cache,
+                    scratch_dir: f.scratch.path(),
+                    max_pack_bytes: 4 * 1024 * 1024,
+                    max_repo_bytes: 8 * 1024 * 1024,
+                },
+            )
+            .await
+            .unwrap()
+        };
+        let commit = |path: std::path::PathBuf, parent: String, msg: &'static str| async move {
+            let oid = git(
+                &path,
+                &[
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@example.invalid",
+                    "commit-tree",
+                    &format!("{parent}^{{tree}}"),
+                    "-p",
+                    &parent,
+                    "-m",
+                    msg,
+                ],
+            )
+            .await;
+            oid.trim().to_string()
+        };
+        let tip = |path: std::path::PathBuf, r: &'static str| async move {
+            git(&path, &["rev-parse", r]).await.trim().to_string()
+        };
+        let approve = |keys: &Keys, head: &str, base: &str| {
+            let event = Evidence {
+                community: *community.as_uuid(),
+                repo: repo.to_string(),
+                git_ref: "refs/heads/main".into(),
+                head: head.into(),
+                base: base.into(),
+                body: EvidenceBody::Approval { approved: true },
+            }
+            .builder()
+            .unwrap()
+            .sign_with_keys(keys)
+            .unwrap();
+            let (state, tenant, auth) = (f.state.clone(), f.tenant.clone(), auth(keys));
+            async move {
+                crate::handlers::ingest::ingest_event(&state, &tenant, event.clone(), auth)
+                    .await
+                    .unwrap();
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT seq FROM audit_log WHERE community_id=$1 AND action='git_evidence' AND object_id=$2",
+                )
+                .bind(community.as_uuid())
+                .bind(event.id.to_hex())
+                .fetch_one(&f.pool)
+                .await
+                .unwrap()
+                .to_string()
+            }
+        };
+        let lander = |oid: String| async move {
+            sqlx::query_scalar::<_, Vec<u8>>(
+                "SELECT principal FROM git_commit_landers WHERE community_id=$1 \
+                 AND repo_id=$2 AND owner_pubkey=$3 AND commit_oid=$4",
+            )
+            .bind(community.as_uuid())
+            .bind(&f.repo)
+            .bind(owner)
+            .bind(oid)
+            .fetch_optional(&f.pool)
+            .await
+            .unwrap()
+        };
+        let counted = |action: &'static str| async move {
+            sqlx::query_scalar::<_, Vec<String>>(
+                "SELECT ARRAY(SELECT jsonb_array_elements_text(detail->'counted'->'refs/heads/main'->'evidence')) \
+                 FROM audit_log WHERE community_id=$1 AND action=$2 AND object_id=$3 ORDER BY seq DESC LIMIT 1",
+            )
+            .bind(community.as_uuid())
+            .bind(action)
+            .bind(repo.to_string())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap()
+        };
+        let key = |k: &Keys| Some(k.public_key().to_bytes().to_vec());
+
+        // The maintainer lands x on an unprotected branch: its first lander.
+        let (push, parent) = hydrate().await;
+        let base = tip(push.path().into(), "refs/heads/main").await;
+        let x = commit(push.path().into(), base.clone(), "x").await;
+        git(push.path(), &["update-ref", "refs/heads/feat", &x]).await;
+        assert_eq!(
+            f.land_push_as(&f.maintainer, None, &push, &parent).await,
+            Verdict::Landed
+        );
+        assert_eq!(lander(x.clone()).await, key(&f.maintainer));
+
+        // A refused land records no lander: y, unapproved, on main.
+        let (push, parent) = hydrate().await;
+        let y = commit(push.path().into(), base.clone(), "y").await;
+        git(push.path(), &["update-ref", "refs/heads/main", &y]).await;
+        assert!(matches!(
+            f.land_push_as(&f.owner, None, &push, &parent).await,
+            Verdict::Refused(_)
+        ));
+        assert_eq!(lander(y).await, None, "a refused land records no lander");
+
+        // The owner moves main to x. x's lander approves: their own work, so
+        // it does not count. Mutation: authors left empty, this lands.
+        approve(&f.maintainer, &x, &base).await;
+        let (push, parent) = hydrate().await;
+        git(push.path(), &["update-ref", "refs/heads/main", &x]).await;
+        assert!(matches!(
+            f.land_push_as(&f.owner, None, &push, &parent).await,
+            Verdict::Refused(_)
+        ));
+        assert!(
+            counted("git_refused").await.is_empty(),
+            "the lander's approval did not count"
+        );
+        assert_eq!(
+            lander(x.clone()).await,
+            key(&f.maintainer),
+            "the first lander stays"
+        );
+        // An independent approval counts, and is the receipt's only evidence.
+        let independent = approve(&f.member, &x, &base).await;
+        assert_eq!(
+            f.land_push_as(&f.owner, None, &push, &parent).await,
+            Verdict::Landed
+        );
+        assert_eq!(counted("git_landed").await, vec![independent]);
+
+        // An agent lands z under a grant: z's lander is its owner, so the
+        // owner's approval of the change bringing z to main does not count.
+        let now = chrono::Utc::now().timestamp() as u64;
+        let grant = buzz_core::governance::GitGrant {
+            owner: f.owner.public_key(),
+            repo: Some(repo.clone()),
+            level: buzz_core::governance::GrantAction::Push,
+            after: Some(now - 60),
+            before: Some(now + 1800),
+        };
+        let (push, parent) = hydrate().await;
+        let z = commit(push.path().into(), x.clone(), "z").await;
+        git(push.path(), &["update-ref", "refs/heads/agent", &z]).await;
+        assert_eq!(
+            f.land_push_as(&agent, Some(&grant), &push, &parent).await,
+            Verdict::Landed
+        );
+        assert_eq!(
+            lander(z.clone()).await,
+            key(&f.owner),
+            "an agent's work is its owner's"
+        );
+        approve(&f.owner, &z, &x).await;
+        let (push, parent) = hydrate().await;
+        git(push.path(), &["update-ref", "refs/heads/main", &z]).await;
+        assert!(matches!(
+            f.land_push_as(&f.maintainer, None, &push, &parent).await,
+            Verdict::Refused(_)
+        ));
+        let independent = approve(&f.member, &z, &x).await;
+        assert_eq!(
+            f.land_push_as(&f.maintainer, None, &push, &parent).await,
+            Verdict::Landed
+        );
+        assert_eq!(counted("git_landed").await, vec![independent]);
+
+        // A commit with no lander row, as one landed before the relay
+        // recorded them, that becomes unreachable and is pushed again is
+        // credited to the push that brings it back (a documented limit).
+        let (push, parent) = hydrate().await;
+        let w = commit(push.path().into(), z.clone(), "w").await;
+        git(push.path(), &["update-ref", "refs/heads/old", &w]).await;
+        assert_eq!(
+            f.land_push_as(&f.maintainer, None, &push, &parent).await,
+            Verdict::Landed
+        );
+        sqlx::query("DELETE FROM git_commit_landers WHERE community_id=$1 AND commit_oid=$2")
+            .bind(community.as_uuid())
+            .bind(&w)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        let (push, parent) = hydrate().await;
+        git(push.path(), &["update-ref", "-d", "refs/heads/old"]).await;
+        assert_eq!(
+            f.land_push_as(&f.owner, None, &push, &parent).await,
+            Verdict::Landed
+        );
+        let (push, parent) = hydrate().await;
+        git(push.path(), &["update-ref", "refs/heads/back", &w]).await;
+        assert_eq!(
+            f.land_push_as(&f.member, None, &push, &parent).await,
+            Verdict::Landed
+        );
+        assert_eq!(lander(w).await, key(&f.member));
+
+        // Past MAX_BRINGS the land cannot tell who did the work. Unapproved,
+        // or on an unprotected ref, that changes nothing; approved, it
+        // refuses the ref, counting nothing. 10,000 is still attributed.
+        for (n, approved, protected, landed) in [
+            (10_000, true, true, true),
+            (10_001, false, false, true),
+            (10_001, true, true, false),
+        ] {
+            let (push, parent) = hydrate().await;
+            let old = tip(push.path().into(), "refs/heads/main").await;
+            let mut stream = String::new();
+            for i in 0..n {
+                stream.push_str(&format!(
+                    "commit refs/heads/big\nmark :{}\ncommitter t <t@example.invalid> 0 +0000\ndata 0\n{}",
+                    i + 1,
+                    if i == 0 { format!("from {old}\n") } else { format!("from :{i}\n") },
+                ));
+            }
+            let mut fi = tokio::process::Command::new("git");
+            fi.current_dir(push.path())
+                .args(["fast-import", "--quiet"])
+                .stdin(std::process::Stdio::piped());
+            super::super::super::transport::harden_git_env(&mut fi);
+            let mut child = fi.spawn().unwrap();
+            use tokio::io::AsyncWriteExt;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(stream.as_bytes())
+                .await
+                .unwrap();
+            assert!(child.wait().await.unwrap().success());
+            let big = tip(push.path().into(), "refs/heads/big").await;
+            let target = if protected {
+                "refs/heads/main"
+            } else {
+                "refs/heads/side"
+            };
+            git(push.path(), &["update-ref", "-d", "refs/heads/big"]).await;
+            git(push.path(), &["update-ref", target, &big]).await;
+            let expected = if approved {
+                Some(approve(&f.member, &big, &old).await)
+            } else {
+                None
+            };
+            let v = f.land_push_as(&f.owner, None, &push, &parent).await;
+            if landed {
+                assert_eq!(v, Verdict::Landed, "{n} commits");
+                if let Some(seq) = expected {
+                    assert_eq!(counted("git_landed").await, vec![seq], "{n} commits");
+                }
+            } else {
+                assert!(
+                    matches!(&v, Verdict::Refused(d) if d.len() == 1 && d[0].reason == TOO_MANY_TO_ATTRIBUTE),
+                    "{n} commits: {v:?}"
+                );
+                assert!(counted("git_refused").await.is_empty(), "nothing counted");
+            }
+        }
     }
 
     #[derive(Default)]

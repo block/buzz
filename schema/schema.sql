@@ -92,6 +92,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 \i tables/public/community_nip_fi_issuers.sql
 \i tables/public/_operator_global_tables.sql
 \i tables/public/git_repo_names.sql
+\i tables/public/git_commit_landers.sql
 \i tables/public/parameterized_event_watermarks.sql
 \i tables/public/product_feedback.sql
 \i tables/public/push_leases.sql

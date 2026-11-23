@@ -60,10 +60,19 @@
 (*     record, and nothing leaves the record, not even when the channel    *)
 (*     is archived.                                                        *)
 (*                                                                         *)
+(*   - A commit's author is whoever first landed it in the repo: the key  *)
+(*     whose push first made it visible.  Pointing a ref at a commit the   *)
+(*     repo already shows makes the pusher an author of that change, not  *)
+(*     of the commit.                                                     *)
+(*                                                                         *)
 (* Not modeled: commit signatures (the relay verifies none, so "own work"  *)
-(* is every key that brought a commit to a ref of the repo), ref patterns  *)
+(* is every key that first landed a commit of the change), ref patterns    *)
 (* (rules name refs), and secrets found after a push landed (removing     *)
-(* them is an operator purge).                                            *)
+(* them is an operator purge).  The relay knows the first lander only of  *)
+(* commits landed since it records them, and it computes what a push      *)
+(* brings from the tips in force, not from everything ever shown: a       *)
+(* commit landed before then that becomes unreachable and is pushed again *)
+(* is credited to that push.  That only adds authors.                     *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -261,11 +270,13 @@ Scanned(p) ==
             Incoming(p) \cap UNION {Ancestry(c.new) : c \in {c \in p.cmds : EffectiveRules(p.repo, c.ref) # {}}}
       [] OTHER -> Incoming(p)
 
-\* Whose work a ref change carries: every key that ever brought one of its
-\* commits to a ref of the repo, and the pusher.
+\* Whose work a ref change carries: every key that first landed one of its
+\* commits in the repo, and the pusher.  An agent stays its owner's: an
+\* owner link only ever goes from none to an owner (OwnerPinned).
 Brings(c) == Ancestry(c.new) \ Ancestry(c.old)
 Authors(p, c) ==
-    {Principal(e[1]) : e \in {e \in pushed : e[2] = p.repo /\ e[3] \in Brings(c)}}
+    (IF "authors-unrecorded" \in Faults THEN {}
+     ELSE {Principal(e[1]) : e \in {e \in pushed : e[2] = p.repo /\ e[3] \in Brings(c)}})
       \cup (IF Brings(c) # {} THEN {Principal(p.by)} ELSE {})
 
 IsCheckKey(k) == \E n \in CheckNames : <<n, k>> \in Trusted
@@ -536,10 +547,8 @@ Publish(x) ==
                                   THEN (CHOOSE c \in p.cmds : c.ref = f).new
                                   ELSE refs[p.repo][f]]]
     /\ visible' = [visible EXCEPT ![p.repo] = @ \cup Incoming(p)]
-    /\ pushed' = pushed \cup {<<p.by, p.repo, y>> : y \in
-                     IF "pusher-of-new-only" \in Faults THEN Incoming(p)
-                     ELSE UNION {Brings(c) : c \in p.cmds}}
-    /\ brought' = brought \cup {<<p.by, p.repo, y>> : y \in UNION {Brings(c) : c \in p.cmds}}
+    /\ pushed' = pushed \cup {<<p.by, p.repo, y>> : y \in Incoming(p)}
+    /\ brought' = brought \cup {<<p.by, p.repo, y>> : y \in Incoming(p)}
     /\ reserved' = reserved \ {x}
     /\ receipts' = CASE "receipt-at-accept" \in Faults -> receipts
                      [] "receipt-at-publish" \in Faults -> receipts \cup {Receipt(p, TRUE)}
@@ -638,7 +647,8 @@ Kind(c) ==
 \* Commits a push brings that the repo has not shown anyone.
 New(p) == UNION {Ancestry(c.new) : c \in p.cmds} \ visible[p.repo]
 
-\* The people whose work a ref change carries.  An agent's is its owner's.
+\* The people whose work a ref change carries: who first landed any of its
+\* commits, and the pusher.  An agent's is its owner's.
 WorkOf(p, c) ==
     LET b == Ancestry(c.new) \ Ancestry(c.old) IN
     {Person(e[1]) : e \in {e \in brought : e[2] = p.repo /\ e[3] \in b}}

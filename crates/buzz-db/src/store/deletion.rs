@@ -103,6 +103,7 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "community_nip_fi_issuers",
     "event_mentions",
     "events",
+    "git_commit_landers",
     "git_repo_names",
     "join_policy_acceptances",
     "media_uploaders",
@@ -173,6 +174,7 @@ pub const PENDING_SCOPED_TABLES: &[&str] = &[
 /// `PENDING_SCOPED_TABLES`, so a request approved before its migration still
 /// runs on the release that requires it.
 pub const APPROVAL_FORWARD_TABLES: &[&str] = &[
+    "git_commit_landers",
     "identity_retirement_actions",
     "identity_retirement_holds",
     "identity_retirement_workflows",
@@ -219,6 +221,7 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "artifact_revisions",
     "events",
     "parameterized_event_watermarks",
+    "git_commit_landers",
     "git_repo_names",
     "archived_identities",
     "audit_log",
@@ -4863,6 +4866,7 @@ pub(crate) mod postgres_tests {
         crate::migration::run_migrations_through(&db.pool, 89)
             .await
             .expect("migrate with fence objects present");
+        crate::test_support::later_tenant_tables(&db.pool).await;
         let store = db.deletion_store();
         let community = db
             .ensure_configured_community("optional-fences.example")
@@ -5008,6 +5012,7 @@ DROP FUNCTION community_deletion_lock_key(UUID);
         crate::migration::run_migrations_through(&db.pool, 86)
             .await
             .expect("phase-one schema");
+        crate::test_support::later_tenant_tables(&db.pool).await;
         let community = db
             .ensure_configured_community("optional-guards.example")
             .await
@@ -8880,6 +8885,27 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         db.record_media_publications(request.community_id, vec![media_hash.clone()])
             .await
             .expect("publication boundary");
+        let lander_repo = buzz_core::governance::RepoCoordinate {
+            owner: "b".repeat(64),
+            name: "repo".into(),
+        };
+        let land = |commit: &'static str| {
+            let db = &db;
+            let repo = &lander_repo;
+            let community = request.community_id;
+            async move {
+                let mut tx = crate::begin_community_write_transaction(
+                    &db.pool,
+                    community,
+                    crate::observability::WriterOperation::Authorization,
+                )
+                .await?;
+                crate::git_land::record_landers(&mut tx, repo, &[9; 32], &[commit.repeat(40)])
+                    .await?;
+                tx.commit().await
+            }
+        };
+        land("c").await.expect("first lander");
         store
             .approve(request.id, "approver", None)
             .await
@@ -8898,6 +8924,10 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
             .record_media_publications(request.community_id, vec!["b".repeat(64)])
             .await
             .is_err());
+        assert!(
+            land("d").await.is_err(),
+            "no lander is recorded once deletion has started"
+        );
         let generation = store.fence(&claim.lease).await.expect("fence");
         let token = LeaseToken {
             fence_generation: Some(generation),
@@ -8933,6 +8963,7 @@ DROP FUNCTION protect_community_deletion_manifest_keys();
         let first = store.purge_postgres(&token).await.expect("purge postgres");
         assert_eq!(first["media_uploaders"], 1);
         assert_eq!(first["media_publications"], 1);
+        assert_eq!(first["git_commit_landers"], 1);
         let optional = {
             let mut conn = db.pool.acquire().await.expect("acquire connection");
             live_optional_tables_on(&mut conn)

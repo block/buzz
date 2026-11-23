@@ -7,6 +7,7 @@
 //! - `policy` — Internal policy endpoint (HMAC-authenticated callback from hook)
 //! - `land` — The governed land: the transaction in which a change takes effect
 //! - `reads` — The record of every read of a governed repository
+//! - `landers` — What a push brings, for who first landed each commit
 //! - `scan` — The secret scan of everything a push brings, read before the land
 
 use std::net::SocketAddr;
@@ -32,6 +33,7 @@ pub(crate) mod gate;
 pub mod hook;
 pub mod hydrate;
 mod land;
+mod landers;
 pub mod manifest;
 pub mod manifest_event;
 pub mod pack_cache;

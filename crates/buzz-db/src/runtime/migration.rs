@@ -1036,7 +1036,10 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 107);
+        assert_eq!(migrations.len(), 108);
+        assert_eq!(migrations[107].version, 108);
+        assert!(strip_sql_comments(migrations[107].sql.as_str())
+            .contains("CREATE TABLE IF NOT EXISTS git_commit_landers"));
         assert_eq!(migrations[106].version, 107);
         assert!(strip_sql_comments(migrations[106].sql.as_str())
             .contains("ADD COLUMN authority_version BIGINT NOT NULL DEFAULT 0"));
@@ -1717,6 +1720,7 @@ mod postgres_tests {
             "nip_fi_profile_heads",
             "media_uploaders",
             "media_publications",
+            "git_commit_landers",
         ];
         for table in crate::deletion::EXPECTED_SCOPED_TABLES
             .iter()
@@ -3492,6 +3496,7 @@ mod postgres_tests {
 
         for table in [
             "media_uploaders",
+            "git_commit_landers",
             "audit_log",
             "media_publications",
             "relay_members",
@@ -4472,6 +4477,7 @@ mod postgres_tests {
             .run_to(retirement - 1, &pool)
             .await
             .expect("apply pre-retirement migrations");
+        crate::test_support::later_tenant_tables(&pool).await;
         let store = crate::deletion::DeletionStore::new(pool.clone());
         store
             .validate_serving_catalog()
@@ -4548,6 +4554,7 @@ mod postgres_tests {
             .run_to(retirement - 1, &pool)
             .await
             .expect("apply pre-retirement migrations");
+        crate::test_support::later_tenant_tables(&pool).await;
         assert_eq!(present(&pool).await, (true, true));
         store
             .validate_serving_catalog()

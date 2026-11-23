@@ -764,3 +764,133 @@ async fn governed_push_receipts_contain_only_counted_approvals() {
         Some(tip.as_str())
     );
 }
+
+/// Over real Git transport: the member who first landed a commit cannot
+/// approve the change that brings it to a protected branch, even when someone
+/// else pushes it there; an independent approval lands it and is the only
+/// evidence in the receipt.
+#[tokio::test]
+#[ignore = "requires isolated live relay + Postgres + MinIO + git"]
+async fn a_commits_first_lander_cannot_approve_it_onto_a_protected_branch() {
+    use buzz_core::governance::{command_builder, Evidence, EvidenceBody, ExpectedHead};
+    use nostr::ToBech32;
+    let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let community: uuid::Uuid = std::env::var("BUZZ_E2E_GIT_COMMUNITY_ID")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let owner = Keys::generate();
+    let author = Keys::generate();
+    let reviewer = Keys::generate();
+    let owner_hex = owner.public_key().to_hex();
+    let nsec = owner.secret_key().to_bech32().unwrap();
+    let author_nsec = author.secret_key().to_bech32().unwrap();
+    let repo = format!("lander-{}", uuid::Uuid::new_v4());
+    let coordinate = format!("30617:{owner_hex}:{repo}");
+    let channel = create_test_channel(&owner).await;
+    for key in [&author, &reviewer] {
+        post_event(
+            &EventBuilder::new(Kind::Custom(9000), "")
+                .tags([
+                    Tag::parse(["h", &channel]).unwrap(),
+                    Tag::parse(["p", &key.public_key().to_hex(), "member"]).unwrap(),
+                ])
+                .sign_with_keys(&owner)
+                .unwrap(),
+        )
+        .await;
+    }
+    post_event(
+        &EventBuilder::new(Kind::from(30617), "")
+            .tags([
+                Tag::parse(["d", &repo]).unwrap(),
+                Tag::parse(["buzz-channel", &channel]).unwrap(),
+            ])
+            .sign_with_keys(&owner)
+            .unwrap(),
+    )
+    .await;
+    let tmp = tempdir_named("buzz-e2e-git-lander");
+    let url = format!("{}/git/{owner_hex}/{repo}", relay_http_url());
+    git(&["clone", "--quiet", &url, "repo"], tmp.path(), &nsec);
+    let dir = tmp.path().join("repo");
+    std::fs::write(dir.join("README.md"), "base\n").unwrap();
+    git(&["add", "."], &dir, &nsec);
+    git(&["commit", "--quiet", "-m", "base"], &dir, &nsec);
+    git(&["branch", "-M", "main"], &dir, &nsec);
+    git(&["push", "--quiet", "origin", "main"], &dir, &nsec);
+    let base = git(&["rev-parse", "HEAD"], &dir, &nsec).trim().to_string();
+    post_event(
+        &command_builder(
+            community,
+            &format!("rules:{coordinate}").parse().unwrap(),
+            &ExpectedHead::Absent,
+            r#"{"version":1,"body":{"type":"rules","rules":[{"id":"review","refs":["refs/heads/main"],"labels":{},"require":[{"type":"review","count":1,"group":null}]}]}}"#,
+        )
+        .unwrap()
+        .sign_with_keys(&owner)
+        .unwrap(),
+    )
+    .await;
+    // The author lands the work on an unprotected branch, as themselves.
+    std::fs::write(dir.join("README.md"), "authored\n").unwrap();
+    git(
+        &["commit", "--quiet", "-am", "authored"],
+        &dir,
+        &author_nsec,
+    );
+    let tip = git(&["rev-parse", "HEAD"], &dir, &nsec).trim().to_string();
+    git(
+        &["push", "--quiet", "origin", "HEAD:refs/heads/feat"],
+        &dir,
+        &author_nsec,
+    );
+    let approve = |keys: &Keys| {
+        Evidence {
+            community,
+            repo: coordinate.clone(),
+            git_ref: "refs/heads/main".into(),
+            head: tip.clone(),
+            base: base.clone(),
+            body: EvidenceBody::Approval { approved: true },
+        }
+        .builder()
+        .unwrap()
+        .sign_with_keys(keys)
+        .unwrap()
+    };
+    // The author approves; the owner pushes it to main: refused.
+    post_event(&approve(&author)).await;
+    assert!(
+        !git_status(&["push", "origin", "main"], &dir, &nsec)
+            .status
+            .success(),
+        "the author's own approval counted"
+    );
+    let refused: serde_json::Value = sqlx::query_scalar("SELECT detail FROM audit_log WHERE community_id=$1 AND action='git_refused' AND object_id=$2 ORDER BY seq DESC LIMIT 1")
+        .bind(community).bind(&coordinate).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        refused["counted"]["refs/heads/main"]["evidence"],
+        serde_json::json!([])
+    );
+    // An independent reviewer approves: it lands, counting only them.
+    let independent = approve(&reviewer);
+    post_event(&independent).await;
+    git(&["push", "--quiet", "origin", "main"], &dir, &nsec);
+    let seq: i64 = sqlx::query_scalar("SELECT seq FROM audit_log WHERE community_id=$1 AND action='git_evidence' AND object_id=$2")
+        .bind(community).bind(independent.id.to_hex()).fetch_one(&pool).await.unwrap();
+    let landed: serde_json::Value = sqlx::query_scalar("SELECT detail FROM audit_log WHERE community_id=$1 AND action='git_landed' AND object_id=$2 ORDER BY seq DESC LIMIT 1")
+        .bind(community).bind(&coordinate).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        landed["counted"]["refs/heads/main"]["evidence"],
+        serde_json::json!([seq.to_string()])
+    );
+    assert_eq!(
+        git(&["ls-remote", "origin", "refs/heads/main"], &dir, &nsec)
+            .split_whitespace()
+            .next(),
+        Some(tip.as_str())
+    );
+}

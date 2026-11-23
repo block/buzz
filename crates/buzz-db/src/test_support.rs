@@ -694,3 +694,16 @@ impl PausingProxy {
 
 mod recent_pass_tests;
 pub(crate) use recent_pass_tests::replace_between_passes;
+
+/// Create the tenant tables that migrations after `0096` add, as their own
+/// migrations do. A test that stops migrating early still runs this
+/// release's deletion catalog, which requires them; their migrations are
+/// idempotent, so migrating on afterwards is unaffected.
+pub(crate) async fn later_tenant_tables(pool: &sqlx::PgPool) {
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0108_git_commit_landers.sql"
+    ))
+    .execute(pool)
+    .await
+    .expect("later tenant tables");
+}

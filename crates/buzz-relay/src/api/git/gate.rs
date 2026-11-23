@@ -5,7 +5,8 @@
 //! ```text
 //!   floor, trusted, labels:<repo>, rules:<repo>  ─┐
 //!   evidence (approvals, checks) for the new tips ─┼─► intern ─► Input ─► decide
-//!   pusher's and approvers' facts, read now       ─┘
+//!   pusher's and approvers' facts, read now       ─┤
+//!   approvers who first landed a commit a ref brings ┘
 //! ```
 //!
 //! The announcement's `buzz-protect` rules are not translated: the caller
@@ -32,6 +33,10 @@ const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 /// Why a push whose scan was not clean is refused.
 pub(super) const SECRET_DETECTED: &str = "the push brings a detected secret";
 pub(super) const SCAN_INCOMPLETE: &str = "the secret scan did not complete";
+/// Why a ref is refused whose approvals cannot be checked against its
+/// authors: it brings more commits than the land attributes.
+pub(super) const TOO_MANY_TO_ATTRIBUTE: &str =
+    "the change brings too many commits to attribute, so its approvals cannot count";
 
 /// A value and the governance head it came from (`None`: no head).
 #[derive(Debug, Clone)]
@@ -145,12 +150,14 @@ pub(super) struct Decision {
 /// Legacy rules stay in their own evaluator so `require-patch`, owner-only
 /// pushes and tag defaults are exactly what they were.
 #[allow(clippy::result_large_err)] // The land's closures return its Axum response.
+#[allow(clippy::too_many_arguments)] // As `decide`, which it calls.
 pub(super) async fn push(
     tx: &mut AdmittedTx,
     authority: &Authority,
     repo: &RepoCoordinate,
     actor: &[u8],
     updates: &[RefUpdate],
+    brings: &[Option<Vec<String>>],
     scan: gate::Scan,
     open: bool,
 ) -> Result<Decision, axum::response::Response> {
@@ -164,7 +171,7 @@ pub(super) async fn push(
             })
             .collect()),
     };
-    let governed = decide(tx, authority, repo, actor, updates, scan, open)
+    let governed = decide(tx, authority, repo, actor, updates, brings, scan, open)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "git land: governance unavailable");
@@ -188,14 +195,17 @@ pub(super) async fn push(
 }
 
 /// Decide `updates` by `actor` under the governance read in `tx`.
-/// `scan` is the secret scan of what the push brings (`super::scan`);
-/// `open` is whether the community admits non-members.
+/// `brings` is, per update, the commits it brings, or `None` past the limit
+/// (`super::landers`); `scan` is the secret scan of what the push brings
+/// (`super::scan`); `open` is whether the community admits non-members.
+#[allow(clippy::too_many_arguments)] // One per input the land read apart.
 pub(super) async fn decide(
     tx: &mut AdmittedTx,
     authority: &Authority,
     repo: &RepoCoordinate,
     actor: &[u8],
     updates: &[RefUpdate],
+    brings: &[Option<Vec<String>>],
     scan: gate::Scan,
     open: bool,
 ) -> Result<Decision, DbError> {
@@ -218,14 +228,53 @@ pub(super) async fn decide(
         let facts = git_land::key_facts(tx, authority.channel, &key).await?;
         approvers.insert(row.actor.clone(), facts);
     }
+    let authors = authors(tx, repo, updates, brings, &rows).await?;
     let pusher = Principal {
         key: hex::encode(actor),
         facts: &authority.facts,
         granted: authority.granted,
     };
     assemble(
-        &policy, repo, &pusher, updates, scan, &rows, &approvers, open,
+        &policy, repo, &pusher, updates, &authors, scan, &rows, &approvers, open,
     )
+}
+
+/// Per update, the approvers who first landed a commit it brings: the only
+/// authors that can change which approvals count. `None` for an update
+/// whose brings are past the limit while an approval of it exists, so its
+/// authors are unknown.
+async fn authors(
+    tx: &mut AdmittedTx,
+    repo: &RepoCoordinate,
+    updates: &[RefUpdate],
+    brings: &[Option<Vec<String>>],
+    rows: &[EvidenceRow],
+) -> Result<Vec<Option<Vec<String>>>, DbError> {
+    if brings.len() != updates.len() {
+        return Err(DbError::InvalidData("brings not read for every ref".into()));
+    }
+    let mut out = Vec::with_capacity(updates.len());
+    for (u, b) in updates.iter().zip(brings) {
+        let approvers: BTreeSet<&str> = latest_approvals(rows)
+            .into_iter()
+            .filter(|r| r.evidence.git_ref == u.ref_name && r.evidence.head == u.new_oid)
+            .map(|r| &*r.actor)
+            .collect();
+        out.push(match b {
+            _ if approvers.is_empty() => Some(Vec::new()),
+            None => None,
+            Some(b) => {
+                let among = approvers
+                    .iter()
+                    .map(hex::decode)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| DbError::InvalidData("invalid evidence producer".into()))?;
+                let found = git_land::landers(tx, repo, b, &among).await?;
+                Some(found.iter().map(hex::encode).collect())
+            }
+        });
+    }
+    Ok(out)
 }
 
 /// The pusher as the land read it.
@@ -261,11 +310,17 @@ fn assemble(
     repo: &RepoCoordinate,
     pusher: &Principal<'_>,
     updates: &[RefUpdate],
+    authors: &[Option<Vec<String>>],
     scan: gate::Scan,
     rows: &[EvidenceRow],
     approvers: &HashMap<String, git_land::KeyFacts>,
     open: bool,
 ) -> Result<Decision, DbError> {
+    if authors.len() != updates.len() {
+        return Err(DbError::InvalidData(
+            "authors not read for every ref".into(),
+        ));
+    }
     let mut ids = Interner::default();
     let mut trusted = Vec::new();
     for (name, keys) in &policy.trusted.value {
@@ -288,7 +343,8 @@ fn assemble(
 
     let cmds: Vec<gate::Cmd> = updates
         .iter()
-        .map(|u| gate::Cmd {
+        .zip(authors)
+        .map(|(u, authors)| gate::Cmd {
             git_ref: ids.git_ref(&u.ref_name),
             is_branch: u.ref_name.starts_with("refs/heads/"),
             old: ids.oid(&u.old_oid),
@@ -300,9 +356,9 @@ fn assemble(
             // Stricter than the truth: any new tip may bring commits, so
             // the pusher never approves its own push.
             brings: u.new_oid != ZERO_OID,
-            // Not tracked yet (git_repo_brought): earlier authors can
-            // still approve.
-            authors: Vec::new(),
+            // The approvers who first landed a commit it brings. Unknown
+            // ones are refused below, never left out.
+            authors: authors.iter().flatten().map(|k| ids.key(k)).collect(),
             // Not resolved yet: a codeowners requirement denies instead.
             owners: Vec::new(),
         })
@@ -374,8 +430,27 @@ fn assemble(
         approvals,
         posts,
     };
-    let counted = counted(&input, updates, &approval_rows);
-    let verdict = if gate::decide(&input) {
+    let mut counted = counted(&input, updates, &approval_rows);
+    let unknown: Vec<Denial> = updates
+        .iter()
+        .zip(authors)
+        .filter(|(_, a)| a.is_none())
+        .map(|(u, _)| Denial {
+            ref_name: u.ref_name.clone(),
+            reason: TOO_MANY_TO_ATTRIBUTE.into(),
+        })
+        .collect();
+    // Without its authors the land cannot tell which approvals were eligible.
+    for d in &unknown {
+        counted
+            .entry(d.ref_name.clone())
+            .or_default()
+            .evidence
+            .clear();
+    }
+    let verdict = if !unknown.is_empty() {
+        Err(unknown)
+    } else if gate::decide(&input) {
         Ok(())
     } else {
         // A scan that is not clean refuses every ref; otherwise name the

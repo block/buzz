@@ -2366,6 +2366,22 @@ async fn finalize_push_inner(
         &workspace.refs,
     )
     .await;
+    // Who did the work, read before the land for the same reason. A push
+    // whose commits cannot be listed is never judged.
+    let brought = match super::landers::read(
+        ctx.repo_handle.path(),
+        &ctx.parent_state.parent.refs,
+        &workspace.refs,
+        &updates,
+    )
+    .await
+    {
+        Ok(brought) => brought,
+        Err(error) => {
+            warn!(owner = %ctx.owner, repo = %ctx.repo, %error, "push refused: could not list the commits it brings");
+            return (StatusCode::SERVICE_UNAVAILABLE, "authorization unavailable").into_response();
+        }
+    };
     let pusher = ctx.pusher.to_bytes();
     let verdict = super::land::land(
         state,
@@ -2378,6 +2394,7 @@ async fn finalize_push_inner(
             seen: ctx.parent_state.parent_digest.as_deref(),
             new: prepared.digest(),
             updates: &updates,
+            incoming: &brought.incoming,
         },
         async |tx, authority| {
             super::gate::push(
@@ -2386,6 +2403,7 @@ async fn finalize_push_inner(
                 &repo,
                 &pusher,
                 &updates,
+                &brought.brings,
                 scan,
                 !state.config.require_relay_membership,
             )

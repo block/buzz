@@ -8,6 +8,7 @@
 //!   decide    (the caller's pure evaluator)
 //!   swap      UPDATE manifest WHERE it is still the one read
 //!             AND clock_timestamp() is before the authority's expiry
+//!   landers   the push's new commits, first lander only
 //!   receipt   (the caller's audit entry) ─► commit
 //! ```
 //!
@@ -388,6 +389,59 @@ pub async fn swap(
         })
     })
     .transpose()
+}
+
+/// Commits per statement when recording landers.
+const LANDERS_CHUNK: usize = 10_000;
+
+/// Record `principal` as the first lander of each of `commits` that has
+/// none yet (`git_commit_landers`). Call after a won [`swap`], in its
+/// transaction, so the record commits exactly when the push does.
+pub async fn record_landers(
+    tx: &mut AdmittedTx,
+    repo: &RepoCoordinate,
+    principal: &[u8],
+    commits: &[String],
+) -> Result<()> {
+    let community = tx.community();
+    for chunk in commits.chunks(LANDERS_CHUNK) {
+        sqlx::query(
+            "INSERT INTO git_commit_landers \
+               (community_id, repo_id, owner_pubkey, commit_oid, principal) \
+             SELECT $1, $2, $3, c, $5 FROM unnest($4::text[]) AS c \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(community.as_uuid())
+        .bind(&repo.name)
+        .bind(&repo.owner)
+        .bind(chunk)
+        .bind(principal)
+        .execute(tx.conn())
+        .await?;
+    }
+    Ok(())
+}
+
+/// Which of `among` first landed any of `commits` in `repo`.
+pub async fn landers(
+    tx: &mut AdmittedTx,
+    repo: &RepoCoordinate,
+    commits: &[String],
+    among: &[Vec<u8>],
+) -> Result<Vec<Vec<u8>>> {
+    let community = tx.community();
+    Ok(sqlx::query_scalar(
+        "SELECT DISTINCT principal FROM git_commit_landers \
+         WHERE community_id = $1 AND repo_id = $2 AND owner_pubkey = $3 \
+           AND commit_oid = ANY($4) AND principal = ANY($5)",
+    )
+    .bind(community.as_uuid())
+    .bind(&repo.name)
+    .bind(&repo.owner)
+    .bind(commits)
+    .bind(among)
+    .fetch_all(tx.conn())
+    .await?)
 }
 
 impl Db {
