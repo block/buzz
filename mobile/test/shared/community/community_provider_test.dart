@@ -9,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:buzz/shared/channels/channel_list_snapshot.dart';
+import 'package:buzz/shared/channels/open_channel_directory_storage.dart';
 import 'package:buzz/shared/channels/saved_message_store.dart';
 import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:buzz/shared/relay/nostr_models.dart';
@@ -658,6 +659,16 @@ void main() {
           return directory;
         }
 
+        Future<File> seedDirectory(String communityId, String signer) async {
+          final file = OpenChannelDirectoryStorage.fileFor(
+            mediaRoot,
+            communityId,
+            signer,
+          );
+          await file.create(recursive: true);
+          return file;
+        }
+
         // Media sweeps run in the background.
         Future<bool> eventuallyExists(FileSystemEntity directory) async {
           for (var i = 0; i < 50 && await directory.exists(); i++) {
@@ -691,6 +702,11 @@ void main() {
         final orphanMedia = await seedMedia(
           MediaDiskCache.communityDirectory(mediaRoot, 'restored'),
         );
+        final oldDirectory = await seedDirectory(community.id, oldKeys.public);
+        final retiredDirectory = await seedDirectory(
+          community.id,
+          nostr.Keys.generate().public,
+        );
         container = createContainer(
           overrides: [
             savedPrefsProvider.overrideWithValue(prefs),
@@ -703,6 +719,8 @@ void main() {
         expect(await cache.write(restoredToken, snapshot), isFalse);
         expect(await eventuallyExists(orphanMedia), isFalse);
         expect(await oldMedia.exists(), isTrue);
+        expect(await eventuallyExists(retiredDirectory), isFalse);
+        expect(await oldDirectory.exists(), isTrue);
 
         await communityStorage.saveActiveId(community.id);
         await container
@@ -712,6 +730,7 @@ void main() {
         expect(prefs.getKeys(), {'unrelated'});
         expect(await cache.write(oldToken, snapshot), isFalse);
         expect(await eventuallyExists(oldMedia), isFalse);
+        expect(await eventuallyExists(oldDirectory), isFalse);
         expect(
           await eventuallyExists(
             MediaDiskCache.communityDirectory(mediaRoot, community.id),
@@ -773,9 +792,19 @@ void main() {
       await container.read(activeCommunityProvider.future);
       expect(container.read(savedMessageScopeProvider), oldSaved);
 
+      // The active provider still holds the removed account when the list
+      // publishes; the scope must already be gone.
+      final scopesDuringRefresh = <SavedMessageScope?>[];
+      container.listen(communityListProvider, (_, next) {
+        if (next.value?.isEmpty == true &&
+            container.read(activeCommunityProvider).value?.id == community.id) {
+          scopesDuringRefresh.add(container.read(savedMessageScopeProvider));
+        }
+      });
       await container
           .read(communityListProvider.notifier)
           .removeCommunity(community.id);
+      expect(scopesDuringRefresh, [isNull]);
       await saved.save(removalInFlight, [
         _savedMessage(oldKeys.secret),
       ], relayAuthor: null);
