@@ -7,6 +7,7 @@ import 'package:buzz/shared/relay/media_auth.dart';
 import 'package:buzz/shared/relay/media_disk_cache.dart';
 import 'package:buzz/shared/relay/media_image.dart';
 import 'package:flutter/painting.dart';
+import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
@@ -355,7 +356,38 @@ void main() {
       expect(files, hasLength(1));
       await overlapping.dispose();
 
-      // A large save into a cache full of small files evicts them over
+      // One eviction pass returns at most its limit, oldest first, and asks
+      // for another pass.
+      final indexDirectory = MediaDiskCache.directoryFor(root, 'index', 's')
+        ..createSync(recursive: true);
+      final index = MediaCacheIndex(
+        File(p.join(indexDirectory.path, 'index.json')),
+        indexDirectory,
+        0,
+        evictionsPerPass: 2,
+      );
+      await index.open();
+      final epoch = DateTime(2026);
+      for (var i = 0; i < 5; i++) {
+        await index.insert(
+          CacheObject(
+            'url-$i',
+            relativePath: 'file-$i',
+            validTill: epoch,
+            length: 1,
+            touched: epoch.add(Duration(minutes: i)),
+          ),
+          setTouchedToNow: false,
+        );
+      }
+      var morePasses = 0;
+      index.onMoreToEvict = () => morePasses++;
+      final firstPass = await index.getObjectsOverCapacity(100);
+      expect(firstPass.map((o) => o.url), ['url-1', 'url-0']);
+      expect(morePasses, 1);
+      await index.close();
+
+      // So a large save into a cache full of small files evicts them over
       // several passes, with no later reads to schedule them, until the
       // directory is back in budget.
       List<String> filesIn(Directory directory) => [
@@ -364,11 +396,10 @@ void main() {
             p.basename(entry.path),
       ];
       final passesDirectory = MediaDiskCache.directoryFor(root, 'passes', 's');
-      const passDelay = Duration(milliseconds: 500);
       final passes = MediaDiskCache.open(
         passesDirectory,
         byteBudget: 20,
-        evictionDelay: passDelay,
+        evictionDelay: const Duration(milliseconds: 200),
         evictionsPerPass: 2,
       );
       for (var i = 0; i < 5; i++) {
@@ -376,10 +407,7 @@ void main() {
         await Future<void>.delayed(const Duration(milliseconds: 5));
       }
       await passes.write('large', Uint8List(16), immutable: true);
-      await Future<void>.delayed(passDelay * 1.5);
-      expect(filesIn(passesDirectory), hasLength(4), reason: 'one pass');
-      await Future<void>.delayed(passDelay * 2);
-      expect(filesIn(passesDirectory), hasLength(2), reason: 'all passes');
+      await _until(() async => filesIn(passesDirectory).length == 2);
       expect(await passes.read('large'), isNotNull);
       expect(await passes.read('small-4'), isNotNull);
       await passes.dispose();
@@ -403,7 +431,9 @@ void main() {
 
       // Reads during refreshes see the old bytes or the new ones in full,
       // never part of a file.
-      final refreshing = await open('refreshing');
+      final refreshing = MediaDiskCache.open(
+        MediaDiskCache.directoryFor(root, 'refreshing', 's'),
+      );
       const sizes = [1024, 8 * 1024 * 1024];
       await refreshing.write('image', Uint8List(sizes[0]), immutable: false);
       final lengths = <int?>{};
