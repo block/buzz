@@ -73,11 +73,8 @@ class _MenuChannelActions extends ChannelActions {
       );
   final List<String> actions;
   @override
-  Future<void> convertSolo(
-    String channelId, {
-    required bool personalChat,
-  }) async {
-    actions.add('convert $channelId');
+  Future<void> archiveChannel(String channelId) async {
+    actions.add('archive $channelId');
   }
 }
 
@@ -370,6 +367,16 @@ void main() {
     );
     expect(container.exists(meMessagesProvider('loose')), isFalse);
     expect(container.exists(huddleLifecycleProvider('loose')), isFalse);
+    await tester.tap(find.text('Archive'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Archive'));
+    await tester.pumpAndSettle();
+    expect(actions, ['archive loose']);
+    expect(pane.selectedId, isNull);
+    pane.open('loose', (_) => const SizedBox());
+    await tester.pumpAndSettle();
+    await tester.longPress(find.text('Unfiled labeled chat'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Mark unread'));
     await tester.pumpAndSettle();
     expect(actions.last, 'unread loose');

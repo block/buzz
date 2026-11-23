@@ -131,9 +131,13 @@ Future<bool?> showConversationPopover({
               ),
             if (!personal && sections.editable)
               item('Move to section…', BuzzIcons.folderInput, () {
+                final pageContext = Navigator.of(
+                  context,
+                  rootNavigator: true,
+                ).context;
                 Navigator.of(context).pop();
                 _showMoveSectionSheet(
-                  anchorContext,
+                  pageContext,
                   channel: channel,
                   sectionId: sections.isReady
                       ? sections.store.assignments[channel.id]

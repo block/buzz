@@ -1610,12 +1610,9 @@ void main() {
     for (final edge in edges) {
       await tester.longPressAt(edge);
       await tester.pumpAndSettle();
-      expect(find.byType(ChannelDetailsPage), findsOneWidget);
-      expect(
-        tester.getCenter(find.text('Mark unread')).dx,
-        lessThan(tester.getCenter(find.text('Mute')).dx),
-      );
-      expect(find.text('Edit'), findsOneWidget);
+      expect(find.byType(ChannelDetailsPage), findsNothing);
+      expect(find.text('Mark unread'), findsOneWidget);
+      expect(find.text('Move to section…'), findsOneWidget);
       navigator.pop();
       await tester.pumpAndSettle();
 
