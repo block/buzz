@@ -10,6 +10,8 @@ import 'channel_messages_provider.dart';
 import 'pending_local_messages_provider.dart';
 import 'saved_channel_page.dart';
 
+const _threadReplyPageSize = 200;
+
 class ThreadRepliesArgs {
   final String channelId;
   final String rootId;
@@ -42,6 +44,19 @@ class _ThreadCursor {
       (createdAt == other.createdAt && eventId.compareTo(other.eventId) > 0);
 }
 
+// Keep the save budget across live and reconnect rebuilds. It resets when
+// the thread closes or the cache scope changes.
+final _claimThreadSaveProvider = Provider.autoDispose
+    .family<bool Function(), ThreadRepliesArgs>((ref, args) {
+      ref.watch(savedMessageScopeProvider);
+      var claimed = false;
+      return () {
+        if (claimed) return false;
+        claimed = true;
+        return true;
+      };
+    });
+
 final threadRepliesProvider = FutureProvider.autoDispose
     .family<List<NostrEvent>, ThreadRepliesArgs>((ref, args) async {
       // A reply missed while the socket is stale cannot invalidate this
@@ -59,6 +74,7 @@ final threadRepliesProvider = FutureProvider.autoDispose
       final ticket = scope == null
           ? null
           : cache.capture(scope, args.savedPage);
+      final claimSave = ref.watch(_claimThreadSaveProvider(args));
       final channelProvider = channelMessagesProvider(args.channelId);
       final channelMessages = ref.exists(channelProvider)
           ? ref.read(channelProvider.notifier)
@@ -147,8 +163,9 @@ final threadRepliesProvider = FutureProvider.autoDispose
               ticket,
               events,
               isCurrent: () => current,
-              refreshEvents: () =>
-                  _readSavedThreadEvents(session, args, events),
+              refreshEvents: () async => claimSave()
+                  ? _readSavedThreadEvents(session, args, events)
+                  : null,
             ),
           );
         }
@@ -176,6 +193,10 @@ Future<List<NostrEvent>> _readSavedThreadEvents(
     for (final event in events)
       if (EventKind.channelTimelineContentKinds.contains(event.kind)) event.id,
   };
+  // Bound the writer query to the root and one reply page. A larger thread
+  // still has complete relay history, but cannot replace its saved page
+  // without also verifying its edits.
+  if (targets.length > _threadReplyPageSize + 1) return const [];
   // The thread scan's aux can come from a replica. Read edits from the writer
   // so a scan that starts after a live edit cannot re-save pre-edit text.
   const editLimit = 1000;
@@ -260,7 +281,7 @@ Future<({List<NostrEvent> replies, List<NostrEvent> aux})> fetchCompleteThread(
     for (final event in events.skip(rows.length)) {
       if (auxIds.add(event.id)) aux.add(event);
     }
-    if (rows.length < 200) return (replies: replies, aux: aux);
+    if (rows.length < _threadReplyPageSize) return (replies: replies, aux: aux);
     final last = rows.last;
     final next = _ThreadCursor(createdAt: last.createdAt, eventId: last.id);
     // A full page of real rows always moves past the cursor. One that does
@@ -282,7 +303,7 @@ Future<({List<NostrEvent> replies, List<NostrEvent> aux})> fetchCompleteThread(
 List<NostrEvent> _leadingRows(List<NostrEvent> events, String rootId) {
   var count = 0;
   while (count < events.length &&
-      count < 200 &&
+      count < _threadReplyPageSize &&
       events[count].threadReference.parentId != null &&
       events[count].threadReference.rootId == rootId &&
       events[count].kind != EventKind.reaction &&
@@ -303,7 +324,7 @@ NostrFilter _threadRepliesFilter(
       '#e': [args.rootId],
       '#h': [args.channelId],
     },
-    limit: 200,
+    limit: _threadReplyPageSize,
     extensions: {
       // The relay binds this as signed i32. Include every representable depth.
       'depth_limit': 0x7fffffff,

@@ -129,7 +129,7 @@ Future<void> saveMessagePage(
   SavedMessageTicket ticket,
   List<NostrEvent> events, {
   required bool Function() isCurrent,
-  Future<List<NostrEvent>> Function()? refreshEvents,
+  Future<List<NostrEvent>?> Function()? refreshEvents,
 }) async {
   try {
     final root = await ref.read(savedMessageRootProvider.future);
@@ -140,6 +140,7 @@ Future<void> saveMessagePage(
     final currentEvents = refreshEvents == null
         ? events
         : await refreshEvents();
+    if (currentEvents == null) return;
     if (!isCurrent() || !store.isCurrent(ticket)) return;
     final author = currentEvents.isEmpty
         ? null

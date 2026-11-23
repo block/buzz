@@ -189,7 +189,7 @@ void main() {
     relay.threadQueries.add(Future.value([reply]));
     relay.writerEvents = [head, edit];
     final replies = threadRepliesProvider(args);
-    container.listen(replies, (_, _) {});
+    final openThread = container.listen(replies, (_, _) {});
     expect(await container.read(replies.future), [reply]);
     await paint();
 
@@ -210,7 +210,51 @@ void main() {
     for (final filter in relay.writerFilters) {
       expect(filter.tags['#h'], [args.channelId]);
     }
+
+    final laterReply = _event('Arrived after opening', args: args);
+    relay.threadQueries.add(Future.value([reply, laterReply]));
+    container.invalidate(replies);
+    expect(await container.read(replies.future), [reply, laterReply]);
+    await paint();
+    expect(relay.writerFilters, hasLength(2));
+    expect(await readSaved(), saved);
+
+    openThread.close();
+    await container.pump();
+    relay.threadQueries.add(Future.value([reply, laterReply]));
+    container.listen(replies, (_, _) {});
+    expect(await container.read(replies.future), [reply, laterReply]);
+    await paint();
+    expect(relay.writerFilters, hasLength(4));
+    expect(await readSaved(), [head, reply, laterReply, edit]);
   });
+
+  test(
+    'oversized threads keep complete relay history and skip the writer',
+    () async {
+      final old = _event('Previously saved reply');
+      final ticket = store.capture(_scope, _args.savedPage);
+      await store.save(ticket, [old], relayAuthor: null);
+      final batch =
+          [
+            for (var index = 0; index < 201; index++)
+              _event('Large thread reply $index'),
+          ]..sort((a, b) {
+            final time = a.createdAt.compareTo(b.createdAt);
+            return time == 0 ? a.id.compareTo(b.id) : time;
+          });
+      relay.threadQueries.addAll([
+        Future.value(batch.take(200).toList()),
+        Future.value([batch.last]),
+      ]);
+      final replies = threadRepliesProvider(_args);
+      container.listen(replies, (_, _) {});
+      expect(await container.read(replies.future), batch);
+      await paint();
+      expect(relay.writerFilters, isEmpty);
+      expect(await store.read(ticket), isNull);
+    },
+  );
 
   test('a live deletion retires an already displayed thread preview', () async {
     final removed = _event('Deleted while history is pending');
