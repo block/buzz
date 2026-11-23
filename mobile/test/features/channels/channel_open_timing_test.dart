@@ -329,6 +329,64 @@ void main() {
     );
   }
 
+  for (final asked in [false, true]) {
+    for (final away in [false, true]) {
+      test(
+        'a thread refusal ${asked ? 'during' : 'before'} the first history '
+        '${away ? 'after a move to the background is not counted' : 'counts one refused open'}',
+        () {
+          fakeAsync((async) {
+            final (:relay, :counts, :container, :opens) = _start(async);
+            final req = asked ? null : relay.holdReq();
+            final held = asked ? relay.holdQuery() : null;
+            container.listen(channelMessagesProvider(_channel), (_, _) {});
+            async.elapse(const Duration(milliseconds: 50));
+            expect(relay.queries, asked ? isNotEmpty : isEmpty);
+            final session = container.read(relaySessionProvider.notifier);
+            if (away) {
+              session.onAppPaused();
+              async.elapse(const Duration(seconds: 1));
+              session.onAppResumed();
+            }
+            container
+                .read(channelMessagesProvider(_channel).notifier)
+                .denyAccessFromThread(
+                  Exception('restricted: not a channel member'),
+                  StackTrace.current,
+                );
+            req?.complete();
+            held?.complete();
+            async.elapse(const Duration(seconds: 1));
+            if (away) {
+              expect(opens(), isEmpty, reason: 'it spanned the background');
+            } else {
+              final open = opens().single;
+              expect(open.failure, NetworkFailure.relayRefused);
+              expect(open.duration, asked ? isNotNull : isNull);
+            }
+          });
+        },
+      );
+    }
+  }
+
+  test('a thread refusal after the channel loaded is not another open', () {
+    fakeAsync((async) {
+      final (:relay, :counts, :container, :opens) = _start(async);
+      container.listen(channelMessagesProvider(_channel), (_, _) {});
+      async.elapse(const Duration(seconds: 1));
+      expect(opens().single.outcome, NetworkOutcome.success);
+      container
+          .read(channelMessagesProvider(_channel).notifier)
+          .denyAccessFromThread(
+            Exception('restricted: not a channel member'),
+            StackTrace.current,
+          );
+      async.elapse(const Duration(seconds: 1));
+      expect(opens(), hasLength(1));
+    });
+  });
+
   test('a relay that runs out of time on the history fails the open', () {
     fakeAsync((async) {
       final (:relay, :counts, :container, :opens) = _start(async);

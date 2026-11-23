@@ -95,6 +95,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   );
   bool _hasListeners = true;
   ChannelOpenTimer? _openTimer;
+  // The first load's untimed refusal, for a refusal that comes via a thread.
+  ChannelOpenTimer? _openRefusal;
   Timer? _liveDetachTimer;
   bool _liveDetached = false;
   late final _summaryRefreshes = ThreadSummaryRefreshQueue(
@@ -177,6 +179,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     ref.onCancel(() {
       _hasListeners = false;
       _openTimer = null;
+      _openRefusal = null;
       _deletionOwnerQueue.pause();
       _summaryRefreshes.pause();
       _liveDetachTimer?.cancel();
@@ -258,6 +261,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         : cache.capture(cacheScope, (channelId: channelId, rootId: ''));
     ChannelOpenTimer? openTimer;
     final refusal = ChannelOpenTimer.refusal(ref, loaded: _hasLoadedHistory);
+    _openRefusal = refusal;
     try {
       final session = ref.read(relaySessionProvider.notifier);
 
@@ -359,6 +363,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       // An open the member left before it finished still took this long.
       openTimer?.finish();
       _openTimer = null;
+      _openRefusal = null;
       if (ticket != null && _hasListeners) {
         unawaited(
           saveMessagePage(
@@ -380,6 +385,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       }
       openTimer?.finish(error: e);
       _openTimer = null;
+      _openRefusal = null;
       if (_accessDenial != null) return;
       _historyRefreshFailed = true;
       final fallbackMessages = state.value ?? _lastKnownMessages;
@@ -411,6 +417,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     stackTrace,
     ref.read(savedMessageStoreProvider),
     ref.read(savedMessageScopeProvider),
+    _openTimer?.running ?? _openRefusal,
   );
 
   void _denyAccess(
@@ -422,6 +429,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   ]) {
     _detachLive();
     _openTimer = null;
+    _openRefusal = null;
     openTimer?.finish(error: error);
     _lastKnownMessages = null;
     _hasLoadedHistory = false;
