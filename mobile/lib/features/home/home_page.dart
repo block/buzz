@@ -6,7 +6,7 @@ import 'package:duo_kit/duo_kit.dart';
 import '../../shared/widgets/adaptive_conversation_pane.dart';
 import '../../shared/widgets/duo_workspace_scaffold.dart';
 import '../../shared/widgets/duo_toolbar.dart';
-import '../../shared/widgets/ios_navigation_metrics.dart';
+import '../../shared/widgets/ios_navigation_bar.dart';
 import '../../shared/widgets/android_expanding_menu_button.dart';
 
 import 'package:flutter/material.dart';
@@ -133,36 +133,61 @@ class HomePage extends HookConsumerWidget {
         reducedMotion: reducedMotion,
       ),
     );
+    List<({String label, String symbol, VoidCallback? onPressed})>
+    moreActionsFor(VoidCallback openSwitcher) => [
+      // An internal build reaches only its organization's community.
+      if (!OrganizationEnvironment.enabled)
+        (
+          label: 'Switch community',
+          symbol: 'arrow.left.arrow.right',
+          onPressed: openSwitcher,
+        ),
+      if (canInvite && communityInvitePageBuilder != null)
+        (
+          label: 'Invite',
+          symbol: 'person.badge.plus',
+          onPressed: () => openPage(communityInvitePageBuilder!),
+        ),
+      (label: 'Agents', symbol: 'agent', onPressed: () => onAgents(context)),
+      if (communityAppearancePageBuilder != null)
+        (
+          label: 'Appearance',
+          symbol: 'circle.lefthalf.filled',
+          onPressed: () => openPage(communityAppearancePageBuilder!),
+        ),
+      (label: 'Settings', symbol: 'gearshape', onPressed: openSettings),
+    ];
     final messages = ChannelsPage(
       settingsPageBuilder: settingsPageBuilder,
+      // On Duo, Activity and the Community menu sit in the rail. Like the
+      // header controls, they hide while Bestie records.
+      messagesRailActionsBuilder: (openSwitcher) => recordingFocus.value
+          ? const []
+          : [
+              IosNavigationAction(
+                label: 'Activity',
+                symbol: 'bell',
+                activityColor: hasUnreadInbox ? context.colors.primary : null,
+                activityLabel: hasUnreadInbox ? 'Unread items' : null,
+                onPressed: openInbox,
+              ),
+              IosNavigationAction(
+                label: 'Community menu',
+                avatarInitial: communityName.isEmpty
+                    ? '?'
+                    : communityName.characters.first.toUpperCase(),
+                children: [
+                  for (final action in moreActionsFor(openSwitcher))
+                    IosNavigationAction(
+                      label: action.label,
+                      symbol: action.symbol,
+                      onPressed: action.onPressed,
+                    ),
+                ],
+              ),
+            ],
       messagesActionsBuilder: (openSwitcher, avatarKey) {
-        final moreActions = [
-          // An internal build reaches only its organization's community.
-          if (!OrganizationEnvironment.enabled)
-            (
-              label: 'Switch community',
-              symbol: 'arrow.left.arrow.right',
-              onPressed: openSwitcher,
-            ),
-          if (canInvite && communityInvitePageBuilder != null)
-            (
-              label: 'Invite',
-              symbol: 'person.badge.plus',
-              onPressed: () => openPage(communityInvitePageBuilder!),
-            ),
-          (
-            label: 'Agents',
-            symbol: 'agent',
-            onPressed: () => onAgents(context),
-          ),
-          if (communityAppearancePageBuilder != null)
-            (
-              label: 'Appearance',
-              symbol: 'circle.lefthalf.filled',
-              onPressed: () => openPage(communityAppearancePageBuilder!),
-            ),
-          (label: 'Settings', symbol: 'gearshape', onPressed: openSettings),
-        ];
+        final moreActions = moreActionsFor(openSwitcher);
         return [
           _NativeControlsGate(
             builder: (_, nativeControlsVisible) =>
@@ -452,6 +477,12 @@ class HomePage extends HookConsumerWidget {
                 child: AdaptiveConversationPane(
                   controller: conversations,
                   strip: strip,
+                  // Keep an open conversation's rail controls below Home's.
+                  listToolbarSlots:
+                      defaultTargetPlatform == TargetPlatform.iOS &&
+                          strip != null
+                      ? 2
+                      : 0,
                   preferredListWidth: sidebarWidth,
                   emptyContent: strip == null
                       ? null
