@@ -17,17 +17,28 @@ typedef EditAuthority = ({Map<String, String> owners, String? relayKey});
 /// Watches the evidence the cross-signer edits in [events] need, and asks
 /// the user cache for the profiles that supply it. Call from a hook build.
 ///
+/// The profiles are asked for on each connect while the edits show, so a
+/// request that failed is made again. The cache skips authors it already
+/// has a current answer for, with or without an attestation.
+///
 /// Nothing is watched for a timeline without such edits, so the relay is not
 /// asked for its key and unrelated profile changes do not reformat it.
 EditAuthority useEditAuthority(WidgetRef ref, List<NostrEvent> events) {
   final needs = useMemoized(() => editAuthorityNeeds(events), [events]);
   final authors = needs.owners.join(',');
+  final connected =
+      authors.isNotEmpty &&
+      ref.watch(
+        relaySessionProvider.select(
+          (session) => session.status == SessionStatus.connected,
+        ),
+      );
   useEffect(() {
-    if (needs.owners.isNotEmpty) {
-      unawaited(ref.read(userCacheProvider.notifier).preload(needs.owners));
+    if (connected) {
+      ref.read(userCacheProvider.notifier).requestLinked(needs.owners);
     }
     return null;
-  }, [authors]);
+  }, [authors, connected]);
   return (
     owners: authors.isEmpty
         ? const <String, String>{}
@@ -62,21 +73,25 @@ EditAuthority readEditAuthority(Ref ref, List<NostrEvent> events) {
 /// an agent whose signed profile verifies [viewer] as its owner. Rendering
 /// applies owner edits from the same verified owner, so the menu offers
 /// exactly the edits that will show.
-bool watchCanManageMessage(WidgetRef ref, String author, String? viewer) {
+///
+/// Read when actions open, from the profile held then, so building a row
+/// verifies nothing.
+bool readCanManageMessage(WidgetRef ref, String author, String? viewer) {
   final key = author.toLowerCase();
   final me = viewer?.toLowerCase();
   if (me == null) return false;
   if (key == me) return true;
-  final owner = ref.watch(verifiedProfileOwnerProvider(key));
-  if (owner == null) {
+  final profile = ref.read(userCacheProvider)[key];
+  final evidence = profile?.ownerEvidence;
+  if (evidence == null) {
     // A restored profile without its signed copy names this viewer: fetch
-    // the profile again so the owner can be verified.
-    final profile = ref.read(userCacheProvider)[key];
-    if (profile?.ownerPubkey == me && profile?.ownerEvidence == null) {
+    // the profile again so a later menu can verify the owner.
+    if (profile?.ownerPubkey == me) {
       ref.read(userCacheProvider.notifier).get(key);
     }
+    return false;
   }
-  return owner == me;
+  return verifiedEvidenceOwner(evidence, key) == me;
 }
 
 /// Verified owners for comma-joined [authors]. Rebuilt only when one of

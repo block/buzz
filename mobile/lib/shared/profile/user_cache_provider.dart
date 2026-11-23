@@ -166,9 +166,10 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     return absent == null || DateTime.now().difference(absent) >= _absentFor;
   }
 
-  /// Requests profiles for keys that identity links name, outside any
-  /// roster. Restored profiles are revalidated, so a renamed key's link
-  /// shows its current name; a key the relay just said has no profile is
+  /// Requests profiles for keys named outside any roster, such as by
+  /// identity links or edits. Restored profiles are revalidated, so a
+  /// renamed key's link shows its current name, and a restored owner hint
+  /// gets its signed profile; a key the relay just said has no profile is
   /// not asked again for [_absentFor]; and a failed batch is retried once
   /// the relay reconnects. Coalesced with every other lookup.
   void requestLinked(Iterable<String> pubkeys) {

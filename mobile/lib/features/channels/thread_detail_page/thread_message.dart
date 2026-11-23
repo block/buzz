@@ -85,7 +85,6 @@ class _ThreadMessage extends HookConsumerWidget {
     final isAgent =
         ref.watch(agentMentionPubkeysProvider(channelId)).contains(pk) ||
         profile?.ownerPubkey != null;
-    final canManageMessage = watchCanManageMessage(ref, pk, currentPubkey);
 
     final userCache = ref.watch(userCacheProvider);
     final knownAgentPubkeys = agentPubkeysWithProfileOwners(
@@ -125,7 +124,7 @@ class _ThreadMessage extends HookConsumerWidget {
         ref: ref,
         message: message,
         channelId: channelId,
-        canManageMessage: canManageMessage,
+        canManageMessage: readCanManageMessage(ref, pk, currentPubkey),
         allMessages: replyMessages,
         onReply: onReply,
         currentPubkey: currentPubkey,
@@ -363,7 +362,12 @@ class _ThreadMessage extends HookConsumerWidget {
                                           ref: ref,
                                           message: message,
                                           channelId: channelId,
-                                          canManageMessage: canManageMessage,
+                                          canManageMessage: () =>
+                                              readCanManageMessage(
+                                                ref,
+                                                pk,
+                                                currentPubkey,
+                                              ),
                                         ),
                                         onMediaMore:
                                             (viewerContext, imageUrl) =>
@@ -374,7 +378,11 @@ class _ThreadMessage extends HookConsumerWidget {
                                                   channelId: channelId,
                                                   imageUrl: imageUrl,
                                                   canManageMessage:
-                                                      canManageMessage,
+                                                      readCanManageMessage(
+                                                        ref,
+                                                        pk,
+                                                        currentPubkey,
+                                                      ),
                                                   onDeleted: () {
                                                     if (viewerContext.mounted) {
                                                       Navigator.of(

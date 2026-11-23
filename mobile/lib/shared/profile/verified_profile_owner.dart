@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../crypto/nip_oa.dart';
@@ -9,14 +10,20 @@ import 'user_cache_provider.dart';
 /// result, and a newer profile is a new object that is checked again.
 final _verifiedOwners = Expando<({String? owner})>();
 
+/// How many signed profiles [verifiedEvidenceOwner] has checked, for tests
+/// that bound when the check runs.
+@visibleForTesting
+int verifiedOwnerChecks = 0;
+
 /// The owner that [evidence] attests for [pubkey]: the profile must be
 /// [pubkey]'s own, with a valid id and signature and a valid owner
 /// attestation (see [verifiedProfileOaOwnerPubkey]). Null otherwise.
 String? verifiedEvidenceOwner(NostrEvent evidence, String pubkey) {
   if (evidence.pubkey.toLowerCase() != pubkey.toLowerCase()) return null;
-  return (_verifiedOwners[evidence] ??= (
-    owner: verifiedProfileOaOwnerPubkey(evidence),
-  )).owner;
+  return (_verifiedOwners[evidence] ??= () {
+    verifiedOwnerChecks++;
+    return (owner: verifiedProfileOaOwnerPubkey(evidence));
+  }()).owner;
 }
 
 /// The verified owner of [pubkey], from the signed profile the user cache

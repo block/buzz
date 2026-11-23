@@ -150,7 +150,12 @@ void main() {
     expect(cache1.state[agent]?.ownerPubkey, owner);
     expect(verifiedOwner(launch1), isNull);
     // Revalidation returns the same event, which fills in its evidence.
-    await Future<void>.delayed(const Duration(milliseconds: 80));
+    // Wait for that rather than for a time: parsing runs on an isolate.
+    final backfilled = Completer<void>();
+    launch1.listen(verifiedProfileOwnerProvider(agent), (_, next) {
+      if (next == owner && !backfilled.isCompleted) backfilled.complete();
+    });
+    await backfilled.future;
     expect(upgrade.requests, 1);
     expect(verifiedOwner(launch1), owner);
     launch1.dispose();
@@ -220,16 +225,35 @@ void main() {
     }
     expect(storage.read(me, _relay).single.profile.ownerEvidence, isNull);
 
-    // Evidence that would push an entry past its bound is left out; the
-    // name is kept and the owner is verified again after the next fetch.
+    // An attested profile is stored once, as its signed event, so one
+    // whose fields and event together would pass the bound keeps both.
     final large = _signedProfile(name: 'Helper', createdAt: 12, pad: 9000);
     final parsed = parseProfileEvent(large);
     expect(parsed.profile.ownerEvidence, isNotNull);
     await storage.write(storage.capture(me, _relay), [parsed]);
     final kept = storage.read(me, _relay).single;
     expect(kept.eventId, large.id);
+    expect(kept.createdAt, large.createdAt);
+    expect(kept.profile.displayName, 'Helper');
     expect(kept.profile.about, hasLength(9000));
-    expect(kept.profile.ownerEvidence, isNull);
+    expect(kept.profile.ownerPubkey, owner);
+    expect(verifiedEvidenceOwner(kept.profile.ownerEvidence!, agent), owner);
+
+    // A signed event past the bound is left out; the name is kept and the
+    // owner is verified again after the next fetch.
+    final oversized = _signedProfile(
+      name: 'Helper',
+      createdAt: 13,
+      banner: maxProfileSnapshotEntryBytes,
+    );
+    await storage.write(storage.capture(me, _relay), [
+      parseProfileEvent(oversized),
+    ]);
+    final named = storage.read(me, _relay).single;
+    expect(named.eventId, oversized.id);
+    expect(named.profile.displayName, 'Helper');
+    expect(named.profile.ownerPubkey, owner);
+    expect(named.profile.ownerEvidence, isNull);
   });
 
   test('snapshot scopes are per identity and relay, and bounded', () async {
@@ -261,13 +285,18 @@ NostrEvent _signedProfile({
   required String name,
   required int createdAt,
   int pad = 0,
+  int banner = 0,
 }) {
   final agent = derivePublicKeyHex(_agentSecret);
   final digest = crypto.sha256.convert(utf8.encode('nostr:agent-auth:$agent:'));
   return NostrEvent.fromJson(
     signNostrEvent(
       kind: 0,
-      content: jsonEncode({'name': name, if (pad > 0) 'about': 'x' * pad}),
+      content: jsonEncode({
+        'name': name,
+        if (pad > 0) 'about': 'x' * pad,
+        if (banner > 0) 'banner': 'x' * banner,
+      }),
       secretKey: _agentSecret,
       createdAt: createdAt,
       tags: [

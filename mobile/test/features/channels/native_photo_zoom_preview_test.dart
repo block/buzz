@@ -212,7 +212,7 @@ void main() {
             replied = true;
           },
           actions: NativePhotoActions(
-            canDelete: false,
+            canDelete: () => false,
             perform: (action, url) async {
               actions.add('$action:$url');
               return null;

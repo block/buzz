@@ -75,7 +75,6 @@ class _MessageBubble extends HookConsumerWidget {
     final isAgent =
         ref.watch(agentMentionPubkeysProvider(currentChannelId)).contains(pk) ||
         profile?.ownerPubkey != null;
-    final canManageMessage = watchCanManageMessage(ref, pk, currentPubkey);
 
     // Watch only profiles referenced by this message. A batched profile fetch
     // should not rebuild every visible message just because an unrelated user
@@ -126,7 +125,7 @@ class _MessageBubble extends HookConsumerWidget {
         ref: ref,
         message: message,
         channelId: currentChannelId,
-        canManageMessage: canManageMessage,
+        canManageMessage: readCanManageMessage(ref, pk, currentPubkey),
         allMessages: allMessages,
         currentPubkey: currentPubkey,
         isMember: isMember,
@@ -398,7 +397,12 @@ class _MessageBubble extends HookConsumerWidget {
                                           ref: ref,
                                           message: message,
                                           channelId: currentChannelId,
-                                          canManageMessage: canManageMessage,
+                                          canManageMessage: () =>
+                                              readCanManageMessage(
+                                                ref,
+                                                pk,
+                                                currentPubkey,
+                                              ),
                                         ),
                                         onMediaMore:
                                             (viewerContext, imageUrl) =>
@@ -409,7 +413,11 @@ class _MessageBubble extends HookConsumerWidget {
                                                   channelId: currentChannelId,
                                                   imageUrl: imageUrl,
                                                   canManageMessage:
-                                                      canManageMessage,
+                                                      readCanManageMessage(
+                                                        ref,
+                                                        pk,
+                                                        currentPubkey,
+                                                      ),
                                                   onDeleted: () {
                                                     if (viewerContext.mounted) {
                                                       Navigator.of(

@@ -112,6 +112,7 @@ import 'package:buzz/features/profile/presence_cache_provider.dart';
 import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
+import 'package:buzz/shared/profile/verified_profile_owner.dart';
 import 'package:buzz/features/profile/user_profile_sheet.dart';
 import 'package:buzz/shared/identity_archives/identity_archives.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';

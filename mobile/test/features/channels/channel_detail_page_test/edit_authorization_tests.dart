@@ -109,9 +109,10 @@ void _editAuthorizationTests() {
   ) async {
     final fixture = _EditFixture();
     // The last session saved the agent's signed profile and the relay key.
+    // Its long about text fits once, but not beside the signed copy.
     final storage = ProfileSnapshotStorage(_testPrefs);
     await storage.write(storage.capture(fixture.owner.public, _editRelay), [
-      parseProfileEvent(fixture.agentProfile),
+      parseProfileEvent(fixture.longAgentProfile),
     ]);
     addTearDown(() => storage.remove(fixture.owner.public, _editRelay));
     final relayRequests = <String>[];
@@ -294,6 +295,172 @@ void _editAuthorizationTests() {
     },
   );
 
+  testWidgets('Edit permission is read from the profile when actions open', (
+    tester,
+  ) async {
+    final fixture = _EditFixture();
+    final cache = _FakeUserCacheNotifier({
+      fixture.agent.public: parseProfileEvent(fixture.agentProfile).profile,
+    });
+    final reply = _textMsg(
+      id: threadIdR1,
+      pubkey: fixture.agent.public,
+      content: 'Agent reply',
+      createdAt: 1500,
+      extraTags: [
+        ['e', threadIdA, '', 'reply'],
+      ],
+    );
+    verifiedOwnerChecks = 0;
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [fixture.agentMessage],
+        threadReplies: {
+          threadIdA: [reply],
+        },
+        userCacheNotifier: cache,
+        signingPubkey: fixture.owner.public,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Without edits, showing the channel checks no signed profile.
+    expect(findRichText('Original agent message'), findsOneWidget);
+    expect(verifiedOwnerChecks, 0);
+    await _expectEditMenu(tester, 'Original agent message', isTrue);
+    expect(verifiedOwnerChecks, 1);
+
+    // A newer profile without the attestation is what the next menu reads,
+    // in the channel and in a thread.
+    cache.replace(parseProfileEvent(fixture.agentProfileWithoutOwner).profile);
+    await tester.pump();
+    await _expectEditMenu(tester, 'Original agent message', isFalse);
+    final head = formatTimeline([fixture.agentMessage]).single;
+    unawaited(
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: head,
+            allMessages: [head],
+            channelId: _channelId,
+            currentPubkey: fixture.owner.public,
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await _expectEditMenu(tester, 'Agent reply', isFalse);
+  });
+
+  testWidgets('image actions read Edit permission when they open', (
+    tester,
+  ) async {
+    final fixture = _EditFixture();
+    final cache = _FakeUserCacheNotifier({
+      fixture.agent.public: parseProfileEvent(fixture.agentProfile).profile,
+    });
+    tester.view.physicalSize = const Size(400, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    const first = 'https://example.org/media/first.png';
+    const second = 'https://example.org/media/second.png';
+    verifiedOwnerChecks = 0;
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [
+          _textMsg(
+            id: threadIdA,
+            pubkey: fixture.agent.public,
+            content: '![First]($first)\n![Second]($second)',
+            extraTags: const [
+              ['imeta', 'url $first', 'm image/png'],
+              ['imeta', 'url $second', 'm image/png'],
+            ],
+          ),
+        ],
+        userCacheNotifier: cache,
+        signingPubkey: fixture.owner.public,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(verifiedOwnerChecks, 0);
+
+    await tester.tap(find.byKey(const ValueKey('message-media-stack')));
+    await tester.pumpAndSettle();
+    final more = find.byKey(
+      const ValueKey('message-media-image-viewer-more-actions'),
+    );
+    await tester.tap(more);
+    await tester.pumpAndSettle();
+    expect(find.text('Delete message'), findsOneWidget);
+    expect(verifiedOwnerChecks, 1);
+
+    // The next opening reads the newer profile without the attestation.
+    Navigator.of(tester.element(find.text('Delete message'))).pop();
+    await tester.pumpAndSettle();
+    cache.replace(parseProfileEvent(fixture.agentProfileWithoutOwner).profile);
+    await tester.pump();
+    await tester.tap(more);
+    await tester.pumpAndSettle();
+    expect(find.text('Save image'), findsOneWidget);
+    expect(find.text('Delete message'), findsNothing);
+  });
+
+  testWidgets('owner profiles are asked for again when the relay reconnects', (
+    tester,
+  ) async {
+    final fixture = _EditFixture();
+    // The agent has no stored profile; the restored one has no signed copy.
+    final storage = ProfileSnapshotStorage(_testPrefs);
+    await storage.write(storage.capture(fixture.owner.public, _editRelay), [
+      fixture.restoredWithoutEvidence,
+    ]);
+    addTearDown(() => storage.remove(fixture.owner.public, _editRelay));
+    final session = _EditRelaySession(
+      profiles: [fixture.agentProfile, fixture.restoredProfile],
+      events: const [],
+      failedProfileReads: 1,
+    );
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [
+          fixture.agentMessage,
+          fixture.ownerEdit,
+          fixture.restoredMessage,
+          fixture.restoredOwnerEdit,
+        ],
+        userCacheNotifier: UserCacheNotifier(),
+        relaySessionNotifier: session,
+        relayConfigNotifier: _EditRelayConfig(fixture.owner.secret),
+        signingPubkey: fixture.owner.public,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The first request for both timed out. The agent's row asks again for
+    // its missing profile, but nothing else asks for the restored one.
+    expect(session.profileReads, greaterThan(1));
+    expect(findRichText('Restored agent message'), findsOneWidget);
+
+    session.setStatus(SessionStatus.reconnecting);
+    await tester.pumpAndSettle();
+    session.setStatus(SessionStatus.connected);
+    await tester.pumpAndSettle();
+    expect(findRichText('Owner update (edited)'), findsOneWidget);
+    expect(findRichText('Restored update (edited)'), findsOneWidget);
+    final reads = session.profileReads;
+
+    // Both are answered now, so a later reconnect does not ask again.
+    session.setStatus(SessionStatus.reconnecting);
+    await tester.pumpAndSettle();
+    session.setStatus(SessionStatus.connected);
+    await tester.pumpAndSettle();
+    expect(session.profileReads, reads);
+  });
+
   // A head outside the relay's thread history is formatted from the saved
   // page, with the edit authority its own edits need.
   for (final attributed in [false, true]) {
@@ -387,14 +554,18 @@ class _EditFixture {
 
   /// An agent whose stored profile names [owner] without its signed copy.
   final restored = nostr.Keys.generate();
+  late final restoredProfile = _signedKind0(
+    signer: restored,
+    tags: [_authTag(owner, restored.public)],
+  );
   late final restoredWithoutEvidence = (
     profile: UserProfile(
       pubkey: restored.public,
       displayName: 'Restored',
       ownerPubkey: owner.public,
     ),
-    createdAt: 1,
-    eventId: 'a' * 64,
+    createdAt: restoredProfile.createdAt,
+    eventId: restoredProfile.id,
   );
   late final restoredMessage = _textMsg(
     id: threadIdUnrelated,
@@ -410,16 +581,22 @@ class _EditFixture {
   );
 
   late final agentProfile = _signedKind0(tags: [_authTag(owner, agent.public)]);
+  late final longAgentProfile = _signedKind0(
+    tags: [_authTag(owner, agent.public)],
+    about: 'x' * 9000,
+  );
   late final agentProfileWithoutOwner = _signedKind0(createdAt: 2);
 
   NostrEvent _signedKind0({
+    nostr.Keys? signer,
     int createdAt = 1,
     List<List<String>> tags = const [],
+    String? about,
   }) => NostrEvent.fromJson(
     signNostrEvent(
       kind: 0,
-      content: jsonEncode({'name': 'Helper'}),
-      secretKey: agent.secret,
+      content: jsonEncode({'name': 'Helper', 'about': ?about}),
+      secretKey: (signer ?? agent).secret,
       createdAt: createdAt,
       tags: tags,
     ).toMap(),
@@ -504,12 +681,17 @@ class _EditRelaySession extends RelaySessionNotifier {
     required this.profiles,
     required this.events,
     this.status = SessionStatus.connected,
+    this.failedProfileReads = 0,
   });
 
   final List<NostrEvent> profiles;
   final List<NostrEvent> events;
   final SessionStatus status;
+
+  /// Profile reads that time out before any succeeds.
+  final int failedProfileReads;
   var directoryReads = 0;
+  var profileReads = 0;
   final _listeners = <(NostrFilter, void Function(NostrEvent))>[];
 
   @override
@@ -529,7 +711,15 @@ class _EditRelaySession extends RelaySessionNotifier {
       directoryReads++;
       return const [];
     }
-    if (filter.kinds.contains(0)) return profiles;
+    if (filter.kinds.contains(0)) {
+      if (++profileReads <= failedProfileReads) {
+        throw TimeoutException('profiles');
+      }
+      return [
+        for (final profile in profiles)
+          if (filter.authors?.contains(profile.pubkey) ?? true) profile,
+      ];
+    }
     return events.where((event) => filter.kinds.contains(event.kind)).toList();
   }
 

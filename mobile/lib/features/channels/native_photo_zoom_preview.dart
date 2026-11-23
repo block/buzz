@@ -12,7 +12,9 @@ import '../../shared/widgets/ios_navigation_metrics.dart';
 /// Message-scoped actions shared with the Flutter gallery.
 class NativePhotoActions {
   const NativePhotoActions({required this.canDelete, required this.perform});
-  final bool canDelete;
+
+  /// Read when the gallery opens and before a delete, so it is current then.
+  final bool Function() canDelete;
   final Future<String?> Function(String action, String url) perform;
 }
 
@@ -158,7 +160,7 @@ class NativePhotoZoomPreview {
                 !['save', 'share', 'copy', 'delete'].contains(action)) {
               return null;
             }
-            if (action == 'delete' && !actions.canDelete) return null;
+            if (action == 'delete' && !actions.canDelete()) return null;
             return actions.perform(action as String, urls[index]);
         }
         return null;
@@ -172,7 +174,7 @@ class NativePhotoZoomPreview {
         'initialIndex': initialIndex,
         'canReply': onReply != null,
         'canMore': actions != null,
-        'canDelete': actions?.canDelete ?? false,
+        'canDelete': actions?.canDelete() ?? false,
         'reduceMotion': reduceMotion,
         'railCenterX': railMetrics.railCenterX,
         'railWindowWidth': railMetrics.windowSize?.width,
