@@ -1111,11 +1111,11 @@ void main() {
       expect(headerNativeView, findsOneWidget);
       await tester.longPress(find.text('General'));
       await tester.pumpAndSettle();
-      expect(find.text('Rename'), findsOneWidget);
+      expect(find.text('Edit'), findsOneWidget);
       expect(headerNativeView, findsNothing);
       await tester.tapAt(const Offset(20, 20));
       await tester.pumpAndSettle();
-      expect(find.text('Rename'), findsNothing);
+      expect(find.text('Edit'), findsNothing);
       expect(headerNativeView, findsOneWidget);
       await tester.pumpWidget(const SizedBox.shrink());
       debugDefaultTargetPlatformOverride = null;

@@ -718,6 +718,7 @@ Future<void> _scrollDetailsTo(WidgetTester tester, Finder target) async {
         .descendant(of: list, matching: find.byType(Scrollable))
         .first,
   );
+  await Scrollable.ensureVisible(tester.element(target), alignment: 0.5);
   await tester.pumpAndSettle();
 }
 
@@ -5178,7 +5179,7 @@ void main() {
                 ),
               )
               .radius,
-          20,
+          Grid.md / 2,
         );
         expect(
           find.descendant(
@@ -5187,8 +5188,26 @@ void main() {
           ),
           findsOneWidget,
         );
-        expect(tester.getSize(aliceRow).height, 40 + (Grid.xxs * 2));
+        expect(tester.getSize(aliceRow).height, Grid.md + (Grid.xs * 2));
 
+        final avatarCenter = tester
+            .getCenter(
+              find.descendant(of: aliceRow, matching: find.byType(AvatarImage)),
+            )
+            .dx;
+        await _scrollDetailsTo(tester, find.text('Star'));
+        expect(
+          tester
+              .getCenter(
+                find.descendant(
+                  of: find.byKey(const ValueKey('channel-details-star-action')),
+                  matching: find.byIcon(BuzzIcons.star),
+                ),
+              )
+              .dx,
+          avatarCenter,
+        );
+        await _scrollDetailsTo(tester, aliceRow);
         await tester.tap(aliceRow);
         await tester.pumpAndSettle();
         expect(find.byType(UserProfileSheet), findsOneWidget);
@@ -5346,9 +5365,10 @@ void main() {
 
       expect(
         tester
-            .widget<AppListRow>(find.widgetWithText(AppListRow, 'Rename'))
-            .onTap,
-        isNull,
+            .getSemantics(find.text('Edit'))
+            .getSemanticsData()
+            .hasAction(SemanticsAction.tap),
+        isTrue,
       );
     });
 
@@ -5581,7 +5601,7 @@ void main() {
         tester.getTopLeft(find.text('See all')).dx,
         closeTo(tester.getTopLeft(firstMemberTitle).dx, 0.1),
       );
-      expect(tester.getSize(seeAllRow).height, 40 + (Grid.xxs * 2));
+      expect(tester.getSize(seeAllRow).height, Grid.md + (Grid.xs * 2));
 
       // Identity display in the preview rows: unnamed members keep distinct
       // hex-keyed avatar initials (the compact-npub label would render `N`
@@ -6370,38 +6390,32 @@ void main() {
         find.byKey(const ValueKey('channel-header-settings-trigger')),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Rename'));
+      await tester.tap(
+        find.byKey(const ValueKey('channel-details-edit-action')),
+      );
       await tester.pumpAndSettle();
+
+      expect(find.text('Mute'), findsOneWidget);
+      expect(find.text('Leave channel'), findsNothing);
+      expect(find.text('Topic'), findsNothing);
+      expect(find.text('Purpose'), findsNothing);
+      expect(find.text('Add Canvas'), findsOneWidget);
+
+      expect(find.text('Edit channel'), findsOneWidget);
       await tester.enterText(
-        find.byKey(const ValueKey('text-editor-input')),
+        find.byKey(const ValueKey('manage-channel-name')),
         '  #renamed  ',
       );
-      await tester.pump();
-      await tester.tap(find.byKey(const ValueKey('text-editor-save')));
-      await tester.pumpAndSettle();
-      expect(updatedName, 'renamed');
-      expect(updatedDescription, isNull);
-      final descriptionRow = find.text('Edit description');
-      await tester.tap(descriptionRow);
-      await tester.pumpAndSettle();
       await tester.enterText(
-        find.byKey(const ValueKey('text-editor-input')),
-        '',
-      );
-      await tester.pump();
-      await tester.tap(find.byKey(const ValueKey('text-editor-save')));
-      await tester.pumpAndSettle();
-      expect(updatedDescription, '');
-      await tester.tap(find.text('Add description'));
-      await tester.pumpAndSettle();
-      await tester.enterText(
-        find.byKey(const ValueKey('text-editor-input')),
+        find.byKey(const ValueKey('manage-channel-description')),
         'A new description',
       );
       await tester.pump();
-      await tester.tap(find.byKey(const ValueKey('text-editor-save')));
+      await tester.tap(
+        find.byKey(const ValueKey('manage-channel-save-details')),
+      );
       await tester.pumpAndSettle();
-      expect(updatedName, isNull);
+      expect(updatedName, 'renamed');
       expect(updatedDescription, 'A new description');
       expect(find.text('renamed'), findsOneWidget);
       expect(find.text('A new description'), findsOneWidget);
@@ -9401,27 +9415,33 @@ void main() {
       );
     });
 
-    testWidgets('top action discovers a Huddle outside the timeline window', (
-      tester,
-    ) async {
-      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: const [],
-          huddleLifecycle: [
-            _huddleMsg(
-              id: 'off-window-huddle',
-              kind: EventKind.huddleStarted,
-              createdAt: now,
-            ),
-          ],
-        ),
-      );
-      await tester.pumpAndSettle();
+    testWidgets(
+      'settings action discovers a Huddle outside the timeline window',
+      (tester) async {
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            huddleLifecycle: [
+              _huddleMsg(
+                id: 'off-window-huddle',
+                kind: EventKind.huddleStarted,
+                createdAt: now,
+              ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
 
-      expect(find.byTooltip('Open Huddle'), findsOneWidget);
-      expect(find.text('Huddle in progress'), findsNothing);
-    });
+        expect(find.byTooltip('Open Huddle'), findsNothing);
+        expect(find.text('Huddle in progress'), findsNothing);
+        await tester.tap(
+          find.byKey(const ValueKey('channel-header-settings-trigger')),
+        );
+        await tester.pumpAndSettle();
+        await _scrollDetailsTo(tester, find.text('Open Huddle'));
+      },
+    );
 
     testWidgets(
       'Huddle card shows participants and freezes elapsed time when ended',
@@ -9842,14 +9862,7 @@ void main() {
 
       expect(find.widgetWithText(FilledButton, 'Retry'), findsNothing);
       expect(find.widgetWithText(FilledButton, 'Start new'), findsOneWidget);
-      expect(find.byTooltip('Start Huddle'), findsOneWidget);
-      expect(
-        find.descendant(
-          of: find.byKey(const ValueKey('channel-huddle-button')),
-          matching: find.byIcon(BuzzIcons.headphones),
-        ),
-        findsOneWidget,
-      );
+      expect(find.byKey(const ValueKey('channel-huddle-button')), findsNothing);
       expect(find.byIcon(BuzzIcons.headphoneOff), findsNothing);
     });
 
@@ -12517,8 +12530,13 @@ void main() {
         );
         await tester.pumpAndSettle();
 
+        await tester.tap(
+          find.byKey(const ValueKey('channel-header-settings-trigger')),
+        );
+        await tester.pumpAndSettle();
+        await _scrollDetailsTo(tester, find.text('Start a huddle'));
         // A stray tap asks first; Cancel leaves no Huddle behind.
-        await tester.tap(find.byKey(const ValueKey('channel-huddle-button')));
+        await tester.tap(find.text('Start a huddle'));
         await tester.pumpAndSettle();
         expect(find.text('Start a Huddle?'), findsOneWidget);
         await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
@@ -12526,7 +12544,7 @@ void main() {
         expect(find.text('Start a Huddle?'), findsNothing);
         expect(relaySession.huddleCreatePublishStarted.isCompleted, isFalse);
 
-        await tester.tap(find.byKey(const ValueKey('channel-huddle-button')));
+        await tester.tap(find.text('Start a huddle'));
         await tester.pumpAndSettle();
         await tester.tap(find.widgetWithText(FilledButton, 'Start Huddle'));
         await tester.pump();
@@ -16916,63 +16934,63 @@ void main() {
       );
     }
 
-    testWidgets('native channel header preserves members settings and Huddle', (
-      tester,
-    ) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-      addTearDown(() => debugDefaultTargetPlatformOverride = null);
-      await tester.pumpWidget(_buildTestable(messages: const []));
-      await tester.pumpAndSettle();
-      final view = tester.widget<UiKitView>(
-        find.byWidgetPredicate(
-          (widget) =>
-              widget is UiKitView &&
-              widget.viewType == 'buzz/ios_navigation_bar',
-        ),
-      );
-      final payload = view.creationParams! as Map<String, Object?>;
-      expect(payload['title'], 'general');
-      expect(payload['subtitle'], '');
-      expect(
-        payload['titleMaxWidth'],
-        closeTo(
-          tester
-                  .getSize(find.byKey(const ValueKey('ios-composer-controls')))
-                  .width *
-              2 /
-              3,
-          0.5,
-        ),
-      );
-      expect(payload['titleEnabled'], isTrue);
-      final actions = payload['actions']! as List;
-      expect(actions, hasLength(1));
-      expect(actions.single, containsPair('label', 'Start Huddle'));
-      expect(actions.single, containsPair('enabled', true));
-      const channel = MethodChannel('buzz/ios_navigation_bar/97');
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        channel,
-        (_) async => null,
-      );
-      addTearDown(
-        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+    testWidgets(
+      'native channel header opens settings and leaves Huddle in the menu',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        await tester.pumpWidget(_buildTestable(messages: const []));
+        await tester.pumpAndSettle();
+        final view = tester.widget<UiKitView>(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is UiKitView &&
+                widget.viewType == 'buzz/ios_navigation_bar',
+          ),
+        );
+        final payload = view.creationParams! as Map<String, Object?>;
+        expect(payload['title'], 'general');
+        expect(payload['subtitle'], '');
+        expect(
+          payload['titleMaxWidth'],
+          closeTo(
+            tester
+                    .getSize(
+                      find.byKey(const ValueKey('ios-composer-controls')),
+                    )
+                    .width *
+                2 /
+                3,
+            0.5,
+          ),
+        );
+        expect(payload['titleEnabled'], isTrue);
+        expect(payload['actions'], isEmpty);
+        const channel = MethodChannel('buzz/ios_navigation_bar/97');
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
           channel,
-          null,
-        ),
-      );
-      view.onPlatformViewCreated!(97);
-      await tester.pump();
-      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
-        channel.name,
-        channel.codec.encodeMethodCall(const MethodCall('action', 'title')),
-        (_) {},
-      );
-      await tester.pumpAndSettle();
-      expect(find.byType(ChannelDetailsPage), findsOneWidget);
-      expect(tester.takeException(), isNull);
-      await tester.pumpWidget(const SizedBox());
-      debugDefaultTargetPlatformOverride = null;
-    });
+          (_) async => null,
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            channel,
+            null,
+          ),
+        );
+        view.onPlatformViewCreated!(97);
+        await tester.pump();
+        await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+          channel.name,
+          channel.codec.encodeMethodCall(const MethodCall('action', 'title')),
+          (_) {},
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(ChannelDetailsPage), findsOneWidget);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
 
     testWidgets(
       'keeps the native iOS glass header aligned at large text sizes',
@@ -17183,7 +17201,9 @@ void main() {
         expect(
           title.right,
           lessThanOrEqualTo(
-            tester.getRect(find.byTooltip('Start Huddle')).left,
+            isDm
+                ? tester.getRect(find.byTooltip('Start Huddle')).left
+                : tester.view.physicalSize.width / tester.view.devicePixelRatio,
           ),
         );
         expect(tester.takeException(), isNull);
@@ -17239,9 +17259,9 @@ void main() {
         expect(find.text('General discussion'), findsOneWidget);
 
         expect(find.text('Preferences'), findsNothing);
-        expect(find.text('Star'), findsOneWidget);
+        expect(find.text('5 members'), findsOneWidget);
         expect(find.text('Mute'), findsOneWidget);
-        expect(find.text('Edit description'), findsOneWidget);
+        expect(find.text('Edit'), findsOneWidget);
         expect(find.text('Actions'), findsNothing);
         expect(find.byTooltip('Back'), findsOneWidget);
 

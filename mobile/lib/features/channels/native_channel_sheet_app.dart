@@ -80,11 +80,12 @@ class ChannelSheetContent extends HookWidget {
   @override
   Widget build(BuildContext context) {
     final solo = data['solo'] == true;
-    final memberSize = solo ? Grid.md : Grid.lg;
     final nameKey = useMemoized(GlobalKey.new);
     final details = data['details'] is Map
         ? Channel.fromJson(Map<String, dynamic>.from(data['details'] as Map))
         : null;
+    final aligned = solo || (details != null && !details.isDm);
+    final memberSize = aligned ? Grid.md : Grid.lg;
     final sections = (data['sections'] as List? ?? const [])
         .map(
           (section) => (section as List)
@@ -164,16 +165,13 @@ class ChannelSheetContent extends HookWidget {
                 )
               else
                 AppListCard(
-                  iconColumnWidth: solo ? Grid.md : null,
-                  dividerIndent:
-                      !solo &&
-                          details != null &&
-                          index == (data['memberSection'] ?? 1)
-                      ? Grid.xs + 40 + Grid.xs
+                  iconColumnWidth: aligned ? Grid.md : null,
+                  dividerIndent: !solo && details != null && index == 1
+                      ? Grid.xs + memberSize + Grid.xs
                       : null,
                   label:
                       details != null &&
-                          index == (data['memberSection'] ?? 1) &&
+                          index == 1 &&
                           (data['memberLabel'] as String? ?? '').isNotEmpty
                       ? data['memberLabel'] as String
                       : null,
@@ -205,7 +203,7 @@ class ChannelSheetContent extends HookWidget {
                       else if (row['member'] is Map)
                         _ChannelMemberPreviewRow(
                           size: memberSize,
-                          padding: solo ? Grid.xs : Grid.xxs,
+                          padding: aligned ? Grid.xs : Grid.xxs,
                           member: ChannelMember(
                             pubkey: (row['member'] as Map)['pubkey'] as String,
                             role: (row['member'] as Map)['role'] as String,
@@ -232,7 +230,7 @@ class ChannelSheetContent extends HookWidget {
                         )
                       else if (row['memberAction'] == true ||
                           details != null &&
-                              index == (data['memberSection'] ?? 1) &&
+                              index == 1 &&
                               (row['label'] == 'Add members' ||
                                   row['label'] == 'See all'))
                         AppListRowRaw(
@@ -255,7 +253,7 @@ class ChannelSheetContent extends HookWidget {
                             style: context.textTheme.bodyLarge,
                           ),
                           trailing: const _ChannelDetailsChevron(),
-                          verticalPadding: solo ? Grid.xs : Grid.xxs,
+                          verticalPadding: aligned ? Grid.xs : Grid.xxs,
                           onTap: select(row),
                         )
                       else

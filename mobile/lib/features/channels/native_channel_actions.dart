@@ -33,11 +33,9 @@ class _NativeChannelActions extends HookConsumerWidget {
     this.heroIsAgent = false,
     this.memberLabel,
     this.solo = false,
-    this.memberSection = 1,
     this.settings,
   });
   final bool solo;
-  final int memberSection;
   final MeChatSettings? settings;
   final Channel? detailsChannel;
   final String? heroAvatarUrl;
@@ -224,7 +222,6 @@ class _NativeChannelActions extends HookConsumerWidget {
     final payload = {
       'session': session,
       'solo': solo,
-      'memberSection': memberSection,
       'title': title ?? '',
       if (detailsChannel != null) 'details': detailsChannel!.toJson(),
       'heroAvatarUrl': imageSource(heroAvatarUrl),

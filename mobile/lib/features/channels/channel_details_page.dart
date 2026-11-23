@@ -105,8 +105,9 @@ class ChannelDetailsPage extends HookConsumerWidget {
     final lifecycleName = solo
         ? resolvedChannel.name
         : '#${resolvedChannel.name}';
-    final memberSize = solo ? Grid.md : Grid.lg;
-    final memberPadding = solo ? Grid.xs : Grid.xxs;
+    final aligned = solo || regularChannel;
+    final memberSize = aligned ? Grid.md : Grid.lg;
+    final memberPadding = aligned ? Grid.xs : Grid.xxs;
     final scrollController = useScrollController();
     final heroNameKey = useMemoized(GlobalKey.new);
     final collapsedTitleOffset = useRef<double?>(null);
@@ -155,6 +156,8 @@ class ChannelDetailsPage extends HookConsumerWidget {
         !resolvedChannel.isDm &&
         canManageLifecycle &&
         !resolvedChannel.isArchived;
+    final canOpenEditor =
+        canEdit || (resolvedChannel.isMember && !resolvedChannel.isArchived);
     final canJoin =
         resolvedChannel.visibility == 'open' &&
         !resolvedChannel.isArchived &&
@@ -443,44 +446,6 @@ class ChannelDetailsPage extends HookConsumerWidget {
               },
             ),
     );
-    final description = resolvedChannel.description.trim();
-    final descriptionLabel = description.isEmpty
-        ? 'Add description'
-        : 'Edit description';
-    final editCard = AppListCard(
-      verticalPadding: _channelDetailsSectionPadding,
-      children: [
-        renameRow,
-        AppListRow(
-          icon: BuzzIcons.pencil,
-          title: descriptionLabel,
-          onTap: !canEdit
-              ? null
-              : () => showTextEditor(
-                  context: context,
-                  title: descriptionLabel,
-                  hintText: 'Description',
-                  initialValue: description,
-                  multiline: true,
-                  onSave: (value) async {
-                    final trimmed = value.trim();
-                    if (trimmed == description) return;
-                    await ref
-                        .read(channelActionsProvider)
-                        .updateChannel(
-                          channelId: resolvedChannel.id,
-                          description: trimmed,
-                        );
-                    if (context.mounted) {
-                      displayedChannel.value = resolvedChannel.copyWith(
-                        description: trimmed,
-                      );
-                    }
-                  },
-                ),
-        ),
-      ],
-    );
     final moveRow = AppListRow(
       icon: BuzzIcons.folderInput,
       title: 'Move to section…',
@@ -494,6 +459,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
       },
     );
     final organizationCard = AppListCard(
+      iconColumnWidth: Grid.md,
       verticalPadding: _channelDetailsSectionPadding,
       children: [
         AppListRow(
@@ -507,7 +473,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
     );
     final channelActionsCard = AppListCard(
       key: const ValueKey('channel-details-channel-card'),
-      iconColumnWidth: solo ? Grid.md : null,
+      iconColumnWidth: aligned ? Grid.md : null,
       verticalPadding: _channelDetailsSectionPadding,
       children: [
         if (solo)
@@ -523,13 +489,6 @@ class ChannelDetailsPage extends HookConsumerWidget {
             onTap: openManageChannel,
           ),
         if (!regularChannel && canFile) moveRow,
-        if (regularChannel)
-          AppListRow(
-            key: const ValueKey('channel-details-edit-action'),
-            icon: BuzzIcons.settings,
-            title: 'Manage channel',
-            onTap: openManageChannel,
-          ),
         AppListRow(
           icon: BuzzIcons.copy,
           title: 'Copy channel name',
@@ -572,7 +531,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
       key: const ValueKey('channel-details-members-card'),
       label: solo ? null : memberLabel,
       dividerIndent: Grid.xs + memberSize + Grid.xs,
-      iconColumnWidth: solo ? Grid.md : null,
+      iconColumnWidth: aligned ? Grid.md : null,
       verticalPadding: _channelDetailsSectionPadding,
       children: [
         if (canAddMembers)
@@ -645,7 +604,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
         canDelete;
     final lifecycleCard = AppListCard(
       key: const ValueKey('channel-details-lifecycle-card'),
-      iconColumnWidth: solo ? Grid.md : null,
+      iconColumnWidth: aligned ? Grid.md : null,
       verticalPadding: _channelDetailsSectionPadding,
       children: [
         if (resolvedChannel.isSolo && canEdit)
@@ -760,7 +719,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
     }
 
     final showHuddle =
-        solo &&
+        (solo || (regularChannel && !resolvedChannel.isForum)) &&
         resolvedChannel.isMember &&
         !resolvedChannel.isArchived &&
         currentMember?.role != 'guest';
@@ -772,7 +731,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
         heroAvatarUrl: counterpartProfile?.avatarUrl,
         heroIsAgent: counterpartProfile?.isAgent ?? false,
         memberLabel: solo || isDirectDm ? null : memberLabel,
-        memberSection: regularChannel ? 4 : 1,
+
         settings: settings,
         groups: [
           SheetActionSection(
@@ -794,6 +753,12 @@ class ChannelDetailsPage extends HookConsumerWidget {
                 title: isMuted ? 'Unmute' : 'Mute',
                 onTap: toggleMute,
               ),
+              if (regularChannel)
+                AppListRow(
+                  icon: BuzzIcons.pencil,
+                  title: 'Edit',
+                  onTap: canOpenEditor ? openManageChannel : null,
+                ),
             ],
           ),
           if (settings != null)
@@ -807,7 +772,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
               ],
             ),
           if (regularChannel) ...[
-            SheetActionSection(children: editCard.children),
+            SheetActionSection(children: membersCard.children),
             SheetActionSection(children: organizationCard.children),
           ] else if (solo)
             SheetActionSection(
@@ -826,10 +791,9 @@ class ChannelDetailsPage extends HookConsumerWidget {
           SheetActionSection(children: channelActionsCard.children),
           if (showHuddle)
             SheetActionSection(
-              children: [soloHuddleActionRow(context, ref, resolvedChannel)],
+              children: [channelHuddleActionRow(context, ref, resolvedChannel)],
             ),
-          if (solo || regularChannel)
-            SheetActionSection(children: membersCard.children),
+          if (solo) SheetActionSection(children: membersCard.children),
           if (showLifecycle)
             SheetActionSection(children: lifecycleCard.children),
         ],
@@ -915,6 +879,18 @@ class ChannelDetailsPage extends HookConsumerWidget {
                     onTap: toggleMute,
                   ),
                 ),
+                if (regularChannel) ...[
+                  const SizedBox(width: Grid.xxs),
+                  Expanded(
+                    child: BuzzActionTile(
+                      key: const ValueKey('channel-details-edit-action'),
+                      icon: BuzzIcons.pencil,
+                      label: 'Edit',
+                      isEnabled: canOpenEditor,
+                      onTap: openManageChannel,
+                    ),
+                  ),
+                ],
                 if (resolvedChannel.isDm && !solo && !isModerationDm) ...[
                   const SizedBox(width: Grid.xxs),
                   Expanded(
@@ -939,15 +915,15 @@ class ChannelDetailsPage extends HookConsumerWidget {
                 verticalPadding: _channelDetailsSectionPadding,
                 children: [renameRow],
               )),
-        if (regularChannel) ...[editCard, organizationCard],
+        if (regularChannel) ...[membersCard, organizationCard],
         if (solo || regularChannel) channelActionsCard,
         if (showHuddle)
           AppListCard(
             iconColumnWidth: Grid.md,
             verticalPadding: _channelDetailsSectionPadding,
-            children: [SoloHuddleRow(channel: resolvedChannel)],
+            children: [ChannelHuddleRow(channel: resolvedChannel)],
           ),
-        if (!isDirectDm) membersCard,
+        if (!regularChannel && !isDirectDm) membersCard,
         if (!solo && !regularChannel) channelActionsCard,
         if (showLifecycle) lifecycleCard,
       ],

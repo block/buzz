@@ -1617,7 +1617,7 @@ void main() {
         tester.getCenter(find.text('Mark as unread')).dx,
         lessThan(tester.getCenter(find.text('Mute')).dx),
       );
-      expect(find.text('Rename'), findsOneWidget);
+      expect(find.text('Edit'), findsOneWidget);
       navigator.pop();
       await tester.pumpAndSettle();
 

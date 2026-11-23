@@ -183,17 +183,17 @@ class _HuddleInvite {
   });
 }
 
-class SoloHuddleRow extends ConsumerWidget {
-  const SoloHuddleRow({super.key, required this.channel});
+class ChannelHuddleRow extends ConsumerWidget {
+  const ChannelHuddleRow({super.key, required this.channel});
 
   final Channel channel;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) =>
-      soloHuddleActionRow(context, ref, channel);
+      channelHuddleActionRow(context, ref, channel);
 }
 
-AppListRow soloHuddleActionRow(
+AppListRow channelHuddleActionRow(
   BuildContext context,
   WidgetRef ref,
   Channel channel,
