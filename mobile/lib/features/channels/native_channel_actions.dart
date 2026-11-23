@@ -48,6 +48,7 @@ class _NativeChannelActions extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final session = useMemoized(() => '${_channelActionsSession++}');
     final presentationEnded = useRef(false);
+    final openingHuddle = useState(false);
     final avatarCancellation = useRef<ValueNotifier<bool>?>(null);
     final resolvedImages = useState(<String, String>{});
     final imageSources = <String, bool>{
@@ -259,6 +260,7 @@ class _NativeChannelActions extends HookConsumerWidget {
           if (disposed || !context.mounted) return;
           presentationEnded.value = true;
           avatarCancellation.value?.value = true;
+          if (selected == 'huddle') openingHuddle.value = true;
           final action = latest.value[selected];
           if (action != null) await action();
         } on PlatformException catch (error) {
@@ -304,7 +306,11 @@ class _NativeChannelActions extends HookConsumerWidget {
       );
       return null;
     }, [payload.toString()]);
-    return const SizedBox.shrink();
+    return openingHuddle.value
+        ? const Center(
+            child: BuzzLoadingIndicator(semanticLabel: 'Opening Huddle'),
+          )
+        : const SizedBox.shrink();
   }
 }
 

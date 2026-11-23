@@ -219,6 +219,7 @@ void main() {
         );
         var result = Completer<String?>();
         var session = HuddleSessionState.idle;
+        final discovery = _MenuHuddleDiscovery();
         final members = Completer<List<ChannelMember>>();
         final calls = <MethodCall>[];
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
@@ -238,6 +239,7 @@ void main() {
             channel: _channel(),
             soloDetails: soloDetails,
             sectionOverrides: [
+              relaySessionProvider.overrideWith(() => discovery),
               huddleLifecycleProvider(
                 'channel-id',
               ).overrideWith((ref) => Stream.value([])),
@@ -308,6 +310,36 @@ void main() {
           await tester.tap(find.text('Open actions'));
           await tester.pumpAndSettle();
           expect(calls.where((call) => call.method == 'present'), hasLength(2));
+          session = HuddleSessionState.idle;
+          container.invalidate(huddleSessionProvider);
+          await tester.pumpAndSettle();
+          result.complete('huddle');
+          await tester.pump();
+          await tester.pump();
+          expect(discovery.requests, 1);
+          expect(find.text('Start a Huddle?'), findsNothing);
+          discovery.history.complete([
+            NostrEvent(
+              id: 'peer-start',
+              pubkey: 'peer',
+              kind: EventKind.huddleStarted,
+              createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+              tags: const [
+                ['h', 'channel-id'],
+              ],
+              content: jsonEncode({
+                'ephemeral_channel_id': '8d764100-fd8f-44cf-9c98-6d8fbd739b8c',
+              }),
+              sig: '',
+            ),
+          ]);
+          await tester.pumpAndSettle();
+          // Joining the discovered call requires a paired account in this fixture.
+          expect(find.text('Start a Huddle?'), findsNothing);
+          result = Completer<String?>();
+          await tester.tap(find.text('Open actions'));
+          await tester.pumpAndSettle();
+          expect(calls.where((call) => call.method == 'present'), hasLength(3));
         }
         result.complete('Copy channel ID');
         await tester.pumpAndSettle();
@@ -1583,4 +1615,19 @@ class _RecordingReadState extends ReadStateNotifier {
     bool clearForcedMessages = false,
     bool explicit = false,
   }) => marks.add((contextId, unixTimestamp, clearForcedMessages));
+}
+
+class _MenuHuddleDiscovery extends RelaySessionNotifier {
+  final history = Completer<List<NostrEvent>>();
+  int requests = 0;
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    if (!filter.kinds.contains(EventKind.huddleStarted)) return [];
+    requests++;
+    return history.future;
+  }
 }

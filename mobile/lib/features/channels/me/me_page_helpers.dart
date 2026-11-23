@@ -55,14 +55,9 @@ class SoloChatTile extends ConsumerWidget {
                   enabled: true,
                   channelId: channel.id,
                   initial: null,
-                  messages:
-                      ProviderScope.containerOf(
-                        context,
-                        listen: false,
-                      ).exists(meMessagesProvider(channel.id))
-                      ? ref.read(meMessagesProvider(channel.id)).value ??
-                            const []
-                      : const [],
+                  // A list menu resolves the saved choice or unique roster agent.
+                  // Reading a dormant timeline would restart its subscription.
+                  messages: const [],
                 );
                 return render(
                   MeChatSettings(

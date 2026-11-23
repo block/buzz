@@ -213,10 +213,22 @@ AppListRow soloHuddleActionRow(
     onTap: action.onPressed == null
         ? null
         : () async {
-            final subscription = container.listen(provider.future, (_, _) {});
+            final session = ref.read(huddleSessionProvider);
+            final config = ref.read(relayConfigProvider);
             try {
-              final current = await subscription.read();
-              if (!context.mounted) return;
+              final history =
+                  session.isInSession && session.parentChannelId == channel.id
+                  ? const <NostrEvent>[]
+                  : await ref
+                        .read(relaySessionProvider.notifier)
+                        .fetchHistory(NostrFilters.huddleLifecycle(channel.id));
+              if (!context.mounted || ref.read(relayConfigProvider) != config) {
+                return;
+              }
+              final current = [
+                ...history,
+                if (container.exists(provider)) ...?ref.read(provider).value,
+              ];
               final latest = _huddleNavigationAction(
                 context,
                 ref,
@@ -234,8 +246,6 @@ AppListRow soloHuddleActionRow(
                   kind: ToastKind.error,
                 );
               }
-            } finally {
-              subscription.close();
             }
           },
   );
