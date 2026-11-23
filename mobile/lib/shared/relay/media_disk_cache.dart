@@ -220,7 +220,22 @@ class MediaDiskCache {
   /// Saves [bytes] for [url]. [immutable] bytes (relay media) are never
   /// refetched; others are refetched after [externalRefreshAge]. Failures are
   /// logged, never thrown: a missing entry only costs a later download.
-  Future<void> write(
+  Future<void> write(String url, Uint8List bytes, {required bool immutable}) {
+    // Overlapping saves of one URL would each create a file, and the index
+    // tracks only the last, so the other would stay on disk past eviction.
+    // Each save waits for the one before it, then replaces its file.
+    final saved = (_writes[url] ?? Future.value()).then(
+      (_) => _write(url, bytes, immutable: immutable),
+    );
+    _writes[url] = saved;
+    return saved.whenComplete(() {
+      if (identical(_writes[url], saved)) _writes.remove(url);
+    });
+  }
+
+  final _writes = <String, Future<void>>{};
+
+  Future<void> _write(
     String url,
     Uint8List bytes, {
     required bool immutable,

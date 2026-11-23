@@ -345,6 +345,19 @@ void main() {
       expect(await refresh.read('other'), isNull);
       expect((await refresh.read('refreshed'))?.bytes, hasLength(8));
       await refresh.dispose();
+
+      // Overlapping saves of one URL, as when two sizes of one image decode
+      // at once, keep one file on disk.
+      final overlapping = await open('overlapping');
+      await Future.wait([
+        for (var i = 0; i < 2; i++)
+          overlapping.write('same', Uint8List(4), immutable: true),
+      ]);
+      final files = MediaDiskCache.directoryFor(root, 'overlapping', 's')
+          .listSync()
+          .where((entry) => !p.basename(entry.path).startsWith('index.json'));
+      expect(files, hasLength(1));
+      await overlapping.dispose();
     },
   );
 
