@@ -4834,9 +4834,6 @@ mod tests {
             }
         }
 
-        /// Carl's coverage gap: a matching-key FI connection whose pubkey is
-        /// banned gets the terminal `authorization denied` NOTICE and the
-        /// socket closes; off mode keeps `OK false` on ctrl, then closes.
         /// While the deny map restores, root AUTH refuses with the
         /// `authorization unavailable` terminal frame and a bare close, never
         /// `authorization denied`.
@@ -4884,6 +4881,9 @@ mod tests {
             );
         }
 
+        /// Carl's coverage gap: a matching-key FI connection whose pubkey is
+        /// banned gets the terminal `authorization denied` NOTICE and the
+        /// socket closes; off mode keeps `OK false` on ctrl, then closes.
         #[tokio::test]
         #[ignore = "requires Postgres — runs in postgres-ci nextest lane"]
         async fn fi_ban_denial_emits_terminal_authorization_denied() {

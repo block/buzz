@@ -4623,7 +4623,9 @@ mod route_integration_tests {
                 .map(|_| nostr::Keys::generate().public_key())
                 .collect();
             let (a, b, c) = (&keys[0], &keys[1], &keys[2]);
-            let t = chrono::Utc::now();
+            // A base an hour ahead: only the synthetic `now` expires entries,
+            // never Redis key TTLs on the wall clock.
+            let t = chrono::Utc::now() + chrono::Duration::hours(1);
             let s = chrono::Duration::seconds;
             let at = |jti: &'static str, target, until, capacity, now| buzz_auth::CommandClaim {
                 issuer: &issuer,

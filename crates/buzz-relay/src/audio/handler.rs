@@ -4938,6 +4938,13 @@ mod tests {
                     audio_denial(buzz_auth::DenialClass::AuthorizationUnavailable).into()
                 ))
             );
+            assert!(
+                !wire.iter().any(|m| matches!(
+                    m,
+                    Message::Close(Some(f)) if f.code == tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy
+                )),
+                "a bare close, never the 1008 of a revocation: {wire:?}"
+            );
         }
     }
 
