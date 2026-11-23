@@ -360,23 +360,15 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         Ok(None) => {}
         Err(e) => return authority_error(e),
     }
-    if let Err(e) = s
-        .authority
-        .consume_challenge(r.challenge_id, challenge, now)
-        .await
-    {
-        return authority_error(e);
-    }
     let ciphertext = match s.token_keyring.seal(&token) {
         Ok(v) => v,
         Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable"),
     };
-    let id = uuid::Uuid::new_v4();
     let n = NewInstallation {
-        id,
+        id: uuid::Uuid::new_v4(),
         platform,
         app_attest_key_id: verified.key_id,
-        app_attest_public_key: verified.public_key,
+        app_attest_public_key: verified.public_key.clone(),
         assertion_counter: 0,
 
         token_ciphertext: ciphertext,
@@ -384,18 +376,26 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         endpoint_epoch: 1,
         expires_at: r.expires_at,
     };
-    if let Err(e) = s.authority.create_installation(n, now).await {
-        return authority_error(e);
+    // One atomic step, so a replay racing this request either waits for its
+    // installation or finds the challenge unspent, never a spent challenge
+    // with nothing behind it.
+    match s
+        .authority
+        .enroll_installation(r.challenge_id, challenge, n, now)
+        .await
+    {
+        Ok(installation) if installation.app_attest_public_key == verified.public_key => (
+            StatusCode::CREATED,
+            Json(InstallationEnrollResponse {
+                installation_handle: installation.id,
+                endpoint_epoch: installation.endpoint_epoch,
+                expires_at: installation.expires_at,
+            }),
+        )
+            .into_response(),
+        Ok(_) => installation_conflict(),
+        Err(e) => authority_error(e),
     }
-    (
-        StatusCode::CREATED,
-        Json(InstallationEnrollResponse {
-            installation_handle: id,
-            endpoint_epoch: 1,
-            expires_at: r.expires_at,
-        }),
-    )
-        .into_response()
 }
 
 /// The attested key an enrollment proved, on either platform.

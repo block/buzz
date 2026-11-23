@@ -639,6 +639,17 @@ impl AuthorityStore for FailingFinishStore {
     ) -> Result<(), AuthorityError> {
         self.0.create_installation(installation, now).await
     }
+    async fn enroll_installation(
+        &self,
+        challenge_id: Uuid,
+        challenge: [u8; 32],
+        installation: NewInstallation,
+        now: i64,
+    ) -> Result<Installation, AuthorityError> {
+        self.0
+            .enroll_installation(challenge_id, challenge, installation, now)
+            .await
+    }
     async fn matching_installation(
         &self,
         app_attest_key_id: &[u8],

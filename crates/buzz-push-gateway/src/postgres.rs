@@ -99,6 +99,104 @@ fn bytes32(v: Vec<u8>) -> Result<[u8; 32], AuthorityError> {
     v.try_into().map_err(|_| AuthorityError::Unavailable)
 }
 
+/// Create an installation inside `tx`, replacing only expired installations
+/// that share its key or token. A live one is a conflict.
+async fn insert_installation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    n: NewInstallation,
+    now: i64,
+) -> Result<(), AuthorityError> {
+    let now_at = at(now)?;
+    let existing = sqlx::query(
+        "SELECT id,expires_at,revoked_at FROM push_gateway_installations WHERE app_attest_key_id=$1 OR token_fingerprint=$2 FOR UPDATE",
+    )
+    .bind(&n.app_attest_key_id)
+    .bind(n.token_fingerprint.to_vec())
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(db)?;
+    if existing.iter().any(|row| {
+        let revoked = row.try_get::<Option<DateTime<Utc>>, _>("revoked_at");
+        let expires = row.try_get::<DateTime<Utc>, _>("expires_at");
+        match (revoked, expires) {
+            (Ok(None), Ok(expires_at)) => expires_at >= now_at,
+            (Ok(Some(_)), Ok(_)) => false,
+            _ => true,
+        }
+    }) {
+        return Err(AuthorityError::Conflict);
+    }
+    let replaced = existing
+        .iter()
+        .map(|row| {
+            Ok((
+                row.try_get::<Uuid, _>("id").map_err(db)?,
+                row.try_get::<DateTime<Utc>, _>("expires_at").map_err(db)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let expired = replaced
+        .into_iter()
+        .filter_map(|(id, expires_at)| (expires_at < now_at).then_some(id))
+        .collect::<Vec<_>>();
+    if !expired.is_empty() {
+        sqlx::query("DELETE FROM push_gateway_delegations WHERE installation_id = ANY($1)")
+            .bind(&expired)
+            .execute(&mut **tx)
+            .await
+            .map_err(db)?;
+        sqlx::query("DELETE FROM push_gateway_installations WHERE id = ANY($1)")
+            .bind(&expired)
+            .execute(&mut **tx)
+            .await
+            .map_err(db)?;
+    }
+    let result = sqlx::query("INSERT INTO push_gateway_installations(id,app_attest_key_id,app_attest_public_key,assertion_counter,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at,platform) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING")
+            .bind(n.id).bind(n.app_attest_key_id).bind(n.app_attest_public_key).bind(i64::from(n.assertion_counter)).bind(n.token_ciphertext).bind(n.token_fingerprint.to_vec()).bind(n.endpoint_epoch).bind(at(n.expires_at)?).bind(n.platform.as_str()).execute(&mut **tx).await.map_err(db)?;
+    if result.rows_affected() != 1 {
+        return Err(AuthorityError::Conflict);
+    }
+    Ok(())
+}
+
+/// The exact live installation an enrollment request committed, if any.
+async fn matching_installation_in<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    key_id: &[u8],
+    token_fingerprint: [u8; 32],
+    endpoint_epoch: i64,
+    expires_at: i64,
+    now: i64,
+) -> Result<Option<Installation>, AuthorityError> {
+    let r = sqlx::query("SELECT * FROM push_gateway_installations WHERE app_attest_key_id=$1 AND token_fingerprint=$2 AND endpoint_epoch=$3 AND expires_at=$4 AND revoked_at IS NULL AND expires_at >= $5")
+        .bind(key_id)
+        .bind(token_fingerprint.to_vec())
+        .bind(endpoint_epoch)
+        .bind(at(expires_at)?)
+        .bind(at(now)?)
+        .fetch_optional(executor)
+        .await
+        .map_err(db)?;
+    r.map(|r| {
+        let id = r.try_get("id").map_err(db)?;
+        Ok(Installation {
+            id,
+            platform: platform_column(&r)?,
+            app_attest_key_id: r.try_get("app_attest_key_id").map_err(db)?,
+            app_attest_public_key: r.try_get("app_attest_public_key").map_err(db)?,
+            assertion_counter: u32::try_from(r.try_get::<i64, _>("assertion_counter").map_err(db)?)
+                .map_err(|_| AuthorityError::Unavailable)?,
+
+            token_ciphertext: r.try_get("token_ciphertext").map_err(db)?,
+            token_fingerprint: bytes32(r.try_get("token_fingerprint").map_err(db)?)?,
+            endpoint_epoch: r.try_get("endpoint_epoch").map_err(db)?,
+            expires_at: ts(r.try_get("expires_at").map_err(db)?),
+            revoked: false,
+        })
+    })
+    .transpose()
+}
+
 #[async_trait]
 impl AuthorityStore for PostgresAuthorityStore {
     async fn ready(&self) -> Result<(), AuthorityError> {
@@ -185,58 +283,58 @@ impl AuthorityStore for PostgresAuthorityStore {
         now: i64,
     ) -> Result<(), AuthorityError> {
         let mut tx = self.pool.begin().await.map_err(db)?;
-        let now_at = at(now)?;
-        let existing = sqlx::query(
-            "SELECT id,expires_at,revoked_at FROM push_gateway_installations WHERE app_attest_key_id=$1 OR token_fingerprint=$2 FOR UPDATE",
-        )
-        .bind(&n.app_attest_key_id)
-        .bind(n.token_fingerprint.to_vec())
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(db)?;
-        if existing.iter().any(|row| {
-            let revoked = row.try_get::<Option<DateTime<Utc>>, _>("revoked_at");
-            let expires = row.try_get::<DateTime<Utc>, _>("expires_at");
-            match (revoked, expires) {
-                (Ok(None), Ok(expires_at)) => expires_at >= now_at,
-                (Ok(Some(_)), Ok(_)) => false,
-                _ => true,
-            }
-        }) {
-            return Err(AuthorityError::Conflict);
+        insert_installation(&mut tx, n, now).await?;
+        tx.commit().await.map_err(db)
+    }
+    async fn enroll_installation(
+        &self,
+        challenge_id: Uuid,
+        challenge: [u8; 32],
+        n: NewInstallation,
+        now: i64,
+    ) -> Result<Installation, AuthorityError> {
+        use sha2::{Digest, Sha256};
+        let mut tx = self.pool.begin().await.map_err(db)?;
+        // The challenge row stays locked until this transaction ends. A
+        // concurrent replay's DELETE waits here, then sees either the
+        // installation this transaction committed or, after a rollback
+        // (including a cancelled request), the challenge itself.
+        let consumed = sqlx::query("DELETE FROM push_gateway_challenges WHERE id=$1 AND challenge_hash=$2 AND expires_at >= $3")
+            .bind(challenge_id)
+            .bind(Sha256::digest(challenge).to_vec())
+            .bind(at(now)?)
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
+        if consumed.rows_affected() != 1 {
+            // Read committed: this statement sees what the request that spent
+            // the challenge committed while the DELETE waited.
+            return matching_installation_in(
+                &mut *tx,
+                &n.app_attest_key_id,
+                n.token_fingerprint,
+                n.endpoint_epoch,
+                n.expires_at,
+                now,
+            )
+            .await?
+            .ok_or(AuthorityError::Rejected);
         }
-        let replaced = existing
-            .iter()
-            .map(|row| {
-                Ok((
-                    row.try_get::<Uuid, _>("id").map_err(db)?,
-                    row.try_get::<DateTime<Utc>, _>("expires_at").map_err(db)?,
-                ))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let expired = replaced
-            .into_iter()
-            .filter_map(|(id, expires_at)| (expires_at < now_at).then_some(id))
-            .collect::<Vec<_>>();
-        if !expired.is_empty() {
-            sqlx::query("DELETE FROM push_gateway_delegations WHERE installation_id = ANY($1)")
-                .bind(&expired)
-                .execute(&mut *tx)
-                .await
-                .map_err(db)?;
-            sqlx::query("DELETE FROM push_gateway_installations WHERE id = ANY($1)")
-                .bind(&expired)
-                .execute(&mut *tx)
-                .await
-                .map_err(db)?;
-        }
-        let result = sqlx::query("INSERT INTO push_gateway_installations(id,app_attest_key_id,app_attest_public_key,assertion_counter,token_ciphertext,token_fingerprint,endpoint_epoch,expires_at,platform) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING")
-            .bind(n.id).bind(n.app_attest_key_id).bind(n.app_attest_public_key).bind(i64::from(n.assertion_counter)).bind(n.token_ciphertext).bind(n.token_fingerprint.to_vec()).bind(n.endpoint_epoch).bind(at(n.expires_at)?).bind(n.platform.as_str()).execute(&mut *tx).await.map_err(db)?;
-        if result.rows_affected() != 1 {
-            return Err(AuthorityError::Conflict);
-        }
+        let created = Installation {
+            id: n.id,
+            platform: n.platform,
+            app_attest_key_id: n.app_attest_key_id.clone(),
+            app_attest_public_key: n.app_attest_public_key.clone(),
+            assertion_counter: n.assertion_counter,
+            token_ciphertext: n.token_ciphertext.clone(),
+            token_fingerprint: n.token_fingerprint,
+            endpoint_epoch: n.endpoint_epoch,
+            expires_at: n.expires_at,
+            revoked: false,
+        };
+        insert_installation(&mut tx, n, now).await?;
         tx.commit().await.map_err(db)?;
-        Ok(())
+        Ok(created)
     }
     async fn installation(&self, id: Uuid, now: i64) -> Result<Installation, AuthorityError> {
         let r = sqlx::query("SELECT * FROM push_gateway_installations WHERE id=$1 AND revoked_at IS NULL AND expires_at >= $2")
@@ -291,41 +389,20 @@ impl AuthorityStore for PostgresAuthorityStore {
     async fn matching_installation(
         &self,
         key_id: &[u8],
-
         token_fingerprint: [u8; 32],
         endpoint_epoch: i64,
         expires_at: i64,
         now: i64,
     ) -> Result<Option<Installation>, AuthorityError> {
-        let r = sqlx::query("SELECT * FROM push_gateway_installations WHERE app_attest_key_id=$1 AND token_fingerprint=$2 AND endpoint_epoch=$3 AND expires_at=$4 AND revoked_at IS NULL AND expires_at >= $5")
-            .bind(key_id)
-            .bind(token_fingerprint.to_vec())
-            .bind(endpoint_epoch)
-            .bind(at(expires_at)?)
-            .bind(at(now)?)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(db)?;
-        r.map(|r| {
-            let id = r.try_get("id").map_err(db)?;
-            Ok(Installation {
-                id,
-                platform: platform_column(&r)?,
-                app_attest_key_id: r.try_get("app_attest_key_id").map_err(db)?,
-                app_attest_public_key: r.try_get("app_attest_public_key").map_err(db)?,
-                assertion_counter: u32::try_from(
-                    r.try_get::<i64, _>("assertion_counter").map_err(db)?,
-                )
-                .map_err(|_| AuthorityError::Unavailable)?,
-
-                token_ciphertext: r.try_get("token_ciphertext").map_err(db)?,
-                token_fingerprint: bytes32(r.try_get("token_fingerprint").map_err(db)?)?,
-                endpoint_epoch: r.try_get("endpoint_epoch").map_err(db)?,
-                expires_at: ts(r.try_get("expires_at").map_err(db)?),
-                revoked: false,
-            })
-        })
-        .transpose()
+        matching_installation_in(
+            &self.pool,
+            key_id,
+            token_fingerprint,
+            endpoint_epoch,
+            expires_at,
+            now,
+        )
+        .await
     }
     async fn advance_assertion_counter(
         &self,
@@ -1086,6 +1163,91 @@ mod postgres_tests {
 
         pool.close().await;
         drop_schema(&schema).await;
+    }
+
+    async fn seed_enrollment_challenge(store: &PostgresAuthorityStore, id: Uuid, now: i64) {
+        store
+            .put_challenge(Challenge {
+                id,
+                value: [6; 32],
+                created_at: now,
+                expires_at: now + 300,
+            })
+            .await
+            .expect("issue enrollment challenge");
+    }
+
+    fn enrollment(id: Uuid, now: i64) -> NewInstallation {
+        NewInstallation {
+            platform: Platform::Android,
+            id,
+            app_attest_key_id: vec![9],
+            app_attest_public_key: vec![8; 65],
+            assertion_counter: 0,
+            token_ciphertext: vec![7],
+            token_fingerprint: [5; 32],
+            endpoint_epoch: 1,
+            expires_at: now + 600,
+        }
+    }
+
+    // An enrollment whose challenge is spent but whose installation has not
+    // committed yet, raced by an exact replay (a client retry after a
+    // timeout). The replay must wait for the outcome, never answer "not
+    // authorized" while the first request can still commit.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn enrollment_replay_waits_for_an_uncommitted_enrollment() {
+        for commits in [true, false] {
+            let (pool, schema) = full_schema(2).await;
+            let store = PostgresAuthorityStore::new(pool.clone());
+            let now = Utc::now().timestamp();
+            let challenge_id = Uuid::new_v4();
+            seed_enrollment_challenge(&store, challenge_id, now).await;
+
+            // The original request: challenge spent, installation pending.
+            let mut original = pool.begin().await.expect("begin original enrollment");
+            let spent = sqlx::query("DELETE FROM push_gateway_challenges WHERE id=$1")
+                .bind(challenge_id)
+                .execute(&mut *original)
+                .await
+                .expect("spend challenge");
+            assert_eq!(spent.rows_affected(), 1);
+            let original_id = Uuid::new_v4();
+            insert_installation(&mut original, enrollment(original_id, now), now)
+                .await
+                .expect("stage original installation");
+
+            let replay_store = store.clone();
+            let replay_id = Uuid::new_v4();
+            let replay = tokio::spawn(async move {
+                replay_store
+                    .enroll_installation(challenge_id, [6; 32], enrollment(replay_id, now), now)
+                    .await
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert!(
+                !replay.is_finished(),
+                "the replay waits on the original request's challenge row"
+            );
+            let expected = if commits {
+                original.commit().await.expect("commit original");
+                original_id
+            } else {
+                // A cancelled request rolls back, and its challenge with it.
+                original.rollback().await.expect("roll back original");
+                replay_id
+            };
+            let installation = replay
+                .await
+                .expect("replay task")
+                .expect("the replay recovers an installation");
+            assert_eq!(installation.id, expected);
+            assert!(store.installation(expected, now).await.is_ok());
+
+            pool.close().await;
+            drop_schema(&schema).await;
+        }
     }
 
     // The schema has no foreign keys, so these tests prove the reference
