@@ -195,7 +195,8 @@ void main() {
         railAction('Set').onPressed!();
         await tester.pumpAndSettle();
         expect(notifier.preferenceWrites, 1);
-        expect(notifier.lastPreference?.mode, ThemeMode.light);
+        expect(instance.getString(appearanceModeKey), ThemeMode.light.name);
+        expect(notifier.lastPreference?.mode, defaultCommunityTheme.mode);
         expect(
           notifier.lastPreference?.accent,
           chatColorChoices[jade].wireValue,
@@ -222,7 +223,7 @@ void main() {
 
   testWidgets('mode and chat color remain drafts until Set', (tester) async {
     final notifier = _RecordingCommunityThemeNotifier();
-    await _pumpPicker(tester, themeNotifier: () => notifier);
+    final prefs = await _pumpPicker(tester, themeNotifier: () => notifier);
     // System -> Light -> Dark.
     for (var i = 0; i < 2; i++) {
       await tester.tap(
@@ -249,9 +250,45 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('theme-preview-set')));
     await tester.pumpAndSettle();
     expect(notifier.preferenceWrites, 1);
-    expect(notifier.lastPreference?.mode, ThemeMode.dark);
-    expect(notifier.lastPreference?.theme, buzzDarkThemeName);
+    // Mode stays on this device; the synced preference keeps its own theme
+    // and followSystem and only takes the new chat color.
+    expect(prefs.getString(appearanceModeKey), ThemeMode.dark.name);
+    expect(notifier.lastPreference?.theme, defaultCommunityTheme.theme);
+    expect(
+      notifier.lastPreference?.followSystem,
+      defaultCommunityTheme.followSystem,
+    );
     expect(notifier.lastPreference?.accent, chatColorChoices[green].wireValue);
+  });
+
+  testWidgets('picker uses the device mode and keeps the synced one', (
+    tester,
+  ) async {
+    const synced = CommunityThemePreference(
+      theme: buzzDarkThemeName,
+      accent: '#3b82f6',
+      followSystem: false,
+    );
+    final notifier = _RecordingCommunityThemeNotifier(synced);
+    final prefs = await _pumpPicker(
+      tester,
+      prefs: {appearanceModeKey: ThemeMode.light.name},
+      themeNotifier: () => notifier,
+    );
+    expect(find.text('Light'), findsOneWidget);
+    // Light -> Dark -> System.
+    for (var i = 0; i < 2; i++) {
+      await tester.tap(
+        find.byKey(const ValueKey('theme-preview-appearance-action-button')),
+      );
+      await tester.pumpAndSettle();
+    }
+    await tester.tap(find.byKey(const ValueKey('theme-preview-set')));
+    await tester.pumpAndSettle();
+
+    expect(prefs.getString(appearanceModeKey), ThemeMode.system.name);
+    // The synced theme and followSystem survive a mode change untouched.
+    expect(notifier.lastPreference, synced);
   });
 
   for (final brightness in Brightness.values) {
@@ -331,7 +368,7 @@ void main() {
 
   testWidgets('Close discards mode changes', (tester) async {
     final notifier = _RecordingCommunityThemeNotifier();
-    await _pumpPicker(tester, themeNotifier: () => notifier);
+    final prefs = await _pumpPicker(tester, themeNotifier: () => notifier);
     await tester.tap(
       find.byKey(const ValueKey('theme-preview-appearance-action-button')),
     );
@@ -339,6 +376,7 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('theme-preview-close')));
     await tester.pumpAndSettle();
     expect(notifier.preferenceWrites, 0);
+    expect(prefs.getString(appearanceModeKey), isNull);
   });
 
   testWidgets(
@@ -358,11 +396,14 @@ void main() {
 }
 
 class _RecordingCommunityThemeNotifier extends CommunityThemeNotifier {
+  _RecordingCommunityThemeNotifier([this.initial = defaultCommunityTheme]);
+
+  final CommunityThemePreference initial;
   int preferenceWrites = 0;
   CommunityThemePreference? lastPreference;
 
   @override
-  CommunityThemePreference build() => defaultCommunityTheme;
+  CommunityThemePreference build() => initial;
 
   @override
   void setPreference(CommunityThemePreference preference) {
