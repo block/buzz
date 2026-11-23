@@ -501,6 +501,36 @@ void main() {
     },
   );
 
+  test(
+    'the enrolling relay keeps its delegation before the caller lists it',
+    () async {
+      // A community's relay may not be in the desired list yet when its first
+      // enrollment finishes; while it is still wanted, its new delegation is
+      // not swept.
+      final grant = (await authority.enroll(
+        relayOrigin: _relayA,
+        relayPubkey: _keyA,
+        endpoint: 'token-1',
+        stillWanted: () => true,
+        desiredRelays: () => {},
+      ))!;
+      final installation = gateway.installations.values.single;
+      expect(installation.revokedDelegations, isEmpty);
+      expect(grant.generation, 1);
+
+      // An opt-out that lands while the next delegation is in flight sees
+      // that delegation revoked by the same sweep.
+      await authority.enroll(
+        relayOrigin: _relayB,
+        relayPubkey: _keyB,
+        endpoint: 'token-1',
+        stillWanted: () => gateway.bodiesFor('/v1/delegations').length < 2,
+        desiredRelays: () => {_relayA},
+      );
+      expect(installation.revokedDelegations, {'$_keyB/1'});
+    },
+  );
+
   test('an opt-out after enrollment creates no delegation', () async {
     final enrolling = authority.enroll(
       relayOrigin: _relayA,

@@ -192,7 +192,13 @@ class AndroidPushAuthority {
           }
         }
         final grant = await _pointOrigin(relayOrigin, relayPubkey);
-        await _revokeUnreferencedDelegations(desiredRelays());
+        // This origin counts as desired even before the caller's list shows
+        // it, but only while it is still wanted: an opt-out that landed
+        // during the delegation must see that delegation revoked.
+        await _revokeUnreferencedDelegations({
+          ...desiredRelays(),
+          if (stillWanted()) relayOrigin,
+        });
         return grant;
       }
     } on _EnrollmentNoLongerWanted {

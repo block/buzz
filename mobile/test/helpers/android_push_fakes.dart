@@ -93,6 +93,9 @@ class FakePushGateway {
   /// `not_authorized` without acting.
   final refuseOnce = <String>{};
 
+  /// Routes whose next response waits for the future after the gateway acted.
+  final holdResponseFor = <String, Future<void>>{};
+
   /// Refuse attestations like a gateway that does not trust this phone.
   bool refuseAttestation = false;
 
@@ -109,6 +112,7 @@ class FakePushGateway {
     if (status != null) return _json(status, {'error': 'unavailable'});
     if (refuseOnce.remove(route)) return _notAuthorized();
     final response = _handle(route, body);
+    await holdResponseFor.remove(route);
     if (loseResponseFor.remove(route)) {
       throw http.ClientException('connection lost');
     }
