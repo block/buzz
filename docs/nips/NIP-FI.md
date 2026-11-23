@@ -559,16 +559,16 @@ handle the commands for one `(iss, target_pubkey)` one at a time.
 1. Perform step 7.  Its `(iss, jti)` reservation and deny entry are provisional
    until step 2 commits.  A replayed `jti` or a full deny set ends the command
    here, with nothing durable changed.
-2. Commit the durable change.
-3. If the commit fails, or would exceed a bound below, undo step 1: release the
-   reservation and restore the deny entry to what it was.  Reject the command
-   `503`.  No session is closed, and the issuer can retry the same signed
-   command.  An admission that the provisional entry denied stays denied, and
-   the client connects again.
+2. Commit the durable change.  If it finds the command already completed, an
+   earlier delivery did the durable work: nothing durable changes now, this
+   process keeps its reservation and deny entry, and it continues with step 4.
+3. If the commit fails for any other reason, or would exceed a bound below,
+   undo step 1: release the reservation and restore the deny entry to what it
+   was.  Reject the command `503`.  No session is closed, and the issuer can
+   retry the same signed command.  An admission that the provisional entry
+   denied stays denied, and the client connects again.
 4. Otherwise close the matching connections as "Request" specifies, and answer
-   `200`.  If step 2 found the command already completed, an earlier delivery
-   did the durable work: nothing durable changes now, and this process keeps
-   its reservation and deny entry.
+   `200`.
 
 An issuer that gets no answer retries the same signed command.  If the relay
 stopped before step 2 committed, the retry is a first delivery.  If it stopped
