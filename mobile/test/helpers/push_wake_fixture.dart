@@ -119,40 +119,52 @@ class FakePushRelay {
   );
 
   FakeChannel dmChannel() => _addChannel(isDm: true);
-  FakeChannel channel() => _addChannel(isDm: false);
+  FakeChannel channel({bool forged = false}) =>
+      _addChannel(isDm: false, forged: forged);
 
-  FakeChannel _addChannel({required bool isDm}) {
+  FakeChannel _addChannel({required bool isDm, bool forged = false}) {
     final id = const Uuid().v4();
     final channel = FakeChannel(id, 'room-${id.substring(0, 4)}', isDm: isDm);
     _channels.add(channel);
-    events.add(
-      _sign(
-        kind: 39000,
-        tags: [
-          ['d', id],
-          ['name', channel.name],
-        ],
-        content: '',
-        author: nostr.Keys.generate(),
-      ),
+    final metadata = _sign(
+      kind: 39000,
+      tags: [
+        ['d', id],
+        ['name', channel.name],
+      ],
+      content: '',
+      author: nostr.Keys.generate(),
     );
+    events.add(forged ? _forge(metadata) : metadata);
     return channel;
   }
 
   void mute(FakeChannel channel) => _muted.add(channel.id);
 
-  FakePerson person(String name) {
+  /// A person with a profile. A [forged] profile carries a signature that
+  /// isn't its author's, as an untrusted relay could serve.
+  FakePerson person(String name, {bool forged = false}) {
     final person = FakePerson(name);
-    events.add(
-      _sign(
-        kind: 0,
-        tags: const [],
-        content: jsonEncode({'display_name': name}),
-        author: person.keys,
-      ),
+    final profile = _sign(
+      kind: 0,
+      tags: const [],
+      content: jsonEncode({'display_name': name}),
+      author: person.keys,
     );
+    events.add(forged ? _forge(profile) : profile);
     return person;
   }
+
+  NostrEvent _forge(NostrEvent event) => NostrEvent.fromJson({
+    ...event.toJson(),
+    'sig': nostr.Event.from(
+      kind: 1,
+      tags: const [],
+      content: 'someone else',
+      secretKey: nostr.Keys.generate().secret,
+      verify: false,
+    ).sig,
+  });
 
   /// Stores a message that arrived `age` before now (default: each message a
   /// second after the previous one, ending a few minutes ago).

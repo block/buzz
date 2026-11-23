@@ -454,8 +454,14 @@ Future<void> _resolveCommunity(
             'limit': channelIds.length,
           },
         ], timeout: metadataBudget);
-        names = _profileNames(metadata);
-        channels = _channelNames(metadata);
+        // A relay can't put words in a person's mouth: a profile must be
+        // signed by its author. A channel's kind 39000 is signed by the relay,
+        // and only its id and signature are checked here, not that the key is
+        // the relay's own. That check comes with the enrollment work (ticket 7
+        // in PLANS/ANDROID_PUSH.md), which knows the relay key.
+        final verified = metadata.where(_hasValidIdAndSignature).toList();
+        names = _profileNames(verified);
+        channels = _channelNames(verified);
       } on Object {
         // Keep the fallback labels.
       }

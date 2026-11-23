@@ -8,6 +8,7 @@ import 'package:buzz/shared/push/push_wake_runner.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:buzz/shared/relay/nostr_models.dart';
+import 'package:buzz/shared/utils/string_utils.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../helpers/push_wake_fixture.dart';
@@ -122,6 +123,22 @@ void main() {
         broadcast.id: null,
       },
     );
+
+    // Names come from signed events only. A profile or channel name that
+    // fails verification leaves the short key and no channel name, and the
+    // message still shows.
+    final stranger = relay.person('Impostor', forged: true);
+    final lookalike = relay.channel(forged: true);
+    final forged = relay.message(
+      lookalike,
+      stranger,
+      'trust me',
+      mention: relay.me,
+    );
+    final unnamed = (await fixture.wake()).notifications.single;
+    expect(unnamed.eventId, forged.id);
+    expect(unnamed.title, shortPubkey(stranger.pubkey));
+    expect(unnamed.conversationTitle, isNull);
   });
 
   test('shown messages stay shown, and a missed wake is recovered', () async {
