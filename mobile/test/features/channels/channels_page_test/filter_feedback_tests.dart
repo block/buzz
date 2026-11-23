@@ -308,7 +308,14 @@ void _filterFeedbackTests(
         nsec: keys.nsec,
         pubkey: keys.public,
       );
+      final other = Community.create(
+        name: 'Other community',
+        relayUrl: 'https://other.example',
+        nsec: keys.nsec,
+        pubkey: keys.public,
+      );
       await storage.save(community);
+      await storage.save(other);
       await storage.saveActiveId(community.id);
       final relay = _FilterJourneyRelay();
       await tester.pumpWidget(
@@ -443,13 +450,6 @@ void _filterFeedbackTests(
       // Switching community still abandons the sheet.
       await tester.tap(find.byTooltip('Team options'));
       await tester.pumpAndSettle();
-      final other = Community.create(
-        name: 'Other community',
-        relayUrl: 'https://other.example',
-        nsec: keys.nsec,
-        pubkey: keys.public,
-      );
-      await communities.addCommunity(other);
       await communities.switchCommunity(other.id);
       await tester.pumpAndSettle();
       expect(find.text(reopen), findsOneWidget);
