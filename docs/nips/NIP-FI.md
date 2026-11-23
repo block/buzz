@@ -523,113 +523,79 @@ cluster-wide application.
 
 ### Deferred actions
 
-A **deferred action** is an action that a relay accepts from an admitted
-session or request and executes later, at a time when no session of the acting
-key needs to exist.  A pending send (NIP-SL) is one.  Closing sessions and
-denying admission do not stop an action that the relay has already accepted,
-and the deny set does not survive a restart.  A relay that executes deferred
-actions MUST therefore apply this section.  So MUST every relay version and
-process that runs against storage that holds a pending deferred action with a
-recorded issuer, whether or not it executes the action itself: a version that
-ignored a command would leave the action for a later version to execute.  A
-relay whose storage holds no deferred action keeps no durable disconnect
-state.  Nothing in this section changes the deny set, which stays in relay
-memory.
+A **deferred action** is something a relay accepts from an admitted session or
+request and carries out later, when the acting key may have no session at all.
+A pending send (NIP-SL) is one.  Closing sessions and denying admission do not
+stop it, and the deny set does not survive a restart.  So a relay with deferred
+actions also records each disconnect in durable storage that all of its
+processes share.  The deny set itself is unchanged.
+
+A relay that executes deferred actions MUST apply this section.  So MUST every
+relay version and process that runs against storage holding a pending deferred
+action with a recorded issuer: one that ignored a command would leave the
+action for a later version to execute.
 
 With each deferred action it accepts, the relay MUST record the admission that
 carried it: the admitting issuer and the owner recorded for the admission, if
-any.  A deferred action **matches**
-`(iss, target_pubkey)` when its recorded issuer is `iss` and its acting key or
-its recorded owner is `target_pubkey`.
+any.  The action **matches** `(iss, target_pubkey)` when its recorded issuer is
+`iss` and its acting key or its recorded owner is `target_pubkey`.
 
-For every disconnect command the relay makes one atomic change to durable
-storage that every relay process shares, the **durable change**:
+For each disconnect command the relay makes one atomic change to that storage,
+the **durable change**.  It applies only if `(iss, jti)` is not already a
+completed command, so a signed command changes durable state at most once,
+however often and to whichever process it is delivered.
 
-1. Record the command's `(iss, jti)` as a **completed command**, until the
-   command's effective expiry (`effective_expiry` in `VerifyCommandJwt`).
-2. Write a **disconnect record** for `(iss, target_pubkey)` that holds the time
-   of the change, `recorded_at`, and the command's `until`.  If a record for
-   that pair exists, the relay keeps the later `recorded_at` and
-   `max(existing_until, command.until)`.
-3. Cancel every pending deferred action that matches `(iss, target_pubkey)`, in
-   every community.
+1. Record `(iss, jti)` as a **completed command** until the command's effective
+   expiry (`effective_expiry` in `VerifyCommandJwt`).
+2. Write a **disconnect record** for `(iss, target_pubkey)` with the time of
+   the change, `recorded_at`, and the command's `until`.  If the pair already
+   has a record, keep the later `recorded_at` and the larger `until`.
+3. Cancel every pending deferred action that matches, in every community.
 
-The durable change applies only if `(iss, jti)` is not already recorded as a
-completed command.  A signed command therefore changes durable state at most
-once, on whichever process and after whatever restart it is delivered again.
+Once steps 1 to 6 of `VerifyCommandJwt` pass, the relay MUST handle the command
+in this order, in place of what "Request" specifies after step 7.  It MUST
+handle the commands for one `(iss, target_pubkey)` one at a time.
 
-A relay that executes deferred actions MUST process a disconnect command in
-the order below, in place of the sequence in "Request" that follows step 7 of
-`VerifyCommandJwt`.  It MUST process the commands for one
-`(iss, target_pubkey)` one at a time from step 2 through step 6.
+1. Perform step 7.  Its `(iss, jti)` reservation and deny entry are provisional
+   until step 2 commits.  A replayed `jti` or a full deny set ends the command
+   here, with nothing durable changed.
+2. Commit the durable change.
+3. If the commit fails, or would exceed a bound below, undo step 1: release the
+   reservation and restore the deny entry to what it was.  Reject the command
+   `503`.  No session is closed, and the issuer can retry the same signed
+   command.  An admission that the provisional entry denied stays denied, and
+   the client connects again.
+4. Otherwise close the matching connections as "Request" specifies, and answer
+   `200`.  If step 2 found the command already completed, an earlier delivery
+   did the durable work: nothing durable changes now, and this process keeps
+   its reservation and deny entry.
 
-1. Run the pure authorization checks of `VerifyCommandJwt`, steps 1 to 6.
-2. Perform step 7 of `VerifyCommandJwt`.  For this relay the step is
-   provisional: the `(iss, jti)` reservation and the deny entry it writes stand
-   only if step 3 commits.  A replayed `jti` or a full deny set ends the
-   command here as that step specifies, and nothing durable has changed.
-3. Commit the durable change.
-4. If the durable change finds `(iss, jti)` recorded as a completed command,
-   an earlier delivery completed the command, and this process has not applied
-   it.  The relay makes no durable change: no record changes and no action is
-   cancelled.  It keeps the `(iss, jti)` reservation and the deny entry of
-   step 2 and continues with step 6.
-5. If the durable change does not commit for any other reason, undo step 2:
-   release the `(iss, jti)` reservation and restore the deny entry for the pair
-   to what it was before step 2.  Then reject the command `503`.  No session
-   is closed, and the issuer can retry the same signed command.
-6. Close the matching connections as "Request" specifies, and answer `200`.
+An issuer that gets no answer retries the same signed command.  If the relay
+stopped before step 2 committed, the retry is a first delivery.  If it stopped
+after, the durable work stands, and the process that receives the retry ends in
+step 4: it holds the deny entry, closes the matching connections and propagates
+both as for any accepted command.  That retry moves no `recorded_at` and
+cancels nothing.  Only a new signed command reaches a deferred action accepted
+since then from an admission the record does not fence.
 
-A command that is denied as a replay therefore changes no record and cancels no
-action.  An admission that the provisional deny entry denied between steps 2
-and 5 stays denied; the client connects again.  A second delivery of the same
-signed command to the same process waits for the first.  It is then denied as a
-replay if the first committed, and is processed as a first delivery if the
-first was undone.  Of two deliveries to different processes, the one whose
-durable change commits first completes the command, and the other applies only
-its session effects under step 4.  A process applies the session effects of one
-signed command at most once.
-
-If the relay process stops after step 3 commits and before it answers, the
-completed command, the disconnect record and the cancellation stand and bind
-every process, while the `jti` reservation and the deny entry of that process
-are lost with it, as on any restart, and it may have closed no session.  The
-issuer has no answer and retries the same signed command.  The process that
-receives the retry applies step 4: it holds the deny entry again, closes the
-matching connections, propagates both as for any accepted command, and answers
-`200`.  The retry moves no `recorded_at` and cancels nothing, so a deferred
-action that the relay accepted after the first delivery, from an admission that
-the record does not fence, stays pending.  Only a new signed command advances
-`recorded_at`.  If the process stops before step 3 commits, nothing durable has
-changed, and the retry is a first delivery.
-
-The relay MUST bound the number of disconnect records per issuer,
-independently of the deny set bound and of other issuers.  It MUST remove only
-records whose retention, defined below, has passed.  It MUST likewise bound
-the completed commands it records per issuer, and MUST remove a completed
-command only after its effective expiry.  A durable change that would exceed
-either bound does not commit.
+The relay MUST bound the disconnect records and the completed commands it keeps
+per issuer, independently of the deny set bound and of other issuers.  It MUST
+remove a completed command only after its effective expiry, and a disconnect
+record only once no fenced admission can still be open.  With a maximum
+connection lifetime `L`, that is after `max(recorded_at, until) + L`.
 
 An admission is **fenced** by a disconnect record when the record's issuer made
 it, its proven key or its recorded owner is the record's target pubkey, and it
 happened at or before `recorded_at` or before `until`.  While it retains the
-record, the relay MUST refuse to accept a deferred action from a fenced
-admission.  The refusal is `authorization_denied`.
+record, the relay MUST refuse a deferred action from a fenced admission with
+`authorization_denied`.  Every relay process MUST decide that against the
+durable record, in the same atomic change that stores the action, and MUST
+serialize that change against the durable change of every disconnect command
+the action matches.  An acceptance therefore either commits first, and the
+command cancels it, or commits second, and finds the record.
 
-The relay MUST evaluate that rule in the same atomic change that stores the
-deferred action, and MUST serialize that change against the durable change of
-every disconnect command the action matches.  An acceptance therefore either
-commits first, and the command cancels the action, or commits second, and
-finds the record.  No accepted action escapes both.  Every relay process MUST
-evaluate the rule against the durable record.  The deny set of one process is
-not a substitute, because it is neither shared nor durable.
-
-The relay MUST retain a disconnect record until no fenced admission can still
-be open.  With a maximum connection lifetime `L`, that is
-`max(recorded_at, until) + L`.
-
-A cancelled deferred action stays cancelled.  A later assertion for the same
-key does not restore it.  [FI-TRACE-DEFERRED-ACTIONS]
+A cancelled deferred action stays cancelled: a later assertion for the same key
+does not restore it.  [FI-TRACE-DEFERRED-ACTIONS]
 
 ### Transport
 
