@@ -256,7 +256,7 @@ void main() {
       final bar = find.byWidgetPredicate(
         (widget) => widget is FrostedAppBar && widget.nativeTitle == 'Messages',
       );
-      expect(tester.widget<FrostedAppBar>(bar).nativeLargeTitle, isFalse);
+      expect(tester.widget<FrostedAppBar>(bar).nativeLargeTitle, isTrue);
       expect(tester.getSize(bar).width, 375);
       expect(
         find.byWidgetPredicate((w) => w is Image && w.semanticLabel == 'Buzz'),
@@ -268,23 +268,23 @@ void main() {
             widget is IosMessageCreateButton &&
             widget.accessibilityLabel == 'Community menu',
       );
-      expect(
-        tester.getCenter(find.text('Messages')).dy,
-        tester.getCenter(menu).dy,
+      final nativeTitle = find.byWidgetPredicate(
+        (w) => w is IosNavigationBar && w.title == 'Messages',
       );
-      expect(
-        tester.getCenter(menu).dy,
-        frostedAppBarHeight(tester.element(bar)) / 2,
-      );
+      final navigation = tester.widget<IosNavigationBar>(nativeTitle);
+      expect(navigation.alignCollapsedTitleToLeading, isFalse);
+      final options = find.byTooltip('Messages options');
+      final optionsAtRest = tester.getCenter(options);
+      expect(optionsAtRest.dx, lessThan(tester.getCenter(bar).dx));
+      expect(navigation.prefersSoftTopEdge, isTrue);
+      final controlsAtRest = tester.getCenter(menu);
       final originalHeaderRect = tester.getRect(bar);
       final scrollable = find.byType(Scrollable).first;
       await tester.drag(scrollable, const Offset(0, -250));
       await tester.pumpAndSettle();
-      expect(tester.getRect(bar), originalHeaderRect);
-      expect(
-        tester.getCenter(find.text('Messages')).dy,
-        tester.getCenter(menu).dy,
-      );
+      expect(tester.getSize(bar).height, lessThan(originalHeaderRect.height));
+      expect(tester.getCenter(menu), controlsAtRest);
+      expect(tester.getCenter(options), optionsAtRest);
       expect(
         find.byWidgetPredicate(
           (widget) =>
@@ -295,30 +295,51 @@ void main() {
       );
       tester.view.physicalSize = const Size(466, 678);
       await tester.pumpAndSettle();
-      expect(tester.widget<FrostedAppBar>(bar).nativeLargeTitle, isFalse);
+      expect(tester.widget<FrostedAppBar>(bar).nativeLargeTitle, isTrue);
       expect(
-        tester.getCenter(find.text('Messages')).dy,
-        tester.getCenter(menu).dy,
+        tester
+            .widget<IosNavigationBar>(nativeTitle)
+            .alignCollapsedTitleToLeading,
+        isTrue,
       );
+      expect(tester.getSize(find.byTooltip('Search')), const Size.square(48));
+      final coverMenu = tester.widget<IosMessageCreateButton>(
+        find.byKey(const ValueKey('vertical-create-menu')),
+      );
+      expect(coverMenu.width, 48);
       final closedHeaderRect = tester.getRect(bar);
       expect(closedHeaderRect.left, 0);
       expect(closedHeaderRect.right, 466);
       expect(tester.getRect(scrollable).right, lessThanOrEqualTo(390));
       expect(tester.getRect(menu).right, lessThanOrEqualTo(466 - 76));
+      final bell = find.byWidgetPredicate(
+        (w) => w is IosGlassNavigationButton && w.semanticLabel == 'Activity',
+      );
+      expect(tester.getCenter(menu).dy, closeTo(47.8, .01));
+      expect(tester.getCenter(bell).dy, closeTo(47.8, .01));
+      final railOptions = find.byKey(
+        const ValueKey('duo-toolbar-Messages options'),
+      );
+      expect(
+        tester.getCenter(railOptions).dx,
+        closeTo(tester.getCenter(find.byTooltip('Search')).dx, 1),
+      );
+      expect(options, findsNothing);
+      expect(
+        tester.widget<FrostedAppBar>(bar).alignLargeTitleWithActions,
+        isTrue,
+      );
 
       await tester.drag(scrollable, const Offset(0, -200));
       await tester.pumpAndSettle();
-      expect(tester.getRect(bar), closedHeaderRect);
+      expect(tester.getRect(bar).height, lessThan(closedHeaderRect.height));
       tester.view.physicalSize = const Size(951, 669);
       tester.view.viewPadding = const FakeViewPadding(left: 76);
       tester.view.padding = const FakeViewPadding(left: 76);
       await tester.pumpAndSettle();
       expect(tester.getRect(bar).left, 0);
       expect(tester.getSize(bar).width, 375 + 76);
-      expect(
-        tester.getRect(find.text('Messages')).left,
-        greaterThanOrEqualTo(76),
-      );
+      expect(tester.getRect(nativeTitle).left, greaterThanOrEqualTo(76));
       expect(tester.takeException(), isNull);
     },
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
@@ -499,8 +520,8 @@ void main() {
       expect(header.useNativeNavigation, isFalse);
       expect(header.nativeLargeTitle, isFalse);
       expect(header.alwaysFrosted, isTrue);
-      expect(header.titleStyle?.fontSize, 22);
-      expect(header.centerTitle, isFalse);
+      expect(header.titleStyle?.fontSize, 17);
+      expect(header.centerTitle, isTrue);
 
       final teamSection = find.descendant(
         of: find.byType(CustomScrollView),
@@ -898,6 +919,10 @@ void main() {
       final collapseHeight = tester
           .widget<FrostedAppBar>(find.byType(FrostedAppBar))
           .bottomHeight;
+      final title = find.text('Messages');
+      final expandedCenter = platform == TargetPlatform.android
+          ? tester.getCenter(title)
+          : Offset.zero;
       for (final fraction in [0.01, 0.25, 0.5, 0.75, 1.0]) {
         scroll.jumpTo(collapseHeight * fraction);
         await tester.pumpAndSettle();
@@ -906,6 +931,16 @@ void main() {
           findsOneWidget,
           reason: 'Bell must remain tappable at collapse fraction $fraction',
         );
+      }
+      if (platform == TargetPlatform.android) {
+        final compactCenter = tester.getCenter(title);
+        expect(compactCenter.dx, closeTo(195, 1));
+        expect(compactCenter.dy, lessThan(expandedCenter.dy));
+        scroll.jumpTo(0);
+        await tester.pumpAndSettle();
+        expect(tester.getCenter(title), expandedCenter);
+        scroll.jumpTo(collapseHeight);
+        await tester.pumpAndSettle();
       }
       if (platform == TargetPlatform.iOS) {
         // Widget tests hit-test the platform view but cannot run UIKit's
@@ -982,10 +1017,26 @@ void main() {
       await tester.pumpWidget(await buildHome());
       await tester.pumpAndSettle();
       final bar = tester.widget<FrostedAppBar>(find.byType(FrostedAppBar));
-      expect(bar.nativeTitle, '');
-      expect(find.text('Messages'), findsOneWidget);
+      expect(bar.nativeTitle, 'Messages');
+      expect(
+        tester
+            .widget<IosNavigationBar>(
+              find.byWidgetPredicate(
+                (w) => w is IosNavigationBar && w.title == 'Messages',
+              ),
+            )
+            .externalExpandedTitle,
+        isFalse,
+      );
+      expect(bar.nativeLargeTitle, isTrue);
+      expect(
+        find.byWidgetPredicate(
+          (w) => w is IosNavigationBar && w.title == 'Messages',
+        ),
+        findsOneWidget,
+      );
       expect(bar.nativeActions, isEmpty);
-      expect(bar.leading, isNull);
+      expect(find.byTooltip('Messages options'), findsOneWidget);
       expect(
         tester
             .widget<IosMessageCreateButton>(
@@ -1127,20 +1178,40 @@ void main() {
       Navigator.of(tester.element(find.text('Switch Community'))).pop();
       await tester.pumpAndSettle();
       expect(tester.widget<Opacity>(homeOpacity).opacity, 1);
-      expect(find.text('Messages'), findsOneWidget);
+      expect(
+        find.byWidgetPredicate(
+          (w) => w is IosNavigationBar && w.title == 'Messages',
+        ),
+        findsOneWidget,
+      );
       // A sheet's dim barrier can't composite over the native header edge.
       final headerNativeView = find.descendant(
         of: find.byType(FrostedAppBar),
         matching: find.byType(IosNavigationBar),
       );
       expect(headerNativeView, findsOneWidget);
+      const bridge = MethodChannel('buzz/channel_actions_sheet');
+      final selection = Completer<String?>();
+      final calls = <MethodCall>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
+        call,
+      ) async {
+        calls.add(call);
+        return call.method == 'present' ? selection.future : null;
+      });
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          bridge,
+          null,
+        ),
+      );
       await tester.longPress(find.text('General'));
       await tester.pumpAndSettle();
-      expect(find.text('Copy channel name'), findsOneWidget);
-      expect(headerNativeView, findsNothing);
+      expect(find.text('Mark unread'), findsOneWidget);
+      expect(find.byType(BottomSheet), findsNothing);
       await tester.tapAt(const Offset(20, 20));
       await tester.pumpAndSettle();
-      expect(find.text('Copy channel name'), findsNothing);
+      expect(find.text('Mark unread'), findsNothing);
       expect(headerNativeView, findsOneWidget);
       await tester.pumpWidget(const SizedBox.shrink());
       debugDefaultTargetPlatformOverride = null;

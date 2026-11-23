@@ -6,10 +6,12 @@ import '../../../shared/theme/theme.dart';
 class SectionOptionsButton extends StatelessWidget {
   const SectionOptionsButton({
     super.key,
+    this.icon = BuzzIcons.ellipsis,
     required this.tooltip,
     required this.onPressed,
   });
 
+  final IconData icon;
   final String tooltip;
   final VoidCallback onPressed;
 
@@ -33,7 +35,7 @@ class SectionOptionsButton extends StatelessWidget {
               width: 44,
               child: Center(
                 child: Icon(
-                  BuzzIcons.ellipsis,
+                  icon,
                   size: 14,
                   color: navigationAccessoryForeground(context),
                 ),

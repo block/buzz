@@ -15,10 +15,12 @@ class MeChatSettings extends StatelessWidget {
     this.agentAvatarUrl,
     this.agentInitial = '?',
     this.hasAgent = false,
+    this.renameRow,
     this.onAgentTap,
     this.onWorkspaceTap,
   });
 
+  final Widget? renameRow;
   final String agentName;
   final String? agentAvatarUrl;
   final String agentInitial;
@@ -28,57 +30,72 @@ class MeChatSettings extends StatelessWidget {
   final VoidCallback? onWorkspaceTap;
 
   @override
-  Widget build(BuildContext context) => AppListCard(
-    verticalPadding: Grid.twelve,
-    dividerIndent: Grid.xs + 32 + Grid.xs,
-    children: [
-      AppListRowRaw(
-        leading: AvatarImage(
-          imageUrl: agentAvatarUrl,
-          radius: 16,
-          isAgent: hasAgent,
-          backgroundColor: context.controlSurface,
-          fallback: hasAgent
-              ? Text(agentInitial)
-              : const Icon(BuzzIcons.plus, size: 20),
-        ),
-        title: Text('Agent', style: context.textTheme.bodyLarge),
-        subtitle: Text(
-          agentName,
-          style: context.textTheme.bodySmall?.copyWith(
-            color: context.colors.onSurfaceVariant,
-          ),
-        ),
-        trailing: Icon(
-          BuzzIcons.chevronRight,
-          size: 18,
+  Widget build(BuildContext context) {
+    final agent = AppListRowRaw(
+      leading: AvatarImage(
+        imageUrl: agentAvatarUrl,
+        radius: 16,
+        isAgent: hasAgent,
+        backgroundColor: context.controlSurface,
+        fallback: hasAgent
+            ? Text(agentInitial)
+            : const Icon(BuzzIcons.plus, size: 20),
+      ),
+      title: Text('Agent', style: context.textTheme.bodyLarge),
+      subtitle: Text(
+        agentName,
+        style: context.textTheme.bodySmall?.copyWith(
           color: context.colors.onSurfaceVariant,
         ),
-        onTap: onAgentTap,
       ),
-      AppListRowRaw(
-        leading: SizedBox.square(
-          dimension: 32,
-          child: Icon(
-            BuzzIcons.workspace,
-            size: 22,
-            color: context.colors.onSurfaceVariant,
-          ),
-        ),
-        title: Text('Workspace', style: context.textTheme.bodyLarge),
-        subtitle: Text(
-          workspaceName,
-          style: context.textTheme.bodySmall?.copyWith(
-            color: context.colors.onSurfaceVariant,
-          ),
-        ),
-        trailing: Icon(
-          BuzzIcons.chevronRight,
-          size: 18,
+      trailing: Icon(
+        BuzzIcons.chevronRight,
+        size: 18,
+        color: context.colors.onSurfaceVariant,
+      ),
+      onTap: onAgentTap,
+    );
+    final workspace = AppListRowRaw(
+      leading: SizedBox.square(
+        dimension: 32,
+        child: Icon(
+          BuzzIcons.folder,
+          size: 22,
           color: context.colors.onSurfaceVariant,
         ),
-        onTap: onWorkspaceTap,
       ),
-    ],
-  );
+      title: Text(
+        renameRow == null ? 'Workspace' : workspaceName,
+        style: context.textTheme.bodyLarge,
+      ),
+      subtitle: renameRow != null
+          ? null
+          : Text(
+              workspaceName,
+              style: context.textTheme.bodySmall?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
+            ),
+      trailing: Icon(
+        BuzzIcons.chevronRight,
+        size: 18,
+        color: context.colors.onSurfaceVariant,
+      ),
+      onTap: onWorkspaceTap,
+    );
+    AppListCard section(List<Widget> rows) => AppListCard(
+      verticalPadding: Grid.twelve,
+      dividerIndent: Grid.xs + Grid.md + Grid.xs,
+      iconColumnWidth: Grid.md,
+      children: rows,
+    );
+    final rename = renameRow;
+    if (rename == null) return section([agent, workspace]);
+    return Column(
+      children: [
+        section([agent]),
+        section([rename, workspace]),
+      ],
+    );
+  }
 }

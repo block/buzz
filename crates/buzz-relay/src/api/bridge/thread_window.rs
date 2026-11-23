@@ -203,6 +203,15 @@ async fn query(
     if request.include_aux {
         let row_count = events.len();
         let original_targets = targets;
+        // The root is always a target and the rows are replies, so the root
+        // anchors the bound (see `window_aux_since`).
+        let aux_since = super::window_aux_since(
+            window
+                .root_created_at
+                .map(|at| at.timestamp())
+                .into_iter()
+                .chain(window.rows.iter().map(super::stored_event_secs)),
+        );
         // A writer retry at an older aux cursor alone would miss newer writer
         // edits. Restart both closure hops once after permanent degradation;
         // preserve the request ledger/deadline, never reset work allowances.
@@ -219,6 +228,7 @@ async fn query(
                         kinds,
                         accessible,
                         cursor: None,
+                        since: aux_since,
                     };
                     loop {
                         let was_replica = session.is_replica();

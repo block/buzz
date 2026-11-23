@@ -20,10 +20,10 @@ void main() {
   test('message typography matches the shared mobile scale', () {
     expectStyle(
       messageBodyTextStyle,
-      fontSize: 15,
+      fontSize: 17,
       fontWeight: FontWeight.w400,
-      lineHeight: 20,
-      letterSpacing: 0,
+      lineHeight: 23,
+      letterSpacing: -0.45,
     );
     expectStyle(
       messageUsernameTextStyle,
@@ -53,8 +53,8 @@ void main() {
     expectStyle(
       channelTitleTextStyle,
       fontSize: 20,
-      fontWeight: FontWeight.w700,
-      lineHeight: 24,
+      fontWeight: FontWeight.w500,
+      lineHeight: 26,
       letterSpacing: 0,
     );
   });
@@ -83,7 +83,7 @@ void main() {
     );
     expectStyle(
       activityPreviewTextStyle,
-      fontSize: 15,
+      fontSize: 16,
       fontWeight: FontWeight.w400,
       lineHeight: 20,
       letterSpacing: 0,

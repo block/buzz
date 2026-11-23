@@ -469,6 +469,92 @@ void _confirmedJoinCases() {
       },
     );
 
+    test('an agent policy refusal of a DM open or add names the agent', () async {
+      final keys = nostr.Keys.generate();
+      final scout = 'd' * 64;
+      final unknown = 'e' * 64;
+      final session = _WriterReplicaRelaySession(memberships: const [])
+        ..dmOpenRefusals.addAll([
+          'forbidden: policy:owner_only — only the agent owner can add this agent (agent $scout)',
+          'forbidden: policy:owner_only — only the agent owner can add this agent (agent $unknown)',
+          'restricted: no',
+        ])
+        ..dmAddRefusals.addAll([
+          'forbidden: policy:nobody — this agent has disabled external channel additions (agent $scout)',
+          'forbidden: policy:nobody — this agent has disabled external channel additions',
+        ]);
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      container
+          .read(userCacheProvider.notifier)
+          .put(UserProfile(pubkey: scout, displayName: 'Scout'));
+      final actions = container.read(
+        Provider<ChannelActions>(
+          (ref) => ChannelActions(
+            ref: ref,
+            session: session,
+            signedEventRelay: SignedEventRelay(
+              session: session,
+              nsec: keys.nsec,
+            ),
+            currentPubkey: 'me',
+          ),
+        ),
+      );
+      Matcher shows(String message) => throwsA(
+        isA<DmAgentRefused>().having(
+          (error) => error.toString(),
+          'message',
+          message,
+        ),
+      );
+      Future<void> open() =>
+          actions.openDm(pubkeys: [scout], includeHistory: true);
+      Future<void> add() => actions.addToDm(
+        channelId: _otherJoinedChannel,
+        pubkeys: [scout],
+        history: DmHistory.ask,
+      );
+
+      await expectLater(
+        open(),
+        shows('Only Scout’s owner can add it to a DM.'),
+      );
+      // Without a name to show, it says whose owner in general.
+      await expectLater(
+        open(),
+        shows('Only this agent’s owner can add it to a DM.'),
+      );
+      // Any other refusal is shown as before.
+      await expectLater(
+        open(),
+        throwsA(
+          isA<Exception>()
+              .having((e) => e is DmAgentRefused, 'named', isFalse)
+              .having(
+                (e) => e.toString(),
+                'message',
+                'Exception: restricted: no',
+              ),
+        ),
+      );
+      await expectLater(
+        add(),
+        shows('Couldn’t add them. Scout can’t be added to a DM.'),
+      );
+      // A relay that names no agent refuses as before.
+      await expectLater(
+        add(),
+        throwsA(
+          isA<Exception>().having(
+            (error) => error.toString(),
+            'message',
+            'Exception: Couldn’t add them. Try again.',
+          ),
+        ),
+      );
+    });
+
     test('a list rebuild during the join still shows the membership', () async {
       final session = _WriterReplicaRelaySession(
         memberships: const [],
@@ -511,6 +597,9 @@ class _WriterReplicaRelaySession extends _FakeRelaySession {
   /// The relay's refusals of the next DM adds, in order, as their OK messages.
   final dmAddRefusals = <String>[];
 
+  /// The relay's refusals of the next DM opens, in order, as their OK messages.
+  final dmOpenRefusals = <String>[];
+
   @override
   Future<NostrEvent> publish(
     NostrEvent event, {
@@ -520,6 +609,9 @@ class _WriterReplicaRelaySession extends _FakeRelaySession {
     published.add(event);
     if (event.kind == 41011 && dmAddRefusals.isNotEmpty) {
       throw Exception(dmAddRefusals.removeAt(0));
+    }
+    if (event.kind == 41010 && dmOpenRefusals.isNotEmpty) {
+      throw Exception(dmOpenRefusals.removeAt(0));
     }
     final response = dmAddResponse;
     if (event.kind == 41011 && response != null) {

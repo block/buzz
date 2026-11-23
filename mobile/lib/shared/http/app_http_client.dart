@@ -50,6 +50,18 @@ http.Client newAppHttpClient([HttpTraffic traffic = HttpTraffic.api]) {
   );
 }
 
+/// Makes [newAppHttpClient] use `dart:io` in this isolate from now on, for an
+/// engine that lives only briefly. A native session belongs to the process,
+/// not the isolate: a Cronet engine keeps its threads after the Flutter engine
+/// that opened it is destroyed, so one opened per push wake would leak them.
+/// Call it before anything opens a client.
+void useDartIoHttpOnly() {
+  assert(_sessions.isEmpty, 'A native session is already open');
+  for (final traffic in HttpTraffic.values) {
+    _sessions[traffic] = null;
+  }
+}
+
 /// Whether [newAppHttpClient] uses a native session on this device.
 bool get hasNativeHttpSession =>
     _sessions.putIfAbsent(HttpTraffic.api, _openNativeSession) != null;

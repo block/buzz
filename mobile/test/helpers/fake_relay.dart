@@ -6,6 +6,7 @@ import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/relay/read_state_snapshot.dart';
 import 'package:buzz/shared/relay/relay_query_response.dart';
+import 'package:clock/clock.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:http/http.dart' as http;
@@ -26,8 +27,11 @@ import 'package:nostr/nostr.dart' as nostr;
 /// relay errors and falls back.
 class FakeRelay {
   /// [now] is the session's wall clock, so a test can model OS suspension:
-  /// time passes while no timer runs.
-  FakeRelay({DateTime Function()? now}) : _now = now {
+  /// time passes while no timer runs. [elapsed] is its monotonic clock for
+  /// durations, by default the test's fake time, which [now] does not move.
+  FakeRelay({DateTime Function()? now, Duration Function()? elapsed})
+    : _now = now,
+      _elapsed = elapsed {
     addTearDown(() {
       expect(unanswerable, isEmpty, reason: 'requests FakeRelay cannot answer');
     });
@@ -51,6 +55,7 @@ class FakeRelay {
   Completer<void>? _authHold;
   Completer<void>? _queryHold;
   final DateTime Function()? _now;
+  final Duration Function()? _elapsed;
 
   String get pubkey => keys.public;
 
@@ -65,6 +70,9 @@ class FakeRelay {
     ),
     snapshotDecoder: (input) async => validateReadStateSnapshot(input),
     now: _now,
+    elapsed:
+        _elapsed ??
+        () => Duration(microseconds: clock.now().microsecondsSinceEpoch),
     random: _MidpointRandom(),
   );
 
@@ -200,13 +208,13 @@ class FakeRelay {
         }
         reqs.add(message);
         final filters = message.skip(2).cast<Map<String, dynamic>>().toList();
-        final refusal = _refusals.indexWhere((r) => filters.any(r.match));
-        if (refusal >= 0) {
-          final reason = _refusals.removeAt(refusal).message;
-          scheduleMicrotask(() => socket._reply(['CLOSED', subId, reason]));
-          return;
-        }
         void admit() {
+          final refusal = _refusals.indexWhere((r) => filters.any(r.match));
+          if (refusal >= 0) {
+            final reason = _refusals.removeAt(refusal).message;
+            scheduleMicrotask(() => socket._reply(['CLOSED', subId, reason]));
+            return;
+          }
           if (!socket._authenticated) return;
           final history = _query(filters);
           if (history == null) return;
