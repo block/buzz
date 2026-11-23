@@ -243,6 +243,10 @@ class _NativeMenuRequest extends HookWidget {
           selected = await android.invokeMethod<String>('show', {
             'id': id,
             'labels': labels,
+            'surface': Theme.of(
+              context,
+            ).colorScheme.surfaceContainerHigh.toARGB32(),
+            'foreground': Theme.of(context).colorScheme.onSurface.toARGB32(),
             'x': rect.left,
             'y': rect.top,
             'width': rect.width,
