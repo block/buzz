@@ -23,7 +23,7 @@ const _hash =
     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const _relayUrl = '$_relayBase/media/$_hash.png';
 const _thumbnailUrl = '$_relayBase/media/$_hash.thumb.jpg';
-const _hugeUrl =
+const _largeUrl =
     '$_relayBase/media/'
     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.png';
 const _corruptUrl =
@@ -57,24 +57,25 @@ void main() {
       'ones are refetched', () async {
     final fetched = <String>[];
     var online = true;
-    // While set, external images answer once it completes, with an image
-    // too large to save.
+    // While set, external images answer once it completes, with a large
+    // image.
     Completer<void>? replaceExternal;
     // While set, external images answer with a body that never decodes.
     var malformedExternal = false;
-    // Trailing bytes after IEND still decode, so this is a 5 MiB+ image.
-    final hugeBytes = [..._pngBytes, ...Uint8List(MediaDiskCache.maxFileBytes)];
+    // Trailing bytes after IEND still decode, so this is a 12 MiB image, the
+    // size of a full-resolution phone photo.
+    final largeBytes = [..._pngBytes, ...Uint8List(12 * 1024 * 1024)];
     final client = http_testing.MockClient((request) async {
       final url = request.url.toString();
       fetched.add(url);
       if (!online) throw const SocketException('offline');
-      if (url == _hugeUrl) return http.Response.bytes(hugeBytes, 200);
+      if (url == _largeUrl) return http.Response.bytes(largeBytes, 200);
       if (malformedExternal && _externalUrls.contains(url)) {
         return http.Response('not an image', 200);
       }
       if (replaceExternal != null && _externalUrls.contains(url)) {
         await replaceExternal.future;
-        return http.Response.bytes(hugeBytes, 200);
+        return http.Response.bytes(largeBytes, 200);
       }
       if (request.url.toString() == _corruptUrl) {
         return http.Response('not an image', 200);
@@ -122,34 +123,32 @@ void main() {
       ).resolve(ImageConfiguration.empty),
     );
 
-    const saved = [_relayUrl, _thumbnailUrl, ..._externalUrls];
-    const urls = [...saved, _hugeUrl];
+    const saved = [_relayUrl, _thumbnailUrl, _largeUrl, ..._externalUrls];
 
-    // First launch downloads everything and saves what fits.
+    // First launch downloads everything and saves what decodes.
     await launch((cache) async {
-      for (final url in urls) {
+      for (final url in saved) {
         expect(await show(cache, url), isNull, reason: url);
       }
       expect(await show(cache, _corruptUrl), isNotNull);
       expect(await show(cache, _truncatedUrl), isNotNull);
       await _settle();
     });
-    expect(fetched, [...urls, _corruptUrl, _truncatedUrl]);
+    expect(fetched, [...saved, _corruptUrl, _truncatedUrl]);
 
     // Offline relaunch: the original and its thumbnail are separate entries,
-    // both shown from disk. The oversized image and the bodies that failed
-    // to decode were never saved.
+    // both shown from disk, as is the large image. The bodies that failed to
+    // decode were never saved.
     fetched.clear();
     online = false;
     await launch((cache) async {
       for (final url in saved) {
         expect(await show(cache, url), isNull, reason: url);
       }
-      expect(await show(cache, _hugeUrl), isNotNull);
       expect(await show(cache, _corruptUrl), isNotNull);
       expect(await show(cache, _truncatedUrl), isNotNull);
     });
-    expect(fetched, [_hugeUrl, _corruptUrl, _truncatedUrl]);
+    expect(fetched, [_corruptUrl, _truncatedUrl]);
 
     // A week on, external images show from disk at once and refresh in the
     // background, two at a time. Relay media never goes stale.
@@ -163,27 +162,19 @@ void main() {
       }
       await _settle();
       expect(fetched, _externalUrls.take(2));
-      // The third waits for a slot. The replacements are too large to save,
-      // so the old copies go rather than showing in their place.
+      // The third waits for a slot. The replacements are saved in place of
+      // the old copies.
       replacement.complete();
       await _until(() async {
         for (final url in _externalUrls) {
-          if (await cache.read(url) != null) return false;
+          final hit = await cache.read(url);
+          if (hit?.bytes.length != largeBytes.length) return false;
         }
         return true;
       });
       expect(fetched, _externalUrls);
     });
     replaceExternal = null;
-
-    fetched.clear();
-    online = false;
-    await launch((cache) async {
-      for (final url in _externalUrls) {
-        expect(await show(cache, url), isNotNull, reason: url);
-      }
-    });
-    expect(fetched, _externalUrls);
 
     // A saved copy that no longer decodes is dropped and fetched again.
     fetched.clear();

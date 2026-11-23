@@ -96,10 +96,6 @@ class MediaDiskCache {
   /// avatars) cannot cost far more disk and index work than their bytes.
   static const maxFiles = 10000;
 
-  /// Larger images still show, from memory, but are never written to disk,
-  /// so one image cannot evict the rest of the cache.
-  static const maxFileBytes = 5 * 1024 * 1024;
-
   /// Age at which a non-relay image is refetched in the background.
   static const externalRefreshAge = Duration(days: 7);
 
@@ -222,10 +218,8 @@ class MediaDiskCache {
   }
 
   /// Saves [bytes] for [url]. [immutable] bytes (relay media) are never
-  /// refetched; others are refetched after [externalRefreshAge]. Bytes over
-  /// [maxFileBytes] are not saved, and drop any older copy so it is not
-  /// shown in their place. Failures are logged, never thrown: a missing
-  /// entry only costs a later download.
+  /// refetched; others are refetched after [externalRefreshAge]. Failures are
+  /// logged, never thrown: a missing entry only costs a later download.
   Future<void> write(
     String url,
     Uint8List bytes, {
@@ -237,10 +231,6 @@ class MediaDiskCache {
     final manager = await _manager;
     if (manager == null || isClosed) return;
     try {
-      if (bytes.length > maxFileBytes) {
-        await manager.removeFile(url);
-        return;
-      }
       await manager.putFile(
         url,
         bytes,
