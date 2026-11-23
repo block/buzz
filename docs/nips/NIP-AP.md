@@ -679,14 +679,14 @@ The agent owner's client moves the agent's local Attention to the relay in this 
 
 A runtime runs its local set until the switch. After it, the runtime runs the set it read back in step 3 until its first complete sync replaces it. A runtime never switches to a set it has not read back complete, so a move that stops part way leaves the local set running.
 
-From step 2 until the switch or a stop, the local set does not change. The client holds each local edit, by the agent or its owner, and applies it after the move: to the relay set if the runtime switched, or to the local set if the move stopped.
+From step 2 until the switch or a stop, the local set does not change. The client holds each local edit, by the agent or its owner, and applies it after the move: to the relay set if the runtime switched, or to the local set if the move stopped. It reports a held edit as done only after applying it, so an edit lost to a restart during the move was never reported as saved.
 
 A runtime that has not switched does not run Find for the agent.
 
 ### Reading attention
 
 1. **Find** the channel. If there is none, the runtime runs nothing from the relay and reports it (see "Lost access").
-2. **Sync** with the filter from Writing, step 1. Buffer each `EVENT` until `EOSE`. At `EOSE`, replace the whole set with the buffer. Do not merge it into the old set.
+2. **Sync** with the filter from "Writing attention", step 1. Buffer each `EVENT` until `EOSE`. At `EOSE`, replace the whole set with the buffer. Do not merge it into the old set.
 3. **Check each record.** A record is skipped, and reported, when any of these is true:
    - it does not have `["ar", "1"]`;
    - its content is not a JSON object with exactly `schema`, `slug` and `value`, or is over 65,535 bytes;
