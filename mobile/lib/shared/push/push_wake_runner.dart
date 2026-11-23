@@ -55,6 +55,7 @@ class PushWakeRunner {
     final failed = <String>{};
     var first = true;
     var interrupted = false;
+    var lastInterrupted = false;
     do {
       _rerun = false;
       final PushWakeResult result;
@@ -73,7 +74,9 @@ class PushWakeRunner {
       first = false;
       notifications.addAll(result.notifications);
       // Only the last pass says what is still unread, because a community
-      // that failed once may have been read by the next.
+      // that failed once may have been read by the next, and a pass that ran
+      // out of time may have been followed by one that finished.
+      lastInterrupted = result.interrupted;
       failed
         ..clear()
         ..addAll(result.failedCommunityIds);
@@ -83,7 +86,7 @@ class PushWakeRunner {
       failedCommunityIds: failed.toList()..sort(),
       // A wake that arrived during the last pass and got no rerun for lack of
       // budget was never looked up, so the caller must fall back for it.
-      interrupted: interrupted || _rerun,
+      interrupted: interrupted || lastInterrupted || _rerun,
     );
   }
 }
