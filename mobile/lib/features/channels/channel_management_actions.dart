@@ -750,10 +750,7 @@ final channelActionsProvider = Provider<ChannelActions>((ref) {
       nsec: relayConfig.nsec,
     ),
     currentPubkey: currentPubkey,
-    isCommunityValid: () {
-      final currentConfig = ref.read(relayConfigProvider);
-      return currentConfig.baseUrl == relayConfig.baseUrl &&
-          currentConfig.nsec == relayConfig.nsec;
-    },
+    isCommunityValid: () =>
+        ref.read(relayConfigProvider).isSameCommunity(relayConfig),
   );
 });
