@@ -29,8 +29,7 @@ class _LivenessProbe {
 /// this, only the WebSocket ping notices it, which can take a minute.
 extension _RelaySessionLiveness on RelaySessionNotifier {
   /// Asks the relay for an immediate answer and reconnects if none arrives in
-  /// [relayLivenessProbeTimeout]. Any frame proves the socket, so a busy
-  /// connection passes even when the answer itself is queued behind others.
+  /// [relayLivenessProbeTimeout].
   ///
   /// Runs on a network change ([networkChanged]) and when a request over the
   /// socket times out. After a network change the old address may be gone, so
@@ -38,6 +37,11 @@ extension _RelaySessionLiveness on RelaySessionNotifier {
   /// resume, and a dead socket reconnects within
   /// [relayNetworkChangeReconnectSpread]. After a timeout the relay may be
   /// overloaded, so a dead socket reconnects after the usual jittered backoff.
+  ///
+  /// After a network change only the probe's own answer proves the socket: a
+  /// frame handled since may have been queued before the change. After a
+  /// timeout any frame since the probe does, so an overloaded relay that still
+  /// delivers is not dropped and reconnected while its answer waits in line.
   void _checkConnection(
     SessionStatus status,
     Ref ref, {
@@ -83,7 +87,7 @@ extension _RelaySessionLiveness on RelaySessionNotifier {
       _resetLiveness();
       if (!_isActiveConnection(generation) || !_socketConnected) return;
       final inbound = _lastInboundAt;
-      if (inbound != null && !inbound.isBefore(sentAt)) {
+      if (!networkChanged && inbound != null && !inbound.isBefore(sentAt)) {
         _sendClose(subId);
         return;
       }

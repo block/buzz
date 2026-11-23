@@ -79,6 +79,47 @@ void main() {
     });
   });
 
+  for (final (name, frame) in <(String, List<dynamic>)>[
+    ('an earlier probe\'s late answer', ['EOSE', 'p-earlier']),
+    ('an unrelated notice', ['NOTICE', 'still here']),
+  ]) {
+    test('after a network change, $name does not prove the socket', () {
+      fakeAsync((async) {
+        final (:relay, :container) = connect(async);
+        final session = container.read(relaySessionProvider.notifier);
+
+        relay.holdReq();
+        session.onNetworkChanged();
+        async.elapse(const Duration(seconds: 1));
+        // Queued before the change, but handled only after the new probe.
+        session.debugHandleMessage(frame);
+        async.elapse(const Duration(milliseconds: 4100));
+        expect(relay.sockets.first.isOpen, isFalse, reason: 'unanswered');
+        async.elapse(const Duration(seconds: 3));
+        expect(relay.sockets, hasLength(2));
+      });
+    });
+  }
+
+  test('after a timeout, a relay still delivering frames is kept', () {
+    fakeAsync((async) {
+      final (:relay, :container) = connect(async);
+      final session = container.read(relaySessionProvider.notifier);
+
+      relay.holdReq();
+      session
+          .fetchHistory(const NostrFilter(kinds: [1], limit: 1))
+          .then<void>((_) {}, onError: (_) {});
+      async.elapse(const Duration(seconds: 8));
+      expect(probes(relay), hasLength(1));
+      // An overloaded relay whose answer waits behind other work.
+      session.debugHandleMessage(['NOTICE', 'busy']);
+      async.elapse(pastProbe + const Duration(seconds: 3));
+      expect(relay.sockets, hasLength(1));
+      expect(relay.sockets.first.isOpen, isTrue);
+    });
+  });
+
   test('a timed-out history request checks the socket, then backs off', () {
     fakeAsync((async) {
       final (:relay, :container) = connect(async);
