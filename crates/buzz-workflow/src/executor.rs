@@ -2330,7 +2330,7 @@ mod tests {
         )));
 
         for other in [
-            "  - id: approve\n    action: request_approval\n    from: '@manager'\n    message: ok?\n",
+            "  - id: approve\n    action: request_approval\n    from: any\n    message: ok?\n",
             "  - id: react\n    action: add_reaction\n    emoji: eyes\n",
             "  - id: dm\n    action: send_dm\n    to: '{{trigger.author}}'\n    text: hi\n",
             "  - id: topic\n    action: set_channel_topic\n    topic: hi\n",
