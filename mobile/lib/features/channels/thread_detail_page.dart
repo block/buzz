@@ -533,7 +533,6 @@ class ThreadDetailPage extends HookConsumerWidget {
     useEffect(
       () {
         final messageId = initialMessageId;
-        // The target may come from relay history or the saved fallback.
         if (messageId == null ||
             !canUseMessagesForInitialTarget ||
             headHeight.value == null) {

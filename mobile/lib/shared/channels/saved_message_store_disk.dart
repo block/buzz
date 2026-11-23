@@ -28,14 +28,20 @@ final class _DiskRequest {
   final List<NostrEvent> events;
   final String? relayAuthor;
   final int payloadBudget;
-  final Set<String>? targets;
+  final Map<String, bool>? targets;
   final Set<String> requiredEdits;
 }
 
 final class _DiskResult {
-  const _DiskResult({this.events, this.reset = false, this.recencyFailure});
+  const _DiskResult({
+    this.events,
+    this.pruned = const {},
+    this.reset = false,
+    this.recencyFailure,
+  });
 
   final List<NostrEvent>? events;
+  final Map<String, bool> pruned;
   final bool reset;
   final StackTrace? recencyFailure;
 }
@@ -63,6 +69,7 @@ _DiskResult _accessDatabase(_DiskRequest request) {
         ? _cacheCandidates(request.events, request.page).toList()
         : const <NostrEvent>[];
     var knownWires = const <String, String>{};
+    var pruned = const <String, bool>{};
     final requiredEdits = request.requiredEdits.toSet();
     if (existed && candidates.isNotEmpty) {
       // Recover any hot rollback journal before reading verified copies.
@@ -71,6 +78,8 @@ _DiskResult _accessDatabase(_DiskRequest request) {
       knownWires = _knownWires(db, candidates);
       if (request.page.rootId.isNotEmpty) {
         requiredEdits.addAll(_savedEditTargets(db, request.page));
+        pruned = _prunedEvents(db, request.page);
+        requiredEdits.addAll(pruned.keys.where((id) => pruned[id]!));
       }
       db.close();
       db = null;
@@ -79,7 +88,7 @@ _DiskResult _accessDatabase(_DiskRequest request) {
     // Signature verification runs with no SQLite connection open.
     final verified = _verifiedWires(
       request,
-      candidates,
+      candidates.where((event) => pruned[event.id] != false),
       knownWires,
       requiredEdits,
     );
@@ -171,26 +180,54 @@ void _checkSchema(Database db) {
   if (version != _version) throw const FormatException('cache format');
 }
 
+void _ensurePrunedEvents(Database db) => db.execute('''
+  CREATE TABLE IF NOT EXISTS pruned_thread_events (
+    channel_id TEXT NOT NULL,
+    root_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    edited INTEGER NOT NULL,
+    PRIMARY KEY (channel_id, root_id, event_id),
+    FOREIGN KEY (channel_id, root_id)
+      REFERENCES pages(channel_id, root_id) ON DELETE CASCADE
+  )
+''');
+
+Map<String, bool> _prunedEvents(Database db, SavedMessagePage page) {
+  if (db.select('''
+    SELECT 1 FROM sqlite_schema
+    WHERE type = 'table' AND name = 'pruned_thread_events'
+  ''').isEmpty) {
+    return const {};
+  }
+  return {
+    for (final row in db.select(
+      '''
+      SELECT event_id, edited FROM pruned_thread_events
+      WHERE channel_id = ? AND root_id = ? ORDER BY rowid
+      ''',
+      [page.channelId, page.rootId],
+    ))
+      row['event_id'] as String: row['edited'] == 1,
+  };
+}
+
 _DiskResult _readPage(
   Database db,
   SavedMessagePage page, {
   bool includePruned = false,
 }) {
   final key = [page.channelId, page.rootId];
+  final pruned = includePruned
+      ? _prunedEvents(db, page)
+      : const <String, bool>{};
   final rows = db.select('''
     SELECT wire FROM page_events JOIN events ON events.id = page_events.event_id
     WHERE channel_id = ? AND root_id = ? ORDER BY position
   ''', key);
   if (rows.isEmpty) {
-    final pruned =
-        includePruned &&
-        db
-            .select(
-              'SELECT 1 FROM pages WHERE channel_id = ? AND root_id = ?',
-              key,
-            )
-            .isNotEmpty;
-    return pruned ? const _DiskResult(events: []) : const _DiskResult();
+    return pruned.isEmpty
+        ? const _DiskResult()
+        : _DiskResult(events: const [], pruned: pruned);
   }
   final events = <NostrEvent>[];
   try {
@@ -208,9 +245,13 @@ _DiskResult _readPage(
     _touchPage(db, page);
   } on SqliteException catch (error, stackTrace) {
     if (_isInvalidDatabase(error)) rethrow;
-    return _DiskResult(events: events, recencyFailure: stackTrace);
+    return _DiskResult(
+      events: events,
+      pruned: pruned,
+      recencyFailure: stackTrace,
+    );
   }
-  return _DiskResult(events: events);
+  return _DiskResult(events: events, pruned: pruned);
 }
 
 _DiskResult _touchPage(Database db, SavedMessagePage page) {
@@ -256,7 +297,7 @@ String? _savedEditTarget(NostrEvent event) => event.tags.reversed
 
 (Map<String, String>, int)? _verifiedWires(
   _DiskRequest request,
-  List<NostrEvent> candidates,
+  Iterable<NostrEvent> candidates,
   Map<String, String> knownWires,
   Set<String> requiredEdits,
 ) {
@@ -368,6 +409,9 @@ _DiskResult _savePage(
       oldAuthor != null &&
       request.relayAuthor != null &&
       oldAuthor != request.relayAuthor;
+  final pruned = !rotated && page.rootId.isNotEmpty && request.events.isNotEmpty
+      ? _prunedEvents(db, page)
+      : const <String, bool>{};
   db.execute('BEGIN IMMEDIATE');
   try {
     if (rotated) {
@@ -379,7 +423,8 @@ _DiskResult _savePage(
       db.execute('INSERT INTO relay_author VALUES (?)', [request.relayAuthor]);
     }
     _deletePage(db, page.channelId, page.rootId);
-    if (selected.isNotEmpty && byteSize <= request.payloadBudget) {
+    if ((selected.isNotEmpty || pruned.isNotEmpty) &&
+        byteSize <= request.payloadBudget) {
       _evictPages(db, request.payloadBudget - byteSize, databasePageBudget);
       final insertedAt = DateTime.now().microsecondsSinceEpoch;
       db.execute('INSERT INTO pages VALUES (?, ?, ?, ?)', [
@@ -388,6 +433,15 @@ _DiskResult _savePage(
         insertedAt,
         byteSize,
       ]);
+      if (pruned.isNotEmpty) {
+        db.execute(
+          '''
+          INSERT INTO pruned_thread_events
+          SELECT ?, ?, key, value FROM json_each(?)
+        ''',
+          [page.channelId, page.rootId, jsonEncode(pruned)],
+        );
+      }
       final insertEvent = db.prepare(
         'INSERT OR IGNORE INTO events VALUES (?, ?)',
       );
@@ -470,18 +524,52 @@ Iterable<NostrEvent> _cacheCandidates(
   );
 }
 
-_DiskResult _removeChannel(Database db, String channel, Set<String>? targets) {
+_DiskResult _removeChannel(
+  Database db,
+  String channel,
+  Map<String, bool>? targets,
+) {
+  if (targets != null) _ensurePrunedEvents(db);
   db.execute('BEGIN IMMEDIATE');
   try {
     if (targets == null) {
       _deletePage(db, channel, null);
-    } else if (_deleteEventReferences(
-      db,
-      'channel_id = ? AND event_id IN (SELECT value FROM json_each(?))',
-      [channel, jsonEncode(targets.toList())],
-    )) {
+    } else {
+      final mutations = jsonEncode(targets);
       db.execute(
         '''
+        INSERT OR REPLACE INTO pruned_thread_events
+        SELECT channel_id, root_id, event_id, MIN(edited)
+        FROM (
+          SELECT pe.channel_id, pe.root_id, pe.event_id, t.value AS edited
+          FROM page_events pe JOIN json_each(?) t ON t.key = pe.event_id
+          WHERE pe.channel_id = ? AND pe.root_id <> ''
+          UNION ALL
+          SELECT pe.channel_id, pe.root_id, pe.event_id, MIN(pe.edited, t.value)
+          FROM pruned_thread_events pe JOIN json_each(?) t ON t.key = pe.event_id
+          WHERE pe.channel_id = ?
+        ) GROUP BY channel_id, root_id, event_id
+      ''',
+        [mutations, channel, mutations, channel],
+      );
+      db.execute(
+        '''
+        DELETE FROM pruned_thread_events WHERE rowid IN (
+          SELECT rowid FROM (
+            SELECT rowid, ROW_NUMBER() OVER (PARTITION BY root_id ORDER BY rowid DESC) AS newest
+            FROM pruned_thread_events WHERE channel_id = ?
+          ) WHERE newest > ?
+        )
+      ''',
+        [channel, SavedMessageStore.maxPageEvents],
+      );
+      if (_deleteEventReferences(
+        db,
+        'channel_id = ? AND event_id IN (SELECT key FROM json_each(?))',
+        [channel, mutations],
+      )) {
+        db.execute(
+          '''
         UPDATE pages SET byte_size = (
           SELECT COALESCE(SUM(length(CAST(wire AS BLOB))), 0)
           FROM page_events JOIN events ON events.id = page_events.event_id
@@ -489,14 +577,17 @@ _DiskResult _removeChannel(Database db, String channel, Set<String>? targets) {
             AND page_events.root_id = pages.root_id
         ) WHERE channel_id = ?;
       ''',
-        [channel],
-      );
-      // Keep a pruned thread's empty index entry. A later scan can use it
-      // to distinguish missing rows after a mutation from a first open.
-      db.execute(
-        "DELETE FROM pages WHERE channel_id = ? AND root_id = '' AND byte_size = 0",
-        [channel],
-      );
+          [channel],
+        );
+        db.execute(
+          '''DELETE FROM pages WHERE channel_id = ? AND byte_size = 0
+             AND NOT EXISTS (
+               SELECT 1 FROM pruned_thread_events
+               WHERE channel_id = pages.channel_id AND root_id = pages.root_id
+             )''',
+          [channel],
+        );
+      }
     }
     db.execute('COMMIT');
   } catch (_) {

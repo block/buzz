@@ -240,7 +240,7 @@ Future<List<NostrEvent>> _readSavedThreadEvents(
   // still has complete relay history, but cannot replace its saved page
   // without also verifying its edits.
   if (targets.length > _threadReplyPageSize + 1) return const [];
-  final prior = await store.read(ticket, includePruned: true);
+  final prior = await store.inspectThread(ticket);
   if (!isCurrent()) return const [];
   String? editTarget(NostrEvent event) => event.tags.reversed
       .where((tag) => tag.length > 1 && tag[0] == 'e')
@@ -249,26 +249,26 @@ Future<List<NostrEvent>> _readSavedThreadEvents(
     args.rootId,
     ...events.map((event) => event.id),
   });
+  final pruned = prior?.pruned ?? const <String, bool>{};
   deleted.addAll({
-    for (final event in prior ?? const <NostrEvent>[])
+    for (final entry in pruned.entries)
+      if (!entry.value) entry.key,
+    for (final event in prior?.events ?? const <NostrEvent>[])
       if (event.kind == EventKind.deletion ||
           event.kind == EventKind.nip29DeleteEvent)
         for (final tag in event.tags)
           if (tag.length > 1 && tag[0] == 'e') tag[1],
   });
-  final changed = prior == null
-      ? const <String>{}
-      : targets.difference(prior.map((event) => event.id).toSet());
-  final idsToVerify = {if (knownRoot == null) args.rootId, ...changed}
+  final prunedEdits = targets.where((id) => pruned[id] == true).toSet();
+  final idsToVerify = {if (knownRoot == null) args.rootId, ...prunedEdits}
     ..removeAll(deleted);
   final editTargets = targets.intersection({
     ...edited,
-    ...changed,
-    for (final event in prior ?? const <NostrEvent>[])
+    ...prunedEdits,
+    for (final event in prior?.events ?? const <NostrEvent>[])
       if (event.kind == EventKind.streamMessageEdit) ?editTarget(event),
   })..removeAll(deleted);
-  // Trust the earlier signed snapshot to identify rows that need the
-  // writer. A missing row may have been pruned while history was offline.
+  // Verify only mutations observed live or in a previous saved page.
   const editLimit = 1000;
   const strong = {'consistency': 'strong'};
   final filters = [

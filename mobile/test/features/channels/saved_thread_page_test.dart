@@ -233,10 +233,7 @@ void main() {
     );
     expect(relay.writerFilters, hasLength(2));
     expect(relay.writerFilters.first.ids, unorderedEquals([head.id, reply.id]));
-    expect(
-      relay.writerFilters.last.tags['#e'],
-      unorderedEquals([head.id, reply.id]),
-    );
+    expect(relay.writerFilters.last.tags['#e'], [reply.id]);
     for (final filter in relay.writerFilters) {
       expect(filter.tags['#h'], [args.channelId]);
     }
@@ -251,7 +248,7 @@ void main() {
 
     openThread.close();
     await container.pump();
-    relay.writerEvents = [head, laterReply, edit];
+    relay.writerEvents = [head, reply, edit];
     relay.threadQueries.add(Future.value([reply, laterReply]));
     final reopenedThread = container.listen(replies, (_, _) {});
     expect(await container.read(replies.future), [reply, laterReply]);
@@ -261,17 +258,14 @@ void main() {
       unorderedEquals([head, reply, laterReply, edit]),
     );
     expect(relay.writerFilters, hasLength(4));
-    expect(
-      relay.writerFilters.last.tags['#e'],
-      unorderedEquals([reply.id, laterReply.id]),
-    );
+    expect(relay.writerFilters.last.tags['#e'], [reply.id]);
 
     // The writer response is still untrusted. A forged edit cannot make the
     // already superseded original eligible for the saved page.
     final forged = NostrEvent.fromJson({...edit.toJson(), 'content': 'Forged'});
     reopenedThread.close();
     await container.pump();
-    relay.writerEvents = [head, forged];
+    relay.writerEvents = [head, reply, forged];
     relay.threadQueries.add(Future.value([reply, laterReply]));
     container.listen(replies, (_, _) {});
     expect(await container.read(replies.future), [reply, laterReply]);
@@ -299,11 +293,25 @@ void main() {
       expect(container.read(channel).value, contains(head));
       relay.threadQueries.add(Future.value([reply]));
       final replies = threadRepliesProvider(args);
-      container.listen(replies, (_, _) {});
+      final opened = container.listen(replies, (_, _) {});
       expect(await container.read(replies.future), [reply]);
       await paint();
       expect(relay.writerFilters, isEmpty);
       expect(await waitForSaved(args.savedPage, [head, reply]), [head, reply]);
+
+      opened.close();
+      await container.pump();
+      final later = _event('New reply', args: args);
+      relay.threadQueries.add(Future.value([reply, later]));
+      container.listen(replies, (_, _) {});
+      expect(await container.read(replies.future), [reply, later]);
+      await paint();
+      expect(await waitForSaved(args.savedPage, [head, reply, later]), [
+        head,
+        reply,
+        later,
+      ]);
+      expect(relay.writerFilters, isEmpty);
     },
   );
 
@@ -358,6 +366,55 @@ void main() {
   }
 
   test(
+    'a pruned deletion survives restart and a later page replacement',
+    () async {
+      final head = _event('Saved head', isRoot: true);
+      final args = ThreadRepliesArgs(
+        channelId: _args.channelId,
+        rootId: head.id,
+      );
+      final deleted = _event('Deleted reply', args: args);
+      final newer = _event('New reply', args: args);
+      await store.save(store.capture(_scope, args.savedPage), [
+        head,
+        deleted,
+      ], relayAuthor: null);
+      store.removeChannelEvents(_scope, args.channelId, {deleted.id});
+      expect(
+        (await store.inspectThread(
+          store.capture(_scope, args.savedPage),
+        ))?.pruned,
+        {deleted.id: false},
+      );
+      container.dispose();
+      openCacheSession();
+      final channel = channelMessagesProvider(args.channelId);
+      container.listen(channel, (_, _) {});
+      relay.connect();
+      await relay.subscribed.future;
+      relay.emit(head);
+      relay.threadQueries.add(Future.value([deleted, newer]));
+      final replies = threadRepliesProvider(args);
+      container.listen(replies, (_, _) {});
+      await container.read(replies.future);
+      await paint();
+      expect(await waitForSaved(args.savedPage, [head, newer]), [head, newer]);
+      expect(relay.writerFilters, isEmpty);
+      expect(
+        (await store.inspectThread(
+          store.capture(_scope, args.savedPage),
+        ))?.pruned,
+        {deleted.id: false},
+      );
+      await store.removeChannel(_scope, args.channelId);
+      expect(
+        await store.inspectThread(store.capture(_scope, args.savedPage)),
+        isNull,
+      );
+    },
+  );
+
+  test(
     'an invalid edit cannot replace a pruned thread after restart',
     () async {
       final head = _event('Older head', isRoot: true);
@@ -378,13 +435,11 @@ void main() {
       store.removeChannelEvents(_scope, args.channelId, {
         reply.id,
       }, edited: true);
-      expect(
-        await store.read(
-          store.capture(_scope, args.savedPage),
-          includePruned: true,
-        ),
-        isEmpty,
+      final prunedPage = await store.inspectThread(
+        store.capture(_scope, args.savedPage),
       );
+      expect(prunedPage?.events, isEmpty);
+      expect(prunedPage?.pruned, {reply.id: true});
       container.dispose();
       openCacheSession();
 
@@ -395,7 +450,7 @@ void main() {
       });
       await store.save(ticket, [head, reply, forged], relayAuthor: null);
       expect(await store.read(ticket), isNull);
-      expect(await store.read(ticket, includePruned: true), isEmpty);
+      expect((await store.inspectThread(ticket))?.pruned, {reply.id: true});
     },
   );
 

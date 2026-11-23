@@ -100,7 +100,7 @@ final class SavedMessageStore {
   final int databasePageLimit;
   final _scopeEpochs = <String, int>{};
   final _channelEpochs = <(String, String), int>{};
-  final _pendingEventRemovals = <(String, String), Set<String>>{};
+  final _pendingEventRemovals = <(String, String), Map<String, bool>>{};
   final _recentMutations = <(String, String, String), bool>{};
   Future<void> _tail = Future.value();
   Future<void> _purgeMarkerTail = Future.value();
@@ -140,15 +140,19 @@ final class SavedMessageStore {
   }
 
   /// Reads a verified page and records that the conversation was opened.
-  Future<List<NostrEvent>?> read(
-    SavedMessageTicket ticket, {
-    bool includePruned = false,
-  }) async {
-    final result = await _forPage(
-      ticket,
-      includePruned ? _DiskAction.inspect : _DiskAction.read,
-    );
+  Future<List<NostrEvent>?> read(SavedMessageTicket ticket) async {
+    final result = await _forPage(ticket, _DiskAction.read);
     return isCurrent(ticket) ? result?.events : null;
+  }
+
+  /// Reads trusted events and the targets removed from this thread page.
+  Future<({List<NostrEvent> events, Map<String, bool> pruned})?> inspectThread(
+    SavedMessageTicket ticket,
+  ) async {
+    final result = await _forPage(ticket, _DiskAction.inspect);
+    final events = result?.events;
+    if (events == null || !isCurrent(ticket)) return null;
+    return (events: events, pruned: result!.pruned);
   }
 
   /// Marks a warm open without reading or decoding the saved page.
@@ -210,10 +214,14 @@ final class SavedMessageStore {
     final key = (_scopeKey(scope), channelId);
     _retireChannel(key);
     final pending = _pendingEventRemovals[key];
-    final batch = pending ?? <String>{};
+    final batch = pending ?? <String, bool>{};
     for (final target in targets) {
       if (batch.length > maxPageEvents) break;
-      batch.add(target);
+      batch.update(
+        target,
+        (wasEdit) => wasEdit && edited,
+        ifAbsent: () => edited,
+      );
       final targetKey = (key.$1, channelId, target);
       final previous = _recentMutations.remove(targetKey);
       _recentMutations[targetKey] = previous == false ? false : edited;
@@ -358,7 +366,7 @@ final class SavedMessageStore {
     String directory,
     String key,
     String channelId, {
-    Set<String>? targets,
+    Map<String, bool>? targets,
   }) async {
     try {
       final result = await _runDisk(
