@@ -1825,7 +1825,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('@Scout'));
+      await tester.tap(_collapsedInput);
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), '');
       await tester.pumpAndSettle();
@@ -2935,13 +2935,16 @@ void main() {
         await tester.enterText(find.byType(TextField), '@S');
         await tester.pump();
         expect(find.text('Saba Saba'), findsNothing);
-        final samTop = tester.getTopLeft(find.text('Sam')).dy;
+        double samOffset() =>
+            tester.getTopLeft(find.text('Sam')).dy -
+            tester.getTopLeft(popover()).dy;
+        final samTop = samOffset();
         final height = tester.getSize(popover()).height;
 
         await settleSearch(tester);
         expect(find.text('Saba Saba'), findsOneWidget);
         // The late row filled reserved space: nothing shown moved.
-        expect(tester.getTopLeft(find.text('Sam')).dy, samTop);
+        expect(samOffset(), samTop);
         expect(tester.getSize(popover()).height, height);
       });
 
@@ -2971,12 +2974,15 @@ void main() {
         await tester.enterText(find.byType(TextField), '@S');
         await tester.pump();
         expect(find.text('Saba Saba'), findsNothing);
-        final samTop = tester.getTopLeft(find.text('Sam')).dy;
+        double samOffset() =>
+            tester.getTopLeft(find.text('Sam')).dy -
+            tester.getTopLeft(popover()).dy;
+        final samTop = samOffset();
         final height = tester.getSize(popover()).height;
 
         await settleSearch(tester);
         expect(find.text('Saba Saba'), findsOneWidget);
-        expect(tester.getTopLeft(find.text('Sam')).dy, samTop);
+        expect(samOffset(), samTop);
         expect(tester.getSize(popover()).height, height);
       });
 
@@ -6731,7 +6737,7 @@ void main() {
 
       // The prompt took focus; reopen the composer to edit the draft.
       await tester.pump(const Duration(milliseconds: 200));
-      await tester.tap(find.text('hello @Helper Bot'));
+      await tester.tap(_collapsedInput);
       await tester.pump(const Duration(milliseconds: 200));
       await tester.enterText(find.byType(TextField), 'newer draft');
       addMemberAcknowledgement.complete();
@@ -7113,14 +7119,13 @@ void main() {
         final container = ProviderScope.containerOf(
           tester.element(find.byType(ComposeBar)),
         );
-        container
-            .read(userCacheProvider.notifier)
-            .put(
-              UserProfile(
-                pubkey: maryJane.pubkey,
-                avatarUrl: 'https://example.org/mary.png',
-              ),
-            );
+        // The picker has a portrait before the timeline has a hydrated profile.
+        container.read(mentionSearchCacheProvider).put('Mary J', [
+          UserProfile(
+            pubkey: maryJane.pubkey,
+            avatarUrl: 'https://example.org/mary.png',
+          ),
+        ]);
         await tester.pumpWidget(
           UncontrolledProviderScope(
             container: container,
@@ -8560,9 +8565,12 @@ AgentDirectoryEntry _testAgent(String pubkey) {
   );
 }
 
+Finder get _collapsedInput =>
+    find.byKey(const ValueKey('collapsed-composer-input'));
+
 Future<void> _expandComposer(WidgetTester tester) async {
   if (find.byType(TextField).evaluate().isNotEmpty) return;
-  await tester.tap(find.text('Message'));
+  await tester.tap(_collapsedInput);
   await tester.pumpAndSettle();
 }
 

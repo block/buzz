@@ -13,6 +13,7 @@ import '../../shared/widgets/avatar_image.dart';
 import '../../shared/theme/buzz_icons.dart';
 import '../../shared/theme/theme.dart';
 import 'channel_identity_names_provider.dart';
+import 'mentions/mention_candidates_provider.dart';
 
 /// The inline identity label shared by chat mentions and channel actions.
 class MessageMentionPill extends ConsumerWidget {
@@ -101,7 +102,10 @@ class MessageMentionPill extends ConsumerWidget {
                       ),
                     )
                   : null) ??
-              candidateAvatar;
+              candidateAvatar ??
+              (isAgent
+                  ? null
+                  : ref.watch(mentionSearchCacheProvider).portraitFor(key));
     final hasPicture = picture != null && picture.isNotEmpty;
     // The enclosing span already scales the chip.
     final size = fontSize;

@@ -64,14 +64,7 @@ final mentionUserSearchProvider = FutureProvider.autoDispose
             ),
       ];
       // A search that outlived its query or community is not kept.
-      if (!disposed) {
-        final profiles = ref.read(userCacheProvider.notifier);
-        for (final person in found) {
-          if (person.profile case final event?)
-            profiles.cacheProfileEvent(event);
-        }
-        ref.read(mentionSearchCacheProvider).put(trimmed, people);
-      }
+      if (!disposed) ref.read(mentionSearchCacheProvider).put(trimmed, people);
       return people;
     });
 
@@ -112,6 +105,16 @@ class MentionSearchCache {
     for (var end = key.length; end > 0; end--) {
       final page = _pages[key.substring(0, end)];
       if (page != null) return page;
+    }
+    return null;
+  }
+
+  /// The newest search portrait for a picked identity awaiting profile hydration.
+  String? portraitFor(String pubkey) {
+    for (final page in _pages.values.toList().reversed) {
+      for (final profile in page) {
+        if (profile.pubkey == pubkey) return profile.avatarUrl;
+      }
     }
     return null;
   }

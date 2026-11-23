@@ -57,7 +57,7 @@ void largeRosterTests() {
         ],
       ),
     );
-    await tester.tap(find.textContaining('@Alex Smith 0'));
+    await tester.tap(_collapsedInput);
     await tester.pumpAndSettle();
 
     Future<int> send() async {

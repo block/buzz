@@ -172,6 +172,7 @@ class _ComposeBarLayout extends HookWidget {
                     button: true,
                     label: resolvedHint,
                     child: GestureDetector(
+                      key: const ValueKey('collapsed-composer-input'),
                       behavior: HitTestBehavior.opaque,
                       onTap: () => _runComposerAction(onExpand),
                       child: Padding(

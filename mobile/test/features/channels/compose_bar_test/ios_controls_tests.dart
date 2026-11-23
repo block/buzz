@@ -397,7 +397,7 @@ void iosControlsTests() {
       await tester.pumpWidget(agentComposer());
       await tester.pumpAndSettle();
       // The mic is offered only for an empty field: remove the prefill.
-      await tester.tap(find.text('@Scout'));
+      await tester.tap(_collapsedInput);
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), '');
       await tester.pumpAndSettle();
