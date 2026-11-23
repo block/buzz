@@ -233,7 +233,7 @@ Within each step, by slug.
 
 ## Turning relay storage on
 
-The agent owner's client moves the agent's local Attention to the relay in this order:
+The agent owner's client moves the agent's local Attention to the relay in this order. It moves only a runtime that has not switched: one that already reads the channel needs no move, and step 1 would stop it.
 
 1. **Find** the channel. If there is none, create it (NIP-AP, "Config channels"), without the agent. If the agent is in it with a role that can write (from an earlier move), remove it, so only the agent owner writes until step 4. A guest stays.
 2. **Write** each local object (Writing), in the order above.
@@ -242,6 +242,8 @@ The agent owner's client moves the agent's local Attention to the relay in this 
 5. **Switch** the runtime to the relay. This is a setting of the runtime, not a record.
 
 A runtime runs its local set until the switch. After it, the runtime runs the set it read back in step 3 until its first complete sync replaces it. A runtime never switches to a set it has not read back complete, so a move that stops part way leaves the local set running.
+
+From step 2 until the switch or a stop, the local set does not change. The client holds each local edit, by the agent or its owner, and applies it after the move: to the relay set if the runtime switched, or to the local set if the move stopped.
 
 A runtime that has not switched does not run Find for the agent.
 
@@ -312,7 +314,7 @@ A runtime writes in two cases only:
 - it removes a spent timer after the task for its last occurrence succeeds;
 - it removes a source watch after every task from its run succeeds.
 
-Each is a `delete` signed as the agent. The runtime first reads the record again (Writing, step 1). It deletes the record only if its head is still the revision that the run started from, with `prev` = that revision. If the head is another revision, even one with the same value, or the delete gets `conflict`, another writer changed the record during the task, for example by removing and adding it again. The runtime keeps the record and applies the new head as a new registration, with none of the old one's run state. A timer that is spent with no last task stays, and the runtime reports it as spent.
+Each is a `delete` signed as the agent. The runtime first reads the record again (Writing, step 1). It deletes the record only if its head is still the revision that the run started from, with `prev` = that revision. If the head is another revision, even one with the same value, or the delete gets `conflict`, another writer changed the record during the task, for example by removing and adding it again. The runtime keeps the record and applies the new head as an edit: a timer keeps the state that "Timer schedule" gives it, so a rearm keeps occurrences used, and a source watch starts a new run, with none of the old run's state. A timer that is spent with no last task stays, and the runtime reports it as spent.
 
 When a source run has a failed task, the runtime keeps the record, marks the run complete in its own state, and does not run it again until the record changes. A runtime with no such state runs a kept source once more.
 
