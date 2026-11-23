@@ -106,6 +106,39 @@ function BackendSupportHint({ action }: { action: StepFormState["action"] }) {
   }
 }
 
+function NotificationControl({
+  step,
+  prefix,
+  disabled,
+  onUpdate,
+}: {
+  step: StepFormState;
+  prefix: string;
+  disabled?: boolean;
+  onUpdate: (step: StepFormState) => void;
+}) {
+  return (
+    <div className="flex items-start gap-2">
+      <Checkbox
+        checked={step.notify !== false}
+        disabled={disabled}
+        id={`${prefix}-notify`}
+        onCheckedChange={(checked) =>
+          onUpdate({ ...step, notify: checked === true })
+        }
+      />
+      <div>
+        <label className="text-xs" htmlFor={`${prefix}-notify`}>
+          Send user notifications
+        </label>
+        <p className="text-xs text-muted-foreground">
+          Turn off to post only this step's message without user notifications.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function StepConfigFields({
   step,
   prefix,
@@ -203,6 +236,12 @@ function StepConfigFields({
               </label>
             </div>
           ) : null}
+          <NotificationControl
+            disabled={disabled}
+            onUpdate={onUpdate}
+            prefix={prefix}
+            step={step}
+          />
         </div>
       );
     case "send_dm":
@@ -236,6 +275,12 @@ function StepConfigFields({
               value={step.text ?? ""}
             />
           </div>
+          <NotificationControl
+            disabled={disabled}
+            onUpdate={onUpdate}
+            prefix={prefix}
+            step={step}
+          />
         </div>
       );
     case "call_webhook":

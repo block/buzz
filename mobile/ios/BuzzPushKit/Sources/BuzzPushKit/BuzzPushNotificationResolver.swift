@@ -514,6 +514,9 @@ public final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     guard let mine = community.pubkey?.lowercased() else { return [] }
     return events.filter {
       $0.pubkey.lowercased() != mine && [9, 40002, 45001, 45003].contains($0.kind)
+        && !$0.tags.contains {
+          $0.count >= 2 && $0[0] == "buzz:workflow-notify" && $0[1] == "false"
+        }
     }.sorted {
       $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt > $1.createdAt
     }

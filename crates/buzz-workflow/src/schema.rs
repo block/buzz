@@ -105,6 +105,10 @@ pub enum ActionDef {
         /// carry a triggering event to reply to.
         #[serde(default)]
         reply_in_thread: bool,
+        /// Whether this step's message may produce user notifications.
+        /// Defaults to `true` for existing workflow definitions.
+        #[serde(default = "default_true")]
+        notify: bool,
     },
     /// Send a direct message to a user.
     SendDm {
@@ -112,6 +116,10 @@ pub enum ActionDef {
         to: String,
         /// Message text (supports template variables).
         text: String,
+        /// Whether this step's message may produce user notifications.
+        /// Defaults to `true` for existing workflow definitions.
+        #[serde(default = "default_true")]
+        notify: bool,
     },
     /// Update the channel topic.
     SetChannelTopic {
@@ -578,6 +586,35 @@ mod tests {
         // Explicit `false` on a schedule trigger is fine — no message needed.
         let yaml = "name: OK\ntrigger:\n  on: schedule\n  cron: '0 9 * * 1-5'\nsteps:\n  - id: s1\n    action: send_message\n    text: hi\n    reply_in_thread: false\n";
         parse_yaml(yaml).expect("reply_in_thread: false on schedule should be valid");
+    }
+
+    #[test]
+    fn notification_opt_out_is_per_message_step_and_round_trips() {
+        let yaml = concat!(
+            "name: Notification Choices\n",
+            "trigger:\n  on: message_posted\n",
+            "steps:\n",
+            "  - id: default_message\n    action: send_message\n    text: default\n",
+            "  - id: quiet_message\n    action: send_message\n    text: quiet\n    notify: false\n",
+            "  - id: default_dm\n    action: send_dm\n    to: '{{trigger.author}}'\n    text: default\n",
+            "  - id: quiet_dm\n    action: send_dm\n    to: '{{trigger.author}}'\n    text: quiet\n    notify: false\n",
+        );
+        let (def, json) = parse_yaml(yaml).expect("parse failed");
+        let notify_values = |def: &WorkflowDef| {
+            def.steps
+                .iter()
+                .map(|step| match &step.action {
+                    ActionDef::SendMessage { notify, .. } | ActionDef::SendDm { notify, .. } => {
+                        *notify
+                    }
+                    other => panic!("unexpected action: {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(notify_values(&def), [true, false, true, false]);
+
+        let reparsed: WorkflowDef = serde_json::from_str(&json).expect("json round-trip");
+        assert_eq!(notify_values(&reparsed), [true, false, true, false]);
     }
 
     #[test]

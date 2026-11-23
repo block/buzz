@@ -204,6 +204,8 @@ An executor MUST evaluate a lease only against events accepted by the relay orig
 
 Filter matching MUST use only the accepted event envelope and relay-local authorization state. An executor MUST NOT decrypt NIP-44 content, NIP-59 seals or gift wraps, or any other encrypted event content to decide whether to wake an installation. For NIP-59 gift wraps, only outer-envelope fields, including the outer `p` tag, are eligible for matching.
 
+An executor MUST NOT enqueue a wake for a Buzz workflow message carrying `["buzz:workflow-notify", "false"]`. This per-step author opt-out suppresses user notifications only; it does not change event visibility, mention indexing, or read authorization.
+
 The verified canonical origin is part of every lease and match key. An executor serving more than one origin MUST partition, at minimum, lease state, filter indexes, cursors, durable outbox jobs, endpoint lookup, foreground-suppression state, gateway capability state, quotas, and rate limits by origin. It MUST NOT match a lease against a global event, pubkey, or tag stream, and MUST NOT use authorization state from one origin to approve a wake or gateway delivery at another origin.
 
 A wake job MUST preserve the origin and lease address selected at match time. Workers MUST re-check the lease's active state, expiration, endpoint generation, and current read authorization before delivery. A failed authorization check MUST suppress that wake without revealing whether the event existed. Implementations SHOULD make the accepted event and outbox insertion one durable transaction, or provide equivalent crash-safe processing, but delivery through a platform transport remains best-effort.

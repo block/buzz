@@ -4,6 +4,17 @@ import {
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
 
+/** Workflow message steps may opt out of user notifications without changing
+ * mentions, unread state, or the message itself.
+ */
+export function hasWorkflowNotificationOptOut(
+  tags: readonly (readonly string[])[],
+): boolean {
+  return tags.some(
+    (tag) => tag[0] === "buzz:workflow-notify" && tag[1] === "false",
+  );
+}
+
 /**
  * Whether the event's `p` tags address `currentPubkey`. A workflow message
  * names its owner in `["p", owner, "", "owner"]` for attribution only; that
@@ -41,6 +52,10 @@ export function shouldNotifyForEvent(
   currentPubkey: string,
   options: NotifyOptions,
 ): boolean {
+  if (hasWorkflowNotificationOptOut(event.tags)) {
+    return false;
+  }
+
   const {
     participatedRootIds,
     followedRootIds,

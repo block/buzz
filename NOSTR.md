@@ -381,6 +381,15 @@ of the channel's messages: `buzz:workflow-owner` also names the owner. A
 marked `p` tag on any other event, for example a kind:39002 member list role,
 matches `#p` normally. See `docs/buzz-push.md` for the push rules.
 
+### Workflow Notification Opt-Out
+
+A `send_message` or `send_dm` step may set `notify: false`; its default is
+`true`, preserving existing workflow definitions. The relay marks that step's
+message with `["buzz:workflow-notify", "false"]`. Clients MUST NOT produce a
+user notification for the marked message, and Buzz's push executor does not
+wake installations for it. The opt-out applies only to that step: it does not
+remove the message, its mention tags, unread state, or agent-direction tags.
+
 ### Workflow Mentions
 
 A workflow message may carry `["buzz:workflow-mention", <pubkey>]` tags. Each

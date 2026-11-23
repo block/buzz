@@ -172,7 +172,17 @@ test("live channel stream drives mention, unread and DM callbacks once across re
     const event = message("mention");
     await h.deliver(h.subscriptions[0], event);
     await h.deliver(h.subscriptions[0], event);
-    assert.deepEqual(mentions, ["mention"]);
+    await h.deliver(
+      h.subscriptions[0],
+      message("quiet-workflow-dm", {
+        tags: [
+          ["h", "channel-0"],
+          ["p", VIEWER],
+          ["buzz:workflow-notify", "false"],
+        ],
+      }),
+    );
+    assert.deepEqual(mentions, ["mention", "mention"]);
     assert.deepEqual(unreads, [["channel-0", "mention"]]);
     assert.deepEqual(dms, [["channel-0", "mention"]]);
   } finally {
