@@ -302,6 +302,11 @@ void main() {
             .alignCollapsedTitleToLeading,
         isTrue,
       );
+      expect(tester.getSize(find.byTooltip('Search')), const Size.square(48));
+      final coverMenu = tester.widget<IosMessageCreateButton>(
+        find.byKey(const ValueKey('vertical-create-menu')),
+      );
+      expect(coverMenu.width, 48);
       final closedHeaderRect = tester.getRect(bar);
       expect(closedHeaderRect.left, 0);
       expect(closedHeaderRect.right, 466);
@@ -914,6 +919,10 @@ void main() {
       final collapseHeight = tester
           .widget<FrostedAppBar>(find.byType(FrostedAppBar))
           .bottomHeight;
+      final title = find.text('Messages');
+      final expandedCenter = platform == TargetPlatform.android
+          ? tester.getCenter(title)
+          : Offset.zero;
       for (final fraction in [0.01, 0.25, 0.5, 0.75, 1.0]) {
         scroll.jumpTo(collapseHeight * fraction);
         await tester.pumpAndSettle();
@@ -922,6 +931,16 @@ void main() {
           findsOneWidget,
           reason: 'Bell must remain tappable at collapse fraction $fraction',
         );
+      }
+      if (platform == TargetPlatform.android) {
+        final compactCenter = tester.getCenter(title);
+        expect(compactCenter.dx, closeTo(195, 1));
+        expect(compactCenter.dy, lessThan(expandedCenter.dy));
+        scroll.jumpTo(0);
+        await tester.pumpAndSettle();
+        expect(tester.getCenter(title), expandedCenter);
+        scroll.jumpTo(collapseHeight);
+        await tester.pumpAndSettle();
       }
       if (platform == TargetPlatform.iOS) {
         // Widget tests hit-test the platform view but cannot run UIKit's

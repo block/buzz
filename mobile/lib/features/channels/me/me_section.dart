@@ -1,3 +1,4 @@
+import '../../../shared/widgets/section_state_chevron.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 
@@ -38,9 +39,7 @@ class MeSection extends HookWidget {
   @override
   Widget build(BuildContext context) {
     final expanded = useState(true);
-    final inset = compactHeaderGap
-        ? 26.0 - MessagesSectionOptions.headerTrim(context)
-        : Grid.xxs;
+    final inset = compactHeaderGap ? Grid.inventoryRowInset : Grid.xxs;
     final toggle = Semantics(
       label: label,
       excludeSemantics: true,
@@ -53,27 +52,13 @@ class MeSection extends HookWidget {
         child: Padding(
           padding: EdgeInsets.fromLTRB(
             Grid.xxs,
-            inset,
+            compactHeaderGap ? Grid.inventorySectionTopInset : inset,
             Grid.xxs,
-            compactHeaderGap && expanded.value ? 0 : inset,
+            inset,
           ),
           child: ConstrainedBox(
             constraints: BoxConstraints(minHeight: compactHeaderGap ? 0 : 28),
-            child: Row(
-              crossAxisAlignment: compactHeaderGap
-                  ? CrossAxisAlignment.end
-                  : CrossAxisAlignment.center,
-              children: [
-                Flexible(
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: navigationBucketHeadingStyle(context),
-                  ),
-                ),
-              ],
-            ),
+            child: SectionHeadingLabel(label: label, expanded: expanded.value),
           ),
         ),
       ),

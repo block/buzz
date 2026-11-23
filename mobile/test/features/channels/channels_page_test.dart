@@ -1116,8 +1116,8 @@ void main() {
     }
     expect(find.byKey(const ValueKey('channel-icon-1')), findsOneWidget);
     final sectionTitle = tester.widget<Text>(find.text('Team'));
-    expect(sectionTitle.style?.fontSize, 14);
-    expect(sectionTitle.style?.fontWeight, FontWeight.w500);
+    expect(sectionTitle.style?.fontSize, navigationChatTitleTextStyle.fontSize);
+    expect(sectionTitle.style?.fontWeight, FontWeight.w600);
   });
 
   testWidgets('section titles toggle their rows at the list gutter', (
@@ -1712,7 +1712,11 @@ void main() {
         of: sectionRow,
         matching: find.byIcon(BuzzIcons.chevronDown),
       );
-      expect(chevron, findsNothing);
+      final fade = find.ancestor(
+        of: chevron,
+        matching: find.byType(AnimatedOpacity),
+      );
+      expect(tester.widget<AnimatedOpacity>(fade.first).opacity, 0);
       for (final divider in tester.widgetList<Divider>(find.byType(Divider))) {
         expect(
           divider.color,
@@ -4560,7 +4564,7 @@ void main() {
 
     expect(
       tester.widget<Text>(find.text('Team')).style?.color,
-      const Color(0xFFA4A4A4),
+      Theme.of(tester.element(find.text('Team'))).colorScheme.onSurface,
     );
     final options = find.descendant(
       of: find.byTooltip('Team options'),

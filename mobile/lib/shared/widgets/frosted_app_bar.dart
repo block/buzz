@@ -21,6 +21,19 @@ import 'ios_navigation_bar.dart';
 import 'navigation_backdrop.dart';
 export 'ios_navigation_bar.dart' show IosNavigationAction;
 
+/// Space below the Android conversation toolbar controls.
+double conversationNavigationBottomPadding(BuildContext context) =>
+    Theme.of(context).platform == TargetPlatform.android ? Grid.xxs : 0;
+
+/// Round Material action containers shared by Android navigation headers.
+ButtonStyle androidNavigationButtonStyle(BuildContext context) =>
+    IconButton.styleFrom(
+      backgroundColor: context.colors.surfaceContainerHighest,
+      foregroundColor: context.colors.onSurface,
+      shape: const CircleBorder(),
+      minimumSize: const Size.square(48),
+    );
+
 /// Minimum height of the frosted app bar content area below the safe area.
 const _kBarContentMinHeight = buzzNavigationRowHeight;
 
@@ -155,6 +168,9 @@ class FrostedAppBar extends StatelessWidget {
   /// Pass the same value to [frostedAppBarHeight] when spacing body content.
   final double titleContentHeight;
 
+  /// Scroll-driven title drawn over the toolbar and its bottom extension.
+  final Widget Function(double toolbarHeight)? titleOverlay;
+
   /// Optional content displayed below the title row in the same surface.
   final Widget? bottom;
 
@@ -271,6 +287,7 @@ class FrostedAppBar extends StatelessWidget {
     this.centerTitle = false,
     this.titleStyle,
     this.titleContentHeight = 0,
+    this.titleOverlay,
     this.bottom,
     this.bottomHeight = 0,
     this.actions = const [],
@@ -597,7 +614,12 @@ class FrostedAppBar extends StatelessWidget {
                       height: 48,
                       child: IconButton(
                         onPressed: () => Navigator.of(context).pop(),
-                        color: effectiveIconColor,
+                        color: defaultTargetPlatform == TargetPlatform.android
+                            ? context.colors.onSurface
+                            : effectiveIconColor,
+                        style: defaultTargetPlatform == TargetPlatform.android
+                            ? androidNavigationButtonStyle(context)
+                            : null,
                         icon: const Icon(BuzzIcons.chevronLeft),
                         tooltip: 'Back',
                       ),
@@ -662,19 +684,21 @@ class FrostedAppBar extends StatelessWidget {
         ),
       ),
     );
-    final contentBody = bottom != null
+    final contentBody = bottomHeight > 0
         ? SizedBox(
             height: barContentHeight + bottomHeight,
             child: Stack(
               children: [
                 Positioned(top: 0, left: 0, right: 0, child: titleRow),
-                Positioned(
-                  top: barContentHeight,
-                  left: 0,
-                  right: 0,
-                  height: bottomHeight,
-                  child: bottom!,
-                ),
+                if (bottom != null)
+                  Positioned(
+                    top: barContentHeight,
+                    left: 0,
+                    right: 0,
+                    height: bottomHeight,
+                    child: bottom!,
+                  ),
+                if (titleOverlay != null) titleOverlay!(barContentHeight),
               ],
             ),
           )
@@ -685,7 +709,14 @@ class FrostedAppBar extends StatelessWidget {
         'frosted-app-bar-content-transition-transform',
       ),
       opacityKey: const ValueKey('frosted-app-bar-content-transition-opacity'),
-      child: contentBody,
+      child: defaultTargetPlatform == TargetPlatform.android
+          ? IconButtonTheme(
+              data: IconButtonThemeData(
+                style: androidNavigationButtonStyle(context),
+              ),
+              child: contentBody,
+            )
+          : contentBody,
     );
 
     final background = Container(
@@ -707,7 +738,7 @@ class FrostedAppBar extends StatelessWidget {
               top: 0,
               left: 0,
               right: 0,
-              height: topPadding + _barContentHeight(context, titleStyle, 0),
+              height: topPadding + barContentHeight + bottomHeight,
               child: IgnorePointer(
                 child: NavigationBackdrop(
                   active: paintsFrost,

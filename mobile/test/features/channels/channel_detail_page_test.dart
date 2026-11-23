@@ -7185,6 +7185,7 @@ void main() {
         unreadRect.top,
         frostedAppBarHeight(
               tester.element(unreadButton),
+              bottomHeight: Grid.xxs,
               titleContentHeight: tester
                   .widget<FrostedAppBar>(find.byType(FrostedAppBar).first)
                   .titleContentHeight,
@@ -8910,6 +8911,7 @@ void main() {
           closeTo(
             frostedAppBarHeight(
                   tester.element(stickyHeader),
+                  bottomHeight: Grid.xxs,
                   titleContentHeight: tester
                       .widget<FrostedAppBar>(find.byType(FrostedAppBar).first)
                       .titleContentHeight,

@@ -373,7 +373,11 @@ class HomePage extends HookConsumerWidget {
                         strip!.rect.center.dx,
                       ) -
                       strip.rect.center.dx -
-                      100,
+                      (256 -
+                              (isCompactDuoWindow(context)
+                                  ? duoCoverRailActionSize
+                                  : 56)) /
+                          2,
                   0,
                 ),
                 child: SafeArea(

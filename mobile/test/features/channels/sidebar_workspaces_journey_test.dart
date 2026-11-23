@@ -137,10 +137,25 @@ void main() {
       expect(
         tester.getBottomLeft(header).dy -
             tester.getBottomLeft(inList(label)).dy,
-        closeTo(top(label) - tester.getTopLeft(header).dy, 0.01),
+        closeTo(Grid.inventoryRowInset, 0.01),
+      );
+      expect(
+        top(label) - tester.getTopLeft(header).dy,
+        Grid.inventorySectionTopInset,
+      );
+      double chevronCenter(IconData icon) => tester
+          .getCenter(find.descendant(of: header, matching: find.byIcon(icon)))
+          .dy;
+      expect(
+        chevronCenter(BuzzIcons.chevronRight),
+        tester.getCenter(inList(label)).dy,
       );
       await tester.tap(inList(label));
       await tester.pumpAndSettle();
+      expect(
+        chevronCenter(BuzzIcons.chevronDown),
+        tester.getCenter(inList(label)).dy,
+      );
       expect(top(label), expandedTop);
     }
 

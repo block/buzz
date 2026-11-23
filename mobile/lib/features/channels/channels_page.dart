@@ -1,3 +1,4 @@
+import '../../shared/widgets/section_state_chevron.dart';
 import 'channel_sections/section_show_more.dart';
 import '../home/home_pins.dart';
 import '../../shared/widgets/native_route_controls.dart';
@@ -212,13 +213,26 @@ class ChannelsPage extends HookConsumerWidget {
         DuoToolbarScope.maybeStripOf(context) ?? FoldGeometry.of(context).strip;
     final coverOptions =
         largeMessagesTitle && strip != null && isCompactDuoWindow(context);
+    final androidTitle =
+        messages && defaultTargetPlatform == TargetPlatform.android;
+    final expandedTitleStyle = context.textTheme.headlineLarge?.copyWith(
+      fontWeight: FontWeight.w700,
+      color: context.colors.onSurface,
+    );
+    final expandedTitleHeight = androidTitle
+        ? MediaQuery.textScalerOf(
+                    context,
+                  ).scale(expandedTitleStyle?.fontSize ?? 32) *
+                  (expandedTitleStyle?.height ?? 1.25) +
+              Grid.xs
+        : 0.0;
     final headerBottomPadding =
         _kTopSectionBottomPadding + (largeMessagesTitle ? 2 * Grid.quarter : 0);
     final topSectionHeight = frostedAppBarHeight(
       context,
       titleStyle: headerTitleStyle,
 
-      bottomHeight: headerBottomPadding,
+      bottomHeight: headerBottomPadding + expandedTitleHeight,
       useNativeNavigation: !messages || largeMessagesTitle,
       nativeLargeTitle: largeMessagesTitle,
       alignWithStatusRegion: messages && !largeMessagesTitle,
@@ -248,7 +262,10 @@ class ChannelsPage extends HookConsumerWidget {
         }
         final next = !channelsScrollController.hasClients
             ? 0.0
-            : (channelsScrollController.offset / _kHeaderFrostScrollDistance)
+            : (channelsScrollController.offset /
+                      (androidTitle
+                          ? expandedTitleHeight
+                          : _kHeaderFrostScrollDistance))
                   .clamp(0.0, 1.0)
                   .toDouble();
         if ((headerFrost.value - next).abs() > 0.001) headerFrost.value = next;
@@ -256,7 +273,7 @@ class ChannelsPage extends HookConsumerWidget {
 
       channelsScrollController.addListener(updateHeaderFrost);
       return () => channelsScrollController.removeListener(updateHeaderFrost);
-    }, [channelsScrollController]);
+    }, [channelsScrollController, expandedTitleHeight]);
 
     // Cache the last successfully loaded channels so the UI never flashes
     // back to a loading state when the provider rebuilds (e.g. reconnect).
@@ -739,10 +756,7 @@ class ChannelsPage extends HookConsumerWidget {
           leading: coverOptions
               ? null
               : messages
-              ? _MessagesOptionsButton(
-                  controlSize: strip != null ? buzzNavigationActionSize : 40,
-                  onPressed: displayOptions,
-                )
+              ? _MessagesOptionsButton(onPressed: displayOptions)
               : _CommunityIndicator(
                   onTap: openCommunitySwitcher,
                   avatarKey: communityAvatarKey,
@@ -752,9 +766,37 @@ class ChannelsPage extends HookConsumerWidget {
           titleStyle: headerTitleStyle,
 
           automaticallyImplyLeading: !messages,
-          title: messages
+          title: messages && (!androidTitle || frostProgress == 1)
               ? Text('Messages', style: headerTitleStyle)
-              : const SizedBox.shrink(),
+              : null,
+          titleOverlay: androidTitle && frostProgress < 1
+              ? (toolbarHeight) => PositionedDirectional(
+                  top: toolbarHeight * (1 - frostProgress),
+                  start: Grid.gutter,
+                  end: Grid.gutter,
+                  height:
+                      expandedTitleHeight * (1 - frostProgress) +
+                      toolbarHeight * frostProgress,
+                  child: IgnorePointer(
+                    child: Align(
+                      alignment: AlignmentDirectional(-1 + frostProgress, 0),
+                      child: Semantics(
+                        header: true,
+                        child: Text(
+                          'Messages',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle.lerp(
+                            expandedTitleStyle,
+                            headerTitleStyle,
+                            frostProgress,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                )
+              : null,
           actions: messages
               ? messagesActionsBuilder?.call(
                       openCommunityGrid,
@@ -767,7 +809,8 @@ class ChannelsPage extends HookConsumerWidget {
                     onCreate: openCreateMenu,
                   ),
                 ],
-          bottomHeight: headerBottomPadding,
+          bottomHeight:
+              headerBottomPadding + expandedTitleHeight * (1 - frostProgress),
           bottom: const SizedBox.expand(),
         ),
         body: child!,

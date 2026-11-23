@@ -415,6 +415,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
 
     if arguments?["mergingNavigation"] as? Bool == true {
       let glass = MergingNavigationGlass(frame: containerView.bounds)
+      glass.diameter = controlSize
       glass.vertical = arguments?["verticalNavigation"] as? Bool ?? false
       glass.autoresizingMask = [.flexibleWidth, .flexibleHeight]
       containerView.addSubview(glass)
@@ -879,6 +880,7 @@ final class NativeSegmentedControlPlatformView: NSObject, FlutterPlatformView {
 
 /// Three native glass elements share a compositor so their surfaces merge.
 final class MergingNavigationGlass: UIView {
+  var diameter: CGFloat = 56
   var vertical = false
   let leftSurface: UIVisualEffectView
   let centerSurface: UIVisualEffectView
@@ -922,17 +924,17 @@ final class MergingNavigationGlass: UIView {
   override func layoutSubviews() {
     super.layoutSubviews()
     // Use bounds/center rather than frame: side views may be transformed.
-    leftSurface.bounds = CGRect(x: 0, y: 0, width: 56, height: 56)
+    leftSurface.bounds = CGRect(x: 0, y: 0, width: diameter, height: diameter)
     rightSurface.bounds = leftSurface.bounds
-    centerSurface.bounds = CGRect(x: 0, y: 0, width: vertical ? 56 : 112, height: 56)
-    leftSurface.center = vertical ? CGPoint(x: bounds.midX, y: 28) : CGPoint(x: 28, y: bounds.midY)
-    rightSurface.center = vertical ? CGPoint(x: bounds.midX, y: bounds.height - 28) : CGPoint(x: bounds.width - 28, y: bounds.midY)
+    centerSurface.bounds = CGRect(x: 0, y: 0, width: vertical ? diameter : 112, height: diameter)
+    leftSurface.center = vertical ? CGPoint(x: bounds.midX, y: diameter / 2) : CGPoint(x: diameter / 2, y: bounds.midY)
+    rightSurface.center = vertical ? CGPoint(x: bounds.midX, y: bounds.height - diameter / 2) : CGPoint(x: bounds.width - diameter / 2, y: bounds.midY)
     centerSurface.center = CGPoint(x: bounds.midX, y: bounds.midY)
   }
 
   func setMenuOpen(_ open: Bool, animator: UIContextMenuInteractionAnimating?) {
     layoutIfNeeded()
-    let movement = (vertical ? bounds.midY : bounds.midX) - 28
+    let movement = (vertical ? bounds.midY : bounds.midX) - diameter / 2
     let dx = vertical ? 0 : movement
     let dy = vertical ? movement : 0
     let changes = { [weak self] in

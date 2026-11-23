@@ -22,7 +22,7 @@ void main() {
       messageBodyTextStyle,
       fontSize: 17,
       fontWeight: FontWeight.w400,
-      lineHeight: 20,
+      lineHeight: 23,
       letterSpacing: -0.45,
     );
     expectStyle(
