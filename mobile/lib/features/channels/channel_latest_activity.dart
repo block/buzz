@@ -16,8 +16,8 @@ class _ChannelActivity {
   // disconnected that no read has seen yet.
   final Set<String> _catchUpFailed = {};
   // Per latest-message read in flight, the newest arrival in each channel
-  // since it began. A read that never reports, such as a superseded refresh,
-  // is dropped once newer reads begin.
+  // since it began. Only the newest read can still report, so a read that
+  // begins drops older ones, such as a superseded refresh.
   final Map<int, Map<String, ({int at, String id})>> _arrivalsByRead = {};
   final Map<int, int> _readSentAt = {};
   // Per latest-message read in flight, the channels whose latest post was
@@ -90,21 +90,18 @@ class _ChannelActivity {
     return channelIds.isNotEmpty;
   }
 
-  /// Whether [read] began since the last [clear].
-  bool isCurrent(int read) => read >= _firstRead;
-
   /// Starts a latest-message read; pass the result to [noteRead].
   int beginRead() {
     final read = _nextRead++;
-    _arrivalsByRead[read] = {};
-    _readSentAt[read] = currentUnixSeconds();
-    _forgottenByRead[read] = {};
-    if (_arrivalsByRead.length > 8) {
-      final oldest = _arrivalsByRead.keys.first;
-      _arrivalsByRead.remove(oldest);
-      _readSentAt.remove(oldest);
-      _forgottenByRead.remove(oldest);
-    }
+    _arrivalsByRead
+      ..clear()
+      ..[read] = {};
+    _readSentAt
+      ..clear()
+      ..[read] = currentUnixSeconds();
+    _forgottenByRead
+      ..clear()
+      ..[read] = {};
     return read;
   }
 
@@ -113,15 +110,17 @@ class _ChannelActivity {
   /// newest authentic message or a newer arrival since the read began, so a
   /// deleted latest post stops counting. A failed batch or channel, or one
   /// whose messages all fail verification, stays unknown, as does one whose
-  /// latest post was deleted while the read was in flight. [authenticIds] is
-  /// the verified [authenticHeadIds] of [events].
+  /// latest post was deleted while the read was in flight, including the
+  /// read's own head when it is among [deletedIds]. [authenticIds] is the
+  /// verified [authenticHeadIds] of [events].
   void noteRead(
     int read,
     Iterable<String> requested,
     Set<String> failedIds,
     List<NostrEvent>? events,
-    Set<String> authenticIds,
-  ) {
+    Set<String> authenticIds, {
+    Set<String> deletedIds = const {},
+  }) {
     if (read < _firstRead) return;
     final arrivals = _arrivalsByRead.remove(read);
     final sentAt = _readSentAt.remove(read);
@@ -135,6 +134,7 @@ class _ChannelActivity {
     }
     final newest = <String, ({int at, String id})>{};
     final invalid = <String>{};
+    final deletedHeads = <String>{};
     for (final MapEntry(key: channelId, value: posts) in byChannel.entries) {
       posts.sort((a, b) => b.createdAt.compareTo(a.createdAt));
       final head = posts
@@ -142,6 +142,8 @@ class _ChannelActivity {
           .firstOrNull;
       if (head == null) {
         invalid.add(channelId);
+      } else if (deletedIds.contains(head.id)) {
+        deletedHeads.add(channelId);
       } else {
         newest[channelId] = (at: _clamp(head.createdAt), id: head.id);
       }
@@ -151,6 +153,15 @@ class _ChannelActivity {
       if (failedIds.contains(channelId) ||
           invalid.contains(channelId) ||
           forgotten.contains(channelId)) {
+        continue;
+      }
+      // Its older posts went unchecked, so it is unknown unless a post
+      // arrived since the read began.
+      if (deletedHeads.contains(channelId)) {
+        if (arrivals?[channelId] == null) {
+          _latest.remove(channelId);
+          _known.remove(channelId);
+        }
         continue;
       }
       covered.add(channelId);

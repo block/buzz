@@ -520,7 +520,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     final listed = {
       if (!fetchLastMessage)
         for (final c in state.value ?? const <Channel>[])
-          if (c.isMember && _activity.hasBaseline(c.id)) c.id,
+          if (c.isMember &&
+              (_activity.hasBaseline(c.id) || !_activity.isWatched(c.id)))
+            c.id,
     };
     final latestRequested = [
       for (final entry in visibleMetas)
@@ -607,6 +609,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       latestFailedIds,
       events,
       latestEvents?.authentic ?? const {},
+      deletedIds: _deletedAmong(events),
     );
     final mutedChannelIds = _mutedChannelIds();
     for (final event in events ?? const <NostrEvent>[]) {

@@ -157,6 +157,7 @@ void main() {
         ],
       );
       addTearDown(container.dispose);
+      container.listen(channelFilterActivityProvider(_channelA), (_, _) {});
       await container.read(channelsProvider.future);
       final notifier = container.read(channelsProvider.notifier);
       await notifier.waitForUnreadCatchUp();
@@ -2746,7 +2747,8 @@ void main() {
       ));
 
       // So does a read whose only post fails verification, and the next
-      // list read asks for that channel again.
+      // list read asks for that channel again while an Active section shows
+      // it.
       final forged = NostrEvent.fromJson({
         ...message('forged', now - 60).toJson(),
         'sig': 'f' * 128,
@@ -2758,6 +2760,7 @@ void main() {
       );
       final retried = _buildContainer(session: unverified);
       addTearDown(retried.dispose);
+      retried.listen(channelFilterActivityProvider(_channelA), (_, _) {});
       await retried.read(channelsProvider.future);
       await _settle();
       final retriedNotifier = retried.read(channelsProvider.notifier);
@@ -2934,10 +2937,34 @@ void main() {
     session.messageBatchError = null;
     await notifier.refresh();
     await notifier.waitForUnreadCatchUp();
+    await _waitUntil(() => notifier.activityFor(_channelA).known);
     expect(notifier.activityFor(_channelA), (
       known: true,
       at: offline.createdAt,
     ));
+
+    // A channel with a gap to read is unknown until that read answers. A pull
+    // to refresh drops the answer, and one that then fails starts no new
+    // catch-up, so the channel stays unknown rather than settling on activity
+    // the gap could hide.
+    final parked = message('parked', now - 25);
+    session.recentMessages = [old, offline, parked];
+    final gapGate = session.gapBatchGate = Completer<void>();
+    await reconnect();
+    await _waitUntil(() => session.gapBatchGate == null);
+    expect(notifier.activityFor(_channelA).known, isFalse);
+    session
+      ..pauseNextMemberMetadataQuery()
+      ..failClaimedMemberMetadataQuery = true;
+    final failing = notifier.refresh();
+    await session.nextMemberMetadataQueryStarted;
+    gapGate.complete();
+    await _settle();
+    session.resumePausedMemberMetadataQuery();
+    await failing;
+    session.failClaimedMemberMetadataQuery = false;
+    await _settle();
+    expect(notifier.activityFor(_channelA).known, isFalse);
 
     // A rebuild while disconnected resets the unread cursor, so the next
     // catch-up starts after the read marker; the post read meanwhile on
@@ -3056,7 +3083,7 @@ void main() {
         final session = _FakeRelaySession(
           memberships: [_membership(_channelA, _activityPk)],
           metadata: [_meta(id: _channelA, name: 'general')],
-          recentMessages: [old, if (!catchUp) head],
+          recentMessages: [old],
           enforceHistoryLimits: true,
         );
         final container = _buildContainer(
@@ -3077,7 +3104,7 @@ void main() {
         await notifier.waitForUnreadCatchUp();
         expect(notifier.activityFor(_channelA), (
           known: true,
-          at: catchUp ? old.createdAt : head.createdAt,
+          at: old.createdAt,
         ));
         final sampled = Completer<void>();
         final release = Completer<void>();
@@ -3104,7 +3131,9 @@ void main() {
           session.setStatus(SessionStatus.reconnecting);
           session.setStatus(SessionStatus.connected);
         } else {
-          // The other device has already read through the deletion's second.
+          // The refresh reads a head newer than the cached one, so deleting
+          // it forgets no committed head. The other device has already read
+          // through the deletion's second.
           (container.read(readStateProvider.notifier) as _ActivityReadState)
               .markReadThrough(_channelA, now);
           refreshing = notifier.refresh();
@@ -3154,6 +3183,7 @@ void main() {
           }
           expect(result.known && result.at == old.createdAt, isFalse);
         } else {
+          expect(result.known, isFalse);
           final pre = session.queryBatches.length;
           session.setStatus(SessionStatus.reconnecting);
           session.setStatus(SessionStatus.connected);
@@ -4738,6 +4768,8 @@ class _FakeRelaySession extends RelaySessionNotifier {
   Object? messageBatchError;
   // Fails batches made only of the catch-up's activity gap reads.
   Object? gapBatchError;
+  // Holds the next batch of activity gap reads.
+  Completer<void>? gapBatchGate;
   Object? latestBatchError;
   Object? messageHistoryError;
   int messageHistoryCount = 0;
@@ -5129,10 +5161,12 @@ class _FakeRelaySession extends RelaySessionNotifier {
       throw RelayException(400, '{"error":"too many explicit channels"}');
     }
     if (messageBatchError case final error?) throw error;
-    if (gapBatchError case final error?
-        when filters.isNotEmpty &&
-            filters.every((f) => f.until != null && f.limit == 1)) {
-      throw error;
+    if (filters.isNotEmpty &&
+        filters.every((f) => f.until != null && f.limit == 1)) {
+      if (gapBatchError case final error?) throw error;
+      final gate = gapBatchGate;
+      gapBatchGate = null;
+      await gate?.future;
     }
     // The unread catch-up is the only batch that carries `since` on every
     // filter; the latest-message batch leaves it null. Snapshot the messages at

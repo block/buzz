@@ -52,6 +52,15 @@ extension _UnreadDeletions on ChannelsNotifier {
     return true;
   }
 
+  /// The posts among [events] that a deletion seen so far removed.
+  Set<String> _deletedAmong(List<NostrEvent>? events) => {
+    for (final event in events ?? const <NostrEvent>[])
+      if (_unscopedUnreadDeletedIds.contains(event.id) ||
+          _unreadDeletedIdsByChannel[event.channelId]?.contains(event.id) ==
+              true)
+        event.id,
+  };
+
   void _applySavedMessageEdit(NostrEvent event, String channelId) {
     if (event.kind != EventKind.streamMessageEdit) return;
     _removeSavedMessageTargets(channelId, {

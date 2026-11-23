@@ -240,12 +240,13 @@ extension _UnreadCatchUp on ChannelsNotifier {
       // deadline-unavailable latest-message batch leaves it unset.
       // So does a channel whose activity became unknown. Newer activity and
       // channels that became known republish once their signatures are
-      // checked. A channel with a gap to read stays as it was until that read
-      // answers.
+      // checked. A channel with a gap to read is unknown until that read
+      // answers, so a newer refresh that retires it leaves the row visible.
       gapFilters.removeWhere((id, _) => failedChannelIds.contains(id));
       deferredGaps.removeAll(failedChannelIds);
+      final unknownGaps = {...deferredGaps, ...gapFilters.keys};
       final coverageChanged =
-          _activity.noteCatchUp(deferredGaps, deferredGaps) |
+          _activity.noteCatchUp(unknownGaps, unknownGaps) |
           _activity.forgetHeads(batchDeletedIds);
       if (recordedAtByChannel.isNotEmpty ||
           appliedDeletion ||
@@ -507,9 +508,11 @@ extension _UnreadCatchUp on ChannelsNotifier {
   /// that covered the channel, for the Active filter: a post that arrived
   /// while disconnected and was read on another device lies there, as does one
   /// before an unread cursor reset. The catch-up asks for its newest post.
-  /// Null when no read covered the channel yet or nothing is skipped.
+  /// A channel known only from a live post counts as covered at that post.
+  /// Null when nothing covered the channel yet or nothing is skipped.
   ({int since, int until})? _activityGap(String channelId, int since) {
-    final coveredAt = _activity.coveredAt(channelId);
+    final coveredAt =
+        _activity.coveredAt(channelId) ?? _activity.latestAt(channelId);
     if (coveredAt == null) return null;
     final from = coveredAt - relayCrossDeviceSkewSeconds;
     return since > from ? (since: from, until: since - 1) : null;
