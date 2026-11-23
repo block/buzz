@@ -28,7 +28,7 @@ Channel roles decide W and R. The roles that can post (member, bot, admin and ow
 
 ## Where the owner loses control
 
-Each of these paths changes W or R without the owner. Checked against `main` at `5b1698ec2`.
+Each of these paths changes W or R without the owner. Checked against `main` at `5b1698ec2`, and the DM rows at `2e3bebe9b`.
 
 | Path | Who does it | Effect |
 |---|---|---|
@@ -37,7 +37,7 @@ Each of these paths changes W or R without the owner. Checked against `main` at 
 | The agent joins an open channel as a member, or writes in it without joining. Both work in an open channel with `join_role = member`. | The agent's own key | R becomes the whole community |
 | The agent creates a channel and adds people to it. The creator owns the channel, so it can add anyone. | The agent's own key | W gains the channel; R gains everyone the agent adds |
 | The agent opens a DM or group DM. `handle_dm_open` has no agent check. | The agent's own key | W and R gain the DM's participants |
-| Someone opens a DM or group DM that includes the agent. Neither opening a DM nor adding a DM member reads `channel_add_policy`, so even `nobody` does not stop it. | Anyone | W and R gain the DM's participants |
+| Someone opens a DM or group DM that includes the agent, or adds the agent to one. Any DM member can add it, and a person can add it with the DM's history. Adding the agent, or opening a group DM with it, checks `channel_add_policy` ([#9125](https://github.com/block/buzz/pull/9125)), but that defaults to `anyone`. A one-to-one DM with the agent ignores the policy: anyone may message an agent. | Anyone who opens the DM, or any DM member | W and R gain the DM's participants |
 | The agent joins the community, through an invite or a community add (kind 9030). The relay then joins it to every default channel, as a self-join. Default channels are open, so with `join_role = member` the agent can post in them. | Whoever admits the agent to the community | R becomes the whole community |
 | The agent publishes a community-readable event outside a channel: profile (kind 0), text note (kind 1), long-form, user status, git events, lists, or a gift wrap to any recipient. | The agent's own key | R becomes everyone who can read that event |
 | Someone joins a channel where the agent can post. New members can read the channel's history. | Whoever the channel's admission rules allow | R grows |
@@ -46,6 +46,8 @@ Each of these paths changes W or R without the owner. Checked against `main` at 
 Four of these paths use the agent's own key. The broker design takes the key away from the agent process for that reason. That is not necessary: the relay already knows who owns each agent (`agent_owner_pubkey`, which cannot change), so it can refuse those actions when the agent tries them.
 
 ## Design
+
+The changes below hand each of those paths back to the owner, or turn it into a choice the owner makes knowingly.
 
 ### Disclosure policies
 
@@ -66,7 +68,7 @@ On every policy, for every action, whatever the membership:
 1. **Read:** you can read a channel only if your clearance is at least its label.
 2. **Write (agents only):** an agent can write in a channel only if its label is at least the agent's clearance.
 
-So a cleared agent reads at or below its clearance and writes at or above it. DMs and everything outside channels are at *none*, so a cleared agent cannot write there, except for its profile with the owner's approval. A channel that a cleared agent creates gets the agent's clearance as its label.
+So a cleared agent reads at or below its clearance and writes at or above it. DMs are unlabelled unless someone labels them, as private channels are. Everything outside channels is at *none*, so a cleared agent cannot write there, except for its profile with the owner's approval. A channel that a cleared agent creates gets the agent's clearance as its label.
 
 When a label goes up or a clearance goes down, nobody is removed. The rules refuse what they no longer allow.
 
@@ -138,13 +140,22 @@ An agent sometimes needs a channel of its own, for example a system channel that
 
 This is the largest cost of clearance. A cleared agent cannot set up a working channel for a team and invite the team. Its owner has to add the people. A configuration channel is not affected: its roster is the agent and its owner.
 
+### Huddles
+
+A Huddle is a private channel: its room. Listening is reading and speaking is writing, so every rule above applies to the room as it does to any private channel or DM, on the audio relay as on the event relay.
+
+- **Label:** a room gets its parent chat's label when it starts. Labels only go up.
+- **Admission:** members of the parent chat join the room automatically. That is the room's admission rule, so the people in R include the parent chat's members and anyone added to the room. Every join, automatic or not, passes rule 1.
+- **Agents:** an agent takes part only as a member of the room. Members can add agents, as in any private channel. A cleared agent joins only when its owner adds it, and only a room labelled at or above its clearance. The audio relay refuses its audio in any other room.
+- **What the agent hears:** the relay sends the agent all of the room's audio. Its client chooses whose speech it acts on, but that is not enforcement, so W includes everything said in the room.
+
 ### Agents don't publish outside channels
 
 An event outside a channel bypasses R entirely. A kind 1 note or a profile update is readable by whoever the relay lets read it, and no channel membership is involved. Everything outside channels is at *none*, so rule 2 refuses any event from a cleared agent that the relay would store outside a channel. An `h` tag does not count when the relay stores that kind community-wide anyway, as it does for kind 0, kind 1, long-form, user status, git events and lists.
 
 The exceptions are kinds whose readers the relay already limits to the agent and its owner: the author-only kinds, and turn metrics (which only the `p`-tagged owner can read). One more exception does not limit its readers: the agent's profile (kind 0). Clients need it, because it carries the NIP-OA owner attestation that tells them the key is an agent, and only the agent's key can sign it. Its fields are public, so the profile is a leak path: the agent can write anything into them. Kind 0 is replaceable, so the agent can change it at any time, and each new version reaches everyone who reads it.
 
-For a cleared agent, the relay accepts a kind 0 only when it carries the owner's signature over its content (a profile approval tag). The owner approves each profile change, and changes are rare. Publish-once is not enough: the agent can read first and then put what it read into its one profile.
+For a cleared agent, the relay accepts a kind 0 only when it carries the owner's signature over its content (a profile approval tag). The owner approves each profile change, and changes are rare. For an auditable agent, the publisher signs the profile from Git. Publish-once is not enough: the agent can read first and then put what it read into its one profile.
 
 Refusing by default is what matters here. A new kind is covered without anyone having to remember that agents exist; it only gets through if someone deliberately adds it to the exceptions.
 
@@ -155,6 +166,8 @@ Some work needs more than the agent's own access, for example summarizing a priv
 One possible answer is a step-up: an action with the owner's authority that the owner approves explicitly, for a stated scope and time, that is attributable to the agent, counted in W and R, and revocable. This is not part of this design. It widens what an agent can reach, so it would need careful boundaries and its own spec.
 
 ### Membership is a decision about the channel
+
+By default, private channels and DMs trust their members, for agents as for people. A member who adds an agent chooses to share what they can read with the agent's R, as a member who adds a person shares the history with that person. Clients show each agent in a conversation and where it can post. The level rules still apply: a cleared agent cannot enter a channel or DM labelled lower than its clearance on any policy. A channel that needs more than member trust gets a label.
 
 The owner cannot control who joins someone else's channel. So when the owner makes the agent a member of a channel, what the owner accepts is the channel's **admission rules**, not its current member list. R includes everyone those rules might let in later, and because new members can read history, those people also get everything the agent wrote before they arrived. Clients have to say this:
 
@@ -178,7 +191,13 @@ Removing an agent from a channel stops new information from coming in, but the a
 
 ### When the owner is not a person
 
-The owner is whichever key signed the agent's NIP-OA attestation. It need not be a person, and the rules do not change.
+The relay checks `agent_owner_pubkey`, and the owner is whichever key signed the agent's NIP-OA attestation. It need not be a person. An auditable agent uses this: its owner is its publisher, a CI key that signs only reviewed changes from Git.
+
+The rules above do not change. Only the owner adds the agent to a channel or raises its role, and here the owner is the publisher. So every change to W and R is a reviewed change in Git. The publisher holds no private information of its own in Buzz, so the agent can read only what those reviewed changes gave it.
+
+Its clearance comes from Git too. An auditable agent is normally cleared, so that every path into R is a reviewed change.
+
+One thing assumes that the owner is a person, and it moves: the join alert goes to the people who answer for the agent, the on-call group named in the auditable runtime's deployment configuration.
 
 ### Product work
 
@@ -186,6 +205,7 @@ The owner is whichever key signed the agent's NIP-OA attestation. It need not be
 2. **Show a label only to people cleared for it.** Everyone else gets "not authorized".
 3. **Ask the owner to approve profile changes** of a cleared agent.
 4. **Offer the add of a cleared agent only to its owner.** Clients that let any member add one directly should not.
+5. **Show each agent in a channel or DM, and where it can post.**
 
 ## What this doesn't stop
 
@@ -218,9 +238,39 @@ The owner is whichever key signed the agent's NIP-OA attestation. It need not be
 2. Refuse private-to-open visibility changes ([#9307](https://github.com/block/buzz/pull/9307)), except in an unlabelled channel where every current and former member is the person opening it or one of that person's agents.
 3. Add policies, labels and clearances, all at *none*.
 4. Enforce rule 1 and hidden labels.
-5. Enforce rule 2 and the cleared-agent rules: only the owner adds a cleared agent to a channel or opens a DM that includes it, the agent adds only its owner, and a channel it creates gets its clearance as its label.
+5. Enforce rule 2 and the cleared-agent rules: only the owner adds a cleared agent to a channel or opens a DM that includes it, the agent adds only its owner, and a channel it creates gets its clearance as its label. The audio relay enforces the same rules for Huddle rooms.
 6. For cleared agents: refuse events that the relay would store outside a channel, after checking what agents publish now, and require profile approval.
 
 Each step only refuses actions, so backing one out means turning the rule off. Existing agents keep their memberships and roles; the rules apply to new actions.
 
 The wire formats for labels, clearances and the profile approval tag are specified when they are built, in the NIPs that own agent identity.
+
+## Proposal: terminology
+
+Not applied yet. These names follow common data-classification and multilevel-security usage.
+
+A domain has levels. Channels, people and agents are labeled for a domain at one of its levels, or unlabeled for that domain. Unlabeled is below every level. A channel, person or agent with any label is labeled; one with none is unlabeled.
+
+| Now | Proposed |
+|---|---|
+| Disclosure policies (section) | Domains and labels |
+| Policy | Domain |
+| Policy administrators | Domain administrators |
+| Levels | Levels (no change) |
+| *none* | Unlabeled for that domain |
+| Channel's label | Channel's label (no change) |
+| Person's or agent's clearance | Person's or agent's label |
+| Cleared agent, Restricted | Labeled agent |
+| Agent with no clearance, Unrestricted | Unlabeled agent |
+| Cleared-agent rules | Labeled-agent rules |
+| Compartment | Domain with one level |
+| Personal policy | Personal domain |
+| An owner clears their agent up to the owner's own clearance | An owner labels their agent up to the owner's own label |
+| Clearance only goes up | An agent's label only goes up |
+| System rating | Accreditation |
+| Rule 1: clearance at least the label | Rule 1: the reader's label is at least the channel's label |
+| Rule 2: label at least the agent's clearance | Rule 2: the channel's label is at least the agent's label |
+
+No change: Public, Personal, declassify, hidden labels, W and R.
+
+With one label, an agent cannot read less and still write as high as before. So when an agent's label expires, the label stays in place and the agent is removed from labeled channels.
