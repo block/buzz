@@ -8,6 +8,7 @@ use futures_util::StreamExt;
 use nostr::JsonUtil;
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, Notify};
 
+use crate::keepalive::Keepalive;
 use crate::topic::EventTopicKey;
 use crate::{ChannelEvent, LinkState};
 
@@ -64,6 +65,7 @@ pub(crate) async fn run_subscriber(
             &mut subscription_rx,
             &subscription_changed,
             &link,
+            Keepalive::DEFAULT,
         )
         .await;
         if link.borrow().up {
@@ -99,10 +101,9 @@ async fn connect_and_subscribe(
     subscription_rx: &mut mpsc::Receiver<SubscriptionCommand>,
     subscription_changed: &Notify,
     link: &watch::Sender<LinkState>,
+    keepalive: Keepalive,
 ) -> Result<(), redis::RedisError> {
-    let client = redis::Client::open(redis_url)?;
-    let conn = client.get_async_pubsub().await?;
-    let (mut sink, mut stream) = conn.split();
+    let (mut sink, mut stream) = keepalive.connect(redis_url).await?;
     let mut active_topics = HashSet::new();
 
     let initial_topics: Vec<EventTopicKey> = {
@@ -115,7 +116,7 @@ async fn connect_and_subscribe(
 
     for topic in initial_topics {
         let channel = topic.redis_channel();
-        sink.subscribe(&channel).await?;
+        keepalive.bounded(sink.subscribe(&channel)).await?;
         active_topics.insert(channel);
     }
 
@@ -125,15 +126,18 @@ async fn connect_and_subscribe(
     );
     mark_loss(link, true);
 
+    let heartbeat = keepalive.heartbeat(sink.clone());
+    tokio::pin!(heartbeat);
     loop {
         tokio::select! {
+            err = &mut heartbeat => return Err(err),
             () = subscription_changed.notified() => {
                 // Retains signal this besides their best-effort queue hint.
                 // Re-read the source of truth so a hint lost to a full queue
                 // cannot leave the live connection missing a topic.
                 for topic in missing_desired_topics(&desired_topics, &active_topics).await {
                     let channel = topic.redis_channel();
-                    sink.subscribe(&channel).await?;
+                    keepalive.bounded(sink.subscribe(&channel)).await?;
                     active_topics.insert(channel);
                 }
             }
@@ -142,13 +146,13 @@ async fn connect_and_subscribe(
                     SubscriptionCommand::Subscribe(topic) => {
                         let channel = topic.redis_channel();
                         if active_topics.insert(channel.clone()) {
-                            sink.subscribe(&channel).await?;
+                            keepalive.bounded(sink.subscribe(&channel)).await?;
                         }
                     }
                     SubscriptionCommand::Confirm(topic, reply) => {
                         let channel = topic.redis_channel();
                         if !active_topics.contains(&channel) {
-                            sink.subscribe(&channel).await?;
+                            keepalive.bounded(sink.subscribe(&channel)).await?;
                             active_topics.insert(channel);
                         }
                         let _ = reply.send(link.borrow().epoch);
@@ -157,7 +161,7 @@ async fn connect_and_subscribe(
                         if desired_refcount(&desired_topics, topic).await == 0 {
                             let channel = topic.redis_channel();
                             if active_topics.remove(&channel) {
-                                sink.unsubscribe(&channel).await?;
+                                keepalive.bounded(sink.unsubscribe(&channel)).await?;
                             }
                         }
                     }
@@ -259,5 +263,77 @@ mod tests {
     async fn desired_refcount_reads_present_topic() {
         let desired = Arc::new(Mutex::new(HashMap::from([(topic(1), 3)])));
         assert_eq!(desired_refcount(&desired, topic(1)).await, 3);
+    }
+
+    mod keepalive {
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        use super::*;
+        use crate::keepalive::fake_redis::{FakeRedis, FAST};
+
+        const BOUND: Duration = Duration::from_secs(2);
+
+        #[tokio::test]
+        async fn stalled_dynamic_confirm_is_not_confirmed_and_drops_socket() {
+            let fake = FakeRedis::start().await;
+            let (tx, _rx) = broadcast::channel(8);
+            let desired = DesiredTopics::default();
+            let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+            let changed = Notify::new();
+            let (link, _link_rx) = watch::channel(LinkState::default());
+            let sub =
+                connect_and_subscribe(&fake.url, &tx, desired, &mut cmd_rx, &changed, &link, FAST);
+            tokio::pin!(sub);
+
+            fake.hold_subscribe.store(true, Ordering::SeqCst);
+            let (reply_tx, reply_rx) = oneshot::channel();
+            cmd_tx
+                .send(SubscriptionCommand::Confirm(topic(1), reply_tx))
+                .await
+                .unwrap();
+
+            let err = tokio::time::timeout(BOUND, &mut sub)
+                .await
+                .expect("stalled SUBSCRIBE must end the connection")
+                .unwrap_err();
+            assert_eq!(err.kind(), redis::ErrorKind::Io);
+            assert!(
+                reply_rx.await.is_err(),
+                "a stalled subscribe must not confirm"
+            );
+            tokio::time::timeout(BOUND, fake.closed.notified())
+                .await
+                .expect("old socket must be closed");
+        }
+
+        #[tokio::test]
+        async fn subscriber_drops_socket_when_pong_withheld() {
+            let fake = FakeRedis::start().await;
+            fake.hold_pong.store(true, Ordering::SeqCst);
+            let (tx, _rx) = broadcast::channel(8);
+            let (_cmd_tx, mut cmd_rx) = mpsc::channel(8);
+            let changed = Notify::new();
+            let (link, _link_rx) = watch::channel(LinkState::default());
+            let err = tokio::time::timeout(
+                BOUND,
+                connect_and_subscribe(
+                    &fake.url,
+                    &tx,
+                    DesiredTopics::default(),
+                    &mut cmd_rx,
+                    &changed,
+                    &link,
+                    FAST,
+                ),
+            )
+            .await
+            .expect("withheld PONG must end the connection")
+            .unwrap_err();
+            assert_eq!(err.kind(), redis::ErrorKind::Io);
+            tokio::time::timeout(BOUND, fake.closed.notified())
+                .await
+                .expect("old socket must be closed");
+        }
     }
 }
