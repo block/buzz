@@ -7,6 +7,8 @@ use chrono::{DateTime, Duration, Utc};
 
 /// GitHub webhook verification.
 pub mod github;
+/// PagerDuty v3 webhook verification.
+pub mod pagerduty;
 
 /// Upper bound on a provider delivery id; longer values are malformed.
 pub const MAX_DELIVERY_ID_BYTES: usize = 256;
@@ -56,12 +58,36 @@ pub trait ProviderAdapter: Send + Sync {
 pub fn adapter(provider: Provider) -> Option<&'static dyn ProviderAdapter> {
     match provider {
         Provider::Github => Some(&github::GitHub),
-        Provider::Pagerduty | Provider::Sentry | Provider::IncidentIo => None,
+        Provider::Pagerduty => Some(&pagerduty::PagerDuty),
+        Provider::Sentry | Provider::IncidentIo => None,
     }
 }
 
 pub(crate) fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|v| v.to_str().ok())
+}
+
+/// True when any secret's HMAC-SHA256 over `message` equals `signature`.
+/// Comparison is constant-time per secret.
+pub(crate) fn any_secret_signs(secrets: &[Vec<u8>], message: &[u8], signature: &[u8]) -> bool {
+    use hmac::{Hmac, KeyInit, Mac};
+    secrets.iter().any(|secret| {
+        Hmac::<sha2::Sha256>::new_from_slice(secret)
+            .map(|mut mac| {
+                mac.update(message);
+                mac.verify_slice(signature).is_ok()
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Event types are dotted lowercase identifiers such as `incident.triggered`.
+pub(crate) fn valid_event_type(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_EVENT_TYPE_BYTES
+        && value.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')
+        })
 }
 
 pub(crate) fn valid_delivery_id(value: &str) -> bool {
