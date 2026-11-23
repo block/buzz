@@ -375,6 +375,7 @@ final class SavedMessageStore {
           action: _DiskAction.removeChannel,
           page: (channelId: channelId, rootId: ''),
           targets: targets,
+          payloadBudget: payloadBudget,
           databasePageLimit: databasePageLimit,
         ),
       );

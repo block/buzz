@@ -108,11 +108,7 @@ _DiskResult _accessDatabase(_DiskRequest request) {
       _DiskAction.inspect => _readPage(db, request.page, includePruned: true),
       _DiskAction.touch => _touchPage(db, request.page),
       _DiskAction.save => _saveWithEviction(db, request, wires, byteSize),
-      _DiskAction.removeChannel => _removeChannel(
-        db,
-        request.page.channelId,
-        request.targets,
-      ),
+      _DiskAction.removeChannel => _removeChannel(db, request),
     };
   } on SqliteException catch (error) {
     if (!_isInvalidDatabase(error)) rethrow;
@@ -192,13 +188,13 @@ void _ensurePrunedEvents(Database db) => db.execute('''
   )
 ''');
 
-Map<String, bool> _prunedEvents(Database db, SavedMessagePage page) {
-  if (db.select('''
+bool _hasPrunedEventsTable(Database db) => db.select('''
     SELECT 1 FROM sqlite_schema
     WHERE type = 'table' AND name = 'pruned_thread_events'
-  ''').isEmpty) {
-    return const {};
-  }
+  ''').isNotEmpty;
+
+Map<String, bool> _prunedEvents(Database db, SavedMessagePage page) {
+  if (!_hasPrunedEventsTable(db)) return const {};
   return {
     for (final row in db.select(
       '''
@@ -526,18 +522,82 @@ Iterable<NostrEvent> _cacheCandidates(
 
 _DiskResult _removeChannel(
   Database db,
-  String channel,
-  Map<String, bool>? targets,
-) {
-  if (targets != null) _ensurePrunedEvents(db);
+  _DiskRequest request, {
+  bool evict = false,
+}) {
+  final channel = request.page.channelId;
+  final targets = request.targets;
   db.execute('BEGIN IMMEDIATE');
   try {
     if (targets == null) {
       _deletePage(db, channel, null);
     } else {
+      if (evict) {
+        _evictPages(
+          db,
+          request.payloadBudget,
+          request.databasePageLimit * 3 ~/ 4,
+        );
+      }
       final mutations = jsonEncode(targets);
-      db.execute(
-        '''
+      final hasPrunedEvents = _recordPrunedEvents(db, channel, mutations);
+      if (_deleteEventReferences(
+        db,
+        'channel_id = ? AND event_id IN (SELECT key FROM json_each(?))',
+        [channel, mutations],
+      )) {
+        db.execute(
+          '''
+          UPDATE pages SET byte_size = (
+            SELECT COALESCE(SUM(length(CAST(wire AS BLOB))), 0)
+            FROM page_events JOIN events ON events.id = page_events.event_id
+            WHERE page_events.channel_id = pages.channel_id
+              AND page_events.root_id = pages.root_id
+          ) WHERE channel_id = ?;
+        ''',
+          [channel],
+        );
+        final keepPrunedPages = hasPrunedEvents
+            ? '''
+             AND NOT EXISTS (
+               SELECT 1 FROM pruned_thread_events
+               WHERE channel_id = pages.channel_id AND root_id = pages.root_id
+             )'''
+            : '';
+        db.execute(
+          'DELETE FROM pages WHERE channel_id = ? AND byte_size = 0 $keepPrunedPages',
+          [channel],
+        );
+      }
+    }
+    db.execute('COMMIT');
+  } catch (error) {
+    if (!db.autocommit) db.execute('ROLLBACK');
+    if (!evict &&
+        targets != null &&
+        error is SqliteException &&
+        error.resultCode == SqlError.SQLITE_FULL) {
+      return _removeChannel(db, request, evict: true);
+    }
+    rethrow;
+  }
+  return const _DiskResult();
+}
+
+bool _recordPrunedEvents(Database db, String channel, String mutations) {
+  if (!_hasPrunedEventsTable(db)) {
+    final threadRows = db.select(
+      '''
+      SELECT 1 FROM page_events pe JOIN json_each(?) t ON t.key = pe.event_id
+      WHERE pe.channel_id = ? AND pe.root_id <> '' LIMIT 1
+    ''',
+      [mutations, channel],
+    );
+    if (threadRows.isEmpty) return false;
+    _ensurePrunedEvents(db);
+  }
+  db.execute(
+    '''
         INSERT OR REPLACE INTO pruned_thread_events
         SELECT channel_id, root_id, event_id, MIN(edited)
         FROM (
@@ -550,10 +610,10 @@ _DiskResult _removeChannel(
           WHERE pe.channel_id = ?
         ) GROUP BY channel_id, root_id, event_id
       ''',
-        [mutations, channel, mutations, channel],
-      );
-      db.execute(
-        '''
+    [mutations, channel, mutations, channel],
+  );
+  db.execute(
+    '''
         DELETE FROM pruned_thread_events WHERE rowid IN (
           SELECT rowid FROM (
             SELECT rowid, ROW_NUMBER() OVER (PARTITION BY root_id ORDER BY rowid DESC) AS newest
@@ -561,40 +621,9 @@ _DiskResult _removeChannel(
           ) WHERE newest > ?
         )
       ''',
-        [channel, SavedMessageStore.maxPageEvents],
-      );
-      if (_deleteEventReferences(
-        db,
-        'channel_id = ? AND event_id IN (SELECT key FROM json_each(?))',
-        [channel, mutations],
-      )) {
-        db.execute(
-          '''
-        UPDATE pages SET byte_size = (
-          SELECT COALESCE(SUM(length(CAST(wire AS BLOB))), 0)
-          FROM page_events JOIN events ON events.id = page_events.event_id
-          WHERE page_events.channel_id = pages.channel_id
-            AND page_events.root_id = pages.root_id
-        ) WHERE channel_id = ?;
-      ''',
-          [channel],
-        );
-        db.execute(
-          '''DELETE FROM pages WHERE channel_id = ? AND byte_size = 0
-             AND NOT EXISTS (
-               SELECT 1 FROM pruned_thread_events
-               WHERE channel_id = pages.channel_id AND root_id = pages.root_id
-             )''',
-          [channel],
-        );
-      }
-    }
-    db.execute('COMMIT');
-  } catch (_) {
-    if (!db.autocommit) db.execute('ROLLBACK');
-    rethrow;
-  }
-  return const _DiskResult();
+    [channel, SavedMessageStore.maxPageEvents],
+  );
+  return true;
 }
 
 void _deletePage(Database db, String channel, String? root) {
