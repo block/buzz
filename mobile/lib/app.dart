@@ -362,10 +362,13 @@ class App extends HookConsumerWidget {
         ref.read(pairingProvider.notifier).reset();
       }
     });
-    final communityTheme = ageSignalState != AgeSignalState.restricted
-        ? ref.watch(communityThemeProvider)
-        : defaultCommunityTheme;
-    final themeMode = communityTheme.mode;
+    final restricted = ageSignalState == AgeSignalState.restricted;
+    final communityTheme = restricted
+        ? defaultCommunityTheme
+        : ref.watch(communityThemeProvider);
+    final themeMode = restricted
+        ? defaultCommunityTheme.mode
+        : ref.watch(appearanceModeProvider);
     // The app rebuilds on every lifecycle change. A new ThemeData never
     // equals the last one, so MaterialApp would animate between identical
     // themes, and each frame of that makes every message re-parse its
