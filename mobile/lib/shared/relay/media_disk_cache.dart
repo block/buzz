@@ -48,15 +48,26 @@ class MediaDiskCache {
     _manager = Future.value(directory)
         // Images wait for the disk, so never wait on it for long.
         .timeout(_openTimeout, onTimeout: () => null)
-        .then((directory) {
+        .then((directory) async {
           if (directory == null || isClosed) return null;
-          return _openManager(
+          // A cache on this directory that is still closing, after a switch
+          // away and back, may hold saves its index has not recorded yet.
+          // Opening after it keeps this one's sweep from deleting them.
+          await _closing[directory.path]?.timeout(
+            _openTimeout,
+            onTimeout: () {},
+          );
+          if (isClosed) return null;
+          _path = directory.path;
+          final (manager, index) = _openManager(
             directory,
             byteBudget: byteBudget,
             fileBudget: fileBudget,
             evictionDelay: evictionDelay,
             evictionsPerPass: evictionsPerPass,
           );
+          _index = index;
+          return manager;
         })
         .catchError((Object error) {
           debugPrint('[MediaDiskCache] open failed: $error');
@@ -64,7 +75,7 @@ class MediaDiskCache {
         });
   }
 
-  static CacheManager _openManager(
+  static (CacheManager, MediaCacheIndex) _openManager(
     Directory directory, {
     required int byteBudget,
     required int fileBudget,
@@ -95,7 +106,7 @@ class MediaDiskCache {
     index.onMoreToEvict = () => unawaited(
       manager.store.retrieveCacheData(_nextPassKey, ignoreMemCache: true),
     );
-    return manager;
+    return (manager, index);
   }
 
   static const _nextPassKey = 'media-disk-cache:next-eviction-pass';
@@ -180,6 +191,7 @@ class MediaDiskCache {
   /// Removes [url]'s saved bytes, for example when they no longer decode.
   /// Failures are logged; a later read finds the same bad bytes.
   Future<void> remove(String url) async {
+    if (isClosed) return;
     try {
       await (await _manager)?.removeFile(url);
     } on Object catch (error) {
@@ -190,6 +202,7 @@ class MediaDiskCache {
   /// Whether [url] has saved bytes, from the index alone, without reading
   /// them.
   Future<bool> contains(String url) async {
+    if (isClosed) return false;
     try {
       final manager = await _manager;
       return await manager?.getFileFromCache(url, ignoreMemCache: true) != null;
@@ -204,7 +217,7 @@ class MediaDiskCache {
     final FileInfo? info;
     final Uint8List bytes;
     final manager = await _manager;
-    if (manager == null) return null;
+    if (manager == null || isClosed) return null;
     try {
       // Past the first lookup, the package serves a URL from memory without
       // marking it used, so a file read often would be evicted first. Going
@@ -281,18 +294,42 @@ class MediaDiskCache {
     }
   }
 
-  /// Stops writes, then flushes the index.
+  /// Stops writes, lets saves in progress finish, then flushes the index.
   Future<void> dispose() {
     if (_closed.isCompleted) return _disposed;
     _closed.complete();
-    return _disposed = _manager
-        .then((manager) => manager?.dispose())
+    // The package leaves an eviction pass scheduled, which could run after
+    // another cache opened this directory and save a stale index over its.
+    _index?.retire();
+    final disposed = _disposed = _manager
+        .then((manager) async {
+          await Future.wait(_writes.values.toList());
+          await manager?.dispose();
+        })
         .catchError((Object error) {
           debugPrint('[MediaDiskCache] close failed: $error');
         });
+    final path = _path;
+    if (path != null) {
+      _closing[path] = disposed;
+      unawaited(
+        disposed.whenComplete(() {
+          if (identical(_closing[path], disposed)) _closing.remove(path);
+        }),
+      );
+    }
+    return disposed;
   }
 
   Future<void> _disposed = Future.value();
+
+  /// The directory this cache opened, once it has.
+  String? _path;
+
+  MediaCacheIndex? _index;
+
+  /// Caches still closing, by directory.
+  static final _closing = <String, Future<void>>{};
 
   static void _logFailure(Object error) =>
       debugPrint('[MediaDiskCache] write failed: $error');
@@ -320,6 +357,12 @@ class MediaCacheIndex extends JsonCacheInfoRepository {
   void Function()? onMoreToEvict;
 
   bool _swept = false;
+  bool _retired = false;
+
+  /// Stops eviction for good, once its cache is disposed: a pass still
+  /// scheduled finds nothing to evict, and one in progress records nothing.
+  /// Saves still finishing are recorded.
+  void retire() => _retired = true;
 
   /// Deletes files the index doesn't track, once, before the first use: a
   /// save interrupted by a full disk or the app exiting, or one whose index
@@ -360,6 +403,7 @@ class MediaCacheIndex extends JsonCacheInfoRepository {
   /// budget, whichever keeps fewer, at most [evictionsPerPass] of them.
   @override
   Future<List<CacheObject>> getObjectsOverCapacity(int capacity) async {
+    if (_retired) return [];
     final newestFirst = await getAllObjects()
       ..sort((a, b) => b.touched!.compareTo(a.touched!));
     var total = 0;
@@ -373,6 +417,14 @@ class MediaCacheIndex extends JsonCacheInfoRepository {
     onMoreToEvict?.call();
     return over.sublist(over.length - evictionsPerPass);
   }
+
+  @override
+  Future<List<CacheObject>> getOldObjects(Duration maxAge) async =>
+      _retired ? [] : super.getOldObjects(maxAge);
+
+  @override
+  Future<int> deleteAll(Iterable<int> ids) async =>
+      _retired ? 0 : super.deleteAll(ids);
 
   /// `putFile` records no length, and replacing a file's bytes keeps the old
   /// one, so measure the file on every write.

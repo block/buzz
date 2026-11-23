@@ -429,6 +429,47 @@ void main() {
       expect(filesIn(sweptDirectory), hasLength(1));
       await relaunched.dispose();
 
+      // A disposed cache's scheduled eviction pass, running after the
+      // community's cache was opened again, keeps the newer cache's saves.
+      final retiredDirectory = MediaDiskCache.directoryFor(
+        root,
+        'retired',
+        's',
+      );
+      Future<int> rows() async {
+        final index = File(p.join(retiredDirectory.path, 'index.json'));
+        return index.existsSync()
+            ? (jsonDecode(await index.readAsString()) as List).length
+            : 0;
+      }
+
+      const passDelay = Duration(milliseconds: 300);
+      final retired = MediaDiskCache.open(
+        retiredDirectory,
+        byteBudget: 80,
+        evictionDelay: passDelay,
+        evictionsPerPass: 1,
+      );
+      for (var i = 0; i < 6; i++) {
+        await retired.write('prior-$i', Uint8List(12), immutable: true);
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      // Two files over budget: the first pass evicts one and schedules
+      // another.
+      await retired.write('large', Uint8List(24), immutable: true);
+      await _until(() async => await rows() == 6);
+      await retired.dispose();
+      final reopened = MediaDiskCache.open(retiredDirectory, byteBudget: 80);
+      await reopened.write('newer', Uint8List(4), immutable: true);
+      await reopened.dispose();
+      await Future<void>.delayed(passDelay * 3);
+      final relaunchedAgain = MediaDiskCache.open(
+        retiredDirectory,
+        byteBudget: 80,
+      );
+      expect(await relaunchedAgain.read('newer'), isNotNull);
+      await relaunchedAgain.dispose();
+
       // Reads during refreshes see the old bytes or the new ones in full,
       // never part of a file.
       final refreshing = MediaDiskCache.open(
