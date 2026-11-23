@@ -445,9 +445,12 @@ void main() {
       'placeholder': 'Display name',
       'multiline': false,
       'brightness': 'dark',
-      'pageBackgroundArgb': AppTheme.dark().colorScheme.surfaceContainerHighest
+      'pageBackgroundArgb': AppTheme.dark().colorScheme.surfaceContainer
           .toARGB32(),
-      'containerBackgroundArgb': AppTheme.dark().colorScheme.surface.toARGB32(),
+      'containerBackgroundArgb': AppTheme.dark()
+          .colorScheme
+          .surfaceContainerHigh
+          .toARGB32(),
       'containerCornerRadius': Radii.container,
       'allowUnchangedSubmission': false,
     });

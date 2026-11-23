@@ -41,6 +41,31 @@ private final class JumpToLatestGlassButton: UIButton {
 }
 
 final class NavigationGlassButton: UIButton {
+  var consumeOutsideTap = false
+  private weak var menuBackdrop: UIControl?
+
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    if window == nil { menuBackdrop?.removeFromSuperview() }
+  }
+
+  private func installMenuBackdrop() {
+    guard consumeOutsideTap, let host = window?.rootViewController?.view,
+          let parent = host.superview else { return }
+    menuBackdrop?.removeFromSuperview()
+    // Place the touch target above Flutter's sheet and its modal barrier,
+    // beneath the UIKit menu presentation.
+    let backdrop = UIControl(frame: host.frame)
+    backdrop.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    backdrop.accessibilityLabel = NSLocalizedString("Dismiss menu", comment: "")
+    backdrop.accessibilityTraits = .button
+    backdrop.addAction(UIAction { [weak self] _ in
+      self?.contextMenuInteraction?.dismissMenu()
+    }, for: .touchUpInside)
+    parent.insertSubview(backdrop, aboveSubview: host)
+    menuBackdrop = backdrop
+  }
+
   var opensMenuAbove = false
   var hitTargetInsets = UIEdgeInsets.zero
   private static weak var visibleMenuButton: NavigationGlassButton?
@@ -58,6 +83,7 @@ final class NavigationGlassButton: UIButton {
 
   private func finishMenuDismissal() {
     if !menuVisible && Self.visibleMenuButton === self { Self.visibleMenuButton = nil }
+    if !menuVisible { menuBackdrop?.removeFromSuperview() }
     menuDismissing = false
     let action = pendingMenuAction
     pendingMenuAction = nil
@@ -92,6 +118,7 @@ final class NavigationGlassButton: UIButton {
     if let previous = Self.visibleMenuButton, previous !== self, previous.window === window {
       previous.contextMenuInteraction?.dismissMenu()
     }
+    installMenuBackdrop()
     Self.visibleMenuButton = self
     animateMenu?(true, animator)
     menuVisibilityChanged?(true)
@@ -286,6 +313,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     containerView.backgroundColor = .clear
     containerView.isOpaque = false
     let arguments = args as? [String: Any]
+    button.consumeOutsideTap = arguments?["consumeOutsideTap"] as? Bool == true
     let buttonCenterX =
       (arguments?["buttonCenterX"] as? NSNumber)?.doubleValue ?? 24
     let hitTargetWidth =
@@ -562,7 +590,8 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     if let menu = arguments?["menu"] as? [[String: Any]] {
       // Keep creation actions and titled sections in reading order even above a bottom-bar trigger.
       let hasImages = menu.contains { !(($0["symbol"] as? String) ?? "").isEmpty }
-      button.preferredMenuElementOrder = arguments?["fixedMenuOrder"] as? Bool == true || !hasImages || menu.contains { $0["sectionTitle"] is String } ? .fixed : .automatic
+      let hasOrderedActions = menu.contains { $0["sectionTitle"] is String || $0["destructive"] as? Bool == true }
+      button.preferredMenuElementOrder = !hasImages || hasOrderedActions ? .fixed : .automatic
       var groups: [[UIMenuElement]] = [[]]
       var groupTitles = [""]
       for item in menu {
@@ -623,7 +652,7 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
     case "moon": buttonIconName = "moon"
     case "trash": buttonIconName = "trash"
     case "bell": buttonIconName = "bell"
-    case "more": buttonIconName = "ellipsis"
+    case "more", "moreCircle": buttonIconName = "ellipsis"
     case "chevronDown": buttonIconName = "chevron.down"
     case "reply": buttonIconName = "arrowshape.turn.up.left"
     case "systemAppearance": buttonIconName = "circle.lefthalf.filled"
@@ -672,6 +701,8 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
           UIColor.white.setFill()
           UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: pointSize, height: pointSize)).fill()
         }.withRenderingMode(.alwaysTemplate)
+      } else if icon == "moreCircle" {
+        buttonImage = UIImage(systemName: "ellipsis.circle", withConfiguration: UIImage.SymbolConfiguration(pointSize: pointSize))
       } else {
         buttonImage = NativeTabler.image(buttonIconName, size: pointSize)
       }

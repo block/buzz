@@ -88,3 +88,24 @@ class _AgentSquircleBorder extends OutlinedBorder {
   @override
   int get hashCode => side.hashCode;
 }
+
+/// Cuts a ring that follows the person or agent avatar silhouette.
+class AvatarRingClipper extends CustomClipper<Path> {
+  const AvatarRingClipper({required this.isAgent, required this.strokeWidth});
+  final bool isAgent;
+  final double strokeWidth;
+
+  @override
+  Path getClip(Size size) {
+    final rect = Offset.zero & size;
+    return Path.combine(
+      PathOperation.difference,
+      avatarPath(rect, isAgent: isAgent),
+      avatarPath(rect.deflate(strokeWidth), isAgent: isAgent),
+    );
+  }
+
+  @override
+  bool shouldReclip(AvatarRingClipper oldClipper) =>
+      oldClipper.isAgent != isAgent || oldClipper.strokeWidth != strokeWidth;
+}

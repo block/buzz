@@ -1,4 +1,4 @@
-import '../../../shared/widgets/native_conversation_menu.dart';
+import '../channel_sections/section_show_more.dart';
 import 'dart:async';
 import 'dart:convert';
 import '../channel_filter/channel_filter_activity.dart';
@@ -6,7 +6,6 @@ import '../channel_sort/channel_sort_provider.dart';
 import '../channel_sort/channel_sort_storage.dart';
 import '../channel_filter/channel_filter_provider.dart';
 import '../channel_filter/channel_filter_store.dart';
-import '../channel_sections/filtered_channel_section_body.dart';
 import '../channels_page/filters.dart';
 
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
@@ -20,7 +19,6 @@ import 'package:uuid/uuid.dart';
 import '../../../shared/profile/user_cache_provider.dart';
 import '../../../shared/widgets/concentric_sheet_surface.dart';
 import '../../../shared/widgets/bee_refresh_indicator.dart';
-import '../../../shared/widgets/collapsible_sliver_body.dart';
 import 'me_section.dart';
 import 'me_working_provider.dart';
 import 'solo_working_dots.dart';
@@ -56,7 +54,6 @@ import '../channel_detail_page.dart';
 import '../channel_management_provider.dart';
 import '../channels_provider.dart';
 import '../channel_sections/channel_sections_provider.dart';
-import '../channel_stars/channel_stars_provider.dart';
 
 part 'me_page_helpers.dart';
 part 'me_empty_state.dart';
@@ -223,49 +220,46 @@ class MePage extends HookConsumerWidget {
                   a.lastMessageAt ?? a.createdAt,
                 ),
               );
-        Widget row(Channel channel) =>
-            SoloChatTile(key: ValueKey(channel.id), channel: channel);
+        Widget row(Channel channel, [VoidCallback? onTap]) => SoloChatTile(
+          key: ValueKey(channel.id),
+          channel: channel,
+          onTap: onTap,
+        );
 
         if (sliver) {
           // Home files Solo chats with the rest of the sidebar, as desktop
           // does. This slot holds the chats left in Solo itself.
           final layout = ref.watch(sidebarLayoutProvider);
-          final stars = ref.watch(channelStarsProvider).store.channels;
           final unfiled = sortChannelsForList([
             for (final channel in visible)
               if (layout.sectionKeyFor(
                     channel.id,
-                    starred: stars[channel.id]?.starred == true,
+                    starred: false,
                     home: 'solo',
                   ) ==
                   'solo')
                 channel,
           ], ref.watch(channelSortProvider).sortModeFor('solo'));
-          return SliverPadding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: Grid.gutter - Grid.xxs,
-            ),
-            sliver: SliverMainAxisGroup(
-              slivers: [
-                if (organizationStatus != null)
-                  SliverToBoxAdapter(
-                    child: Padding(
-                      padding: const EdgeInsets.all(Grid.gutter),
-                      child: organizationStatus,
-                    ),
+          return SliverMainAxisGroup(
+            slivers: [
+              if (organizationStatus != null)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.all(Grid.gutter),
+                    child: organizationStatus,
                   ),
-                ?offlineNotice,
-                _SoloFilterSection(
-                  key: const ValueKey('me-ungrouped-chats'),
-                  group: 'solo',
-                  label: 'Solo',
-                  chats: unfiled,
-                  unread: unreadIds,
-                  row: row,
-                  empty: organization == null ? null : 'No chats yet',
                 ),
-              ],
-            ),
+              ?offlineNotice,
+              _SoloFilterSection(
+                key: const ValueKey('me-ungrouped-chats'),
+                group: 'solo',
+                label: 'Solo',
+                chats: unfiled,
+                unread: unreadIds,
+                row: row,
+                empty: organization == null ? null : 'No chats yet',
+              ),
+            ],
           );
         }
 
@@ -287,9 +281,9 @@ class MePage extends HookConsumerWidget {
         final inventorySlivers = <Widget>[
           SliverPadding(
             padding: EdgeInsets.fromLTRB(
-              Grid.gutter - Grid.xxs,
+              0,
               topSectionHeight + (sliver ? 0 : Grid.xxs),
-              Grid.gutter - Grid.xxs,
+              0,
               sliver
                   ? 0
                   : visible.isEmpty && sections.isEmpty
@@ -458,7 +452,7 @@ class _SoloFilterSection extends HookConsumerWidget {
   final String label;
   final Iterable<Channel> chats;
   final Set<String> unread;
-  final Widget Function(Channel) row;
+  final SectionChatRowBuilder row;
   final String? empty;
 
   @override
@@ -467,22 +461,28 @@ class _SoloFilterSection extends HookConsumerWidget {
       group == 'solo' ? channelFilterProvider : soloFilterProvider,
     );
     useListenable(manager);
-    final mode = manager?.store.modeFor(group) ?? ChannelFilterMode.all;
-    final window =
-        manager?.store.windowFor(group) ?? defaultActiveWindowSeconds;
+    final display = MessagesSectionOptions.active(context)
+        ? ref.watch(messagesDisplayProvider)
+        : const MessagesDisplay();
+    final mode = display.modeFor(manager?.store, group);
+    final window = display.windowFor(manager?.store, group);
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final selected = ConversationPaneScope.maybeOf(context)?.selectedId;
     final tick = useState(0);
     int? nextExpiry;
-    final visibleIds = <String>{};
-    final sortMode = ref.watch(
+    final rows = <Widget>[];
+    final sectionSortMode = ref.watch(
       channelSortProvider.select(
         (state) => group == 'solo'
             ? state.sortModeFor(group)
             : state.store.groups[group] ?? ChannelSortMode.recent,
       ),
     );
-    final orderedChats = sortMode == ChannelSortMode.alpha
+    final sortMode = display.sort ?? sectionSortMode;
+    final matching = <Channel>[];
+    final limit = display.limitFor(manager?.store, group);
+    final orderedChats =
+        display.sort != null || sortMode == ChannelSortMode.alpha
         ? sortChannelsForList(chats.toList(), sortMode)
         : chats.toList();
     for (final chat in orderedChats) {
@@ -505,7 +505,8 @@ class _SoloFilterSection extends HookConsumerWidget {
         windowSeconds: window,
         selected: selected == chat.id,
       )) {
-        visibleIds.add(chat.id);
+        matching.add(chat);
+        if (limit == null || rows.length < limit) rows.add(row(chat));
       }
     }
     useEffect(() {
@@ -515,40 +516,46 @@ class _SoloFilterSection extends HookConsumerWidget {
         () => tick.value++,
       ).cancel;
     }, [nextExpiry, tick.value]);
-    return MeSection.sliverBody(
+    if (rows.length < matching.length) {
+      rows.add(
+        SectionShowMore(
+          leadingInset: MessagesSectionOptions.leadingInset(context),
+          buildRow: row,
+          title: label,
+          channels: matching,
+          buildDetail: (channel) {
+            final viewer = ref.read(myPubkeyProvider);
+            final legacy =
+                ref.read(meGroupsProvider).value?.channels ?? const <String>[];
+            return ChannelDetailPage(
+              channel: channel,
+              personalChat: channel.isPersonalChat(viewer, legacy),
+            );
+          },
+        ),
+      );
+    }
+    return MeSection(
+      compactHeaderGap: MessagesSectionOptions.active(context),
       label: label,
-      onFilter: () => showSectionViewSheet(
-        context,
-        group: group,
-        title: label,
-        sortMode: sortMode,
-        onSort: (value) =>
-            ref.read(channelSortProvider.notifier).setSortModeFor(group, value),
-      ),
-      buildBody: (expanded) => group == 'solo'
-          ? FilteredChannelSectionBody(
-              expanded: expanded,
-              channels: orderedChats,
-              isVisible: (chat) => visibleIds.contains(chat.id),
-              buildRow: row,
-              disclosureInset: Grid.xxs,
-              emptySliver: empty == null
-                  ? null
-                  : SliverToBoxAdapter(child: _MeSectionEmpty(empty!)),
-            )
-          : CollapsibleSliverBody(
-              expanded: expanded,
-              sliver: SliverList.list(
-                children: [
-                  for (final chat in orderedChats)
-                    if (visibleIds.contains(chat.id)) row(chat),
-                  if (visibleIds.isEmpty && (chats.isNotEmpty || empty != null))
-                    _MeSectionEmpty(
-                      chats.isEmpty ? empty! : 'No matching chats',
-                    ),
-                ],
-              ),
+      sliver: true,
+      onFilter: MessagesSectionOptions.active(context)
+          ? null
+          : () => showSectionViewSheet(
+              context,
+              group: group,
+              title: label,
+              sortMode: sortMode,
+              onSort: (value) => ref
+                  .read(channelSortProvider.notifier)
+                  .setSortModeFor(group, value),
             ),
+      children: rows.isEmpty
+          ? [
+              if (chats.isNotEmpty || empty != null)
+                _MeSectionEmpty(chats.isEmpty ? empty! : 'No matching chats'),
+            ]
+          : rows,
     );
   }
 }

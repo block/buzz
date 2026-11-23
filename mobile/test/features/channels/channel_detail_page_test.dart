@@ -126,7 +126,6 @@ import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scaffold.dart';
 import 'package:buzz/shared/widgets/flapping_bee.dart';
 import 'package:buzz/shared/widgets/keyboard_dismiss_on_drag.dart';
-import 'package:buzz/shared/widgets/app_list.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -1976,7 +1975,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        find.byKey(const ValueKey('channel-details-star-action')),
+        find.byKey(const ValueKey('channel-details-pin-action')),
         findsOneWidget,
       );
       expect(
@@ -5352,17 +5351,17 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final readSemantics = tester.getSemantics(
-        find.byKey(const ValueKey('channel-details-read-action')),
+      final muteSemantics = tester.getSemantics(
+        find.byKey(const ValueKey('channel-details-mute-action')),
       );
-      expect(readSemantics.label, 'Mark unread');
-      expect(readSemantics.flagsCollection.isButton, isTrue);
+      expect(muteSemantics.label, 'Mute');
+      expect(muteSemantics.flagsCollection.isButton, isTrue);
       expect(
-        readSemantics.flagsCollection.isEnabled.toString(),
+        muteSemantics.flagsCollection.isEnabled.toString(),
         'Tristate.isTrue',
       );
       expect(
-        readSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+        muteSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
         isTrue,
       );
 
@@ -5386,22 +5385,25 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        final starAction = find.byKey(
-          const ValueKey('channel-details-star-action'),
+        final pinAction = find.byKey(
+          const ValueKey('channel-details-pin-action'),
         );
         final muteAction = find.byKey(
           const ValueKey('channel-details-mute-action'),
         );
-        expect(find.text('Star'), findsOneWidget);
-        expect(find.byIcon(BuzzIcons.star), findsOneWidget);
+        expect(find.text('Pin'), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.pinned), findsOneWidget);
         expect(find.text('Mute'), findsOneWidget);
         expect(find.byIcon(BuzzIcons.bellOff), findsOneWidget);
 
-        await tester.tap(starAction);
+        await tester.ensureVisible(pinAction);
+        await tester.tap(pinAction);
         await tester.pump();
 
-        expect(find.text('Unstar'), findsOneWidget);
-        expect(find.byIcon(BuzzIcons.starOff), findsOneWidget);
+        expect(find.text('Unpin'), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.pinnedOff), findsOneWidget);
+
+        await tester.ensureVisible(muteAction);
         await tester.tap(muteAction);
         await tester.pump();
 
@@ -5409,12 +5411,15 @@ void main() {
         final activeBell = tester.widget<Icon>(find.byIcon(BuzzIcons.bell));
         expect(activeBell.color, AppTheme.light().colorScheme.primary);
 
-        await tester.tap(starAction);
+        await tester.ensureVisible(pinAction);
+        await tester.tap(pinAction);
+        await tester.ensureVisible(muteAction);
         await tester.tap(muteAction);
         await tester.pump();
 
-        expect(find.text('Star'), findsOneWidget);
+        expect(find.text('Pin'), findsOneWidget);
         expect(find.text('Mute'), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.pinned), findsOneWidget);
         expect(find.byIcon(BuzzIcons.bellOff), findsOneWidget);
       },
     );
@@ -5430,7 +5435,7 @@ void main() {
       await tester.pumpWidget(
         _buildTestable(
           messages: const [],
-          textScaler: const TextScaler.linear(2),
+          textScaler: const TextScaler.linear(3),
         ),
       );
       await tester.pumpAndSettle();
@@ -5440,15 +5445,17 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final readAction = find.byKey(
-        const ValueKey('channel-details-read-action'),
-      );
       final muteAction = find.byKey(
         const ValueKey('channel-details-mute-action'),
       );
-      expect(tester.getSize(readAction).height, greaterThan(84));
+      final editAction = find.byKey(
+        const ValueKey('channel-details-edit-action'),
+      );
+      expect(find.text('Mute'), findsOneWidget);
+      expect(find.text('Edit'), findsOneWidget);
+      expect(tester.getSize(muteAction).height, greaterThan(84));
       expect(
-        tester.getSize(readAction).height,
+        tester.getSize(editAction).height,
         tester.getSize(muteAction).height,
       );
       expect(tester.takeException(), isNull);
@@ -6512,19 +6519,19 @@ void main() {
       }
       final aliceName = find.text('Alice');
       final aliceText = tester.widget<Text>(aliceName);
-      expect(aliceText.style?.fontSize, 11);
+      expect(aliceText.style?.fontSize, 12);
       expect(aliceText.style?.fontWeight, FontWeight.w500);
-      expect(aliceText.style?.height, 17 / 11);
+      expect(aliceText.style?.height, 1.25);
       final aliceUsername = tester.widget<Text>(
         find.byKey(const ValueKey('message-username-msg1')),
       );
       final aliceTimestamp = tester.widget<Text>(
         find.byKey(const ValueKey('message-timestamp-msg1')),
       );
-      expect(aliceUsername.style?.fontSize, 11);
+      expect(aliceUsername.style?.fontSize, 12);
       expect(aliceUsername.style?.fontWeight, FontWeight.w400);
-      expect(aliceUsername.style?.height, 17 / 11);
-      expect(aliceTimestamp.style?.fontSize, 11);
+      expect(aliceUsername.style?.height, 1.25);
+      expect(aliceTimestamp.style?.fontSize, 12);
       expect(aliceTimestamp.style?.fontWeight, FontWeight.w400);
       final timeFinder = find.byKey(const ValueKey('message-timestamp-msg1'));
       expect(
@@ -6892,7 +6899,7 @@ void main() {
           'Photo 1 of 2',
         );
         expect(
-          carouselRect.left + Grid.xs,
+          carouselRect.left + messageBubbleHorizontalInset,
           tester
               .getRect(find.byKey(const ValueKey('message-author-gallery')))
               .left,
@@ -15747,7 +15754,12 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.byType(ComposeBar));
+      await tester.tap(
+        find.descendant(
+          of: find.byType(ComposeBar),
+          matching: find.text('Message'),
+        ),
+      );
       await tester.pumpAndSettle();
       final editor = find.descendant(
         of: find.byType(ComposeBar),
@@ -17287,7 +17299,6 @@ void main() {
         expect(find.text('General discussion'), findsOneWidget);
 
         expect(find.text('Preferences'), findsNothing);
-        expect(find.text('5 members'), findsOneWidget);
         expect(find.text('Mute'), findsOneWidget);
         expect(find.text('Edit'), findsOneWidget);
         expect(find.text('Actions'), findsNothing);
@@ -17304,19 +17315,21 @@ void main() {
             .getRect(find.byKey(const ValueKey('channel-details-description')))
             .bottom;
         final firstActionTop = tester
-            .getRect(find.byKey(const ValueKey('channel-details-read-action')))
+            .getRect(find.byKey(const ValueKey('channel-details-mute-action')))
             .top;
         expect(firstActionTop - descriptionBottom, closeTo(Grid.sm, 0.5));
         expect(
           tester
               .getSize(
-                find.byKey(const ValueKey('channel-details-read-action')),
+                find.byKey(const ValueKey('channel-details-mute-action')),
               )
               .height,
           68 + (Grid.xxs * 2),
         );
 
-        await _scrollDetailsTo(tester, find.text('5 members'));
+        final firstActionBottom = tester
+            .getRect(find.byKey(const ValueKey('channel-details-mute-action')))
+            .bottom;
         final membersLabelTop = tester.getRect(find.text('5 members')).top;
         expect(membersLabelTop, greaterThanOrEqualTo(0));
         expect(
@@ -19205,7 +19218,7 @@ void main() {
           const ValueKey('thread-message-timestamp-$threadIdThreadDashRoot'),
         ),
       );
-      expect(threadTimestamp.style?.fontSize, 11);
+      expect(threadTimestamp.style?.fontSize, 12);
       expect(
         find.descendant(
           of: find.byKey(

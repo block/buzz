@@ -1,6 +1,4 @@
-import 'package:buzz/shared/huddle/huddle_session.dart';
-import 'package:buzz/features/channels/huddle_lifecycle_provider.dart';
-import 'package:buzz/features/channels/me/me_chat_settings.dart';
+import 'package:buzz/shared/widgets/bottom_up_page_route.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -143,6 +141,27 @@ Widget _modalApp({
   ),
 );
 
+Future<void> selectNativeManageChannel(WidgetTester tester) async {
+  const bridge = MethodChannel('buzz/channel_actions_sheet');
+  final result = Completer<String?>();
+  final messenger = tester.binding.defaultBinaryMessenger;
+  var hasManage = false;
+  messenger.setMockMethodCallHandler(bridge, (call) async {
+    final payload = call.arguments as Map;
+    final rows = (payload['sections'] as List).expand((group) => group as List);
+    hasManage = rows.any(
+      (row) => row['id'] == 'Manage channel' && row['enabled'] == true,
+    );
+    return call.method == 'present' ? result.future : null;
+  });
+  addTearDown(() => messenger.setMockMethodCallHandler(bridge, null));
+  await tester.tap(find.text('Open actions'));
+  await tester.pumpAndSettle();
+  expect(hasManage, isTrue);
+  result.complete('Manage channel');
+  await tester.pumpAndSettle();
+}
+
 void main() {
   for (final size in [const Size(800, 390), const Size(669, 951)]) {
     testWidgets('Duo cover or portrait $size retains the Flutter sheet', (
@@ -251,8 +270,12 @@ void main() {
             createChannelActions: (ref) => _FakeChannelActions(ref),
           ),
         );
+        final homeRoute = ModalRoute.of(
+          tester.element(find.text('Open actions')),
+        );
         await tester.tap(find.text('Open actions'));
         await tester.pumpAndSettle();
+        expect(BottomUpPageRoute.hasRetainedControls(homeRoute), isTrue);
         if (soloDetails) {
           expect(calls.last.arguments.toString(), contains('general'));
           expect(
@@ -344,6 +367,7 @@ void main() {
         result.complete('Copy channel ID');
         await tester.pumpAndSettle();
         expect(clipboard, ['channel-id']);
+        expect(BottomUpPageRoute.hasRetainedControls(homeRoute), isFalse);
         expect(find.byType(ChannelActionsSheet), findsNothing);
         expect(find.byType(ChannelDetailsPage), findsNothing);
         expect(find.text('Open actions'), findsOneWidget);
@@ -364,7 +388,7 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        expect(find.byType(BuzzActionTile), findsNWidgets(2));
+        expect(find.byType(BuzzActionTile), findsNWidgets(soloDetails ? 2 : 1));
         expect(find.byType(AppListCard), findsWidgets);
         if (soloDetails) {
           expect(
@@ -378,9 +402,9 @@ void main() {
           await tester.tap(find.text('Agent'));
           expect(selected.removeLast(), 'Agent');
         }
-        await tester.ensureVisible(find.text('Star'));
-        await tester.tap(find.text('Star'));
-        expect(selected, ['Star']);
+        await tester.ensureVisible(find.text('Pin'));
+        await tester.tap(find.text('Pin'));
+        expect(selected, ['Pin']);
         await tester.pumpWidget(const SizedBox());
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
@@ -407,7 +431,7 @@ void main() {
     await tester.pumpAndSettle();
 
     for (final label in [
-      'Star',
+      'Pin',
       'Mark Unread',
       'Move to section…',
       'Mute channel',
@@ -987,6 +1011,45 @@ void main() {
     );
   });
 
+  testWidgets(
+    'iPhone long press sends full channel details to the native sheet',
+    (tester) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(420, 912);
+      tester.view.padding = const FakeViewPadding(top: 62);
+      tester.view.viewPadding = const FakeViewPadding(top: 62);
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        _modalApp(
+          channel: _channel(),
+          details: true,
+          loadMembers: () async => [],
+          createChannelActions: (ref) => _FakeChannelActions(ref),
+        ),
+      );
+      const bridge = MethodChannel('buzz/channel_actions_sheet');
+      final calls = <MethodCall>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
+        call,
+      ) async {
+        calls.add(call);
+        return null;
+      });
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          bridge,
+          null,
+        ),
+      );
+      await tester.tap(find.text('Open actions'));
+      await tester.pumpAndSettle();
+      final payload =
+          calls.firstWhere((call) => call.method == 'present').arguments as Map;
+      expect(payload['details'], _channel().toJson());
+    },
+    variant: TargetPlatformVariant.only(TargetPlatform.iOS),
+  );
+
   testWidgets('Manage refreshes metadata after saving from actions', (
     tester,
   ) async {
@@ -1079,10 +1142,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Open actions'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Manage channel'));
-      await tester.pumpAndSettle();
+      await selectNativeManageChannel(tester);
       expect(updates, [
         ('renamed', 'Updated description'),
         ('renamed', 'Updated description'),
@@ -1144,11 +1204,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Open actions'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Manage channel'));
-    await tester.pump();
-    // Presented once, before the canvas resolved, and marked not loaded.
+    await selectNativeManageChannel(tester);
     expect(opened, [(false, false)]);
     expect(saved, isTrue);
     canvas.complete(
@@ -1208,10 +1264,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Open actions'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('Manage channel'));
-    await tester.pumpAndSettle();
+    await selectNativeManageChannel(tester);
     expect(canvasPresentations, [containsPair('title', 'Canvas')]);
     expect(canvasPresentations.single['multiline'], true);
     expect(channelPresentations, hasLength(2));
@@ -1348,10 +1401,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Open actions'));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Manage channel'));
-      await tester.pumpAndSettle();
+      await selectNativeManageChannel(tester);
       expect(presentations.map((p) => p.$1), List.filled(3, 'presentChannel'));
       expect(presentations.map((p) => p.$2['canvasLoaded']), [
         true,
@@ -1447,13 +1497,13 @@ void main() {
     for (final label in [
       'Mute channel',
       'Copy channel name',
+      'Pin',
       'Copy channel ID',
     ]) {
       expect(find.text(label), findsOneWidget, reason: label);
     }
     for (final label in [
-      'Star',
-      'Unstar',
+      'Unpin',
       'Mark Unread',
       'Mark Read',
       'Move to section…',

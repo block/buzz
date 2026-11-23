@@ -754,6 +754,7 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       resizeToAvoidBottomInset:
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
+        nativePaneSoftEdge: true,
         nativeTitleInsets: duoContentInsetsOf(context),
         alignWithStatusRegion: true,
         automaticallyImplyLeading:

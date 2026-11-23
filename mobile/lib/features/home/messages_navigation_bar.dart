@@ -282,9 +282,9 @@ class _MenuNudge extends StatelessWidget {
             0,
           )..scaleByDouble(scale, scale, 1, 1),
           child: AnimatedOpacity(
+            opacity: menuOpen ? 0 : 1,
             duration: duration,
             curve: Curves.easeOutCubic,
-            opacity: menuOpen ? 0 : 1,
             child: child,
           ),
         ),

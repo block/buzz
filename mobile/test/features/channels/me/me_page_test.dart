@@ -249,10 +249,11 @@ void main() {
     await tester.tap(find.byTooltip('App work options'));
     await tester.pumpAndSettle();
     expect(find.text('Sort'), findsOneWidget);
-    await tester.tap(find.text('Show'));
+    await tester.tap(find.text('View'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Active'));
     await tester.pumpAndSettle();
+    expect(find.text('Show'), findsNothing);
     await tester.tap(find.text('Active in the past'));
     await tester.pumpAndSettle();
     for (final label in ['1 day', '7 days', '30 days', '90 days']) {
@@ -1056,6 +1057,9 @@ void main() {
   for (final failed in [true, false]) {
     testWidgets('shared Solo chats stay listed while preferences '
         '${failed ? 'fail' : 'load'}', (tester) async {
+      // Keep both sections on screen while the preferences error is visible.
+      await tester.binding.setSurfaceSize(const Size(420, 1000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
       SharedPreferences.setMockInitialValues({});
       final prefs = await SharedPreferences.getInstance();
       final pending = StreamController<MeGroups>();
