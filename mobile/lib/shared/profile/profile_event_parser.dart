@@ -46,8 +46,14 @@ ParsedProfileEvent parseProfileEvent(NostrEvent event) {
       about: data.about,
       nip05Handle: data.nip05,
       ownerPubkey: verifiedOaOwnerPubkey(event.tags, event.pubkey),
+      ownerEvidence: carriesOwnerAttestation(event) ? event : null,
     ),
     createdAt: event.createdAt,
     eventId: event.id,
   );
 }
+
+/// Whether [event] has an `auth` tag, so it is kept as owner evidence.
+bool carriesOwnerAttestation(NostrEvent event) =>
+    event.kind == 0 &&
+    event.tags.any((tag) => tag.isNotEmpty && tag[0] == 'auth');

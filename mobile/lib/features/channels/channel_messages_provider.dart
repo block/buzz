@@ -4,11 +4,10 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/channels/saved_message_store.dart';
-import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
-import '../../shared/relay/relay_author_provider.dart';
 import 'channel_event_order.dart';
 import 'channel_open_timing.dart';
+import 'edit_authority.dart';
 import 'pending_local_messages_provider.dart';
 import 'saved_channel_page.dart';
 import 'channel_window.dart';
@@ -20,10 +19,6 @@ import 'timeline_message.dart';
 part 'channel_messages_provider/thread_summaries.dart';
 part 'channel_messages_provider/pagination.dart';
 part 'channel_messages_provider/notices.dart';
-
-// Channel history keeps partial reply evidence; full threads stay route-scoped.
-const _maxCachedRepliesPerRoot = 256;
-const _maxCachedReplies = 2048;
 
 /// How long a chat nobody shows keeps its live subscription. A brief cover,
 /// such as a profile pushed over the chat, returns without a catch-up fetch.

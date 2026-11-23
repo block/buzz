@@ -93,6 +93,8 @@ import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/features/channels/message_mention_pill.dart';
 import 'package:buzz/shared/utils/string_utils.dart';
+import 'package:buzz/shared/channels/saved_message_store.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:buzz/shared/profile/profile_event_parser.dart';
 import 'package:buzz/shared/profile/profile_snapshot.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
@@ -359,6 +361,7 @@ Widget _buildTestable({
   bool? huddleHistoryMembership,
   String? huddleCurrentPubkey,
   String? huddleRelayAuthor,
+  Future<String?> Function(String relayUrl)? loadRelayAuthor,
   http.Client? mediaClient,
   Widget? home,
   Stream<MeGroups>? organization,
@@ -577,7 +580,10 @@ Widget _buildTestable({
         ),
       if (huddleHumanCountLoader != null)
         huddleHumanCountProvider.overrideWithValue(huddleHumanCountLoader),
-      relayAuthorProvider.overrideWith((ref, url) async => huddleRelayAuthor),
+      relayAuthorProvider.overrideWith(
+        (ref, url) async =>
+            loadRelayAuthor == null ? huddleRelayAuthor : loadRelayAuthor(url),
+      ),
       huddleLifecycleProvider(
         _channelId,
       ).overrideWith((ref) => Stream.value(huddleLifecycle)),

@@ -64,7 +64,11 @@ void main() {
         owners: <String, String>{},
         applied: true,
       ),
-      for (final kind in [EventKind.streamMessage, EventKind.streamMessageV2])
+      for (final kind in [
+        EventKind.streamMessage,
+        EventKind.streamMessageV2,
+        EventKind.streamMessageDiff,
+      ])
         (
           name: 'a verified owner may edit kind $kind in the same channel',
           target: _event(kind: kind),
@@ -119,9 +123,22 @@ void main() {
         applied: false,
       ),
       (
-        name: 'owner editing is limited to chat message kinds',
-        target: _event(kind: EventKind.streamMessageDiff),
+        name: 'a verified owner may edit a relay attributed kind 40008',
+        target: _event(
+          author: _relay,
+          kind: EventKind.streamMessageDiff,
+          tags: [
+            ['actor', _author],
+          ],
+        ),
         edit: _edit(author: _owner),
+        owners: {_author: _owner},
+        applied: true,
+      ),
+      (
+        name: 'a kind 40008 owner edit requires the same channel',
+        target: _event(kind: EventKind.streamMessageDiff),
+        edit: _edit(author: _owner, channel: 'another-channel'),
         owners: {_author: _owner},
         applied: false,
       ),
@@ -245,6 +262,113 @@ void main() {
         ).single;
         expect(message.content, scenario.applied ? 'Updated' : 'Original');
         expect(message.edited, scenario.applied);
+        // Every owner that can apply an edit is one the lookup asks for.
+        final needs = editAuthorityNeeds([scenario.target, scenario.edit]);
+        for (final MapEntry(key: author, value: owner)
+            in scenario.owners.entries) {
+          if (scenario.applied && scenario.edit.pubkey == owner) {
+            expect(needs.owners, contains(author));
+          }
+        }
+      });
+    }
+  });
+
+  group('edit authority needs', () {
+    final cases = [
+      (
+        name: 'a timeline without edits needs nothing',
+        events: [_event()],
+        owners: <String>[],
+        relayKey: false,
+      ),
+      (
+        name: 'an edit by the message signer needs nothing',
+        events: [
+          _event(
+            tags: [
+              ['actor', _other],
+            ],
+          ),
+          _edit(),
+        ],
+        owners: <String>[],
+        relayKey: false,
+      ),
+      (
+        name: 'a cross-signer edit needs the author owner only',
+        events: [
+          _event(),
+          _edit(author: _owner),
+        ],
+        owners: [_author],
+        relayKey: false,
+      ),
+      (
+        name: 'a kind 40008 cross-signer edit needs the author owner',
+        events: [
+          _event(kind: EventKind.streamMessageDiff),
+          _edit(author: _owner),
+        ],
+        owners: [_author],
+        relayKey: false,
+      ),
+      (
+        name: 'an attributed target needs the relay key and both owners',
+        events: [
+          _event(
+            author: _relay,
+            tags: [
+              ['actor', _author],
+            ],
+          ),
+          _edit(author: _owner),
+        ],
+        owners: [_author, _relay],
+        relayKey: true,
+      ),
+      (
+        name: 'a p tag also justifies the relay key lookup',
+        events: [
+          _event(
+            tags: [
+              ['p', _other],
+            ],
+          ),
+          _edit(author: _other),
+        ],
+        owners: [_author, _other],
+        relayKey: true,
+      ),
+      (
+        name: 'an edit from another channel needs no owner',
+        events: [
+          _event(),
+          _edit(author: _owner, channel: 'elsewhere'),
+        ],
+        owners: <String>[],
+        relayKey: false,
+      ),
+      (
+        name: 'an edit whose target is outside the window needs nothing',
+        events: [
+          _event(),
+          _edit(
+            author: _owner,
+            targets: [
+              ['e', threadIdUnrelated],
+            ],
+          ),
+        ],
+        owners: <String>[],
+        relayKey: false,
+      ),
+    ];
+    for (final scenario in cases) {
+      test(scenario.name, () {
+        final needs = editAuthorityNeeds(scenario.events);
+        expect(needs.owners, scenario.owners);
+        expect(needs.relayKey, scenario.relayKey);
       });
     }
   });

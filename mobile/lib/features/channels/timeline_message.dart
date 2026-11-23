@@ -344,8 +344,9 @@ VoidCallback? debugOnFormatTimeline;
 ///
 /// Mirrors the desktop's `formatTimelineMessages` logic.
 /// [currentPubkey] is used to determine if the current user has reacted.
-/// [agentOwners] contains only verified agent-to-owner pubkeys. [relayPubkey]
-/// is the relay's signing identity, used to recognize attributed authors.
+/// [agentOwners] maps authors to owners verified from their signed profiles,
+/// and [relayPubkey] is the relay's trusted signing key, used to recognize
+/// attributed authors; `useEditAuthority` supplies both.
 List<TimelineMessage> formatTimeline(
   List<NostrEvent> events, {
   String? currentPubkey,
@@ -784,6 +785,13 @@ String? _firstEditTarget(List<List<String>> tags) {
   return null;
 }
 
+/// Message kinds whose author's verified owner may edit them.
+const _ownerEditableKinds = {
+  EventKind.streamMessage,
+  EventKind.streamMessageV2,
+  EventKind.streamMessageDiff,
+};
+
 bool _mayEditMessage(
   NostrEvent edit,
   NostrEvent target,
@@ -793,16 +801,24 @@ bool _mayEditMessage(
   final signer = edit.pubkey.toLowerCase();
   final author = _effectiveEditAuthor(target, relayPubkey);
   if (signer == target.pubkey.toLowerCase() || signer == author) return true;
-  return (target.kind == EventKind.streamMessage ||
-          target.kind == EventKind.streamMessageV2) &&
-      edit.channelId != null &&
-      edit.channelId == target.channelId &&
+  return _ownerMayEdit(edit, target) &&
       signer == agentOwners[author]?.toLowerCase();
 }
+
+bool _ownerMayEdit(NostrEvent edit, NostrEvent target) =>
+    _ownerEditableKinds.contains(target.kind) &&
+    edit.channelId != null &&
+    edit.channelId == target.channelId;
 
 String _effectiveEditAuthor(NostrEvent target, String? relayPubkey) {
   final signer = target.pubkey.toLowerCase();
   if (signer != relayPubkey?.toLowerCase()) return signer;
+  return _attributedAuthor(target) ?? signer;
+}
+
+/// The author a relay-signed [target] names: its `actor`, else first `p`.
+/// Only meaningful once the target's signer is known to be the relay.
+String? _attributedAuthor(NostrEvent target) {
   final actor = target.getTagValue('actor');
   if (_isEditHex(actor)) return actor!.toLowerCase();
   for (final tag in target.tags) {
@@ -810,7 +826,38 @@ String _effectiveEditAuthor(NostrEvent target, String? relayPubkey) {
       return tag[1].toLowerCase();
     }
   }
-  return signer;
+  return null;
+}
+
+/// What the cross-signer edits in [events] need before [formatTimeline] can
+/// judge them: [owners] lists the authors whose verified owner could make an
+/// edit, and [relayKey] says a target names an attributed author, which
+/// counts only if the relay's signing key signed it. Edits by a message's
+/// own signer need neither.
+typedef EditAuthorityNeeds = ({List<String> owners, bool relayKey});
+
+/// Computes [EditAuthorityNeeds] for the edits in [events].
+EditAuthorityNeeds editAuthorityNeeds(List<NostrEvent> events) {
+  Map<String, NostrEvent>? targets;
+  final owners = <String>{};
+  var relayKey = false;
+  for (final edit in events) {
+    if (edit.kind != EventKind.streamMessageEdit) continue;
+    final targetId = _firstEditTarget(edit.tags);
+    if (targetId == null) continue;
+    targets ??= {for (final event in events) event.id.toLowerCase(): event};
+    final target = targets[targetId];
+    if (target == null ||
+        edit.pubkey.toLowerCase() == target.pubkey.toLowerCase()) {
+      continue;
+    }
+    final attributed = _attributedAuthor(target);
+    relayKey |= attributed != null;
+    if (!_ownerMayEdit(edit, target)) continue;
+    owners.add(target.pubkey.toLowerCase());
+    if (attributed != null) owners.add(attributed);
+  }
+  return (owners: owners.toList()..sort(), relayKey: relayKey);
 }
 
 /// Get the last `e` tag value (reaction target convention).

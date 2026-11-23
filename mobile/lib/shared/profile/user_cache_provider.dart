@@ -422,7 +422,12 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
       final pending = [
         for (final event in events)
           if (event.kind == 0 &&
-              _isNewer(event.pubkey.toLowerCase(), event.createdAt, event.id))
+              _admits(
+                event.pubkey.toLowerCase(),
+                event.createdAt,
+                event.id,
+                evidence: carriesOwnerAttestation(event),
+              ))
             event,
       ];
       if (pending.isEmpty) return true;
@@ -448,7 +453,12 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
     final updated = Map<String, UserProfile>.from(state);
     var changed = false;
     for (final parsed in profiles) {
-      if (!_isNewer(parsed.profile.pubkey, parsed.createdAt, parsed.eventId)) {
+      if (!_admits(
+        parsed.profile.pubkey,
+        parsed.createdAt,
+        parsed.eventId,
+        evidence: parsed.profile.ownerEvidence != null,
+      )) {
         continue;
       }
       updated[parsed.profile.pubkey] = parsed.profile;
@@ -469,10 +479,31 @@ class UserCacheNotifier extends Notifier<Map<String, UserProfile>> {
             eventId.compareTo(current.eventId) < 0);
   }
 
+  /// Whether a profile event replaces the stored one: it is newer, or it is
+  /// the stored event itself and brings the owner evidence the stored copy
+  /// lacks (restored from a snapshot written without it).
+  bool _admits(
+    String pubkey,
+    int createdAt,
+    String eventId, {
+    required bool evidence,
+  }) =>
+      _isNewer(pubkey, createdAt, eventId) ||
+      (evidence &&
+          _profileEventOrders[pubkey]?.eventId == eventId &&
+          state[pubkey]?.ownerEvidence == null);
+
   bool _cacheProfileEvent(NostrEvent event, Map<String, UserProfile> profiles) {
     if (event.kind != 0) return false;
     final pubkey = event.pubkey.toLowerCase();
-    if (!_isNewer(pubkey, event.createdAt, event.id)) return false;
+    if (!_admits(
+      pubkey,
+      event.createdAt,
+      event.id,
+      evidence: carriesOwnerAttestation(event),
+    )) {
+      return false;
+    }
     profiles[pubkey] = parseProfileEvent(event).profile;
     _profileEventOrders[pubkey] = (
       createdAt: event.createdAt,
