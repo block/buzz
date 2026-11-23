@@ -210,7 +210,7 @@ class _SliverChannelsList extends HookConsumerWidget {
       final solo = isSoloRow(channel);
       final key = layout.sectionKeyFor(
         channel.id,
-        starred: soloSliver == null && starredChannelIds.contains(channel.id),
+        starred: starredChannelIds.contains(channel.id),
         home: solo
             ? 'solo'
             : channel.isDm
@@ -572,10 +572,13 @@ class _SliverChannelsList extends HookConsumerWidget {
       );
     }
 
+    final pinned = soloSliver == null
+        ? null
+        : ref.watch(channelPinsProvider).store.channels;
     final pins = [
       ...soloChannels,
       ...visibleChannels,
-    ].where((c) => starredChannelIds.contains(c.id)).toList();
+    ].where((c) => pinned?[c.id]?.enabled == true).toList();
     final pinsCard = soloSliver != null && pins.isNotEmpty
         ? _HomePinsSection(
             pins: pins,
@@ -598,11 +601,7 @@ class _SliverChannelsList extends HookConsumerWidget {
             onOpen: openChat,
           )
         : null;
-    final keys = layout.sectionKeys
-        .where(
-          (key) => key != 'forums' && (soloSliver == null || key != 'starred'),
-        )
-        .toList();
+    final keys = layout.sectionKeys.where((key) => key != 'forums').toList();
     final orderKey = ref.watch(mobileSectionOrderKeyProvider);
     final saved = orderKey == null
         ? const <String>[]
@@ -612,8 +611,8 @@ class _SliverChannelsList extends HookConsumerWidget {
     final sections = <Widget>[?pinsCard];
     for (final key in resolveMobileSectionOrder(keys, saved)) {
       final section = sectionFor(key);
-      if (section == null) continue;
-      sections.add(section);
+      if (section == null && key != 'starred') continue;
+      if (section != null) sections.add(section);
       labels[key] = switch (key) {
         'starred' => 'Starred',
         'solo' => 'Solo',

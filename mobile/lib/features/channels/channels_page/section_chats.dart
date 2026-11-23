@@ -19,7 +19,7 @@ SectionChatContent _watchSectionChats(
     if ((!c.isStream && !c.isDm) || (!messages && solo(c))) return false;
     return layout.sectionKeyFor(
           c.id,
-          starred: !messages && stars[c.id]?.starred == true,
+          starred: stars[c.id]?.starred == true,
           home: solo(c)
               ? 'solo'
               : c.isDm

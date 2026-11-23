@@ -97,6 +97,7 @@ void main() {
           defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
           meAssistantsProvider.overrideWith((ref) async => []),
           channelStarsProvider.overrideWith(_Stars.new),
+          channelPinsProvider.overrideWith(() => _Stars(id: 'pinned')),
           meUnreadChannelIdsProvider.overrideWith(_SoloUnread.new),
         ],
         child: MaterialApp(
@@ -327,7 +328,9 @@ void main() {
     final channelIcon = tester.getRect(
       find.byKey(const ValueKey('channel-icon-general')),
     );
-    expect(inList('Starred'), findsNothing);
+    expect(inList('Starred'), findsOneWidget);
+    expect(inList('solo-star'), findsOneWidget);
+    expect(find.byTooltip('solo-star'), findsNothing);
     expect(
       tester.getTopLeft(inList('Later')).dx,
       tester.getTopLeft(inList('Team')).dx,
@@ -419,6 +422,7 @@ void main() {
     );
 
     const sectionIds = [
+      'starred',
       'group:launch',
       'group:later',
       'channels',
@@ -468,7 +472,7 @@ void main() {
     await tester.pumpAndSettle();
     await openEdit();
     await tester.pumpAndSettle();
-    expect(find.text('Starred'), findsNothing);
+    expect(find.text('Starred'), findsOneWidget);
 
     final dmFocus = Focus.of(tester.element(handle('dms')));
     for (
@@ -480,7 +484,7 @@ void main() {
       await tester.pump();
     }
     expect(dmFocus.hasPrimaryFocus, isTrue);
-    final visibleOrder = firstOrder.where((id) => id != 'starred').toList();
+    final visibleOrder = firstOrder.toList();
     final from = visibleOrder.indexOf('dms');
     visibleOrder.insert(from - 1, visibleOrder.removeAt(from));
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
@@ -497,6 +501,7 @@ void main() {
     stars.setStarred(true);
     await tester.pumpAndSettle();
     final labels = {
+      'starred': 'Starred',
       'group:launch': 'Launch',
       'group:later': 'Later',
       'channels': 'Team',
@@ -531,6 +536,7 @@ class _Channels extends ChannelsNotifier {
   Future<List<Channel>> build() async => [
     _channel('general'),
     _channel('pinned'),
+    _channel('solo-star', solo: true),
     _channel('design-crit'),
     // Newest in Launch, so Recent puts it above design-crit.
     _channel('solo-plan', solo: true, day: 9),
@@ -539,11 +545,14 @@ class _Channels extends ChannelsNotifier {
 }
 
 class _Stars extends ChannelStarsNotifier {
+  _Stars({this.id = 'solo-star'});
+  final String id;
+
   @override
-  ChannelStarsState build() => const ChannelStarsState(
+  ChannelStarsState build() => ChannelStarsState(
     isReady: true,
     store: ChannelStarStore(
-      channels: {'pinned': ChannelStarEntry(starred: true, updatedAt: 1)},
+      channels: {id: const ChannelStarEntry(starred: true, updatedAt: 1)},
     ),
   );
 

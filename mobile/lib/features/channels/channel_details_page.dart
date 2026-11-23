@@ -104,6 +104,13 @@ class ChannelDetailsPage extends HookConsumerWidget {
             .channels[resolvedChannel.id]
             ?.muted ==
         true;
+    final isPinned =
+        ref
+            .watch(channelPinsProvider)
+            .store
+            .channels[resolvedChannel.id]
+            ?.enabled ==
+        true;
     final isStarred =
         ref
             .watch(channelStarsProvider)
@@ -340,9 +347,12 @@ class ChannelDetailsPage extends HookConsumerWidget {
 
     void toggleStar() {
       final notifier = ref.read(channelStarsProvider.notifier);
-      isStarred
-          ? notifier.unstarChannel(resolvedChannel.id)
-          : notifier.starChannel(resolvedChannel.id);
+      notifier.setEnabled(resolvedChannel.id, !isStarred);
+    }
+
+    void togglePin() {
+      final notifier = ref.read(channelPinsProvider.notifier);
+      notifier.setEnabled(resolvedChannel.id, !isPinned);
     }
 
     void toggleMute() {
@@ -456,8 +466,13 @@ class ChannelDetailsPage extends HookConsumerWidget {
                   ),
                 ),
               action(
-                isStarred ? 'Unpin' : 'Pin',
-                isStarred ? BuzzIcons.pinnedOff : BuzzIcons.pinned,
+                isPinned ? 'Unpin' : 'Pin',
+                isPinned ? BuzzIcons.pinnedOff : BuzzIcons.pinned,
+                togglePin,
+              ),
+              action(
+                isStarred ? 'Unstar' : 'Star',
+                isStarred ? BuzzIcons.starOff : BuzzIcons.star,
                 toggleStar,
               ),
               action(
@@ -738,8 +753,13 @@ class ChannelDetailsPage extends HookConsumerWidget {
               ),
             AppListRow(
               key: const ValueKey('channel-details-pin-action'),
-              icon: isStarred ? BuzzIcons.pinnedOff : BuzzIcons.pinned,
-              title: isStarred ? 'Unpin' : 'Pin',
+              icon: isPinned ? BuzzIcons.pinnedOff : BuzzIcons.pinned,
+              title: isPinned ? 'Unpin' : 'Pin',
+              onTap: togglePin,
+            ),
+            AppListRow(
+              icon: isStarred ? BuzzIcons.starOff : BuzzIcons.star,
+              title: isStarred ? 'Unstar' : 'Star',
               onTap: toggleStar,
             ),
             AppListRow(

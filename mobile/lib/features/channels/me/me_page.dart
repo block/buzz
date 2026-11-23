@@ -1,4 +1,5 @@
 import '../channel_sections/section_show_more.dart';
+import '../channel_stars/channel_stars_provider.dart';
 import 'dart:async';
 import 'dart:convert';
 import '../channel_filter/channel_filter_activity.dart';
@@ -230,11 +231,12 @@ class MePage extends HookConsumerWidget {
           // Home files Solo chats with the rest of the sidebar, as desktop
           // does. This slot holds the chats left in Solo itself.
           final layout = ref.watch(sidebarLayoutProvider);
+          final stars = ref.watch(channelStarsProvider).store.channels;
           final unfiled = sortChannelsForList([
             for (final channel in visible)
               if (layout.sectionKeyFor(
                     channel.id,
-                    starred: false,
+                    starred: stars[channel.id]?.enabled == true,
                     home: 'solo',
                   ) ==
                   'solo')
@@ -545,6 +547,9 @@ class _SoloFilterSection extends HookConsumerWidget {
                     : null) ??
                 routeRef.watch(channelSortProvider).store.groups[group] ??
                 ChannelSortMode.recent;
+            final stars = group == 'solo'
+                ? routeRef.watch(channelStarsProvider).store.channels
+                : null;
             final viewer = routeRef.watch(myPubkeyProvider);
             return (
               title: label,
@@ -556,7 +561,7 @@ class _SoloFilterSection extends HookConsumerWidget {
                   if (group == 'solo') {
                     return layout.sectionKeyFor(
                           c.id,
-                          starred: false,
+                          starred: stars?[c.id]?.enabled == true,
                           home: 'solo',
                         ) ==
                         'solo';
