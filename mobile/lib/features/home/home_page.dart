@@ -404,7 +404,9 @@ class HomePage extends HookConsumerWidget {
                         strip!.rect.center.dx,
                       ) -
                       strip.rect.center.dx -
-                      100,
+                      // The vertical bar is 256 points wide with its controls
+                      // on the right edge. Center the controls on the rail.
+                      (256 - MessagesNavigationBar.railControlSize) / 2,
                   0,
                 ),
                 child: SafeArea(

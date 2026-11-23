@@ -42,6 +42,8 @@ class IosMessageCreateButton extends HookConsumerWidget {
     this.onMenuVisibilityChanged,
     this.mergingNavigation = false,
     this.navigationAxis = Axis.horizontal,
+    this.navigationControlSize = 56,
+    this.navigationGap = Grid.xs,
   });
 
   final Set<int> dividerBefore;
@@ -80,6 +82,12 @@ class IosMessageCreateButton extends HookConsumerWidget {
 
   /// Direction of the merged navigation surfaces.
   final Axis navigationAxis;
+
+  /// Side of each merged navigation surface.
+  final double navigationControlSize;
+
+  /// Resting space between merged navigation surfaces.
+  final double navigationGap;
 
   final List<({String label, String symbol, VoidCallback? onPressed})> actions;
 
@@ -236,7 +244,10 @@ class IosMessageCreateButton extends HookConsumerWidget {
               navigationAxis == Axis.horizontal &&
               DuoToolbarScope.maybeOf(context)?.strip != null,
           'verticalNavigation': navigationAxis == Axis.vertical,
-          'controlSize': mergingNavigation ? 56.0 : height,
+          'controlSize': mergingNavigation ? navigationControlSize : height,
+          // Surfaces merge within this distance. Keep the resting gap 4 points
+          // wider, so they merge only while the menu draws them together.
+          'mergeSpacing': navigationGap - 4,
           'hitTargetWidth': width,
           'hitTargetHeight': height,
           'brightness': brightness.name,

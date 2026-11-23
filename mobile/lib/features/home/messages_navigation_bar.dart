@@ -14,6 +14,10 @@ import '../../shared/widgets/android_expanding_menu_button.dart';
 import '../../shared/widgets/ios_message_create_button.dart';
 
 /// Separate glass shortcuts for search and creation.
+/// Size and spacing of Duo's native rail controls (`DuoToolbarPortal`).
+const double _railControlSize = 48;
+const double _railControlGap = 12;
+
 class MessagesNavigationBar extends HookWidget {
   const MessagesNavigationBar({
     super.key,
@@ -24,6 +28,10 @@ class MessagesNavigationBar extends HookWidget {
     this.axis = Axis.horizontal,
   });
   final Axis axis;
+
+  /// Side of each control in the vertical layout, which keeps them on the
+  /// right edge of its 256-point width.
+  static const double railControlSize = _railControlSize;
   final VoidCallback onSearch;
   final Widget agent;
   final ValueChanged<bool>? onRecordingChanged;
@@ -54,16 +62,24 @@ class MessagesNavigationBar extends HookWidget {
         child: Opacity(opacity: overlay.value ? 0 : 1, child: child),
       ),
     );
+    // Duo's rail stacks these at the size and spacing of its native rail
+    // controls.
+    final vertical = axis == Axis.vertical;
+    final controlSize = vertical
+        ? _railControlSize
+        : AgentNavigationOverlay.defaultControlSize;
     return AgentNavigationOverlay(
       active: overlay,
       menuOpen: menuOpen.value || menuMoving.value,
       onRecordingChanged: onRecordingChanged,
+      controlSize: controlSize,
       child: Builder(
         builder: (context) {
-          if (axis == Axis.vertical) {
+          if (vertical) {
+            const height = _railControlSize * 3 + _railControlGap * 2;
             return SizedBox(
               width: 256,
-              height: 168 + Grid.xs * 2,
+              height: height,
               child: Stack(
                 clipBehavior: Clip.none,
                 children: [
@@ -79,8 +95,10 @@ class MessagesNavigationBar extends HookWidget {
                         dividerBefore: const {2},
                         sectionTitles: const {0: 'Solo', 2: 'Team'},
                         accessibilityLabel: 'New',
-                        width: 56,
-                        height: 168 + Grid.xs * 2,
+                        width: _railControlSize,
+                        height: height,
+                        navigationControlSize: _railControlSize,
+                        navigationGap: _railControlGap,
                         plain: false,
                       ),
                     ),
@@ -88,17 +106,21 @@ class MessagesNavigationBar extends HookWidget {
                   Positioned(
                     right: 0,
                     top: 0,
-                    width: 56,
-                    height: 56 + Grid.xs / 2,
+                    width: _railControlSize,
+                    height: _railControlSize + _railControlGap / 2,
                     child: ClipRect(
                       child: Align(
                         alignment: Alignment.topCenter,
                         child: _MenuNudge(
                           axis: Axis.vertical,
-                          offset: menuOpen.value ? 56 + Grid.xs : 0,
+                          offset: menuOpen.value
+                              ? _railControlSize + _railControlGap
+                              : 0,
                           menuOpen: menuOpen.value,
                           alignment: Alignment.center,
-                          child: hideDuringVoice(_search(context)),
+                          child: hideDuringVoice(
+                            _search(context, _railControlSize),
+                          ),
                         ),
                       ),
                     ),
@@ -107,7 +129,7 @@ class MessagesNavigationBar extends HookWidget {
                     bottom: 0,
                     right: 0,
                     width: 256,
-                    height: 56,
+                    height: _railControlSize,
                     child: OverflowBox(
                       alignment: Alignment.centerRight,
                       minWidth: 0,
@@ -117,7 +139,9 @@ class MessagesNavigationBar extends HookWidget {
                         alignment: Alignment.centerRight,
                         child: _MenuNudge(
                           axis: Axis.vertical,
-                          offset: menuOpen.value ? -56 - Grid.xs : 0,
+                          offset: menuOpen.value
+                              ? -_railControlSize - _railControlGap
+                              : 0,
                           menuOpen: menuOpen.value,
                           alignment: Alignment.center,
                           onEnd: () => menuMoving.value = false,
@@ -230,8 +254,11 @@ class MessagesNavigationBar extends HookWidget {
     );
   }
 
-  Widget _search(BuildContext context) => SizedBox.square(
-    dimension: 56,
+  Widget _search(
+    BuildContext context, [
+    double size = AgentNavigationOverlay.defaultControlSize,
+  ]) => SizedBox.square(
+    dimension: size,
     child: IconButton(
       tooltip: 'Search',
       onPressed: () {
