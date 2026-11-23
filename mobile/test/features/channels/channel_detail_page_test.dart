@@ -1002,7 +1002,7 @@ void main() {
       findsNWidgets(2),
     );
     expect(
-      find.descendant(of: quick, matching: find.text('Mark as unread')),
+      find.descendant(of: quick, matching: find.text('Mark unread')),
       findsOneWidget,
     );
     expect(find.text('Rename'), findsOneWidget);
@@ -5352,7 +5352,7 @@ void main() {
       final readSemantics = tester.getSemantics(
         find.byKey(const ValueKey('channel-details-read-action')),
       );
-      expect(readSemantics.label, 'Mark as unread');
+      expect(readSemantics.label, 'Mark unread');
       expect(readSemantics.flagsCollection.isButton, isTrue);
       expect(
         readSemantics.flagsCollection.isEnabled.toString(),

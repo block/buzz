@@ -372,7 +372,7 @@ void main() {
             findsOneWidget,
           );
           expect(find.text('general'), findsOneWidget);
-          expect(find.text('Mark as unread'), findsOneWidget);
+          expect(find.text('Mark unread'), findsOneWidget);
           expect(find.text('Terp'), findsOneWidget);
           expect(find.text('No workspace'), findsOneWidget);
           await tester.tap(find.text('Agent'));

@@ -696,7 +696,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
         if (canLeave && (solo || regularChannel)) leaveRow,
       ],
     );
-    final readLabel = isUnread ? 'Mark as read' : 'Mark as unread';
+    final readLabel = isUnread ? 'Mark read' : 'Mark unread';
     void markUnread() {
       if (isUnread) {
         _markChannelReadNow(ref, resolvedChannel.id);

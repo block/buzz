@@ -402,7 +402,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.longPress(find.text('Unfiled labeled chat'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Mark as unread'));
+    await tester.tap(find.text('Mark unread'));
     await tester.pumpAndSettle();
     expect(actions.last, 'unread loose');
     expect(pane.selectedId, isNull);
