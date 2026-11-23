@@ -150,6 +150,215 @@ void _editAuthorizationTests() {
     expect(relayRequests, isEmpty);
     await _expectEditMenu(tester, 'Owner update (edited)', isTrue);
   });
+
+  testWidgets(
+    'a restored owner without its signed profile cannot edit, in the channel '
+    'or a thread',
+    (tester) async {
+      final fixture = _EditFixture();
+      // The restored agent's entry kept its owner but lost its signed copy.
+      final storage = ProfileSnapshotStorage(_testPrefs);
+      await storage.write(storage.capture(fixture.owner.public, _editRelay), [
+        parseProfileEvent(fixture.agentProfile),
+        fixture.restoredWithoutEvidence,
+      ]);
+      addTearDown(() => storage.remove(fixture.owner.public, _editRelay));
+      final replies = [
+        _textMsg(
+          id: threadIdR1,
+          pubkey: fixture.agent.public,
+          content: 'Signed agent reply',
+          createdAt: 1500,
+          extraTags: [
+            ['e', threadIdA, '', 'reply'],
+          ],
+        ),
+        _textMsg(
+          id: threadIdRetained,
+          pubkey: fixture.restored.public,
+          content: 'Restored agent reply',
+          createdAt: 1501,
+          extraTags: [
+            ['e', threadIdA, '', 'reply'],
+          ],
+        ),
+      ];
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            fixture.agentMessage,
+            fixture.ownerEdit,
+            fixture.restoredMessage,
+            fixture.restoredOwnerEdit,
+          ],
+          threadReplies: {threadIdA: replies},
+          userCacheNotifier: UserCacheNotifier(),
+          relaySessionNotifier: _EditRelaySession(
+            profiles: const [],
+            events: const [],
+            status: SessionStatus.disconnected,
+          ),
+          relayConfigNotifier: _EditRelayConfig(fixture.owner.secret),
+          signingPubkey: fixture.owner.public,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(findRichText('Owner update (edited)'), findsOneWidget);
+      expect(findRichText('Restored agent message'), findsOneWidget);
+      await _expectEditMenu(tester, 'Owner update (edited)', isTrue);
+      await _expectEditMenu(tester, 'Restored agent message', isFalse);
+
+      final head = formatTimeline(
+        [fixture.agentMessage, fixture.ownerEdit],
+        agentOwners: {fixture.agent.public: fixture.owner.public},
+      ).single;
+      unawaited(
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: head,
+              allMessages: [head],
+              channelId: _channelId,
+              currentPubkey: fixture.owner.public,
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(ThreadDetailPage), findsOneWidget);
+      await _expectEditMenu(tester, 'Signed agent reply', isTrue);
+      await _expectEditMenu(tester, 'Restored agent reply', isFalse);
+    },
+  );
+
+  testWidgets('a profile signed by another key does not make an owner', (
+    tester,
+  ) async {
+    final fixture = _EditFixture();
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [fixture.restoredMessage, fixture.restoredOwnerEdit],
+        users: {
+          // A valid attestation for another key, filed under this agent.
+          fixture.restored.public: UserProfile(
+            pubkey: fixture.restored.public,
+            ownerPubkey: fixture.owner.public,
+            ownerEvidence: fixture.agentProfile,
+          ),
+        },
+        signingPubkey: fixture.owner.public,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(findRichText('Restored agent message'), findsOneWidget);
+    expect(findRichText('Restored update (edited)'), findsNothing);
+    await _expectEditMenu(tester, 'Restored agent message', isFalse);
+  });
+
+  testWidgets(
+    'the saved relay key applies until a key is read, then the read one does',
+    (tester) async {
+      final fixture = _EditFixture();
+      final live = Completer<String?>();
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            fixture.relayMessage(_trustedRelayKey),
+            fixture.humanRelayEdit,
+          ],
+          relaySessionNotifier: _EditRelaySession(
+            profiles: const [],
+            events: const [],
+          ),
+          relayConfigNotifier: _EditRelayConfig(fixture.owner.secret),
+          signingPubkey: fixture.owner.public,
+          loadRelayAuthor: (_) => live.future,
+          extraOverrides: [
+            savedRelayAuthorProvider.overrideWith(
+              (ref) async => _trustedRelayKey,
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(findRichText('Relay update (edited)'), findsOneWidget);
+
+      live.complete(_rotatedRelayKey);
+      await tester.pumpAndSettle();
+      expect(findRichText('Relay message'), findsOneWidget);
+      expect(findRichText('Relay update (edited)'), findsNothing);
+    },
+  );
+
+  // A head outside the relay's thread history is formatted from the saved
+  // page, with the edit authority its own edits need.
+  for (final attributed in [false, true]) {
+    testWidgets('a saved thread head shows its '
+        '${attributed ? 'relay attributed author' : 'owner'} edit', (
+      tester,
+    ) async {
+      final fixture = _EditFixture();
+      final head = attributed
+          ? fixture.relayMessage(_trustedRelayKey)
+          : fixture.agentMessage;
+      final relayKey = Completer<String?>();
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          savedThreadPreview: Future.value([
+            head,
+            attributed ? fixture.humanRelayEdit : fixture.ownerEdit,
+          ]),
+          initialThreadRootId: head.id,
+          threadReplies: {
+            head.id: [
+              _textMsg(
+                id: threadIdR1,
+                pubkey: fixture.human.public,
+                content: 'Relay reply',
+                createdAt: 1500,
+                extraTags: [
+                  ['e', head.id, '', 'reply'],
+                ],
+              ),
+            ],
+          },
+          users: {
+            fixture.agent.public: parseProfileEvent(
+              fixture.agentProfile,
+            ).profile,
+          },
+          relaySessionNotifier: _EditRelaySession(
+            profiles: const [],
+            events: const [],
+          ),
+          relayConfigNotifier: _EditRelayConfig(fixture.owner.secret),
+          signingPubkey: fixture.owner.public,
+          loadRelayAuthor: (_) => relayKey.future,
+          extraOverrides: [
+            savedRelayAuthorProvider.overrideWith((ref) async => null),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(ThreadDetailPage), findsOneWidget);
+      expect(findRichText('Relay reply'), findsOneWidget);
+
+      if (attributed) {
+        expect(findRichText('Relay message'), findsOneWidget);
+        relayKey.complete(_trustedRelayKey);
+        await tester.pumpAndSettle();
+        expect(findRichText('Relay update (edited)'), findsOneWidget);
+      } else {
+        expect(findRichText('Owner update (edited)'), findsOneWidget);
+        await _expectEditMenu(tester, 'Owner update (edited)', isTrue);
+      }
+    });
+  }
 }
 
 /// Long-presses [text] and checks whether the actions offer Edit.
@@ -175,6 +384,30 @@ class _EditFixture {
   final owner = nostr.Keys.generate();
   final agent = nostr.Keys.generate();
   final human = nostr.Keys.generate();
+
+  /// An agent whose stored profile names [owner] without its signed copy.
+  final restored = nostr.Keys.generate();
+  late final restoredWithoutEvidence = (
+    profile: UserProfile(
+      pubkey: restored.public,
+      displayName: 'Restored',
+      ownerPubkey: owner.public,
+    ),
+    createdAt: 1,
+    eventId: 'a' * 64,
+  );
+  late final restoredMessage = _textMsg(
+    id: threadIdUnrelated,
+    pubkey: restored.public,
+    content: 'Restored agent message',
+    createdAt: 1004,
+  );
+  late final restoredOwnerEdit = _edit(
+    owner.public,
+    threadIdUnrelated,
+    'Restored update',
+    2003,
+  );
 
   late final agentProfile = _signedKind0(tags: [_authTag(owner, agent.public)]);
   late final agentProfileWithoutOwner = _signedKind0(createdAt: 2);

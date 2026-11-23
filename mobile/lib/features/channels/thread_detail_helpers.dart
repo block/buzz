@@ -219,9 +219,21 @@ _watchThreadMessages(
   final events = savedReplies == null && replyEvents == null
       ? live
       : mergeThreadEvents([...?savedReplies, ...?replyEvents], live);
+  // A head outside relay history comes from the saved page. These events
+  // include [events], so one authority covers both lists formatted here.
+  final savedHeadEvents = relayRepliesAvailable && saved != null
+      ? mergeThreadEvents(
+          saved.where(
+            (event) =>
+                event.id == threadHead.id ||
+                EventKind.channelAuxEventKinds.contains(event.kind),
+          ),
+          events,
+        )
+      : null;
   final (owners: agentOwners, relayKey: relayPubkey) = useEditAuthority(
     ref,
-    events,
+    savedHeadEvents ?? events,
   );
   final observed = accessDenied
       ? const <TimelineMessage>[]
@@ -253,18 +265,10 @@ _watchThreadMessages(
     // Relay history can replace the saved replies before the channel's
     // separate exact-ID lookup finds a head outside its normal history.
     savedHead:
-        relayRepliesAvailable &&
-            saved != null &&
+        savedHeadEvents != null &&
             !allMsgs.any((message) => message.id == threadHead.id)
         ? formatTimeline(
-            mergeThreadEvents(
-              saved.where(
-                (event) =>
-                    event.id == threadHead.id ||
-                    EventKind.channelAuxEventKinds.contains(event.kind),
-              ),
-              events,
-            ),
+            savedHeadEvents,
             currentPubkey: currentPubkey,
             agentOwners: agentOwners,
             relayPubkey: relayPubkey,
