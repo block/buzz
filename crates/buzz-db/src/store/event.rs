@@ -1349,10 +1349,16 @@ fn push_exact_tag_match(
 ///   `created_at` index and filters `d_tag` row by row. Its `LIMIT` is never
 ///   reached when it asks for one row per value, so it reads every stored
 ///   version of the kind (relay-signed channel metadata, say) instead of
-///   probing `idx_events_parameterized` once per value.
+///   probing `idx_events_parameterized` once per value;
+/// - a `#e` or `#a` reference match (the channel-window aux closure, say)
+///   can no longer see that its kinds are rare, so it ANDs a `tags` GIN
+///   probe into every partition's scan. Deletions targeting a page's
+///   reactions then cost a GIN probe per month of history instead of a
+///   short read of the community's kind index.
 fn plans_with_bound_values(q: &EventQuery) -> bool {
     q.tag_values.iter().any(|(_, values)| !values.is_empty())
         || q.d_tags.as_ref().is_some_and(|ds| !ds.is_empty())
+        || reference_tag_fence(q)
 }
 
 /// AND the NIP-33 `d` match: one value, or any of [`EventQuery::d_tags`] as
@@ -3478,8 +3484,10 @@ mod postgres_tests {
     /// parameter-aware planning. A cached generic plan ignores the values: a
     /// label match scans every group-state row in the community instead of
     /// using the `tags` GIN index, and a `#d` read walks the author's
-    /// `created_at` index and reads every stored version of the kind. The `#d`
-    /// read still returns and counts exactly the requested addresses.
+    /// `created_at` index and reads every stored version of the kind, and a
+    /// `#e` reference read probes the `tags` GIN index in every partition even
+    /// when its kinds are rare. The `#d` and `#e`
+    /// reads still return exactly the requested rows.
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn value_matched_queries_are_not_cached_as_prepared_statements() {
@@ -3497,6 +3505,13 @@ mod postgres_tests {
                 .expect("insert addressable event");
             addressed.push((d, event.id));
         }
+        let reaction = EventBuilder::new(Kind::Reaction, "+")
+            .tags([Tag::parse(["e", &addressed[0].1.to_hex()]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        insert_event(&pool, community, &reaction, None)
+            .await
+            .expect("insert reaction");
         let mut conn = pool.acquire().await.expect("acquire");
         // Clear SQLx's statement cache and Postgres's prepared statements
         // together; a raw `DEALLOCATE ALL` would leave the client cache
@@ -3512,7 +3527,14 @@ mod postgres_tests {
         d_tags.kinds = Some(vec![30023]);
         d_tags.pubkey = Some(keys.public_key().to_bytes().to_vec());
         d_tags.d_tags = Some(vec!["a".to_owned(), "c".to_owned()]);
-        for (q, statement) in [(&label, "%tags @> ANY(%"), (&d_tags, "%d_tag = ANY(%")] {
+        let mut references = EventQuery::for_community(community);
+        references.kinds = Some(vec![7]);
+        references.e_tags = Some(vec![addressed[0].1.to_hex(), "ab".repeat(32)]);
+        for (q, statement) in [
+            (&label, "%tags @> ANY(%"),
+            (&d_tags, "%d_tag = ANY(%"),
+            (&references, "%tags @> ANY(%"),
+        ] {
             for _ in 0..6 {
                 query_events_on(&mut conn, q, ReadDeadline::PerRead)
                     .await
@@ -3543,6 +3565,18 @@ mod postgres_tests {
                 .await
                 .expect("d-tag count"),
             2
+        );
+
+        let referencing: Vec<_> = query_events_on(&mut conn, &references, ReadDeadline::PerRead)
+            .await
+            .expect("reference read")
+            .into_iter()
+            .map(|stored| stored.event.id)
+            .collect();
+        assert_eq!(
+            referencing,
+            vec![reaction.id],
+            "exactly the referencing row"
         );
 
         // Control: the same query without a value match stays a cached
