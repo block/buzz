@@ -263,48 +263,84 @@ void main() {
         findsOneWidget,
       );
       expect(tester.getTopLeft(bar).dy, 0);
+      // Duo keeps main's Flutter header: "Messages" stays large on the
+      // leading edge, at main's position and header height. Only the header's
+      // controls move into the rail. The rects below were measured on main.
+      final title = find.text('Messages');
       final menu = find.byWidgetPredicate(
         (widget) =>
             widget is IosMessageCreateButton &&
             widget.accessibilityLabel == 'Community menu',
       );
-      expect(
-        tester.getCenter(find.text('Messages')).dy,
-        tester.getCenter(menu).dy,
-      );
-      expect(
-        tester.getCenter(menu).dy,
-        frostedAppBarHeight(tester.element(bar)) / 2,
-      );
+      final rail = find.byKey(const ValueKey('duo-toolbar-Community menu'));
+      void expectLeadingTitle(Rect titleRect, double headerHeight) {
+        expect(tester.widget<FrostedAppBar>(bar).useNativeNavigation, isFalse);
+        expect(tester.getRect(title), titleRect);
+        expect(tester.getSize(bar).height, headerHeight);
+        expect(menu, findsNothing);
+        expect(rail, findsOneWidget);
+      }
+
+      const wideTitle = Rect.fromLTRB(20, 19.5, 196, 48.5);
+      expectLeadingTitle(wideTitle, 76);
+      // Home's scrolling never reaches the rail controls: no rebuilds and no
+      // `scroll` calls, which UIKit ignores for standalone controls.
+      final railCalls = <String>[];
+      var railRebuilds = 0;
+      for (final (name, id) in [('Activity', 9801), ('Community menu', 9802)]) {
+        final view = tester.widget<UiKitView>(
+          find.descendant(
+            of: find.byKey(ValueKey('duo-toolbar-$name')),
+            matching: find.byType(UiKitView),
+          ),
+        );
+        final channel = MethodChannel('${IosNavigationBar.viewType}/$id');
+        binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+          call,
+        ) async {
+          railCalls.add(call.method);
+          return null;
+        });
+        addTearDown(
+          () => binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            channel,
+            null,
+          ),
+        );
+        view.onPlatformViewCreated!(id);
+      }
+      await tester.pumpAndSettle();
+      railCalls.clear();
+      final previousOnRebuild = debugOnRebuildDirtyWidget;
+      debugOnRebuildDirtyWidget = (element, _) {
+        final widget = element.widget;
+        if (widget is IosNavigationBar && widget.standaloneControl) {
+          railRebuilds++;
+        }
+      };
+      addTearDown(() => debugOnRebuildDirtyWidget = previousOnRebuild);
       final originalHeaderRect = tester.getRect(bar);
       final scrollable = find.byType(Scrollable).first;
-      await tester.drag(scrollable, const Offset(0, -250));
+      await tester.timedDrag(
+        scrollable,
+        const Offset(0, -250),
+        const Duration(milliseconds: 500),
+      );
       await tester.pumpAndSettle();
+      debugOnRebuildDirtyWidget = previousOnRebuild;
+      expect(railCalls, isEmpty);
+      expect(railRebuilds, 0);
       expect(tester.getRect(bar), originalHeaderRect);
-      expect(
-        tester.getCenter(find.text('Messages')).dy,
-        tester.getCenter(menu).dy,
-      );
-      expect(
-        find.byWidgetPredicate(
-          (widget) =>
-              widget is IosMessageCreateButton &&
-              widget.accessibilityLabel == 'Community menu',
-        ),
-        findsOneWidget,
-      );
+      expectLeadingTitle(wideTitle, 76);
       tester.view.physicalSize = const Size(466, 678);
       await tester.pumpAndSettle();
       expect(tester.widget<FrostedAppBar>(bar).nativeLargeTitle, isFalse);
-      expect(
-        tester.getCenter(find.text('Messages')).dy,
-        tester.getCenter(menu).dy,
-      );
+      expectLeadingTitle(const Rect.fromLTRB(20, 13.5, 196, 42.5), 64);
       final closedHeaderRect = tester.getRect(bar);
       expect(closedHeaderRect.left, 0);
       expect(closedHeaderRect.right, 466);
       expect(tester.getRect(scrollable).right, lessThanOrEqualTo(390));
-      expect(tester.getRect(menu).right, lessThanOrEqualTo(466 - 76));
+      expect(tester.getCenter(rail).dx, greaterThan(466 - 76));
 
       await tester.drag(scrollable, const Offset(0, -200));
       await tester.pumpAndSettle();
@@ -315,10 +351,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.getRect(bar).left, 0);
       expect(tester.getSize(bar).width, 375 + 76);
-      expect(
-        tester.getRect(find.text('Messages')).left,
-        greaterThanOrEqualTo(76),
-      );
+      expectLeadingTitle(wideTitle.shift(const Offset(76, 0)), 76);
+      expect(tester.getCenter(rail).dx, lessThan(76));
       expect(tester.takeException(), isNull);
     },
     variant: TargetPlatformVariant.only(TargetPlatform.iOS),
@@ -343,6 +377,59 @@ void main() {
       Axis.vertical,
     );
     expect(tester.getCenter(find.byTooltip('Search')).dx, greaterThan(390));
+
+    // Duo moves the Messages header's Activity and Community menu controls
+    // into the rail as native controls, in header order.
+    final headerBell = find.byWidgetPredicate(
+      (widget) =>
+          widget is IosGlassNavigationButton &&
+          widget.icon == IosGlassNavigationIcon.bell,
+    );
+    final headerMenu = find.byWidgetPredicate(
+      (widget) =>
+          widget is IosMessageCreateButton &&
+          widget.accessibilityLabel == 'Community menu',
+    );
+    final railActivity = find.byKey(const ValueKey('duo-toolbar-Activity'));
+    final railMenu = find.byKey(const ValueKey('duo-toolbar-Community menu'));
+    IosNavigationAction railAction(Finder control) => tester
+        .widget<IosNavigationBar>(
+          find.descendant(of: control, matching: find.byType(IosNavigationBar)),
+        )
+        .leading!;
+    expect(headerBell, findsNothing);
+    expect(headerMenu, findsNothing);
+    expect(tester.getCenter(railActivity).dx, greaterThan(390));
+    expect(tester.getCenter(railMenu).dx, tester.getCenter(railActivity).dx);
+    expect(
+      tester.getCenter(railActivity).dy,
+      lessThan(tester.getCenter(railMenu).dy),
+    );
+    expect(railAction(railActivity).activityColor, isNull);
+    expect(
+      railAction(railMenu).children.map((action) => action.label),
+      containsAllInOrder(['Agents', 'Settings']),
+    );
+    railAction(railActivity).onPressed!();
+    await tester.pumpAndSettle();
+    expect(find.byType(ActivityPage), findsOneWidget);
+    expect(railActivity, findsNothing);
+    Navigator.of(tester.element(find.byType(ActivityPage))).pop();
+    await tester.pumpAndSettle();
+    expect(railActivity, findsOneWidget);
+    // Bestie recording hides the rail controls with Search and New, so they
+    // cannot open a route that cancels the recording.
+    void recording(bool value) => tester
+        .widget<MessagesNavigationBar>(find.byType(MessagesNavigationBar))
+        .onRecordingChanged!(value);
+    recording(true);
+    await tester.pumpAndSettle();
+    expect(railActivity, findsNothing);
+    expect(railMenu, findsNothing);
+    recording(false);
+    await tester.pumpAndSettle();
+    expect(railActivity, findsOneWidget);
+    expect(railMenu, findsOneWidget);
     final create = tester.widget<IosMessageCreateButton>(
       find.descendant(
         of: find.byType(MessagesNavigationBar),
@@ -389,11 +476,15 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Conversation content'), findsOneWidget);
     expect(find.byType(MessagesNavigationBar), findsNothing);
+    expect(railActivity, findsNothing);
     tester.view.physicalSize = const Size(951, 669);
     await tester.pumpAndSettle();
     expect(find.byType(MessagesNavigationBar), findsOneWidget);
     expect(find.text('Conversation content'), findsOneWidget);
     expect(pane.selectedId, 'sample');
+    // The list's rail controls stay above the open conversation's.
+    expect(railActivity, findsOneWidget);
+    expect(railMenu, findsOneWidget);
     final openNavigation = find.byType(MessagesNavigationBar);
     expect(
       tester.widget<MessagesNavigationBar>(openNavigation).axis,
@@ -467,6 +558,10 @@ void main() {
           .axis,
       Axis.horizontal,
     );
+    // An ordinary iPhone keeps the header controls.
+    expect(headerBell, findsOneWidget);
+    expect(headerMenu, findsOneWidget);
+    expect(railActivity, findsNothing);
     expect(tester.takeException(), isNull);
     debugDefaultTargetPlatformOverride = null;
   });

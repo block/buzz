@@ -151,6 +151,7 @@ class ChannelsPage extends HookConsumerWidget {
     required this.settingsPageBuilder,
     this.onSearch,
     this.messagesActionsBuilder,
+    this.messagesRailActionsBuilder,
     this.soloSliver,
     this.newChannelAction,
     this.newDmAction,
@@ -167,6 +168,11 @@ class ChannelsPage extends HookConsumerWidget {
   /// standalone Channels header.
   final List<Widget> Function(VoidCallback openSwitcher, GlobalKey avatarKey)?
   messagesActionsBuilder;
+
+  /// Builds the Messages header actions as native controls for Duo's rail,
+  /// which replaces the header actions there.
+  final List<IosNavigationAction> Function(VoidCallback openSwitcher)?
+  messagesRailActionsBuilder;
   final Widget? soloSliver;
   final ValueNotifier<VoidCallback?>? newChannelAction;
   final ValueNotifier<VoidCallback?>? newDmAction;
@@ -211,6 +217,7 @@ class ChannelsPage extends HookConsumerWidget {
         (DuoToolbarScope.maybeStripOf(context) ??
                 FoldGeometry.of(context).strip) !=
             null;
+    final railActions = nativeDuoTitle && messagesRailActionsBuilder != null;
     final topSectionHeight = frostedAppBarHeight(
       context,
       titleStyle: headerTitleStyle,
@@ -724,7 +731,9 @@ class ChannelsPage extends HookConsumerWidget {
                   child: Text('Messages', style: headerTitleStyle),
                 )
               : const SizedBox.shrink(),
-          actions: messages
+          actions: railActions
+              ? const []
+              : messages
               ? messagesActionsBuilder?.call(
                       openCommunityGrid,
                       communityAvatarKey,
@@ -746,7 +755,14 @@ class ChannelsPage extends HookConsumerWidget {
       current: routeCurrent,
       nativeSuppressed: headerNativeSuppressed,
       suppressesNative: messages,
-      child: page,
+      // Outside the header's scroll-driven builder and scroll scope, so the
+      // rail controls do not rebuild or receive scroll updates per frame.
+      child: railActions
+          ? _DuoRailActions(
+              actions: messagesRailActionsBuilder!(openCommunityGrid),
+              child: page,
+            )
+          : page,
     );
   }
 }
@@ -866,4 +882,28 @@ BoxConstraints _quickActionSheetConstraints(BuildContext context) {
   return BoxConstraints(
     maxHeight: mediaQuery.size.height - mediaQuery.viewPadding.top,
   );
+}
+
+/// Shows Home's Messages actions in Duo's rail while its pane and route are
+/// current.
+class _DuoRailActions extends StatelessWidget {
+  const _DuoRailActions({required this.actions, required this.child});
+
+  final List<IosNavigationAction> actions;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final toolbarScope = DuoToolbarScope.maybeOf(context);
+    return DuoToolbarPortal(
+      strip: toolbarScope == null
+          ? FoldGeometry.of(context).strip
+          : toolbarScope.strip,
+      active:
+          (toolbarScope?.active ?? true) &&
+          (ModalRoute.isCurrentOf(context) ?? true),
+      actions: actions,
+      child: child,
+    );
+  }
 }
