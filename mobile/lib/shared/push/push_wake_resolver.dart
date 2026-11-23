@@ -13,6 +13,7 @@ import '../relay/relay_http_query_client.dart';
 import '../relay/relay_provider.dart';
 import '../relay/relay_query_response.dart';
 import '../relay/relay_session.dart' show buildNip98AuthHeader;
+import '../relay/thread_reference.dart' show isBroadcastReply;
 import '../utils/string_utils.dart';
 import 'notification_body.dart';
 import 'push_wake_eligibility.dart';
@@ -419,7 +420,11 @@ Future<void> _resolveCommunity(
             communityId: community.id,
             channelId: channelId,
             eventId: event.id,
-            threadRootId: event.threadReference.rootId,
+            // A reply opens its direct parent's thread, as the in-app inbox
+            // does, and a broadcast reply is a top-level message.
+            threadRootId: isBroadcastReply(event.tags)
+                ? null
+                : event.threadReference.parentId,
           ),
         ),
       );

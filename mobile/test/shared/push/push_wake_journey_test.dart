@@ -7,6 +7,7 @@ import 'package:buzz/shared/push/push_wake_resolver.dart';
 import 'package:buzz/shared/push/push_wake_runner.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
+import 'package:buzz/shared/relay/nostr_models.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../helpers/push_wake_fixture.dart';
@@ -79,6 +80,48 @@ void main() {
     expect(second.body, 'hello there');
     expect(second.conversationTitle, isNull);
     expect(second.conversationId, isNot(first.conversationId));
+
+    // Tapping a reply opens the thread of the message it answers, as in the
+    // inbox: a reply to a reply opens its direct parent's thread, and a
+    // broadcast reply is a top-level message with no thread.
+    List<List<String>> replyTo(NostrEvent root, [NostrEvent? parent]) => [
+      ['e', root.id, '', 'root'],
+      ['e', (parent ?? root).id, '', 'reply'],
+    ];
+    final start = relay.message(dm, friend, 'thread start');
+    final reply = relay.message(
+      dm,
+      friend,
+      'first reply',
+      extraTags: replyTo(start),
+    );
+    final nested = relay.message(
+      dm,
+      friend,
+      'reply to the reply',
+      extraTags: replyTo(start, reply),
+    );
+    final broadcast = relay.message(
+      dm,
+      friend,
+      'also for the channel',
+      extraTags: [
+        ...replyTo(start, reply),
+        ['broadcast', '1'],
+      ],
+    );
+    expect(
+      {
+        for (final n in (await fixture.wake()).notifications)
+          n.eventId: n.target.threadRootId,
+      },
+      {
+        start.id: null,
+        reply.id: start.id,
+        nested.id: reply.id,
+        broadcast.id: null,
+      },
+    );
   });
 
   test('shown messages stay shown, and a missed wake is recovered', () async {

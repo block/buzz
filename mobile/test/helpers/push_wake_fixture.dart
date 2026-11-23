@@ -162,6 +162,7 @@ class FakePushRelay {
     String content, {
     FakePerson? mention,
     List<String> extraMentions = const [],
+    List<List<String>> extraTags = const [],
     Duration? age,
   }) {
     final createdAt = pushWakeClock
@@ -173,6 +174,7 @@ class FakePushRelay {
         ['h', channel.id],
         if (mention != null) ['p', mention.pubkey],
         for (final pubkey in extraMentions) ['p', pubkey],
+        ...extraTags,
       ],
       content: content,
       author: author.keys,
