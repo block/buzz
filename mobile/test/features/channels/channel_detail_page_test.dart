@@ -446,6 +446,7 @@ Widget _buildTestable({
       if (!useRealChannelProviders)
         channelsProvider.overrideWith(() => fakeChannelsNotifier),
       channelStarsProvider.overrideWith(_FakeChannelStarsNotifier.new),
+      channelPinsProvider.overrideWith(_FakeChannelStarsNotifier.new),
       channelMutesProvider.overrideWith(_FakeChannelMutesNotifier.new),
       if (!useRealChannelProviders)
         channelDetailsProvider(_channelId).overrideWith(
@@ -5401,9 +5402,18 @@ void main() {
         await tester.pump();
 
         expect(find.text('Unpin'), findsOneWidget);
+        await tester.ensureVisible(find.text('Star'));
+        await tester.tap(find.text('Star'));
+        await tester.pump();
+        expect(find.text('Unstar'), findsOneWidget);
+        expect(find.text('Unpin'), findsOneWidget);
         expect(find.byIcon(BuzzIcons.pinnedOff), findsOneWidget);
 
-        await tester.ensureVisible(muteAction);
+        await Scrollable.ensureVisible(
+          tester.element(muteAction),
+          alignment: 0.5,
+        );
+        await tester.pumpAndSettle();
         await tester.tap(muteAction);
         await tester.pump();
 
@@ -5413,7 +5423,11 @@ void main() {
 
         await tester.ensureVisible(pinAction);
         await tester.tap(pinAction);
-        await tester.ensureVisible(muteAction);
+        await Scrollable.ensureVisible(
+          tester.element(muteAction),
+          alignment: 0.5,
+        );
+        await tester.pumpAndSettle();
         await tester.tap(muteAction);
         await tester.pump();
 

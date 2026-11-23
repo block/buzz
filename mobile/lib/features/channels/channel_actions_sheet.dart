@@ -239,6 +239,9 @@ class ChannelActionsSheet extends HookConsumerWidget {
     final canFile = ref.watch(
       channelSectionsProvider.select((state) => state.editable),
     );
+    final isPinned =
+        ref.watch(channelPinsProvider).store.channels[channel.id]?.enabled ==
+        true;
     final isStarred =
         ref.watch(channelStarsProvider).store.channels[channel.id]?.starred ==
         true;
@@ -365,14 +368,21 @@ class ChannelActionsSheet extends HookConsumerWidget {
       SheetActionSection(
         children: [
           _ChannelSheetRow(
-            leading: Icon(isStarred ? BuzzIcons.pinnedOff : BuzzIcons.pinned),
-            title: Text(isStarred ? 'Unpin' : 'Pin'),
+            leading: Icon(isPinned ? BuzzIcons.pinnedOff : BuzzIcons.pinned),
+            title: Text(isPinned ? 'Unpin' : 'Pin'),
+            onTap: () {
+              close();
+              final notifier = ref.read(channelPinsProvider.notifier);
+              notifier.setEnabled(channel.id, !isPinned);
+            },
+          ),
+          _ChannelSheetRow(
+            leading: Icon(isStarred ? BuzzIcons.starOff : BuzzIcons.star),
+            title: Text(isStarred ? 'Unstar' : 'Star'),
             onTap: () {
               close();
               final notifier = ref.read(channelStarsProvider.notifier);
-              isStarred
-                  ? notifier.unstarChannel(channel.id)
-                  : notifier.starChannel(channel.id);
+              notifier.setEnabled(channel.id, !isStarred);
             },
           ),
           _ChannelSheetRow(
