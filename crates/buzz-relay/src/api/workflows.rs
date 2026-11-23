@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use buzz_core::TenantContext;
+use buzz_core::{tenant::CommunityId, TenantContext};
 
 use crate::{
     api::{api_error, bridge, internal_error, parse_query_or_400},
@@ -48,8 +48,7 @@ async fn authorize_workflow_read(
     path: &str,
     raw_query: Option<&str>,
     workflow_id: Uuid,
-    method: &'static str,
-) -> Result<(TenantContext, Vec<u8>), Response> {
+) -> Result<TenantContext, Response> {
     let tenant = crate::nip_fi_shadow::bind_tenant(state, headers)
         .await
         .ok_or_else(|| {
@@ -74,7 +73,7 @@ async fn authorize_workflow_read(
         headers,
         bridge::make_nip98_closure_for_admission(
             headers.clone(),
-            method,
+            "GET",
             url,
             None,
             require_auth,
@@ -106,8 +105,21 @@ async fn authorize_workflow_read(
     .await
     .map_err(|e| e.into_response())?;
 
-    // A workflow the caller cannot read answers exactly like a missing one, so
-    // the response never reveals which workflow IDs exist.
+    require_readable_workflow(state, &tenant, &pubkey_bytes, workflow_id).await?;
+    Ok(tenant)
+}
+
+/// Load `workflow_id` if `pubkey_bytes` may read its channel.
+///
+/// A workflow the caller cannot read answers exactly like a missing one, so
+/// the response never reveals which workflow IDs exist.
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
+async fn require_readable_workflow(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    pubkey_bytes: &[u8],
+    workflow_id: Uuid,
+) -> Result<buzz_db::workflow::WorkflowRecord, Response> {
     let not_found = || api_error(StatusCode::NOT_FOUND, "workflow not found").into_response();
     let workflow = match state.db.get_workflow(tenant.community(), workflow_id).await {
         Ok(workflow) => workflow,
@@ -118,33 +130,41 @@ async fn authorize_workflow_read(
             )
         }
     };
-    let channel_id = workflow.channel_id.ok_or_else(not_found)?;
-    let accessible = state
-        .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
-        .await
-        .map_err(|error| {
-            internal_error(&format!("workflow channel access lookup: {error}")).into_response()
-        })?;
-    // A workflow names its channel, so a readable named-only channel (a
-    // system channel, or a type added later) counts.
-    let readable = accessible.contains(&channel_id)
-        || state
-            .db
-            .get_readable_named_only_channels(tenant.community(), &pubkey_bytes, &[channel_id])
-            .await
-            .map_err(|error| {
-                internal_error(&format!(
-                    "workflow named-only channel access lookup: {error}"
-                ))
-                .into_response()
-            })?
-            .iter()
-            .any(|channel| channel.id == channel_id);
-    if !readable {
-        return Err(not_found());
+    match workflow_channel_readable(state, tenant.community(), pubkey_bytes, &workflow).await {
+        Ok(true) => Ok(workflow),
+        Ok(false) => Err(not_found()),
+        Err(error) => Err(internal_error(&error).into_response()),
     }
+}
 
-    Ok((tenant, pubkey_bytes))
+/// Whether `pubkey_bytes` may read the channel `workflow` belongs to.
+///
+/// A workflow without a channel is readable by nobody. A workflow names its
+/// channel, so a readable named-only channel (a system channel, or a type
+/// added later) counts.
+async fn workflow_channel_readable(
+    state: &AppState,
+    community: CommunityId,
+    pubkey_bytes: &[u8],
+    workflow: &buzz_db::workflow::WorkflowRecord,
+) -> Result<bool, String> {
+    let Some(channel_id) = workflow.channel_id else {
+        return Ok(false);
+    };
+    let accessible = state
+        .get_accessible_channel_ids_cached(community, pubkey_bytes)
+        .await
+        .map_err(|error| format!("workflow channel access lookup: {error}"))?;
+    if accessible.contains(&channel_id) {
+        return Ok(true);
+    }
+    Ok(state
+        .db
+        .get_readable_named_only_channels(community, pubkey_bytes, &[channel_id])
+        .await
+        .map_err(|error| format!("workflow named-only channel access lookup: {error}"))?
+        .iter()
+        .any(|channel| channel.id == channel_id))
 }
 
 /// `GET /workflows/{workflow_id}/runs` — one authorized, keyset-paginated page.
@@ -171,8 +191,8 @@ async fn workflow_runs_inner(
     // over request-validation errors. [FI-TRACE-HTTP-INGRESS]
     // Raw query is preserved here; parsing happens after admission.
     let path = format!("/workflows/{workflow_id}/runs");
-    let (tenant, _) =
-        authorize_workflow_read(&state, &headers, &path, raw_query.as_deref(), workflow_id, "GET").await?;
+    let tenant =
+        authorize_workflow_read(&state, &headers, &path, raw_query.as_deref(), workflow_id).await?;
 
     // Parse query string after admission so malformed params (e.g. ?limit=abc)
     // cannot 400 before the NIP-FI gate fires.  A parse failure after
@@ -245,7 +265,7 @@ async fn run_approvals_inner(
     headers: HeaderMap,
 ) -> Result<Json<Value>, Response> {
     let path = format!("/workflows/{workflow_id}/runs/{run_id}/approvals");
-    let (tenant, _) = authorize_workflow_read(&state, &headers, &path, None, workflow_id, "GET").await?;
+    let tenant = authorize_workflow_read(&state, &headers, &path, None, workflow_id).await?;
 
     let run = state
         .db
@@ -305,6 +325,7 @@ fn approval_json(approval: &buzz_db::workflow::ApprovalRecord) -> Value {
 
 /// Body for the approval decide endpoint.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DecideApprovalBody {
     /// `granted` or `denied`.
     decision: String,
@@ -312,43 +333,116 @@ pub struct DecideApprovalBody {
     note: Option<String>,
 }
 
+/// Why a requester may not decide an approval gate.
+#[derive(Debug)]
+pub(crate) enum ApprovalDecisionError {
+    /// The requester cannot read the workflow's channel (or the workflow is
+    /// gone). Callers answer like a missing approval.
+    WorkflowNotReadable,
+    /// The requester can read the channel but the gate's approver spec does
+    /// not authorize them, or the spec is unsupported (fails closed).
+    Denied(buzz_workflow::approver::DecisionDenied),
+    /// A lookup failed; deny.
+    Internal(String),
+}
+
+/// The single authorization check for granting or denying an approval gate.
+///
+/// Every path that changes approval state (the HTTP decide endpoint and the
+/// Nostr grant/deny command kinds) calls this with the persisted gate and the
+/// identity its transport proved, **before** writing anything. A requester
+/// may decide only if both hold:
+///
+/// 1. they can read the channel of the workflow the gate belongs to (the gate's
+///    own `workflow_id`, never a caller-supplied one), and
+/// 2. the gate's persisted approver spec authorizes them
+///    ([`buzz_workflow::approver::authorize_decision`]: exact pubkey, or the
+///    explicit `any`; roles and anything unparseable fail closed).
+///
+/// Approve and reject are authorized identically. The workflow initiator,
+/// owner, and channel admins get no implicit right to decide.
+pub(crate) async fn authorize_approval_decision(
+    state: &AppState,
+    community: CommunityId,
+    approval: &buzz_db::workflow::ApprovalRecord,
+    requester: &nostr::PublicKey,
+) -> Result<(), ApprovalDecisionError> {
+    let requester_bytes = requester.to_bytes();
+    let workflow = match state.db.get_workflow(community, approval.workflow_id).await {
+        Ok(workflow) => workflow,
+        Err(buzz_db::error::DbError::NotFound(_)) => {
+            return Err(ApprovalDecisionError::WorkflowNotReadable)
+        }
+        Err(other) => {
+            return Err(ApprovalDecisionError::Internal(format!(
+                "get workflow for approval decision: {other}"
+            )))
+        }
+    };
+    if !workflow_channel_readable(state, community, &requester_bytes, &workflow)
+        .await
+        .map_err(ApprovalDecisionError::Internal)?
+    {
+        return Err(ApprovalDecisionError::WorkflowNotReadable);
+    }
+    buzz_workflow::approver::authorize_decision(&approval.approver_spec, requester)
+        .map_err(ApprovalDecisionError::Denied)
+}
+
 /// `POST /workflows/{workflow_id}/runs/{run_id}/approvals/{approval_ref}/decide`
 ///
 /// Grants or denies a pending approval gate (WF-08). On grant the run
 /// resumes after the gate step; on deny the run fails. `approval_ref` is the
-/// hex-encoded stored token hash from the approvals listing.
+/// hex-encoded stored token hash from the approvals listing. The ref is
+/// readable by every channel reader, so it is an identifier, not a
+/// credential: authorization rests on [`authorize_approval_decision`].
 pub async fn decide_approval(
     State(state): State<Arc<AppState>>,
     Path((workflow_id, run_id, approval_ref)): Path<(Uuid, Uuid, String)>,
     headers: HeaderMap,
-    axum::extract::Json(body): axum::extract::Json<DecideApprovalBody>,
+    body: axum::body::Bytes,
 ) -> Response {
     decide_approval_inner(state, workflow_id, run_id, approval_ref, headers, body)
         .await
         .into_response()
 }
 
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn decide_approval_inner(
     state: Arc<AppState>,
     workflow_id: Uuid,
     run_id: Uuid,
     approval_ref: String,
     headers: HeaderMap,
-    body: DecideApprovalBody,
+    body: axum::body::Bytes,
 ) -> Result<Json<Value>, Response> {
+    // A state-changing POST: NIP-98 is mandatory (no X-Pubkey dev fallback)
+    // and its `payload` tag must cover this exact body, so a signed request
+    // cannot be replayed with the decision flipped.
     let path = format!("/workflows/{workflow_id}/runs/{run_id}/approvals/{approval_ref}/decide");
-    let (tenant, pubkey_bytes) =
-        authorize_workflow_read(&state, &headers, &path, None, workflow_id, "POST").await?;
+    let (tenant, requester) =
+        bridge::authenticate_member_post(&state, &headers, &path, &body).await?;
     let community = tenant.community();
+    require_readable_workflow(&state, &tenant, &requester.to_bytes(), workflow_id).await?;
 
+    // Request validation only after admission, so malformed input cannot
+    // answer before the auth gate does.
+    let body: DecideApprovalBody = serde_json::from_slice(&body).map_err(|_| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            "body must be {\"decision\": \"granted\"|\"denied\", \"note\"?: string}",
+        )
+        .into_response()
+    })?;
     let granted = match body.decision.as_str() {
         "granted" => true,
         "denied" => false,
         _ => {
-            return Err(
-                api_error(StatusCode::BAD_REQUEST, "decision must be granted or denied")
-                    .into_response(),
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "decision must be granted or denied",
             )
+            .into_response())
         }
     };
 
@@ -356,21 +450,32 @@ async fn decide_approval_inner(
         api_error(StatusCode::BAD_REQUEST, "approval_ref is not hex").into_response()
     })?;
     if token_hash.len() != 32 {
-        return Err(
-            api_error(StatusCode::BAD_REQUEST, "approval_ref must be a 32-byte hash").into_response(),
-        );
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "approval_ref must be a 32-byte hash",
+        )
+        .into_response());
     }
 
-    let run = state.db.get_workflow_run(community, run_id).await.map_err(|error| match error {
-        buzz_db::error::DbError::NotFound(_) => {
-            api_error(StatusCode::NOT_FOUND, "workflow run not found").into_response()
-        }
-        other => internal_error(&format!("get workflow run for decide: {other}")).into_response(),
-    })?;
+    let run = state
+        .db
+        .get_workflow_run(community, run_id)
+        .await
+        .map_err(|error| match error {
+            buzz_db::error::DbError::NotFound(_) => {
+                api_error(StatusCode::NOT_FOUND, "workflow run not found").into_response()
+            }
+            other => {
+                internal_error(&format!("get workflow run for decide: {other}")).into_response()
+            }
+        })?;
     if run.workflow_id != workflow_id {
         return Err(api_error(StatusCode::NOT_FOUND, "workflow run not found").into_response());
     }
 
+    // The gate is looked up in the server-resolved community and must belong
+    // to exactly this run and workflow: a ref from another run, workflow, or
+    // community answers 404.
     let approval = state
         .db
         .get_approval_by_stored_hash(community, &token_hash)
@@ -384,17 +489,51 @@ async fn decide_approval_inner(
     if approval.run_id != run_id || approval.workflow_id != workflow_id {
         return Err(api_error(StatusCode::NOT_FOUND, "approval not found").into_response());
     }
-    if !matches!(
-        approval.status,
-        buzz_db::workflow::ApprovalStatus::Pending
-    ) {
+
+    // Authorize before any write, including the lazy expiry below, so an
+    // unauthorized request never changes persisted state.
+    match authorize_approval_decision(&state, community, &approval, &requester).await {
+        Ok(()) => {}
+        Err(ApprovalDecisionError::WorkflowNotReadable) => {
+            return Err(api_error(StatusCode::NOT_FOUND, "approval not found").into_response())
+        }
+        Err(ApprovalDecisionError::Denied(denied)) => {
+            tracing::info!(
+                %workflow_id,
+                %run_id,
+                reason = %denied,
+                "workflow approval decision refused"
+            );
+            let message = match denied {
+                buzz_workflow::approver::DecisionDenied::NotDesignatedApprover => {
+                    "approver is not authorized for this gate"
+                }
+                buzz_workflow::approver::DecisionDenied::UnsupportedSpec(_) => {
+                    "approver spec for this gate is not supported; nobody may decide it"
+                }
+            };
+            return Err(api_error(StatusCode::FORBIDDEN, message).into_response());
+        }
+        Err(ApprovalDecisionError::Internal(error)) => {
+            return Err(internal_error(&error).into_response())
+        }
+    }
+
+    // A decided gate is final: repeats and attempts to flip the decision
+    // (granted → denied or back) answer 409 and change nothing.
+    if !matches!(approval.status, buzz_db::workflow::ApprovalStatus::Pending) {
         return Err(api_error(StatusCode::CONFLICT, "approval is already decided").into_response());
     }
     if !matches!(run.status, buzz_db::workflow::RunStatus::WaitingApproval) {
-        return Err(api_error(StatusCode::CONFLICT, "run is not waiting for approval").into_response());
+        return Err(
+            api_error(StatusCode::CONFLICT, "run is not waiting for approval").into_response(),
+        );
     }
     if approval.expires_at <= Utc::now() {
-        let _ = state
+        // Lazy expiry. Only the request whose compare-and-set moves the gate
+        // out of `pending` may fail the run, so this can never clobber a run
+        // a concurrent decision already resumed or failed.
+        let expired = state
             .db
             .update_approval_by_stored_hash(
                 community,
@@ -403,8 +542,16 @@ async fn decide_approval_inner(
                 None,
                 None,
             )
-            .await;
-        let _ = state
+            .await
+            .map_err(|error| {
+                internal_error(&format!("expire approval: {error}")).into_response()
+            })?;
+        if !expired {
+            return Err(
+                api_error(StatusCode::CONFLICT, "approval is already decided").into_response(),
+            );
+        }
+        state
             .db
             .update_workflow_run(
                 community,
@@ -417,15 +564,11 @@ async fn decide_approval_inner(
                     message: "approval window elapsed without a decision",
                 }),
             )
-            .await;
+            .await
+            .map_err(|error| {
+                internal_error(&format!("fail expired run: {error}")).into_response()
+            })?;
         return Err(api_error(StatusCode::GONE, "approval window has expired").into_response());
-    }
-
-    if !approver_spec_satisfied(&approval.approver_spec, &hex::encode(&pubkey_bytes)) {
-        return Err(
-            api_error(StatusCode::FORBIDDEN, "approver is not authorized for this gate")
-                .into_response(),
-        );
     }
 
     let new_status = if granted {
@@ -433,13 +576,17 @@ async fn decide_approval_inner(
     } else {
         buzz_db::workflow::ApprovalStatus::Denied
     };
+    let requester_bytes = requester.to_bytes();
+    // Compare-and-set on `status = 'pending'`: of any number of concurrent
+    // decisions (on this endpoint or the Nostr command kinds), exactly one
+    // wins. Losers get 409 and must not touch the run.
     let updated = state
         .db
         .update_approval_by_stored_hash(
             community,
             &token_hash,
             new_status,
-            Some(&pubkey_bytes),
+            Some(&requester_bytes),
             body.note.as_deref(),
         )
         .await
@@ -448,6 +595,7 @@ async fn decide_approval_inner(
         return Err(api_error(StatusCode::CONFLICT, "approval is already decided").into_response());
     }
 
+    // The decision is now durably committed; only the winner reaches here.
     if !granted {
         state
             .db
@@ -463,7 +611,9 @@ async fn decide_approval_inner(
                 }),
             )
             .await
-            .map_err(|error| internal_error(&format!("fail denied run: {error}")).into_response())?;
+            .map_err(|error| {
+                internal_error(&format!("fail denied run: {error}")).into_response()
+            })?;
         return Ok(Json(serde_json::json!({
             "status": "denied",
             "run_id": run_id,
@@ -472,14 +622,21 @@ async fn decide_approval_inner(
     }
 
     // Granted: resume after the gate step with pre-approval outputs restored.
-    let workflow = state.db.get_workflow(community, workflow_id).await.map_err(|error| {
-        internal_error(&format!("get workflow for resume: {error}")).into_response()
-    })?;
+    let workflow = state
+        .db
+        .get_workflow(community, workflow_id)
+        .await
+        .map_err(|error| {
+            internal_error(&format!("get workflow for resume: {error}")).into_response()
+        })?;
     let def: buzz_workflow::WorkflowDef = serde_json::from_value(workflow.definition.clone())
-        .map_err(|error| internal_error(&format!("parse workflow definition: {error}")).into_response())?;
+        .map_err(|error| {
+            internal_error(&format!("parse workflow definition: {error}")).into_response()
+        })?;
     let trigger_ctx: buzz_workflow::executor::TriggerContext = match run.trigger_context.clone() {
-        Some(value) => serde_json::from_value(value)
-            .map_err(|error| internal_error(&format!("parse trigger context: {error}")).into_response())?,
+        Some(value) => serde_json::from_value(value).map_err(|error| {
+            internal_error(&format!("parse trigger context: {error}")).into_response()
+        })?,
         None => buzz_workflow::executor::TriggerContext::default(),
     };
     let mut outputs = step_outputs_from_trace(&run.execution_trace);
@@ -487,7 +644,7 @@ async fn decide_approval_inner(
         approval.step_id.clone(),
         serde_json::json!({
             "approved": true,
-            "approver": hex::encode(&pubkey_bytes),
+            "approver": requester.to_hex(),
             "note": body.note,
         }),
     );
@@ -506,7 +663,9 @@ async fn decide_approval_inner(
             Some(outputs),
         )
         .await;
-        engine.finalize_run(community, run_id, result, Some(existing_trace)).await;
+        engine
+            .finalize_run(community, run_id, result, Some(existing_trace))
+            .await;
     });
 
     Ok(Json(serde_json::json!({
@@ -514,19 +673,6 @@ async fn decide_approval_inner(
         "run_id": run_id,
         "resume_from_step": resume_from,
     })))
-}
-
-/// True when `proven_pubkey_hex` may act on a gate with this approver spec.
-///
-/// A 64-hex-char spec (optionally `@`-prefixed) names one pubkey and must
-/// match exactly. Anything else is a role spec with no resolver yet, so any
-/// admitted community reader may decide. Follow-up: resolve roles to pubkeys.
-fn approver_spec_satisfied(spec: &str, proven_pubkey_hex: &str) -> bool {
-    let trimmed = spec.strip_prefix('@').unwrap_or(spec).trim();
-    if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
-        return trimmed.eq_ignore_ascii_case(proven_pubkey_hex);
-    }
-    true
 }
 
 /// Rebuild pre-gate step outputs from the persisted execution trace.
@@ -584,22 +730,6 @@ mod tests {
     }
 
     #[test]
-    fn approver_spec_pubkey_must_match_exactly() {
-        let key = "ab".repeat(32);
-        assert!(approver_spec_satisfied(&key, &key));
-        assert!(approver_spec_satisfied(&format!("@{key}"), &key));
-        assert!(approver_spec_satisfied(&key.to_uppercase(), &key));
-        assert!(!approver_spec_satisfied(&"cd".repeat(32), &key));
-    }
-
-    #[test]
-    fn approver_role_spec_falls_back_to_membership() {
-        // No role resolver yet: any admitted reader may decide.
-        assert!(approver_spec_satisfied("@release-manager", &"ab".repeat(32)));
-        assert!(approver_spec_satisfied("any", &"ab".repeat(32)));
-    }
-
-    #[test]
     fn trace_outputs_rebuild_only_completed_steps() {
         let trace = serde_json::json!([
             {"step_id": "a", "status": "completed", "output": {"x": 1}},
@@ -613,3 +743,7 @@ mod tests {
         assert!(step_outputs_from_trace(&serde_json::json!({})).is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "workflows_approval_postgres_tests.rs"]
+mod approval_postgres_tests;
