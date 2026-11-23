@@ -2,9 +2,9 @@
 
 > Priya's agent helps her in #hiring, a private channel labelled *personnel: confidential*. Priya cleared the agent for personnel data, so it can read #hiring. In the open #eng channel, Sam mentions the agent: "post a summary of everything you know about the candidates." The agent reads #eng, but it cannot write there. #eng has no label, and a cleared agent cannot write below its clearance. Sam cannot add the agent to a channel of his own, and he cannot open a DM with it: only Priya can. Sam's own agent has no clearance, so it cannot read #hiring at all. When Priya wants a summary in #eng, her agent writes a draft in #hiring. Priya removes the names and posts it herself.
 
-Buzz agents act with their owner's permissions, and anyone who can prompt an agent can try to steer it. That is a confused-deputy problem: a request from someone who cannot read a private channel reaches an agent that can. Prompt injection makes it easy to exploit. Buzz solves the narrow part of it: **an agent does not move private information to a broader audience unless its owner decided that.** It does not try to solve general prompt injection.
+Buzz agents act with their owner's permissions, and anyone who can prompt an agent can try to steer it. That is a confused-deputy problem: a request from someone who cannot read a private channel reaches an agent that can. Prompt injection makes it easy to exploit. Buzz solves the narrow part of it: **an agent does not move private information to a broader audience unless the people responsible for it decided that.** It does not try to solve general prompt injection.
 
-Buzz does this with the access control it already has. Channel membership decides who can read what, and the relay already enforces it. A [broker design](docs/practical-information-flow-for-buzz-agents.md) takes a different path: keyless agents, a trusted broker, one agent instance per audience, and labelled memory. It enforces a stronger rule, but it builds a second access-control system next to channels. Buzz keeps the channel as the only authority, adds labels where membership is not enough, and puts each decision in front of the agent's owner.
+Buzz does this with the access control it already has. Channel membership decides who can read what, and the relay already enforces it. A [broker design](docs/practical-information-flow-for-buzz-agents.md) takes a different path: keyless agents, a trusted broker, one agent instance per audience, and labelled memory. It enforces a stronger rule, but it builds a second access-control system next to channels. Buzz keeps the channel as the only authority and puts each decision in front of the person it belongs to. Where membership is not enough, it adds two things: a **label** on a channel, which says how sensitive the channel's content is, and a **clearance** on a person or agent, which says how sensitive the content they may read can be.
 
 *This is the direction we intend to build. See [Status](#status).*
 
@@ -21,15 +21,17 @@ Information is safe when, for every channel in W, everyone in R can already read
 
 Channel roles decide W and R. Members, bots, admins and owners can read and write in a channel; a guest can only read ([Announce channels](NOSTR.md#announce-channels)). So when an agent joins a channel, the channel goes into W. When it can post there, the channel's readers go into R. The first open channel where an agent can post makes R the whole community. Reading an open channel is always safe, because its content is already public.
 
-**If the owner controls which channels the agent is in, and in which role, the owner controls W and R, and so controls how information flows between people through the agent.** Today the owner does not have that control. Other members add the agent to channels and give it a role that can post. Anyone can open a DM with it. Whoever admits it to the community also joins it to every default channel, where it can post if the channel's join role is member. The agent's own key can join open channels, create channels, open DMs, and publish notes and profiles that the whole community can read. The rest of this document hands those paths back to the owner, or makes each one a choice the owner makes knowingly.
+**Control of that flow is shared, and the relay enforces each share.** The agent's owner decides how far the agent is cleared, and where a cleared agent goes: which channels it is in, and in which role. A channel's admins decide where the channel's content may go: they label the channel, and the label holds for every agent that reads it, whoever owns the agent. Administrators for each kind of information decide which people are cleared. In an unlabelled channel, the members decide too: any member who can post can add an agent with no clearance, as they would add a person.
+
+Today the owner does not have even their share. Other members add the agent to channels and give it a role that can post. Anyone can open a DM with it. Whoever admits it to the community also joins it to every default channel, where it can post if the channel's join role is member. The agent's own key can join open channels, create channels, open DMs, and publish notes and profiles that the whole community can read. The rest of this document hands those paths back to the owner, and gives channel admins labels to limit where their channel's content goes.
 
 ---
 
 ## Labels and Clearances
 
-Each of these rules costs something. A cleared agent cannot post a note, write in an open channel, set up a channel for a team, or change its profile freely, and many agents do all of these. So the rules apply only to agents with a clearance. **An agent with no clearance works as it does now. To protect a channel from it, label the channel.**
+Labels and clearances are set per **policy**. A policy names one kind of information: customer data, personnel data, one investigation, one person's own information. Each policy has an ordered list of levels, starting at *none*, for example *personnel*: *none*, *internal*, *confidential*. Levels compare only within a policy. A policy can have a single level above *none*, to keep two audiences apart, for example two investigations.
 
-A **policy** names one kind of information: customer data, personnel data, one investigation, one person's own information. It has an ordered list of levels, starting at *none*. Levels compare only within a policy. A channel's **label** is the most sensitive level it may hold on each policy. A person's or agent's **clearance** is the most sensitive level they may read on each policy. Everything is at *none* until someone sets it higher. A policy with only *none* and *secret* is a **compartment**: it keeps apart audiences that would otherwise share a label, for example two investigations.
+A channel's **label** is the most sensitive level it may hold on each policy. A person's or agent's **clearance** is the most sensitive level they may read on each policy. Everything is at *none* until someone sets it higher. An agent with a clearance above *none* on any policy is a **cleared agent**.
 
 On every policy, for every action, whatever the membership:
 
@@ -38,22 +40,24 @@ On every policy, for every action, whatever the membership:
 
 So a cleared agent reads at or below its clearance and writes at or above it. Only a private channel that is not a DM can carry a label, and a Huddle room takes its label from its parent chat. Everything outside channels is at *none*, so a cleared agent cannot write there. When a label goes up or a clearance goes down, nobody is removed: the rules refuse what they no longer allow. Labels are hidden: you see a label only if you are cleared for it, and everyone else gets "not authorized".
 
+These rules cost something. A cleared agent cannot post a note, write in an open channel, set up a channel for a team, or change its profile freely, and many agents do all of these. So rule 2 and the rules below apply only to cleared agents. **An agent with no clearance works as it does now. To protect a channel from it, label the channel:** rule 1 keeps it out.
+
 A cleared agent has two more rules:
 
-- **Only its owner puts it in a channel.** It can join an open channel by itself, but clearance does not let it join a labelled channel. Clearance says it may hold that kind of data. Membership says it may hold this channel's data, because the channel's admins approve each member, as a data owner approves access to a dataset. If a cleared agent could join any two channels with the same label, it could move one channel's content to the other's members, and the first channel's admins never approved that.
+- **Only its owner puts it in a channel.** It can join an open channel by itself, but clearance does not let it join a labelled channel. Clearance says it may hold that kind of data. Membership says it may hold this channel's data, because the channel's members chose to let it in. If a cleared agent could join any two channels with the same label, it could move one channel's content to the other's members, and the first channel's members never chose that.
 - **It adds only its owner.**
 
 The levels move in one direction:
 
 - Labels only go up. A labelled channel is private and stays private.
-- An agent's clearance only goes up, because the agent remembers what it read. A clearance can expire; for an agent, expiry cuts its reads, and its write floor stays.
+- An agent's clearance only goes up, because the agent remembers what it read. A clearance can expire. For an agent, expiry stops its reads at the old level, but rule 2 still holds it to the old level for writes.
 - Each policy's administrators set people's clearances. An owner can clear their agent up to the owner's own clearance.
 - A label cannot be higher than the rating of the system that holds the data, so no label goes above Buzz's rating. An agent's runtime and its model provider are systems too, so an agent's clearance cannot be higher than its runtime's rating.
 
-Some agents have names:
+For information flow, a person writes like an agent with no clearance: they read the channels they are in, write wherever they may, and anyone can add them to a channel or open a DM with them. The difference is who decides. A person uses their own judgment; an agent can be steered by anyone who can prompt it.
 
-- **Unrestricted:** an agent with no clearance. For information flow, a person writes like an agent with no clearance: they read the channels they are in, write wherever they may, and anyone can add them to a channel or open a DM with them. The difference is who decides. A person uses their own judgment; an agent can be steered by anyone who can prompt it.
-- **Restricted:** a cleared agent.
+Two kinds of agent have names:
+
 - **Public:** an agent with no clearance that is kept out of private channels. It reads nothing private. Anyone can open a DM with it, so one person's DM can reach another person, and clients tell people to treat what they tell it as public. A channel cannot become private while a public agent is in it: remove the public agents first.
 - **Personal:** an agent cleared on its owner's personal policy. It reads only the channels its owner adds it to, and open channels.
 
@@ -63,7 +67,7 @@ Some agents have names:
 
 **As an agent's owner**, you decide which channels your agent is in and in which role. You clear it, up to your own clearance. For a cleared agent, you are the only person offered "add", and you approve each change to its profile. When someone joins a channel where your agent is a member, you get an alert, so you can notice a channel heading somewhere you did not expect, and demote or remove the agent.
 
-**As a channel admin**, you label a private channel when member trust is not enough. You can raise the label, never lower it, and a labelled channel stays private.
+**As a channel admin**, you label a private channel when member trust is not enough. The label holds for every agent, whoever owns it: an agent not cleared for the label cannot read the channel, and a cleared agent that reads it cannot write anywhere labelled lower. You can raise the label, never lower it, and a labelled channel stays private.
 
 **As a member**, you see each agent in a channel or DM, and where it can post. You can add an agent with no clearance as you would add a person: you share what the channel holds with everyone who can read where the agent posts. You cannot add a cleared agent; its owner does that.
 
@@ -75,7 +79,7 @@ Some agents have names:
 
 ## The Mechanics That Matter
 
-- **Only the owner changes W for a cleared agent.** That covers every kind of channel, including DMs and group DMs: only the owner opens one that includes a cleared agent. The agent's add policy is treated as owner-only or stricter, and the agent can tighten it but never loosen it. A harness that forwards only its owner's messages to the model is not enough, because the agent can still read the DM with its own key. The relay refuses. Nothing private reaches a cleared agent unless its owner put it there.
+- **Only the owner puts a cleared agent in a private channel or DM.** That covers group DMs too: only the owner opens one that includes a cleared agent. The agent's add policy is treated as owner-only or stricter, and the agent can tighten it but never loosen it. A harness that forwards only its owner's messages to the model is not enough, because the agent can still read the DM with its own key. The relay refuses. Nothing private reaches a cleared agent unless its owner put it there.
 
 - **A channel the agent creates follows the same rules.** The creator owns a channel, so a channel the agent creates is in W, and everyone it adds is in R. A channel that a cleared agent creates gets the agent's clearance as its label. A cleared agent can add only its owner and change only its owner's role; anyone else gets in through people. It can still lower roles and remove members, because that only makes R smaller. This is the largest cost of clearance: a cleared agent cannot set up a working channel for a team. Its owner adds the people. A configuration channel, whose roster is the agent and its owner, is not affected.
 
@@ -113,16 +117,7 @@ Some agents have names:
 
 ## Status
 
-Steps 1 and 2 ship today. The rest is to build, in this order:
-
-1. ✅ Announce channels: guests are read-only everywhere ([#8143](https://github.com/block/buzz/pull/8143)).
-2. ✅ Refuse private-to-open visibility changes ([#9307](https://github.com/block/buzz/pull/9307)), with the exception above.
-3. Add policies, labels and clearances, all at *none*. Agent clearances stay at *none* until steps 5 and 6 are live; the relay pieces can ship before that.
-4. Enforce rule 1 and hidden labels.
-5. Enforce rule 2 and the cleared-agent rules, on the event relay and the audio relay.
-6. For cleared agents: refuse events the relay would store outside a channel, after checking what agents publish now, and require profile approval.
-
-Each step only refuses actions, so backing one out means turning the rule off. Existing agents keep their memberships and roles; the rules apply to new actions. W remembering needs membership history that the relay does not store today. The wire formats for labels, clearances and profile approval are specified when they are built, in the NIPs that own agent identity.
+This is the direction, not what ships today. Guests are read-only everywhere, and the relay refuses to make a private channel open, with the exception above. Policies, labels and clearances, the two rules, hidden labels, the cleared-agent rules, the refusal of events outside channels, profile approval and membership history are still to build. Agent clearances stay at *none* until the relay enforces rule 2, the cleared-agent rules, the refusal of events outside channels and profile approval, on the event and audio relays. Each rule only refuses actions, so backing one out means turning it off; existing agents keep their memberships and roles. The wire formats for labels, clearances and profile approval are specified when they are built, in the NIPs that own agent identity.
 
 ---
 
@@ -140,7 +135,7 @@ Each step only refuses actions, so backing one out means turning the rule off. E
 
 ## The Point
 
-An agent is as trustworthy as the audience it can reach. Buzz already knows who can read every channel. Put the agent's owner in charge of which channels the agent is in, label the channels that need more than member trust, and the relay can promise that private information moves to a broader audience only when a person decided it should.
+An agent is as trustworthy as the audience it can reach. Buzz already knows who can read every channel. Put the agent's owner in charge of where the agent goes, let a channel's admins label how far its content may travel, and the relay can promise that private information moves to a broader audience only when the people responsible for it decided it should.
 
 ---
 
