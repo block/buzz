@@ -81,6 +81,7 @@ Widget _modalApp({
   Future<ChannelCanvas>? pendingCanvas,
   List<Override>? sectionOverrides,
   String? sectionId,
+  bool? isUnread,
 }) => ProviderScope(
   overrides: [
     currentPubkeyProvider.overrideWith((ref) => _currentPubkey),
@@ -117,6 +118,7 @@ Widget _modalApp({
                   currentPubkey: _currentPubkey,
                   onMemberTap: (_, _) {},
                   personalChat: soloDetails,
+                  isUnread: isUnread,
                 )
               : showChannelActionsSheet(
                   context: context,
@@ -179,9 +181,14 @@ void main() {
     });
   }
 
-  for (final soloDetails in [false, true]) {
+  for (final (label, soloDetails, rowDetails) in [
+    ('channel actions', false, false),
+    ('Solo details', true, false),
+    ('channel row details', false, true),
+  ]) {
+    final details = soloDetails || rowDetails;
     testWidgets(
-      'Duo ${soloDetails ? 'Solo details' : 'channel actions'} uses native presentation and live permissions',
+      'Duo $label uses native presentation, live permissions and the embedded sheet layout',
       (tester) async {
         debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
         tester.view.devicePixelRatio = 1;
@@ -242,6 +249,8 @@ void main() {
           _modalApp(
             channel: _channel(),
             soloDetails: soloDetails,
+            details: rowDetails,
+            isUnread: rowDetails ? true : null,
             loadMembers: () => members.future,
             createChannelActions: (ref) => _FakeChannelActions(ref),
           ),
@@ -252,8 +261,10 @@ void main() {
         await tester.tap(find.text('Open actions'));
         await tester.pumpAndSettle();
         expect(BottomUpPageRoute.hasRetainedControls(homeRoute), isTrue);
-        if (soloDetails) {
+        if (details) {
           expect(calls.last.arguments.toString(), contains('general'));
+        }
+        if (soloDetails) {
           expect(
             calls.last.arguments.toString(),
             isNot(contains('Move to section')),
@@ -308,9 +319,38 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        expect(find.byType(BuzzActionTile), findsNWidgets(soloDetails ? 2 : 1));
+        expect(
+          find.byType(BuzzActionTile),
+          findsNWidgets(
+            rowDetails
+                ? 3
+                : soloDetails
+                ? 2
+                : 1,
+          ),
+        );
         expect(find.byType(AppListCard), findsWidgets);
-        if (soloDetails) {
+        if (rowDetails) {
+          // Mark Read joins the action tiles; the members card keeps its label.
+          expect(
+            find.ancestor(
+              of: find.text('Mark Read'),
+              matching: find.byType(BuzzActionTile),
+            ),
+            findsOneWidget,
+          );
+          final membersCard = tester
+              .widgetList<AppListCard>(find.byType(AppListCard))
+              .singleWhere((card) => card.label == '1 member');
+          expect(
+            find.descendant(
+              of: find.byWidget(membersCard),
+              matching: find.text('Add members'),
+            ),
+            findsOneWidget,
+          );
+        }
+        if (details) {
           expect(
             find.byKey(const ValueKey('channel-details-avatar')),
             findsOneWidget,

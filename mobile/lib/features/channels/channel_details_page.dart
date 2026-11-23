@@ -413,13 +413,16 @@ class ChannelDetailsPage extends HookConsumerWidget {
         heroIsAgent: counterpartProfile?.isAgent ?? false,
         memberLabel: isDirectDm ? null : memberLabel,
         groups: [
-          if (readToggleIsUnread != null)
-            _ChannelQuickActionsRow(
-              isUnread: readToggleIsUnread,
-              onToggleRead: () => toggleRead(readToggleIsUnread),
-            ),
           SheetActionSection(
             children: [
+              // The native renderer draws only the first section as tiles,
+              // and labels the second as members, so this stays in here.
+              if (readToggleIsUnread != null)
+                action(
+                  readToggleIsUnread ? 'Mark Read' : 'Mark Unread',
+                  BuzzIcons.checkCheck,
+                  () => toggleRead(readToggleIsUnread),
+                ),
               action(
                 isMuted ? 'Unmute' : 'Mute',
                 isMuted ? BuzzIcons.bell : BuzzIcons.bellOff,
