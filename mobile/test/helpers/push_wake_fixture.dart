@@ -88,6 +88,9 @@ class FakePushRelay {
   /// Refuses connections.
   bool unreachable = false;
 
+  /// Refuses connections once it has answered this many queries.
+  int? unreachableAfter;
+
   /// Answers every query with this body instead of the stored events, as a
   /// hostile relay would.
   http.Response Function()? hostileResponse;
@@ -214,7 +217,9 @@ class FakePushRelay {
   );
 
   Future<http.Response> handle(http.Request request) async {
-    if (unreachable) throw const SocketException('connection refused');
+    if (unreachable || queries.length >= (unreachableAfter ?? 1 << 30)) {
+      throw const SocketException('connection refused');
+    }
     if (request.method != 'POST' ||
         request.url.path != '/query' ||
         request.headers['Authorization'] == null) {
@@ -258,6 +263,8 @@ class FakePushRelay {
     }
     final since = filter['since'] as int?;
     if (since != null && event.createdAt < since) return false;
+    final until = filter['until'] as int?;
+    if (until != null && event.createdAt > until) return false;
     for (final MapEntry(:key, :value) in filter.entries) {
       if (!key.startsWith('#')) continue;
       final wanted = (value as List).cast<String>();

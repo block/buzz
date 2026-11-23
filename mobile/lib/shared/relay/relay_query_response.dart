@@ -29,6 +29,12 @@ Future<List<NostrEvent>> _decodeInIsolate(
   String? contentType,
 ) => Isolate.run(() => parseRelayQueryEvents(bytes, contentType));
 
+/// A relay response that went past the byte cap given for it, as received or
+/// once inflated.
+class RelayResponseTooLarge extends FormatException {
+  const RelayResponseTooLarge(super.message);
+}
+
 /// Parses the event array a relay `/query` or `/profiles/search` answers.
 ///
 /// Throws a [FormatException] for a body that is not JSON, is not an array,
@@ -109,7 +115,7 @@ class _CappedByteSink implements Sink<List<int>> {
   @override
   void add(List<int> data) {
     if (_output.length + data.length > _maxBytes) {
-      throw FormatException(
+      throw RelayResponseTooLarge(
         'relay response exceeds $_maxBytes bytes after inflating',
       );
     }

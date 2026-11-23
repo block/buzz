@@ -34,6 +34,13 @@ const pushWakeMaxPerConversation = 8;
 /// Fifty events of the 64 KiB content limit fit with room to spare.
 const pushWakeMaxResponseBytes = 4 * 1024 * 1024;
 
+/// Events one page of a wake's message fetch asks for, per subscription.
+const pushWakeMessagePageSize = 50;
+
+/// Most pages one community's message fetch may take, however many events a
+/// relay holds. A fetch that stops there leaves the community unfinished.
+const pushWakeMaxMessagePages = 5;
+
 /// How a notification is categorized, which is the Android channel the user
 /// may have silenced. A message in a direct-message channel is a
 /// [directMessage] even when it also mentions the user.
@@ -337,15 +344,73 @@ Future<void> _resolveCommunity(
   final since =
       (newest ?? clock()).millisecondsSinceEpoch ~/ 1000 -
       shownMessageReorderWindow.inSeconds;
-  final fetched = await query([
-    for (final subscription in subscriptions)
-      {...subscription.filter.toJson(), 'since': since, 'limit': 50},
-  ], timeout: timeouts.request);
+  // Reads every subscription's messages since [since], newest first, a page
+  // at a time. A relay answers a filter's newest `limit` events, so when
+  // messages that can't notify (already shown, muted, or my own) fill a page,
+  // an eligible one may sit behind them: a subscription whose page came back
+  // full is read again below the oldest event it returned.
+  Future<({List<NostrEvent> events, bool complete})> fetchMessages() async {
+    final found = <String, NostrEvent>{};
+    // The newest second each subscription still has to read, once a page of
+    // it has filled. Subscriptions that came back short are done.
+    final until = <int, int?>{
+      for (var i = 0; i < subscriptions.length; i++) i: null,
+    };
+    var limit = pushWakeMessagePageSize;
+    var pages = 0;
+    while (until.isNotEmpty) {
+      if (pages == pushWakeMaxMessagePages || run.expired(timeouts)) {
+        return (events: found.values.toList(), complete: false);
+      }
+      final List<NostrEvent> page;
+      try {
+        page = await query([
+          for (final MapEntry(key: i, value: latest) in until.entries)
+            {
+              ...subscriptions[i].filter.toJson(),
+              'since': since,
+              'until': ?latest,
+              'limit': limit,
+            },
+        ], timeout: timeouts.request);
+      } on Object catch (error) {
+        // A page too big to take is asked for again with half the events.
+        if (error is RelayResponseTooLarge && limit > 1) {
+          limit ~/= 2;
+          continue;
+        }
+        // The first page failing is the community failing. A later one only
+        // leaves it unfinished, and the newest messages it did read still
+        // show.
+        if (pages == 0) rethrow;
+        return (events: found.values.toList(), complete: false);
+      }
+      pages++;
+      for (final event in page) {
+        found[event.id] = event;
+      }
+      for (final i in until.keys.toList()) {
+        final filter = subscriptions[i].filter;
+        final times = [
+          for (final event in page)
+            if (pushFilterMatches(filter, event)) event.createdAt,
+        ];
+        if (times.length < limit) {
+          until.remove(i);
+          continue;
+        }
+        // `until` includes the oldest event's second, so the next page
+        // repeats it. Events found twice are kept once.
+        until[i] = times.reduce((a, b) => a < b ? a : b);
+      }
+    }
+    return (events: found.values.toList(), complete: true);
+  }
 
+  final fetch = await fetchMessages();
   final selected = <({NostrEvent event, PushWakeCategory category})>[];
-  final seen = <String>{};
-  for (final event in fetched) {
-    if (!seen.add(event.id) || event.pubkey.toLowerCase() == mine) continue;
+  for (final event in fetch.events) {
+    if (event.pubkey.toLowerCase() == mine) continue;
     final matching = [
       for (final subscription in subscriptions)
         if (pushSubscriptionMatches(subscription, event)) subscription,
@@ -381,7 +446,7 @@ Future<void> _resolveCommunity(
     // wakes see messages they have already shown.
     final claimed = <PushWakeNotification>[];
     final senders = <String, String>{};
-    var complete = true;
+    var complete = fetch.complete;
     for (final (:event, :category) in selected) {
       // Stop at the deadline. Messages not yet claimed stay unclaimed, so the
       // next wake gets them, and the ones already claimed are still returned.

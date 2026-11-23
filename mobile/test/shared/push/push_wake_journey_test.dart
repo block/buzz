@@ -23,6 +23,10 @@ void main() {
   });
   tearDown(() => directory.deleteSync(recursive: true));
 
+  // The message fetches a relay saw, without the name lookups after them.
+  Iterable<List<Map<String, dynamic>>> messageQueries(FakePushRelay relay) =>
+      relay.queries.where((query) => query.first.containsKey('since'));
+
   // Records a message as shown [age] ago, as an earlier wake would have.
   Future<void> shownAgo(FakePushRelay relay, Duration age) async {
     expect(
@@ -214,6 +218,56 @@ void main() {
           .map((n) => n.eventId),
       [latest.id, earlier.id],
     );
+
+    // Messages that can't notify can fill a page of the fetch, and an
+    // eligible one behind them must still show: here a DM behind messages
+    // already shown, and a mention behind mentions in a muted channel.
+    final crowded = fixture.addCommunity();
+    final crowdedDm = crowded.dmChannel();
+    final mutedDm = crowded.dmChannel();
+    final crowdedRoom = crowded.channel();
+    crowded.mute(mutedDm);
+    final chatty = crowded.person('Chatty');
+    const buriedAge = Duration(minutes: 12);
+    final buriedDm = crowded.message(
+      crowdedDm,
+      chatty,
+      'buried',
+      age: buriedAge,
+    );
+    final buriedMention = crowded.message(
+      crowdedRoom,
+      chatty,
+      'buried mention',
+      mention: crowded.me,
+      age: buriedAge,
+    );
+    for (var i = 0; i < pushWakeMessagePageSize + 5; i++) {
+      final seen = crowded.message(crowdedDm, chatty, 'seen $i');
+      expect(
+        await fixture.openStore().claim(
+          crowded.communityId,
+          seen.id,
+          DateTime.fromMillisecondsSinceEpoch(
+            seen.createdAt * 1000,
+            isUtc: true,
+          ),
+        ),
+        isTrue,
+      );
+      crowded.message(mutedDm, chatty, 'muted $i', mention: crowded.me);
+    }
+    final dug = await fixture.wake();
+    expect(dug.incomplete, isFalse);
+    expect(
+      dug.notifications
+          .where((n) => n.target.communityId == crowded.communityId)
+          .map((n) => n.eventId),
+      unorderedEquals([buriedDm.id, buriedMention.id]),
+    );
+    expect(crowded.queries.first.every((f) => f['until'] == null), isTrue);
+    expect(crowded.queries[1].every((f) => f['until'] != null), isTrue);
+    expect((await fixture.wake()).notifications, isEmpty);
   });
 
   test('every community notifies, each from its own relay', () async {
@@ -382,6 +436,100 @@ void main() {
       expect(recovered.notifications.map((n) => n.eventId), [
         hostileMessage.id,
       ]);
+
+      // A page too big to take is asked for again with half the events, and
+      // the fetch carries on at that size.
+      final heavy = fixture.addCommunity();
+      final heavyDm = heavy.dmChannel();
+      heavy.mute(heavyDm);
+      final bulky = heavy.person('Friend');
+      final small = heavy.message(
+        heavy.channel(),
+        bulky,
+        'small',
+        mention: heavy.me,
+        age: const Duration(minutes: 12),
+      );
+      final bulk = 'x' * 90000;
+      for (var i = 0; i < 60; i++) {
+        heavy.message(heavyDm, bulky, bulk, mention: heavy.me);
+      }
+      final halved = await fixture.wake();
+      expect(halved.incomplete, isFalse);
+      expect(halved.notifications.map((n) => n.eventId), [small.id]);
+      expect(
+        [for (final query in messageQueries(heavy)) query.first['limit']],
+        [pushWakeMessagePageSize, 25, 25, 25],
+      );
+
+      // A relay with more history than the page cap allows still shows the
+      // newest messages, and leaves its community unfinished.
+      final endless = fixture.addCommunity();
+      final endlessDm = endless.dmChannel();
+      endless.mute(endlessDm);
+      final noisy = endless.person('Friend');
+      for (
+        var i = 0;
+        i < pushWakeMessagePageSize * pushWakeMaxMessagePages;
+        i++
+      ) {
+        endless.message(endlessDm, noisy, 'noise $i', mention: endless.me);
+      }
+      final newest = endless.message(
+        endless.channel(),
+        noisy,
+        'newest',
+        mention: endless.me,
+      );
+      final capped = await fixture.wake();
+      expect(capped.failedCommunityIds, [endless.communityId]);
+      expect(
+        capped.notifications
+            .where((n) => n.target.communityId == endless.communityId)
+            .map((n) => n.eventId),
+        [newest.id],
+      );
+      expect(messageQueries(endless), hasLength(pushWakeMaxMessagePages));
+
+      // A later page failing leaves the community unfinished too, and the
+      // next wake reads on from what was shown.
+      final flaky = fixture.addCommunity();
+      final flakyDm = flaky.dmChannel();
+      flaky.mute(flakyDm);
+      final flakyFriend = flaky.person('Friend');
+      final older = flaky.message(
+        flaky.channel(),
+        flakyFriend,
+        'older',
+        mention: flaky.me,
+        age: const Duration(minutes: 12),
+      );
+      for (var i = 0; i < pushWakeMessagePageSize + 5; i++) {
+        flaky.message(flakyDm, flakyFriend, 'noise $i', mention: flaky.me);
+      }
+      final latest = flaky.message(
+        flaky.channel(),
+        flakyFriend,
+        'latest',
+        mention: flaky.me,
+      );
+      flaky.unreachableAfter = 1;
+      final cut = await fixture.wake();
+      expect(cut.failedCommunityIds, contains(flaky.communityId));
+      expect(
+        cut.notifications
+            .where((n) => n.target.communityId == flaky.communityId)
+            .map((n) => n.eventId),
+        [latest.id],
+      );
+      flaky.unreachableAfter = null;
+      final resumed = await fixture.wake();
+      expect(
+        resumed.notifications
+            .where((n) => n.target.communityId == flaky.communityId)
+            .map((n) => n.eventId),
+        [older.id],
+      );
     });
 
     test('with nothing found say so, so the caller can fall back', () async {
