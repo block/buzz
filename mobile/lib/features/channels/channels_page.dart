@@ -757,9 +757,13 @@ class ChannelsPage extends HookConsumerWidget {
       suppressesNative: messages,
       // Outside the header's scroll-driven builder and scroll scope, so the
       // rail controls do not rebuild or receive scroll updates per frame.
-      child: railActions
+      // The wrapper stays mounted while the strip comes and goes, so
+      // unfolding or rotating keeps the list and its scroll position.
+      child: messagesRailActionsBuilder != null
           ? _DuoRailActions(
-              actions: messagesRailActionsBuilder!(openCommunityGrid),
+              actions: railActions
+                  ? messagesRailActionsBuilder!(openCommunityGrid)
+                  : const [],
               child: page,
             )
           : page,
