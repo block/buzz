@@ -60,6 +60,12 @@ pub(super) async fn dispatch(
             value["execution_mode"] = "rehearsal".into();
             value["account_erasure_complete"] = false.into();
             store.save_stage_success(lease, row.id, value).await?;
+            if row.stage == "purge_media" && !options.next_step {
+                use std::io::Write;
+                // This is a progress hint after commit. A closed stderr cannot
+                // invalidate the saved stage or its transition.
+                let _ = writeln!(std::io::stderr(), "Media preview saved. View file decisions now with: buzz-admin user-deletions inspect {}", request.id);
+            }
         }
         Err(error) => {
             if let Err(save) = store
@@ -98,7 +104,11 @@ pub(super) async fn preview_handler(
                     &configured
                 }
             };
-            super::media::handle_with_storage(db, media, subject, false, &mut output).await
+            if options.read_only {
+                super::media::stage_preview(db, media, subject).await
+            } else {
+                super::media::handle_with_storage(db, media, subject, false, &mut output).await
+            }
         }
         "purge_content" => {
             let summary = users
@@ -162,23 +172,29 @@ pub(super) async fn preview_handler(
 
 async fn report(store: &EntityDeletionStore, request: &EntityRequest) -> Result<Value> {
     let inspection = store.inspect(request.id).await?;
-    let stages: Vec<_> = inspection
+    let mut stages = Vec::new();
+    for mut stage in inspection
         .stage_history
-        .iter()
+        .into_iter()
         .filter(|s| s.stage != "remaining_cleanup")
-        .map(|s| {
-            json!({"id":s.id,"stage":s.stage,"community":s.target_community_id,
-            "status":s.status,"result":s.metadata_json["result"]})
-        })
-        .collect();
-    ensure!(
-        inspection
-            .stage_history
-            .iter()
-            .filter(|s| s.stage != "remaining_cleanup")
-            .all(|s| s.status == "completed"),
-        "cannot report completion with unfinished stages"
-    );
+    {
+        ensure!(
+            stage.status == "completed",
+            "cannot report completion with unfinished stages"
+        );
+        let mut result = stage.metadata_json["result"].take();
+        // The final report links to the full media preview by stage ID.
+        if stage.stage == "purge_media" {
+            if let Some(media) = result.as_object_mut() {
+                media.remove("files");
+                media.remove("target_pubkeys");
+            }
+        }
+        stages.push(json!({
+            "id": stage.id, "stage": stage.stage, "community": stage.target_community_id,
+            "status": stage.status, "result": result,
+        }));
+    }
     let report = json!({"record":"rehearsal_report","request_id":request.id,
         "run_id":request.inventory_manifest.as_ref().map(|m| &m["run_id"]),
         "subject":Inventory::subject(request)?,"source_data_unchanged":true,

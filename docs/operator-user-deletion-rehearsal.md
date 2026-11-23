@@ -112,7 +112,24 @@ without approvals, leases, stage writes or child submission. Select one handler
 with `--stage purge_profile --community <uuid>`. `--next-step` in stateless mode
 inspects the current position; it does not advance it.
 
-Handler details go to stderr; summaries and the final inspection go to stdout.
+As soon as `purge_media` completes, `run --read-only --next-step` prints the
+per-file decisions in the workflow JSON on stdout. The same stage row stores
+them for later inspection. To list each filename, decision and reason:
+
+```sh
+buzz-admin user-deletions inspect "$request_id" |
+  jq '.stage_history[] | select(.stage == "purge_media") | .metadata_json.result.files[]? | {filename, decision, reason}'
+```
+
+Each file includes its hash and storage versions. A `delete` decision means the
+handler would delete the file. The outcome counts stay zero during rehearsal.
+During a multi-stage run, stderr prints the inspection command when the media
+row commits. Operators can use it while later stages are running. The saved
+media report has a 16 MiB limit. A larger report fails the stage before saving
+a partial result. Use `user-deletions media-batches --pubkey <human-key>
+--read-only` to stream the full preview. Older completed media stages contain
+only counts. Other handler details and
+connection logs go to stderr.
 The persisted report contains stage results, child observations, profile
 prerequisites and unsupported gate/drain, global, cache and erasure-verifier work.
 An exit code of zero alone is insufficient: a shutdown or a single step can also

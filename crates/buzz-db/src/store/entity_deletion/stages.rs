@@ -220,15 +220,37 @@ impl EntityDeletionStore {
     where
         F: FnOnce(&EntityRequest, &[EntityStage]) -> Result<StageTransition> + Send,
     {
+        self.transition_stage_omitting_result(lease, previous_stage_id, None, decide)
+            .await
+    }
+
+    /// A workflow can omit a completed stage's result payload when its routing
+    /// decision only needs proof the result exists. This projection affects
+    /// only the callback's view of history, never the persisted metadata.
+    pub async fn transition_stage_omitting_result<F>(
+        &self,
+        lease: &EntityLease,
+        previous_stage_id: Option<Uuid>,
+        omit_completed_result_for: Option<&str>,
+        decide: F,
+    ) -> Result<NextStage>
+    where
+        F: FnOnce(&EntityRequest, &[EntityStage]) -> Result<StageTransition> + Send,
+    {
         let mut tx = self.pool.begin().await?;
         let request = lock_owned(&mut tx, lease).await?;
         validate_approved_inventory(&mut tx, &request).await?;
         let history: Vec<EntityStage> = sqlx::query_as(
             "SELECT id, request_id, target_community_id, stage, status, is_current,
-                    started_at, finished_at, metadata_json, last_error, updated_at
+                    started_at, finished_at,
+                    CASE WHEN stage = $2 AND status = 'completed' THEN
+                        jsonb_set(metadata_json, '{result}', 'null'::jsonb, false)
+                    ELSE metadata_json END AS metadata_json,
+                    last_error, updated_at
              FROM entity_deletion_stage_history WHERE request_id = $1 LIMIT 10001",
         )
         .bind(request.id)
+        .bind(omit_completed_result_for)
         .fetch_all(&mut *tx)
         .await?;
         if history.len() > 10000 {

@@ -12,6 +12,8 @@ use std::io::{BufWriter, Write};
 mod inventory;
 #[path = "media_report.rs"]
 mod report;
+#[path = "media_stage_report.rs"]
+mod stage_report;
 use inventory::{Inventory, PAGE_SIZE};
 
 const MAX_STORAGE_PAGES: usize = 100_000;
@@ -66,6 +68,10 @@ pub(super) async fn handle_with_storage(
 ) -> Result<Value> {
     let pubkey = buzz_db::user_deletion::normalize_user_deletion_pubkey(pubkey)?;
     run_handler(db, media, &pubkey, delete, output).await
+}
+
+pub(super) async fn stage_preview(db: &Db, media: &MediaStorage, subject: &str) -> Result<Value> {
+    stage_report::stage_preview(db, media, subject).await
 }
 
 // Fakes replace only external DB/storage boundaries; the tests run the same

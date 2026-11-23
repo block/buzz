@@ -1855,7 +1855,11 @@ fn run_output(request: DeletionRequest) -> RunOutput {
 }
 
 fn print_json(value: &impl Serialize) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(value)?);
+    use std::io::Write;
+    let mut stdout = std::io::BufWriter::new(std::io::stdout().lock());
+    serde_json::to_writer_pretty(&mut stdout, value)?;
+    stdout.write_all(b"\n")?;
+    stdout.flush()?;
     Ok(())
 }
 

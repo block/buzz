@@ -280,8 +280,10 @@ media stage is transitioned without running media again.
 
 `--next-step` executes one handler, transitions, and releases the lease. Without
 it, an invocation executes up to 100 handlers. The worker prints an inspection
-JSON document; media's file report goes to stderr. The direct command prints the
-file report on stdout. Each file has its hash, filename when present,
+JSON document. For persisted read-only media, the per-file report appears in
+the stage result on stdout and in subsequent `inspect` output. For actual
+deletion the file report streams to stderr. The direct media command prints
+the file report on stdout. Each file has its hash, filename when present,
 keep/delete decision, versions, and outcome counts; uploader lists are omitted.
 
 `--fail-stage purge_content`, `--stage-delay-ms`, and `--demo-no-agents-in` exercise

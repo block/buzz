@@ -26,7 +26,7 @@ impl<'a> UserDeletionTransition<'a> {
         previous: Option<Uuid>,
     ) -> Result<NextStage> {
         self.store
-            .transition_stage(lease, previous, decide_next)
+            .transition_stage_omitting_result(lease, previous, Some("purge_media"), decide_next)
             .await
     }
 }

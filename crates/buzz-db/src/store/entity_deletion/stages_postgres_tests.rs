@@ -65,6 +65,20 @@ async fn stage_storage_accepts_caller_policy_and_rolls_back_invalid_decisions() 
         .save_stage_success(&lease, row.id, serde_json::json!({"done": true}))
         .await
         .unwrap();
+    let projected = store
+        .transition_stage_omitting_result(&lease, Some(row.id), Some(&row.stage), |_, history| {
+            assert_eq!(
+                history[0].metadata_json.get("result"),
+                Some(&serde_json::Value::Null)
+            );
+            assert_eq!(history[0].metadata_json["inputs"]["example"], true);
+            Err(invalid("checked routing projection"))
+        })
+        .await;
+    assert!(projected
+        .unwrap_err()
+        .to_string()
+        .contains("checked routing projection"));
     assert!(matches!(
         store
             .transition_stage(&lease, Some(row.id), |_, history| {

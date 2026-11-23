@@ -19,9 +19,19 @@ async fn agent_claims_in_other_communities_protect_blobs_and_are_not_selected() 
         media.object(format!("{hash}.png"), ObjectVersionKind::Object);
     }
     let before = media.entries.borrow().clone();
-    let preview = run_handler(&db, &media, ALICE, false, &mut Vec::new())
+    let mut output = Vec::new();
+    let preview = run_handler(&db, &media, ALICE, false, &mut output)
         .await
         .unwrap();
+    let stage = stage_report::stage_preview(&db, &media, ALICE)
+        .await
+        .unwrap();
+    let streamed: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(stage["files"], streamed["files"]);
+    assert_eq!(stage["target_pubkeys"], streamed["target_pubkeys"]);
+    for (field, value) in preview.as_object().unwrap() {
+        assert_eq!(&stage[field], value);
+    }
     assert_eq!(preview["selected_files"], 3);
     assert_eq!(preview["kept_files"], 2);
     assert_eq!(*media.entries.borrow(), before);

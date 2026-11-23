@@ -92,6 +92,7 @@ async fn rehearsal_resumes_real_previews_delegates_owner_and_finishes_without_de
         .find(|s| s.stage == "purge_media")
         .unwrap();
     assert_eq!(failed_media.status, "failed");
+    assert!(failed_media.metadata_json.get("result").is_none());
     let media_id = failed_media.id;
     f.fail_listing.store(false, Ordering::SeqCst);
     sqlx::query("UPDATE entity_deletion_requests SET next_attempt_at=now() WHERE id=$1")
@@ -99,6 +100,40 @@ async fn rehearsal_resumes_real_previews_delegates_owner_and_finishes_without_de
         .execute(&f.pool)
         .await
         .unwrap();
+    run(
+        &f.store,
+        request.id,
+        "restarted-worker",
+        &options,
+        &shutdown,
+    )
+    .await
+    .unwrap();
+    let inspection = f.store.inspect(request.id).await.unwrap();
+    let saved = inspection
+        .stage_history
+        .iter()
+        .find(|s| s.id == media_id)
+        .unwrap();
+    assert_eq!(saved.status, "completed");
+    let result = &saved.metadata_json["result"];
+    assert_eq!(result["mode"], "read-only");
+    assert_eq!(result["selected_files"], 1);
+    assert_eq!(result["deleted_versions"], 0);
+    assert_eq!(result["target_pubkeys"], serde_json::json!([key]));
+    let files = result["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1);
+    let file = &files[0];
+    assert_eq!(file["file_hash"], "a".repeat(64));
+    assert_eq!(file["filename"], format!("{}.png", "a".repeat(64)));
+    assert_eq!(file["decision"], "delete");
+    assert_eq!(
+        file["reason"],
+        "All known uploaders belong to the target set"
+    );
+    assert_eq!(file["versions"][0]["version_id"], "v1");
+    assert_eq!(file["deleted_versions"], 0);
+    assert_eq!(file["removed_uploader_rows"], 0);
     for _ in 0..20 {
         run(
             &f.store,
@@ -161,6 +196,15 @@ async fn rehearsal_resumes_real_previews_delegates_owner_and_finishes_without_de
         report.metadata_json["result"]["account_erasure_complete"],
         false
     );
+    let media_summary = report.metadata_json["result"]["stages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["stage"] == "purge_media")
+        .unwrap();
+    assert_eq!(media_summary["id"], media_id.to_string());
+    assert_eq!(media_summary["result"]["selected_files"], 1);
+    assert!(media_summary["result"].get("files").is_none());
     assert_eq!(snapshot(&f.pool).await, before);
     assert!(!f.deleted.load(Ordering::SeqCst));
     assert!(f.requests.load(Ordering::SeqCst) > 0);
