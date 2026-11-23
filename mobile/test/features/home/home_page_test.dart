@@ -1077,13 +1077,7 @@ void main() {
         (tester.getTopRight(search).dx - tester.getTopLeft(search).dx),
         closeTo(initialWidth * .9, .01),
       );
-      final fadedControls = find.descendant(
-        of: find.byType(MessagesNavigationBar),
-        matching: find.byWidgetPredicate(
-          (w) => w is AnimatedOpacity && w.opacity == 0,
-        ),
-      );
-      expect(fadedControls, findsNWidgets(2));
+      expect(shortcutOpacities(), [0.0, 0.0]);
       expect(search.hitTestable(), findsNothing);
       creationMenu.onMenuVisibilityChanged!(false);
       await tester.pumpAndSettle();
@@ -1213,12 +1207,11 @@ void main() {
       );
       await tester.longPress(find.text('General'));
       await tester.pumpAndSettle();
-      final presentation = calls.singleWhere(
-        (call) => call.method == 'present',
-      );
-      expect(presentation.arguments.toString(), contains('Copy channel name'));
-      selection.complete(null);
+      expect(find.text('Mark unread'), findsOneWidget);
+      expect(find.byType(BottomSheet), findsNothing);
+      await tester.tapAt(const Offset(20, 20));
       await tester.pumpAndSettle();
+      expect(find.text('Mark unread'), findsNothing);
       expect(headerNativeView, findsOneWidget);
       await tester.pumpWidget(const SizedBox.shrink());
       debugDefaultTargetPlatformOverride = null;

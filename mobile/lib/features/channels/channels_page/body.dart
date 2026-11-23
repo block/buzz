@@ -564,8 +564,8 @@ class _SliverChannelsList extends HookConsumerWidget {
         buildRow: (c, [onTap]) => row(c, key, onTap),
         buildDetail: buildDetail,
         previewLimit: previewLimit,
-        expanded: sectionExpanded(section.id),
-        onToggle: () => toggleSection(section.id),
+        expanded: sectionExpanded(key),
+        onToggle: () => toggleSection(key),
         edits: team == null ? null : editsFor(team, section.id),
         sortMode: mode(),
         onSortModeChange: sortSetter(group),
@@ -592,6 +592,9 @@ class _SliverChannelsList extends HookConsumerWidget {
                 context: context,
                 channel: channel,
                 currentPubkey: currentPubkey,
+                isUnread:
+                    unreadChannelIds.contains(channel.id) ||
+                    attentionChannelIds.contains(channel.id),
                 sectionId: key != null && key.startsWith('group:')
                     ? teamIdOf(key)
                     : null,

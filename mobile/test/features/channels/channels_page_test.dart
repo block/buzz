@@ -1898,7 +1898,9 @@ void main() {
     for (final edge in edges) {
       await tester.longPressAt(edge);
       await tester.pumpAndSettle();
-      expect(find.byType(ChannelDetailsPage), findsOneWidget);
+      expect(find.byType(ChannelDetailsPage), findsNothing);
+      expect(find.text('Mark unread'), findsOneWidget);
+      expect(find.text('Move to section…'), findsOneWidget);
       navigator.pop();
       await tester.pumpAndSettle();
 
@@ -4661,7 +4663,6 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-
         expect(
           tester.widget<Text>(find.text('general')).style?.fontWeight,
           FontWeight.w500,
@@ -4676,7 +4677,10 @@ void main() {
         );
 
         if (viaChannelRead) {
-          readState.markContextRead('1', 30, clearForcedMessages: true);
+          await tester.longPress(find.text('general'));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Mark read'));
+          await tester.pumpAndSettle();
           await tester.pump();
         } else {
           readState.markContextRead('thread-activity:$threadIdRoot', 30);
@@ -4825,6 +4829,14 @@ void main() {
         const ValueKey('channel-attention-dot-1'),
       );
       expect(attentionDot, dot ? findsOneWidget : findsNothing);
+
+      if (dot) {
+        await tester.longPress(find.text('general'));
+        await tester.pumpAndSettle();
+        expect(find.text('Mark read'), findsOneWidget);
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
+      }
 
       if (dot) {
         mutes.setMute(muted: true, relayMuted: false);

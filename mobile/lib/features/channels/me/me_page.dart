@@ -1,5 +1,6 @@
 import '../channel_sections/section_show_more.dart';
 import '../channel_stars/channel_stars_provider.dart';
+import '../../../shared/widgets/native_conversation_menu.dart';
 import 'dart:async';
 import 'dart:convert';
 import '../channel_filter/channel_filter_activity.dart';

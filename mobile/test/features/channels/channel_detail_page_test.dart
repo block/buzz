@@ -126,6 +126,7 @@ import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scaffold.dart';
 import 'package:buzz/shared/widgets/flapping_bee.dart';
 import 'package:buzz/shared/widgets/keyboard_dismiss_on_drag.dart';
+import 'package:buzz/shared/widgets/app_list.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -5352,17 +5353,17 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final muteSemantics = tester.getSemantics(
-        find.byKey(const ValueKey('channel-details-mute-action')),
+      final readSemantics = tester.getSemantics(
+        find.byKey(const ValueKey('channel-details-read-action')),
       );
-      expect(muteSemantics.label, 'Mute');
-      expect(muteSemantics.flagsCollection.isButton, isTrue);
+      expect(readSemantics.label, 'Mark unread');
+      expect(readSemantics.flagsCollection.isButton, isTrue);
       expect(
-        muteSemantics.flagsCollection.isEnabled.toString(),
+        readSemantics.flagsCollection.isEnabled.toString(),
         'Tristate.isTrue',
       );
       expect(
-        muteSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+        readSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
         isTrue,
       );
 
@@ -5397,12 +5398,20 @@ void main() {
         expect(find.text('Mute'), findsOneWidget);
         expect(find.byIcon(BuzzIcons.bellOff), findsOneWidget);
 
-        await tester.ensureVisible(pinAction);
+        await Scrollable.ensureVisible(
+          tester.element(pinAction),
+          alignment: 0.5,
+        );
+        await tester.pumpAndSettle();
         await tester.tap(pinAction);
         await tester.pump();
 
         expect(find.text('Unpin'), findsOneWidget);
-        await tester.ensureVisible(find.text('Star'));
+        await Scrollable.ensureVisible(
+          tester.element(find.text('Star')),
+          alignment: 0.5,
+        );
+        await tester.pumpAndSettle();
         await tester.tap(find.text('Star'));
         await tester.pump();
         expect(find.text('Unstar'), findsOneWidget);
@@ -5421,7 +5430,11 @@ void main() {
         final activeBell = tester.widget<Icon>(find.byIcon(BuzzIcons.bell));
         expect(activeBell.color, AppTheme.light().colorScheme.primary);
 
-        await tester.ensureVisible(pinAction);
+        await Scrollable.ensureVisible(
+          tester.element(pinAction),
+          alignment: 0.5,
+        );
+        await tester.pumpAndSettle();
         await tester.tap(pinAction);
         await Scrollable.ensureVisible(
           tester.element(muteAction),
@@ -5459,17 +5472,15 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      final readAction = find.byKey(
+        const ValueKey('channel-details-read-action'),
+      );
       final muteAction = find.byKey(
         const ValueKey('channel-details-mute-action'),
       );
-      final editAction = find.byKey(
-        const ValueKey('channel-details-edit-action'),
-      );
-      expect(find.text('Mute'), findsOneWidget);
-      expect(find.text('Edit'), findsOneWidget);
-      expect(tester.getSize(muteAction).height, greaterThan(84));
+      expect(tester.getSize(readAction).height, greaterThan(84));
       expect(
-        tester.getSize(editAction).height,
+        tester.getSize(readAction).height,
         tester.getSize(muteAction).height,
       );
       expect(tester.takeException(), isNull);
@@ -5652,7 +5663,7 @@ void main() {
       );
       expect(_previewRowAvatarInitial(tester, 'self'), 'Y');
 
-      await tester.ensureVisible(seeAllRow);
+      await Scrollable.ensureVisible(tester.element(seeAllRow), alignment: 0.5);
       await tester.pumpAndSettle();
       await tester.tap(seeAllRow);
       await tester.pumpAndSettle();
@@ -17315,6 +17326,7 @@ void main() {
         expect(find.text('General discussion'), findsOneWidget);
 
         expect(find.text('Preferences'), findsNothing);
+        expect(find.text('5 members'), findsOneWidget);
         expect(find.text('Mute'), findsOneWidget);
         expect(find.text('Edit'), findsOneWidget);
         expect(find.text('Actions'), findsNothing);
@@ -17331,21 +17343,19 @@ void main() {
             .getRect(find.byKey(const ValueKey('channel-details-description')))
             .bottom;
         final firstActionTop = tester
-            .getRect(find.byKey(const ValueKey('channel-details-mute-action')))
+            .getRect(find.byKey(const ValueKey('channel-details-read-action')))
             .top;
         expect(firstActionTop - descriptionBottom, closeTo(Grid.sm, 0.5));
         expect(
           tester
               .getSize(
-                find.byKey(const ValueKey('channel-details-mute-action')),
+                find.byKey(const ValueKey('channel-details-read-action')),
               )
               .height,
           68 + (Grid.xxs * 2),
         );
 
-        final firstActionBottom = tester
-            .getRect(find.byKey(const ValueKey('channel-details-mute-action')))
-            .bottom;
+        await _scrollDetailsTo(tester, find.text('5 members'));
         final membersLabelTop = tester.getRect(find.text('5 members')).top;
         expect(membersLabelTop, greaterThanOrEqualTo(0));
         expect(

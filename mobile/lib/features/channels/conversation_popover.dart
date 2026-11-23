@@ -63,6 +63,12 @@ Future<bool?> showConversationPopover({
         enabled: personal,
         channelId: channel.id,
       );
+      final starred =
+          ref.watch(channelStarsProvider).store.channels[channel.id]?.enabled ==
+          true;
+      final pinned =
+          ref.watch(channelPinsProvider).store.channels[channel.id]?.enabled ==
+          true;
       final callbacks = <String, FutureOr<void> Function()>{};
       Widget item(
         String label,
@@ -105,6 +111,26 @@ Future<bool?> showConversationPopover({
               );
             }
           }),
+          item(
+            pinned ? 'Unpin' : 'Pin',
+            pinned ? BuzzIcons.pinnedOff : BuzzIcons.pinned,
+            () {
+              ref
+                  .read(channelPinsProvider.notifier)
+                  .setEnabled(channel.id, !pinned);
+              Navigator.of(context).pop();
+            },
+          ),
+          item(
+            starred ? 'Unstar' : 'Star',
+            starred ? BuzzIcons.starOff : BuzzIcons.star,
+            () {
+              ref
+                  .read(channelStarsProvider.notifier)
+                  .setEnabled(channel.id, !starred);
+              Navigator.of(context).pop();
+            },
+          ),
           if (manage && !channel.isArchived)
             item(
               'Rename',

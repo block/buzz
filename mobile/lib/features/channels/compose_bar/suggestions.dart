@@ -356,8 +356,13 @@ class _ComposerSearchSuggestions<T> extends StatelessWidget {
                 dimension: 36,
                 child: Center(child: leading(context, item)),
               ),
-              title: Text(channel.name, style: bodyLargeTextStyle),
-              onTap: () => _runComposerAction(() => onSelect(channel)),
+              title: Text(
+                label(item),
+                style: labelStyle ?? bodyLargeTextStyle,
+                maxLines: singleLineLabel ? 1 : null,
+                overflow: singleLineLabel ? TextOverflow.ellipsis : null,
+              ),
+              onTap: () => _runComposerAction(() => onSelect(item)),
             );
           },
         ),

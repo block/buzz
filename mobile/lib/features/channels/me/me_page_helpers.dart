@@ -70,44 +70,60 @@ class SoloChatTile extends ConsumerWidget {
     );
     final pane = ConversationPaneScope.maybeOf(context);
     final selected = pane?.selectedId == channel.id;
-    return markMessagesRow(
-      context,
-      Stack(
-        children: [
-          if (selected)
-            Positioned.fill(
-              left: MessagesSectionOptions.leadingInset(context) - Grid.xxs,
-              right: Grid.gutter - Grid.xxs,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: context.colors.primaryContainer,
-                  borderRadius: BorderRadius.circular(Radii.container),
+    return IosConversationMenuRow(
+      onMenu: (session) => openConversationListDetails(
+        context,
+        channel,
+        viewer,
+        personal: channel.isPersonalChat(viewer, legacyChannels),
+        isUnread: isUnread,
+        nativeSession: session,
+      ),
+      child: markMessagesRow(
+        context,
+        Stack(
+          children: [
+            if (selected)
+              Positioned.fill(
+                left: MessagesSectionOptions.leadingInset(context) - Grid.xxs,
+                right: Grid.gutter - Grid.xxs,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: context.colors.primaryContainer,
+                    borderRadius: BorderRadius.circular(Radii.container),
+                  ),
                 ),
               ),
-            ),
-          Semantics(
-            selected: selected,
-            child: _MeChatRow(
-              channelId: channel.id,
-              name: channel.name,
-              isUnread: isUnread,
-              onLongPress: () => showActions(context, channel, viewer),
-              onTap:
-                  onTap ??
-                  () => openConversationPane(
-                    context,
-                    channel.id,
-                    (_) => ChannelDetailPage(
-                      channel: channel,
-                      personalChat: channel.isPersonalChat(
-                        viewer,
-                        legacyChannels,
+            Semantics(
+              selected: selected,
+              child: _MeChatRow(
+                channelId: channel.id,
+                name: channel.name,
+                isUnread: isUnread,
+                onLongPress: () => openConversationListDetails(
+                  context,
+                  channel,
+                  viewer,
+                  personal: channel.isPersonalChat(viewer, legacyChannels),
+                  isUnread: isUnread,
+                ),
+                onTap:
+                    onTap ??
+                    () => openConversationPane(
+                      context,
+                      channel.id,
+                      (_) => ChannelDetailPage(
+                        channel: channel,
+                        personalChat: channel.isPersonalChat(
+                          viewer,
+                          legacyChannels,
+                        ),
                       ),
                     ),
-                  ),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

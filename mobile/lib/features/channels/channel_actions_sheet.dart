@@ -1,3 +1,4 @@
+import '../../shared/widgets/tabler_star_icon.dart';
 import '../../shared/widgets/native_conversation_menu.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
@@ -59,6 +60,7 @@ import '../../shared/widgets/covered_route_keyboard_insets.dart';
 
 import '../../shared/widgets/bottom_up_page_route.dart';
 
+part 'conversation_popover.dart';
 part 'channel_details_page.dart';
 part 'channel_details_rows.dart';
 part 'native_channel_actions.dart';
