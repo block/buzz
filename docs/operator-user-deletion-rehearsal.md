@@ -90,7 +90,9 @@ the stepped command's stdout or a later `user-deletions inspect <request-id>`.
 Both action groups (`delete` and `replace_archive_snapshot`) give affected row
 counts by table and event counts by kind. A snapshot replacement counts once in
 its group and twice in the existing `items` mutation total. The stage result
-also records target public keys and any unmet prerequisites. The persisted
+labels each entry in `profile.targets` with its `pubkey`, its `role`
+(`human` or `owned_agent`), and whether this community has a `users` row
+selected for deletion (`delete_users_row`). It also records unmet prerequisites. The persisted
 profile step sends diagnostics to stderr and keeps its preview in the journal.
 Older completed stages keep the result written when they ran.
 

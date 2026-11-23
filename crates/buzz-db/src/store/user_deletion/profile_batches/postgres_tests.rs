@@ -181,6 +181,17 @@ async fn preview_delete_retry_preserve_other_identities_and_communities() {
         .await
         .unwrap();
     let counts = preview.profile.unwrap();
+    assert_eq!(counts.targets.len(), 2);
+    for target in &counts.targets {
+        let expected_role = if target.pubkey == f.human.public_key().to_hex() {
+            "human"
+        } else {
+            assert_eq!(target.pubkey, f.agent.public_key().to_hex());
+            "owned_agent"
+        };
+        assert_eq!(target.role, expected_role);
+        assert!(target.delete_users_row);
+    }
     assert_eq!(
         counts.delete.by_table,
         [
@@ -283,6 +294,15 @@ async fn preview_delete_retry_preserve_other_identities_and_communities() {
         .await
         .unwrap();
     assert_eq!(second.items, 0);
+    let empty = f
+        .store
+        .preview_profile_plan(&opts, &mut Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        json!(empty)["profile"]["targets"],
+        json!([{"pubkey": f.human.public_key().to_hex(), "role": "human", "delete_users_row": false}])
+    );
     assert_eq!(after, export(&f.pool).await);
 }
 

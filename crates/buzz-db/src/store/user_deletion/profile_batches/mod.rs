@@ -51,14 +51,26 @@ pub struct ProfileBatchSummary {
 
 #[derive(Debug, Default, Serialize)]
 struct ProfileCounts {
+    targets: Vec<ProfileTarget>,
     delete: ContentRowCounts,
     replace_archive_snapshot: ContentRowCounts,
+}
+
+#[derive(Debug, Serialize)]
+struct ProfileTarget {
+    pubkey: String,
+    role: &'static str,
+    delete_users_row: bool,
 }
 
 impl ProfileCounts {
     fn from_plan(plan: &Plan) -> Self {
         let mut counts = Self::default();
+        let mut selected_users = std::collections::HashSet::new();
         for op in &plan.ops {
+            if op.table.name == "users" {
+                selected_users.insert(&op.key["pubkey"]);
+            }
             let group = if op.snapshot.is_some() {
                 &mut counts.replace_archive_snapshot
             } else {
@@ -70,6 +82,20 @@ impl ProfileCounts {
                 *group.events_by_kind.entry(i64::from(kind)).or_default() += 1;
             }
         }
+        counts.targets = plan
+            .scope
+            .targets
+            .iter()
+            .map(|key| ProfileTarget {
+                pubkey: key.clone(),
+                role: if key == &plan.scope.human {
+                    "human"
+                } else {
+                    "owned_agent"
+                },
+                delete_users_row: selected_users.contains(&Value::String(format!("\\x{key}"))),
+            })
+            .collect();
         counts
     }
 }

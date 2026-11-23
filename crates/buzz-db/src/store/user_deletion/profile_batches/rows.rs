@@ -50,7 +50,8 @@ pub(super) const ARCHIVES: Table = Table {
 };
 pub(super) const USERS: Table = Table {
     name: "users",
-    key: "jsonb_build_object('pubkey',t.pubkey)",
+    // Preserve the bytea key format used by the plan across database output settings.
+    key: "jsonb_build_object('pubkey',chr(92)||'x'||encode(t.pubkey,'hex'))",
     identity: "pubkey=($2->>'pubkey')::bytea",
     selector: "t.pubkey=ANY($2::bytea[])",
 };
