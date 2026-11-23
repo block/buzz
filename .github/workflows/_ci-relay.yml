@@ -130,6 +130,7 @@ jobs:
             --test e2e_author_only_deletion \
             --test e2e_existence_oracle \
             --test e2e_channel_pins \
+            --test e2e_human_edit_agent_content \
             --archive-file target/ci/backend-integration-tests.tar.zst
       - name: Build PostgreSQL test archive
         if: steps.relay-artifacts-cache.outputs.cache-hit != 'true' && matrix.artifact == 'postgres-tests'
@@ -655,6 +656,17 @@ jobs:
           RELAY_URL: ws://localhost:3000
           # schema/schema.sql (applied above) indexes kind:5 content.
           BUZZ_TEST_SEARCH_INDEXES_DELETIONS: "1"
+      - name: Edit target e2e
+        # Message-edit target rules over WebSocket and HTTP, plus accepted
+        # edits taking effect. Select the new cases by name: the binary's
+        # older ownership cases are not part of this lane.
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'binary(e2e_human_edit_agent_content) and test(/^edit_(requires_|with_one_target_)/)' \
+            --run-ignored ignored-only
+        env:
+          RELAY_URL: ws://localhost:3000
       - name: Upload relay log
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
