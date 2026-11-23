@@ -295,16 +295,16 @@ impl AuthorityStore for PostgresAuthorityStore {
     ) -> Result<Installation, AuthorityError> {
         use sha2::{Digest, Sha256};
         let mut tx = self.pool.begin().await.map_err(db)?;
-        // Lock the matching challenge before judging its expiry. A concurrent
+        // Spend the matching challenge before judging its expiry. A concurrent
         // request that already spent it holds this row until its transaction
-        // ends, so the lock waits for that outcome: after a commit the row is
-        // gone and this statement sees the committed installation; after a
+        // ends, so the DELETE waits for that outcome: after a commit the row is
+        // gone and the lookup below sees the committed installation; after a
         // rollback (including a cancelled request) the row is back and its
-        // expiry decides. Testing expiry first would skip a locked row that
-        // crossed its deadline and answer "rejected" while the earlier
-        // request could still commit.
+        // expiry decides. Filtering on expiry in the DELETE would skip a
+        // locked row that crossed its deadline and answer "rejected" while the
+        // earlier request could still commit.
         let expires_at: Option<DateTime<Utc>> = sqlx::query_scalar(
-            "SELECT expires_at FROM push_gateway_challenges WHERE id=$1 AND challenge_hash=$2 FOR UPDATE",
+            "DELETE FROM push_gateway_challenges WHERE id=$1 AND challenge_hash=$2 RETURNING expires_at",
         )
         .bind(challenge_id)
         .bind(Sha256::digest(challenge).to_vec())
@@ -313,7 +313,7 @@ impl AuthorityStore for PostgresAuthorityStore {
         .map_err(db)?;
         let Some(expires_at) = expires_at else {
             // Read committed: this statement sees what the request that spent
-            // the challenge committed while the lock waited.
+            // the challenge committed while the DELETE waited.
             return matching_installation_in(
                 &mut *tx,
                 &n.app_attest_key_id,
@@ -325,11 +325,6 @@ impl AuthorityStore for PostgresAuthorityStore {
             .await?
             .ok_or(AuthorityError::Rejected);
         };
-        sqlx::query("DELETE FROM push_gateway_challenges WHERE id=$1")
-            .bind(challenge_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(db)?;
         if ts(expires_at) < now {
             // Retire the expired challenge before refusing, so a slower
             // request for it that read its clock earlier cannot spend it after
