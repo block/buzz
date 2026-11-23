@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../../shared/relay/media_image.dart';
+
 import 'agent_avatar_geometry.dart';
 
 /// Compensates for the shared transparent padding in the Buzzy assets.
@@ -22,9 +24,9 @@ class AgentCharacterAlignment extends StatelessWidget {
 
 /// One full-resolution cache entry shared by tray, flight, and video placeholder.
 /// Layout-sized decodes would otherwise reload at every animation frame.
-Widget characterPoster(String url) => Image.network(
-  url,
+Widget characterPoster(String url) => MediaImage(
+  url: url,
   fit: BoxFit.contain,
-  gaplessPlayback: true,
+  boundDecodeToLayout: false,
   errorBuilder: (_, _, _) => const Icon(Icons.smart_toy_outlined),
 );

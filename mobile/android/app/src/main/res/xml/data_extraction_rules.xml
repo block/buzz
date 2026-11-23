@@ -1,17 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Android 12+. flutter_secure_storage data is encrypted with Android Keystore
      keys that never leave the device, so a restored copy can't be decrypted
-     and would leave an unreadable identity behind. Other app data still
-     backs up and transfers as before. -->
+     and would leave an unreadable identity behind. The diagnostics install
+     ID belongs to one installation, so a restored phone gets its own. Other
+     app data still backs up and transfers as before. -->
 <data-extraction-rules>
     <cloud-backup>
+        <exclude domain="file" path="bestie-transcripts/"/>
+        <exclude domain="file" path="composer-transcripts/"/>
         <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
         <exclude domain="sharedpref" path="FlutterSecureKeyStorage.xml"/>
         <exclude domain="sharedpref" path="FlutterSecureStorageConfiguration.xml"/>
+        <exclude domain="file" path="diagnostics_install_id"/>
+        <exclude domain="sharedpref" path="buzz_push.xml"/>
     </cloud-backup>
     <device-transfer>
+        <exclude domain="file" path="bestie-transcripts/"/>
+        <exclude domain="file" path="composer-transcripts/"/>
         <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
         <exclude domain="sharedpref" path="FlutterSecureKeyStorage.xml"/>
         <exclude domain="sharedpref" path="FlutterSecureStorageConfiguration.xml"/>
+        <exclude domain="file" path="diagnostics_install_id"/>
+        <exclude domain="sharedpref" path="buzz_push.xml"/>
     </device-transfer>
 </data-extraction-rules>

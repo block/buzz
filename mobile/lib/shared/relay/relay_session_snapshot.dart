@@ -53,10 +53,10 @@ extension on RelaySessionNotifier {
     final origin = Uri.parse(config.baseUrl);
     final discovery = http.Request('GET', origin.resolve('/'))
       ..headers['Accept'] = 'application/nostr+json';
-    // The query transport leaves gzip bodies compressed (see
-    // RelayHttpQueryClient), and the relay's CDN gzips both responses. The
-    // inflated size is capped too: the transport cap only sees the
-    // compressed bytes.
+    // The relay's CDN gzips both responses. The inflated size is capped too:
+    // where the query transport leaves gzip bodies compressed (see
+    // RelayHttpQueryClient), the transport cap only sees the compressed
+    // bytes.
     final discovered = await send(discovery, 64 * 1024);
     final info = jsonDecode(
       relayResponseText(
@@ -94,12 +94,24 @@ extension on RelaySessionNotifier {
     final response = await send(request, readStateSnapshotMaxEnvelopeBytes);
     // Inflating, parsing and Schnorr verification must not block Flutter's
     // UI isolate.
-    final events = await _snapshotDecoder((
-      bytes: response.bodyBytes,
-      contentType: response.headers['content-type'],
-      viewer: viewer,
-      community: community,
-    ));
+    final List<NostrEvent> events;
+    try {
+      events = await _snapshotDecoder((
+        bytes: response.bodyBytes,
+        contentType: response.headers['content-type'],
+        viewer: viewer,
+        community: community,
+      ));
+    } catch (error, stackTrace) {
+      // A retired session reports that, not whatever its bytes decoded to.
+      checkContext();
+      _diagnostics.reportError(
+        error,
+        stackTrace,
+        operation: DiagnosticOperation.relayQuery,
+      );
+      rethrow;
+    }
     checkContext();
     return events;
   }

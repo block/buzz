@@ -40,6 +40,18 @@ enum NativeAttachmentPopoverAnchorLayout {
 }
 
 enum NativeAttachmentPopoverPresentationLayout {
+  @MainActor
+  static func transitionSource(in host: UIView, sourceRect: CGRect) -> UIView? {
+    var candidate = host.hitTest(
+      CGPoint(x: sourceRect.midX, y: sourceRect.midY), with: nil
+    )
+    while let view = candidate, view !== host {
+      if view is UIButton { return view }
+      candidate = view.superview
+    }
+    return nil
+  }
+
   static func keyboardDismissalOffset(
     sourceRect: CGRect,
     containerBounds: CGRect,
@@ -125,7 +137,11 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
         height: CGFloat(truncating: height)
       )
       DispatchQueue.main.async { [weak self] in
-        result(self?.presentPopover(sourceRect: sourceRect) ?? false)
+        result(
+          self?.presentPopover(
+            sourceRect: sourceRect
+          ) ?? false
+        )
       }
     case "dismiss":
       DispatchQueue.main.async { [weak self] in
@@ -163,6 +179,13 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
       convertedRect = sourceRect
     }
 
+    // Zoom from the actual glass control, rather than an invisible rectangle.
+    // Keep a separate anchor for popover positioning as expanded panels move.
+    let transitionSource = sourceView.flatMap { host in
+      NativeAttachmentPopoverPresentationLayout.transitionSource(
+        in: host, sourceRect: convertedRect
+      )
+    }
     if let sourceView {
       let keyboardDismissalOffset =
         NativeAttachmentPopoverPresentationLayout.keyboardDismissalOffset(
@@ -193,7 +216,7 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
     let availableWidth = max(
       320,
       min(
-        (sourceView?.bounds.width ?? UIScreen.main.bounds.width) - 24,
+        (sourceView?.bounds.width ?? UIScreen.main.bounds.width) - 40,
         430
       )
     )
@@ -202,8 +225,8 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
       expandedWidth: availableWidth
     )
     controller.modalPresentationStyle = .popover
-    controller.preferredTransition = .zoom { [weak anchorView] _ in
-      anchorView
+    controller.preferredTransition = .zoom { [weak transitionSource, weak anchorView] _ in
+      transitionSource ?? anchorView
     }
     controller.onDismiss = { [weak self] in
       self?.presentedController = nil
@@ -218,6 +241,16 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
     popover.sourceView = anchorView
     popover.sourceRect = anchorView.bounds
     popover.permittedArrowDirections = [.down]
+    // iOS 27 adds a 28-point system inset to these margins. Compensate
+    // for it so the expanded content meets the 20-point message rail.
+    let horizontalMargin: CGFloat
+    if #available(iOS 27.0, *) {
+      horizontalMargin = -8
+    } else {
+      horizontalMargin = 20
+    }
+    popover.popoverLayoutMargins.left = horizontalMargin
+    popover.popoverLayoutMargins.right = horizontalMargin
     popover.backgroundColor = .clear
     popover.delegate = controller
 
@@ -265,7 +298,7 @@ final class NativeAttachmentPopoverCoordinator: NSObject {
 }
 
 enum NativeAttachmentMenuLayout {
-  static let itemCount: CGFloat = 5
+  static let itemCount: CGFloat = 4
   static let contentPadding: CGFloat = 16
   static let minimumItemHeight: CGFloat = 52
   static let itemSpacing: CGFloat = 8

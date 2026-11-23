@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use nostr::JsonUtil;
-use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex, Notify};
 
 use crate::topic::EventTopicKey;
 use crate::{ChannelEvent, LinkState};
@@ -51,6 +51,7 @@ pub(crate) async fn run_subscriber(
     broadcast_tx: broadcast::Sender<ChannelEvent>,
     desired_topics: DesiredTopics,
     mut subscription_rx: mpsc::Receiver<SubscriptionCommand>,
+    subscription_changed: Arc<Notify>,
     link: watch::Sender<LinkState>,
 ) {
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
@@ -61,6 +62,7 @@ pub(crate) async fn run_subscriber(
             &broadcast_tx,
             desired_topics.clone(),
             &mut subscription_rx,
+            &subscription_changed,
             &link,
         )
         .await;
@@ -95,6 +97,7 @@ async fn connect_and_subscribe(
     broadcast_tx: &broadcast::Sender<ChannelEvent>,
     desired_topics: DesiredTopics,
     subscription_rx: &mut mpsc::Receiver<SubscriptionCommand>,
+    subscription_changed: &Notify,
     link: &watch::Sender<LinkState>,
 ) -> Result<(), redis::RedisError> {
     let client = redis::Client::open(redis_url)?;
@@ -124,6 +127,16 @@ async fn connect_and_subscribe(
 
     loop {
         tokio::select! {
+            () = subscription_changed.notified() => {
+                // Retains signal this besides their best-effort queue hint.
+                // Re-read the source of truth so a hint lost to a full queue
+                // cannot leave the live connection missing a topic.
+                for topic in missing_desired_topics(&desired_topics, &active_topics).await {
+                    let channel = topic.redis_channel();
+                    sink.subscribe(&channel).await?;
+                    active_topics.insert(channel);
+                }
+            }
             Some(command) = subscription_rx.recv() => {
                 match command {
                     SubscriptionCommand::Subscribe(topic) => {
@@ -187,7 +200,6 @@ async fn connect_and_subscribe(
                     community_id: topic_key.community_id,
                     topic: topic_key.topic,
                     event,
-                    received_at: tokio::time::Instant::now(),
                 };
 
                 if let Err(_e) = broadcast_tx.send(channel_event) {
@@ -200,6 +212,21 @@ async fn connect_and_subscribe(
             }
         }
     }
+}
+
+/// Retained topics the live connection has not subscribed yet.
+pub(crate) async fn missing_desired_topics(
+    desired_topics: &DesiredTopics,
+    active_topics: &HashSet<String>,
+) -> Vec<EventTopicKey> {
+    desired_topics
+        .lock()
+        .await
+        .iter()
+        .filter_map(|(topic, count)| {
+            (*count > 0 && !active_topics.contains(&topic.redis_channel())).then_some(*topic)
+        })
+        .collect()
 }
 
 async fn desired_refcount(desired_topics: &DesiredTopics, topic: EventTopicKey) -> usize {

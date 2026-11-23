@@ -282,7 +282,10 @@ class CreateAgentPage extends HookConsumerWidget {
                                     FocusScope.of(context).unfocus();
                                     if (avatar.value.url != null) {
                                       await precacheImage(
-                                        NetworkImage(avatar.value.url!),
+                                        mediaImageProviderFor(
+                                          ref,
+                                          avatar.value.url!,
+                                        ),
                                         context,
                                         onError: (_, _) {},
                                       ).timeout(

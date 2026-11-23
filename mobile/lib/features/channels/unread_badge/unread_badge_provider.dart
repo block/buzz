@@ -1,6 +1,5 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../channel_unread.dart';
 import '../channels_provider.dart';
 import '../../../shared/read_state/read_state_provider.dart';
 import 'observed_unread_event.dart';
@@ -38,18 +37,22 @@ final unreadBadgeProvider = Provider<UnreadBadgeState>((ref) {
 
         if (!latestObservedByChannel.containsKey(channel.id)) continue;
 
-        // The badge follows the channel list rows: what a row has seen
-        // does not count.
-        final observed = observedEventsByChannel[channel.id];
-        final observedEvents = observed == null
-            ? null
-            : rowObservedUnreadEvents(observed, channel.id, readState);
-        int? readAtForObservedEvent(ObservedUnreadEvent event) =>
-            observedUnreadEventReadAt(
-              event,
-              channel.id,
-              readState.effectiveTimestamp,
-            );
+        final observedEvents = observedEventsByChannel[channel.id];
+        int? readAtForObservedEvent(ObservedUnreadEvent event) {
+          if (!channel.isDm &&
+              rowSawObservedUnreadEvent(
+                event,
+                channel.id,
+                readState.contexts,
+              )) {
+            return event.createdAt;
+          }
+          return observedUnreadEventReadAt(
+            event,
+            channel.id,
+            readState.effectiveTimestamp,
+          );
+        }
 
         final unreadCount = countUnreadObservedEvents(
           observedEvents,

@@ -184,6 +184,9 @@ class _IOSAttachmentPopoverCoordinator {
 }
 
 class _IOSAttachmentPopoverController {
+  bool get isActive =>
+      identical(_iosAttachmentPopoverCoordinator._activeOwner, this);
+
   Future<bool> present({
     required BuildContext sourceContext,
     required Future<void> Function(XFile image) onCapture,

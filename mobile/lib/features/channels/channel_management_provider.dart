@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/auth/auth.dart';
+import '../../shared/channels/saved_message_store.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/crypto/nip_oa.dart';
@@ -18,14 +19,35 @@ import '../profile/profile_provider.dart';
 import 'channel.dart';
 import 'channel_metadata_updates.dart';
 import 'channels_provider.dart';
+import 'saved_channel_page.dart';
 
 export 'channel_metadata_updates.dart';
 
 part 'channel_huddle_actions.dart';
 part 'channel_management_actions.dart';
 
-String _relayErrorMessage(Object error) =>
-    error.toString().replaceFirst('Exception: ', '');
+/// Why adding to a DM failed when the relay says it would be too full.
+const dmAdditionFailedMessage =
+    'Couldn’t add them. A DM holds up to 9 people, not counting agents.';
+
+/// Whether the people added to a DM see its history.
+enum DmHistory {
+  /// Let the relay decide: agents join this DM, and a person joining a DM of
+  /// two or more people raises [DmNeedsHistoryChoice].
+  ask,
+
+  /// Join this DM and read its earlier messages.
+  include,
+
+  /// Start a new DM of its people and them.
+  startNew,
+}
+
+/// The relay needs the person adding to choose whether the people they add
+/// see this DM's history.
+class DmNeedsHistoryChoice implements Exception {
+  const DmNeedsHistoryChoice();
+}
 
 /// Raised when one or more kind:9000 adds were rejected, keyed by pubkey.
 ///
@@ -114,6 +136,7 @@ String _channelMemberSnapshotKey({
 
 class _ChannelMembersSnapshotCache {
   final _membersByKey = <String, List<ChannelMember>>{};
+  final _latestReadByKey = <String, int>{};
 
   List<ChannelMember>? read({
     required String relayBaseUrl,
@@ -126,19 +149,35 @@ class _ChannelMembersSnapshotCache {
         channelId: channelId,
       )];
 
+  /// Starts a roster read for this scope and returns its generation. A later
+  /// call supersedes it, so its [write] is then ignored.
+  int beginRead({
+    required String relayBaseUrl,
+    required String? pubkey,
+    required String channelId,
+  }) {
+    final key = _channelMemberSnapshotKey(
+      relayBaseUrl: relayBaseUrl,
+      pubkey: pubkey,
+      channelId: channelId,
+    );
+    return _latestReadByKey[key] = (_latestReadByKey[key] ?? 0) + 1;
+  }
+
   void write({
     required String relayBaseUrl,
     required String? pubkey,
     required String channelId,
+    required int generation,
     required List<ChannelMember> members,
   }) {
-    _membersByKey[_channelMemberSnapshotKey(
+    final key = _channelMemberSnapshotKey(
       relayBaseUrl: relayBaseUrl,
       pubkey: pubkey,
       channelId: channelId,
-    )] = List.unmodifiable(
-      members,
     );
+    if (_latestReadByKey[key] != generation) return;
+    _membersByKey[key] = List.unmodifiable(members);
   }
 }
 
@@ -368,6 +407,9 @@ final channelDetailsProvider = FutureProvider.family<ChannelDetails, String>((
     ),
   );
   if (events.isEmpty) {
+    // A channel that turned private or was deleted stays in the saved
+    // directory until its next full read. Opening it is how we learn early.
+    ref.read(channelsProvider.notifier).forgetDirectoryChannel(channelId);
     throw Exception('Channel not found: $channelId');
   }
   return channelDetailsFromEvent(events.first);
@@ -384,6 +426,14 @@ final channelMembersProvider = FutureProvider.autoDispose
       final relayBaseUrl = ref.watch(relayConfigProvider).baseUrl;
       final pubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
       final snapshotCache = ref.read(_channelMembersSnapshotCacheProvider);
+      // A read superseded by a later one (a roster update arriving mid-read)
+      // must not overwrite the snapshot the newer read already wrote. A read
+      // torn down with nothing newer still writes: it has the latest roster.
+      final generation = snapshotCache.beginRead(
+        relayBaseUrl: relayBaseUrl,
+        pubkey: pubkey,
+        channelId: channelId,
+      );
       // Re-fetch only after reconnect completes. During the disconnected
       // interval this provider has no session dependency, so its current value
       // remains visible to every consumer rather than becoming AsyncData([]).
@@ -409,6 +459,7 @@ final channelMembersProvider = FutureProvider.autoDispose
             relayBaseUrl: relayBaseUrl,
             pubkey: pubkey,
             channelId: channelId,
+            generation: generation,
             members: channelListMembers,
           );
           return channelListMembers;
@@ -424,6 +475,7 @@ final channelMembersProvider = FutureProvider.autoDispose
           relayBaseUrl: relayBaseUrl,
           pubkey: pubkey,
           channelId: channelId,
+          generation: generation,
           members: const [],
         );
         return const [];
@@ -446,6 +498,7 @@ final channelMembersProvider = FutureProvider.autoDispose
         relayBaseUrl: relayBaseUrl,
         pubkey: pubkey,
         channelId: channelId,
+        generation: generation,
         members: members,
       );
       return members;
@@ -468,6 +521,22 @@ List<ChannelMember>? watchLatestChannelMembers(Ref ref, String channelId) {
         channelId: channelId,
       );
 }
+
+/// The roster to draw right away for [channelId]: the latest loaded one, or
+/// before any load in this scope, the channel list's member snapshot.
+///
+/// [channelMembersProvider] refetches on every page open, so a header that
+/// waited for it would redraw once the fetch lands.
+final latestChannelMembersProvider = Provider.autoDispose
+    .family<List<ChannelMember>?, String>((ref, channelId) {
+      final latest = watchLatestChannelMembers(ref, channelId);
+      if (latest != null) return latest;
+      if (ref.watch(channelsProvider).asData == null) return null;
+      final listed = ref
+          .read(channelsProvider.notifier)
+          .cachedMembersForChannel(channelId);
+      return listed.isEmpty ? null : listed;
+    });
 
 /// Channel canvas (kind:40100 for the channel).
 final channelCanvasProvider = FutureProvider.family<ChannelCanvas, String>((

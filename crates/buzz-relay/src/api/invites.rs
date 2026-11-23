@@ -1,9 +1,14 @@
 //! Relay invite HTTP API — mint and claim stateless invite codes.
 //!
-//! Routes (both NIP-98 signed, outside the Nostr event data plane):
+//! Routes (all NIP-98 signed, outside the Nostr event data plane):
 //!
 //! - `POST /api/invites` — mint an invite code. Caller must hold the `owner`
 //!   or `admin` role in the tenant community (mirrors the kind:9030 authz).
+//! - `GET /api/invites` — list the community's v2 invites, newest first.
+//!   Owner/admin only. Never returns a code or its hash.
+//! - `POST /api/invites/revoke` — revoke one v2 invite by `id` or by `code`.
+//!   Owners and admins can revoke any invite; a member can revoke one they
+//!   created. Idempotent; existing members stay. Never echoes the code.
 //! - `POST /api/invites/claim` — claim an invite code. Deliberately **exempt
 //!   from the relay-membership gate**: the whole point is that the caller is
 //!   not a member yet. NIP-98 proves control of the joining pubkey; the HMAC
@@ -39,7 +44,9 @@ use crate::state::AppState;
 
 use super::{api_error, bridge, internal_error};
 mod claim_auth;
+mod manage;
 use claim_auth::{authenticate, map_claim_error};
+pub use manage::{list_invites, revoke_invite};
 
 /// Fixed-window size for the per-pubkey claim rate limiter.
 pub(crate) const CLAIM_RATE_WINDOW: Duration = Duration::from_secs(60);
@@ -66,7 +73,7 @@ pub struct MintInviteRequest {
     pub max_uses: Option<i32>,
 }
 
-fn validate_mint_request(
+pub(crate) fn validate_mint_request(
     request: &MintInviteRequest,
 ) -> Result<(u64, Option<i32>), (StatusCode, Json<Value>)> {
     let ttl = request.ttl_secs.unwrap_or(DEFAULT_INVITE_TTL_SECS);
@@ -231,9 +238,13 @@ pub async fn accept_policy(
     Ok(Json(serde_json::json!({ "receipt": receipt })))
 }
 
-fn map_mint_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
+pub(crate) fn map_mint_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
     match error {
         buzz_db::DbError::InviteRestricted => api_error(StatusCode::FORBIDDEN, "invite_restricted"),
+        buzz_db::DbError::InviteIssuerNotAdmin => api_error(
+            StatusCode::FORBIDDEN,
+            "only relay owners and admins can create invites",
+        ),
         buzz_db::DbError::InvalidData(message) | buzz_db::DbError::DeletionSafety(message) => {
             api_error(StatusCode::BAD_REQUEST, &message)
         }
@@ -260,7 +271,6 @@ pub async fn mint_invite(
     mint_invite_checked(state, slot, headers, body).await
 }
 
-#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 async fn mint_invite_checked(
     state: Arc<AppState>,
     slot: AccessSlot,
@@ -269,87 +279,17 @@ async fn mint_invite_checked(
 ) -> axum::response::Response {
     use axum::response::IntoResponse as _;
 
-    let Some(tenant) = crate::nip_fi_shadow::bind_tenant(&state, &headers).await else {
-        return api_error(
-            StatusCode::NOT_FOUND,
-            "relay: no community is configured for this host",
-        )
-        .into_response();
-    };
-
-    let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, "/api/invites");
-
-    // NIP-FI admission: NIP-98 extraction runs inside the closure, followed by
-    // assertion verify → pair → deny-map in fixed order. The proven pubkey is
-    // only available through the returned NipFiAdmission. [FI-TRACE-AUTHORITY-UNIFORM]
-    let admission = match admit_nip_fi_http_on_state(
-        &state,
-        &headers,
-        &slot,
-        bridge::make_nip98_closure_for_admission(
-            slot.clone(),
-            headers.clone(),
-            "POST",
-            url,
-            Some(body.to_vec()),
-            true, // invites always require NIP-98; no X-Pubkey dev fallback
-            true, // POST bodies must be covered by a payload tag
-        ),
-    )
-    .await
-    {
-        Ok(a) => a,
-        Err(resp) => return resp,
-    };
-    let mut caller = bridge::ProvenCaller::new(admission, &slot, &tenant);
-    let pubkey = caller.pubkey;
-
-    // Replay detection runs after NIP-98+assertion admission (both proofs verified).
-    if let Err(e) = caller.replay(&state, &tenant).await {
-        return e.into_response();
-    }
-
-    // Membership and community ban, same step as the other NIP-98 routes.
-    let membership = super::relay_members::enforce_relay_membership(
-        &state,
-        &tenant,
-        pubkey.as_bytes(),
-        super::relay_members::extract_auth_tag_header(&headers),
-        caller.signed_at,
-        caller.token_owner,
-    )
-    .await;
-    if let Err(e) = caller.check(
-        membership,
-        super::relay_members::MembershipRefusal::auth_result,
-    ) {
-        return e.into_response();
-    }
-
-    if let Some(owner) = super::relay_members::extract_nip_oa_owner(
-        pubkey.as_bytes(),
-        super::relay_members::extract_auth_tag_header(&headers),
-        caller.signed_at,
-    ) {
-        match super::relay_members::link_agent_owner(&state, &tenant, &pubkey, &owner).await {
-            super::relay_members::OwnerLink::Linked => {}
-            super::relay_members::OwnerLink::Conflict => {
-                slot.finish(AuthResult::Denied(AuthReason::OwnerMismatch));
-                return api_error(StatusCode::FORBIDDEN, "invite_owner_mismatch").into_response();
-            }
-            super::relay_members::OwnerLink::Unavailable => {
-                slot.finish(AuthResult::Denied(AuthReason::NipOaOwnerUnlinked));
-                return api_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    crate::handlers::auth::OWNER_LINK_ERROR,
-                )
-                .into_response();
-            }
-        }
-    }
+    let gate = InviteGate::Admin("only relay owners and admins can create invites");
+    let (tenant, pubkey) =
+        match admit_invite_caller(&state, &slot, &headers, "POST", "/api/invites", &body, gate)
+            .await
+        {
+            Ok(admitted) => admitted,
+            Err(response) => return response,
+        };
 
     // The request's access line carries the minted invite.
-    match mint_invite_inner(&state, &mut caller, body, tenant, pubkey).await {
+    match mint_invite_inner(&state, body, tenant, pubkey).await {
         Ok((json, minted)) => {
             slot.detail(minted);
             json.into_response()
@@ -358,42 +298,129 @@ async fn mint_invite_checked(
     }
 }
 
+/// The last HTTP admission step of an invite-management route.
+#[derive(Clone, Copy)]
+pub(crate) enum InviteGate {
+    /// Owner or admin; the message is the route's refusal.
+    Admin(&'static str),
+    /// Any member. The database transaction makes the final role decision.
+    Member,
+}
+
+/// Admission shared by the invite-management routes, in order: tenant bind,
+/// NIP-98 through NIP-FI admission for `method` and `path_and_query`, replay,
+/// relay membership and ban, the NIP-OA owner link, then `gate`.
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
+pub(crate) async fn admit_invite_caller(
+    state: &Arc<AppState>,
+    slot: &AccessSlot,
+    headers: &HeaderMap,
+    method: &'static str,
+    path_and_query: &str,
+    body: &axum::body::Bytes,
+    gate: InviteGate,
+) -> Result<(buzz_core::TenantContext, nostr::PublicKey), axum::response::Response> {
+    use axum::response::IntoResponse as _;
+
+    let Some(tenant) = crate::nip_fi_shadow::bind_tenant(state, headers).await else {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "relay: no community is configured for this host",
+        )
+        .into_response());
+    };
+
+    let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, path_and_query);
+    let has_body = method != "GET";
+
+    // NIP-FI admission: NIP-98 extraction runs inside the closure, followed by
+    // assertion verify → pair → deny-map in fixed order. The proven pubkey is
+    // only available through the returned NipFiAdmission. [FI-TRACE-AUTHORITY-UNIFORM]
+    let admission = admit_nip_fi_http_on_state(
+        state,
+        headers,
+        slot,
+        bridge::make_nip98_closure_for_admission(
+            slot.clone(),
+            headers.clone(),
+            method,
+            url,
+            has_body.then(|| body.to_vec()),
+            true,     // invites always require NIP-98; no X-Pubkey dev fallback
+            has_body, // POST bodies must be covered by a payload tag
+        ),
+    )
+    .await?;
+    let mut caller = bridge::ProvenCaller::new(admission, slot, &tenant);
+    let pubkey = caller.pubkey;
+
+    // Replay detection runs after NIP-98+assertion admission (both proofs verified).
+    caller
+        .replay(state, &tenant)
+        .await
+        .map_err(|e| e.into_response())?;
+
+    // Membership and community ban, same step as the other NIP-98 routes.
+    let membership = super::relay_members::enforce_relay_membership(
+        state,
+        &tenant,
+        pubkey.as_bytes(),
+        super::relay_members::extract_auth_tag_header(headers),
+        caller.signed_at,
+        caller.token_owner,
+    )
+    .await;
+    let membership = match gate {
+        InviteGate::Admin(_) => caller.check(
+            membership,
+            super::relay_members::MembershipRefusal::auth_result,
+        ),
+        InviteGate::Member => caller.admit_member(membership),
+    };
+    // The shared gate records the verified owner; a different stored owner
+    // keeps this route's own refusal code.
+    if let Err(e) = membership {
+        if let super::relay_members::MembershipRefusal::Api(AuthReason::OwnerMismatch, _) = e {
+            return Err(api_error(StatusCode::FORBIDDEN, "invite_owner_mismatch").into_response());
+        }
+        return Err(e.into_response());
+    }
+
+    if let InviteGate::Admin(refusal) = gate {
+        // Authz mirrors kind:9030 (add member): owner or admin only.
+        let member = caller
+            .check(
+                state
+                    .db
+                    .get_relay_member(tenant.community(), &pubkey.to_hex())
+                    .await,
+                |_| AuthResult::Denied(AuthReason::AuthorizationUnavailable),
+            )
+            .map_err(|e| internal_error(&format!("invite role lookup: {e}")).into_response())?;
+        // The role gate is the route's last admission step.
+        let role = member.map(|m| m.role).unwrap_or_default();
+        caller
+            .admit(
+                if role == "owner" || role == "admin" {
+                    Ok(())
+                } else {
+                    Err(())
+                },
+                |()| AuthResult::Denied(AuthReason::NotRelayAdmin),
+            )
+            .map_err(|()| api_error(StatusCode::FORBIDDEN, refusal).into_response())?;
+    }
+
+    Ok((tenant, pubkey))
+}
+
 async fn mint_invite_inner(
     state: &AppState,
-    caller: &mut bridge::ProvenCaller,
     body: axum::body::Bytes,
     tenant: buzz_core::TenantContext,
     pubkey: nostr::PublicKey,
 ) -> Result<(Json<Value>, crate::access::Detail), (StatusCode, Json<Value>)> {
-    // Authz mirrors kind:9030 (add member): owner or admin only.
     let sender_hex = pubkey.to_hex();
-    let member = caller
-        .check(
-            state
-                .db
-                .get_relay_member(tenant.community(), &sender_hex)
-                .await,
-            |_| AuthResult::Denied(AuthReason::AuthorizationUnavailable),
-        )
-        .map_err(|e| internal_error(&format!("invite mint role lookup: {e}")))?;
-    // The role gate is the route's last admission step.
-    let role = member.map(|m| m.role).unwrap_or_default();
-    caller
-        .admit(
-            if role == "owner" || role == "admin" {
-                Ok(())
-            } else {
-                Err(())
-            },
-            |()| AuthResult::Denied(AuthReason::NotRelayAdmin),
-        )
-        .map_err(|()| {
-            api_error(
-                StatusCode::FORBIDDEN,
-                "only relay owners and admins can create invites",
-            )
-        })?;
-
     let request: MintInviteRequest = if body.is_empty() {
         MintInviteRequest::default()
     } else {
@@ -410,10 +437,30 @@ async fn mint_invite_inner(
     // Mint a v2 opaque, database-backed invite.
     let invite = state
         .db
-        .mint_relay_invite(tenant.community(), &sender_hex, ttl, max_uses)
+        .mint_relay_invite_as_admin(tenant.community(), &sender_hex, ttl, max_uses)
         .await
         .map_err(map_mint_error)?;
 
+    let minted = crate::access::Detail {
+        invite_id: Some(invite.invite_id),
+        expires_at: invite.expires_at.map(|at| at.timestamp()),
+        max_uses: invite.max_uses,
+        ..Default::default()
+    };
+
+    Ok((
+        Json(minted_invite_json(state, tenant.host(), &invite)),
+        minted,
+    ))
+}
+
+/// The mint response contract shared by every mint route: the invite id, the
+/// code, its expiry in Unix seconds (`null` for a link that never expires), its use limits, and the landing-page URL on `host`.
+pub(crate) fn minted_invite_json(
+    state: &AppState,
+    host: &str,
+    invite: &buzz_db::relay_invite::MintedInvite,
+) -> Value {
     // Same TLS-posture logic as nip98_expected_url: wss deployments get an
     // https landing page URL, ws dev/test deployments get http.
     let scheme = if state.config.relay_url.trim_start().starts_with("wss://") {
@@ -421,27 +468,14 @@ async fn mint_invite_inner(
     } else {
         "http"
     };
-
-    let minted = crate::access::Detail {
-        invite_id: Some(invite.invite_id),
-        expires_at: Some(invite.expires_at.timestamp()),
-        max_uses: invite.max_uses,
-        ..Default::default()
-    };
-
-    // expires_at as unix seconds for the response contract.
-    let expires_at_unix = invite.expires_at.timestamp() as u64;
-
-    Ok((
-        Json(serde_json::json!({
-            "code": invite.code,
-            "expires_at": expires_at_unix,
-            "max_uses": invite.max_uses,
-            "uses_remaining": invite.uses_remaining,
-            "url": format!("{scheme}://{}/invite/{}", tenant.host(), invite.code),
-        })),
-        minted,
-    ))
+    serde_json::json!({
+        "invite_id": invite.invite_id,
+        "code": invite.code,
+        "expires_at": invite.expires_at.map(|at| at.timestamp()),
+        "max_uses": invite.max_uses,
+        "uses_remaining": invite.uses_remaining,
+        "url": format!("{scheme}://{host}/invite/{}", invite.code),
+    })
 }
 
 /// Claim an invite code — `POST /api/invites/claim`, NIP-98 signed by the
@@ -699,6 +733,7 @@ fn claim_key_rate_limited(
 
 #[cfg(test)]
 mod postgres_tests {
+    mod manage_tests;
     mod owner_admission_tests;
     mod recovery_postgres_tests;
     mod restriction_tests;
@@ -1351,7 +1386,7 @@ mod postgres_tests {
                 "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
                  WHERE wait_event_type = 'Lock' \
                    AND $1 = ANY(pg_blocking_pids(pid)) \
-                   AND query LIKE 'SELECT archived_at FROM channels %FOR NO KEY UPDATE')",
+                   AND query LIKE 'SELECT archived_at, deleted_at IS NOT NULL FROM channels %FOR NO KEY UPDATE')",
             )
             .bind(blocker_pid)
             .fetch_one(pool)

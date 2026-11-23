@@ -14,12 +14,15 @@ class InventoryAccount extends BuilderlabAccountClient {
   Map<String, dynamic> recovery = {};
   final calls = <String>[];
   @override
-  BuilderlabAccount get account =>
-      BuilderlabAccount(subject: 'fixture', expiresAt: DateTime.utc(2100));
+  BuilderlabAccount get account => BuilderlabAccount(
+    subject: 'fixture',
+    email: 'owner@example.com',
+    expiresAt: DateTime.utc(2100),
+  );
   @override
   Future<BuilderlabAccount?> restore() async => account;
   @override
-  Future<Map<String, dynamic>> currentIdentity() async => {
+  Future<Map<String, dynamic>> currentIdentity({String? signer}) async => {
     if (bound != null) 'identity': {'pubkey_hex': bound},
   };
   @override
@@ -27,6 +30,7 @@ class InventoryAccount extends BuilderlabAccountClient {
     String path,
     Map<String, dynamic> body, {
     String? expectedSubject,
+    String? signer,
   }) async {
     calls.add(path);
     if (path.endsWith('/status')) {
@@ -591,9 +595,9 @@ class _SwitchingAccount extends InventoryAccount {
   BuilderlabAccount get account =>
       BuilderlabAccount(subject: subject, expiresAt: DateTime.utc(2100));
   @override
-  Future<Map<String, dynamic>> currentIdentity() async {
+  Future<Map<String, dynamic>> currentIdentity({String? signer}) async {
     reach('current');
-    return super.currentIdentity();
+    return super.currentIdentity(signer: signer);
   }
 
   @override
@@ -601,6 +605,7 @@ class _SwitchingAccount extends InventoryAccount {
     String path,
     Map<String, dynamic> body, {
     String? expectedSubject,
+    String? signer,
   }) async {
     if (path.endsWith('/status')) reach('status');
     return super.post(path, body, expectedSubject: expectedSubject);
@@ -622,7 +627,7 @@ class _BoundAccount extends InventoryAccount {
   _BoundAccount(this.current);
   final String current;
   @override
-  Future<Map<String, dynamic>> currentIdentity() async => {
+  Future<Map<String, dynamic>> currentIdentity({String? signer}) async => {
     'identity': {'pubkey_hex': current},
   };
 }
@@ -634,6 +639,7 @@ class _BrokenStatusAccount extends InventoryAccount {
     String path,
     Map<String, dynamic> body, {
     String? expectedSubject,
+    String? signer,
   }) async => path.endsWith('/status')
       ? {'current_nostr_pubkey': null, 'backup_nostr_pubkeys': 'none'}
       : super.post(path, body, expectedSubject: expectedSubject);

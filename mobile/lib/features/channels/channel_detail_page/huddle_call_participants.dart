@@ -12,6 +12,7 @@ class _HuddleCallParticipants extends StatelessWidget {
     required this.activeSpeakerPubkeys,
     required this.speakerLevels,
     required this.workingAgentPubkeys,
+    required this.agentPubkeys,
     required this.retryTooltip,
     required this.retryIcon,
     required this.onRetry,
@@ -31,6 +32,9 @@ class _HuddleCallParticipants extends StatelessWidget {
   final Set<String> activeSpeakerPubkeys;
   final Map<String, double> speakerLevels;
   final Set<String> workingAgentPubkeys;
+
+  /// Lowercase pubkeys that the Huddle roster counts as agents.
+  final Set<String> agentPubkeys;
   final String retryTooltip;
   final IconData retryIcon;
   final VoidCallback onRetry;
@@ -154,6 +158,7 @@ class _HuddleCallParticipants extends StatelessWidget {
                 activeSpeakerPubkeys: activeSpeakerPubkeys,
                 speakerLevels: speakerLevels,
                 workingAgentPubkeys: workingAgentPubkeys,
+                agentPubkeys: agentPubkeys,
                 movementDuration: movementDuration,
                 entryDuration: entryDuration,
                 exitDuration: exitDuration,

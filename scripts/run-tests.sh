@@ -103,6 +103,12 @@ run_unit_tests() {
   run_test_step "buzz-pubsub connection tests" \
     cargo test -p buzz-pubsub --lib connection::tests:: -- --nocapture
 
+  # A retain past a full subscriber command queue (no Redis dialed;
+  # infra-free). Mirrors `just test-unit`.
+  run_test_step "buzz-pubsub full-queue retain test" \
+    cargo test -p buzz-pubsub --lib -- --exact --nocapture \
+      tests::queue_full_retain_does_not_wait_and_schedules_reconciliation
+
   run_test_step "buzz-voice tests" \
     cargo test -p buzz-voice --lib -- --nocapture
 
@@ -129,6 +135,11 @@ run_unit_tests() {
   # buzz-workflow unit tests (infra-free). Mirrors `just test-unit`.
   run_test_step "buzz-workflow unit tests" \
     cargo test -p buzz-workflow --lib -- --nocapture
+
+  # Deletion workflow/unit tests; Postgres cases remain ignored here.
+  # Mirrors the nextest path in `just test-unit`.
+  run_test_step "buzz-deletion unit tests" \
+    cargo test -p buzz-deletion --lib -- --nocapture
 
   # Keep the relay-to-agent trust-boundary regressions in the fallback path
   # when cargo-nextest is unavailable.
@@ -304,6 +315,10 @@ run_unit_tests() {
       handlers::req::tests::concurrent_claims_and_stale_teardowns_keep_the_last_owner \
       handlers::req::tests::timeout_closed_is_emitted_before_a_replacement_can_claim \
       handlers::req::tests::revoke_then_replacement_keeps_replacement_whole \
+      handlers::req::tests::revoke_of_a_replaced_holder_spares_the_pending_replacement \
+      handlers::req::tests::superseded_or_closed_requests_cannot_claim \
+      connection::tests::close_fences_a_req_whose_handler_has_not_run \
+      connection::tests::only_the_newest_same_id_req_answers \
       handlers::req::tests::claims_after_connection_cleanup_are_refused \
       handlers::req::tests::dropped_terminal_frame_cancels_connection \
       handlers::req::tests::revoke_dropped_terminal_frame_cancels_connection \
@@ -407,10 +422,16 @@ run_unit_tests() {
       community_active::tests::invalidation_fences_an_in_flight_fill_and_its_waiters \
       community_active::tests::errors_are_not_cached \
       state::tests::concurrent_open_channel_misses_share_the_in_flight_read \
+      state::tests::a_member_snapshot_ages_from_its_read_not_its_insert \
+      state::tests::overlapping_member_reads_cache_the_first_to_finish \
+      state::tests::an_open_read_that_straddles_an_invalidation_is_not_cached \
       state::tests::concurrent_restriction_and_host_misses_share_the_in_flight_read \
       tenant::tests::app_state_resolver_serves_fresh_cached_hosts_only \
       tenant::tests::an_overlong_host_fails_closed_before_the_resolver \
       state::tests::disconnect_drops_the_cached_restriction_row
+
+  run_test_step "buzz-relay member-channel invalidation route tests" \
+    cargo test -p buzz-relay --lib state::tests::member_channel_invalidation_tests:: -- --nocapture
 
   run_test_step "buzz-relay membership snapshot tests" \
     cargo test -p buzz-relay --lib membership_cache::tests:: -- --nocapture
@@ -446,6 +467,12 @@ run_unit_tests() {
   # BUZZ_GIT_S3_PROBE=1.
   run_test_step "buzz-relay Git object-store and conformance-probe tests" \
     cargo test -p buzz-relay --lib api::git::store:: -- --nocapture
+
+  run_test_step "buzz-relay Git push publish-decision tests" \
+    cargo test -p buzz-relay --lib api::git::cas_publish::tests:: -- --nocapture
+
+  run_test_step "buzz-relay Git push track C tests" \
+    cargo test -p buzz-relay --lib api::git::transport::track_c_tests:: -- --nocapture
 
   run_test_step "buzz-relay NIP-FI upgrade tests" \
     cargo test -p buzz-relay --lib nip_fi_upgrade:: -- --nocapture
@@ -532,6 +559,9 @@ run_unit_tests() {
   run_test_step "buzz-relay binary tests" \
     cargo test -p buzz-relay --bin buzz-relay -- --nocapture
 
+  run_test_step "buzz-relay public invite previews" \
+    cargo test -p buzz-relay --lib invite_preview -- --nocapture
+
   run_test_step "buzz-relay invitation token and cutoff contracts" \
     cargo test -p buzz-relay --lib invite_token:: -- --nocapture
   run_test_step "buzz-relay invitation cutoff configuration" \
@@ -550,9 +580,10 @@ run_unit_tests() {
   run_test_step "buzz-relay boot lifecycle tests" \
     cargo test -p buzz-relay --test boot_lifecycle -- --nocapture
 
-  # Load generator unit tests are infra-free. Keep in step with `just test-unit`.
-  run_test_step "buzz-test-client loadgen unit tests" \
-    cargo test -p buzz-test-client --lib loadgen:: -- --nocapture
+  # Load generator and acceptance probe unit tests are infra-free. Keep in
+  # step with `just test-unit`.
+  run_test_step "buzz-test-client loadgen and acceptance unit tests" \
+    cargo test -p buzz-test-client --lib -- --nocapture loadgen:: acceptance::
 }
 
 # ---- DB / integration tests (infra required) --------------------------------

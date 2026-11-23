@@ -104,7 +104,7 @@ Commands:
   stop          Stop containers without deleting volumes
   restart       Recreate the relay after env/image changes
   pull          Pull configured images
-  upgrade       Pull and restart, then print backup reminders
+  upgrade       After changing the BUZZ_IMAGE tag in .env, pull and restart
   logs [svc]    Follow logs (default: relay)
   status        Show compose service status
   config        Render merged compose config

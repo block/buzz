@@ -17,24 +17,12 @@ sealed class ProfileAvatarDraft {
   Future<String> upload(MediaUploadService service);
 }
 
-/// An avatar draft that already has its final URL and needs no media upload.
-final class ProfileUrlAvatarDraft extends ProfileAvatarDraft {
-  /// Creates a draft backed by [url].
-  const ProfileUrlAvatarDraft(this.url);
-
-  /// The URL that will be written to the profile.
-  final String url;
-
-  @override
-  Future<String> upload(MediaUploadService service) async => url;
-}
-
 /// A locally prepared still image awaiting upload on Save.
 final class ProfileImageAvatarDraft extends ProfileAvatarDraft {
-  /// Creates a still-image draft from JPEG [bytes].
+  /// Creates a still-image draft from JPEG or PNG [bytes].
   ProfileImageAvatarDraft(this.bytes);
 
-  /// The prepared JPEG payload.
+  /// The prepared JPEG or PNG payload.
   final Uint8List bytes;
   MediaUploadService? _uploadService;
   Future<String>? _uploadedUrl;
@@ -48,7 +36,7 @@ final class ProfileImageAvatarDraft extends ProfileAvatarDraft {
     final existing = _uploadedUrl;
     if (existing != null) return existing;
     final upload = service
-        .uploadBytes(bytes, mimeType: 'image/jpeg')
+        .uploadBytes(bytes, mimeType: detectImageMimeType(bytes))
         .then((descriptor) => descriptor.url);
     _uploadedUrl = upload;
     try {
@@ -143,7 +131,6 @@ Map<String, Object?>? encodeProfileAvatarDraft(ProfileAvatarDraft? draft) =>
         'animation': animation,
         'poster': poster,
       },
-      ProfileUrlAvatarDraft(:final url) => {'type': 'url', 'url': url},
       null => null,
     };
 
@@ -154,6 +141,5 @@ ProfileAvatarDraft? decodeProfileAvatarDraft(Map<dynamic, dynamic>? value) =>
         animation: value!['animation'] as Uint8List,
         poster: value['poster'] as Uint8List,
       ),
-      'url' => ProfileUrlAvatarDraft(value!['url'] as String),
       _ => null,
     };

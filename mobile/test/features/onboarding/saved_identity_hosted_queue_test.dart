@@ -15,6 +15,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import '../../helpers/test_assertion.dart';
 
 void main() {
   testWidgets(
@@ -60,7 +61,7 @@ void main() {
                 }
               : path.endsWith('/identity/assertions')
               ? {
-                  'assertion': 'test-assertion',
+                  'assertion': testAssertion('test-assertion'),
                   'nostr_pubkey': keys.first.public,
                   'expires_at':
                       DateTime.now().millisecondsSinceEpoch ~/ 1000 + 120,

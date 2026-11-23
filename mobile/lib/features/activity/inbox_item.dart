@@ -41,6 +41,11 @@ bool isBroadcastReply(List<List<String>> tags) {
   );
 }
 
+/// A thread reply also sent to the channel: it has a parent and the
+/// broadcast tag. [isThreadReply] excludes it.
+bool isChannelSentReply(List<List<String>> tags) =>
+    threadReferenceOf(tags).parentId != null && isBroadcastReply(tags);
+
 /// A thread reply that is not broadcast — desktop's `isThreadReply`.
 bool isThreadReply(List<List<String>> tags) {
   return threadReferenceOf(tags).parentId != null && !isBroadcastReply(tags);
@@ -134,7 +139,10 @@ class InboxItem {
     );
   }
 
-  final category = item.categories.firstOrNull ?? item.item.category;
+  // Label the event the row displays. A group can hold an older mention and
+  // a newer plain reply; the row shows the reply, so it must not say
+  // "Mentioned in". [InboxItem.categories] still drives filtering.
+  final category = item.item.category;
   if (category == 'mention') {
     return (
       text: channelName != null ? 'Mentioned in' : 'Mentioned',

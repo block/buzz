@@ -1,6 +1,6 @@
 # Partition catalog monitoring
 
-The relay audits the `events` and `delivery_log` partition catalogs at startup
+The relay audits the `events` partition catalog at startup
 and every `BUZZ_PARTITION_AUDIT_INTERVAL_SECS` (default 900 seconds). Results are
 diagnostic only. They appear in `/_status.partition_catalog` and in the metrics
 below, and they never change `/_readiness` or `/_liveness`. Alert on them; do not
@@ -68,7 +68,7 @@ timestamp disappears only when audits stop running for longer than the idle
 timeout; the other per-table gauges can be evicted during sustained failures.
 
 Counters are not idle-evicted while the process runs. The relay exports every
-run outcome for both managed tables, and the failure counter, at 0 when its
+run outcome for each managed table, and the failure counter, at 0 when its
 metrics exporter starts, so `increase()` counts the first failure and the first
 run with a new outcome:
 

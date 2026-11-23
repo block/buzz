@@ -5,6 +5,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import '../../shared/animated_avatar.dart';
 import '../../shared/widgets/avatar_shape.dart';
 import 'agent_avatar_picker.dart';
+import 'agent_character_artwork.dart';
 
 /// Keeps native playback mounted while a cached image carries the route motion.
 class AgentAvatarHero extends HookWidget {
@@ -114,11 +115,7 @@ Widget _poster(AgentAvatarSelection selection, double offset) =>
               )
             : Transform.scale(
                 scale: animatedAvatarArtworkScale,
-                child: Image.network(
-                  selection.url!,
-                  fit: BoxFit.contain,
-                  gaplessPlayback: true,
-                ),
+                child: characterPoster(selection.url!),
               ),
       ),
     );

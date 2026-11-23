@@ -456,6 +456,12 @@ mod tests {
     #[tokio::test]
     async fn a_dominated_write_is_a_conflict() {
         let (client, relay) = setup().await;
+        seed_at(
+            &client,
+            &relay,
+            &doc_with_sections(&["Theirs"]),
+            now().as_secs() + 3_600,
+        );
         relay.lock().unwrap().duplicate = true;
         let err = run(
             SidebarSectionsCmd::Create {
@@ -467,5 +473,24 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, CliError::Conflict(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn a_retry_of_a_stored_write_is_success() {
+        let (client, relay) = setup().await;
+        relay.lock().unwrap().stored_duplicate = true;
+        let out = run(
+            SidebarSectionsCmd::Create {
+                name: "Once".into(),
+                icon: None,
+            },
+            &client,
+        )
+        .await
+        .unwrap();
+        let (event, _) = published(&client, &relay);
+        assert_eq!(out["event_id"], json!(event.id.to_hex()));
+        assert_eq!(out["message"], json!(""));
+        assert_eq!(published_count(&relay), 1);
     }
 }

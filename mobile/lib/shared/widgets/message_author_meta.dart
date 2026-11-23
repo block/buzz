@@ -55,6 +55,9 @@ class MessageAuthorMeta extends StatelessWidget {
   /// Positions the metadata within the available message width.
   final MainAxisAlignment alignment;
 
+  /// Whether the row fills the available width or wraps its metadata.
+  final MainAxisSize mainAxisSize;
+
   /// Creates an inline author row with optional username and tap handling.
   const MessageAuthorMeta({
     super.key,
@@ -64,6 +67,7 @@ class MessageAuthorMeta extends StatelessWidget {
     required this.metadataColor,
     this.username,
     this.alignment = MainAxisAlignment.start,
+    this.mainAxisSize = MainAxisSize.max,
     this.reversed = false,
     this.showTimestamp = true,
     this.showIdentity = true,
@@ -140,6 +144,7 @@ class MessageAuthorMeta extends StatelessWidget {
           label: showIdentity ? null : displayName,
           child: Row(
             mainAxisAlignment: alignment,
+            mainAxisSize: mainAxisSize,
             crossAxisAlignment: CrossAxisAlignment.center,
             children: reversed ? children.reversed.toList() : children,
           ),

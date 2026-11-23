@@ -55,25 +55,33 @@ for attempt in $(seq 1 "$attempts"); do
   set -m
   "$@" &
   pid=$!
+  # The watchdog exits 0 if stopped before it signals the attempt and 124 once
+  # it has, so a timeout is reported only when the watchdog really stopped the
+  # attempt. Elapsed time cannot tell: $SECONDS counts whole wall-clock
+  # seconds, so an instant failure that straddled a second boundary looked
+  # like it had run for the whole 1s deadline.
   (
+    trap 'exit 0' TERM
     sleep "$deadline"
+    trap 'exit 124' TERM
     kill -TERM -- "-$pid" 2>/dev/null || exit 0
     sleep "$kill_after"
     kill -KILL -- "-$pid" 2>/dev/null || true
+    exit 124
   ) >/dev/null 2>&1 &
   watchdog=$!
   set +m
-  started=$SECONDS
   rc=0
   # Bash reports a job killed by a signal on wait's stderr; the warning below
   # says the same thing.
   wait "$pid" 2>/dev/null || rc=$?
   kill -- "-$watchdog" 2>/dev/null || true
-  wait "$watchdog" 2>/dev/null || true
+  watchdog_rc=0
+  wait "$watchdog" 2>/dev/null || watchdog_rc=$?
   [ "$rc" -eq 0 ] && exit 0
   # The leader can exit on TERM while a child that ignores it lives on.
   kill -KILL -- "-$pid" 2>/dev/null || true
-  if [ $((SECONDS - started)) -ge "$deadline" ]; then
+  if [ "$watchdog_rc" -eq 124 ]; then
     echo "::warning::attempt $attempt/$attempts timed out after ${deadline}s: $*"
   else
     echo "::warning::attempt $attempt/$attempts failed (exit $rc): $*"

@@ -2,7 +2,8 @@
 //! a moderation kick and a moderation DM: each notice reaches the member's
 //! live subscription, and a channel-list read made on receipt already shows
 //! the change. "On receipt" is enforced by `notice_barrier`, which parks the
-//! producer at the notice while the test reads.
+//! producer at the notice while the test reads. A new DM message resurfaces
+//! the DM for members who hid it, in the message's own commit.
 
 use std::sync::Arc;
 
@@ -63,6 +64,23 @@ fn subscribe_notices(
     tenant: &TenantContext,
     reader: &Keys,
 ) -> Receiver<axum::extract::ws::Message> {
+    let filter = json!({
+        "kinds": [KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION],
+        "#p": [reader.public_key().to_hex()],
+    });
+    subscribe(state, tenant, reader, filter, None)
+}
+
+/// Register `reader` as a connected client holding one live subscription to
+/// `filter`, scoped to `channel` when its events are a channel's, and return
+/// its outbound frames.
+fn subscribe(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    reader: &Keys,
+    filter: Value,
+    channel: Option<Uuid>,
+) -> Receiver<axum::extract::ws::Message> {
     let conn_id = Uuid::new_v4();
     let (tx, rx) = tokio::sync::mpsc::channel(32);
     state.conn_manager.register(
@@ -81,16 +99,12 @@ fn subscribe_notices(
     state
         .conn_manager
         .set_authenticated_pubkey(conn_id, reader.public_key().to_bytes().to_vec());
-    let filter = json!({
-        "kinds": [KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION],
-        "#p": [reader.public_key().to_hex()],
-    });
     state.sub_registry.register_scoped(
         tenant.community(),
         conn_id,
-        "notices".into(),
+        "live".into(),
         vec![serde_json::from_value(filter).expect("filter")],
-        None,
+        channel,
     );
     rx
 }
@@ -167,7 +181,8 @@ async fn read_tags(
         let message: Value = serde_json::from_str(&text).expect("relay frame");
         match message[0].as_str() {
             Some("EVENT") => values.extend(tag_values(&message[2], name)),
-            Some("EOSE") | Some("CLOSED") => return values,
+            Some("EOSE") => return values,
+            Some("CLOSED") => panic!("read refused: {message}"),
             _ => {}
         }
     }
@@ -433,4 +448,235 @@ async fn moderation_dm_notifies_the_recipient_once_visible() {
         (KIND_MEMBER_ADDED_NOTIFICATION as u64, &dm)
     );
     assert_ne!(second_notice[0].2, first_notice[0].2);
+}
+
+/// A new message from someone else resurfaces a DM its reader hid, in the
+/// reader's NIP-DV snapshot. The reader's own message, and one addressed only
+/// to agents, leave the hide alone.
+/// The message commits with the snapshot: when the snapshot does not land,
+/// neither is stored or delivered, and the resend is not taken as a
+/// duplicate. A read made when the message fans out sees the DM.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn dm_message_from_someone_else_unhides_it() {
+    let (state, tenant) = fixture().await;
+    let reader = Keys::generate();
+    let sender = Keys::generate();
+    let (dm, _) = state
+        .db
+        .open_dm(
+            tenant.community(),
+            &[
+                &reader.public_key().to_bytes(),
+                &sender.public_key().to_bytes(),
+            ],
+            &reader.public_key().to_bytes(),
+            false,
+            &|_: &str, _: &[u8]| Ok(()),
+        )
+        .await
+        .expect("open dm");
+    let dm = dm.id.to_string();
+    // The `h` tags of the reader's snapshot, which must exist.
+    let hidden = async || {
+        let filter = json!({"kinds": [KIND_DM_VISIBILITY], "#p": [reader.public_key().to_hex()]});
+        let snapshot = read_tags(&state, &tenant, &reader, filter.clone(), "d").await;
+        assert_eq!(snapshot, [reader.public_key().to_hex()], "one snapshot");
+        read_tags(&state, &tenant, &reader, filter, "h").await
+    };
+    publish(
+        &state,
+        &tenant,
+        &reader,
+        KIND_DM_HIDE as u16,
+        &[&["h", &dm]],
+    )
+    .await;
+    assert_eq!(hidden().await, std::slice::from_ref(&dm));
+
+    publish(&state, &tenant, &reader, 9, &[&["h", &dm]]).await;
+    assert_eq!(
+        hidden().await,
+        std::slice::from_ref(&dm),
+        "the reader's own message keeps the DM hidden"
+    );
+    publish(
+        &state,
+        &tenant,
+        &sender,
+        9,
+        &[&["h", &dm], &["audience", "agents"]],
+    )
+    .await;
+    assert_eq!(
+        hidden().await,
+        std::slice::from_ref(&dm),
+        "a message only for agents keeps the DM hidden"
+    );
+
+    let filter = json!({"kinds": [9], "#h": [dm]});
+    let mut live = subscribe(&state, &tenant, &reader, filter, Some(dm.parse().unwrap()));
+    let message = EventBuilder::new(Kind::Custom(9), "")
+        .tags([Tag::parse(["h", dm.as_str()]).unwrap()])
+        .sign_with_keys(&sender)
+        .expect("sign");
+    let stored = async || {
+        let filter = json!({"kinds": [9], "#h": [dm], "ids": [message.id.to_hex()]});
+        read_tags(&state, &tenant, &reader, filter, "h").await
+    };
+    // The trigger skips the snapshot's insert, so the replacement reports it
+    // did not land, as a lost race would.
+    let refuse = format!("refuse_dm_snapshot_{}", Uuid::new_v4().simple());
+    let pool = state.db.pool();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "CREATE FUNCTION {refuse}() RETURNS trigger LANGUAGE plpgsql AS \
+         $$ BEGIN RETURN NULL; END $$; \
+         CREATE TRIGGER {refuse} BEFORE INSERT ON events FOR EACH ROW \
+         WHEN (NEW.kind = {KIND_DM_VISIBILITY} AND NEW.d_tag = '{}') \
+         EXECUTE FUNCTION {refuse}();",
+        reader.public_key().to_hex()
+    )))
+    .execute(pool)
+    .await
+    .expect("install snapshot refusal");
+    let refused = ingest_event(&state, &tenant, message.clone(), http_auth(&sender)).await;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        "DROP TRIGGER {refuse} ON events; DROP FUNCTION {refuse}();"
+    )))
+    .execute(pool)
+    .await
+    .expect("remove snapshot refusal");
+    assert!(refused.is_err(), "message accepted without its snapshot");
+    assert!(
+        stored().await.is_empty(),
+        "message stored without its snapshot"
+    );
+    assert_eq!(hidden().await, std::slice::from_ref(&dm));
+    assert!(
+        live_notices(&mut live).is_empty(),
+        "refused message delivered"
+    );
+
+    // Park the resend at its fan-out and read as a client does on receipt.
+    let mut barrier = notice_barrier::install(&sender.public_key().to_bytes());
+    let resend = tokio::spawn({
+        let (state, tenant, message) = (state.clone(), tenant.clone(), message.clone());
+        let auth = http_auth(&sender);
+        async move { ingest_event(&state, &tenant, message, auth).await }
+    });
+    let (_, hidden_on_receipt) = at_receipt(&mut barrier, async |_| hidden().await).await;
+    let resent = resend.await.expect("task").expect("resend");
+    assert!(
+        resent.accepted && !resent.message.starts_with("duplicate"),
+        "resend refused: {}",
+        resent.message
+    );
+    assert!(
+        hidden_on_receipt.is_empty(),
+        "someone else's message unhides the DM before it is delivered"
+    );
+    let delivered = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let delivered = live_notices(&mut live);
+            if !delivered.is_empty() {
+                return delivered;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("message not delivered");
+    assert_eq!(
+        delivered,
+        [(9, dm.clone(), message.id.to_hex())],
+        "the resend is delivered once"
+    );
+    assert_eq!(stored().await, std::slice::from_ref(&dm));
+}
+
+/// A hide racing a message from someone else lands wholly before or after it.
+/// The message is parked after it read the DM as visible, holding the DM's
+/// membership key shared; the hide waits on that key exclusively rather than
+/// committing underneath it, so the hide is the later write and the reader's
+/// snapshot ends up hiding the DM.
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn dm_hide_racing_a_message_lands_after_it() {
+    let (state, tenant) = fixture().await;
+    let reader = Keys::generate();
+    let sender = Keys::generate();
+    let (dm, _) = state
+        .db
+        .open_dm(
+            tenant.community(),
+            &[
+                &reader.public_key().to_bytes(),
+                &sender.public_key().to_bytes(),
+            ],
+            &reader.public_key().to_bytes(),
+            false,
+            &|_: &str, _: &[u8]| Ok(()),
+        )
+        .await
+        .expect("open dm");
+    let dm = dm.id.to_string();
+    let message = EventBuilder::new(Kind::Custom(9), "")
+        .tags([Tag::parse(["h", dm.as_str()]).unwrap()])
+        .sign_with_keys(&sender)
+        .expect("sign");
+    let mut barrier = notice_barrier::install(message.id.as_bytes());
+    let send = tokio::spawn({
+        let (state, tenant, message) = (state.clone(), tenant.clone(), message.clone());
+        let auth = http_auth(&sender);
+        async move { ingest_event(&state, &tenant, message, auth).await }
+    });
+    let (_, hide) = at_receipt(&mut barrier, async |_| {
+        let hide = tokio::spawn({
+            let (state, tenant, reader, dm) =
+                (state.clone(), tenant.clone(), reader.clone(), dm.clone());
+            async move {
+                publish(
+                    &state,
+                    &tenant,
+                    &reader,
+                    KIND_DM_HIDE as u16,
+                    &[&["h", &dm]],
+                )
+                .await
+            }
+        });
+        // The hide must wait for the message's shared hold, exclusively, on
+        // this DM's membership key, not commit underneath it.
+        let key = format!("buzz_channel_membership:{}:{dm}", tenant.community().as_uuid());
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' \
+                     AND NOT granted AND mode = 'ExclusiveLock' \
+                     AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
+                     AND ((classid::bigint << 32) | objid::bigint) = hashtextextended($1, 0))",
+                )
+                .bind(&key)
+                .fetch_one(state.db.pool())
+                .await
+                .expect("observe the hide waiting");
+                if waiting {
+                    break;
+                }
+                assert!(!hide.is_finished(), "hide committed under the message");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("hide never waited on the message");
+        // Released when this returns; the hide then follows the message.
+        Some(hide)
+    })
+    .await;
+    let sent = send.await.expect("task").expect("send");
+    assert!(sent.accepted, "{}", sent.message);
+    hide.expect("hide task").await.expect("hide");
+    let filter = json!({"kinds": [KIND_DM_VISIBILITY], "#p": [reader.public_key().to_hex()]});
+    let hidden = read_tags(&state, &tenant, &reader, filter, "h").await;
+    assert_eq!(hidden, [dm], "the later hide is kept");
 }

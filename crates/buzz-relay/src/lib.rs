@@ -9,6 +9,7 @@ mod build_info;
 mod community_active;
 mod fenced_cache;
 mod host_cache;
+mod invite_preview;
 mod rejection;
 
 /// Shared NIP-FI assertion evaluation, denial rendering, and key pairing.
@@ -49,6 +50,8 @@ pub mod handlers;
 pub mod invite_token;
 /// Fixed-schema evidence for the relay's earliest startup steps.
 pub mod lifecycle;
+/// Fences cache refills against invalidation.
+mod load_fence;
 mod membership_cache;
 /// Inter-relay mesh startup wiring (`BUZZ_MESH` seam).
 pub mod mesh_boot;
@@ -104,3 +107,5 @@ pub use state::AppState;
 
 /// Optional relay-signed verified profiles.
 pub mod verified_profiles;
+
+mod single_community;

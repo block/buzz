@@ -1,6 +1,11 @@
+import 'package:buzz/shared/read_state/thread_follows_format.dart';
+import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+
 import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
+
 import 'package:flutter/rendering.dart';
 import 'package:buzz/shared/widgets/ios_message_create_button.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
@@ -8,7 +13,7 @@ import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:flutter/foundation.dart';
 import 'package:buzz/features/activity/activity_page.dart';
 import 'package:buzz/features/activity/activity_provider.dart';
-import 'package:buzz/features/activity/compose_drafts_provider.dart';
+import 'package:buzz/shared/drafts/compose_drafts_provider.dart';
 import 'package:buzz/features/activity/feed_item.dart';
 import 'package:buzz/features/activity/reminders_provider.dart';
 import 'package:buzz/features/channels/channel.dart';
@@ -16,9 +21,13 @@ import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/shared/identity_names/identity_names.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
+import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
+import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/reminders/reminder_service.dart' as reminder;
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -31,6 +40,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:hooks_riverpod/misc.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/thread_ids.dart';
@@ -124,6 +134,7 @@ void main() {
   };
 
   Future<Widget> buildTestable({
+    bool withPane = false,
     HomeFeedResponse? feed,
     ActivityNotifier Function()? activityNotifier,
     Map<String, UserProfile>? users,
@@ -134,6 +145,7 @@ void main() {
     ValueListenable<int>? tabReselection,
     List<ComposeDraft> drafts = const [],
     List<Reminder> reminders = const [],
+    RemindersNotifier Function()? remindersNotifier,
     Set<String> knownAgentPubkeys = const {},
     List<Override> overrides = const [],
     UserCacheNotifier Function()? userCache,
@@ -159,7 +171,9 @@ void main() {
         composeDraftsProvider.overrideWith(
           () => _FakeComposeDraftsNotifier(drafts),
         ),
-        remindersProvider.overrideWith(() => _FakeRemindersNotifier(reminders)),
+        remindersProvider.overrideWith(
+          remindersNotifier ?? () => _FakeRemindersNotifier(reminders),
+        ),
         ...overrides,
       ],
       child: MaterialApp(
@@ -170,9 +184,162 @@ void main() {
           ).copyWith(textScaler: textScaler, padding: mediaPadding),
           child: child!,
         ),
-        home: ActivityPage(tabReselection: tabReselection),
+        home: withPane
+            ? AdaptiveConversationDestination(
+                child: ActivityPage(tabReselection: tabReselection),
+              )
+            : ActivityPage(tabReselection: tabReselection),
       ),
     );
+  }
+
+  testWidgets(
+    'unfolded portrait aligns Activity and Close beside the status cluster',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(669, 951);
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        IosNavigationMetricsHost(
+          child: await buildTestable(
+            mediaPadding: const EdgeInsets.only(top: 82),
+          ),
+        ),
+      );
+      IosNavigationMetrics.updatePortraitHeader(
+        tester.element(find.byType(ActivityPage)),
+        [669, 951, 0, 20, 535, 56],
+      );
+      await tester.pumpAndSettle();
+      expect(tester.getCenter(find.byTooltip('Close activity')).dy, 48);
+      expect(tester.getCenter(find.text('Activity')).dy, 48);
+      expect(
+        tester.getSize(find.byKey(const ValueKey('activity-filters'))).width,
+        669,
+      );
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
+
+  for (final hasRail in [true, false]) {
+    testWidgets(
+      'expanded iOS Activity Close is in the rail only when present ($hasRail)',
+      (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(951, 669);
+        tester.view.viewPadding = FakeViewPadding(right: hasRail ? 76 : 0);
+        addTearDown(tester.view.reset);
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        await tester.pumpWidget(await buildTestable(withPane: true));
+        await tester.pumpAndSettle();
+        final railClose = find.byKey(
+          const ValueKey('duo-toolbar-Close activity'),
+        );
+        final inlineClose = find.byTooltip('Close activity');
+        final nativeHeader = find.byType(FrostedAppBar);
+        final title = find.text('Activity');
+        expect(title, findsOneWidget);
+        if (hasRail) {
+          expect(railClose, findsOneWidget);
+          final bar = tester.widget<IosNavigationBar>(
+            find.descendant(
+              of: railClose,
+              matching: find.byType(IosNavigationBar),
+            ),
+          );
+          expect(bar.leading!.label, 'Close activity');
+          expect(bar.leading!.symbol, 'xmark');
+          expect(inlineClose, findsNothing);
+          final header = tester.widget<FrostedAppBar>(nativeHeader);
+          expect(header.railOnly, isTrue);
+          expect(header.nativeTitle, isEmpty);
+          expect(tester.getRect(title).left, Grid.gutter);
+        } else {
+          expect(railClose, findsNothing);
+          expect(nativeHeader, findsNothing);
+          expect(inlineClose, findsOneWidget);
+          expect(
+            tester.getRect(title).left,
+            greaterThan(tester.getRect(inlineClose).right),
+          );
+        }
+        final titleStyle = tester.widget<Text>(title).style!;
+        expect(titleStyle.fontSize, 22);
+        expect(titleStyle.fontWeight, FontWeight.w600);
+        await tester.pumpWidget(const SizedBox());
+        debugDefaultTargetPlatformOverride = null;
+      },
+    );
+  }
+
+  for (final (name, platform, size, safeTop, viewPadding, headerTop) in [
+    (
+      'iOS Duo cover',
+      TargetPlatform.iOS,
+      const Size(466, 678),
+      0.0,
+      const FakeViewPadding(right: 84, bottom: 34),
+      24.0,
+    ),
+    (
+      'iOS Duo wide',
+      TargetPlatform.iOS,
+      const Size(951, 669),
+      0.0,
+      const FakeViewPadding(right: 84, bottom: 34),
+      24.0,
+    ),
+    (
+      'iOS phone',
+      TargetPlatform.iOS,
+      const Size(402, 874),
+      62.0,
+      const FakeViewPadding(top: 62, bottom: 34),
+      8.0,
+    ),
+    (
+      'Android with a side inset',
+      TargetPlatform.android,
+      const Size(466, 678),
+      0.0,
+      const FakeViewPadding(right: 84, bottom: 34),
+      8.0,
+    ),
+  ]) {
+    testWidgets('Activity header clears the top edge on $name', (tester) async {
+      debugDefaultTargetPlatformOverride = platform;
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = size;
+      tester.view.viewPadding = viewPadding;
+      addTearDown(tester.view.reset);
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      await tester.pumpWidget(
+        await buildTestable(
+          withPane: true,
+          mediaPadding: EdgeInsets.only(top: safeTop),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final title = find.text('Activity');
+      final row = tester.getRect(
+        find.ancestor(of: title, matching: find.byType(Row)).first,
+      );
+      expect(row.top, safeTop + headerTop);
+      expect(tester.getRect(title).center.dy, row.center.dy);
+      final inlineClose = find.byTooltip('Close activity');
+      if (size.width < 600) {
+        expect(tester.getRect(inlineClose).center.dy, row.center.dy);
+      } else {
+        // Close moves to the rail in the wide layout.
+        expect(inlineClose, findsNothing);
+      }
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    });
   }
 
   _activityTabJourneys(
@@ -359,10 +526,11 @@ void main() {
     expect(material.surfaceTintColor, Colors.transparent);
     expect(material.clipBehavior, Clip.antiAlias);
 
-    final items = tester.widgetList<PopupMenuItem<String>>(
-      find.byType(PopupMenuItem<String>),
+    final items = tester.widgetList<CheckedPopupMenuItem<String>>(
+      find.byType(CheckedPopupMenuItem<String>),
     );
     expect(items, hasLength(3));
+    expect(items.singleWhere((item) => item.checked).value, 'Anyone');
     expect(
       items.every((item) => item.height >= Grid.xl),
       isTrue,
@@ -879,6 +1047,76 @@ void main() {
     },
   );
 
+  testWidgets(
+    'reading a thread row under People leaves hidden agent replies unread',
+    (tester) async {
+      FeedItem threadEvent(String id, String pubkey, int age) => FeedItem(
+        id: id,
+        kind: 9,
+        pubkey: pubkey,
+        content: 'body $id',
+        createdAt: now - age,
+        channelId: 'ch1',
+        channelName: 'general',
+        tags: const [
+          ['e', threadIdRoot1, '', 'root'],
+          ['e', threadIdRoot1, '', 'reply'],
+        ],
+        category: 'mention',
+      );
+
+      await tester.pumpWidget(
+        await buildTestable(
+          knownAgentPubkeys: const {'agent_pk'},
+          feed: HomeFeedResponse(
+            mentions: [
+              threadEvent('g1', 'agent_pk', 300),
+              threadEvent('p1', 'bob_pk', 200),
+            ],
+            needsAction: const [],
+            activity: const [],
+            agentActivity: const [],
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      Future<void> chooseSender(String label) async {
+        await tester.tap(find.byKey(const ValueKey('activity-sender-menu')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text(label).last);
+        await tester.pumpAndSettle();
+      }
+
+      await chooseSender('People');
+      await tester.drag(
+        find.byKey(const ValueKey('inbox-row-p1')),
+        const Offset(-500, 0),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('inbox-unread-dot-p1')), findsNothing);
+
+      await chooseSender('Anyone');
+      expect(find.byKey(const ValueKey('inbox-unread-dot-p1')), findsOneWidget);
+      int? threadMarker() => ProviderScope.containerOf(
+        tester.element(find.byType(ActivityPage)),
+      ).read(readStateProvider).contexts[threadContextKey(threadIdRoot1)];
+      // The synced marker stops short of the hidden agent reply.
+      expect(threadMarker(), now - 301);
+
+      await chooseSender('Agents');
+      await tester.drag(
+        find.byKey(const ValueKey('inbox-row-g1')),
+        const Offset(-500, 0),
+      );
+      await tester.pumpAndSettle();
+      // With the agent reply read too, the synced marker covers both.
+      expect(threadMarker(), now - 200);
+      await chooseSender('Anyone');
+      expect(find.byKey(const ValueKey('inbox-unread-dot-p1')), findsNothing);
+    },
+  );
+
   testWidgets('sender filter preloads authors hidden under newer rows', (
     tester,
   ) async {
@@ -1005,7 +1243,17 @@ void main() {
       participants: const ['Alice'],
     );
     // A DM reply must still open its thread: the DM timeline hides replies.
-    for (final channelId in ['ch1', 'dm1']) {
+    for (final scenario in [
+      (channel: 'ch1', wide: false),
+      (channel: 'dm1', wide: false),
+      (channel: 'ch1', wide: true),
+    ]) {
+      final channelId = scenario.channel;
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = scenario.wide
+          ? const Size(1100, 800)
+          : const Size(800, 600);
+      addTearDown(tester.view.reset);
       final threadMention = FeedItem(
         id: 'reply-event',
         kind: 9,
@@ -1029,7 +1277,11 @@ void main() {
       );
 
       await tester.pumpWidget(
-        await buildTestable(feed: feed, channels: [...testChannels, dmChannel]),
+        await buildTestable(
+          withPane: scenario.wide,
+          feed: feed,
+          channels: [...testChannels, dmChannel],
+        ),
       );
       await tester.pumpAndSettle();
 
@@ -1044,8 +1296,26 @@ void main() {
       expect(page.initialMessageId, 'reply-event');
       expect(
         page.initialThreadRouteBehavior,
-        InitialThreadRouteBehavior.replaceCurrentRoute,
+        scenario.wide
+            ? InitialThreadRouteBehavior.push
+            : InitialThreadRouteBehavior.replaceCurrentRoute,
       );
+      if (scenario.wide) {
+        final controller = ConversationPaneScope.maybeOf(
+          tester.element(find.byType(ChannelDetailPage)),
+        )!;
+        final previousKey = controller.selectionKey;
+        await tester.tap(find.byKey(const ValueKey('inbox-row-reply-event')));
+        await tester.pumpAndSettle();
+        expect(controller.selectedId, 'reply-event');
+        expect(controller.selectionKey, isNot(previousKey));
+        expect(
+          tester
+              .widget<ChannelDetailPage>(find.byType(ChannelDetailPage))
+              .initialThreadRootId,
+          threadIdParentDashReply,
+        );
+      }
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
     }
@@ -1098,6 +1368,187 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byKey(const ValueKey('inbox-unread-dot-m1')), findsOneWidget);
+  });
+
+  testWidgets('reading one row keeps another row\'s mark unread in the same '
+      'channel', (tester) async {
+    await tester.pumpWidget(
+      await buildTestable(
+        readContexts: {'ch1': now, 'ch2': now, 'thread:$threadIdRoot1': now},
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    Future<void> rowAction(String id, String action) async {
+      await tester.longPress(find.byKey(ValueKey('inbox-row-$id')));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.descendant(
+          of: find.byType(BottomSheet),
+          matching: find.text(action),
+        ),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    // Two top-level rows in ch1, both already read through the channel.
+    await rowAction('m1', 'Mark unread');
+    await rowAction('ag1', 'Mark unread');
+    expect(find.byKey(const ValueKey('inbox-unread-dot-ag1')), findsOneWidget);
+
+    await rowAction('m1', 'Mark as read');
+    expect(find.byKey(const ValueKey('inbox-unread-dot-m1')), findsNothing);
+    expect(find.byKey(const ValueKey('inbox-unread-dot-ag1')), findsOneWidget);
+  });
+
+  testWidgets('long-press follows a thread and sets a reminder', (
+    tester,
+  ) async {
+    final reminders = _CapturingReminderService();
+    final remindersNotifier = _FakeRemindersNotifier(const []);
+    await tester.pumpWidget(
+      await buildTestable(
+        remindersNotifier: () => remindersNotifier,
+        overrides: [
+          reminder.reminderServiceProvider.overrideWithValue(reminders),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(ActivityPage)),
+    );
+    Finder sheetText(String text) => find.descendant(
+      of: find.byType(BottomSheet),
+      matching: find.text(text),
+    );
+
+    // A thread row follows its root, and the menu then offers unfollow.
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-a1')));
+    await tester.pumpAndSettle();
+    await tester.tap(sheetText('Follow thread'));
+    await tester.pumpAndSettle();
+    expect(
+      container.read(threadFollowsProvider).isFollowing(threadIdRoot1),
+      isTrue,
+    );
+
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-a1')));
+    await tester.pumpAndSettle();
+    expect(sheetText('Follow thread'), findsNothing);
+    await tester.tap(sheetText('Unfollow thread'));
+    await tester.pumpAndSettle();
+    expect(
+      container.read(threadFollowsProvider).isFollowing(threadIdRoot1),
+      isFalse,
+    );
+
+    // A top-level row follows the message itself as a potential thread head.
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-m1')));
+    await tester.pumpAndSettle();
+    await tester.tap(sheetText('Follow thread'));
+    await tester.pumpAndSettle();
+    expect(container.read(threadFollowsProvider).isFollowing('m1'), isTrue);
+
+    // Remind me opens the shared reminder sheet for the row's message.
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-m1')));
+    await tester.pumpAndSettle();
+    await tester.tap(sheetText('Remind me'));
+    await tester.pumpAndSettle();
+    expect(find.text('Remind me about this message'), findsOneWidget);
+    await tester.tap(find.text('In 1 hour'));
+    await tester.pumpAndSettle();
+
+    final first = reminders.saved.single;
+    expect(first.target.eventId, 'm1');
+    expect(first.target.channelId, 'ch1');
+    expect(first.target.preview, 'Hey check this out');
+    expect(first.dTag, isNull);
+    expect(find.text('Reminder set'), findsOneWidget);
+    expect(remindersNotifier.refreshes, 1);
+  });
+
+  testWidgets('long-press reschedules an existing reminder instead of adding '
+      'one', (tester) async {
+    final reminders = _CapturingReminderService();
+    final existing = Reminder(
+      id: 'reminder-d1',
+      notBefore: now + 600,
+      status: 'pending',
+      target: const ReminderTarget(
+        eventId: 'm1',
+        channelId: 'ch1',
+        preview: 'Hey check this out',
+        authorPubkey:
+            'a11ce00000000000000000000000000000000000000000000000000000000000',
+      ),
+      note: 'Reply after standup',
+      createdAt: now - 60,
+      eventId: 'reminder-event-1',
+    );
+    await tester.pumpWidget(
+      await buildTestable(
+        reminders: [existing],
+        overrides: [
+          reminder.reminderServiceProvider.overrideWithValue(reminders),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-m1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remind me'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('In 1 hour'));
+    await tester.pumpAndSettle();
+
+    final saved = reminders.saved.single;
+    expect(saved.dTag, 'reminder-d1');
+    expect(saved.note, 'Reply after standup');
+    expect(find.text('Reminder updated'), findsOneWidget);
+  });
+
+  testWidgets('long-press omits Follow in a Solo chat', (tester) async {
+    await tester.pumpWidget(
+      await buildTestable(
+        channels: [
+          Channel(
+            id: 'ch1',
+            name: 'Notes',
+            channelType: 'stream',
+            visibility: 'private',
+            description: '',
+            createdBy: 'x',
+            createdAt: DateTime(2025),
+            memberCount: 1,
+            isMember: true,
+            labels: const ['buzz.solo'],
+          ),
+          testChannels[1],
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-m1')));
+    await tester.pumpAndSettle();
+    expect(find.text('Open conversation'), findsOneWidget);
+    expect(find.text('Follow thread'), findsNothing);
+  });
+
+  testWidgets('long-press hides reminders when signed out', (tester) async {
+    await tester.pumpWidget(
+      await buildTestable(
+        overrides: [reminder.reminderServiceProvider.overrideWithValue(null)],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.byKey(const ValueKey('inbox-row-m1')));
+    await tester.pumpAndSettle();
+    expect(find.text('Follow thread'), findsOneWidget);
+    expect(find.text('Remind me'), findsNothing);
   });
 
   testWidgets('swiping an inbox row reveals and runs its row actions', (
@@ -1256,6 +1707,129 @@ void main() {
     expect(find.text('npub15yw\u2026ccpw'), findsOneWidget);
     expect(find.text('Alice'), findsNothing);
   });
+
+  group('replies also sent to the channel', () {
+    const alice =
+        'a11ce00000000000000000000000000000000000000000000000000000000000';
+    final olderMention = FeedItem(
+      id: 'm-old',
+      kind: 9,
+      pubkey: alice,
+      content: 'older mention elsewhere',
+      createdAt: now - 500,
+      channelId: 'ch1',
+      channelName: 'general',
+      tags: const [],
+      category: 'mention',
+    );
+    FeedItem reply(String id, int age, {bool sentToChannel = false}) =>
+        FeedItem(
+          id: id,
+          kind: 9,
+          pubkey: 'bob_pk',
+          content: 'reply $id',
+          createdAt: now - age,
+          channelId: 'ch1',
+          channelName: 'general',
+          tags: [
+            const ['e', threadIdRoot1, '', 'root'],
+            const ['e', threadIdRoot1, '', 'reply'],
+            if (sentToChannel) const ['broadcast', '1'],
+          ],
+          category: 'activity',
+        );
+    final broadcast = reply('bc', 200, sentToChannel: true);
+    final ordinary = reply('r2', 100);
+    HomeFeedResponse feedOf(List<FeedItem> activity) => HomeFeedResponse(
+      mentions: [olderMention],
+      needsAction: const [],
+      activity: activity,
+      agentActivity: const [],
+    );
+
+    // Marking the row read reads each reply also sent to the channel by its
+    // own mark, never the channel marker, so the older mention stays unread.
+    for (final scenario in [
+      (
+        name: 'a row of only that reply',
+        activity: [broadcast],
+        row: 'bc',
+        people: false,
+        thread: false,
+      ),
+      (
+        name: 'a thread row with an ordinary reply',
+        activity: [broadcast, ordinary],
+        row: 'r2',
+        people: false,
+        thread: true,
+      ),
+      (
+        name: 'a sender-filtered row of only that reply',
+        activity: [broadcast],
+        row: 'bc',
+        people: true,
+        thread: false,
+      ),
+    ]) {
+      testWidgets('Mark read on ${scenario.name} keeps other unread', (
+        tester,
+      ) async {
+        await tester.pumpWidget(
+          await buildTestable(feed: feedOf(scenario.activity)),
+        );
+        await tester.pumpAndSettle();
+        if (scenario.people) {
+          await tester.tap(find.byKey(const ValueKey('activity-sender-menu')));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('People').last);
+          await tester.pumpAndSettle();
+        }
+
+        final row = find.byKey(ValueKey('inbox-row-${scenario.row}'));
+        await tester.drag(row, const Offset(-200, 0));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(ValueKey('inbox-swipe-read-${scenario.row}')),
+        );
+        await tester.pumpAndSettle();
+
+        final contexts = ProviderScope.containerOf(
+          tester.element(find.byType(ActivityPage)),
+        ).read(readStateProvider).contexts;
+        expect(contexts[msgContextKey('bc')], broadcast.createdAt);
+        expect(contexts.containsKey('ch1'), isFalse);
+        expect(
+          contexts[threadContextKey(threadIdRoot1)],
+          scenario.thread ? ordinary.createdAt : isNull,
+        );
+        expect(
+          find.byKey(const ValueKey('inbox-unread-dot-m-old')),
+          findsOneWidget,
+        );
+      });
+    }
+
+    testWidgets('a thread row led by that reply opens the thread', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        await buildTestable(feed: feedOf([broadcast, ordinary])),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('inbox-row-r2')));
+      await tester.pumpAndSettle();
+
+      final page = tester.widget<ChannelDetailPage>(
+        find.byType(ChannelDetailPage),
+      );
+      expect(page.initialMessageId, 'bc');
+      expect(page.initialThreadRootId, threadIdRoot1);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+    });
+  });
 }
 
 class _FakeActivityNotifier extends ActivityNotifier {
@@ -1320,8 +1894,30 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
     String contextId,
     int unixTimestamp, {
     bool clearForcedMessages = false,
+    bool explicit = false,
   }) {
     state = state.copyWithContext(contextId, unixTimestamp);
+  }
+
+  @override
+  Future<bool> setThreadFollow(
+    String channelId,
+    String rootId,
+    bool follow,
+  ) async {
+    state = ReadStateState(
+      isReady: state.isReady,
+      pubkey: state.pubkey,
+      contexts: state.contexts,
+      version: state.version + 1,
+      forcedUnreadContexts: state.forcedUnreadContexts,
+      threadFollows: {
+        ...state.threadFollows,
+        threadFollowKey(channelId, rootId): (follow: follow, at: 1),
+      },
+      threadFollowsIncomplete: false,
+    );
+    return true;
   }
 }
 
@@ -1329,8 +1925,13 @@ class _FakeRemindersNotifier extends RemindersNotifier {
   final List<Reminder> _reminders;
   _FakeRemindersNotifier(this._reminders);
 
+  int refreshes = 0;
+
   @override
   Future<List<Reminder>> build() async => _reminders;
+
+  @override
+  Future<void> refresh() async => refreshes++;
 }
 
 class _FakeComposeDraftsNotifier extends ComposeDraftsNotifier {
@@ -1339,4 +1940,31 @@ class _FakeComposeDraftsNotifier extends ComposeDraftsNotifier {
 
   @override
   List<ComposeDraft> build() => _drafts;
+}
+
+class _CapturingReminderService extends reminder.ReminderService {
+  _CapturingReminderService._(nostr.Keys keys)
+    : super(
+        signedEventRelay: SignedEventRelay(
+          session: RelaySessionNotifier(),
+          nsec: keys.nsec,
+        ),
+        crypto: reminder.ReminderCrypto(keys.nsec, keys.public),
+      );
+
+  factory _CapturingReminderService() =>
+      _CapturingReminderService._(nostr.Keys.generate());
+
+  final saved =
+      <({reminder.ReminderTarget target, String? note, String? dTag})>[];
+
+  @override
+  Future<void> createReminder({
+    required reminder.ReminderTarget target,
+    required int notBefore,
+    String? note,
+    String? replacingDTag,
+  }) async {
+    saved.add((target: target, note: note, dTag: replacingDTag));
+  }
 }

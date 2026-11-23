@@ -6,6 +6,7 @@ class ReconnectCapsule extends HookWidget {
     super.key,
     required this.onSignIn,
     this.visible = true,
+    this.onHidden,
     this.message = 'Reconnect to Builderlab',
     this.actionLabel = 'Sign in',
     this.destructiveAction = false,
@@ -17,6 +18,7 @@ class ReconnectCapsule extends HookWidget {
 
   final VoidCallback onSignIn;
   final bool visible;
+  final VoidCallback? onHidden;
 
   /// Persistent status displayed beside or above the actions.
   final String message;
@@ -47,7 +49,7 @@ class ReconnectCapsule extends HookWidget {
       destructiveAction: destructiveAction,
       secondaryAction: secondaryAction,
       onRetry: onSignIn,
-      onDismiss: () {},
+      onDismiss: onHidden ?? () {},
       persistent: true,
       visible: visible,
       islandOrigin: islandOrigin,

@@ -64,6 +64,22 @@ void registerNativeCreationTests(Widget Function(List<Override>) buildPage) {
       expect(found['detail'], isNull);
       await event('toggle', {'pubkey': _dmKey(2)});
       await event('query', {'value': 'Person'});
+      // Two taps before Flutter rebuilds still never list a person twice.
+      for (var tap = 0; tap < 2; tap++) {
+        await messenger.handlePlatformMessage(
+          bridge.name,
+          const StandardMethodCodec().encodeMethodCall(
+            MethodCall('toggle', {'session': session, 'pubkey': _dmKey(3)}),
+          ),
+          (_) {},
+        );
+      }
+      await tester.pumpAndSettle();
+      final picked = [
+        for (final user in states.last['selected'] as List)
+          (user as Map)['pubkey'],
+      ];
+      expect(picked.toSet(), hasLength(picked.length));
       for (final key in people.keys) {
         await event('toggle', {'pubkey': key});
       }
@@ -72,6 +88,8 @@ void registerNativeCreationTests(Widget Function(List<Override>) buildPage) {
       expect(states.last['error'], contains('Try again'));
       expect(states.last['selected'] as List, hasLength(8));
       expect(actions.calls.single, hasLength(8));
+      // The relay picks the DM of these people, and named agents join it.
+      expect(actions.history, [true]);
       await event('closed');
       expect(
         Navigator.of(tester.element(find.byType(ChannelsPage))).canPop(),
@@ -85,12 +103,15 @@ void registerNativeCreationTests(Widget Function(List<Override>) buildPage) {
 
 class _NativeDmActions implements ChannelActions {
   final calls = <List<String>>[];
+  final history = <bool>[];
   @override
   Future<Channel> openDm({
     required List<String> pubkeys,
     bool waitForChannelList = true,
+    bool includeHistory = false,
   }) async {
     calls.add(pubkeys);
+    history.add(includeHistory);
     throw StateError('Try again');
   }
 

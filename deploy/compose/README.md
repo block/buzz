@@ -23,11 +23,18 @@ The bootstrap script should eventually replace manual `.env` editing for normal
 users. It is responsible for generating stable secrets and, optionally, an owner
 keypair.
 
+## Upgrade
+
+Compose defaults to the exact relay release `ghcr.io/block/buzz:0.3.0`.
+A `BUZZ_IMAGE` already set in `.env` takes precedence over that default.
+To upgrade to a newer release, set `BUZZ_IMAGE` in `.env` to its exact relay
+image tag, then run `./run.sh upgrade`. For rolling test builds, set
+`BUZZ_IMAGE=ghcr.io/block/buzz:main`.
+
 ## Production notes
 
 - Requires Docker Compose v2.24.4 or newer; the TLS override uses Compose's
   `!reset` tag to remove the direct relay port when Caddy terminates HTTPS.
-- Default `BUZZ_IMAGE` tracks `ghcr.io/block/buzz:main` for early testing. Pin it to `ghcr.io/block/buzz:sha-<7>` or a semver release tag for production once available.
 - Keep `BUZZ_RELAY_PRIVATE_KEY`, `BUZZ_GIT_HOOK_HMAC_SECRET`, database/Redis,
   and S3 secrets stable across restarts.
 - `RELAY_OWNER_PUBKEY` is intentionally not prefixed with `BUZZ_`; it must be a
@@ -41,7 +48,10 @@ keypair.
 - Mobile push remains off by default. To use the public gateway, keep the
   template's explicit `BUZZ_PUSH_GATEWAY_DELIVERY_URL` and set
   `BUZZ_PUSH_ENABLED=true`. To use another gateway, replace the exact HTTPS
-  `/v1/deliveries/apns` URL before enabling push.
+  `/v1/deliveries/apns` URL before enabling push. Newer gateways and relays
+  also accept the platform-neutral `/v1/deliveries` route; the template stays on
+  `/v1/deliveries/apns` until the public gateway and a relay release both
+  support it.
 - The bundled Compose stack fixes the relay endpoint to `http://minio:9000` and
   `BUZZ_S3_ADDRESSING_STYLE=path`: Docker DNS resolves `minio`, not
   `<bucket>.minio`. It is not configurable for an external S3 provider through

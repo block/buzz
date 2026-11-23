@@ -61,6 +61,8 @@ confirmation, not app runs.
 - Before reviewing, read [VISION.md](VISION.md), the `VISION_*.md` docs for the affected surface, and the PR's stated goal and linked
   issue. Review the change against what it is trying to do.
 - Check the change against the [Review-Proven Rules](#review-proven-rules): the defects reviewers and load tests here find most often.
+- For mobile changes, and relay or push-gateway behavior the mobile app relies
+  on, also review against [mobile/REVIEWING.md](mobile/REVIEWING.md).
 - Judge minimalism, elegance, and correctness, aiming for 9/10 on each. A score
   below 9 names the concrete defect and the fix.
 - Recommend blocking only for concrete correctness, security, or agreed-contract
@@ -796,7 +798,7 @@ which buzz-app also uses), even where a payload is documented only in code.
 cd mobile
 dart format --output=none --set-exit-if-changed .
 flutter analyze
-flutter test --dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example
+flutter test
 ```
 
 Or from repo root: `just mobile-fmt` (auto-fix), `just mobile-check` (lint + fmt check), `just mobile-test` (tests).

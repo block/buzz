@@ -25,12 +25,14 @@ pub async fn handle_close(sub_id: String, conn: Arc<ConnectionState>, state: Arc
     debug!(conn_id = %conn.conn_id, sub_id = %sub_id, "Subscription closed");
 }
 
-/// Refuse a `REQ` or sync `REQ` with `CLOSED reason`. A `REQ` replaces
-/// whatever held its ID (NIP-01), and `CLOSED` tells the client the ID is
-/// closed, so the old holder is retired before the frame, under the lifecycle
-/// lock. Every refusal before a request claims its ID goes through here. If
-/// the frame cannot be queued, the connection is cancelled: the client would
-/// otherwise never learn that the old holder is gone.
+/// Refuse a `REQ` or sync `REQ` as it arrives, before it is admitted, with
+/// `CLOSED reason`. A `REQ` replaces whatever held its ID (NIP-01), and
+/// `CLOSED` tells the client the ID is closed, so the old holder and any
+/// request still pending for the ID are retired before the frame, under the
+/// lifecycle lock. Only the connection's read loop calls this, in arrival
+/// order; an admitted request refuses with `close_if_owner`. If the frame
+/// cannot be queued, the connection is cancelled: the client would otherwise
+/// never learn that the old holder is gone.
 pub(crate) async fn refuse(sub_id: &str, reason: &str, conn: &ConnectionState, state: &AppState) {
     let mut subs = conn.subscriptions.lock().await;
     retire_locked(&mut subs, sub_id, conn, state).await;
@@ -52,31 +54,123 @@ pub(crate) async fn send_if_owner(
     #[cfg(test)]
     test_seam::pause_at(&test_seam::SEND_PAUSE).await;
     let subs = conn.subscriptions.lock().await;
-    subs.get(sub_id) == Some(&owner) && conn.send(frame)
+    owns(&subs, sub_id, owner) && conn.send(frame)
 }
 
-/// Monotonic source of subscription owner tokens. Each REQ claims its sub ID
-/// with a fresh token, so a superseded request can tell it no longer owns it.
+/// Monotonic source of subscription owner tokens. Each REQ takes its sub ID
+/// with a fresh token when it arrives, so a request that a later same-ID REQ
+/// or a `CLOSE` superseded can tell it no longer owns the ID.
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn next_owner() -> u64 {
     NEXT_OWNER.fetch_add(1, Ordering::Relaxed)
 }
 
+/// What the lifecycle map holds for a subscription ID: the token of the
+/// newest admitted request, and whether that request has claimed the ID.
+/// Until it claims, whatever is registered for the ID belongs to an older
+/// request it is replacing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SubOwner {
+    /// The request's token from `next_owner`.
+    pub owner: u64,
+    /// The request has claimed the ID: what is registered for it is its own.
+    pub claimed: bool,
+}
+
+/// Whether the request holding `owner` still owns `sub_id`. The caller holds
+/// the lifecycle lock.
+pub(crate) fn owns(subs: &HashMap<String, SubOwner>, sub_id: &str, owner: u64) -> bool {
+    subs.get(sub_id).is_some_and(|held| held.owner == owner)
+}
+
+/// Claim `sub_id` for the request holding `owner`: `false` once the
+/// connection is closing or a `CLOSE` or newer same-ID REQ superseded it.
+/// The caller holds the lifecycle lock and, on `true`, replaces whatever is
+/// registered for the ID in the same critical section.
+pub(crate) fn claim_locked(
+    subs: &mut HashMap<String, SubOwner>,
+    sub_id: &str,
+    owner: u64,
+    conn: &ConnectionState,
+) -> bool {
+    if conn.cancel.is_cancelled() {
+        return false;
+    }
+    match subs.get_mut(sub_id) {
+        Some(held) if held.owner == owner => {
+            held.claimed = true;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Why `admit` did not admit a request.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NotAdmitted {
+    /// The connection is closing; the request exits silently.
+    Closing,
+    /// A new ID past `MAX_SUBSCRIPTIONS`; `CLOSED` was queued.
+    TooManySubscriptions,
+}
+
+/// Admit a `REQ` or sync `REQ` for `sub_id` as it arrives, before its handler
+/// is spawned, and return its owner token. Admission order is arrival order:
+/// the newest request owns the ID from this point, so an older request still
+/// in its access checks can no longer claim, refuse, or send for the ID, and a
+/// `CLOSE` retires a request that has not yet claimed. The previous holder
+/// stays registered until this request claims or is refused.
+pub(crate) async fn admit(sub_id: &str, conn: &ConnectionState) -> Result<u64, NotAdmitted> {
+    let mut subs = conn.subscriptions.lock().await;
+    if conn.cancel.is_cancelled() {
+        return Err(NotAdmitted::Closing);
+    }
+    if !subs.contains_key(sub_id) && subs.len() >= super::req::MAX_SUBSCRIPTIONS {
+        // A new ID has no old holder to retire, but a lost CLOSED would leave
+        // the client waiting on a refused request.
+        if !conn.send(RelayMessage::closed(
+            sub_id,
+            "error: too many subscriptions",
+        )) {
+            conn.cancel.cancel();
+        }
+        return Err(NotAdmitted::TooManySubscriptions);
+    }
+    let owner = next_owner();
+    subs.insert(
+        sub_id.to_owned(),
+        SubOwner {
+            owner,
+            claimed: false,
+        },
+    );
+    Ok(owner)
+}
+
 // Lifecycle lock: `conn.subscriptions` serializes every change to a
 // connection's subscription state — map token, registry entry, topic
 // retention, and the terminal CLOSED frame. Neither the registry nor pubsub
-// takes it, so holding it across their awaits cannot invert lock order.
+// takes it, so holding it across their awaits cannot invert lock order. The
+// map holds, per ID, the newest admitted request's `SubOwner`, whether it has
+// claimed (registered) yet or is still pending.
 
 /// Drop `sub_id` from the map, the fan-out index, and its topic retention.
 /// The caller holds the lifecycle lock (`subs`).
 pub(crate) async fn retire_locked(
-    subs: &mut HashMap<String, u64>,
+    subs: &mut HashMap<String, SubOwner>,
     sub_id: &str,
     conn: &ConnectionState,
     state: &AppState,
 ) {
     subs.remove(sub_id);
+    retire_holder_locked(sub_id, conn, state).await;
+}
+
+/// Drop the registered holder of `sub_id` from the fan-out index and its topic
+/// retention, but keep the map token: the newer request that owns the ID is
+/// replacing it. The caller holds the lifecycle lock.
+pub(crate) async fn retire_holder_locked(sub_id: &str, conn: &ConnectionState, state: &AppState) {
     state.artifact_syncs.remove(conn.conn_id, sub_id);
     if let Some(removed) = state.sub_registry.remove_subscription(conn.conn_id, sub_id) {
         #[cfg(test)]
@@ -89,7 +183,9 @@ pub(crate) async fn retire_locked(
 /// send `closed` (if any) before releasing the lifecycle lock, so a replacing
 /// REQ can never claim the ID between the teardown and its terminal frame.
 /// Returns whether this request still owned the ID. A superseded request
-/// touches nothing and says nothing.
+/// touches nothing and says nothing. An admitted request refuses through here:
+/// owning the ID, it retires the previous holder (NIP-01 replacement) before
+/// its `CLOSED`.
 pub(crate) async fn close_if_owner(
     sub_id: &str,
     owner: u64,
@@ -97,9 +193,36 @@ pub(crate) async fn close_if_owner(
     conn: &ConnectionState,
     state: &AppState,
 ) -> bool {
+    close_owned(sub_id, owner, None, closed, conn, state).await
+}
+
+/// `close_if_owner` with `CLOSED reason`, preceded by `NOTICE notice` in the
+/// same critical section, so a superseded request sends neither.
+pub(crate) async fn refuse_if_owner_with_notice(
+    sub_id: &str,
+    owner: u64,
+    notice: &str,
+    reason: &str,
+    conn: &ConnectionState,
+    state: &AppState,
+) -> bool {
+    close_owned(sub_id, owner, Some(notice), Some(reason), conn, state).await
+}
+
+async fn close_owned(
+    sub_id: &str,
+    owner: u64,
+    notice: Option<&str>,
+    closed: Option<&str>,
+    conn: &ConnectionState,
+    state: &AppState,
+) -> bool {
     let mut subs = conn.subscriptions.lock().await;
-    if subs.get(sub_id) != Some(&owner) {
+    if !owns(&subs, sub_id, owner) {
         return false;
+    }
+    if let Some(notice) = notice {
+        conn.send(RelayMessage::notice(notice));
     }
     retire_locked(&mut subs, sub_id, conn, state).await;
     #[cfg(test)]

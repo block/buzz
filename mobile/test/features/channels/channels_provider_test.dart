@@ -1,25 +1,56 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
+import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:fake_async/fake_async.dart';
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' show listEquals;
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_platform_interface.dart';
+import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/features/activity/activity_page.dart';
+import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart';
+import 'package:buzz/shared/channels/open_channel_directory_storage.dart';
+import 'package:buzz/shared/channels/saved_message_store.dart';
+import 'package:buzz/shared/crypto/event_signing.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_provider.dart';
 import 'package:buzz/features/channels/channel_mutes/channel_mutes_storage.dart';
+import 'package:buzz/features/channels/channel_unread.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/saved_channel_page.dart';
+import 'package:buzz/features/channels/thread_follows/thread_follows_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
+import 'package:buzz/features/channels/unread_badge/unread_badge_provider.dart';
+import 'package:buzz/shared/read_state/read_state_format.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/features/activity/activity_provider.dart';
+import 'package:buzz/features/activity/inbox_item.dart';
+import 'package:buzz/features/activity/inbox_read_state.dart';
+import 'package:nostr/nostr.dart' as nostr;
 
 part 'channels_provider_live_cases.dart';
+part 'channels_provider_huddle_cases.dart';
 part 'channels_provider_deletion_cases.dart';
 part 'channels_provider_terminal_cases.dart';
 part 'channels_provider_readiness_cases.dart';
 part 'channels_provider_request_path_cases.dart';
+part 'channels_provider_activity_cases.dart';
+part 'channels_provider_join_cases.dart';
+part 'channels_provider_follow_cases.dart';
+part 'channels_provider_saved_directory_cases.dart';
+part 'channels_provider_thread_interest_cases.dart';
+part 'channels_provider_unread_revision_cases.dart';
 
 /// Tests for [ChannelsNotifier] in the pure-Nostr world.
 ///
@@ -34,9 +65,16 @@ part 'channels_provider_request_path_cases.dart';
 /// records [subscribe] calls so we can assert filter shapes and emit live
 /// events on demand.
 void main() {
+  _huddleNavigationCases();
   _unreadReadinessCases();
   _unreadDeletionCases();
+  _unreadRevisionCases();
   _requestPathCases();
+  _threadActivityCases();
+  _confirmedJoinCases();
+  _threadFollowCases();
+  _savedDirectoryCases();
+  _threadInterestCases();
   const myPk = 'me';
 
   test(
@@ -67,26 +105,181 @@ void main() {
     },
   );
 
-  test('ensureDirectoryLoaded reads again once older than maxAge', () async {
-    final session = _FakeRelaySession(
-      memberships: const [],
-      metadata: [_meta(id: _channelA, name: 'general')],
-    );
-    final container = _buildContainer(session: session);
-    addTearDown(container.dispose);
-    await container.read(channelsProvider.future);
-    final channels = container.read(channelsProvider.notifier);
+  test(
+    'the saved directory serves readers across launches and stays current',
+    () async {
+      final root = await Directory.systemTemp.createTemp('saved-directory');
+      addTearDown(() => root.delete(recursive: true));
+      final file = File('${root.path}/directory.json');
+      var now = DateTime.utc(2026, 1, 1);
+      var session = _FakeRelaySession(
+        memberships: const [],
+        metadata: [_meta(id: _channelA, name: 'general', createdAt: 100)],
+      );
+      final sessions = [session];
+      ProviderContainer launch() {
+        final container = _buildContainer(
+          session: session,
+          overrides: [
+            openChannelDirectoryStorageProvider.overrideWithValue(
+              OpenChannelDirectoryStorage(Future.value(file)),
+            ),
+            channelDirectoryClockProvider.overrideWithValue(() => now),
+          ],
+        );
+        addTearDown(container.dispose);
+        return container;
+      }
 
-    await channels.ensureDirectoryLoaded();
-    final reads = session.directoryQueryFilters.length;
-    expect(reads, isPositive);
-    // A loaded directory serves later calls until it is older than maxAge.
-    await channels.ensureDirectoryLoaded();
-    await channels.ensureDirectoryLoaded(maxAge: const Duration(hours: 1));
-    expect(session.directoryQueryFilters, hasLength(reads));
-    await channels.ensureDirectoryLoaded(maxAge: Duration.zero);
-    expect(session.directoryQueryFilters, hasLength(reads * 2));
-  });
+      // The first page of each read; a read pages on with `until`.
+      List<int?> reads() => [
+        for (final session in sessions)
+          for (final filter in session.directoryQueryFilters)
+            if (filter.until == null) filter.since,
+      ];
+      List<String> names(ProviderContainer container) => [
+        for (final channel in container.read(channelsProvider).requireValue)
+          channel.name,
+      ];
+      // Saving runs behind the list update, on real file I/O.
+      Future<void> expectSaved(List<String> expected) async {
+        List<String> saved() {
+          if (!file.existsSync()) return const [];
+          final json = jsonDecode(file.readAsStringSync()) as Map;
+          return [
+            for (final meta in (json['metas'] as List).cast<Map>())
+              for (final tag in (meta['tags'] as List).cast<List>())
+                if (tag.first == 'name') tag[1] as String,
+          ]..sort();
+        }
+
+        for (var i = 0; i < 200 && !listEquals(saved(), expected); i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 10));
+        }
+        expect(saved(), expected);
+      }
+
+      // The first reader reads the whole directory and saves it.
+      var container = launch();
+      await container.read(channelsProvider.future);
+      var channels = container.read(channelsProvider.notifier);
+      await channels.ensureDirectoryLoaded();
+      await _settle();
+      expect(reads(), [null]);
+      expect(names(container), ['general']);
+      await expectSaved(['general']);
+      expect(await file.readAsString(), isNot(contains('"sig"')));
+
+      // More readers within a minute ask the relay nothing.
+      await channels.ensureDirectoryLoaded();
+      await _settle();
+      expect(reads(), [null]);
+
+      // A minute on, a reader asks only for changes, from a minute before the
+      // newest saved one: a rename and a new channel.
+      now = now.add(const Duration(minutes: 1));
+      session.metadata = [
+        _meta(id: _channelA, name: 'general-chat', createdAt: 150),
+        _meta(id: _channelB, name: 'fresh', createdAt: 200),
+      ];
+      await channels.ensureDirectoryLoaded();
+      await _settle();
+      expect(reads().last, 100 - 60);
+      expect(names(container), unorderedEquals(['general-chat', 'fresh']));
+      await expectSaved(['fresh', 'general-chat']);
+
+      // A catch-up that brings back only held events (the overlap always
+      // returns the newest) neither rebuilds the list nor rewrites the file.
+      final list = container.read(channelsProvider).requireValue;
+      final stamp = DateTime(2020);
+      file.setLastModifiedSync(stamp);
+      now = now.add(const Duration(minutes: 1));
+      await channels.ensureDirectoryLoaded();
+      await _settle();
+      expect(reads().last, 200 - 60);
+      expect(
+        identical(container.read(channelsProvider).requireValue, list),
+        isTrue,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(file.lastModifiedSync(), stamp);
+
+      // After a relaunch the saved copy serves at once; the relay is asked only
+      // for changes since the newest saved one.
+      container.dispose();
+      now = now.add(const Duration(minutes: 5));
+      session = _FakeRelaySession(
+        memberships: const [],
+        metadata: session.metadata,
+      );
+      sessions.add(session);
+      container = launch();
+      await container.read(channelsProvider.future);
+      channels = container.read(channelsProvider.notifier);
+      final before = reads().length;
+      await channels.ensureDirectoryLoaded();
+      expect(names(container), unorderedEquals(['general-chat', 'fresh']));
+      await _settle();
+      expect(reads().skip(before), [200 - 60]);
+
+      // A channel that turned private is never in a catch-up, so it stays
+      // until the daily full read, which replaces the saved copy.
+      session.metadata = [
+        _meta(id: _channelA, name: 'general-chat', createdAt: 150),
+      ];
+      now = now.add(const Duration(minutes: 1));
+      await channels.ensureDirectoryLoaded();
+      await _settle();
+      expect(names(container), unorderedEquals(['general-chat', 'fresh']));
+      now = now.add(savedDirectoryFullReadAge);
+      // A full read slower than the check interval is shared, not displaced:
+      // a reader opening a minute later asks the relay nothing more.
+      session.pauseNextDirectoryQuery();
+      await channels.ensureDirectoryLoaded();
+      await session.nextDirectoryQueryStarted;
+      final held = reads().length;
+      now = now.add(const Duration(minutes: 2));
+      await channels.ensureDirectoryLoaded();
+      await _settle();
+      expect(reads().length, held);
+      session.resumePausedDirectoryQuery();
+      await _settle();
+      expect(reads().last, isNull);
+      expect(names(container), ['general-chat']);
+      await expectSaved(['general-chat']);
+      // The quiet reads never showed search a loading state.
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.loaded,
+      );
+
+      // Opening a channel the relay no longer serves drops it at once, and a
+      // read already in flight, whose response predates the drop, does not
+      // bring it back.
+      now = now.add(const Duration(minutes: 1));
+      session.metadata = [
+        _meta(id: _channelA, name: 'general-chat', createdAt: 150),
+        _meta(id: _channelB, name: 'late', createdAt: 300),
+      ];
+      session.pauseNextDirectoryQuery();
+      await channels.ensureDirectoryLoaded();
+      await session.nextDirectoryQueryStarted;
+      session.metadata = [];
+      await expectLater(
+        container.read(channelDetailsProvider(_channelA).future),
+        throwsException,
+      );
+      await _settle();
+      expect(names(container), isEmpty);
+      session.resumePausedDirectoryQuery();
+      await _settle();
+      // The shared full read advanced the full-read age, so this was a
+      // catch-up from the newest saved change.
+      expect(reads().last, 150 - 60);
+      expect(names(container), ['late']);
+      await expectSaved(['late']);
+    },
+  );
 
   test(
     'ensureDirectoryLoaded reads again after the community switches away and back',
@@ -100,11 +293,8 @@ void main() {
       await container.read(channelsProvider.future);
       final config = container.read(relayConfigProvider.notifier);
       final communityA = container.read(relayConfigProvider).baseUrl;
-      const maxAge = Duration(hours: 1);
 
-      await container
-          .read(channelsProvider.notifier)
-          .ensureDirectoryLoaded(maxAge: maxAge);
+      await container.read(channelsProvider.notifier).ensureDirectoryLoaded();
       expect(container.read(channelsProvider).requireValue.map((c) => c.id), [
         _channelA,
       ]);
@@ -117,15 +307,131 @@ void main() {
       await container.read(channelsProvider.future);
       final reads = session.directoryQueryFilters.length;
 
-      await container
-          .read(channelsProvider.notifier)
-          .ensureDirectoryLoaded(maxAge: maxAge);
+      await container.read(channelsProvider.notifier).ensureDirectoryLoaded();
       expect(session.directoryQueryFilters.length, greaterThan(reads));
       expect(container.read(channelsProvider).requireValue.map((c) => c.id), [
         _channelA,
       ]);
     },
   );
+
+  test('a directory load keeps latest-message times', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [
+        _meta(id: _channelA, name: 'general'),
+        _meta(id: _channelB, name: 'discoverable'),
+      ],
+      recentMessages: [
+        const NostrEvent(
+          id: 'm1',
+          pubkey: 'alice',
+          createdAt: 30,
+          kind: EventKind.streamMessageV2,
+          tags: [
+            ['h', _channelA],
+          ],
+          content: 'hi',
+          sig: 'sig',
+        ),
+      ],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+    bool isLatest(List<NostrFilter> batch) =>
+        batch.isNotEmpty &&
+        batch.every(
+          (filter) =>
+              filter.since == null &&
+              filter.tags.containsKey('#h') &&
+              (filter.limit == 1 || filter.limit == 20),
+        );
+    await container.read(channelsProvider.future);
+    await _settle();
+    final latestReads = session.queryBatches.where(isLatest).length;
+    expect(latestReads, isPositive);
+
+    await container.read(channelsProvider.notifier).retryDirectory();
+    await _settle();
+
+    expect(session.queryBatches.where(isLatest), hasLength(latestReads));
+    final channels = container.read(channelsProvider).requireValue;
+    expect(channels.map((channel) => channel.id), [_channelB, _channelA]);
+    expect(
+      channels.firstWhere((channel) => channel.id == _channelA).lastMessageAt,
+      DateTime.fromMillisecondsSinceEpoch(30 * 1000, isUtc: true),
+    );
+  });
+
+  for (final deadlineFirst in [false, true]) {
+    _testWithClock('a directory load dates newly listed DMs'
+        '${deadlineFirst ? ' after a latest-message deadline' : ''}', (clock) {
+      NostrEvent message(String channelId, int at, String author) => NostrEvent(
+        id: '$channelId-$at',
+        pubkey: author,
+        createdAt: at,
+        kind: EventKind.streamMessageV2,
+        tags: [
+          ['h', channelId],
+        ],
+        content: 'hello',
+        sig: 'sig',
+      );
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [
+          _meta(id: _channelA, name: 'Alice', channelType: 'dm'),
+          _meta(id: _channelB, name: 'Bob', channelType: 'dm'),
+        ],
+        recentMessages: [message(_channelA, 30, 'alice')],
+        enforceHistoryLimits: true,
+      );
+      final container = _buildContainer(session: session);
+      container.listen(channelsProvider, (_, _) {});
+      clock.flushMicrotasks();
+      DateTime? latest(String id) => container
+          .read(channelsProvider)
+          .requireValue
+          .singleWhere((channel) => channel.id == id)
+          .lastMessageAt;
+
+      // Another device opened DM B with an outgoing message, which unread
+      // catch-up skips. Search's directory load discovers B first.
+      session.memberships = [
+        _membership(_channelA, myPk),
+        _membership(_channelB, myPk),
+      ];
+      session.recentMessages = [
+        message(_channelA, 30, 'alice'),
+        message(_channelB, 40, myPk),
+      ];
+      if (deadlineFirst) {
+        session.latestBatchError = RelayException(
+          503,
+          '{"error":"query timed out"}',
+        );
+      }
+      container.read(channelsProvider.notifier).retryDirectory();
+      clock.flushMicrotasks();
+      if (deadlineFirst) {
+        expect(latest(_channelB), isNull);
+        // The retry after the deadline reads the whole list again.
+        session.latestBatchError = null;
+        clock.elapse(const Duration(seconds: 10));
+      }
+
+      expect(
+        latest(_channelB),
+        DateTime.fromMillisecondsSinceEpoch(40 * 1000, isUtc: true),
+      );
+      expect(
+        latest(_channelA),
+        DateTime.fromMillisecondsSinceEpoch(30 * 1000, isUtc: true),
+      );
+      container.dispose();
+      clock.elapse(const Duration(minutes: 10));
+    });
+  }
 
   test('a directory load during the first channel load waits for it', () async {
     final session = _FakeRelaySession(
@@ -146,7 +452,7 @@ void main() {
     await session.nextMemberMetadataQueryStarted;
     final directory = container
         .read(channelsProvider.notifier)
-        .ensureDirectoryLoaded(maxAge: const Duration(seconds: 30));
+        .ensureDirectoryLoaded();
     await _settle();
 
     // The first load's reply arrives last. It must not replace the list.
@@ -1774,6 +2080,282 @@ void main() {
     expect(session.metadataPageRequestCount, initialDirectoryRequests);
   });
 
+  group('search directory load on a loaded list', () {
+    const channelC = '33333333-3333-4333-8333-333333333333';
+
+    Future<ProviderContainer> loaded(_FakeRelaySession session) async {
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      // Let the first load's detached unread catch-up finish.
+      await _settle();
+      return container;
+    }
+
+    List<String> listedIds(ProviderContainer container) => container
+        .read(channelsProvider)
+        .requireValue
+        .map((channel) => channel.id)
+        .toList();
+
+    test('reads only the directory and keeps joined channels', () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(id: _channelB, name: 'discoverable'),
+        ],
+      );
+      final container = await loaded(session);
+      final joined = container.read(channelsProvider).requireValue.single;
+      final memberships = session.membershipRequestCount;
+      final histories = session.historyFilters.length;
+      final batches = session.queryBatches.length;
+
+      session.metadata = [
+        _meta(id: _channelA, name: 'general'),
+        _meta(
+          id: _channelB,
+          name: 'discoverable',
+          visibility: 'private',
+          createdAt: 2,
+        ),
+        _meta(id: channelC, name: 'new-open'),
+      ];
+      await container
+          .read(channelsProvider.notifier)
+          .retryDirectory(directoryOnly: true);
+
+      // No roster, member metadata, hidden-DM, Huddle or message reads.
+      expect(session.membershipRequestCount, memberships);
+      expect(session.historyFilters, hasLength(histories));
+      expect(session.queryBatches, hasLength(batches));
+      expect(session.directoryQueryFilters, isNotEmpty);
+      expect(listedIds(container), unorderedEquals([_channelA, channelC]));
+      final listed = container.read(channelsProvider).requireValue;
+      expect(listed.firstWhere((c) => c.id == _channelA), same(joined));
+      expect(listed.firstWhere((c) => c.id == channelC).isMember, isFalse);
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.loaded,
+      );
+    });
+
+    test('a membership refresh during the load is kept', () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(id: _channelB, name: 'discoverable'),
+          _meta(id: _channelD, name: 'joined-elsewhere'),
+        ],
+      );
+      final container = await loaded(session);
+
+      session.pauseNextDirectoryQuery();
+      final directory = container
+          .read(channelsProvider.notifier)
+          .retryDirectory(directoryOnly: true);
+      await session.nextDirectoryQueryStarted;
+
+      // Joining on another device lands while the directory is in flight.
+      session.memberships = [
+        _membership(_channelA, myPk),
+        _membership(_channelD, myPk),
+      ];
+      await container.read(channelsProvider.notifier).refresh();
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.loading,
+      );
+
+      session.resumePausedDirectoryQuery();
+      await directory;
+      await _settle();
+
+      final listed = container.read(channelsProvider).requireValue;
+      expect(
+        listed.map((c) => c.id),
+        unorderedEquals([_channelA, _channelB, _channelD]),
+      );
+      expect(listed.firstWhere((c) => c.id == _channelD).isMember, isTrue);
+      expect(listed.firstWhere((c) => c.id == _channelB).isMember, isFalse);
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).status,
+        ChannelDirectoryLoadStatus.loaded,
+      );
+    });
+
+    test(
+      'a refresh that merged the directory before it landed keeps it',
+      () async {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [
+            _meta(id: _channelA, name: 'general'),
+            _meta(id: _channelB, name: 'discoverable'),
+          ],
+        );
+        final container = await loaded(session);
+
+        // The refresh merges the directory it has (none) and then waits for
+        // its latest messages while the search load completes.
+        final gate = Completer<void>();
+        session.latestBatchGate = gate;
+        final refresh = container.read(channelsProvider.notifier).refresh();
+        await _waitUntil(() => session.latestBatchGate == null);
+        await container
+            .read(channelsProvider.notifier)
+            .retryDirectory(directoryOnly: true);
+        expect(listedIds(container), unorderedEquals([_channelA, _channelB]));
+
+        gate.complete();
+        await refresh;
+
+        expect(listedIds(container), unorderedEquals([_channelA, _channelB]));
+      },
+    );
+
+    test('a community switch discards the response', () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [
+          _meta(id: _channelA, name: 'general'),
+          _meta(id: _channelB, name: 'community-a-open'),
+        ],
+      );
+      final container = await loaded(session);
+      final communityB = channelDirectoryScope(
+        'https://community-b.example',
+        container.read(myPubkeyProvider),
+      );
+
+      session.pauseNextDirectoryQuery();
+      final directory = container
+          .read(channelsProvider.notifier)
+          .retryDirectory(directoryOnly: true);
+      await session.nextDirectoryQueryStarted;
+
+      session.memberships = [_membership(_channelD, myPk)];
+      session.metadata = [_meta(id: _channelD, name: 'community-b-general')];
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://community-b.example');
+      await container.read(channelsProvider.future);
+
+      session.resumePausedDirectoryQuery();
+      await directory;
+      await _settle();
+
+      expect(listedIds(container), [_channelD]);
+      expect(
+        container.read(channelDirectoryLoadStatusProvider).scope,
+        isNot(communityB),
+      );
+    });
+
+    test(
+      'returning to a community during a discarded load loads again',
+      () async {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [
+            _meta(id: _channelA, name: 'general'),
+            _meta(id: _channelB, name: 'community-a-open'),
+          ],
+        );
+        final container = await loaded(session);
+        final communityA = container.read(relayConfigProvider).baseUrl;
+
+        session.pauseNextDirectoryQuery();
+        final directory = container
+            .read(channelsProvider.notifier)
+            .retryDirectory(directoryOnly: true);
+        await session.nextDirectoryQueryStarted;
+
+        container
+            .read(relayConfigProvider.notifier)
+            .update(baseUrl: 'https://community-b.example');
+        await container.read(channelsProvider.future);
+        container
+            .read(relayConfigProvider.notifier)
+            .update(baseUrl: communityA);
+        await container.read(channelsProvider.future);
+        await _settle();
+        final directoryQueries = session.directoryQueryFilters.length;
+        await container
+            .read(channelsProvider.notifier)
+            .retryDirectory(directoryOnly: true);
+
+        expect(
+          session.directoryQueryFilters.length,
+          greaterThan(directoryQueries),
+        );
+        expect(
+          container.read(channelDirectoryLoadStatusProvider).status,
+          ChannelDirectoryLoadStatus.loaded,
+        );
+
+        // The old request ending later leaves the newer load's status alone.
+        session.resumePausedDirectoryQuery();
+        await directory;
+        await _settle();
+        expect(
+          container.read(channelDirectoryLoadStatusProvider).status,
+          ChannelDirectoryLoadStatus.loaded,
+        );
+      },
+    );
+
+    test(
+      'returning to a community after a discarded load loads again',
+      () async {
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [
+            _meta(id: _channelA, name: 'general'),
+            _meta(id: _channelB, name: 'community-a-open'),
+          ],
+        );
+        final container = await loaded(session);
+        final communityA = container.read(relayConfigProvider).baseUrl;
+
+        session.pauseNextDirectoryQuery();
+        final directory = container
+            .read(channelsProvider.notifier)
+            .retryDirectory(directoryOnly: true);
+        await session.nextDirectoryQueryStarted;
+
+        container
+            .read(relayConfigProvider.notifier)
+            .update(baseUrl: 'https://community-b.example');
+        await container.read(channelsProvider.future);
+        session.resumePausedDirectoryQuery();
+        await directory;
+        await _settle();
+
+        container
+            .read(relayConfigProvider.notifier)
+            .update(baseUrl: communityA);
+        await container.read(channelsProvider.future);
+        await _settle();
+        final directoryQueries = session.directoryQueryFilters.length;
+        await container
+            .read(channelsProvider.notifier)
+            .retryDirectory(directoryOnly: true);
+
+        expect(
+          session.directoryQueryFilters.length,
+          greaterThan(directoryQueries),
+        );
+        expect(
+          container.read(channelDirectoryLoadStatusProvider).status,
+          ChannelDirectoryLoadStatus.loaded,
+        );
+      },
+    );
+  });
+
   test('membership refresh does not refetch a loaded directory', () async {
     final session = _FakeRelaySession(
       memberships: [_membership(_channelA, myPk)],
@@ -1911,6 +2493,52 @@ void main() {
     expect(members.map((member) => member.pubkey), [myPk, 'alice']);
     expect(members.every((member) => member.joinedAt == joinedAt), isTrue);
   });
+
+  test(
+    'self-authored activity invalidates filter reads without changing unread or sort time',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      final notifier = container.read(channelsProvider.notifier);
+      final before = container
+          .read(channelsProvider)
+          .requireValue
+          .single
+          .lastMessageAt;
+      final versions = <int>[];
+      final listener = container.listen(
+        channelsProvider.select((_) => notifier.activityRevisionFor(_channelA)),
+        (_, next) => versions.add(next),
+      );
+      addTearDown(listener.close);
+      session.emit(
+        const NostrEvent(
+          id: 'self-message',
+          pubkey: myPk,
+          createdAt: 20,
+          kind: EventKind.streamMessageV2,
+          tags: [
+            ['h', _channelA],
+          ],
+          content: 'my own activity',
+          sig: 'sig',
+        ),
+      );
+      await _settle();
+      expect(versions, [1]);
+      expect(notifier.latestObservedByChannel[_channelA], isNull);
+      expect(
+        container.read(channelsProvider).requireValue.single.lastMessageAt,
+        before,
+      );
+      expect(notifier.activityRevisionFor(_channelB), 0);
+    },
+  );
 
   test('live channel events update channel lastMessageAt', () async {
     final session = _FakeRelaySession(
@@ -3079,6 +3707,143 @@ void main() {
     await _waitUntil(() => session.subscribeFilters.length == 1);
     expect(session.subscribeFilters, hasLength(1));
   });
+
+  // A reply also sent to the channel shows in the timeline, but it is still a
+  // thread reply: it dots only when it mentions the reader or sits in one of
+  // their threads. Elsewhere it bolds the channel like a top-level post.
+  group('replies also sent to the channel', () {
+    final otherRoot = 'a' * 64;
+    final ownRoot = 'b' * 64;
+    bool isUnread(List<NostrFilter> batch) =>
+        batch.isNotEmpty && batch.every((filter) => filter.since != null);
+    NostrEvent post(
+      String id,
+      int createdAt, {
+      String author = 'alice',
+      String? parentId,
+      bool broadcast = false,
+      bool mention = false,
+    }) => NostrEvent(
+      id: id,
+      pubkey: author,
+      createdAt: createdAt,
+      kind: EventKind.streamMessageV2,
+      tags: [
+        const ['h', _channelA],
+        if (parentId != null) ['e', parentId, '', 'reply'],
+        if (broadcast) const ['broadcast', '1'],
+        if (mention) const ['p', myPk],
+      ],
+      content: 'hi',
+      sig: 'sig',
+    );
+
+    for (final (name, setup, follow, mention, dotted) in [
+      ("someone else's thread", <NostrEvent>[], false, false, false),
+      (
+        "someone else's thread, mentioning the reader",
+        <NostrEvent>[],
+        false,
+        true,
+        true,
+      ),
+      ('a thread the reader follows', <NostrEvent>[], true, false, true),
+      (
+        'a thread the reader started',
+        [post(ownRoot, 10, author: myPk)],
+        false,
+        false,
+        true,
+      ),
+      (
+        'a thread the reader replied in',
+        [post('own-reply', 11, author: myPk, parentId: otherRoot)],
+        false,
+        false,
+        true,
+      ),
+    ]) {
+      test('$name ${dotted ? 'dots' : 'only bolds'} the channel', () async {
+        final root = setup.any((event) => event.id == ownRoot)
+            ? ownRoot
+            : otherRoot;
+        final session = _FakeRelaySession(
+          memberships: [_membership(_channelA, myPk)],
+          metadata: [_meta(id: _channelA, name: 'general')],
+        );
+        final follows = _TestFollows();
+        final container = _buildContainer(session: session, follows: follows);
+        addTearDown(container.dispose);
+        await container.read(channelsProvider.future);
+        await _waitUntil(() => session.queryBatches.any(isUnread));
+        await _settle();
+        if (follow) {
+          follows.choose(followed: {root}, channelByRoot: {root: _channelA});
+        }
+        setup.forEach(session.emit);
+        final broadcast = post(
+          'broadcast',
+          20,
+          parentId: root,
+          broadcast: true,
+          mention: mention,
+        );
+        session.emit(broadcast);
+        await _settle();
+
+        final notifier = container.read(channelsProvider.notifier);
+        final channels = container.read(channelsProvider).value!;
+        final observed =
+            notifier.observedUnreadEventsByChannel[_channelA]!['broadcast']!;
+        expect(observed.highPriority, dotted);
+        expect(observed.attention, dotted);
+        // Activity lists the thread only when the reply earns attention.
+        expect(
+          notifier.observedThreadReplies(channels),
+          dotted ? [broadcast] : isEmpty,
+        );
+        // The app icon counts it as attention only when it dots. Otherwise
+        // it is ordinary unread, the same as a new top-level post.
+        final badge = container.read(unreadBadgeProvider);
+        expect(badge.highPriorityCount, dotted ? 1 : 0);
+        expect(badge.generalUnreadCount, dotted ? 0 : 1);
+
+        void expectHighlights(
+          Map<String, int> contexts, {
+          required bool unread,
+          required bool attention,
+        }) {
+          final highlights = computeChannelListHighlights(
+            channels: channels,
+            readState: ReadStateState(
+              isReady: true,
+              pubkey: myPk,
+              contexts: contexts,
+              version: 0,
+            ),
+            channelsNotifier: notifier,
+          );
+          expect(highlights.unread, unread ? {_channelA} : isEmpty);
+          expect(highlights.attention, attention ? {_channelA} : isEmpty);
+        }
+
+        expectHighlights(const {}, unread: !dotted, attention: dotted);
+        // Read by its own mark either way, as desktop reads it: reaching the
+        // bottom of the channel does not read it.
+        expect(observed.channelCatchUp, isFalse);
+        expectHighlights(
+          {activityContextKey(_channelA): 100},
+          unread: !dotted,
+          attention: dotted,
+        );
+        expectHighlights(
+          {msgContextKey('broadcast'): 20},
+          unread: false,
+          attention: false,
+        );
+      });
+    }
+  });
 }
 
 const _channelA = '11111111-1111-4111-8111-111111111111';
@@ -3135,6 +3900,8 @@ NostrEvent _meta({
   String visibility = 'open',
   int createdAt = 1,
   int? ttlSeconds,
+  String? creator,
+  String? description,
   bool archived = false,
   bool unlisted = false,
   List<String> participants = const [],
@@ -3146,6 +3913,8 @@ NostrEvent _meta({
   tags: [
     ['d', id],
     ['name', name],
+    if (creator != null) ['P', creator],
+    if (description != null) ['about', description],
     ['t', channelType],
     [visibility == 'private' ? 'private' : 'public'],
     if (ttlSeconds != null) ['ttl', '$ttlSeconds'],
@@ -3160,11 +3929,15 @@ NostrEvent _meta({
 ProviderContainer _buildContainer({
   required _FakeRelaySession session,
   _TestMutes? mutes,
+  _TestFollows? follows,
+  List<Override> overrides = const [],
 }) {
   return ProviderContainer(
     retry: (_, _) => null,
     overrides: [
+      ...overrides,
       if (mutes != null) channelMutesProvider.overrideWith(() => mutes),
+      if (follows != null) threadFollowsProvider.overrideWith(() => follows),
       appLifecycleProvider.overrideWith(() => _FakeAppLifecycleNotifier()),
       relaySessionProvider.overrideWith(() => session),
       // Route the pubkey through a mutable notifier so tests can switch the
@@ -3243,6 +4016,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     this.maxMetadataPageRequests,
     this.hiddenDmEvents = const [],
     this.huddleStarts = const [],
+    this.creations = const [],
     this.recentMessages = const [],
     this.deletionChannels = const {},
     this.enforceHistoryLimits = false,
@@ -3260,6 +4034,10 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final int? maxMetadataPageRequests;
   final List<NostrEvent> hiddenDmEvents;
   final List<NostrEvent> huddleStarts;
+  final List<NostrEvent> creations;
+  Completer<void>? creationGate;
+  int creationReads = 0;
+  bool failCreations = false;
   List<NostrEvent> recentMessages;
   final Map<String, String> deletionChannels;
   final bool enforceHistoryLimits;
@@ -3274,6 +4052,9 @@ class _FakeRelaySession extends RelaySessionNotifier {
 
   /// While set, member metadata reads wait for it to complete.
   Completer<void>? metadataGate;
+  // Holds the next latest-message batch, which a list refresh awaits after it
+  // has merged the directory.
+  Completer<void>? latestBatchGate;
   final List<List<NostrFilter>> queryBatches = [];
   Object? messageBatchError;
   Object? latestBatchError;
@@ -3296,6 +4077,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   Completer<void>? _pausedSubscribe;
   Completer<void>? _subscribeStarted;
   Completer<void>? _pausedDirectory;
+  bool _pauseClaimed = false;
   Completer<void>? _directoryStarted;
   Completer<void>? _pausedHiddenDm;
   Completer<void>? _hiddenDmStarted;
@@ -3527,6 +4309,13 @@ class _FakeRelaySession extends RelaySessionNotifier {
       }
       return hiddenDmEvents;
     }
+    if (filter.kinds.contains(9007)) {
+      creationReads++;
+      await creationGate?.future;
+      if (failCreations) throw Exception('receipt unavailable');
+      final ids = filter.tags['#h'] ?? const <String>[];
+      return creations.where((e) => ids.contains(e.getTagValue('h'))).toList();
+    }
     if (filter.kinds.contains(EventKind.huddleStarted)) {
       // Claim the parked slot so the newer refresh's own Huddle query runs
       // unblocked: one shot, exactly like the hidden-DM and member-metadata hooks.
@@ -3618,11 +4407,15 @@ class _FakeRelaySession extends RelaySessionNotifier {
       // active when the response is released.
       final directorySnapshot = List.of(metadata);
       final paused = _pausedDirectory;
-      if (paused != null) {
+      // Only the first query after the pause waits; a later one meanwhile
+      // (a new scope's load) answers at once.
+      if (paused != null && !_pauseClaimed) {
+        _pauseClaimed = true;
         _directoryStarted!.complete();
         await paused.future;
         _pausedDirectory = null;
         _directoryStarted = null;
+        _pauseClaimed = false;
       }
       if (directoryFailures > 0) {
         directoryFailures--;
@@ -3643,7 +4436,12 @@ class _FakeRelaySession extends RelaySessionNotifier {
         }
         return const [];
       }
-      return filter.until == null ? directorySnapshot : const [];
+      if (filter.until != null) return const [];
+      final since = filter.since;
+      return [
+        for (final event in directorySnapshot)
+          if (since == null || event.createdAt >= since) event,
+      ];
     }
     queryBatches.add(filters);
     if (_explicitChannelValues(filters) > kMaxExplicitChannelValues) {
@@ -3656,6 +4454,11 @@ class _FakeRelaySession extends RelaySessionNotifier {
     final isUnreadCatchUp =
         filters.isNotEmpty && filters.every((filter) => filter.since != null);
     if (!isUnreadCatchUp && latestBatchError != null) throw latestBatchError!;
+    if (!isUnreadCatchUp) {
+      final gate = latestBatchGate;
+      latestBatchGate = null;
+      await gate?.future;
+    }
     final messageSnapshot = List.of(recentMessages);
     if (isUnreadCatchUp) {
       // Claim the parked slot so the refresh that follows the switch can run
@@ -3721,6 +4524,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
     required void Function(RelaySubscriptionStatus) onStatusChanged,
+    bool resumeSince = true,
   }) => subscribe(filter, onEvent, onClosed: onClosed);
 
   @override

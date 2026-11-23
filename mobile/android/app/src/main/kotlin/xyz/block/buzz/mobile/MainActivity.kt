@@ -130,6 +130,9 @@ class MainActivity : FlutterFragmentActivity() {
     private var mediaUploadChannel: MethodChannel? = null
     private var ageSignalChannel: MethodChannel? = null
     private val ageSignalRequest = AgeSignalRequest()
+    private var pushRegistrationPlugin: PushRegistrationPlugin? = null
+    private var pushKeystorePlugin: PushKeystorePlugin? = null
+    private var deviceTranscriptionPlugin: DeviceTranscriptionPlugin? = null
     private var huddleMediaPlugin: HuddleMediaPlugin? = null
     private var hapticsPlugin: HapticsPlugin? = null
     private var hostedHpkePlugin: HostedHpkePlugin? = null
@@ -138,6 +141,9 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        deviceTranscriptionPlugin = DeviceTranscriptionPlugin(flutterEngine.dartExecutor.binaryMessenger)
+        pushRegistrationPlugin = PushRegistrationPlugin(this, flutterEngine.dartExecutor.binaryMessenger)
+        pushKeystorePlugin = PushKeystorePlugin(flutterEngine.dartExecutor.binaryMessenger)
         flutterEngine.platformViewsController.registry.registerViewFactory(
             "buzz/transparent-avatar",
             TransparentAvatarViewFactory(flutterEngine.dartExecutor.binaryMessenger),
@@ -236,6 +242,8 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     override fun onDestroy() {
+        deviceTranscriptionPlugin?.dispose()
+        deviceTranscriptionPlugin = null
         browserAuthPlugin?.dispose()
         browserAuthPlugin = null
         identityFilePlugin?.dispose()
@@ -244,6 +252,10 @@ class MainActivity : FlutterFragmentActivity() {
         hostedHpkePlugin = null
         hapticsPlugin?.dispose()
         hapticsPlugin = null
+        pushRegistrationPlugin?.dispose()
+        pushRegistrationPlugin = null
+        pushKeystorePlugin?.dispose()
+        pushKeystorePlugin = null
         ageSignalRequest.retire()
         huddleMediaPlugin?.dispose()
         huddleMediaPlugin = null

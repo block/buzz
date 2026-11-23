@@ -138,6 +138,16 @@ final class NativeAttachmentPopoverViewController:
     stopCamera()
   }
 
+  override func viewDidDisappear(_ animated: Bool) {
+    super.viewDidDisappear(animated)
+    // Zoom dismissal can finish without the popover delegate callback. Release
+    // the bridge owner when this presentation ends, not when a child covers it.
+    // Programmatic finishes deliver their selected media before notifying.
+    if !isFinishing, isBeingDismissed || presentingViewController == nil {
+      notifyDismissalIfNeeded()
+    }
+  }
+
   override func traitCollectionDidChange(
     _ previousTraitCollection: UITraitCollection?
   ) {
@@ -180,10 +190,10 @@ final class NativeAttachmentPopoverViewController:
     stopCamera()
 
     var configuration = PHPickerConfiguration(photoLibrary: .shared())
-    configuration.filter = .images
+    configuration.filter = .any(of: [.images, .videos])
     configuration.selectionLimit = 0
     configuration.selection = .continuousAndOrdered
-    configuration.preferredAssetRepresentationMode = .compatible
+    configuration.preferredAssetRepresentationMode = .current
     configuration.disabledCapabilities = [
       .search,
       .stagingArea,
@@ -290,13 +300,17 @@ final class NativeAttachmentPopoverViewController:
     selectionTask = nil
     Self.removeTemporaryFiles(selectedPhotoPaths)
     selectedPhotoPaths = []
-    stopCamera()
+    // Reject pending startup callbacks immediately, but keep the live preview
+    // attached while the outgoing camera surface fades back into the menu.
+    cameraStartupGeneration += 1
+    cameraIsStarting = false
 
     let menu = makeMenuView()
     transition(
       to: .menu,
       content: menu,
       completion: { [weak self] in
+        self?.stopCamera()
         self?.removePhotoPicker()
       }
     )
@@ -339,33 +353,29 @@ final class NativeAttachmentPopoverViewController:
       ? CGSize(width: expandedWidth, height: expandedHeight)
       : menuSize
 
+    // Lay out the destination once at its final size. The glass host clips
+    // it during the morph, so Photos never reflows from menu-sized columns.
     nextView.translatesAutoresizingMaskIntoConstraints = false
     contentHost.addSubview(nextView)
-    NSLayoutConstraint.activate([
+    let fixedSize = [
+      nextView.widthAnchor.constraint(equalToConstant: targetSize.width),
+      nextView.heightAnchor.constraint(equalToConstant: targetSize.height),
+    ]
+    NSLayoutConstraint.activate(fixedSize + [
       nextView.leadingAnchor.constraint(equalTo: contentHost.leadingAnchor),
-      nextView.trailingAnchor.constraint(equalTo: contentHost.trailingAnchor),
-      nextView.topAnchor.constraint(equalTo: contentHost.topAnchor),
       nextView.bottomAnchor.constraint(equalTo: contentHost.bottomAnchor),
     ])
     contentHost.layoutIfNeeded()
-
-    let shouldAnimate = !UIAccessibility.isReduceMotionEnabled
-    // Do not expose embedded surfaces while the popover changes size. In
-    // particular, PHPicker visibly reflows its grid from the compact menu
-    // width to the expanded width if it is allowed to paint during this step.
     nextView.alpha = 0
     visibleContentView = nextView
     surface = nextSurface
 
-    let duration = shouldAnimate ? (isExpanding ? 0.24 : 0.2) : 0
     UIView.animate(
-      withDuration: duration,
+      withDuration: UIAccessibility.isReduceMotionEnabled ? 0 : 0.28,
       delay: 0,
-      options: [
-        .beginFromCurrentState,
-        .allowUserInteraction,
-        .curveEaseInOut,
-      ]
+      usingSpringWithDamping: 0.9,
+      initialSpringVelocity: 0,
+      options: [.beginFromCurrentState, .allowUserInteraction]
     ) {
       self.preferredContentSize = targetSize
       if let popover = self.popoverPresentationController,
@@ -378,28 +388,18 @@ final class NativeAttachmentPopoverViewController:
         )
       }
       previousView?.alpha = 0
+      nextView.alpha = 1
       self.view.layoutIfNeeded()
-    } completion: { _ in
+    } completion: { [weak self] _ in
       previousView?.removeFromSuperview()
-      self.view.layoutIfNeeded()
-
-      let reveal = {
-        UIView.animate(
-          withDuration: shouldAnimate ? 0.14 : 0,
-          delay: 0,
-          options: [
-            .beginFromCurrentState,
-            .allowUserInteraction,
-            .curveEaseOut,
-          ]
-        ) {
-          nextView.alpha = 1
-        } completion: { _ in
-          completion?()
-        }
-      }
-
-      reveal()
+      // An interrupted transition must not finish a later surface's work.
+      guard let self, self.visibleContentView === nextView else { return }
+      NSLayoutConstraint.deactivate(fixedSize)
+      NSLayoutConstraint.activate([
+        nextView.trailingAnchor.constraint(equalTo: self.contentHost.trailingAnchor),
+        nextView.topAnchor.constraint(equalTo: self.contentHost.topAnchor),
+      ])
+      completion?()
     }
   }
 
@@ -505,9 +505,8 @@ final class NativeAttachmentPopoverViewController:
       guard let self else { return }
       var paths: [String] = []
       do {
-        for result in results {
-          try Task.checkCancellation()
-          paths.append(try await self.exportPickerResult(result))
+        paths = try await PickerFilePreparation.prepare(count: results.count) {
+          try await self.exportPickerResult(results[$0])
         }
         try Task.checkCancellation()
         await MainActor.run {
@@ -541,7 +540,7 @@ final class NativeAttachmentPopoverViewController:
     } else if count == 0 {
       title = "All Photos"
     } else {
-      title = "Add \(count) \(count == 1 ? "photo" : "photos")"
+      title = "Add \(count) \(count == 1 ? "item" : "items")"
     }
     guard let button = photoActionButton else { return }
     let canInteract = !preparing
@@ -576,7 +575,7 @@ final class NativeAttachmentPopoverViewController:
     guard
       let typeIdentifier = provider.registeredTypeIdentifiers.first(where: {
         guard let type = UTType($0) else { return false }
-        return type.conforms(to: .image)
+        return type.conforms(to: .image) || type.conforms(to: .movie)
       })
     else {
       throw NativeAttachmentPopoverError.unsupportedImage

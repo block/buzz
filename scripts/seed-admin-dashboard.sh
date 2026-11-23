@@ -19,15 +19,35 @@ export PGUSER="${PGUSER:-buzz}"
 export PGPASSWORD="${PGPASSWORD:-buzz_dev}"
 export PGDATABASE="${PGDATABASE:-buzz}"
 
+# This raw fixture writer is unarmed and must never target a live replica fence.
+if [[ -n "${PGHOSTADDR:-}" || -n "${PGSERVICE:-}" || "${PGHOST}" == *,* ]]; then
+  echo "error: admin seed requires a local PostgreSQL target without PGHOSTADDR, PGSERVICE or multiple hosts" >&2
+  exit 1
+fi
+case "${PGHOST}" in
+  localhost|127.0.0.1|::1|/*) ;;
+  *)
+    echo "error: admin seed requires a local PostgreSQL target (PGHOST=${PGHOST})" >&2
+    exit 1
+    ;;
+esac
+# psql -d treats URI and key=value values as full connection strings that
+# override -h, so accept only a plain database name.
+if [[ ! "${PGDATABASE}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  echo "error: admin seed requires a local PostgreSQL target with a plain PGDATABASE name" >&2
+  exit 1
+fi
+
+# -X skips psqlrc, which runs after this guard and could \connect elsewhere.
 if command -v psql >/dev/null 2>&1; then
   run_psql() {
-    PGPASSWORD="${PGPASSWORD}" psql -h "${PGHOST}" -p "${PGPORT}" \
+    PGPASSWORD="${PGPASSWORD}" psql -X -h "${PGHOST}" -p "${PGPORT}" \
       -U "${PGUSER}" -d "${PGDATABASE}" "$@"
   }
 elif docker exec buzz-postgres psql --version >/dev/null 2>&1; then
   run_psql() {
     docker exec -i -e PGPASSWORD="${PGPASSWORD}" buzz-postgres \
-      psql -U "${PGUSER}" -d "${PGDATABASE}" "$@"
+      psql -X -U "${PGUSER}" -d "${PGDATABASE}" "$@"
   }
 else
   echo "error: neither psql nor buzz-postgres docker psql is available" >&2

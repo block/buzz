@@ -98,6 +98,18 @@ test("persistent failure backs off between attempts and stops at the budget", ()
   assert.ok(r.seconds >= 3, `took ${r.seconds}s`);
 });
 
+// A quick failure that straddles a wall-clock second boundary is still a
+// failure: only the watchdog stopping the attempt makes it a timeout. Start
+// 0.8s into a second so the 0.4s attempt crosses the next boundary while
+// finishing well inside its 1s deadline.
+test("a quick failure across a second boundary is not a timeout", async () => {
+  await sleep((1800 - (Date.now() % 1000)) % 1000);
+  const r = run("sleep 0.4; exit 7", { CI_HERMIT_ATTEMPTS: "1" });
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stdout, /attempt 1\/1 failed \(exit 7\)/);
+  assert.doesNotMatch(r.stdout, /timed out/);
+});
+
 test("no command is a usage error", () => {
   assert.equal(spawnSync("bash", [script]).status, 2);
 });

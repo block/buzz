@@ -266,6 +266,9 @@ pub async fn provision_community(
         );
     }
     validate_host(&request.host)?;
+    if !crate::single_community::serves_host(&state.config, &request.host) {
+        return Err("community_creation_disabled".to_owned());
+    }
     let nip_fi_policy = state.config.nip_fi_provision_binding.as_ref();
     // Unbound either way: `issuers_for_new_host` binds nothing on a reserved host.
     let nip_fi_issuers =
@@ -282,6 +285,9 @@ pub async fn provision_community(
         .transpose()?;
 
     if request.create_only {
+        if !state.config.multi_community_relay {
+            return Err("community_creation_disabled".to_string());
+        }
         if nip_fi_policy.is_some_and(|policy| policy.is_reserved(&request.host)) {
             return Err(buzz_auth::BindRefusal::ReservedHost.to_string());
         }
@@ -340,11 +346,22 @@ pub async fn provision_community(
     // Legacy convergence mode remains available to deployment operators and
     // startup tooling. Clients provisioning on behalf of end users must use
     // create_only so an existing owner can never be rotated by a create race.
-    let record = state
-        .db
-        .ensure_configured_community_with_nip_fi_issuers(&request.host, nip_fi_issuers)
-        .await
-        .map_err(|e| format!("failed to create community: {e}"))?;
+    let record = if state.config.multi_community_relay {
+        state
+            .db
+            .ensure_configured_community_with_nip_fi_issuers(&request.host, nip_fi_issuers)
+            .await
+            .map_err(|e| format!("failed to create community: {e}"))?
+    } else {
+        // Never call an inserting ensure/upsert after an existence check: the
+        // disabled path must be unable to create even if the host disappears.
+        state
+            .db
+            .existing_configured_community(&request.host)
+            .await
+            .map_err(|e| format!("failed to create community: {e}"))?
+            .ok_or_else(|| "community_creation_disabled".to_string())?
+    };
     state.invalidate_community_host(&TenantContext::resolved(record.id, &record.host));
     if record.created {
         record_binding_creation(

@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../../shared/deeplink/deep_link.dart';
 import '../../../shared/mentions/mention_bindings.dart';
+import '../../../shared/mentions/mention_identity_links.dart';
 import '../message_media.dart';
 import 'buzz_link_label.dart';
 import 'channel_token_pattern.dart';
@@ -147,6 +148,25 @@ String messagePreviewSource(String content, {required int maxLines}) {
   return content.substring(0, end);
 }
 
+/// The keys of the identity links a [maxLines] preview of [content] draws,
+/// read as the preview reads them (outside code, within its source limit),
+/// so a row resolves and loads only names it shows. The preview reads one
+/// line past [maxLines] to know it overflows; that line is never drawn.
+Set<String> messagePreviewIdentityKeys(
+  String content, {
+  required int maxLines,
+}) => maxLines > 0 && content.contains('nostr:npub1')
+    ? {
+        for (final piece in messagePreviewPieces(
+          normalizeBareLinks(
+            messagePreviewSource(content, maxLines: maxLines - 1),
+          ),
+          maxLines: maxLines - 1,
+        ))
+          if (piece is PreviewMention) piece.pubkey,
+      }
+    : const {};
+
 /// The first `maxLines + 1` lines that render, trimmed and without block
 /// syntax, read lazily so the rest of [content] is never scanned. Lines that
 /// don't render still cost a scan, so reading also stops after
@@ -157,7 +177,10 @@ Iterable<({String text, bool code, int end})> _keptLines(
   int maxLines,
 ) sync* {
   var kept = 0;
-  var fenceOpen = false;
+  // The open fence's run (for example ``` or ~~~~), or null outside one.
+  String? fence;
+  var fenceQuoted = false;
+  var inQuote = false;
   var start = 0;
   while (start <= content.length &&
       start <= _maxScanLength &&
@@ -175,12 +198,38 @@ Iterable<({String text, bool code, int end})> _keptLines(
     final cut = end == cap && cap < content.length;
     var line = content.substring(start, end).trim();
     start = cut ? content.length + 1 : end + 1;
-    // A fence opens at any line starting with backticks and closes only at a
-    // line holding nothing else, as in gpt_markdown.
-    if (!fenceOpen && line.startsWith('```') || fenceOpen && line == '```') {
-      fenceOpen = !fenceOpen;
+    // A backtick or tilde fence opens at a line starting with three or more
+    // of its character and closes only at a line holding nothing else but at
+    // least as many, as the full message reads it. Outside an unquoted fence,
+    // a quote marker enters a blockquote and only a blank line leaves it,
+    // closing a fence opened inside it. That quoted fence closes at a closer
+    // with or without the marker; an unquoted fence closes only at an
+    // unmarked closer, and markers and blank lines inside it are code.
+    if (line.isEmpty) {
+      if (fence == null || fenceQuoted) {
+        inQuote = false;
+        fence = null;
+      }
       continue;
     }
+    final unquoted = line.replaceFirst(_quote, '').trim();
+    if (fence == null) {
+      if (unquoted != line) inQuote = true;
+      if (_fenceRun.firstMatch(unquoted) case final open?) {
+        fence = open[1];
+        fenceQuoted = inQuote;
+        continue;
+      }
+    } else {
+      final closer = fenceQuoted ? unquoted : line;
+      if (closer.startsWith(fence) &&
+          closer.split('').every((c) => c == fence![0])) {
+        fence = null;
+        continue;
+      }
+    }
+    final fenceOpen = fence != null;
+    if (fenceOpen && fenceQuoted) line = unquoted;
     if (line.isEmpty) continue;
     if (!fenceOpen) {
       if (_rule.hasMatch(line) || _tableDivider.hasMatch(line)) continue;
@@ -206,6 +255,7 @@ bool _isHighSurrogate(int unit) => unit >= 0xD800 && unit <= 0xDBFF;
 final _rule = RegExp(r'^([-*_])(?:\s*\1){2,}$');
 final _tableDivider = RegExp(r'^\|?(?:\s*:?-+:?\s*\|)+\s*:?-*:?\s*\|?$');
 final _quote = RegExp(r'^(?:>\s?)+');
+final _fenceRun = RegExp(r'^(`{3,}|~{3,})');
 final _heading = RegExp(r'^#{1,6}\s+');
 final _task = RegExp(r'^[-*+]\s+\[[ xX]\]\s+');
 final _bullet = RegExp(r'^[-*+]\s+');
@@ -258,6 +308,7 @@ final _hasDelimiter = RegExp(r'[*_~<]');
 // Look ahead so adjacent tokens sharing a colon are both considered.
 final _shortcode = RegExp(r'(?=:([a-z0-9_-]+):)', caseSensitive: false);
 final _qualifier = RegExp(r'\(([0-9a-f]{64})\)');
+final _escapedPunctuation = RegExp(r'\\([!-/:-@\[-`{-~])');
 
 class _PreviewBuilder {
   final Map<String, Set<String>> mentionBindings;
@@ -367,6 +418,11 @@ class _PreviewBuilder {
         add(PreviewMedia(kind));
         continue;
       }
+      final identity = _identityMention(label, url);
+      if (identity != null) {
+        add(identity);
+        continue;
+      }
       final uri = Uri.tryParse(url);
       final deepLink = uri?.scheme == 'buzz'
           ? parseBuzzDeepLink(uri!) ?? parseEntityDeepLink(uri)
@@ -441,6 +497,31 @@ class _PreviewBuilder {
     text(unshieldMarkdownEscapes(source.substring(cursor)));
   }
 
+  /// Mirrors the thread view's identity-link pill: the name its key resolves
+  /// to, else the label written into the link. Null for any other link.
+  PreviewMention? _identityMention(String label, String url) {
+    final pubkey = mentionIdentityLinkKey(url);
+    if (pubkey == null) return null;
+    final written = decodeMarkdownLabelSyntax(label)
+        .replaceAllMapped(_escapedPunctuation, (m) => m[1]!)
+        .replaceAll('\u00A0', ' ');
+    if (!isMentionIdentityLabel(written)) return null;
+    final name =
+        mentionLabels[pubkey] ??
+        mentionIdentityLinkName(pubkey, mentionNames[pubkey]);
+    final fullLabel = name ?? written.substring(1);
+    return PreviewMention(
+      pubkey: pubkey,
+      label: _shortQualifier(fullLabel),
+      semanticsLabel: fullLabel,
+    );
+  }
+
+  static String _shortQualifier(String label) => label.replaceAllMapped(
+    _qualifier,
+    (m) => '(${m[1]!.substring(0, 8)}…${m[1]!.substring(60)})',
+  );
+
   /// Mirrors the thread view's mention chip: an ambiguous label stays text.
   PreviewMention? _mention(String label, String typed) {
     final matches = mentionBindings[label] ?? const <String>{};
@@ -452,10 +533,7 @@ class _PreviewBuilder {
     final fullLabel = displayName ?? typed;
     return PreviewMention(
       pubkey: pubkey,
-      label: fullLabel.replaceAllMapped(
-        _qualifier,
-        (m) => '(${m[1]!.substring(0, 8)}…${m[1]!.substring(60)})',
-      ),
+      label: _shortQualifier(fullLabel),
       semanticsLabel: fullLabel,
     );
   }

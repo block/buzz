@@ -2,7 +2,7 @@ import AVFoundation
 import Flutter
 import UIKit
 
-/// Foreground-only native seam for iOS Huddle media.
+/// Native Flutter interface for iOS Huddle media.
 ///
 /// Owns microphone permission, the voice-processing audio session, native
 /// Opus capture/playout, interruptions, and the built-in output toggle.
@@ -10,9 +10,11 @@ final class HuddleMediaPlugin {
   private let channel: FlutterMethodChannel
   private let audioSession = AVAudioSession.sharedInstance()
   private var audioSessionPrepared = false
+  private var audioInterrupted = false
   private var speakerEnabled = false
   private var audioEngine: HuddleAudioEngine?
   private var interruptionObserver: NSObjectProtocol?
+  private var foregroundObserver: NSObjectProtocol?
   private var mediaServicesResetObserver: NSObjectProtocol?
 
   init(messenger: FlutterBinaryMessenger) {
@@ -30,6 +32,13 @@ final class HuddleMediaPlugin {
     ) { [weak self] notification in
       self?.handleInterruption(notification)
     }
+    foregroundObserver = NotificationCenter.default.addObserver(
+      forName: UIApplication.didBecomeActiveNotification,
+      object: nil,
+      queue: .main
+    ) { [weak self] _ in
+      self?.reportUnresolvedInterruption()
+    }
     mediaServicesResetObserver = NotificationCenter.default.addObserver(
       forName: AVAudioSession.mediaServicesWereResetNotification,
       object: audioSession,
@@ -45,6 +54,9 @@ final class HuddleMediaPlugin {
     audioEngine = nil
     if let interruptionObserver {
       NotificationCenter.default.removeObserver(interruptionObserver)
+    }
+    if let foregroundObserver {
+      NotificationCenter.default.removeObserver(foregroundObserver)
     }
     if let mediaServicesResetObserver {
       NotificationCenter.default.removeObserver(mediaServicesResetObserver)
@@ -425,23 +437,31 @@ final class HuddleMediaPlugin {
     else { return }
 
     if type == .began {
+      audioInterrupted = true
       audioEngine?.setInterrupted(true)
       emitInterruptionChanged(true)
       return
     }
+    guard audioInterrupted else { return }
     let rawOptions =
       notification.userInfo?[AVAudioSessionInterruptionOptionKey]
       as? NSNumber
     let options = AVAudioSession.InterruptionOptions(
       rawValue: rawOptions?.uintValue ?? 0
     )
-    guard options.contains(.shouldResume) else { return }
+    guard options.contains(.shouldResume) else {
+      if UIApplication.shared.applicationState == .active {
+        reportUnresolvedInterruption()
+      }
+      return
+    }
     do {
       try audioSession.setActive(true)
       if speakerEnabled {
         try audioSession.overrideOutputAudioPort(.speaker)
       }
       audioEngine?.setInterrupted(false)
+      audioInterrupted = false
       emitInterruptionChanged(false)
     } catch {
       emitNativeFailure(
@@ -451,11 +471,21 @@ final class HuddleMediaPlugin {
     }
   }
 
+  private func reportUnresolvedInterruption() {
+    guard audioInterrupted, audioEngine != nil else { return }
+    audioInterrupted = false
+    emitNativeFailure(
+      code: "audio_resume_failed",
+      message: "Huddle audio was interrupted. Rejoin the Huddle to continue."
+    )
+  }
+
   private func handleMediaServicesReset() {
     guard audioSessionPrepared || audioEngine != nil else { return }
     audioEngine?.stop()
     audioEngine = nil
     audioSessionPrepared = false
+    audioInterrupted = false
     speakerEnabled = false
     emitNativeFailure(
       code: "media_services_reset",
@@ -466,6 +496,7 @@ final class HuddleMediaPlugin {
   private func stop(result: @escaping FlutterResult) {
     audioEngine?.stop()
     audioEngine = nil
+    audioInterrupted = false
     guard audioSessionPrepared else {
       speakerEnabled = false
       result(nil)

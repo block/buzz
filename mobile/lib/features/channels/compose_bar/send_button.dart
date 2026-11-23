@@ -4,6 +4,7 @@ class _SendButton extends StatelessWidget {
   final bool isSending;
   final bool isDisabled;
   final VoidCallback onTap;
+  static const size = 36.0;
 
   const _SendButton({
     required this.isSending,
@@ -14,9 +15,10 @@ class _SendButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: 36,
-      height: 36,
+      width: size,
+      height: size,
       child: IconButton(
+        tooltip: 'Send',
         onPressed: (isSending || isDisabled)
             ? null
             : () => _runComposerAction(onTap),
@@ -44,6 +46,4 @@ class _SendButton extends StatelessWidget {
   }
 }
 
-String _formatUploadError(Object error) {
-  return error.toString().replaceFirst('Exception: ', '');
-}
+String _formatUploadError(Object error) => relayErrorText(error);

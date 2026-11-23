@@ -2,6 +2,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../../shared/agents/owned_agent_directory.dart';
 import '../../../shared/crypto/nip_oa.dart';
+import '../../../shared/identity_archives/identity_archives.dart';
 import '../../../shared/identity_names/identity_names.dart';
 import '../../../shared/identity_names/identity_names_provider.dart';
 import '../../../shared/mentions/agent_identity_provider.dart';
@@ -201,23 +202,28 @@ const newDmMentionHistoryKey = 'new-dm';
 const addMembersMentionHistoryKey = 'add-members';
 
 /// One recipient picker search: its [query], the [historyKey] its choices
-/// are remembered under, and whether agents that do not answer the viewer
-/// are offered too ([unsharedAgents]), as a channel can hold them.
+/// are remembered under, whether agents that do not answer the viewer
+/// are offered too ([unsharedAgents]), as a channel can hold them, and the
+/// channel whose members the picker hides ([channelId]), if any.
 typedef RecipientSearch = ({
   String query,
   String historyKey,
   bool unsharedAgents,
+  String? channelId,
 });
 
 /// Ranked recipients for a picker (New DM, Add members), chosen exactly like
 /// mention autocomplete in a stream: no channel members yet, the viewer's
 /// own agents offered unprompted, agents shared with the viewer, and people
 /// from the community directory search, with the same debounce and search
-/// cache.
+/// cache. Before a name is typed, where `@` lists the channel's members, a
+/// picker lists its agents and then the people the viewer shares a channel
+/// or DM with, so known people never push an agent off the list.
 final recipientCandidatesProvider = Provider.family
     .autoDispose<List<MentionCandidate>, RecipientSearch>((ref, search) {
       final currentPubkey = ref.watch(currentPubkeyProvider)?.toLowerCase();
-      return [
+      final empty = search.query.trim().isEmpty;
+      final candidates = [
         for (final candidate in _chooserCandidates(
           ref,
           members: const [],
@@ -226,10 +232,26 @@ final recipientCandidatesProvider = Provider.family
           offerOwnedAgents: true,
           offerUnsharedAgents: search.unsharedAgents,
           historyKey: search.historyKey,
+          knownPeople: empty
+              ? _knownPeople(ref, excludedChannelId: search.channelId)
+              : const [],
         ))
           if (candidate.pubkey != currentPubkey) candidate,
       ];
+      if (!empty) return candidates;
+      return [
+        for (final candidate in candidates)
+          if (candidate.isAgent) candidate,
+        for (final candidate in candidates)
+          if (!candidate.isAgent) candidate,
+      ];
     });
+
+/// Unnamed known people whose profiles a picker opening already requested,
+/// so a person with no profile is asked for once, not on every rebuild.
+final _requestedKnownPeopleProvider = Provider.autoDispose<Set<String>>(
+  (ref) => <String>{},
+);
 
 /// Whether a recipient picker's directory search for [query] still runs.
 final recipientSearchPendingProvider = Provider.family
@@ -247,6 +269,73 @@ final recipientSearchFailedProvider = Provider.family.autoDispose<bool, String>(
   },
 );
 
+/// Most roster entries one known-people scan reads.
+const _knownPeopleScanLimit = 2000;
+
+/// Named people in the viewer's open channels and DMs, as directory search
+/// results, from the member lists the channel list already loaded. DM
+/// partners come first, and members of [excludedChannelId] are skipped. At
+/// most [mentionSuggestionLimit] people are gathered, a full picker list;
+/// profiles are loaded for the unnamed ones among them.
+List<UserProfile> _knownPeople(Ref ref, {String? excludedChannelId}) {
+  final listed = ref.watch(channelsProvider).asData?.value ?? const [];
+  final channels = [
+    for (final channel in listed)
+      if (channel.isDm) channel,
+    for (final channel in listed)
+      if (!channel.isDm) channel,
+  ];
+  final notifier = ref.read(channelsProvider.notifier);
+  final userCache = ref.watch(userCacheProvider);
+  final verified = ref.watch(verifiedProfilesProvider);
+  final viewer = ref.watch(currentPubkeyProvider)?.toLowerCase();
+  final seen = <String>{
+    ?viewer,
+    if (excludedChannelId != null)
+      for (final member in notifier.cachedMembersForChannel(excludedChannelId))
+        member.pubkey.toLowerCase(),
+  };
+  final people = <UserProfile>[];
+  final unnamed = <String>[];
+  // Roster entries read, bounded even when most are already excluded.
+  var visited = 0;
+  gather:
+  for (final channel in channels) {
+    if (!channel.isMember || channel.isArchived) continue;
+    if (channel.id == excludedChannelId) continue;
+    final pubkeys = channel.participantPubkeys.followedBy(
+      notifier.cachedMembersForChannel(channel.id).map((m) => m.pubkey),
+    );
+    for (final pubkey in pubkeys) {
+      if (people.length + unnamed.length >= mentionSuggestionLimit ||
+          ++visited > _knownPeopleScanLimit) {
+        break gather;
+      }
+      final key = pubkey.toLowerCase();
+      if (!seen.add(key)) continue;
+      final profile = userCache[key];
+      if (profile?.displayName?.trim().isNotEmpty == true) {
+        people.add(profile!);
+      } else if (verified[key] case final name?) {
+        people.add(UserProfile(pubkey: key, displayName: name.displayName));
+      } else {
+        unnamed.add(key);
+      }
+    }
+  }
+  final requested = ref.watch(_requestedKnownPeopleProvider);
+  final load = [
+    for (final pubkey in unnamed)
+      if (requested.add(pubkey)) pubkey,
+  ];
+  if (load.isNotEmpty) {
+    Future.microtask(() {
+      if (ref.mounted) ref.read(userCacheProvider.notifier).preload(load);
+    });
+  }
+  return people;
+}
+
 List<MentionCandidate> _chooserCandidates(
   Ref ref, {
   required List<ChannelMember> members,
@@ -255,6 +344,7 @@ List<MentionCandidate> _chooserCandidates(
   required bool offerOwnedAgents,
   bool offerUnsharedAgents = false,
   required String historyKey,
+  List<UserProfile> knownPeople = const [],
 }) {
   final channels =
       ref.watch(channelsProvider).asData?.value ?? const <Channel>[];
@@ -267,6 +357,9 @@ List<MentionCandidate> _chooserCandidates(
   final userCache = ref.watch(userCacheProvider);
   final currentPubkey = ref.watch(currentPubkeyProvider);
   final searches = ref.watch(mentionSearchCacheProvider);
+  // Removed before labels are scoped, so an archived namesake never adds a
+  // qualifier to a live name.
+  final archived = ref.watch(hiddenArchivedIdentitiesProvider);
 
   final sharedChannelIds = {
     for (final channel in channels)
@@ -289,13 +382,15 @@ List<MentionCandidate> _chooserCandidates(
       sharedChannelIds: sharedChannelIds,
       userCache: userCache,
       ownerByAgentPubkey: owners,
-      searchResults: [...searchResults, ...verifiedMatches],
+      searchResults: [...searchResults, ...verifiedMatches, ...knownPeople],
       currentPubkey: currentPubkey,
       ownedAgents: ownedAgents,
       offerOwnedAgents: offerOwnedAgents,
       offerUnsharedAgents: offerUnsharedAgents,
     ))
-      if (isMentionKey(candidate.pubkey)) candidate,
+      if (isMentionKey(candidate.pubkey) &&
+          !archived.contains(candidate.pubkey))
+        candidate,
   ];
 
   // Admission does not gate the search: `@Mary J` can name a person

@@ -1,14 +1,21 @@
+import 'dart:async';
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:buzz/features/channels/channel.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/mobile_huddle_controller.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/channels/saved_message_store.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 
 import 'package:buzz/shared/verified_profiles/verified_profile.dart';
 
 import '../../shared/verified_profiles/verified_profile_fixture.dart';
+import '../../helpers/fake_relay.dart';
 
 /// Tests for [channelDetailsFromEvent].
 ///
@@ -18,6 +25,124 @@ import '../../shared/verified_profiles/verified_profile_fixture.dart';
 /// also exposed on `ChannelDetails` MUST be propagated here — otherwise
 /// `mergeDetails` silently clears that state on the merged Channel.
 void main() {
+  for (final action in ['leave', 'delete']) {
+    test('$action clears only that channel from disk', () async {
+      final relay = FakeRelay();
+      final scope = (communityId: 'cache-test-community', pubkey: relay.pubkey);
+      const page = (channelId: _channelId, rootId: '');
+      const otherPage = (channelId: 'other-channel', rootId: '');
+      final root = await Directory.systemTemp.createTemp('buzz-leave-cache');
+      addTearDown(() => root.delete(recursive: true));
+      final container = ProviderContainer(
+        overrides: [
+          ...relay.overrides,
+          channelsProvider.overrideWith(_ChannelsAfterLeave.new),
+          savedMessageRootProvider.overrideWith((ref) async => root),
+          savedMessageScopeProvider.overrideWithValue(scope),
+        ],
+      );
+      addTearDown(container.dispose);
+      final store = container.read(savedMessageStoreProvider);
+      Future<NostrEvent> save(SavedMessagePage page) async {
+        final event = relay.sign(
+          kind: EventKind.streamMessage,
+          content: 'Saved history',
+          createdAt: 1700000000,
+          tags: [
+            ['h', page.channelId],
+          ],
+        );
+        await store.save(store.capture(scope, page), [
+          event,
+        ], relayAuthor: null);
+        return event;
+      }
+
+      final saved = await save(page);
+      final other = await save(otherPage);
+      expect(await store.read(store.capture(scope, page)), [saved]);
+      final connected = Completer<void>();
+      container.listen(relaySessionProvider, (_, state) {
+        if (state.status == SessionStatus.connected && !connected.isCompleted) {
+          connected.complete();
+        }
+      }, fireImmediately: true);
+      await connected.future;
+      final actions = container.read(channelActionsProvider);
+      if (action == 'leave') {
+        await actions.leaveChannel(_channelId);
+        expect(relay.published.single.kind, 9022);
+      } else {
+        await actions.deleteChannel(_channelId);
+        expect(relay.published.single.kind, 9008);
+      }
+      expect(await store.read(store.capture(scope, page)), isNull);
+      expect(await store.read(store.capture(scope, otherPage)), [other]);
+    });
+  }
+
+  test('leave completes without waiting for the saved-page purge', () async {
+    final relay = FakeRelay();
+    final scope = (communityId: 'cache-test-community', pubkey: relay.pubkey);
+    const page = (channelId: _channelId, rootId: '');
+    final dir = await Directory.systemTemp.createTemp('buzz-leave-unblocked');
+    addTearDown(() => dir.delete(recursive: true));
+    final root = Completer<Directory>();
+    var blockPurge = false;
+    const diagnostics = NoopDiagnosticReporter();
+    final store = SavedMessageStore(
+      root: () async => blockPurge ? await root.future : dir,
+      purgeRoot: () async => dir,
+      diagnostics: diagnostics,
+    );
+    final event = relay.sign(
+      kind: EventKind.streamMessage,
+      content: 'Saved history',
+      createdAt: 1700000000,
+      tags: [
+        ['h', _channelId],
+      ],
+    );
+    await store.save(store.capture(scope, page), [event], relayAuthor: null);
+    final container = ProviderContainer(
+      overrides: [
+        ...relay.overrides,
+        channelsProvider.overrideWith(_ChannelsAfterLeave.new),
+        savedMessageStoreProvider.overrideWithValue(store),
+        savedMessageScopeProvider.overrideWithValue(scope),
+      ],
+    );
+    addTearDown(container.dispose);
+    final connected = Completer<void>();
+    container.listen(relaySessionProvider, (_, state) {
+      if (state.status == SessionStatus.connected && !connected.isCompleted) {
+        connected.complete();
+      }
+    }, fireImmediately: true);
+    await connected.future;
+
+    blockPurge = true;
+    try {
+      await container
+          .read(channelActionsProvider)
+          .leaveChannel(_channelId)
+          .timeout(const Duration(seconds: 5));
+      expect(relay.published.single.kind, 9022);
+      expect(root.isCompleted, isFalse);
+      expect(File('${dir.path}/saved_message_purge').existsSync(), isTrue);
+      final restarted = SavedMessageStore(
+        root: () async => dir,
+        purgeRoot: () async => dir,
+        diagnostics: diagnostics,
+      );
+      expect(await restarted.read(restarted.capture(scope, page)), isNull);
+    } finally {
+      root.complete(dir);
+      // Let the queued purge finish before teardown deletes the directory.
+      await store.read(store.capture(scope, page));
+    }
+  });
+
   test('shortcut selects only an active exact DM using current membership', () {
     final dm = Channel(
       id: 'dm',
@@ -77,7 +202,7 @@ void main() {
   });
 
   test(
-    'Solo metadata survives details merges and classifies only own private streams',
+    'Solo metadata survives details merges regardless of stream visibility',
     () {
       for (final type in ['stream', 'forum', 'dm']) {
         for (final private in [true, false]) {
@@ -110,11 +235,10 @@ void main() {
           ).mergeDetails(details).copyWith(isMember: true);
           expect(channel.labels, ['buzz.solo']);
           expect(channel.createdBy, 'owner');
-          expect(channel.isSolo, type == 'stream' && private);
-          expect(
-            channel.isPersonalChat('owner', const []),
-            type == 'stream' && private,
-          );
+          expect(channel.isSolo, type == 'stream');
+          expect(channel.isSoloChat(const []), type == 'stream');
+          expect(channel.isSoloChat(const ['chat']), isTrue);
+          expect(channel.isPersonalChat('owner', const []), type == 'stream');
           expect(channel.isPersonalChat('other', const []), isFalse);
           expect(ChannelDetails.fromChannel(channel).labels, ['buzz.solo']);
         }
@@ -488,6 +612,115 @@ void main() {
     },
   );
 
+  test('add-members failures keep each error name but drop a bare '
+      'Exception prefix', () async {
+    final keys = nostr.Keys.generate();
+    final timedOut = 'a' * 64;
+    final rejected = 'b' * 64;
+    final lost = 'c' * 64;
+    final session = _RecordingPublishRelaySession()
+      ..publishErrors.addAll({
+        timedOut: RelayAckTimeoutError('Event e not acknowledged'),
+        rejected: const RelayEventRejectedException(
+          'restricted: Exception: sponsor approval required',
+        ),
+        lost: RelayAckLostError(Exception('App moved to background')),
+      });
+    final actionsProvider = Provider<ChannelActions>((ref) {
+      return ChannelActions(
+        ref: ref,
+        session: session,
+        signedEventRelay: SignedEventRelay(session: session, nsec: keys.nsec),
+        currentPubkey: keys.public,
+      );
+    });
+    final container = ProviderContainer(retry: (_, _) => null);
+    addTearDown(container.dispose);
+
+    await expectLater(
+      container
+          .read(actionsProvider)
+          .addMembers(
+            channelId: _channelId,
+            pubkeys: [timedOut, rejected, lost],
+            role: 'member',
+          ),
+      throwsA(
+        isA<AddMembersException>().having((e) => e.failures, 'failures', {
+          timedOut: 'TimeoutException: Event e not acknowledged',
+          rejected: 'restricted: Exception: sponsor approval required',
+          lost:
+              'Connection lost before the relay acknowledged the event: '
+              'App moved to background',
+        }),
+      ),
+    );
+  });
+
+  test('reactions tag the reacted-to message author', () async {
+    final keys = nostr.Keys.generate();
+    final session = _RecordingPublishRelaySession();
+    final actionsProvider = Provider<ChannelActions>((ref) {
+      return ChannelActions(
+        ref: ref,
+        session: session,
+        signedEventRelay: SignedEventRelay(session: session, nsec: keys.nsec),
+        currentPubkey: keys.public,
+      );
+    });
+    final container = ProviderContainer(retry: (_, _) => null);
+    addTearDown(container.dispose);
+    final author = nostr.Keys.generate().public;
+
+    await container
+        .read(actionsProvider)
+        .addReaction('target-event', '👍', targetAuthor: author);
+
+    expect(session.publishedEvents.single.tags, [
+      ['e', 'target-event'],
+      ['p', author],
+    ]);
+  });
+
+  test(
+    'join confirms membership with strong roster reads before settling',
+    () async {
+      final keys = nostr.Keys.generate();
+      final session = _RecordingPublishRelaySession();
+      final actionsProvider = Provider<ChannelActions>((ref) {
+        return ChannelActions(
+          ref: ref,
+          session: session,
+          signedEventRelay: SignedEventRelay(session: session, nsec: keys.nsec),
+          currentPubkey: keys.public,
+        );
+      });
+      final container = ProviderContainer(
+        retry: (_, _) => null,
+        overrides: [relaySessionProvider.overrideWith(() => session)],
+      );
+      addTearDown(container.dispose);
+
+      await expectLater(
+        container.read(actionsProvider).joinChannel(_channelId),
+        throwsA(isA<ChannelJoinUnconfirmed>()),
+      );
+
+      expect(session.publishedEvents.single.kind, 9021);
+      expect(session.historyQueryCount, 0);
+      expect(session.queryFilters, hasLength(4));
+      for (final filter in session.queryFilters) {
+        expect(filter.toJson(), {
+          'kinds': [39002],
+          'limit': 1,
+          '#d': [_channelId],
+          '#p': [keys.public],
+          'consistency': 'strong',
+        });
+      }
+    },
+  );
+
   group('Huddle channel lifecycle', () {
     test(
       'starts from accepted signed events without refreshing all channels',
@@ -515,7 +748,9 @@ void main() {
         addTearDown(container.dispose);
 
         final actions = container.read(actionsProvider);
-        final backingChannelId = await actions.createHuddleBackingChannel();
+        final backingChannelId = await actions.createHuddleBackingChannel(
+          parentChannelId: _channelId,
+        );
         final started = await actions.announceHuddleStarted(
           parentChannelId: _channelId,
           ephemeralChannelId: backingChannelId,
@@ -529,6 +764,15 @@ void main() {
         expect(create.tags, contains(equals(['visibility', 'private'])));
         expect(create.tags, contains(equals(['channel_type', 'stream'])));
         expect(create.tags, contains(equals(['ttl', '3600'])));
+        expect(
+          create.tags,
+          contains(
+            equals([
+              'about',
+              'Buzz Huddle (buzz.huddles/v1)\nparent:$_channelId',
+            ]),
+          ),
+        );
 
         final start = session.publishedEvents.last;
         expect(start.kind, EventKind.huddleStarted);
@@ -735,6 +979,91 @@ void main() {
       },
     );
 
+    for (final (label, olderAnswer) in [
+      ('a roster', [_heldRoster('bot', 2)]),
+      ('no roster event', <NostrEvent>[]),
+      ('an empty roster', [_emptyHeldRoster(2)]),
+    ]) {
+      test('a superseded roster read answering with $label does not replace '
+          'the offline roster', () async {
+        final session = _HeldRosterRelaySession();
+        final container = ProviderContainer(
+          retry: (_, _) => null,
+          overrides: [relaySessionProvider.overrideWith(() => session)],
+        );
+        addTearDown(container.dispose);
+        final subscription = container.listen(
+          channelMembersProvider(_channelId),
+          (_, _) {},
+        );
+        addTearDown(subscription.close);
+        Future<String> role() async => (await container.read(
+          channelMembersProvider(_channelId).future,
+        )).single.role;
+
+        expect(await role(), 'bot');
+        await container.pump();
+
+        // Two roster updates arrive; the first read answers after the second.
+        final older = Completer<List<NostrEvent>>();
+        session.nextRead = older.future;
+        session.emit(_heldRoster('bot', 2));
+        await container.pump();
+        final newer = Completer<List<NostrEvent>>();
+        session.nextRead = newer.future;
+        session.emit(_heldRoster('member', 3));
+        await container.pump();
+        newer.complete([_heldRoster('member', 3)]);
+        expect(await role(), 'member');
+        older.complete(olderAnswer);
+        await container.pump();
+
+        session.disconnect();
+        await container.pump();
+        expect(await role(), 'member');
+      });
+    }
+
+    test(
+      'a roster read torn down with no newer read still updates the offline roster',
+      () async {
+        final session = _HeldRosterRelaySession();
+        final container = ProviderContainer(
+          retry: (_, _) => null,
+          overrides: [relaySessionProvider.overrideWith(() => session)],
+        );
+        addTearDown(container.dispose);
+        var subscription = container.listen(
+          channelMembersProvider(_channelId),
+          (_, _) {},
+        );
+        Future<String> role() async => (await container.read(
+          channelMembersProvider(_channelId).future,
+        )).single.role;
+        expect(await role(), 'bot');
+        await container.pump();
+
+        // A roster update arrives; the user leaves before its read answers.
+        final fresh = Completer<List<NostrEvent>>();
+        session.nextRead = fresh.future;
+        session.emit(_heldRoster('member', 2));
+        await container.pump();
+        subscription.close();
+        await container.pump();
+        fresh.complete([_heldRoster('member', 2)]);
+        await container.pump();
+
+        session.disconnect();
+        await container.pump();
+        subscription = container.listen(
+          channelMembersProvider(_channelId),
+          (_, _) {},
+        );
+        addTearDown(subscription.close);
+        expect(await role(), 'member');
+      },
+    );
+
     test('keeps the member snapshot available during reconnect', () {
       final cachedMembers = [
         ChannelMember(
@@ -783,6 +1112,10 @@ const _memberPubkey =
 
 class _RecordingPublishRelaySession extends RelaySessionNotifier {
   final publishedEvents = <NostrEvent>[];
+  final queryFilters = <NostrFilter>[];
+
+  /// Errors to throw instead of publishing, keyed by the event's `p` tag.
+  final publishErrors = <String, Object>{};
   int historyQueryCount = 0;
 
   @override
@@ -792,7 +1125,14 @@ class _RecordingPublishRelaySession extends RelaySessionNotifier {
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
   }) async {
+    final target = event.tags
+        .where((tag) => tag.length > 1 && tag[0] == 'p')
+        .map((tag) => tag[1])
+        .firstOrNull;
+    final error = publishErrors[target];
+    if (error != null) throw error;
     publishedEvents.add(event);
     return event;
   }
@@ -803,6 +1143,15 @@ class _RecordingPublishRelaySession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     historyQueryCount++;
+    return const [];
+  }
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    queryFilters.addAll(filters);
     return const [];
   }
 }
@@ -861,4 +1210,73 @@ class _ConnectionAwareRelaySession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
   }) async => () {};
+}
+
+NostrEvent _heldRoster(String role, int version) => NostrEvent(
+  id: 'members-$version',
+  pubkey: 'owner',
+  createdAt: 1800000000 + version,
+  kind: 39002,
+  tags: [
+    ['d', _channelId],
+    ['p', _memberPubkey, '', role],
+  ],
+  content: '',
+  sig: '',
+);
+
+NostrEvent _emptyHeldRoster(int version) => NostrEvent(
+  id: 'empty-members-$version',
+  pubkey: 'owner',
+  createdAt: 1800000000 + version,
+  kind: 39002,
+  tags: [
+    ['d', _channelId],
+  ],
+  content: '',
+  sig: '',
+);
+
+/// Answers each roster read with [nextRead] and delivers live roster updates
+/// through [emit].
+class _HeldRosterRelaySession extends RelaySessionNotifier {
+  Future<List<NostrEvent>> nextRead = Future.value([_heldRoster('bot', 1)]);
+  void Function(NostrEvent)? _listener;
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) => nextRead;
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+    bool resumeSince = true,
+  }) async {
+    _listener = onEvent;
+    onStatusChanged(RelaySubscriptionStatus.ready);
+    return () {
+      if (identical(_listener, onEvent)) _listener = null;
+    };
+  }
+
+  void emit(NostrEvent event) => _listener?.call(event);
+
+  void disconnect() =>
+      state = const SessionState(status: SessionStatus.disconnected);
+}
+
+class _ChannelsAfterLeave extends ChannelsNotifier {
+  @override
+  Future<List<Channel>> build() async => const [];
+
+  @override
+  Future<void> refresh({bool fetchDirectory = false}) async {}
 }
