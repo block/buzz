@@ -8,6 +8,7 @@ import 'dart:developer' as developer;
 import 'dart:math';
 
 import 'package:buzz/shared/crypto/event_signing.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -26,7 +27,8 @@ import '../relay/media_disk_cache.dart';
 import '../relay/nostr_models.dart';
 import '../relay/relay_session.dart';
 import '../relay/signed_event_relay.dart';
-import '../relay/relay_provider.dart' show RelayConfig, pubkeyFromNsec;
+import '../relay/relay_provider.dart'
+    show RelayConfig, pubkeyFromNsec, relayConfigProvider;
 import 'community.dart';
 import 'community_storage.dart';
 
@@ -137,9 +139,10 @@ typedef CommunityPushLeaseReader =
 final communityPushLeaseReaderProvider = Provider<CommunityPushLeaseReader>((
   ref,
 ) {
-  return (community) => _readCommunityPushLease(
+  return (community) => readCommunityPushLease(
     community,
     query: ref.read(relaySessionProvider.notifier).queryRelay,
+    currentRelay: () => ref.read(relayConfigProvider),
   );
 });
 
@@ -216,11 +219,26 @@ void _checkDeadline(DateTime? deadline) {
   }
 }
 
-Future<BuzzPushLeaseState?> _readCommunityPushLease(
+/// Reads [community]'s push lease through [query], which sends to whichever
+/// relay [currentRelay] names when it runs. Throws when that relay or key is
+/// no longer [community]'s: a switch while the read waits would otherwise
+/// settle one community from another's relay.
+@visibleForTesting
+Future<BuzzPushLeaseState?> readCommunityPushLease(
   Community community, {
   required Future<List<NostrEvent>> Function(List<NostrFilter> filters) query,
+  required RelayConfig Function() currentRelay,
 }) async {
+  final expected = RelayConfig(baseUrl: community.relayUrl).baseUrl;
+  void checkStillCurrent() {
+    final relay = currentRelay();
+    if (relay.baseUrl != expected || relay.nsec != community.nsec) {
+      throw StateError('The active community changed during the lease read.');
+    }
+  }
+
   final target = await _pushLeaseTarget(community);
+  checkStillCurrent();
   final events = await query([
     NostrFilter(
       kinds: const [buzzPushLeaseKind],
@@ -229,8 +247,11 @@ Future<BuzzPushLeaseState?> _readCommunityPushLease(
         '#d': [target.installationId],
       },
       limit: 1,
+      // A replica can lag the write that replaced the lease.
+      extensions: const {'consistency': 'strong'},
     ),
   ]);
+  checkStillCurrent();
   final event = events.firstOrNull;
   if (event == null) return null;
   return decryptBuzzPushLease(
