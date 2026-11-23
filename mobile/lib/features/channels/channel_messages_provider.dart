@@ -498,29 +498,6 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     }
   }
 
-  Future<ChannelWindowPage> _fetchWindowPage(
-    RelaySessionNotifier session,
-    ChannelPageCursor? cursor,
-  ) async {
-    final events = await session.queryRelay([_channelWindowFilter(cursor)]);
-    return parseChannelWindowResponse(events, channelId, cursor);
-  }
-
-  NostrFilter _channelWindowFilter(ChannelPageCursor? cursor) => NostrFilter(
-    kinds: EventKind.channelWindowPageKinds,
-    tags: {
-      '#h': [channelId],
-    },
-    limit: 50,
-    until: cursor?.createdAt,
-    extensions: {
-      'top_level': true,
-      'include_summaries': true,
-      'include_aux': true,
-      if (cursor != null) 'before_id': cursor.eventId,
-    },
-  );
-
   void _handleLiveEvent(
     NostrEvent event, {
     bool authoritative = true,
