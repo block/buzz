@@ -14,7 +14,14 @@ if (process.env.GITHUB_EVENT_NAME === "pull_request") {
   // potentially incomplete list to skip a runtime suite.
   runAll = count >= 3000;
 }
-for (const key of ["rust", "desktop", "desktop-rust", "web", "mobile"]) {
+for (const key of [
+  "rust",
+  "desktop",
+  "desktop-rust",
+  "web",
+  "mobile",
+  "mobile-native",
+]) {
   assert.ok(
     ["true", "false"].includes(filters[key]),
     `Invalid ${key} selection`,

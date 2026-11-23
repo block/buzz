@@ -3,6 +3,7 @@ import 'package:duo_kit/duo_kit.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import '../../shared/diagnostics/diagnostic_navigation_observer.dart';
 import '../../shared/widgets/adaptive_conversation_pane.dart';
 import '../../shared/widgets/duo_toolbar.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -134,6 +135,10 @@ class _AgentsNavigation extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final communityId = ref.watch(activeCommunityProvider).asData?.value?.id;
     final heroController = useMemoized(HeroController.new);
+    final screenObserver = useMemoized(
+      ref.read(diagnosticScreenTrailProvider).observer,
+    );
+    useEffect(() => screenObserver.dispose, [screenObserver]);
     final navigator = useMemoized(() => GlobalKey<NavigatorState>(), [
       communityId,
     ]);
@@ -154,7 +159,7 @@ class _AgentsNavigation extends HookConsumerWidget {
         },
         child: Navigator(
           key: navigator,
-          observers: [heroController],
+          observers: [heroController, screenObserver],
           onGenerateRoute: (_) => MaterialPageRoute<void>(
             builder: (_) => _AgentsWorkspace(
               child: Builder(

@@ -17,18 +17,6 @@ sealed class ProfileAvatarDraft {
   Future<String> upload(MediaUploadService service);
 }
 
-/// An avatar draft that already has its final URL and needs no media upload.
-final class ProfileUrlAvatarDraft extends ProfileAvatarDraft {
-  /// Creates a draft backed by [url].
-  const ProfileUrlAvatarDraft(this.url);
-
-  /// The URL that will be written to the profile.
-  final String url;
-
-  @override
-  Future<String> upload(MediaUploadService service) async => url;
-}
-
 /// A locally prepared still image awaiting upload on Save.
 final class ProfileImageAvatarDraft extends ProfileAvatarDraft {
   /// Creates a still-image draft from JPEG or PNG [bytes].
@@ -143,7 +131,6 @@ Map<String, Object?>? encodeProfileAvatarDraft(ProfileAvatarDraft? draft) =>
         'animation': animation,
         'poster': poster,
       },
-      ProfileUrlAvatarDraft(:final url) => {'type': 'url', 'url': url},
       null => null,
     };
 
@@ -154,6 +141,5 @@ ProfileAvatarDraft? decodeProfileAvatarDraft(Map<dynamic, dynamic>? value) =>
         animation: value!['animation'] as Uint8List,
         poster: value['poster'] as Uint8List,
       ),
-      'url' => ProfileUrlAvatarDraft(value!['url'] as String),
       _ => null,
     };

@@ -256,12 +256,12 @@ Future<BuzzPushLeaseDescriptor> fetchBuzzPushLeaseDescriptor(
   final ownedClient = client ?? newAppHttpClient();
   // Closing a client does not stop a request on a shared session.
   final abort = Completer<void>();
+  final request = http.AbortableRequest(
+    'GET',
+    requestUri,
+    abortTrigger: abort.future,
+  )..headers['Accept'] = 'application/nostr+json';
   try {
-    final request = http.AbortableRequest(
-      'GET',
-      requestUri,
-      abortTrigger: abort.future,
-    )..headers['Accept'] = 'application/nostr+json';
     final response = await ownedClient
         .send(request)
         .then(http.Response.fromStream)
@@ -276,6 +276,9 @@ Future<BuzzPushLeaseDescriptor> fetchBuzzPushLeaseDescriptor(
       throw const FormatException('NIP-11 response must be a JSON object');
     }
     return BuzzPushLeaseDescriptor.fromRelayInformation(decoded);
+  } on TimeoutException {
+    noteHttpDeadline(request);
+    rethrow;
   } finally {
     abort.complete();
     if (client == null) ownedClient.close();

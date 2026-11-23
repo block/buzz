@@ -16,8 +16,8 @@ import 'package:buzz/shared/http/app_http_client.dart';
 http.Client _defaultTransport() {
   if (hasNativeHttpSession) return newAppHttpClient();
   final client = http.Client();
-  if (client is! IOClient) return client;
-  return IOClient(HttpClient()..autoUncompress = false);
+  if (client is! IOClient) return countedAppHttpClient(client);
+  return countedAppHttpClient(IOClient(HttpClient()..autoUncompress = false));
 }
 
 /// Owns the reusable HTTP transport used for relay `/query` requests.
@@ -51,13 +51,13 @@ class RelayHttpQueryClient {
     // Retiring a generation cannot stop a request on a shared session, so a
     // timed-out request is aborted rather than left holding bandwidth.
     final abort = Completer<void>();
+    final request =
+        http.AbortableRequest('POST', url, abortTrigger: abort.future)
+          ..followRedirects = false
+          ..headers['Accept-Encoding'] = 'gzip'
+          ..headers.addAll(headers)
+          ..bodyBytes = body;
     try {
-      final request =
-          http.AbortableRequest('POST', url, abortTrigger: abort.future)
-            ..followRedirects = false
-            ..headers['Accept-Encoding'] = 'gzip'
-            ..headers.addAll(headers)
-            ..bodyBytes = body;
       final transport = _injectedClient ?? generation!.client;
       final client = decorate?.call(transport, () => active) ?? transport;
       return await client
@@ -65,6 +65,7 @@ class RelayHttpQueryClient {
           .then(http.Response.fromStream)
           .timeout(timeout);
     } on TimeoutException {
+      noteHttpDeadline(request);
       if (!abort.isCompleted) abort.complete();
       if (identical(_currentGeneration, generation)) {
         _currentGeneration = null;
@@ -134,6 +135,7 @@ class RelayHttpQueryClient {
     try {
       return await receive().timeout(timeout);
     } on TimeoutException {
+      noteHttpDeadline(sent);
       if (!abort.isCompleted) abort.complete();
       if (identical(_currentGeneration, generation)) {
         _currentGeneration = null;
