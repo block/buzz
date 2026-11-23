@@ -522,6 +522,29 @@ pub(crate) mod tests {
         assert_eq!(records, ["deny_set/denied"]);
     }
 
+    /// While the deny map restores, the shadow upgrade records the deny set
+    /// as unavailable, never revoked, for a listed key and an unknown one.
+    #[test]
+    fn restoring_deny_map_records_unavailable_not_revoked() {
+        let key = Keys::generate().public_key();
+        let records = shadow_records(async move {
+            let state = shadow_state(Some(key)).await;
+            state.nip_fi_deny_map.as_deref().unwrap().begin_restore();
+            for target in [key, Keys::generate().public_key()] {
+                let assertion = VerifiedAssertion::for_test(
+                    Some(target),
+                    vec![Utc::now() + Duration::hours(1)],
+                );
+                assert!(upgrade_denied(
+                    &state,
+                    &crate::nip_fi_shadow::BOUND.into(),
+                    &assertion
+                ));
+            }
+        });
+        assert_eq!(records, ["deny_set/unavailable", "deny_set/unavailable"]);
+    }
+
     /// Delivers a real cross-pod disconnect for `key` to a shadow pod.
     pub(crate) fn deliver(state: &AppState, key: &PublicKey) -> buzz_auth::CrossPodMergeResult {
         let msg = buzz_pubsub::NipFiDisconnect {
