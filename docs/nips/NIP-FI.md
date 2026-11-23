@@ -430,7 +430,7 @@ A disconnect call causes the relay to:
 The relay holds the deny set in memory and MAY also keep it in shared storage
 that outlives a relay process, with each entry expiring at its `until`.  A
 relay that keeps such storage MUST record an accepted command there before
-reporting success, and MUST NOT admit protected connections after a restart
+reporting success, and MUST NOT admit protected connections or protected HTTP requests after a restart
 until it has restored the active entries.  A relay without such storage MAY
 forget active deny entries on restart.  In that case, if the issuer stops
 issuing assertions and re-push completes before any expired-entry reconnection
@@ -570,12 +570,13 @@ VerifyCommandJwt(token, request_method, request_path, request_body_pubkey):
       target_pubkey=target_k, until=until
   ) or DENY(authorization_denied)  // replay: jti already reserved
     or REJECT(503)                 // capacity: deny set full; neither mutation applied
+    or REJECT(authorization_unavailable) // shared storage outcome unknown: jti and deny entry may be recorded; no sessions closed
 
   return CommandResult(target_pubkey=target_k, caller=(claims.iss, claims.sub))
 ```
 
-Any failure at any step is fail-closed: no side effects occur and the relay
-returns the appropriate error.
+Any failure at any step is fail-closed: no sessions are closed and the relay
+returns the appropriate error. Only an unknown shared-storage outcome, described below, can leave state behind.
 
 ### Request
 
@@ -593,7 +594,7 @@ performs all pure authorization checks and then, as its single atomic admission
 mutation (step 7), simultaneously reserves the `(iss, jti)` replay identity and
 inserts the deny entry — both or neither.  A capacity failure at that step rejects
 `503`; neither the jti nor the deny entry is recorded, and the caller may safely
-retry the same signed command.  On success, the relay MUST close every live connection
+retry the same signed command.  A relay that keeps the deny set in shared storage and cannot learn whether its write applied MUST reject `503` `authorization_unavailable` and close no sessions. The `jti` and deny entry may already be recorded, so the caller retries with a freshly signed command (new `jti`), not the same one.  On success, the relay MUST close every live connection
 registered under the command's issuer (`claims.iss`) whose proven key equals
 `CommandResult.target_pubkey` or whose recorded owner equals
 `CommandResult.target_pubkey`, whether or not admission has completed.
@@ -617,6 +618,7 @@ under the merge rule.
 | Missing or invalid command JWT | `401` / `403` | Per the rejection table |
 | Malformed request body or `until` exceeds ceiling | `400` | `bad request\n` |
 | Deny set at capacity | `503` | `deny set full\n` |
+| Shared deny storage outcome unknown | `503` | `authorization unavailable\n` |
 
 ## HTTP ingress
 
@@ -868,7 +870,7 @@ is unavailable.
 | assertion or proof absent | `missing_evidence` | `auth-required: authentication required` | `401`; `WWW-Authenticate: Nostr`; `Content-Type: text/plain; charset=utf-8`; body `authentication required\n` |
 | unknown or community-unauthorized issuer; malformed, invalid, or expired evidence | `evidence_rejected` | `restricted: evidence rejected` | `403`; `Content-Type: text/plain; charset=utf-8`; body `evidence rejected\n` |
 | assertion–key mismatch; unauthorized issuer principal, signed-target–body mismatch, or replayed `jti` on a signed command; active deny-set entry for pubkey | `authorization_denied` | `restricted: authorization denied` | `403`; `Content-Type: text/plain; charset=utf-8`; body `authorization denied\n` |
-| required JWKS snapshot or community/Host resolution unavailable | `authorization_unavailable` | `restricted: authorization unavailable` | `503`; `Content-Type: text/plain; charset=utf-8`; body `authorization unavailable\n` |
+| required JWKS snapshot, community/Host resolution, or restored deny set unavailable | `authorization_unavailable` | `restricted: authorization unavailable` | `503`; `Content-Type: text/plain; charset=utf-8`; body `authorization unavailable\n` |
 
 A denial decided on a WebSocket upgrade is the HTTP response in place of `101`.
 A denial decided on a protected HTTP request is the HTTP response.
