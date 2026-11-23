@@ -1,5 +1,6 @@
 import 'dart:io';
 
+// Keep this policy aligned with mobile/android/app/build.gradle.kts.
 bool isValidPushGatewayOrigin(String value, {bool requireHttps = false}) {
   try {
     final uri = Uri.parse(value);
@@ -13,7 +14,6 @@ bool isValidPushGatewayOrigin(String value, {bool requireHttps = false}) {
     }
     if (uri.path.isNotEmpty && uri.path != '/') return false;
     if (uri.hasQuery || uri.hasFragment) return false;
-    if (requireHttps && uri.hasPort) return false;
     final port = uri.port;
     return port >= 1 && port <= 65535;
   } on FormatException {
@@ -30,7 +30,7 @@ void main(List<String> arguments) {
     return;
   }
   final requirement = requireHttps
-      ? 'an HTTPS origin without an explicit port, credentials, path, query, or fragment'
+      ? 'an HTTPS origin without credentials, path, query, or fragment'
       : 'an HTTP(S) origin without credentials, path, query, or fragment';
   stderr.writeln('error: BUZZ_PUSH_GATEWAY_URL must be $requirement.');
   exitCode = 1;
