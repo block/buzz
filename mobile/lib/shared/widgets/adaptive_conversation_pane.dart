@@ -6,6 +6,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:duo_kit/duo_kit.dart';
 
+import '../diagnostics/diagnostic_navigation_observer.dart';
 import 'duo_toolbar.dart';
 import 'app_route_observer.dart';
 import 'conversation_layout.dart';
@@ -16,6 +17,7 @@ import 'conversation_thread_pane.dart';
 import 'conversation_thread_scope.dart';
 import 'covered_route_keyboard_insets.dart';
 import 'ios_navigation_metrics.dart';
+import 'media_query_override.dart';
 import 'duo_workspace_scaffold.dart';
 
 import '../theme/theme.dart';
@@ -260,6 +262,10 @@ class AdaptiveConversationPane extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final routeObserver = useMemoized(appRouteObserver.createNestedObserver);
+    final screenObserver = useMemoized(
+      ref.read(diagnosticScreenTrailProvider).observer,
+    );
+    useEffect(() => screenObserver.dispose, [screenObserver]);
     final navigator = useMemoized(() => GlobalKey<NavigatorState>());
     final ownerRoute = ModalRoute.of(context);
     useEffect(() {
@@ -553,7 +559,12 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                 Widget detail = Navigator(
                   requestFocus: selected != null,
                   key: navigator,
-                  observers: [routeObserver, detailRoutes, detailModals],
+                  observers: [
+                    routeObserver,
+                    screenObserver,
+                    detailRoutes,
+                    detailModals,
+                  ],
                   pages: [
                     if (!(wide && persistentSelection && selected != null))
                       MaterialPage<void>(
@@ -917,23 +928,6 @@ class _CoveredList extends StatelessWidget {
       ),
     ),
   );
-}
-
-/// Derives [child]'s [MediaQuery] in a leaf, so the caller's build does not
-/// depend on every field (keyboard insets change on each animation frame).
-class MediaQueryOverride extends StatelessWidget {
-  const MediaQueryOverride({
-    required this.transform,
-    required this.child,
-    super.key,
-  });
-
-  final MediaQueryData Function(MediaQueryData) transform;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) =>
-      MediaQuery(data: transform(MediaQuery.of(context)), child: child);
 }
 
 /// Reports its route as [covering] once the route fully covers the compact

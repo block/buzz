@@ -387,6 +387,9 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
             .openDm(
               pubkeys: selectedUsers.value.map((user) => user.pubkey).toList(),
               waitForChannelList: false,
+              // The relay picks the DM of these people, which agents named
+              // here join with its history.
+              includeHistory: true,
             );
         if (context.mounted) {
           if (nativePresentation) {

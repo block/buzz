@@ -7,6 +7,7 @@ import '../../shared/widgets/adaptive_conversation_pane.dart';
 import '../../shared/widgets/duo_workspace_scaffold.dart';
 import '../../shared/widgets/duo_toolbar.dart';
 import '../../shared/widgets/ios_navigation_metrics.dart';
+import '../../shared/widgets/media_query_override.dart';
 import '../../shared/widgets/android_expanding_menu_button.dart';
 
 import 'package:flutter/material.dart';

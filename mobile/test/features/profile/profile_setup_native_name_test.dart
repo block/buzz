@@ -128,7 +128,10 @@ void main() {
       }
 
       await invoke('avatarDraft', {
-        'draft': {'type': 'url', 'url': 'https://example.com/avatar.png'},
+        'draft': {
+          'type': 'image',
+          'bytes': Uint8List.fromList([0xff, 0xd8, 0xff]),
+        },
       });
       for (final value in [Brightness.dark, Brightness.light]) {
         brightness.value = value;

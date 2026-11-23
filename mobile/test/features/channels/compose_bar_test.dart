@@ -1590,6 +1590,12 @@ void main() {
             false,
           ),
           (
+            'any other named error',
+            (_) => Future.error(const FormatException('bad relay frame')),
+            'Not sent: FormatException: bad relay frame',
+            false,
+          ),
+          (
             'any other state error',
             (_) => Future.error(StateError('Relay session is disposed')),
             'Not sent: Relay session is disposed',
@@ -6089,6 +6095,50 @@ void main() {
       expect(find.textContaining('upload failed'), findsOneWidget);
       expect(find.text('Keep this draft'), findsOneWidget);
       expect(find.byTooltip('Remove attachment'), findsOneWidget);
+    });
+
+    testWidgets('shows a failed upload connection error with its name', (
+      tester,
+    ) async {
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient(
+          (request) async => throw http.ClientException('Connection reset'),
+        ),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async =>
+            XFile.fromData(_pngBytes, name: 'tiny.png'),
+      );
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _openSystemPhotoPicker(tester);
+      await tester.pumpAndSettle();
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'Keep this draft');
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await _pumpUntilUpload(
+        tester,
+        () => find.textContaining('Connection reset').evaluate().isNotEmpty,
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.textContaining('ClientException: Connection reset'),
+        findsOneWidget,
+      );
+      expect(find.text('Keep this draft'), findsOneWidget);
     });
 
     for (final statusCode in [

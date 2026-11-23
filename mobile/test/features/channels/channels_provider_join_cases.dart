@@ -264,6 +264,211 @@ void _confirmedJoinCases() {
       },
     );
 
+    test(
+      'an add that lands in another DM is confirmed through the writer',
+      () async {
+        final keys = nostr.Keys.generate();
+        final session = _WriterReplicaRelaySession(
+          memberships: const [],
+          metadata: [
+            _meta(id: _otherJoinedChannel, name: 'dm', channelType: 'dm'),
+            _meta(id: _joinedChannel, name: 'new dm', channelType: 'dm'),
+          ],
+        )..dmAddResponse = 'response:{"channel_id":"$_joinedChannel"}';
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        final actions = container.read(
+          Provider<ChannelActions>(
+            (ref) => ChannelActions(
+              ref: ref,
+              session: session,
+              signedEventRelay: SignedEventRelay(
+                session: session,
+                nsec: keys.nsec,
+              ),
+              currentPubkey: 'me',
+            ),
+          ),
+        );
+        await container.read(channelsProvider.future);
+
+        // The writer has the new DM; the replica the list reads does not.
+        session.writerMemberships = [_membership(_joinedChannel, 'me')];
+        session.rosterFailures = 1;
+        await expectLater(
+          actions.addToDm(
+            channelId: _otherJoinedChannel,
+            pubkeys: const ['robin'],
+            history: DmHistory.startNew,
+          ),
+          throwsA(
+            isA<DmAddUnconfirmed>().having(
+              (error) => error.channelId,
+              'channelId',
+              _joinedChannel,
+            ),
+          ),
+        );
+
+        // Opening it again reads the writer and sends nothing.
+        final dm = await actions.openAddedDm(_joinedChannel);
+        expect(dm.id, _joinedChannel);
+        expect(session.published.map((event) => event.kind), [41011]);
+      },
+    );
+
+    test(
+      'a DM add asks the relay, and its refusals become words to show',
+      () async {
+        final keys = nostr.Keys.generate();
+        final session = _WriterReplicaRelaySession(memberships: const [])
+          ..dmAddRefusals.addAll([
+            'needs-choice: history',
+            'invalid: history must be "include", got "ask"',
+            'invalid: DM supports at most 9 people',
+            'invalid: a DM may hold at most 9 people; agents do not count',
+            'needs-choice: history',
+            'restricted: you cannot add people to this DM',
+          ]);
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        final actions = container.read(
+          Provider<ChannelActions>(
+            (ref) => ChannelActions(
+              ref: ref,
+              session: session,
+              signedEventRelay: SignedEventRelay(
+                session: session,
+                nsec: keys.nsec,
+              ),
+              currentPubkey: 'me',
+            ),
+          ),
+        );
+        Future<void> add(DmHistory history) => actions.addToDm(
+          channelId: _otherJoinedChannel,
+          pubkeys: const ['robin'],
+          history: history,
+        );
+        Matcher refused(String message) => throwsA(
+          isA<Exception>().having(
+            (error) => error.toString(),
+            'message',
+            'Exception: $message',
+          ),
+        );
+
+        // The relay asks, and so does one from before it knew "ask".
+        await expectLater(
+          add(DmHistory.ask),
+          throwsA(isA<DmNeedsHistoryChoice>()),
+        );
+        await expectLater(
+          add(DmHistory.ask),
+          throwsA(isA<DmNeedsHistoryChoice>()),
+        );
+        await expectLater(add(DmHistory.ask), refused(dmAdditionFailedMessage));
+        await expectLater(
+          add(DmHistory.include),
+          refused(dmAdditionFailedMessage),
+        );
+        // Only an add that asked can be told to choose.
+        await expectLater(
+          add(DmHistory.include),
+          refused('Couldn’t add them. Try again.'),
+        );
+        await expectLater(
+          add(DmHistory.startNew),
+          refused('Couldn’t add them. Try again.'),
+        );
+        expect(
+          session.published.map(
+            (event) =>
+                event.tags.where((tag) => tag.first == 'history').toList(),
+          ),
+          [
+            [
+              ['history', 'ask'],
+            ],
+            [
+              ['history', 'ask'],
+            ],
+            [
+              ['history', 'ask'],
+            ],
+            [
+              ['history', 'include'],
+            ],
+            [
+              ['history', 'include'],
+            ],
+            <List<String>>[],
+          ],
+        );
+      },
+    );
+
+    test(
+      'an agent whose history tag is refused adds again without it',
+      () async {
+        final keys = nostr.Keys.generate();
+        final session =
+            _WriterReplicaRelaySession(
+                memberships: const [],
+                metadata: [
+                  _meta(id: _otherJoinedChannel, name: 'dm', channelType: 'dm'),
+                  _meta(id: _joinedChannel, name: 'new dm', channelType: 'dm'),
+                ],
+              )
+              ..dmAddResponse = 'response:{"channel_id":"$_joinedChannel"}'
+              ..writerMemberships = [_membership(_joinedChannel, 'me')];
+        final container = _buildContainer(session: session);
+        addTearDown(container.dispose);
+        final actions = container.read(
+          Provider<ChannelActions>(
+            (ref) => ChannelActions(
+              ref: ref,
+              session: session,
+              signedEventRelay: SignedEventRelay(
+                session: session,
+                nsec: keys.nsec,
+              ),
+              currentPubkey: 'me',
+            ),
+          ),
+        );
+        await container.read(channelsProvider.future);
+
+        for (final history in [DmHistory.ask, DmHistory.include]) {
+          session.dmAddRefusals.add(
+            "forbidden: only people can share a DM's history",
+          );
+          final dm = await actions.addToDm(
+            channelId: _otherJoinedChannel,
+            pubkeys: const ['robin'],
+            history: history,
+          );
+          expect(dm.id, _joinedChannel);
+        }
+        expect(
+          session.published.map(
+            (event) =>
+                event.tags.where((tag) => tag.first == 'history').toList(),
+          ),
+          [
+            [
+              ['history', 'ask'],
+            ],
+            <List<String>>[],
+            [
+              ['history', 'include'],
+            ],
+            <List<String>>[],
+          ],
+        );
+      },
+    );
+
     test('a list rebuild during the join still shows the membership', () async {
       final session = _WriterReplicaRelaySession(
         memberships: const [],
@@ -300,6 +505,12 @@ class _WriterReplicaRelaySession extends _FakeRelaySession {
   int rosterFailures = 0;
   final published = <NostrEvent>[];
 
+  /// The relay's answer to a DM add (kind:41011), as its OK message.
+  String? dmAddResponse;
+
+  /// The relay's refusals of the next DM adds, in order, as their OK messages.
+  final dmAddRefusals = <String>[];
+
   @override
   Future<NostrEvent> publish(
     NostrEvent event, {
@@ -307,6 +518,21 @@ class _WriterReplicaRelaySession extends _FakeRelaySession {
     Future<bool> Function()? mayPublish,
   }) async {
     published.add(event);
+    if (event.kind == 41011 && dmAddRefusals.isNotEmpty) {
+      throw Exception(dmAddRefusals.removeAt(0));
+    }
+    final response = dmAddResponse;
+    if (event.kind == 41011 && response != null) {
+      return NostrEvent(
+        id: event.id,
+        pubkey: event.pubkey,
+        createdAt: event.createdAt,
+        kind: event.kind,
+        tags: event.tags,
+        content: response,
+        sig: event.sig,
+      );
+    }
     return event;
   }
 

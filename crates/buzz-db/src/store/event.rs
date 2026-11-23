@@ -844,7 +844,7 @@ fn push_event_filters(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, q
     if let Some(ref e_tags) = q.e_tags {
         if !e_tags.is_empty() {
             qb.push(" AND ");
-            push_e_tag_match(qb, col_prefix, e_tags);
+            push_exact_tag_match(qb, col_prefix, "e", e_tags);
         }
     }
 
@@ -1316,64 +1316,28 @@ pub(crate) async fn fetch_with_read_deadline(
 /// `[["t","t"]]` is contained in `["t","other"]`, and `[["e",id]]` in
 /// `["x","e",id]`. Over-matching before `LIMIT` lets a non-matching newer row
 /// take the slot, so containment stays only as the GIN-indexed prefilter
-/// (one array bind, so the SQL text does not change with `values`) and the
-/// positional check makes the predicate exact.
+/// (one array-bound test, so planner cost does not scale with `values`) and
+/// the positional check makes the predicate exact.
 fn push_exact_tag_match(
     qb: &mut QueryBuilder<sqlx::Postgres>,
     col_prefix: &str,
     name: &str,
     values: &[String],
 ) {
-    push_tag_match(qb, col_prefix, name, values, false);
-}
-
-/// Above this many `#e` values, [`push_e_tag_match`] hides them from the
-/// planner's selectivity estimate. Hiding plans faster from one value up, but
-/// visible values keep a narrow read's per-value plan; at 8 they cost at most
-/// ~0.6 ms of extra planning.
-const E_TAG_ESTIMATED_VALUES_MAX: usize = 8;
-
-/// [`push_exact_tag_match`] for `#e`. Planning a bound array estimates GIN
-/// selectivity once per element in every partition, about 0.07 ms per value:
-/// a 201-id thread-page aux closure spent ~14 ms planning against ~1 ms
-/// executing, on every page, because its custom plan never yields to the
-/// cached generic one. Past [`E_TAG_ESTIMATED_VALUES_MAX`] values the arrays
-/// are read through a scalar subquery, which the planner estimates as one
-/// unknown value (the estimate a cached generic plan already uses for these
-/// reads) while the GIN index still serves the containment at run time.
-fn push_e_tag_match(qb: &mut QueryBuilder<sqlx::Postgres>, col_prefix: &str, values: &[String]) {
-    let opaque = values.len() > E_TAG_ESTIMATED_VALUES_MAX;
-    push_tag_match(qb, col_prefix, "e", values, opaque);
-}
-
-fn push_tag_match(
-    qb: &mut QueryBuilder<sqlx::Postgres>,
-    col_prefix: &str,
-    name: &str,
-    values: &[String],
-    opaque_values: bool,
-) {
-    // `ANY((SELECT $n)::T[])` is an array expression over an InitPlan, while
-    // `ANY((SELECT $n))` would compare against a subquery's rows instead.
-    let (open, close, text_cast) = if opaque_values {
-        ("(SELECT ", ")", "::text[]")
-    } else {
-        ("", "", "")
-    };
     let containments: Vec<serde_json::Value> = values
         .iter()
         .map(|value| serde_json::json!([[name, value]]))
         .collect();
-    qb.push(format!("({col_prefix}tags @> ANY({open}"))
+    qb.push(format!("({col_prefix}tags @> ANY("))
         .push_bind(containments)
         .push(format!(
-            "{close}::jsonb[]) AND EXISTS (SELECT 1 FROM jsonb_array_elements({col_prefix}tags) AS tag \
+            "::jsonb[]) AND EXISTS (SELECT 1 FROM jsonb_array_elements({col_prefix}tags) AS tag \
              WHERE tag->>0 = "
         ))
         .push_bind(name.to_owned())
-        .push(format!(" AND tag->>1 = ANY({open}"))
+        .push(" AND tag->>1 = ANY(")
         .push_bind(values.to_vec())
-        .push(format!("{close}{text_cast})))"));
+        .push(")))");
 }
 
 /// Whether `q` must run as an unnamed statement, so Postgres plans it with the
@@ -1695,7 +1659,7 @@ fn count_events_sql(q: &EventQuery) -> QueryBuilder<sqlx::Postgres> {
     if let Some(ref e_tags) = q.e_tags {
         if !e_tags.is_empty() {
             qb.push(" AND ");
-            push_e_tag_match(&mut qb, col_prefix, e_tags);
+            push_exact_tag_match(&mut qb, col_prefix, "e", e_tags);
         }
     }
 
@@ -3116,19 +3080,6 @@ mod e_tag_filter_shape_tests {
         assert!(!sql[..fence_end].contains("ORDER BY"));
         assert!(!sql[..fence_end].contains("LIMIT"));
         assert!(sql[fence_end..].contains("ORDER BY created_at DESC, id ASC LIMIT "));
-        // A wide `#e` set reaches the planner as one unknown value, not 188
-        // estimated elements; a narrow one keeps its bound-value estimate.
-        assert!(sql.contains("tags @> ANY((SELECT $"));
-        assert!(sql.contains("tag->>1 = ANY((SELECT $"));
-        for (ids, opaque) in [
-            (1, false),
-            (E_TAG_ESTIMATED_VALUES_MAX, false),
-            (E_TAG_ESTIMATED_VALUES_MAX + 1, true),
-        ] {
-            q.e_tags = Some((0..ids).map(|i| format!("{i:064x}")).collect());
-            let qb = build_query_events_sql(&q, Range::All, page_limit(&q));
-            assert_eq!(qb.sql().as_str().contains("(SELECT $"), opaque, "{ids} ids");
-        }
     }
 
     /// Only a one-channel, one-root read of channel-message kinds without a
