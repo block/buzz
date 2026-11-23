@@ -235,10 +235,10 @@ Within each step, by slug.
 
 The agent owner's client moves the agent's local Attention to the relay in this order:
 
-1. **Find** the channel. If there is none, create it (NIP-AP, "Config channels"), without the agent.
+1. **Find** the channel. If there is none, create it (NIP-AP, "Config channels"), without the agent. If the agent is in it with a role that can write (from an earlier move), remove it, so only the agent owner writes until step 4. A guest stays.
 2. **Write** each local object (Writing), in the order above.
 3. **Read back** the set (Reading, steps 2 and 3) and compare it with the local set. If they differ, stop: nothing switches, and the local set keeps running.
-4. **Add the agent** with the `member` role, if it is not a member yet.
+4. **Add the agent** with the `member` role, if it is not in the channel. Then Find again: if the add is not confirmed or the agent is not in the roster, stop, and nothing switches. A later move finds the set already there, writes nothing and adds the agent.
 5. **Switch** the runtime to the relay. This is a setting of the runtime, not a record.
 
 A runtime runs its local set until the switch. After it, the runtime runs the relay set from its first complete sync, and holds the events that its watches would match until then. A runtime never switches to a set it has not read back complete, so a move that stops part way leaves the local set running.
