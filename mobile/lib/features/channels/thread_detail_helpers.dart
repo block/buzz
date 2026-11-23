@@ -181,6 +181,110 @@ class _ThreadTailIntent {
   }
 }
 
+({
+  AsyncValue<List<NostrEvent>> relayReplyState,
+  List<TimelineMessage> allMsgs,
+  TimelineMessage? savedHead,
+  Set<String> savedOnlyIds,
+  bool accessDenied,
+  bool liveDeletionHidesHead,
+  bool hasFetchedReplies,
+  bool canUseMessagesForInitialTarget,
+})
+_watchThreadMessages(
+  WidgetRef ref,
+  ThreadRepliesArgs args,
+  TimelineMessage threadHead,
+  List<TimelineMessage> routeSnapshot,
+  String? currentPubkey, {
+  required bool headFromSavedPage,
+  required String? initialMessageId,
+}) {
+  final relayReplyState = ref.watch(threadRepliesProvider(args));
+  final replyEvents = ref.watch(threadRepliesWithLocalProvider(args)).value;
+  final channelState = ref.watch(channelMessagesProvider(args.channelId));
+  final accessDenied = [
+    relayReplyState.error,
+    channelState.error,
+  ].any((error) => error != null && isRelayChannelAccessDenied(error));
+  final relayRepliesAvailable = relayReplyState.hasValue;
+  final preview = accessDenied || (relayRepliesAvailable && !headFromSavedPage)
+      ? null
+      : ref.watch(savedThreadPreviewProvider(args.savedPage));
+  final saved = preview?.isLoading == false ? preview?.value : null;
+  final live = channelState.value ?? const <NostrEvent>[];
+  // The relay query carries the aux it observed. Fold in later live changes
+  // before formatting so a deletion can suppress a reply from either source.
+  final savedReplies = relayRepliesAvailable ? null : saved;
+  final events = savedReplies == null && replyEvents == null
+      ? live
+      : mergeThreadEvents([...?savedReplies, ...?replyEvents], live);
+  final observed = accessDenied
+      ? const <TimelineMessage>[]
+      : formatTimeline(events, currentPubkey: currentPubkey);
+  final headDeleted = _isDeletedBy(events, threadHead.id);
+  final allMsgs = accessDenied
+      ? const <TimelineMessage>[]
+      : !relayRepliesAvailable
+      ? _provisionalThreadMessages(routeSnapshot, observed, events)
+      : [
+          if (!headFromSavedPage &&
+              !headDeleted &&
+              !observed.any((message) => message.id == threadHead.id))
+            threadHead,
+          ...observed,
+        ];
+  final hasSavedTarget =
+      initialMessageId != null &&
+      (saved?.any((event) => event.id == initialMessageId) ?? false) &&
+      allMsgs.any((message) => message.id == initialMessageId);
+  return (
+    relayReplyState: relayReplyState,
+    allMsgs: allMsgs,
+    // Relay history can replace the saved replies before the channel's
+    // separate exact-ID lookup finds a head outside its normal history.
+    savedHead:
+        relayRepliesAvailable &&
+            saved != null &&
+            !allMsgs.any((message) => message.id == threadHead.id)
+        ? formatTimeline(
+            mergeThreadEvents(
+              saved.where(
+                (event) =>
+                    event.id == threadHead.id ||
+                    EventKind.channelAuxEventKinds.contains(event.kind),
+              ),
+              events,
+            ),
+            currentPubkey: currentPubkey,
+          ).where((message) => message.id == threadHead.id).firstOrNull
+        : null,
+    savedOnlyIds: savedReplies == null
+        ? const {}
+        : {
+            for (final event in savedReplies)
+              if (EventKind.channelTimelineContentKinds.contains(event.kind))
+                event.id,
+          }.difference({
+            for (final event in live) event.id,
+            for (final event in replyEvents ?? const <NostrEvent>[]) event.id,
+            for (final message in routeSnapshot)
+              if (!headFromSavedPage || message.id != threadHead.id) message.id,
+          }),
+    accessDenied: accessDenied,
+    liveDeletionHidesHead: headDeleted,
+    hasFetchedReplies: replyEvents != null,
+    // After a failed fetch, a target in the saved page can be shown during
+    // retries. Other targets wait for relay history or a settled fallback.
+    canUseMessagesForInitialTarget:
+        !accessDenied &&
+        (relayRepliesAvailable ||
+            (preview?.isLoading != true &&
+                relayReplyState.hasError &&
+                (!relayReplyState.retrying || hasSavedTarget))),
+  );
+}
+
 /// Display evidence while the authoritative thread query has no value (still
 /// loading, or failed on first load): the route snapshot plus live, cached
 /// and optimistic replies. The page keeps the query's loading/error status,
@@ -201,4 +305,32 @@ List<TimelineMessage> _provisionalThreadMessages(
     final order = a.createdAtMs.compareTo(b.createdAtMs);
     return order != 0 ? order : a.id.compareTo(b.id);
   });
+}
+
+/// Resolve the leading visible reply by identity before relay rows reindex
+/// the list. This also works when the relay drops the first visible row.
+({int index, double alignment})? _threadPreviewAnchor(
+  Iterable<ItemPosition> positions,
+  List<TimelineMessage> preview,
+  List<TimelineMessage> replies,
+  double top,
+) {
+  final indices = {for (final (i, reply) in replies.indexed) reply.id: i + 1};
+  final visible =
+      positions
+          .where(
+            (position) =>
+                position.index <= preview.length &&
+                position.itemLeadingEdge < 1 &&
+                position.itemTrailingEdge > top,
+          )
+          .toList()
+        ..sort((a, b) => a.index.compareTo(b.index));
+  for (final position in visible) {
+    if (position.index == 0) return null;
+    final index = indices[preview[position.index - 1].id];
+    if (index == null) continue;
+    return (index: index, alignment: position.itemLeadingEdge.clamp(0, 1));
+  }
+  return null;
 }

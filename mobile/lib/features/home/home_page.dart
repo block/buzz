@@ -347,18 +347,14 @@ class HomePage extends HookConsumerWidget {
         child: Builder(builder: defaultAgentBuilder),
       ),
       creationActions: [
-        (
-          label: 'New chat',
-          symbol: 'square.and.pencil',
-          onPressed: newChat.value,
-        ),
+        (label: 'New chat', symbol: 'message.circle', onPressed: newChat.value),
+        (label: 'New channel', symbol: 'number', onPressed: newChannel.value),
+        (label: 'New DM', symbol: 'person.circle', onPressed: newDm.value),
         (
           label: 'New workspace',
-          symbol: 'workspace',
+          symbol: 'folder',
           onPressed: newWorkspace.value,
         ),
-        (label: 'New DM', symbol: 'bubble.left', onPressed: newDm.value),
-        (label: 'New channel', symbol: 'number', onPressed: newChannel.value),
       ],
     );
     return DuoWorkspaceScaffold(

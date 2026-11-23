@@ -5,6 +5,7 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32"
@@ -74,6 +75,11 @@
              bandwidth, and native reports skip the app's Dart filter. -->
         <meta-data
             android:name="io.sentry.breadcrumbs.network-events"
+            android:value="false" />
+        <!-- FCM would fetch a token at startup for every install. The app asks
+             for one only once the user turns notifications on. -->
+        <meta-data
+            android:name="firebase_messaging_auto_init_enabled"
             android:value="false" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->

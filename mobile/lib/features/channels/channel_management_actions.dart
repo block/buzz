@@ -513,7 +513,7 @@ class ChannelActions {
       final recorded = _ref
           .read(savedMessageStoreProvider)
           .removeChannel(scope, channelId, deferDisk: true);
-      _ref.invalidate(savedChannelPreviewProvider(channelId));
+      invalidateSavedMessagePreviews(_ref, channelId);
       await recorded;
     }
     _ensureCommunityValid();
@@ -715,10 +715,7 @@ final channelActionsProvider = Provider<ChannelActions>((ref) {
       nsec: relayConfig.nsec,
     ),
     currentPubkey: currentPubkey,
-    isCommunityValid: () {
-      final currentConfig = ref.read(relayConfigProvider);
-      return currentConfig.baseUrl == relayConfig.baseUrl &&
-          currentConfig.nsec == relayConfig.nsec;
-    },
+    isCommunityValid: () =>
+        ref.read(relayConfigProvider).isSameCommunity(relayConfig),
   );
 });

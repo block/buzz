@@ -589,10 +589,10 @@ final class NavigationGlassButtonPlatformView: NSObject, FlutterPlatformView {
       button.accessibilityLabel = accessibilityLabel
     }
     if let menu = arguments?["menu"] as? [[String: Any]] {
-      // Keep titled sections in reading order even above a bottom-bar trigger.
+      // Keep creation actions and titled sections in reading order even above a bottom-bar trigger.
       let hasImages = menu.contains { !(($0["symbol"] as? String) ?? "").isEmpty }
       let hasOrderedActions = menu.contains { $0["sectionTitle"] is String || $0["destructive"] as? Bool == true }
-      button.preferredMenuElementOrder = !hasImages || hasOrderedActions ? .fixed : .automatic
+      button.preferredMenuElementOrder = arguments?["fixedMenuOrder"] as? Bool == true || !hasImages || hasOrderedActions ? .fixed : .automatic
       var groups: [[UIMenuElement]] = [[]]
       var groupTitles = [""]
       for item in menu {

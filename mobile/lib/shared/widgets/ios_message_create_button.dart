@@ -158,6 +158,7 @@ class IosMessageCreateButton extends HookConsumerWidget {
       'showIconWithLabel': showIconWithLabel,
       'accessibilityLabel': accessibilityLabel,
       'menu': menu,
+      'fixedMenuOrder': mergingNavigation,
       'deferMenuActions': deferMenuActions,
     };
     // Keep one handler per channel. Replacing this effect on enabled changes

@@ -156,11 +156,13 @@ Future<void> _deactivateCommunityPushLease(
   final matchingGrant = (await readBuzzPushEndpointGrants())
       .where((grant) => grant.relayOrigin == descriptor.origin)
       .firstOrNull;
-  if (matchingGrant == null) {
+  // A gateway change leaves no grant for the relay, but the lease the relay
+  // holds is still addressed by the id the community saved.
+  if (matchingGrant == null && community.pushLeaseInstallationId == null) {
     throw StateError('No endpoint grant exists for push lease tombstone.');
   }
   final installationId =
-      community.pushLeaseInstallationId ?? matchingGrant.installationId;
+      community.pushLeaseInstallationId ?? matchingGrant!.installationId;
   final uri = Uri.parse(community.relayUrl);
   final httpScheme = switch (uri.scheme) {
     'wss' => 'https',

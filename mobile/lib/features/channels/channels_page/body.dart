@@ -352,16 +352,22 @@ class _SliverChannelsList extends HookConsumerWidget {
               .setSortModeFor(groupKey, mode, liveSectionIds: liveSectionIds)
         : null;
 
-    final sectionExpandedStates = useState<Map<String, bool>>({});
+    final collapseProvider = collapsedSectionsProvider(
+      ref.watch(collapsedSectionKeyProvider),
+    );
+    final collapsed = ref.watch(collapseProvider);
+    bool sectionExpanded(String key) => !collapsed.contains(key);
 
-    bool sectionExpanded(String key) =>
-        sectionExpandedStates.value[key] ?? true;
-
-    void toggleSection(String key) {
-      sectionExpandedStates.value = {
-        ...sectionExpandedStates.value,
-        key: !sectionExpanded(key),
-      };
+    Future<void> toggleSection(String key) async {
+      try {
+        await ref.read(collapseProvider.notifier).toggle(key);
+      } catch (_) {
+        if (context.mounted) {
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            const SnackBar(content: Text('Could not save sidebar preference.')),
+          );
+        }
+      }
     }
 
     bool visible(String group, Channel channel) {
@@ -558,8 +564,8 @@ class _SliverChannelsList extends HookConsumerWidget {
         buildRow: (c, [onTap]) => row(c, key, onTap),
         buildDetail: buildDetail,
         previewLimit: previewLimit,
-        expanded: sectionExpanded(section.id),
-        onToggle: () => toggleSection(section.id),
+        expanded: sectionExpanded(key),
+        onToggle: () => toggleSection(key),
         edits: team == null ? null : editsFor(team, section.id),
         sortMode: mode(),
         onSortModeChange: sortSetter(group),

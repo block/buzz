@@ -1,4 +1,5 @@
 import 'package:duo_kit/duo_kit.dart';
+import 'package:buzz/shared/widgets/buzz_toast_host.dart';
 import 'package:buzz/shared/widgets/duo_toolbar.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:buzz/features/activity/activity_page.dart';
@@ -277,6 +278,8 @@ NostrEvent _edit({
 );
 
 Widget _buildTestable({
+  /// Wraps the navigator in [BuzzToastHost], as the app does.
+  bool toastHost = false,
   List<AgentDirectoryEntry> soloAgents = const [],
   String? bestie,
   bool useRealChannelProviders = false,
@@ -318,6 +321,7 @@ Widget _buildTestable({
   InboxLocalStateNotifier? inboxLocalState,
   _FakeMessagesNotifier? messagesNotifier,
   Future<SavedChannelPreview?>? savedPreview,
+  Future<List<NostrEvent>?>? savedThreadPreview,
 
   /// The channel's own history in a personal chat, which [messagesNotifier]
   /// does not back there.
@@ -408,6 +412,8 @@ Widget _buildTestable({
         savedChannelPreviewProvider(
           _channelId,
         ).overrideWith((ref) => savedPreview),
+      if (savedThreadPreview != null)
+        savedThreadPreviewProvider.overrideWith((ref, _) => savedThreadPreview),
       channelMessagesProvider(_huddleChannelId).overrideWith(
         () => _FakeMessagesNotifier(
           huddleMessages,
@@ -587,25 +593,28 @@ Widget _buildTestable({
           : darkTheme
           ? AppTheme.dark()
           : AppTheme.light(),
-      builder: (context, child) => MediaQuery(
-        data: MediaQuery.of(context).copyWith(
-          textScaler: textScaler,
-          disableAnimations: disableAnimations,
-        ),
-        child: huddleStrip == null
-            ? MobileHuddleShell(navigatorKey: navigatorKey, child: child!)
-            : ValueListenableBuilder<FoldStrip?>(
-                valueListenable: huddleStrip,
-                builder: (context, strip, _) => DuoToolbarScope(
-                  strip: strip,
-                  active: true,
-                  child: MobileHuddleShell(
-                    navigatorKey: navigatorKey,
-                    child: child!,
+      builder: (context, child) {
+        final page = MediaQuery(
+          data: MediaQuery.of(context).copyWith(
+            textScaler: textScaler,
+            disableAnimations: disableAnimations,
+          ),
+          child: huddleStrip == null
+              ? MobileHuddleShell(navigatorKey: navigatorKey, child: child!)
+              : ValueListenableBuilder<FoldStrip?>(
+                  valueListenable: huddleStrip,
+                  builder: (context, strip, _) => DuoToolbarScope(
+                    strip: strip,
+                    active: true,
+                    child: MobileHuddleShell(
+                      navigatorKey: navigatorKey,
+                      child: child!,
+                    ),
                   ),
                 ),
-              ),
-      ),
+        );
+        return toastHost ? BuzzToastHost(child: page) : page;
+      },
       navigatorObservers: navigatorObservers,
       home:
           home ??

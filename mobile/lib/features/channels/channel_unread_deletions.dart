@@ -57,15 +57,23 @@ extension _UnreadDeletions on ChannelsNotifier {
     _removeSavedMessageTargets(channelId, {
       for (final tag in event.tags)
         if (tag.length >= 2 && tag[0] == 'e') tag[1],
-    });
+    }, edited: true);
   }
 
-  void _removeSavedMessageTargets(String channelId, Set<String> targets) {
+  void _removeSavedMessageTargets(
+    String channelId,
+    Set<String> targets, {
+    bool edited = false,
+  }) {
     if (targets.isEmpty) return;
     final scope = _lifecycleRef.read(savedMessageScopeProvider);
     if (scope == null) return;
-    _lifecycleRef
-        .read(savedMessageStoreProvider)
-        .removeChannelEvents(scope, channelId, targets);
+    pruneSavedMessageTargets(
+      _lifecycleRef,
+      scope,
+      channelId,
+      targets,
+      edited: edited,
+    );
   }
 }
