@@ -456,8 +456,6 @@ void main() {
   testWidgets(
     'See all keeps the Messages row height and label column while searching',
     (tester) async {
-      SharedPreferences.setMockInitialValues({});
-      final prefs = await SharedPreferences.getInstance();
       final channels = [
         for (var i = 0; i < 8; i++)
           Channel(
@@ -476,7 +474,6 @@ void main() {
         buildTestable(
           realHome: true,
           overrides: [
-            savedPrefsProvider.overrideWithValue(prefs),
             channelsProvider.overrideWith(() => _FakeNotifier(channels)),
           ],
         ),
@@ -1123,13 +1120,10 @@ void main() {
   testWidgets('section titles toggle their rows at the list gutter', (
     tester,
   ) async {
-    SharedPreferences.setMockInitialValues({});
-    final prefs = await SharedPreferences.getInstance();
     await tester.pumpWidget(
       buildTestable(
         soloSliver: const SliverToBoxAdapter(),
         overrides: [
-          savedPrefsProvider.overrideWithValue(prefs),
           channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
         ],
       ),
