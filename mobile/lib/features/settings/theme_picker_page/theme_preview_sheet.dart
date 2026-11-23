@@ -10,10 +10,14 @@ class _ThemePreviewExperience extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final inRail = DuoToolbarScope.maybeOf(context)?.strip != null;
-    final stored = ref.read(communityThemeProvider);
     final draftMode = useState(ref.read(appearanceModeProvider));
-    final draftAccent = useState(chatColorIndex(stored.accent));
     final pickedAccent = useState<int?>(null);
+    // Until the user taps a swatch, the preview follows the saved color,
+    // including one synced from another device while this sheet is open.
+    final savedAccent = ref.watch(
+      communityThemeProvider.select((t) => chatColorIndex(t.accent)),
+    );
+    final draftAccent = pickedAccent.value ?? savedAccent;
     final platformBrightness = MediaQuery.platformBrightnessOf(context);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     final brightness = switch (draftMode.value) {
@@ -37,11 +41,8 @@ class _ThemePreviewExperience extends HookConsumerWidget {
     void chooseColor() => showAccentColorPickerSheet(
       context: context,
       colorScheme: selectedBaseScheme,
-      selectedIndex: draftAccent.value,
-      onSelected: (index) {
-        draftAccent.value = index;
-        pickedAccent.value = index;
-      },
+      selectedIndex: draftAccent,
+      onSelected: (index) => pickedAccent.value = index,
     );
 
     void applySelection() {
@@ -98,7 +99,7 @@ class _ThemePreviewExperience extends HookConsumerWidget {
             child: _ThemePreviewPage(
               theme: selectedEntry,
               mode: draftMode.value,
-              accentIndex: draftAccent.value,
+              accentIndex: draftAccent,
               platformBrightness: platformBrightness,
             ),
           ),
@@ -125,7 +126,7 @@ class _ThemePreviewExperience extends HookConsumerWidget {
                         semanticLabel: 'Chat color',
                         color: chatColorForScheme(
                           selectedBaseScheme,
-                          draftAccent.value,
+                          draftAccent,
                         ),
                         onTap: chooseColor,
                       ),
@@ -170,7 +171,7 @@ class _ThemePreviewExperience extends HookConsumerWidget {
           _PreviewSheetCircleAction(
             key: const ValueKey('theme-preview-accent-action-button'),
             semanticLabel: 'Chat color',
-            color: chatColorForScheme(selectedBaseScheme, draftAccent.value),
+            color: chatColorForScheme(selectedBaseScheme, draftAccent),
             onTap: chooseColor,
           ),
           _AppearanceCycleAction(
@@ -222,10 +223,7 @@ class _ThemePreviewExperience extends HookConsumerWidget {
                   child: _PreviewSheetCircleAction(
                     key: const ValueKey('theme-preview-accent-action-button'),
                     semanticLabel: 'Chat color',
-                    color: chatColorForScheme(
-                      selectedBaseScheme,
-                      draftAccent.value,
-                    ),
+                    color: chatColorForScheme(selectedBaseScheme, draftAccent),
                     onTap: chooseColor,
                   ),
                 ),

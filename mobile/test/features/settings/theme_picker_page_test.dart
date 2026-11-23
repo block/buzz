@@ -1,4 +1,7 @@
+import 'dart:convert';
+
 import 'package:buzz/features/settings/theme_picker_page.dart';
+import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -8,6 +11,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../helpers/fake_relay.dart';
 import '../../helpers/widget_helpers.dart';
 
 Future<SharedPreferences> _prefs(Map<String, Object> initial) async {
@@ -299,23 +303,100 @@ void main() {
 
   group('a legacy chat color', () {
     // Desktop's legacy Cyan and Indigo have no swatch of their own: Cyan
-    // shows as Jade and Indigo as Cobalt.
-    const cyan = CommunityThemePreference(
-      theme: buzzDarkThemeName,
-      accent: '#06b6d4',
-      followSystem: false,
-    );
-    const indigo = CommunityThemePreference(
-      theme: buzzDarkThemeName,
-      accent: '#6366f1',
-      followSystem: false,
-    );
+    // shows as Jade and Indigo as Cobalt. These run the real notifier over
+    // a fake relay, so Set goes through the real save and publish path.
+    const cyan = '#06b6d4';
+    const indigo = '#6366f1';
     String swatch(String name) =>
         chatColorChoices.firstWhere((color) => color.name == name).wireValue;
+    CommunityThemePreference preference(String accent) =>
+        CommunityThemePreference(
+          theme: buzzDarkThemeName,
+          accent: accent,
+          followSystem: false,
+        );
+
+    late FakeRelay relay;
+    late ProviderContainer container;
+    var revision = 1;
+
+    NostrEvent synced(String accent) => relay.sign(
+      kind: EventKind.readState,
+      tags: const [
+        ['d', communityThemeDTag],
+        ['t', communityThemeDTag],
+      ],
+      content: jsonEncode(preference(accent).toJson()),
+      createdAt: revision++,
+      author: relay.keys,
+    );
+
+    Future<void> pumpPicker(WidgetTester tester, String accent) async {
+      relay = FakeRelay();
+      revision = 1;
+      relay.seed([synced(accent)]);
+      final prefs = await _prefs({});
+      // Open the picker once the synced color has loaded, as a user would.
+      final open = ValueNotifier(false);
+      addTearDown(open.dispose);
+      await tester.pumpWidget(
+        WidgetHelpers.testable(
+          child: ValueListenableBuilder(
+            valueListenable: open,
+            builder: (_, isOpen, _) =>
+                isOpen ? const ThemePickerPage() : const SizedBox.shrink(),
+          ),
+          overrides: [
+            savedPrefsProvider.overrideWithValue(prefs),
+            ...relay.overrides,
+            communityThemeCryptoProvider.overrideWithValue(
+              CommunityThemeCrypto(encrypt: (s) => s, decrypt: (s) => s),
+            ),
+          ],
+        ),
+      );
+      container = ProviderScope.containerOf(
+        tester.element(find.byType(MaterialApp)),
+      );
+      // The app's theme keeps this provider listened in production.
+      container.listen(communityThemeProvider, (_, _) {});
+      await tester.pumpAndSettle();
+      expect(container.read(communityThemeProvider).accent, accent);
+      open.value = true;
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> receive(WidgetTester tester, String accent) async {
+      relay.deliver(synced(accent));
+      await tester.pumpAndSettle();
+      expect(container.read(communityThemeProvider).accent, accent);
+    }
+
+    int shownSwatch(WidgetTester tester) {
+      final bubble =
+          tester
+                  .widget<DecoratedBox>(
+                    find.byKey(const ValueKey('theme-chat-outgoing-bubble')),
+                  )
+                  .decoration
+              as BoxDecoration;
+      // System mode follows the test platform's light appearance, and one
+      // mode tap would make it Light: the preview is light either way.
+      return chatColorChoices.indexWhere(
+        (choice) =>
+            mobileAppearanceTheme(
+              Brightness.light,
+              choice.wireValue,
+            ).extension<ChatColors>()!.outgoing ==
+            bubble.color,
+      );
+    }
+
+    int index(String name) =>
+        chatColorChoices.indexWhere((color) => color.name == name);
 
     Future<void> tapSwatch(WidgetTester tester, String name) async {
-      final index = chatColorChoices.indexWhere((color) => color.name == name);
-      final option = find.byKey(ValueKey('accent-option-$index'));
+      final option = find.byKey(ValueKey('accent-option-${index(name)}'));
       await tester.tap(
         find.byKey(const ValueKey('theme-preview-accent-action-button')),
       );
@@ -334,37 +415,56 @@ void main() {
       );
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('theme-preview-set')));
-      await tester.pumpAndSettle();
+      // Past the sync manager's publish debounce.
+      await tester.pumpAndSettle(const Duration(seconds: 3));
     }
+
+    List<String> publishedAccents() => [
+      for (final event in relay.published)
+        if (event.getTagValue('d') == communityThemeDTag)
+          (jsonDecode(event.content) as Map<String, dynamic>)['accent']
+              as String,
+    ];
 
     testWidgets('publishes the swatch it maps to when the user taps it', (
       tester,
     ) async {
-      final notifier = _RecordingCommunityThemeNotifier(cyan);
-      await _pumpPicker(tester, themeNotifier: () => notifier);
+      await pumpPicker(tester, cyan);
       await tapSwatch(tester, 'Jade');
-      await tester.tap(find.byKey(const ValueKey('theme-preview-set')));
-      await tester.pumpAndSettle();
-      expect(notifier.lastPreference?.accent, swatch('Jade'));
+      await cycleModeAndSet(tester);
+      expect(container.read(communityThemeProvider).accent, swatch('Jade'));
+      expect(publishedAccents(), [swatch('Jade')]);
     });
 
     testWidgets('keeps a tapped swatch when a sync lands under the picker', (
       tester,
     ) async {
-      final notifier = _RecordingCommunityThemeNotifier(cyan);
-      await _pumpPicker(tester, themeNotifier: () => notifier);
+      await pumpPicker(tester, cyan);
       await tapSwatch(tester, 'Cobalt');
-      notifier.receiveSynced(indigo);
+      await receive(tester, indigo);
       await cycleModeAndSet(tester);
-      expect(notifier.lastPreference?.accent, swatch('Cobalt'));
+      expect(container.read(communityThemeProvider).accent, swatch('Cobalt'));
+      expect(publishedAccents(), [swatch('Cobalt')]);
     });
 
     testWidgets('keeps a synced color on a mode-only Set', (tester) async {
-      final notifier = _RecordingCommunityThemeNotifier(cyan);
-      await _pumpPicker(tester, themeNotifier: () => notifier);
-      notifier.receiveSynced(indigo);
+      await pumpPicker(tester, cyan);
+      await receive(tester, indigo);
       await cycleModeAndSet(tester);
-      expect(notifier.lastPreference?.accent, indigo.accent);
+      expect(container.read(communityThemeProvider).accent, indigo);
+      expect(publishedAccents(), isEmpty);
+    });
+
+    testWidgets('the preview follows a sync until the user taps a swatch', (
+      tester,
+    ) async {
+      await pumpPicker(tester, cyan);
+      expect(shownSwatch(tester), index('Jade'));
+      await receive(tester, indigo);
+      expect(shownSwatch(tester), index('Cobalt'));
+      await tapSwatch(tester, 'Gray');
+      await receive(tester, cyan);
+      expect(shownSwatch(tester), index('Gray'));
     });
   });
 
@@ -473,17 +573,11 @@ void main() {
 }
 
 class _RecordingCommunityThemeNotifier extends CommunityThemeNotifier {
-  _RecordingCommunityThemeNotifier([this.initial = defaultCommunityTheme]);
-
-  final CommunityThemePreference initial;
   int preferenceWrites = 0;
   CommunityThemePreference? lastPreference;
 
   @override
-  CommunityThemePreference build() => initial;
-
-  /// A preference synced from another device while the picker is open.
-  void receiveSynced(CommunityThemePreference preference) => state = preference;
+  CommunityThemePreference build() => defaultCommunityTheme;
 
   @override
   void setPreference(CommunityThemePreference preference) {
