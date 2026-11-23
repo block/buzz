@@ -249,6 +249,8 @@ const _emojiSuggestionLimit = 50;
 
 final _emojiToken = RegExp(r'(?:^|[\s(\[{]):([a-zA-Z0-9_+-]{2,64})$');
 
+final _emojiSuffix = RegExp(r'[a-zA-Z0-9_+-]*:?');
+
 String? _emojiQuery(TextEditingValue value) {
   final caret = value.selection;
   if (!caret.isValid || !caret.isCollapsed || caret.end > value.text.length) {
@@ -256,6 +258,17 @@ String? _emojiQuery(TextEditingValue value) {
   }
   return _emojiToken.firstMatch(value.text.substring(0, caret.end))?.group(1);
 }
+
+Widget _emojiSuggestionPreview(BuildContext context, _EmojiChoice entry) =>
+    entry.url == null
+    ? ExcludeSemantics(
+        child: Text(entry.text, style: const TextStyle(fontSize: 26)),
+      )
+    : _CachedCustomEmojiPreview(
+        shortcode: entry.code,
+        url: entry.url!,
+        size: 26,
+      );
 
 /// A custom emoji in the suggestion list, drawn only from bytes another
 /// surface already downloaded. Typing a shortcode starts no image request: an

@@ -441,12 +441,17 @@ class ComposeBar extends HookConsumerWidget {
     void selectEmoji(_EmojiChoice choice) {
       final query = _emojiQuery(controller.value);
       if (query == null || query != emojiQuery.value) return;
-      spliceAndMoveCursor(
+      final caret = controller.selection.end;
+      final start = caret - query.length - 1;
+      final suffix = _emojiSuffix.matchAsPrefix(controller.text, caret)!;
+      _replaceComposerRange(
         controller,
-        focusNode,
-        start: controller.selection.end - query.length - 1,
+        start: start,
+        end: suffix.end,
         replacement: choice.text,
+        caret: start + choice.text.length,
       );
+      focusNode.requestFocus();
       emojiQuery.value = null;
     }
 
@@ -960,13 +965,7 @@ class ComposeBar extends HookConsumerWidget {
               horizontalTitleGap: 8,
               singleLineLabel: true,
               labelStyle: context.textTheme.bodyLarge?.copyWith(fontSize: 14),
-              leading: (_, entry) => entry.url == null
-                  ? Text(entry.text, style: const TextStyle(fontSize: 26))
-                  : _CachedCustomEmojiPreview(
-                      shortcode: entry.code,
-                      url: entry.url!,
-                      size: 26,
-                    ),
+              leading: _emojiSuggestionPreview,
               onSelect: selectEmoji,
             ),
           )

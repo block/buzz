@@ -2061,6 +2061,15 @@ void main() {
         await tester.sendKeyEvent(LogicalKeyboardKey.tab);
         await tester.pumpAndSettle();
         expect(controller.text, '😄');
+        await tester.enterText(field, 'try :smile: later');
+        controller.selection = const TextSelection.collapsed(offset: 7);
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.descendant(of: panel, matching: find.text(':smile:')),
+        );
+        await tester.pumpAndSettle();
+        expect(controller.text, 'try 😄 later');
+        expect(controller.selection.extentOffset, 'try 😄'.length);
         await tester.enterText(field, 'try :blob-pr later');
         controller.selection = const TextSelection.collapsed(offset: 12);
         await tester.pumpAndSettle();
