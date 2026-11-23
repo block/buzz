@@ -12,6 +12,7 @@ import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -216,6 +217,85 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     });
   }
+  testWidgets('an accepted opt-out never shows the failure warning', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(430, 1800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    PackageInfo.setMockInitialValues(
+      appName: 'Buzz',
+      packageName: 'buzz',
+      version: '1.0.0',
+      buildNumber: '1',
+      buildSignature: '',
+    );
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final secure = _SlowSecureStorage();
+    final storage = CommunityStorage(secure: secure);
+    final subscriptions = [
+      BuzzPushSubscription(
+        filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+        notificationClass: 'default',
+      ),
+    ];
+    final community =
+        Community.create(
+          name: 'Team',
+          relayUrl: 'https://relay.example',
+        ).copyWith(
+          pushNotificationsEnabled: true,
+          pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+            desired: subscriptions,
+          ).withAccepted(subscriptions: subscriptions, generation: 7),
+        );
+    await storage.save(community);
+    await storage.saveActiveId(community.id);
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          authProvider.overrideWith(_Auth.new),
+          communityStorageProvider.overrideWithValue(storage),
+          communitySnapshotWriterProvider.overrideWithValue((_) async {}),
+          communityPushLeaseDeactivatorProvider.overrideWithValue(
+            (community, {generation, deadline}) async {},
+          ),
+          currentRelayPushDescriptorProvider.overrideWith(
+            (ref) => Future.value(null),
+          ),
+          appLifecycleProvider.overrideWith(_Lifecycle.new),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: SettingsPage(
+            profileHeader: const SizedBox.shrink(),
+            identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+    // On a device the active community trails the list by a keychain read.
+    secure.slow = true;
+    await tester.tap(find.byType(Switch));
+    var flashed = false;
+    for (var i = 0; i < 200; i++) {
+      await tester.pump(const Duration(milliseconds: 1));
+      flashed |= find
+          .text('Could not confirm that notifications were turned off.')
+          .evaluate()
+          .isNotEmpty;
+    }
+    expect(flashed, isFalse);
+    await tester.pumpAndSettle();
+    expect(find.text('Notifications'), findsNothing);
+    debugDefaultTargetPlatformOverride = null;
+  });
 }
 
 class _Lifecycle extends AppLifecycleNotifier {
@@ -227,4 +307,22 @@ class _Auth extends AuthNotifier {
   @override
   Future<AuthState> build() async =>
       const AuthState(status: AuthStatus.unauthenticated);
+}
+
+class _SlowSecureStorage extends FakeSecureStorage {
+  bool slow = false;
+
+  @override
+  Future<String?> read({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    if (slow) await Future<void>.delayed(const Duration(milliseconds: 2));
+    return super.read(key: key);
+  }
 }
