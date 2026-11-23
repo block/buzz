@@ -23,6 +23,7 @@ Future<bool?> openConversationListDetails(
   required bool personal,
   bool isUnread = false,
   String? sectionId,
+  ConversationMenuSession? nativeSession,
 }) async {
   final pane = ConversationPaneScope.maybeOf(context);
   final result = await showConversationPopover(
@@ -32,6 +33,7 @@ Future<bool?> openConversationListDetails(
     personal: personal,
     isUnread: isUnread,
     sectionId: sectionId,
+    nativeSession: nativeSession,
   );
   if (result == true && context.mounted && pane?.selectedId == channel.id) {
     pane!.clear();
@@ -56,31 +58,39 @@ class SoloChatTile extends ConsumerWidget {
     );
     final pane = ConversationPaneScope.maybeOf(context);
     final selected = pane?.selectedId == channel.id;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: selected ? context.colors.primaryContainer : null,
-        borderRadius: BorderRadius.circular(Radii.container),
-      ),
-      child: Semantics(
-        selected: selected,
-        child: _MeChatRow(
-          channelId: channel.id,
-          name: channel.name,
+    void openMenu(ConversationMenuSession? session) =>
+        openConversationListDetails(
+          context,
+          channel,
+          viewer,
+          personal: channel.isPersonalChat(viewer, legacyChannels),
           isUnread: isUnread,
-          onLongPress: () => openConversationListDetails(
-            context,
-            channel,
-            viewer,
-            personal: channel.isPersonalChat(viewer, legacyChannels),
+          nativeSession: session,
+        );
+    void openChat() => openConversationPane(
+      context,
+      channel.id,
+      (_) => ChannelDetailPage(
+        channel: channel,
+        personalChat: channel.isPersonalChat(viewer, legacyChannels),
+      ),
+    );
+    return IosConversationMenuRow(
+      onMenu: openMenu,
+      onTap: openChat,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: selected ? context.colors.primaryContainer : null,
+          borderRadius: BorderRadius.circular(Radii.container),
+        ),
+        child: Semantics(
+          selected: selected,
+          child: _MeChatRow(
+            channelId: channel.id,
+            name: channel.name,
             isUnread: isUnread,
-          ),
-          onTap: () => openConversationPane(
-            context,
-            channel.id,
-            (_) => ChannelDetailPage(
-              channel: channel,
-              personalChat: channel.isPersonalChat(viewer, legacyChannels),
-            ),
+            onLongPress: () => openMenu(null),
+            onTap: openChat,
           ),
         ),
       ),

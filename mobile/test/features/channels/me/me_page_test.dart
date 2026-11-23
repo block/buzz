@@ -2,6 +2,7 @@ import 'package:buzz/features/channels/huddle_lifecycle_provider.dart';
 import 'package:buzz/features/channels/me/me_messages_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+import 'package:buzz/shared/widgets/native_conversation_menu.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_activity.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_manager.dart';
 import 'package:buzz/features/channels/channel_filter/channel_filter_provider.dart';
@@ -375,9 +376,34 @@ void main() {
     expect(pane.selectedId, isNull);
     pane.open('loose', (_) => const SizedBox());
     await tester.pumpAndSettle();
-    await tester.longPress(find.text('Unfiled labeled chat'));
+    final row = tester.widget<IosConversationMenuRow>(
+      find.ancestor(
+        of: find.text('Unfiled labeled chat'),
+        matching: find.byType(IosConversationMenuRow),
+      ),
+    );
+    const bridge = MethodChannel('test/solo-context-menu');
+    List<String>? updatedLabels;
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(bridge, (call) async {
+      if (call.method == 'update') {
+        updatedLabels = List<String>.from(call.arguments as List);
+      }
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(bridge, null));
+    final nativeMenu = ConversationMenuSession(bridge: bridge);
+    row.onMenu(nativeMenu);
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Mark unread'));
+    expect(updatedLabels ?? await nativeMenu.labels.future, [
+      'Rename',
+      'Archive',
+      'Mark unread',
+      'Change workspace',
+    ]);
+    expect(find.text('Mark unread'), findsNothing);
+    nativeMenu.close('Mark unread');
     await tester.pumpAndSettle();
     expect(actions.last, 'unread loose');
     expect(pane.selectedId, isNull);

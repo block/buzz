@@ -46,7 +46,7 @@ class _ChannelTile extends ConsumerWidget {
         ConversationPaneScope.maybeOf(context)?.selectedId == channel.id;
     // The gutter insets only the selection paint; the whole row width
     // still opens the channel and its actions.
-    return GestureDetector(
+    final row = GestureDetector(
       behavior: HitTestBehavior.opaque,
       excludeFromSemantics: true,
       onTap: onTap,
@@ -212,9 +212,19 @@ class _ChannelTile extends ConsumerWidget {
         ),
       ),
     );
+    if (channel.isDm && !channel.isSolo) return row;
+    return IosConversationMenuRow(
+      onTap: onTap,
+      onMenu: (session) => _showChannelActions(context, ref, session),
+      child: row,
+    );
   }
 
-  void _showChannelActions(BuildContext context, WidgetRef ref) {
+  void _showChannelActions(
+    BuildContext context,
+    WidgetRef ref, [
+    ConversationMenuSession? session,
+  ]) {
     if (!channel.isDm || channel.isSolo) {
       openConversationListDetails(
         context,
@@ -222,6 +232,7 @@ class _ChannelTile extends ConsumerWidget {
         currentPubkey,
         isUnread: isUnread || hasAttention,
         sectionId: sectionId,
+        nativeSession: session,
         personal:
             channel.isSolo && channel.isPersonalChat(currentPubkey, const []),
       );

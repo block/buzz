@@ -85,6 +85,9 @@ import os.log
       registrar.register(IosMediaCarouselFactory(messenger: registrar.messenger()), withId: "buzz/ios_media_carousel")
     }
 
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "ConversationMenuRow") {
+      registrar.register(ConversationMenuRowFactory(registrar.messenger()), withId: "buzz/conversation_row")
+    }
     let messenger = engineBridge.applicationRegistrar.messenger()
     let keyboardChannel = FlutterMethodChannel(
       name: "buzz/community_keyboard", binaryMessenger: messenger)
