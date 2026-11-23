@@ -654,8 +654,6 @@ class ComposeBar extends HookConsumerWidget {
         messenger: messenger,
       );
 
-      // Another submission may have finished the same asynchronous checks.
-      if (!context.mounted || isSending.value) return;
       isSending.value = true;
       try {
         if (queuedAttachments.isEmpty) {
@@ -1084,7 +1082,6 @@ class ComposeBar extends HookConsumerWidget {
 
     return _ComposerDockFrame(
       expansionAnimation: composerExpansionController,
-      hasDraft: draftText.isNotEmpty,
       forceFullWidth: _voiceNoteFullWidth(voiceNote, attachments.value),
       child: _ComposerInputTray(
         tool: inputTool,

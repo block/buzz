@@ -268,12 +268,8 @@ class _ThreadMessage extends HookConsumerWidget {
                                       Padding(
                                         padding: EdgeInsets.only(
                                           bottom: Grid.quarter,
-                                          left: ownMessage
-                                              ? 0
-                                              : messageBubbleHorizontalInset,
-                                          right: ownMessage
-                                              ? messageBubbleHorizontalInset
-                                              : 0,
+                                          left: ownMessage ? 0 : Grid.xs,
+                                          right: ownMessage ? Grid.xs : 0,
                                         ),
                                         child: MessageLongPressTarget(
                                           child: MessageAuthorMeta(
@@ -285,14 +281,24 @@ class _ThreadMessage extends HookConsumerWidget {
                                             alignment: ownMessage
                                                 ? MainAxisAlignment.end
                                                 : MainAxisAlignment.start,
-                                            nameStyle: messageBylineTextStyle
+                                            nameStyle: messageUsernameTextStyle
                                                 .copyWith(
                                                   fontWeight: FontWeight.w500,
+                                                  fontSize: 11,
+                                                  height: 17 / 11,
                                                 ),
                                             metadataStyle:
-                                                messageBylineTextStyle,
+                                                messageMetadataTextStyle
+                                                    .copyWith(
+                                                      fontSize: 11,
+                                                      height: 17 / 11,
+                                                    ),
                                             timestampStyle:
-                                                messageBylineTextStyle,
+                                                messageTimestampTextStyle
+                                                    .copyWith(
+                                                      fontSize: 11,
+                                                      height: 17 / 11,
+                                                    ),
                                             displayName: ownMessage
                                                 ? 'You'
                                                 : displayName,

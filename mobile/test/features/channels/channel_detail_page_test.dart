@@ -6413,19 +6413,19 @@ void main() {
       }
       final aliceName = find.text('Alice');
       final aliceText = tester.widget<Text>(aliceName);
-      expect(aliceText.style?.fontSize, 12);
+      expect(aliceText.style?.fontSize, 11);
       expect(aliceText.style?.fontWeight, FontWeight.w500);
-      expect(aliceText.style?.height, 1.25);
+      expect(aliceText.style?.height, 17 / 11);
       final aliceUsername = tester.widget<Text>(
         find.byKey(const ValueKey('message-username-msg1')),
       );
       final aliceTimestamp = tester.widget<Text>(
         find.byKey(const ValueKey('message-timestamp-msg1')),
       );
-      expect(aliceUsername.style?.fontSize, 12);
+      expect(aliceUsername.style?.fontSize, 11);
       expect(aliceUsername.style?.fontWeight, FontWeight.w400);
-      expect(aliceUsername.style?.height, 1.25);
-      expect(aliceTimestamp.style?.fontSize, 12);
+      expect(aliceUsername.style?.height, 17 / 11);
+      expect(aliceTimestamp.style?.fontSize, 11);
       expect(aliceTimestamp.style?.fontWeight, FontWeight.w400);
       final timeFinder = find.byKey(const ValueKey('message-timestamp-msg1'));
       expect(
@@ -6793,7 +6793,7 @@ void main() {
           'Photo 1 of 2',
         );
         expect(
-          carouselRect.left + messageBubbleHorizontalInset,
+          carouselRect.left + Grid.xs,
           tester
               .getRect(find.byKey(const ValueKey('message-author-gallery')))
               .left,
@@ -19103,7 +19103,7 @@ void main() {
           const ValueKey('thread-message-timestamp-$threadIdThreadDashRoot'),
         ),
       );
-      expect(threadTimestamp.style?.fontSize, 12);
+      expect(threadTimestamp.style?.fontSize, 11);
       expect(
         find.descendant(
           of: find.byKey(
@@ -19618,7 +19618,7 @@ void main() {
               id: 'reply-$i',
               pubkey: 'bob',
               content: i == 29
-                  ? List.filled(27, 'Tall reply').join('\n')
+                  ? List.filled(31, 'Tall reply').join('\n')
                   : 'Reply $i',
               createdAt: 1100 + i,
               extraTags: const [
@@ -19984,7 +19984,7 @@ void main() {
               id: 'reply-$i',
               pubkey: 'bob',
               content: i == 29
-                  ? List.filled(12, 'Tall reply').join('\n')
+                  ? List.filled(14, 'Tall reply').join('\n')
                   : 'Reply $i',
               createdAt: 1100 + i,
               extraTags: const [

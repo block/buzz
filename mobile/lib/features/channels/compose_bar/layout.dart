@@ -97,7 +97,10 @@ class _ComposeBarLayout extends HookWidget {
     BuildContext context,
     Animation<double> recordingTransition,
   ) {
-    final hasDraft = controller.text.isNotEmpty;
+    final trimmedDraft = controller.text.trim();
+    final collapsedText = trimmedDraft.isEmpty
+        ? resolvedHint
+        : trimmedDraft.replaceAll(RegExp(r'\s+'), ' ');
     final hasVoiceNoteAttachment = attachments.any(
       (attachment) => attachment.kind == _PendingAttachmentKind.voiceNote,
     );
@@ -121,7 +124,7 @@ class _ComposeBarLayout extends HookWidget {
             alignment: Alignment.centerLeft,
             child: Text(
               error,
-              style: messageCaptionTextStyle.copyWith(
+              style: context.textTheme.bodySmall?.copyWith(
                 color: context.colors.error,
               ),
             ),
@@ -177,28 +180,34 @@ class _ComposeBarLayout extends HookWidget {
                       onTap: () => _runComposerAction(onExpand),
                       child: Padding(
                         padding: EdgeInsets.symmetric(
-                          vertical: hasDraft
-                              ? Grid.half
-                              : keyboardToolbar
-                              ? 0
-                              : Grid.half,
-                          horizontal: keyboardToolbar || hasDraft
-                              ? Grid.half
-                              : 0,
+                          vertical: keyboardToolbar ? 0 : Grid.half,
+                          horizontal: keyboardToolbar ? Grid.half : 0,
                         ),
                         child: Align(
                           alignment: Alignment.centerLeft,
-                          child: hasDraft
-                              ? ConstrainedBox(
-                                  constraints: BoxConstraints(
-                                    maxHeight: _draftMaxHeight(context),
-                                  ),
-                                  child: SingleChildScrollView(
-                                    primary: false,
-                                    child: _inactiveText(context),
+                          child: controller.bindings.isEmpty
+                              ? Text(
+                                  collapsedText,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: context.textTheme.bodyLarge?.copyWith(
+                                    color: trimmedDraft.isEmpty
+                                        ? context.colors.onSurfaceVariant
+                                        : context.colors.onSurface,
                                   ),
                                 )
-                              : _inactiveText(context),
+                              : Text.rich(
+                                  controller.buildTextSpan(
+                                    context: context,
+                                    style: context.textTheme.bodyLarge
+                                        ?.copyWith(
+                                          color: context.colors.onSurface,
+                                        ),
+                                    withComposing: false,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
                         ),
                       ),
                     ),
@@ -324,7 +333,9 @@ class _ComposeBarLayout extends HookWidget {
       builder: (context, child) {
         final progress = expansionAnimation.value.clamp(0.0, 1.0).toDouble();
         final usesCapsule =
-            !hasDraft && attachments.isEmpty && uploadError == null;
+            (!isExpanded || controller.text.isEmpty) &&
+            attachments.isEmpty &&
+            uploadError == null;
         final composerRadius =
             defaultTargetPlatform == TargetPlatform.iOS && usesCapsule
             ? Radii.full
@@ -339,11 +350,6 @@ class _ComposeBarLayout extends HookWidget {
         final voiceNoteInsetProgress = hasVoiceNoteAttachment
             ? 1.0
             : recordingTransition.value;
-        // Both draft presentations include four points around the text.
-        final messageInsets =
-            (hasDraft || (!keyboardToolbar && isExpanded)) &&
-            voiceNoteRecorder == null &&
-            voiceNoteInsetProgress == 0;
         final composer = KeyedSubtree(
           key: surfaceKey,
           child: Container(
@@ -359,17 +365,9 @@ class _ComposeBarLayout extends HookWidget {
               ),
             ),
             padding: EdgeInsets.symmetric(
-              horizontal:
-                  (messageInsets
-                      ? messageBubbleHorizontalInset - Grid.half - 1
-                      : Grid.xxs) +
-                  Grid.half * voiceNoteInsetProgress,
+              horizontal: Grid.xxs + Grid.half * voiceNoteInsetProgress,
               vertical:
-                  (messageInsets
-                      ? messageBubbleVerticalInset - Grid.half - 1
-                      : usesIosConcentricSurface
-                      ? 5
-                      : Grid.xxs) +
+                  (usesIosConcentricSurface ? 5 : Grid.xxs) +
                   Grid.half * voiceNoteInsetProgress,
             ),
             child: child,
@@ -411,33 +409,6 @@ class _ComposeBarLayout extends HookWidget {
     );
   }
 
-  Widget _inactiveText(BuildContext context) {
-    final hasDraft = controller.text.isNotEmpty;
-    final style = messageBodyTextStyle.copyWith(
-      color: hasDraft
-          ? context.colors.onSurface
-          : context.colors.onSurfaceVariant,
-    );
-    if (controller.bindings.isNotEmpty) {
-      return Text.rich(
-        controller.buildTextSpan(
-          context: context,
-          style: style,
-          withComposing: false,
-        ),
-      );
-    }
-    return Text(
-      hasDraft ? controller.text : resolvedHint,
-      maxLines: hasDraft ? null : 1,
-      overflow: hasDraft ? TextOverflow.clip : TextOverflow.ellipsis,
-      style: style,
-    );
-  }
-
-  double _draftMaxHeight(BuildContext context) =>
-      MediaQuery.sizeOf(context).height / 2;
-
   Widget _buildTextField(BuildContext context) {
     return Actions(
       actions: {
@@ -448,12 +419,7 @@ class _ComposeBarLayout extends HookWidget {
         canRequestFocus: false,
         skipTraversal: true,
         onKeyEvent: onKeyEvent,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxHeight: _draftMaxHeight(context) + Grid.half * 2,
-          ),
-          child: _buildEditableField(context),
-        ),
+        child: _buildEditableField(context),
       ),
     );
   }
@@ -480,15 +446,17 @@ class _ComposeBarLayout extends HookWidget {
         allowedMimeTypes: _pastedImageMimeTypes,
         onContentInserted: onContentInserted,
       ),
-      // Allow inline avatars to increase the height of their own line.
-      strutStyle: const StrutStyle(forceStrutHeight: false),
+      // Give wrapped mention chips room above and below their baseline.
+      strutStyle: controller.bindings.isEmpty
+          ? null
+          : const StrutStyle(forceStrutHeight: false),
       minLines: 1,
-      maxLines: null,
-      style: messageBodyTextStyle,
+      maxLines: 5,
+      style: context.textTheme.bodyLarge,
       decoration: InputDecoration(
         hintText: resolvedHint,
         hintMaxLines: 1,
-        hintStyle: messageBodyTextStyle.copyWith(
+        hintStyle: context.textTheme.bodyLarge?.copyWith(
           color: context.colors.onSurfaceVariant,
         ),
         border: InputBorder.none,
@@ -496,7 +464,7 @@ class _ComposeBarLayout extends HookWidget {
         focusedBorder: InputBorder.none,
         contentPadding: EdgeInsets.symmetric(
           horizontal: Grid.half,
-          vertical: keyboardToolbar && controller.text.isEmpty ? 0 : Grid.half,
+          vertical: keyboardToolbar ? 0 : Grid.half,
         ),
         isDense: true,
       ),

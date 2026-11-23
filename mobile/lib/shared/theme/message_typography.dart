@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 
 import 'grid.dart';
-import 'text_theme.dart';
 
 const _fontFamily = 'Inter';
 
@@ -20,18 +19,13 @@ const messageAvatarContentGap = Grid.twelve;
 /// Maximum text-bubble width relative to the screen, including padding.
 const messageTextMaxWidthFraction = 2 / 3;
 
-const messageBubbleHorizontalInset = 14.0;
-const messageBubbleVerticalInset = 10.0;
-const messageBylineTextStyle = bodyExtraSmallTextStyle;
-const messageCaptionTextStyle = messageTimestampTextStyle;
-
-/// Shared by drafts and sent messages.
+/// Primary message copy: 15sp regular on a 20sp line height.
 const messageBodyTextStyle = TextStyle(
   fontFamily: _fontFamily,
-  fontSize: 17,
+  fontSize: 15,
   fontWeight: FontWeight.w400,
-  height: 22 / 17,
-  letterSpacing: -0.45,
+  height: 20 / 15,
+  letterSpacing: 0,
 );
 
 /// Message author names: 15sp semibold on a 17sp line height.
@@ -110,13 +104,7 @@ const filterChipTextStyle = TextStyle(
 );
 
 /// Search fields use the primary 15sp body treatment.
-const searchInputTextStyle = TextStyle(
-  fontFamily: _fontFamily,
-  fontSize: 15,
-  fontWeight: FontWeight.w400,
-  height: 20 / 15,
-  letterSpacing: 0,
-);
+const searchInputTextStyle = messageBodyTextStyle;
 
 /// Activity sender names share the primary author style.
 const activityUsernameTextStyle = messageUsernameTextStyle;

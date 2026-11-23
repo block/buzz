@@ -2935,16 +2935,13 @@ void main() {
         await tester.enterText(find.byType(TextField), '@S');
         await tester.pump();
         expect(find.text('Saba Saba'), findsNothing);
-        double samOffset() =>
-            tester.getTopLeft(find.text('Sam')).dy -
-            tester.getTopLeft(popover()).dy;
-        final samTop = samOffset();
+        final samTop = tester.getTopLeft(find.text('Sam')).dy;
         final height = tester.getSize(popover()).height;
 
         await settleSearch(tester);
         expect(find.text('Saba Saba'), findsOneWidget);
         // The late row filled reserved space: nothing shown moved.
-        expect(samOffset(), samTop);
+        expect(tester.getTopLeft(find.text('Sam')).dy, samTop);
         expect(tester.getSize(popover()).height, height);
       });
 
@@ -2974,15 +2971,12 @@ void main() {
         await tester.enterText(find.byType(TextField), '@S');
         await tester.pump();
         expect(find.text('Saba Saba'), findsNothing);
-        double samOffset() =>
-            tester.getTopLeft(find.text('Sam')).dy -
-            tester.getTopLeft(popover()).dy;
-        final samTop = samOffset();
+        final samTop = tester.getTopLeft(find.text('Sam')).dy;
         final height = tester.getSize(popover()).height;
 
         await settleSearch(tester);
         expect(find.text('Saba Saba'), findsOneWidget);
-        expect(samOffset(), samTop);
+        expect(tester.getTopLeft(find.text('Sam')).dy, samTop);
         expect(tester.getSize(popover()).height, height);
       });
 
