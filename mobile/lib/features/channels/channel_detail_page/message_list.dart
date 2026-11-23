@@ -103,6 +103,9 @@ class _MessageList extends HookConsumerWidget {
     final previousLatestEntryId = useRef<String?>(null);
     final observedLocalSendIds = useRef(localSendAnimations.keys.toSet());
     final didJumpToInitialMessage = useRef(false);
+    // The target's index when last placed and, once relay history had
+    // loaded, the latest entry then.
+    final initialMessageAnchor = useRef<(int, String?)?>(null);
     final isUnreadNavigationDismissed = useState(false);
     final detachedWhileUnreadShown = useRef(false);
     final oldestUnreadMessageId = useState<String?>(null);
@@ -412,6 +415,7 @@ class _MessageList extends HookConsumerWidget {
 
     void scrollToLatest({String? targetMessageId}) {
       if (!itemScrollController.isAttached || isAutoScrolling.value) return;
+      initialMessageAnchor.value = null;
       isAutoScrolling.value = true;
       followsLatest.value = true;
       hasUserScrolled.value = false;
@@ -438,6 +442,7 @@ class _MessageList extends HookConsumerWidget {
         return;
       }
       isUnreadNavigationDismissed.value = true;
+      initialMessageAnchor.value = null;
       followsLatest.value = false;
       hasUserScrolled.value = false;
       isAtLatest.value = false;
@@ -732,14 +737,30 @@ class _MessageList extends HookConsumerWidget {
 
     useEffect(() {
       final targetIndex = reversedIndexOf(initialMessageId);
+      final anchor = initialMessageAnchor.value;
+      // Older pages filling the gap below the target move its index, so keep
+      // it in place until a scroll or a navigation. Entries after the latest
+      // one it was placed with are live updates, which leave it where it is.
+      final liveCount = anchor?.$2 == null ? 0 : reversedIndexOf(anchor!.$2);
       if (initialThreadRootId != null ||
           targetIndex == null ||
-          didJumpToInitialMessage.value) {
+          (didJumpToInitialMessage.value &&
+              (anchor == null ||
+                  liveCount == null ||
+                  targetIndex - liveCount == anchor.$1))) {
         return null;
       }
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!context.mounted || !itemScrollController.isAttached) return;
+        if (didJumpToInitialMessage.value &&
+            initialMessageAnchor.value == null) {
+          return;
+        }
         didJumpToInitialMessage.value = true;
+        initialMessageAnchor.value = (
+          targetIndex,
+          relayHistoryReady ? latestEntryId : null,
+        );
         followsLatest.value = false;
         hasUserScrolled.value = false;
         isAtLatest.value = false;
@@ -771,6 +792,7 @@ class _MessageList extends HookConsumerWidget {
         return null;
       }
       if (localSendId != null) {
+        initialMessageAnchor.value = null;
         followsLatest.value = true;
         hasUserScrolled.value = false;
       }
@@ -805,6 +827,7 @@ class _MessageList extends HookConsumerWidget {
       olderFetchPaused: olderFetchPaused,
       oldestNavigationGeneration: oldestNavigationGeneration,
       onStart: () {
+        initialMessageAnchor.value = null;
         followsLatest.value = false;
         hasUserScrolled.value = true;
         isAtLatest.value = false;
@@ -903,6 +926,7 @@ class _MessageList extends HookConsumerWidget {
             if (notification is UserScrollNotification &&
                 notification.direction != ScrollDirection.idle) {
               navigatingOldest.value = false;
+              initialMessageAnchor.value = null;
               oldestNavigationGeneration.value++;
               olderFetchPaused.value = false;
               viewportFillPages.value = 0;
