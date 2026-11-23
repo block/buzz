@@ -181,10 +181,13 @@ class FakePushRelay {
     List<String> extraMentions = const [],
     List<List<String>> extraTags = const [],
     Duration? age,
+    DateTime? at,
   }) {
-    final createdAt = pushWakeClock
-        .subtract(age ?? const Duration(minutes: 5))
-        .add(Duration(seconds: _sequence++));
+    final createdAt =
+        at ??
+        pushWakeClock
+            .subtract(age ?? const Duration(minutes: 5))
+            .add(Duration(seconds: _sequence++));
     final event = _sign(
       kind: EventKind.streamMessage,
       tags: [

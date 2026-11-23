@@ -279,6 +279,48 @@ void main() {
     expect(crowded.queries.first.every((f) => f['until'] == null), isTrue);
     expect(crowded.queries[1].every((f) => f['until'] != null), isTrue);
     expect((await fixture.wake()).notifications, isEmpty);
+
+    // Subscriptions overlap: a DM that mentions me answers the DM filter and
+    // also matches the mention filter. Being older than the room's mentions,
+    // it must not move the mention filter's next page past them.
+    final overlap = fixture.addCommunity();
+    final palDm = overlap.dmChannel();
+    final noisyDm = overlap.dmChannel();
+    final room = overlap.channel();
+    overlap.mute(noisyDm);
+    final pal = overlap.person('Pal');
+    final expected = [
+      overlap
+          .message(
+            palDm,
+            pal,
+            'dm mention',
+            mention: overlap.me,
+            age: const Duration(minutes: 13),
+          )
+          .id,
+      for (final minutes in [12, 11, 10])
+        overlap
+            .message(
+              room,
+              pal,
+              'mention $minutes',
+              mention: overlap.me,
+              age: Duration(minutes: minutes),
+            )
+            .id,
+    ];
+    for (var i = 0; i < pushWakeMessagePageSize + 5; i++) {
+      overlap.message(noisyDm, pal, 'muted $i', mention: overlap.me);
+    }
+    final untangled = await fixture.wake();
+    expect(untangled.incomplete, isFalse);
+    expect(
+      untangled.notifications
+          .where((n) => n.target.communityId == overlap.communityId)
+          .map((n) => n.eventId),
+      unorderedEquals(expected),
+    );
   });
 
   test('every community notifies, each from its own relay', () async {
@@ -541,6 +583,34 @@ void main() {
             .map((n) => n.eventId),
         [older.id],
       );
+
+      // A full page inside one second can't be paged by time: the next
+      // request would answer the same page. The fetch stops there, leaving
+      // the community unfinished, rather than spending its pages on repeats.
+      final stuck = fixture.addCommunity();
+      final stuckDm = stuck.dmChannel();
+      stuck.mute(stuckDm);
+      final stuckFriend = stuck.person('Friend');
+      stuck.message(
+        stuck.channel(),
+        stuckFriend,
+        'behind',
+        mention: stuck.me,
+        age: const Duration(minutes: 12),
+      );
+      final second = pushWakeClock.subtract(const Duration(minutes: 1));
+      for (var i = 0; i < pushWakeMessagePageSize + 5; i++) {
+        stuck.message(
+          stuckDm,
+          stuckFriend,
+          'same second $i',
+          mention: stuck.me,
+          at: second,
+        );
+      }
+      final repeated = await fixture.wake();
+      expect(repeated.failedCommunityIds, contains(stuck.communityId));
+      expect(messageQueries(stuck), hasLength(2));
     });
 
     test('with nothing found say so, so the caller can fall back', () async {

@@ -390,6 +390,7 @@ Future<void> _resolveCommunity(
     };
     var limit = pushWakeMessagePageSize;
     var pages = 0;
+    var complete = true;
     while (until.isNotEmpty) {
       if (pages == pushWakeMaxMessagePages) {
         return (events: found.values.toList(), complete: false);
@@ -425,21 +426,36 @@ Future<void> _resolveCommunity(
         found[event.id] = event;
       }
       for (final i in until.keys.toList()) {
+        // A subscription's page is what the relay answered for its filter:
+        // the events at or below its `until` that match it. Events another
+        // filter brought back can match it too (a DM that mentions me), but
+        // they say nothing about where its own page ended.
+        final latest = until[i];
         final filter = subscriptions[i].filter;
-        final times = [
+        final times = {
           for (final event in page)
-            if (pushFilterMatches(filter, event)) event.createdAt,
-        ];
+            if (pushFilterMatches(filter, event) &&
+                (latest == null || event.createdAt <= latest))
+              event.id: event.createdAt,
+        }.values.toList()..sort((a, b) => b.compareTo(a));
         if (times.length < limit) {
           until.remove(i);
           continue;
         }
-        // `until` includes the oldest event's second, so the next page
-        // repeats it. Events found twice are kept once.
-        until[i] = times.reduce((a, b) => a < b ? a : b);
+        // `until` includes its second, so the next page starts at the oldest
+        // second this one reached, and events found twice are kept once.
+        final next = times[limit - 1];
+        // A whole page inside one second: the next would repeat it, so the
+        // subscription stops here, unfinished.
+        if (next == latest) {
+          until.remove(i);
+          complete = false;
+          continue;
+        }
+        until[i] = next;
       }
     }
-    return (events: found.values.toList(), complete: true);
+    return (events: found.values.toList(), complete: complete);
   }
 
   final fetch = await fetchMessages();
@@ -466,8 +482,7 @@ Future<void> _resolveCommunity(
   // Claim oldest first. Each claim can advance the store's watermark, and a
   // claim below the watermark's reorder window is rejected, so claiming a
   // newer message first would reject older unshown ones fetched in the same
-  // wake. Oldest first also means a wake cut short leaves only messages newer
-  // than everything it claimed, which the next wake's fetch still covers.
+  // wake.
   selected.sort(
     (a, b) => a.event.createdAt != b.event.createdAt
         ? a.event.createdAt.compareTo(b.event.createdAt)
