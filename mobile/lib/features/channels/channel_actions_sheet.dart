@@ -1,3 +1,5 @@
+import '../../shared/widgets/tabler_star_icon.dart';
+import '../../shared/widgets/native_conversation_menu.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'dart:async';
@@ -21,6 +23,7 @@ import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/app_list.dart';
+import '../../shared/widgets/text_editor.dart';
 import '../../shared/widgets/app_list_card.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_action_tile.dart';
@@ -28,10 +31,14 @@ import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
-import '../../shared/widgets/tabler_star_icon.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/duo_toolbar.dart';
+import '../profile/user_profile_sheet.dart';
+import 'channel_member_profile_actions.dart';
 import 'channel.dart';
+import 'me/me_chat_settings.dart';
+import 'me/me_workspace_picker.dart';
+import '../../shared/widgets/anchored_popover_menu.dart';
 import 'channel_detail_page.dart';
 import 'add_members_sheet.dart';
 import 'channel_identity_names_provider.dart';
@@ -51,7 +58,11 @@ import '../../shared/community/community_provider.dart';
 import '../../shared/relay/relay_author_provider.dart';
 import '../../shared/widgets/covered_route_keyboard_insets.dart';
 
+import '../../shared/widgets/bottom_up_page_route.dart';
+
+part 'conversation_popover.dart';
 part 'channel_details_page.dart';
+part 'channel_details_rows.dart';
 part 'native_channel_actions.dart';
 part 'native_channel_sheet_app.dart';
 
@@ -63,15 +74,42 @@ Future<bool?> showChannelActionsSheet({
   required bool isUnread,
   String? sectionId,
 }) {
-  final native = _usesNativeChannelSheet(context);
-  Widget content(BuildContext context) => ChannelActionsSheet(
-    channel: channel,
-    isUnread: isUnread,
-    sectionId: sectionId,
-    nativePresentation: native,
+  Widget content(BuildContext context, {bool nativePresentation = false}) =>
+      ChannelActionsSheet(
+        channel: channel,
+        isUnread: isUnread,
+        sectionId: sectionId,
+        nativePresentation: nativePresentation,
+      );
+  return _presentChannelListSheet(context, content);
+}
+
+Future<bool?> _presentChannelListSheet(
+  BuildContext context,
+  Widget Function(BuildContext, {bool nativePresentation}) content,
+) {
+  final native =
+      _usesNativeChannelSheet(context) ||
+      (defaultTargetPlatform == TargetPlatform.iOS &&
+          (DuoToolbarScope.maybeOf(context)?.strip ??
+                  FoldGeometry.of(context).strip) ==
+              null);
+  if (native) {
+    return _showNativeChannelSheet(
+      context,
+      (context) => content(context, nativePresentation: true),
+      fallback: () => _showChannelLongPressSheet(
+        context: context,
+        builder: content,
+        fullHeight: true,
+      ),
+    );
+  }
+  return _showChannelLongPressSheet(
+    context: context,
+    builder: content,
+    fullHeight: true,
   );
-  if (native) return _showNativeChannelSheet(context, content);
-  return _showChannelLongPressSheet(context: context, builder: content);
 }
 
 bool _usesNativeChannelSheet(BuildContext context) {
@@ -97,15 +135,31 @@ class _NativeChannelSheetRoute extends PageRouteBuilder<bool>
         pageBuilder: (context, _, _) => builder(context),
       );
 
+  bool hasFallback = false;
+  bool unavailable = false;
   Future<bool?>? lifecycleResult;
 }
 
 Future<bool?> _showNativeChannelSheet(
   BuildContext context,
-  WidgetBuilder builder,
-) async {
-  final route = _NativeChannelSheetRoute(builder);
-  final result = await Navigator.of(context, rootNavigator: true).push(route);
+  WidgetBuilder builder, {
+  Future<bool?> Function()? fallback,
+}) async {
+  final route = _NativeChannelSheetRoute(builder)
+    ..hasFallback = fallback != null;
+  final covered = ModalRoute.of(context);
+  final release = covered == null
+      ? null
+      : BottomUpPageRoute.retainControlsForSheet(covered);
+  bool? result;
+  try {
+    result = await Navigator.of(context, rootNavigator: true).push(route);
+  } finally {
+    release?.call();
+  }
+  if (route.unavailable && fallback != null && context.mounted) {
+    return fallback();
+  }
   return route.lifecycleResult == null ? result : await route.lifecycleResult;
 }
 
@@ -113,16 +167,23 @@ Future<bool?> _showNativeChannelSheet(
 Future<bool?> _showChannelLongPressSheet({
   required BuildContext context,
   required WidgetBuilder builder,
+  bool fullHeight = false,
 }) {
   return showBuzzModalBottomSheet<bool>(
     context: context,
     isScrollControlled: true,
     showDragHandle: true,
+    useSafeArea: fullHeight,
     constraints: BoxConstraints(
       maxWidth: 640,
-      maxHeight: MediaQuery.sizeOf(context).height * 0.7,
+      maxHeight: fullHeight
+          ? double.infinity
+          : MediaQuery.sizeOf(context).height * 0.7,
     ),
-    builder: builder,
+    builder: fullHeight
+        ? (context) =>
+              SizedBox(height: double.infinity, child: builder(context))
+        : builder,
   );
 }
 
@@ -180,10 +241,12 @@ class ChannelActionsSheet extends HookConsumerWidget {
     final canFile = ref.watch(
       channelSectionsProvider.select((state) => state.editable),
     );
+    final isPinned =
+        ref.watch(channelPinsProvider).store.channels[channel.id]?.enabled ==
+        true;
     final isStarred =
-        !channel.isDm &&
         ref.watch(channelStarsProvider).store.channels[channel.id]?.starred ==
-            true;
+        true;
     final membersAsync = channel.isDm
         ? const AsyncValue<List<ChannelMember>>.data([])
         : ref.watch(channelMembersProvider(channel.id));
@@ -212,6 +275,14 @@ class ChannelActionsSheet extends HookConsumerWidget {
     final canDelete =
         !channel.isArchived &&
         (currentMember?.isOwner == true || ownsOwnerAgent);
+    final canLeave =
+        channel.isMember &&
+        !channel.isArchived &&
+        (!channel.isSolo ||
+            (currentMember != null &&
+                !currentMember.isOwner &&
+                !ownsOwnerAgent &&
+                agentOwnersAsync.hasValue));
     final lifecycleCapabilitiesLoading =
         membersAsync.isLoading || agentOwnersAsync.isLoading;
     final lifecycleCapabilitiesUnavailable =
@@ -222,15 +293,7 @@ class ChannelActionsSheet extends HookConsumerWidget {
     final groups = <Widget>[
       if (!channel.isDm) ...[
         _ChannelQuickActionsRow(
-          isStarred: isStarred,
           isUnread: isUnread,
-          onToggleStar: () {
-            close();
-            final notifier = ref.read(channelStarsProvider.notifier);
-            isStarred
-                ? notifier.unstarChannel(channel.id)
-                : notifier.starChannel(channel.id);
-          },
           onToggleRead: () {
             close();
             if (isUnread) {
@@ -307,6 +370,24 @@ class ChannelActionsSheet extends HookConsumerWidget {
       SheetActionSection(
         children: [
           _ChannelSheetRow(
+            leading: Icon(isPinned ? BuzzIcons.pinnedOff : BuzzIcons.pinned),
+            title: Text(isPinned ? 'Unpin' : 'Pin'),
+            onTap: () {
+              close();
+              final notifier = ref.read(channelPinsProvider.notifier);
+              notifier.setEnabled(channel.id, !isPinned);
+            },
+          ),
+          _ChannelSheetRow(
+            leading: Icon(isStarred ? BuzzIcons.starOff : BuzzIcons.star),
+            title: Text(isStarred ? 'Unstar' : 'Star'),
+            onTap: () {
+              close();
+              final notifier = ref.read(channelStarsProvider.notifier);
+              notifier.setEnabled(channel.id, !isStarred);
+            },
+          ),
+          _ChannelSheetRow(
             leading: const Icon(BuzzIcons.copy),
             title: const Text('Copy channel name'),
             onTap: () {
@@ -335,10 +416,10 @@ class ChannelActionsSheet extends HookConsumerWidget {
       if (!channel.isDm)
         SheetActionSection(
           children: [
-            if (channel.isMember && !channel.isArchived)
+            if (canLeave)
               _ActionTile(
                 icon: BuzzIcons.logOut,
-                label: 'Leave channel',
+                label: channel.isSolo ? 'Leave Solo' : 'Leave channel',
                 destructive: true,
                 onTap: () => _confirmAndRun(
                   context,
@@ -350,7 +431,7 @@ class ChannelActionsSheet extends HookConsumerWidget {
                       ref.read(channelActionsProvider).leaveChannel(channel.id),
                 ),
               ),
-            if (lifecycleCapabilitiesLoading)
+            if (lifecycleCapabilitiesLoading && !nativePresentation)
               const _ChannelSheetRow(
                 enabled: false,
                 leading: BuzzLoadingIndicator(
@@ -359,13 +440,14 @@ class ChannelActionsSheet extends HookConsumerWidget {
                 ),
                 title: Text('Loading channel actions…'),
               )
-            else if (lifecycleCapabilitiesUnavailable)
+            else if (!lifecycleCapabilitiesLoading &&
+                lifecycleCapabilitiesUnavailable)
               const _ChannelSheetRow(
                 enabled: false,
                 leading: Icon(BuzzIcons.triangleAlert),
                 title: Text('Channel actions unavailable'),
               )
-            else ...[
+            else if (!lifecycleCapabilitiesLoading) ...[
               if (canArchive)
                 _ActionTile(
                   icon: BuzzIcons.archive,
@@ -438,32 +520,16 @@ class ChannelActionsSheet extends HookConsumerWidget {
 
 class _ChannelQuickActionsRow extends StatelessWidget {
   const _ChannelQuickActionsRow({
-    required this.isStarred,
     required this.isUnread,
-    required this.onToggleStar,
     required this.onToggleRead,
   });
 
-  final bool isStarred;
   final bool isUnread;
-  final VoidCallback onToggleStar;
   final VoidCallback onToggleRead;
 
   @override
   Widget build(BuildContext context) => Row(
     children: [
-      Expanded(
-        child: _ChannelQuickAction(
-          icon: BuzzIcons.star,
-          iconWidget: TablerStarIcon(
-            color: context.colors.onSurface,
-            filled: isStarred,
-          ),
-          label: isStarred ? 'Unstar' : 'Star',
-          onTap: onToggleStar,
-        ),
-      ),
-      const SizedBox(width: Grid.twelve),
       Expanded(
         child: _ChannelQuickAction(
           icon: isUnread ? BuzzIcons.checkCheck : BuzzIcons.circleDot,
@@ -478,13 +544,11 @@ class _ChannelQuickActionsRow extends StatelessWidget {
 class _ChannelQuickAction extends StatelessWidget {
   const _ChannelQuickAction({
     required this.icon,
-    this.iconWidget,
     required this.label,
     required this.onTap,
   });
 
   final IconData icon;
-  final Widget? iconWidget;
   final String label;
   final VoidCallback onTap;
 
@@ -508,8 +572,7 @@ class _ChannelQuickAction extends StatelessWidget {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              iconWidget ??
-                  Icon(icon, size: 22, color: context.colors.onSurface),
+              Icon(icon, size: 22, color: context.colors.onSurface),
               const SizedBox(height: Grid.xxs),
               Text(
                 label,

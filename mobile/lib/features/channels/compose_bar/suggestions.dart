@@ -93,7 +93,7 @@ class _MentionSuggestions extends StatelessWidget {
               visualDensity: VisualDensity.compact,
               title: Text(
                 'Could not search community people.',
-                style: context.textTheme.bodySmall?.copyWith(
+                style: messageCaptionTextStyle.copyWith(
                   color: context.colors.error,
                 ),
               ),
@@ -124,7 +124,7 @@ class _MentionSuggestions extends StatelessWidget {
                 // public key for unnamed ones so the compact-npub label
                 // doesn't render `N` for everyone.
                 candidate.initial,
-                style: context.textTheme.labelMedium?.copyWith(
+                style: messageCaptionTextStyle.copyWith(
                   color: context.colors.onPrimaryContainer,
                   fontWeight: FontWeight.w600,
                 ),
@@ -136,7 +136,9 @@ class _MentionSuggestions extends StatelessWidget {
                 Flexible(
                   child: Text(
                     name,
-                    style: context.textTheme.titleSmall,
+                    style: bodyLargeTextStyle.copyWith(
+                      fontWeight: FontWeight.w500,
+                    ),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
@@ -190,7 +192,7 @@ abstract final class _MentionSuggestionInfo {
 
     if (!candidate.isAgent && !isAdmin && detail == null) return null;
 
-    final style = context.textTheme.labelSmall?.copyWith(
+    final style = messageBylineTextStyle.copyWith(
       color: context.colors.onSurfaceVariant,
     );
 
@@ -212,9 +214,7 @@ abstract final class _MentionSuggestionInfo {
             ),
             child: Text(
               'admin',
-              style: style?.copyWith(
-                color: context.colors.onSecondaryContainer,
-              ),
+              style: style.copyWith(color: context.colors.onSecondaryContainer),
             ),
           ),
         if (detail != null) ...[
@@ -358,7 +358,7 @@ class _ComposerSearchSuggestions<T> extends StatelessWidget {
               ),
               title: Text(
                 label(item),
-                style: labelStyle ?? context.textTheme.bodyLarge,
+                style: labelStyle ?? bodyLargeTextStyle,
                 maxLines: singleLineLabel ? 1 : null,
                 overflow: singleLineLabel ? TextOverflow.ellipsis : null,
               ),

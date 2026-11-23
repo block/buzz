@@ -224,7 +224,7 @@ class _CameraPlaceholder extends StatelessWidget {
                     Text(
                       message ?? 'Camera isn’t available here.',
                       textAlign: TextAlign.center,
-                      style: context.textTheme.bodyMedium?.copyWith(
+                      style: navigationChatTitleTextStyle.copyWith(
                         color: Colors.white,
                       ),
                     ),

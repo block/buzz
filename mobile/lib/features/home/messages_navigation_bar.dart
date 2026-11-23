@@ -10,8 +10,15 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/theme/buzz_icons.dart';
 import '../../shared/widgets/navigation_button_surface.dart';
+import '../../shared/widgets/buzz_navigation_metrics.dart';
+import '../../shared/widgets/duo_toolbar.dart';
 import '../../shared/widgets/android_expanding_menu_button.dart';
 import '../../shared/widgets/ios_message_create_button.dart';
+
+bool _reduceShortcutMotion(BuildContext context) =>
+    MediaQuery.disableAnimationsOf(context) ||
+    (defaultTargetPlatform == TargetPlatform.iOS &&
+        View.of(context).platformDispatcher.accessibilityFeatures.reduceMotion);
 
 /// Separate glass shortcuts for search and creation.
 class MessagesNavigationBar extends HookWidget {
@@ -34,10 +41,9 @@ class MessagesNavigationBar extends HookWidget {
   Widget build(BuildContext context) {
     final menuOpen = useState(false);
     final menuMoving = useState(false);
-    final disableAnimations = MediaQuery.disableAnimationsOf(context);
     void menuVisibilityChanged(bool visible) {
       if (menuOpen.value == visible) return;
-      menuMoving.value = !disableAnimations;
+      menuMoving.value = !_reduceShortcutMotion(context);
       menuOpen.value = visible;
     }
 
@@ -61,9 +67,12 @@ class MessagesNavigationBar extends HookWidget {
       child: Builder(
         builder: (context) {
           if (axis == Axis.vertical) {
+            final diameter = isCompactDuoWindow(context)
+                ? duoCoverRailActionSize
+                : 56.0;
             return SizedBox(
               width: 256,
-              height: 168 + Grid.xs * 2,
+              height: 3 * diameter + Grid.xs * 2,
               child: Stack(
                 clipBehavior: Clip.none,
                 children: [
@@ -76,11 +85,10 @@ class MessagesNavigationBar extends HookWidget {
                         navigationAxis: Axis.vertical,
                         onMenuVisibilityChanged: menuVisibilityChanged,
                         actions: creationActions,
-                        dividerBefore: const {2},
-                        sectionTitles: const {0: 'Solo', 2: 'Team'},
+                        dividerBefore: const {3},
                         accessibilityLabel: 'New',
-                        width: 56,
-                        height: 168 + Grid.xs * 2,
+                        width: diameter,
+                        height: 3 * diameter + Grid.xs * 2,
                         plain: false,
                       ),
                     ),
@@ -88,17 +96,17 @@ class MessagesNavigationBar extends HookWidget {
                   Positioned(
                     right: 0,
                     top: 0,
-                    width: 56,
-                    height: 56 + Grid.xs / 2,
+                    width: diameter,
+                    height: diameter + Grid.xs / 2,
                     child: ClipRect(
                       child: Align(
                         alignment: Alignment.topCenter,
                         child: _MenuNudge(
                           axis: Axis.vertical,
-                          offset: menuOpen.value ? 56 + Grid.xs : 0,
+                          offset: menuOpen.value ? diameter + Grid.xs : 0,
                           menuOpen: menuOpen.value,
                           alignment: Alignment.center,
-                          child: hideDuringVoice(_search(context)),
+                          child: hideDuringVoice(_search(context, diameter)),
                         ),
                       ),
                     ),
@@ -107,7 +115,7 @@ class MessagesNavigationBar extends HookWidget {
                     bottom: 0,
                     right: 0,
                     width: 256,
-                    height: 56,
+                    height: diameter,
                     child: OverflowBox(
                       alignment: Alignment.centerRight,
                       minWidth: 0,
@@ -117,11 +125,14 @@ class MessagesNavigationBar extends HookWidget {
                         alignment: Alignment.centerRight,
                         child: _MenuNudge(
                           axis: Axis.vertical,
-                          offset: menuOpen.value ? -56 - Grid.xs : 0,
+                          offset: menuOpen.value ? -diameter - Grid.xs : 0,
                           menuOpen: menuOpen.value,
                           alignment: Alignment.center,
                           onEnd: () => menuMoving.value = false,
-                          child: NavigationGlassGroup(child: agent),
+                          child: NavigationGlassGroup(
+                            diameter: diameter,
+                            child: agent,
+                          ),
                         ),
                       ),
                     ),
@@ -143,8 +154,7 @@ class MessagesNavigationBar extends HookWidget {
                       mergingNavigation: true,
                       onMenuVisibilityChanged: menuVisibilityChanged,
                       actions: creationActions,
-                      dividerBefore: const {2},
-                      sectionTitles: const {0: 'Solo', 2: 'Team'},
+                      dividerBefore: const {3},
                       label: 'New',
                       showIconWithLabel: true,
                       accessibilityLabel: 'New',
@@ -212,8 +222,7 @@ class MessagesNavigationBar extends HookWidget {
                         AndroidExpandingMenuButton(
                           expansionBoundsContext: controlsContext,
                           actions: creationActions,
-                          dividerBefore: const {2},
-                          sectionTitles: const {0: 'Solo', 2: 'Team'},
+                          dividerBefore: const {3},
                         ),
                         const SizedBox(width: Grid.xs),
                         const SizedBox.square(dimension: 56),
@@ -230,18 +239,19 @@ class MessagesNavigationBar extends HookWidget {
     );
   }
 
-  Widget _search(BuildContext context) => SizedBox.square(
-    dimension: 56,
-    child: IconButton(
-      tooltip: 'Search',
-      onPressed: () {
-        unawaited(HapticFeedback.lightImpact());
-        onSearch();
-      },
-      color: context.colors.onSurface,
-      icon: const Icon(BuzzIcons.search300, size: 24),
-    ),
-  );
+  Widget _search(BuildContext context, [double diameter = 56]) =>
+      SizedBox.square(
+        dimension: diameter,
+        child: IconButton(
+          tooltip: 'Search',
+          onPressed: () {
+            unawaited(HapticFeedback.lightImpact());
+            onSearch();
+          },
+          color: context.colors.onSurface,
+          icon: const Icon(BuzzIcons.search300, size: 24),
+        ),
+      );
 }
 
 class _MenuNudge extends StatelessWidget {
@@ -262,7 +272,7 @@ class _MenuNudge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final duration = MediaQuery.disableAnimationsOf(context)
+    final duration = _reduceShortcutMotion(context)
         ? Duration.zero
         : const Duration(milliseconds: 180);
     final scale = menuOpen ? .9 : 1.0;
@@ -280,7 +290,12 @@ class _MenuNudge extends StatelessWidget {
             axis == Axis.vertical ? offset : 0,
             0,
           )..scaleByDouble(scale, scale, 1, 1),
-          child: child,
+          child: AnimatedOpacity(
+            duration: duration,
+            curve: Curves.easeOutCubic,
+            opacity: menuOpen ? 0 : 1,
+            child: child,
+          ),
         ),
       ),
     );

@@ -56,6 +56,34 @@ Future<T?> showAnchoredPopover<T>({
   EdgeInsetsGeometry menuPadding = EdgeInsets.zero,
   Clip clipBehavior = Clip.antiAlias,
   Key? surfaceKey,
+}) => showAnchoredPopoverContent<T>(
+  context: context,
+  items: items,
+  width: width,
+  alignment: alignment,
+  color: color,
+  shape: shape,
+  elevation: elevation,
+  shadowColor: shadowColor,
+  offset: offset,
+  menuPadding: menuPadding,
+  clipBehavior: clipBehavior,
+  surfaceKey: surfaceKey,
+);
+
+Future<T?> showAnchoredPopoverContent<T>({
+  required BuildContext context,
+  required List<Widget> items,
+  required double width,
+  required AnchoredPopoverAlignment alignment,
+  Color? color,
+  ShapeBorder? shape,
+  double elevation = appPopoverElevation,
+  Color? shadowColor,
+  Offset offset = Offset.zero,
+  EdgeInsetsGeometry menuPadding = EdgeInsets.zero,
+  Clip clipBehavior = Clip.antiAlias,
+  Key? surfaceKey,
 }) async {
   final navigator = Navigator.of(context);
   final overlay = navigator.overlay;
@@ -100,7 +128,7 @@ Future<T?> showAnchoredPopover<T>({
 
 class _AnchoredPopoverRoute<T> extends PopupRoute<T> {
   final RelativeRect position;
-  final List<PopupMenuEntry<T>> items;
+  final List<Widget> items;
   final double width;
   final AnchoredPopoverAlignment alignment;
   final Offset offset;

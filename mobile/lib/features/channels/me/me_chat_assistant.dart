@@ -51,6 +51,10 @@ String? resolveMeAssistant({
   return null;
 }
 
+final _savedAssistantProvider = Provider.autoDispose.family<String?, String>(
+  (ref, key) => ref.watch(meSyncProvider).prefs?.getString(key),
+);
+
 /// Header avatar and persistent mobile selection for a personal chat.
 ({
   String? selected,
@@ -72,8 +76,8 @@ useMeChatAssistant(
   final key = sync == null
       ? ''
       : 'me-assistant:${sync.community}:${sync.pubkey}:$channelId';
-  final prefs = sync?.prefs;
-  final selection = useState((key, initial ?? prefs?.getString(key)));
+  final saved = enabled ? ref.watch(_savedAssistantProvider(key)) : null;
+  final container = ProviderScope.containerOf(context, listen: false);
   final busy = useState(false);
   final List<AgentDirectoryEntry> agents = enabled
       ? ref.watch(meAssistantsProvider).value ?? []
@@ -82,9 +86,7 @@ useMeChatAssistant(
       ? ref.watch(channelMembersProvider(channelId)).value ?? []
       : [];
   final selected = resolveMeAssistant(
-    selected: selection.value.$1 == key
-        ? selection.value.$2
-        : prefs?.getString(key),
+    selected: saved ?? initial,
     available: {
       for (final agent in agents)
         if (members.any((member) => member.pubkey == agent.pubkey))
@@ -215,7 +217,7 @@ useMeChatAssistant(
           }
         },
       );
-      if (context.mounted) selection.value = (key, picked);
+      container.invalidate(_savedAssistantProvider(key));
     } catch (error) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showFeedbackSnackBar(

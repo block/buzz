@@ -107,7 +107,7 @@ useMeWorkspace(
       (groups != null || groupState?.hasError == true);
   return (
     busy: busy.value,
-    name: current == null ? 'No Workspace' : name ?? 'Unavailable workspace',
+    name: current == null ? 'No workspace' : name ?? 'Unavailable workspace',
     openPicker: !available
         ? null
         : ({MeSettingsPresenter? present}) async {
@@ -159,7 +159,7 @@ useMeWorkspace(
       key: const ValueKey('me-workspace-button'),
       tooltip: label,
       enabled: available,
-      icon: const Icon(BuzzIcons.workspace),
+      icon: const Icon(BuzzIcons.folder),
       onSelected: choose,
       itemBuilder: (_) => [
         CheckedPopupMenuItem(
@@ -182,7 +182,7 @@ useMeWorkspace(
     ),
     nativeAction: IosNavigationAction(
       label: label,
-      icon: BuzzIcons.workspace,
+      icon: BuzzIcons.folder,
       sharesBackground: false,
       children: !available
           ? const []
