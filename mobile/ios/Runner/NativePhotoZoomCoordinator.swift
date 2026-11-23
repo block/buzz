@@ -171,8 +171,9 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   private var action = "closed"
   private var finishing = false
   private lazy var downwardDismiss = UIPanGestureRecognizer(target: self, action: #selector(dragToDismiss(_:)))
-  // Video pages hide the overlaid actions on tap, like AVKit's own controls.
+  // Video pages hide the overlaid actions and transport on tap, like other video apps.
   private lazy var chromeTap = UITapGestureRecognizer(target: self, action: #selector(toggleChrome))
+  private var galleryInsets = UIEdgeInsets.zero
   private var chromeHidden = false
   private var chromeTimer: Timer?
   var selectionFeedback = UISelectionFeedbackGenerator()
@@ -265,6 +266,8 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     layoutGallery(insets: view.safeAreaInsets)
   }
   func layoutGallery(insets: UIEdgeInsets) {
+    galleryInsets = insets
+    for page in pager.children.compactMap({ $0 as? NativePhotoPage }) { page.chromeInsets = insets }
     let bounds = view.bounds
     let right = insets.right > 0 && insets.left == 0
     let left = insets.left > 0 && insets.right == 0
@@ -325,7 +328,7 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
       let centerY = safe.minY + navigationSizingBar.sizeThatFits(bounds.size).height / 2
       close.frame = CGRect(x: safe.maxX - 60, y: centerY - 22, width: 44, height: 44)
       if videoIndices.contains(index) {
-        // AVKit owns the bottom of the screen, so every action moves to the top row.
+        // The video transport owns the bottom of the screen, so every action moves to the top row.
         reply.frame = CGRect(x: safe.minX + 16, y: centerY - 22, width: 44, height: 44)
         share.frame = CGRect(x: safe.maxX - 112, y: centerY - 22, width: 44, height: 44)
         pageContainer.frame = CGRect(x: safe.minX + 68, y: centerY - 22,
@@ -354,10 +357,10 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   }
   func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
     guard gestureRecognizer === chromeTap else { return true }
-    // Only the bare video toggles the actions: never our buttons, Retry or AVKit's controls.
+    // Only the bare video toggles the actions: never our buttons, Retry or the video transport.
     var touched = touch.view
     while let current = touched, current !== view {
-      if current is UIControl || current === pageContainer { return false }
+      if current is UIControl || current is NativeVideoTransport || current === pageContainer { return false }
       touched = current.superview
     }
     return true
@@ -371,7 +374,7 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     else { UIView.animate(withDuration: 0.2, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction], animations: animations) }
     if !hidden { scheduleChromeHide() }
   }
-  // Match AVKit, which fades its playback controls about 3s into playback.
+  // Fade the actions and transport 3s into playback, as AVKit does with its own controls.
   private func scheduleChromeHide() {
     chromeTimer?.invalidate(); chromeTimer = nil
     guard !chromeHidden, !finishing, videoIndices.contains(index), !UIAccessibility.isVoiceOverRunning,
@@ -473,10 +476,11 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
   }
   private func page(_ value: Int) -> NativePhotoPage {
     let page = NativePhotoPage(index: value, label: labels[value], image: images[value] ?? previews[value], isVideo: videoIndices.contains(value))
+    page.chromeInsets = galleryInsets
     page.onRetry = { [weak self] in self?.videoPath = nil; self?.updateChrome(); self?.loadVideo() }
     page.onPlayback = { [weak self, weak page] playing in
       guard let self, let page, self.pager.viewControllers?.first === page else { return }
-      // AVKit shows its controls again on pause and at the end; keep ours in step.
+      // Bring the actions back on pause, at the end and while scrubbing.
       if playing { self.scheduleChromeHide() } else { self.setChrome(hidden: false) }
     }
     if page.isVideo {
@@ -555,6 +559,8 @@ private final class NativePhotoZoomViewController: UIViewController, UIPageViewC
     // A single page has no indicator, so its strip must not swallow touches.
     pageContainer.isUserInteractionEnabled = !hidden && labels.count > 1
     share.isUserInteractionEnabled = video && !hidden
+    // The video transport is part of the same chrome, so a tap shows or hides everything together.
+    (pager.viewControllers?.first as? NativePhotoPage)?.setTransport(visible: !hidden)
   }
   private func selected(_ value: Int) {
     guard value != index else { return }
@@ -635,7 +641,13 @@ private final class NativePhotoPage: UIViewController, UIScrollViewDelegate {
   let isVideo: Bool
   var onRetry: (() -> Void)?
   var onPlayback: ((Bool) -> Void)?
+  var chromeInsets = UIEdgeInsets.zero { didSet { if chromeInsets != oldValue { viewIfLoaded?.setNeedsLayout() } } }
   private lazy var video = AVPlayerViewController()
+  private let transport = NativeVideoTransport()
+  private var timeObserver: Any?
+  private var endObserver: NSObjectProtocol?
+  private var atEnd = false
+  private var resumeAfterScrub = false
   private let retry = UIButton(type: .system)
   private var observation: NSKeyValueObservation?
   private var playbackObservation: NSKeyValueObservation?
@@ -673,6 +685,9 @@ private final class NativePhotoPage: UIViewController, UIScrollViewDelegate {
     view.addSubview(status)
     if isVideo {
       video.allowsPictureInPicturePlayback = false
+      // AVKit's controls toggle themselves on tap and can't be shown, hidden or observed,
+      // so they drift out of step with ours. The gallery draws its own transport instead.
+      video.showsPlaybackControls = false
       video.view.backgroundColor = .clear
       video.view.isHidden = true
       addChild(video); view.insertSubview(video.view, belowSubview: status); video.didMove(toParent: self)
@@ -681,6 +696,12 @@ private final class NativePhotoPage: UIViewController, UIScrollViewDelegate {
       retry.titleLabel?.adjustsFontForContentSizeCategory = true
       retry.addTarget(self, action: #selector(retryVideo), for: .touchUpInside)
       retry.isHidden = true; view.addSubview(retry)
+      transport.isHidden = true; view.addSubview(transport)
+      transport.playPause.addTarget(self, action: #selector(togglePlayback), for: .touchUpInside)
+      transport.mute.addTarget(self, action: #selector(toggleMute), for: .touchUpInside)
+      transport.slider.addTarget(self, action: #selector(beginScrub), for: .touchDown)
+      transport.slider.addTarget(self, action: #selector(scrub), for: .valueChanged)
+      transport.slider.addTarget(self, action: #selector(endScrub), for: [.touchUpInside, .touchUpOutside, .touchCancel])
       view.addSubview(loading); loading.setLoading(true)
     }
     let tap = UITapGestureRecognizer(target: self, action: #selector(toggleZoom)); tap.numberOfTapsRequired = 2; if !isVideo { scroll.addGestureRecognizer(tap) }
@@ -703,25 +724,78 @@ private final class NativePhotoPage: UIViewController, UIScrollViewDelegate {
       DispatchQueue.main.async {
         guard let self, let item, self.video.player?.currentItem === item else { return }
         if item.status == .failed { self.videoFailed() }
-        else if item.status == .readyToPlay { self.loading.setLoading(false); self.status.text = nil; self.video.view.isHidden = false; self.scroll.isHidden = true }
+        else if item.status == .readyToPlay {
+          self.loading.setLoading(false); self.status.text = nil; self.video.view.isHidden = false; self.scroll.isHidden = true
+          self.transport.isHidden = false; self.updateTransport()
+        }
       }
     }
     playbackObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
       DispatchQueue.main.async {
         guard let self, self.video.player === player else { return }
+        self.transport.setPlaying(player.timeControlStatus != .paused)
         self.onPlayback?(player.timeControlStatus != .paused)
       }
     }
+    timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 4), queue: .main) { [weak self] _ in
+      self?.updateTransport()
+    }
+    endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+      self?.atEnd = true
+    }
+    atEnd = false
+    transport.setMuted(player.isMuted)
     if autoplay { player.play() }
+  }
+  func setTransport(visible: Bool) {
+    guard isVideo else { return }
+    loadViewIfNeeded()
+    transport.alpha = visible ? 1 : 0
+    transport.isUserInteractionEnabled = visible
+    transport.accessibilityElementsHidden = !visible
+  }
+  private func updateTransport() {
+    guard let item = video.player?.currentItem, !transport.slider.isTracking else { return }
+    transport.update(time: item.currentTime().seconds, duration: item.duration.seconds)
+  }
+  @objc private func togglePlayback() {
+    guard let player = video.player else { return }
+    if player.timeControlStatus != .paused { player.pause(); return }
+    if atEnd { atEnd = false; player.seek(to: .zero) }
+    player.play()
+  }
+  @objc private func toggleMute() {
+    guard let player = video.player else { return }
+    player.isMuted.toggle(); transport.setMuted(player.isMuted)
+  }
+  // Pausing while the thumb is held also keeps the actions on screen.
+  @objc private func beginScrub() {
+    guard let player = video.player else { return }
+    resumeAfterScrub = player.timeControlStatus != .paused
+    player.pause()
+  }
+  @objc private func scrub() {
+    guard let item = video.player?.currentItem else { return }
+    let seconds = Double(transport.slider.value)
+    atEnd = false
+    transport.update(time: seconds, duration: item.duration.seconds)
+    video.player?.seek(to: CMTime(seconds: seconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+  }
+  @objc private func endScrub() {
+    if resumeAfterScrub { video.player?.play() }
+    resumeAfterScrub = false
   }
   func playVideo() { if isVideo { video.player?.play() } }
   func pauseVideo() { if isVideo { video.player?.pause() } }
   func stopVideo() {
     guard isVideo else { return }
     observation = nil; playbackObservation = nil
+    if let timeObserver { video.player?.removeTimeObserver(timeObserver) }
+    if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+    timeObserver = nil; endObserver = nil; atEnd = false; resumeAfterScrub = false
     loading.setLoading(false)
     video.player?.pause(); video.player?.replaceCurrentItem(with: nil); video.player = nil
-    if isViewLoaded { video.view.isHidden = true; scroll.isHidden = false }
+    if isViewLoaded { video.view.isHidden = true; scroll.isHidden = false; transport.isHidden = true }
   }
   private func videoFailed() {
     stopVideo(); status.text = "Video unavailable"; retry.isHidden = false
@@ -734,12 +808,83 @@ private final class NativePhotoPage: UIViewController, UIScrollViewDelegate {
       video.view.frame = view.bounds
       loading.frame = CGRect(x: view.bounds.midX - 22, y: view.bounds.midY - 22, width: 44, height: 44)
       retry.frame = CGRect(x: 24, y: view.bounds.midY + 32, width: max(0, view.bounds.width - 48), height: 48)
+      let safe = view.bounds.inset(by: chromeInsets)
+      let width = max(0, min(safe.width - 32, 640))
+      transport.frame = CGRect(x: safe.midX - width / 2, y: safe.maxY - 52, width: width, height: 44)
     }
     guard previousSize != scroll.bounds.size else { return }; previousSize = scroll.bounds.size
     scroll.zoomScale = 1; imageView.frame = scroll.bounds; scroll.contentSize = scroll.bounds.size
   }
   func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
   @objc private func toggleZoom() { scroll.setZoomScale(scroll.zoomScale > 1 ? 1 : 2.5, animated: !UIAccessibility.isReduceMotionEnabled) }
+}
+
+// Play/pause, position and mute for gallery video. It belongs to the gallery's
+// chrome, so it shows and hides with Close, Share and Reply on tap.
+private final class NativeVideoTransport: UIView {
+  let playPause = UIButton(type: .system)
+  let mute = UIButton(type: .system)
+  let slider = UISlider()
+  private let elapsed = UILabel()
+  private let total = UILabel()
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    backgroundColor = UIColor(white: 0, alpha: 0.5)
+    layer.cornerRadius = 22; layer.cornerCurve = .continuous
+    for button in [playPause, mute] {
+      button.tintColor = .white
+      button.setPreferredSymbolConfiguration(UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold), forImageIn: .normal)
+      addSubview(button)
+    }
+    let font = UIFontMetrics(forTextStyle: .caption1).scaledFont(for: .monospacedDigitSystemFont(ofSize: 12, weight: .medium))
+    for label in [elapsed, total] {
+      label.textColor = .white; label.font = font; label.adjustsFontForContentSizeCategory = true
+      label.isAccessibilityElement = false
+      addSubview(label)
+    }
+    total.textAlignment = .right
+    slider.minimumTrackTintColor = .white
+    slider.maximumTrackTintColor = UIColor(white: 1, alpha: 0.35)
+    slider.accessibilityLabel = "Video position"
+    addSubview(slider)
+    setPlaying(false); setMuted(false); update(time: 0, duration: 0)
+  }
+  required init?(coder: NSCoder) { nil }
+
+  func setPlaying(_ playing: Bool) {
+    playPause.setImage(UIImage(systemName: playing ? "pause.fill" : "play.fill"), for: .normal)
+    playPause.accessibilityLabel = playing ? "Pause" : "Play"
+  }
+  func setMuted(_ muted: Bool) {
+    mute.setImage(UIImage(systemName: muted ? "speaker.slash.fill" : "speaker.wave.2.fill"), for: .normal)
+    mute.accessibilityLabel = muted ? "Unmute" : "Mute"
+  }
+  func update(time: Double, duration: Double) {
+    let duration = duration.isFinite ? max(0, duration) : 0
+    let time = time.isFinite ? min(max(0, time), duration) : 0
+    slider.maximumValue = Float(duration)
+    if !slider.isTracking { slider.value = Float(time) }
+    elapsed.text = Self.format(time); total.text = Self.format(duration)
+    slider.accessibilityValue = "\(Self.format(time)) of \(Self.format(duration))"
+    setNeedsLayout()
+  }
+  static func format(_ seconds: Double) -> String {
+    let value = Int(seconds.rounded(.down))
+    return value >= 3600
+      ? String(format: "%d:%02d:%02d", value / 3600, value / 60 % 60, value % 60)
+      : String(format: "%d:%02d", value / 60, value % 60)
+  }
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    let height = bounds.height
+    playPause.frame = CGRect(x: 0, y: 0, width: 44, height: height)
+    mute.frame = CGRect(x: bounds.width - 44, y: 0, width: 44, height: height)
+    let label = max(elapsed.sizeThatFits(bounds.size).width, total.sizeThatFits(bounds.size).width)
+    elapsed.frame = CGRect(x: playPause.frame.maxX, y: 0, width: label, height: height)
+    total.frame = CGRect(x: mute.frame.minX - label, y: 0, width: label, height: height)
+    slider.frame = CGRect(x: elapsed.frame.maxX + 10, y: 0, width: max(0, total.frame.minX - elapsed.frame.maxX - 20), height: height)
+  }
 }
 
 // Native counterpart of BuzzLoadingIndicator: 44pt white quarter arc, 4pt

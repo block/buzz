@@ -160,6 +160,11 @@ struct NativePhotoZoomTests {
     let videoButtons = ["Close media", "Share video", "Reply in thread"].map { label in
       descendants(viewer.view).compactMap { $0 as? UIButton }.first { $0.accessibilityLabel == label }!
     }
+    precondition(!playerController.showsPlaybackControls, "AVKit's self-toggling controls stay off so they can't fall out of step")
+    let transport = descendants(first.view).compactMap { $0 as? NativeVideoTransport }.first!
+    let slider = descendants(transport).compactMap { $0 as? UISlider }.first!
+    precondition(!transport.isHidden && slider.accessibilityLabel == "Video position", "A playable video shows the gallery's own transport")
+    precondition(["Play", "Pause"].contains(transport.playPause.accessibilityLabel ?? "") && transport.mute.accessibilityLabel == "Mute", "Transport buttons are labelled")
     for (size, insets) in [(CGSize(width: 390, height: 844), UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0)),
                            (CGSize(width: 844, height: 390), UIEdgeInsets(top: 0, left: 59, bottom: 21, right: 59))] {
       viewer.view.frame = CGRect(origin: .zero, size: size)
@@ -167,8 +172,13 @@ struct NativePhotoZoomTests {
       precondition(pager.view.frame == viewer.view.bounds, "Video fills the screen in portrait and landscape")
       for button in videoButtons {
         precondition(viewer.view.bounds.inset(by: insets).contains(button.frame), "Overlaid video actions stay in the safe area")
-        precondition(button.frame.maxY < viewer.view.bounds.midY, "Video actions sit in the top row, clear of AVKit's transport bar")
+        precondition(button.frame.maxY < viewer.view.bounds.midY, "Video actions sit in the top row, clear of the transport")
       }
+      pager.view.layoutIfNeeded(); first.view.layoutIfNeeded()
+      let bar = transport.convert(transport.bounds, to: viewer.view)
+      precondition(viewer.view.bounds.inset(by: insets).contains(bar) && bar.minY > viewer.view.bounds.midY, "The transport sits at the bottom of the safe area")
+      precondition(bar.height >= 44 && transport.playPause.bounds.width >= 44 && transport.mute.bounds.width >= 44, "Transport keeps 44pt targets")
+      precondition(slider.frame.width > 100, "The scrubber has room in portrait and landscape")
       for (slot, button) in videoButtons.enumerated() where slot > 0 {
         precondition(!button.frame.intersects(videoButtons[slot - 1].frame), "Video actions must not overlap")
       }
@@ -177,13 +187,28 @@ struct NativePhotoZoomTests {
     viewer.layoutGallery(insets: UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 76))
     precondition(pager.view.frame == viewer.view.bounds, "Video spans the full Duo window beside the rail")
     precondition(videoButtons.allSatisfy { $0.center.x >= 875 }, "Duo video actions stay in the rail")
+    first.view.layoutIfNeeded()
+    precondition(transport.convert(transport.bounds, to: viewer.view).maxX <= 875, "The Duo transport stays clear of the rail")
     viewer.view.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
     viewer.layoutGallery(insets: .zero)
     precondition(videoButtons[1].isEnabled && videoButtons[1].alpha == 1, "A downloaded video can be shared")
     viewer.setChrome(hidden: true)
     precondition(videoButtons.allSatisfy { $0.alpha == 0 && !$0.isUserInteractionEnabled && $0.accessibilityElementsHidden }, "Tapping the video hides its actions")
+    precondition(transport.alpha == 0 && !transport.isUserInteractionEnabled && transport.accessibilityElementsHidden, "The transport hides with the actions")
     viewer.setChrome(hidden: false)
     precondition(videoButtons.allSatisfy { $0.alpha == 1 && $0.isUserInteractionEnabled }, "Tapping again restores them")
+    precondition(transport.alpha == 1 && transport.isUserInteractionEnabled && !transport.accessibilityElementsHidden, "The transport comes back with the actions")
+    func settle() { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
+    player.pause(); settle()
+    precondition(transport.playPause.accessibilityLabel == "Play", "A paused video offers Play")
+    send(.touchUpInside, to: transport.playPause); settle()
+    precondition(player.rate > 0 && transport.playPause.accessibilityLabel == "Pause", "Play starts the video")
+    send(.touchUpInside, to: transport.playPause); settle()
+    precondition(player.rate == 0 && transport.playPause.accessibilityLabel == "Play", "Pause stops it")
+    send(.touchUpInside, to: transport.mute)
+    precondition(player.isMuted && transport.mute.accessibilityLabel == "Unmute", "Mute toggles the player")
+    send(.touchUpInside, to: transport.mute)
+    precondition(NativeVideoTransport.format(65) == "1:05" && NativeVideoTransport.format(3725) == "1:02:05", "Times read like the Flutter viewer")
     precondition(feedback.clicks == 0, "Opening must not trigger selection haptics")
     viewer.pageViewController(pager, willTransitionTo: [first])
     precondition(feedback.clicks == 1, "Swipe feedback fires before the page changes")
@@ -244,10 +269,11 @@ struct NativePhotoZoomTests {
     precondition(loader.layer.animation(forKey: "loading") == nil, "Detached loaders must stop animating")
     window.isHidden = true
   }
-  @MainActor static func sendValueChanged(_ control: UIControl) {
+  @MainActor static func sendValueChanged(_ control: UIControl) { send(.valueChanged, to: control) }
+  @MainActor static func send(_ event: UIControl.Event, to control: UIControl) {
     // A command-line UIKit fixture has no UIApplication action dispatcher.
     for target in control.allTargets {
-      for action in control.actions(forTarget: target, forControlEvent: .valueChanged) ?? [] {
+      for action in control.actions(forTarget: target, forControlEvent: event) ?? [] {
         _ = (target as AnyObject).perform(NSSelectorFromString(action), with: control)
       }
     }
