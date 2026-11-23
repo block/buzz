@@ -398,8 +398,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(updatedLabels ?? await nativeMenu.labels.future, [
       'Mark unread',
-      'Change workspace',
       'Rename',
+      'Change workspace',
       'Archive',
     ]);
     expect(find.text('Mark unread'), findsNothing);

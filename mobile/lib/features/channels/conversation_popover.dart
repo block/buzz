@@ -104,6 +104,12 @@ Future<bool?> showConversationPopover({
               );
             }
           }),
+          if (manage && !channel.isArchived)
+            item(
+              'Rename',
+              BuzzIcons.pencil,
+              () => finish(_renameConversation(context, ref, channel)),
+            ),
           if (workspace.openPicker != null)
             item(
               'Change workspace',
@@ -125,12 +131,6 @@ Future<bool?> showConversationPopover({
                     : sectionId,
               );
             }),
-          if (manage && !channel.isArchived)
-            item(
-              'Rename',
-              BuzzIcons.pencil,
-              () => finish(_renameConversation(context, ref, channel)),
-            ),
           if (manage)
             item(
               channel.isArchived ? 'Unarchive' : 'Archive',
