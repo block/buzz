@@ -4,11 +4,16 @@ class _HistorySubscription {
   final List<NostrEvent> events = [];
   final Completer<List<NostrEvent>> completer;
   final Timer timeout;
+  final DateTime startedAt;
 
   /// The filter of a request held until the socket authenticates.
   NostrFilter? heldFilter;
 
-  _HistorySubscription({required this.completer, required this.timeout});
+  _HistorySubscription({
+    required this.completer,
+    required this.timeout,
+    required this.startedAt,
+  });
 }
 
 class _LiveSubscription {
@@ -71,8 +76,13 @@ class _ClosedRetry {
 class _PendingEvent {
   final Completer<NostrEvent> completer;
   final Timer timeout;
+  final DateTime startedAt;
 
-  _PendingEvent({required this.completer, required this.timeout});
+  _PendingEvent({
+    required this.completer,
+    required this.timeout,
+    required this.startedAt,
+  });
 }
 
 class _BufferedEvent {

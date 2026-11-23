@@ -21,6 +21,7 @@ import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_flow.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
 import 'package:buzz/shared/hosted/organization_sign_in.dart';
+import 'package:buzz/shared/relay/media_upload.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:buzz/shared/relay/relay_session.dart';
 import 'package:buzz/shared/relay/relay_socket.dart';
@@ -54,6 +55,7 @@ class HostedJourneyFixture {
   String? refusedSelfHostedPubkey;
   final profileWrites = <String>[];
   final profileAvatars = <String?>[];
+  int avatarUploads = 0;
   final recoveryScopes = <InviteJoinRecoveryScope>[];
   final rows = <Map<String, dynamic>>[];
   final cloudKeys = <nostr.Keys>[];
@@ -451,6 +453,11 @@ class HostedJourneyFixture {
         disableAnimations: true,
         overrides: [
           hostedFlowProvider.overrideWith(createFlow),
+          mediaUploadServiceProvider.overrideWith((ref) {
+            final uploads = _Uploads(this);
+            ref.onDispose(uploads.dispose);
+            return uploads;
+          }),
           if (pairingValidator != null || pairingSocketFactory != null)
             pairingProvider.overrideWith(
               () => PairingNotifier(
@@ -695,6 +702,35 @@ class _Profile extends ProfileNotifier {
     }
     fixture.profileWrites.add(name);
     fixture.profileAvatars.add(avatarUrl);
+  }
+}
+
+// Replace media transport so a setup avatar draft uploads without a relay.
+final class _Uploads extends MediaUploadService {
+  _Uploads(this.fixture)
+    : super(
+        baseUrl: 'https://media.example',
+        nsec: null,
+        pickGalleryImage: () async => null,
+        pickGalleryVideo: () async => null,
+      );
+  final HostedJourneyFixture fixture;
+
+  @override
+  Future<BlobDescriptor> uploadBytes(
+    Uint8List bytes, {
+    required String mimeType,
+    ValueChanged<double>? onProgress,
+    UploadCancellationToken? cancellationToken,
+  }) async {
+    fixture.avatarUploads++;
+    return BlobDescriptor(
+      url: 'https://media.example/avatar.png',
+      sha256: 'avatar',
+      size: bytes.length,
+      type: mimeType,
+      uploaded: 1,
+    );
   }
 }
 

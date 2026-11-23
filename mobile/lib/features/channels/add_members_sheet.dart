@@ -11,9 +11,11 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list_card_item.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/confirmation_dialog.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/relay/relay.dart';
+import 'channel.dart';
 import 'channel_management_provider.dart';
 import 'ios_add_members_sheet.dart';
 import 'mentions/mention_candidates.dart';
@@ -25,10 +27,16 @@ import '../../shared/widgets/modal_presentation.dart';
 bool _nativePickerOpen = false;
 
 /// Opens the platform member picker, retaining the Android sheet presentation.
+///
+/// For a DM, [isDm] asks whether added people see its history, and
+/// [onAddedToDm] receives the DM they ended up in: this one, grown, or
+/// another.
 Future<bool?> showAddChannelMembersSheet({
   required BuildContext context,
   required String channelId,
   required Set<String> existingPubkeys,
+  bool isDm = false,
+  void Function(Channel dm)? onAddedToDm,
 }) async {
   if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
     if (_nativePickerOpen) return null;
@@ -41,6 +49,8 @@ Future<bool?> showAddChannelMembersSheet({
         pageBuilder: (_, _, _) => AddChannelMembersSheet(
           channelId: channelId,
           existingPubkeys: existingPubkeys,
+          isDm: isDm,
+          onAddedToDm: onAddedToDm,
           nativePresentation: true,
         ),
       );
@@ -61,6 +71,8 @@ Future<bool?> showAddChannelMembersSheet({
     builder: (_) => AddChannelMembersSheet(
       channelId: channelId,
       existingPubkeys: existingPubkeys,
+      isDm: isDm,
+      onAddedToDm: onAddedToDm,
     ),
   );
 }
@@ -71,11 +83,15 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     super.key,
     required this.channelId,
     required this.existingPubkeys,
+    this.isDm = false,
+    this.onAddedToDm,
     this.nativePresentation = false,
   });
 
   final String channelId;
   final Set<String> existingPubkeys;
+  final bool isDm;
+  final void Function(Channel dm)? onAddedToDm;
   final bool nativePresentation;
 
   @override
@@ -88,6 +104,14 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     final selectedUsers = useState<List<MentionCandidate>>([]);
     final isSubmitting = useState(false);
     final submitError = useState<String?>(null);
+    // Not a failure: what to do next, such as after an accepted add.
+    final submitNotice = useState<String?>(null);
+    // The DM an accepted add landed in but that is not confirmed yet. Add
+    // then opens it again instead of sending the add a second time.
+    final acceptedDm = useState<String?>(null);
+    // The iOS picker marks itself busy before asking Dart to add; a bump
+    // rebuilds the sheet so it receives the unchanged idle state again.
+    final resync = useState(0);
     final actions = useMemoized(() => ref.read(channelActionsProvider));
 
     // The same candidates, ranking, debounce and search cache as mention
@@ -163,7 +187,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
     void retry() => ref.invalidate(mentionUserSearchProvider(search));
 
     void toggleUser(MentionCandidate user) {
-      if (isSubmitting.value) return;
+      if (isSubmitting.value || acceptedDm.value != null) return;
       final normalized = user.pubkey.toLowerCase();
       // The current selection, not this build's: a second tap can land
       // before the rebuild that reflects the first.
@@ -183,19 +207,75 @@ class AddChannelMembersSheet extends HookConsumerWidget {
       }
       opening.value++;
       submitError.value = null;
+      submitNotice.value = null;
+    }
+
+    // The relay decides who is an agent: an add first asks it, and only a
+    // person joining a DM of two or more people needs the history choice.
+    Future<bool?> askIncludeHistory(List<MentionCandidate> users) async {
+      try {
+        return await showDmHistoryChoice(
+          context: context,
+          title: users.length == 1
+              ? 'Add ${labelFor(users.single)}?'
+              : 'Add ${users.length} members?',
+        );
+      } finally {
+        if (context.mounted) resync.value++;
+      }
     }
 
     Future<void> addSelectedMembers() async {
       if (selectedUsers.value.isEmpty || isSubmitting.value) return;
       final submittedUsers = List<MentionCandidate>.of(selectedUsers.value);
-      isSubmitting.value = true;
       submitError.value = null;
+      submitNotice.value = null;
       try {
+        final accepted = acceptedDm.value;
+        if (accepted != null) {
+          isSubmitting.value = true;
+          final dm = await actions.openAddedDm(accepted);
+          if (!context.mounted) return;
+          Navigator.of(context).pop(true);
+          onAddedToDm?.call(dm);
+          return;
+        }
+        isSubmitting.value = true;
+        if (isDm) {
+          final pubkeys = submittedUsers.map((user) => user.pubkey).toList();
+          Channel dm;
+          try {
+            dm = await actions.addToDm(
+              channelId: channelId,
+              pubkeys: pubkeys,
+              history: DmHistory.ask,
+            );
+          } on DmNeedsHistoryChoice {
+            if (!context.mounted) return;
+            isSubmitting.value = false;
+            final includeHistory = await askIncludeHistory(submittedUsers);
+            if (includeHistory == null || !context.mounted) return;
+            isSubmitting.value = true;
+            dm = await actions.addToDm(
+              channelId: channelId,
+              pubkeys: pubkeys,
+              history: includeHistory ? DmHistory.include : DmHistory.startNew,
+            );
+          }
+          if (!context.mounted) return;
+          Navigator.of(context).pop(true);
+          onAddedToDm?.call(dm);
+          return;
+        }
         await actions.addMembers(
           channelId: channelId,
           pubkeys: submittedUsers.map((user) => user.pubkey).toList(),
         );
         if (context.mounted) Navigator.of(context).pop(true);
+      } on DmAddUnconfirmed catch (error) {
+        if (!context.mounted) return;
+        acceptedDm.value = error.channelId;
+        submitNotice.value = error.toString();
       } on AddMembersException catch (error) {
         if (!context.mounted) return;
         final failedPubkeys = error.failures.keys
@@ -214,7 +294,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
         submitError.value = error.message;
       } catch (error) {
         if (!context.mounted) return;
-        submitError.value = error.toString();
+        submitError.value = error.toString().replaceFirst('Exception: ', '');
       } finally {
         if (context.mounted) isSubmitting.value = false;
       }
@@ -271,6 +351,7 @@ class AddChannelMembersSheet extends HookConsumerWidget {
           'loading': searching,
           'loadError': searchFailed,
           'error': submitError.value,
+          'notice': submitNotice.value,
           'submitting': isSubmitting.value,
           'selected': [for (final user in selectedUsers.value) row(user)],
           'users': [for (final user in availableUsers) row(user)],
@@ -434,6 +515,14 @@ class AddChannelMembersSheet extends HookConsumerWidget {
                   error,
                   style: context.textTheme.bodySmall?.copyWith(
                     color: context.colors.error,
+                  ),
+                ),
+              ] else if (submitNotice.value case final notice?) ...[
+                const SizedBox(height: Grid.xxs),
+                Text(
+                  notice,
+                  style: context.textTheme.bodySmall?.copyWith(
+                    color: context.colors.onSurfaceVariant,
                   ),
                 ),
               ],

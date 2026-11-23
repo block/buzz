@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
+import '../../shared/diagnostics/diagnostic_navigation_observer.dart';
 import '../../shared/clipboard_utils.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/identity_archives/identity_archives.dart';
@@ -31,6 +32,7 @@ import '../../shared/widgets/tabler_star_icon.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/duo_toolbar.dart';
 import 'channel.dart';
+import 'channel_detail_page.dart';
 import 'add_members_sheet.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
@@ -45,6 +47,8 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../activity/inbox_local_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
+import '../../shared/community/community_provider.dart';
+import '../../shared/relay/relay_author_provider.dart';
 import '../../shared/widgets/covered_route_keyboard_insets.dart';
 
 part 'channel_details_page.dart';
@@ -82,7 +86,8 @@ bool _usesNativeChannelSheet(BuildContext context) {
 }
 
 // Keep the result alive after retiring the invisible route for relay work.
-class _NativeChannelSheetRoute extends PageRouteBuilder<bool> {
+class _NativeChannelSheetRoute extends PageRouteBuilder<bool>
+    with DiagnosticSheetRoute<bool> {
   _NativeChannelSheetRoute(WidgetBuilder builder)
     : super(
         opaque: false,

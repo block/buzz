@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:ui' show Rect;
 
@@ -8,6 +9,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:share_plus/share_plus.dart';
 
 import '../../shared/hosted/hosted_relay_auth.dart';
+import '../../shared/http/app_http_client.dart';
 import '../../shared/community/community_membership_provider.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/relay/relay.dart';
@@ -218,10 +220,14 @@ class RelayCommunityInviteActions implements CommunityInviteActions {
     final body = <String, Object>{'ttl_secs': ttlSeconds};
     if (maxUses != null) body['max_uses'] = maxUses;
     final bodyBytes = utf8.encode(jsonEncode(body));
-    final response = await _httpClient
-        .post(
-          Uri.parse(url),
-          headers: {
+    final abort = Completer<void>();
+    final request =
+        http.AbortableRequest(
+            'POST',
+            Uri.parse(url),
+            abortTrigger: abort.future,
+          )
+          ..headers.addAll({
             'Authorization': buildNip98AuthHeader(
               method: 'POST',
               url: url,
@@ -229,10 +235,20 @@ class RelayCommunityInviteActions implements CommunityInviteActions {
               nsec: _nsec,
             ),
             'Content-Type': 'application/json',
-          },
-          body: bodyBytes,
-        )
-        .timeout(const Duration(seconds: 15));
+          })
+          ..bodyBytes = bodyBytes;
+    final http.Response response;
+    try {
+      // One deadline covers the headers and the body.
+      response = await Future(
+        () async => http.Response.fromStream(await _httpClient.send(request)),
+      ).timeout(const Duration(seconds: 15));
+    } on TimeoutException {
+      noteHttpDeadline(request);
+      rethrow;
+    } finally {
+      abort.complete();
+    }
     _ensureCommunityActive();
 
     final dynamic decoded;
