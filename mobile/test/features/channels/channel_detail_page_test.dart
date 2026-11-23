@@ -1012,6 +1012,9 @@ void main() {
       lessThan(tester.getTopLeft(find.text('Rename')).dy),
     );
 
+    await _capturePresence(tester, 'solo-details-alignment');
+    await tester.drag(find.byType(ChannelDetailsPage), const Offset(0, -190));
+    await tester.pumpAndSettle();
     final members = find.byKey(const ValueKey('channel-details-members-card'));
     expect(tester.widget<AppListCard>(members).label, isNull);
     expect(
@@ -1049,7 +1052,6 @@ void main() {
     ]) {
       expect(tester.getCenter(leading).dx, center);
     }
-    await _capturePresence(tester, 'solo-details-alignment');
     await tester.scrollUntilVisible(
       find.text('Delete chat'),
       300,

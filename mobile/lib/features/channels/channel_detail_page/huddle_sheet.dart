@@ -224,8 +224,9 @@ AppListRow soloHuddleActionRow(
                 current,
                 sessionSnapshot: ref.read(huddleSessionProvider),
               );
-              if (latest.onPressed != null)
+              if (latest.onPressed != null) {
                 await Future<void>.sync(latest.onPressed!);
+              }
             } catch (error) {
               if (context.mounted) {
                 ScaffoldMessenger.of(context).showFeedbackSnackBar(
