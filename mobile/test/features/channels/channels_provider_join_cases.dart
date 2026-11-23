@@ -555,159 +555,6 @@ void _confirmedJoinCases() {
       );
     });
 
-    group('an add whose answer was lost', () {
-      const relay = 'relay';
-      NostrEvent roster(
-        String id,
-        List<String> members, {
-        String signer = relay,
-      }) => NostrEvent(
-        id: 'roster-$id-${members.length}-$signer',
-        pubkey: signer,
-        createdAt: 2,
-        kind: 39002,
-        tags: [
-          ['d', id],
-          for (final member in members) ['p', member],
-        ],
-        content: '',
-        sig: 'sig',
-      );
-      Future<(ChannelActions, _WriterReplicaRelaySession)> setUpAdd() async {
-        final keys = nostr.Keys.generate();
-        final session =
-            _WriterReplicaRelaySession(
-                memberships: [_membership(_otherJoinedChannel, 'me')],
-                metadata: [
-                  _meta(
-                    id: _otherJoinedChannel,
-                    name: 'dm',
-                    channelType: 'dm',
-                    participants: const ['me', 'alice'],
-                  ),
-                  _meta(id: _joinedChannel, name: 'new dm', channelType: 'dm'),
-                ],
-              )
-              ..writerMemberships = [
-                roster(_otherJoinedChannel, const ['me', 'alice']),
-              ];
-        final container = _buildContainer(
-          session: session,
-          overrides: [
-            relayAuthorProvider.overrideWith((ref, url) async => relay),
-          ],
-        );
-        addTearDown(container.dispose);
-        final actions = container.read(
-          Provider<ChannelActions>(
-            (ref) => ChannelActions(
-              ref: ref,
-              session: session,
-              signedEventRelay: SignedEventRelay(
-                session: session,
-                nsec: keys.nsec,
-              ),
-              currentPubkey: 'me',
-            ),
-          ),
-        );
-        await container.read(channelsProvider.future);
-        return (actions, session);
-      }
-
-      Future<String> add(ChannelActions actions) async =>
-          (await actions.addToDm(
-            channelId: _otherJoinedChannel,
-            pubkeys: const ['robin'],
-            history: DmHistory.ask,
-          )).id;
-
-      test('is found in the roster when it grew this DM', () async {
-        final (actions, session) = await setUpAdd();
-        session.dmAddsLost.add([
-          roster(_otherJoinedChannel, const ['me', 'alice', 'robin']),
-        ]);
-        final dm = await add(actions);
-        expect(dm, _otherJoinedChannel);
-        expect(
-          session.published.where((event) => event.kind == 41011),
-          hasLength(1),
-        );
-      });
-
-      test(
-        'is found in the roster when it started a DM of its people and them',
-        () async {
-          final (actions, session) = await setUpAdd();
-          session.dmAddsLost.add([
-            roster(_otherJoinedChannel, const ['me', 'alice']),
-            roster(_joinedChannel, const ['me', 'alice', 'robin']),
-          ]);
-          final dm = await add(actions);
-          expect(dm, _joinedChannel);
-          expect(
-            session.published.where((event) => event.kind == 41011),
-            hasLength(1),
-          );
-        },
-      );
-
-      test('trusts only rosters the relay signed', () async {
-        final (actions, session) = await setUpAdd();
-        session.dmAddsLost.add([
-          roster(_otherJoinedChannel, const ['me', 'alice']),
-          roster(_joinedChannel, const [
-            'me',
-            'alice',
-            'robin',
-          ], signer: 'mallory'),
-        ]);
-        await expectLater(
-          add(actions),
-          throwsA(
-            isA<Exception>().having(
-              (error) => error.toString(),
-              'message',
-              'Exception: Couldn’t add them. Try again.',
-            ),
-          ),
-        );
-        expect(
-          session.strongRosterFilters.map((filter) => filter.authors),
-          everyElement([relay]),
-        );
-      });
-
-      test(
-        'fails when the roster shows it did not land, and only then adds again',
-        () async {
-          final (actions, session) = await setUpAdd();
-          session.dmAddsLost.add(null);
-          await expectLater(
-            add(actions),
-            throwsA(
-              isA<Exception>().having(
-                (error) => error.toString(),
-                'message',
-                'Exception: Couldn’t add them. Try again.',
-              ),
-            ),
-          );
-          session
-            ..dmAddResponse = 'response:{"channel_id":"$_otherJoinedChannel"}'
-            ..writerMemberships = [
-              roster(_otherJoinedChannel, const ['me', 'alice', 'robin']),
-            ];
-          final dm = await add(actions);
-          expect(dm, _otherJoinedChannel);
-          expect(
-            session.published.where((event) => event.kind == 41011),
-            hasLength(2),
-          );
-        },
-      );
-    });
-
     test('a list rebuild during the join still shows the membership', () async {
       final session = _WriterReplicaRelaySession(
         memberships: const [],
@@ -741,7 +588,6 @@ class _WriterReplicaRelaySession extends _FakeRelaySession {
 
   List<NostrEvent> writerMemberships = const [];
   int strongMembershipReads = 0;
-  final strongRosterFilters = <NostrFilter>[];
   int rosterFailures = 0;
   final published = <NostrEvent>[];
 
@@ -750,11 +596,6 @@ class _WriterReplicaRelaySession extends _FakeRelaySession {
 
   /// The relay's refusals of the next DM adds, in order, as their OK messages.
   final dmAddRefusals = <String>[];
-
-  /// The next DM adds whose answer is lost after the relay commits them,
-  /// in order: each becomes the writer's memberships, or, when null, the add
-  /// did not land.
-  final dmAddsLost = <List<NostrEvent>?>[];
 
   /// The relay's refusals of the next DM opens, in order, as their OK messages.
   final dmOpenRefusals = <String>[];
@@ -768,11 +609,6 @@ class _WriterReplicaRelaySession extends _FakeRelaySession {
     published.add(event);
     if (event.kind == 41011 && dmAddRefusals.isNotEmpty) {
       throw Exception(dmAddRefusals.removeAt(0));
-    }
-    if (event.kind == 41011 && dmAddsLost.isNotEmpty) {
-      final committed = dmAddsLost.removeAt(0);
-      if (committed != null) writerMemberships = committed;
-      throw TimeoutException('no answer');
     }
     if (event.kind == 41010 && dmOpenRefusals.isNotEmpty) {
       throw Exception(dmOpenRefusals.removeAt(0));
@@ -801,7 +637,6 @@ class _WriterReplicaRelaySession extends _FakeRelaySession {
         when filter.kinds.length == 1 &&
             filter.kinds.single == 39002 &&
             filter.extensions['consistency'] == 'strong') {
-      strongRosterFilters.add(filter);
       final channelIds = filter.tags['#d']?.toSet();
       if (channelIds != null) {
         if (rosterFailures > 0) {

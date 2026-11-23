@@ -284,8 +284,7 @@ class ChannelActions {
   /// more people. When that other DM cannot be confirmed yet, throws
   /// [DmAddUnconfirmed] with its id. The relay lets only people share a DM's
   /// history, so when it refuses the history tag to a signed-in agent, the add
-  /// is resent as [DmHistory.startNew]. When the relay's answer is lost,
-  /// the roster says whether the add landed before it is reported failed.
+  /// is resent as [DmHistory.startNew].
   Future<Channel> addToDm({
     required String channelId,
     required List<String> pubkeys,
@@ -302,9 +301,7 @@ class ChannelActions {
           ['history', history == DmHistory.ask ? 'ask' : 'include'],
       ],
     );
-    final before = _ref.read(channelsProvider).value ?? const <Channel>[];
-    NostrEvent? result;
-    String? landed;
+    NostrEvent result;
     try {
       try {
         result = await submit(history);
@@ -319,17 +316,22 @@ class ChannelActions {
     } on StateError {
       rethrow;
     } catch (error) {
-      // The relay may have added them and its answer been lost: before they
-      // can add again, the roster says whether it landed.
-      if (error is! RelayEventRejectedException) {
-        landed = await _landedAdd(channelId, pubkeys, before);
+      final reason = relayErrorText(error);
+      // A relay from before "ask" refuses it by name; it needs the choice too.
+      if (history == DmHistory.ask &&
+          (reason == 'needs-choice: history' ||
+              reason == 'invalid: history must be "include", got "ask"')) {
+        throw const DmNeedsHistoryChoice();
       }
-      if (landed == null) await _throwAddFailed(error, history);
+      await _throwIfAgentRefused(reason, adding: true);
+      throw Exception(
+        reason.contains('at most 9 people')
+            ? dmAdditionFailedMessage
+            : 'Couldn’t add them. Try again.',
+      );
     }
     _ensureCommunityValid();
-    final id =
-        landed ??
-        parseCommandResponse(result!.content)?['channel_id'] as String?;
+    final id = parseCommandResponse(result.content)?['channel_id'] as String?;
     if (id == null || id.isEmpty) {
       throw Exception('Relay did not return a DM channel id');
     }
@@ -342,106 +344,6 @@ class ChannelActions {
     }
     return openAddedDm(id);
   }
-
-  /// Throws what to show for a DM add that failed with [error].
-  Future<Never> _throwAddFailed(Object error, DmHistory history) async {
-    final reason = relayErrorText(error);
-    // A relay from before "ask" refuses it by name; it needs the choice too.
-    if (history == DmHistory.ask &&
-        (reason == 'needs-choice: history' ||
-            reason == 'invalid: history must be "include", got "ask"')) {
-      throw const DmNeedsHistoryChoice();
-    }
-    await _throwIfAgentRefused(reason, adding: true);
-    throw Exception(
-      reason.contains('at most 9 people')
-          ? dmAdditionFailedMessage
-          : 'Couldn’t add them. Try again.',
-    );
-  }
-
-  /// Where an add to [channelId] whose answer never came landed, as the
-  /// writer's roster now shows it: this DM holding [pubkeys], or a DM the
-  /// user was not in [before] holding its people and them. Null when the
-  /// roster shows no such change, or cannot be read, so the add is reported
-  /// failed and may be sent again.
-  Future<String?> _landedAdd(
-    String channelId,
-    List<String> pubkeys,
-    List<Channel> before,
-  ) async {
-    final me = _currentPubkey?.toLowerCase();
-    final source = before.where((channel) => channel.id == channelId);
-    if (me == null || source.isEmpty || pubkeys.isEmpty) return null;
-    final members = {
-      for (final key in source.first.participantPubkeys) key.toLowerCase(),
-    };
-    final added = {for (final key in pubkeys) key.toLowerCase()};
-    if (members.containsAll(added)) return null;
-    final known = {for (final channel in before) channel.id};
-    final cache = _ref.read(userCacheProvider.notifier);
-    final required = {
-      me,
-      ...members.where((key) => cache.get(key)?.isAgent != true),
-      ...added,
-    };
-    final rosters = <NostrEvent>[];
-    final String? relayAuthor;
-    try {
-      // Only the relay signs rosters; anyone can publish a lookalike.
-      final author = _ref.listen(
-        relayAuthorProvider(_ref.read(relayConfigProvider).baseUrl).future,
-        (_, _) {},
-      );
-      try {
-        relayAuthor = await author.read();
-      } finally {
-        author.close();
-      }
-      if (relayAuthor == null) return null;
-      // Whichever DM it landed in holds the first of them.
-      for (final tags in [
-        {
-          '#d': [channelId],
-        },
-        {
-          '#p': [added.first],
-        },
-      ]) {
-        rosters.addAll(
-          await _session.queryRelay([
-            NostrFilter(
-              kinds: const [39002],
-              authors: [relayAuthor],
-              tags: tags,
-              limit: 100,
-              extensions: const {'consistency': 'strong'},
-            ),
-          ]),
-        );
-      }
-    } catch (error) {
-      debugPrint('Checking a DM add whose answer was lost failed: $error');
-      return null;
-    }
-    _ensureCommunityValid();
-    final ids = <String>{
-      for (final event in rosters)
-        if (event.kind == 39002 && event.pubkey == relayAuthor)
-          if (event.getTagValue('d') case final id?)
-            if (_holds(event, id == channelId ? added : required) &&
-                (id == channelId || !known.contains(id)))
-              id,
-    };
-    return ids.length == 1 ? ids.single : null;
-  }
-
-  static bool _holds(NostrEvent roster, Set<String> keys) => keys.every(
-    {
-      for (final tag in roster.tags)
-        if (tag.length > 1 && tag[0] == 'p') tag[1].toLowerCase(),
-    }.contains,
-  );
 
   /// Throws [DmAgentRefused] naming the agent when [reason] is an agent's
   /// add-policy refusal of a DM. A failed name read still refuses, without
