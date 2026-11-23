@@ -946,8 +946,10 @@ const AUX_MAX_PAGES: usize = 64;
 const WINDOW_AUX_SINCE_MARGIN_SECS: i64 = 24 * 60 * 60;
 
 /// Lower `created_at` bound for both window aux hops: the oldest aux target
-/// (Unix seconds) minus [`WINDOW_AUX_SINCE_MARGIN_SECS`]. A hop-2 deletion
-/// postdates the aux event it deletes, so the same bound covers both hops.
+/// (Unix seconds) minus [`WINDOW_AUX_SINCE_MARGIN_SECS`]. Every aux event, in
+/// either hop, really happened after the row it chains back to, so its
+/// timestamp is at most twice the ingest drift before that row's; the same
+/// bound covers both hops.
 /// `None` when there are no targets (no hops run).
 fn window_aux_since(
     target_created_at: impl IntoIterator<Item = i64>,
