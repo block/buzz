@@ -35,8 +35,9 @@ class MediaDiskCache {
   /// [directory] to resolve, so a load never skips the disk while it does.
   /// [now] is the clock staleness is judged by.
   ///
-  /// Tests can shrink the budgets and the delay after a write or first read
-  /// before eviction runs (10 s in `flutter_cache_manager`).
+  /// Tests can shrink the budgets, the delay after a write or first read
+  /// before eviction runs (10 s in `flutter_cache_manager`), and how long
+  /// requests wait for the directory or for a previous cache to close.
   MediaDiskCache.open(
     FutureOr<Directory?> directory, {
     @visibleForTesting DateTime Function() now = DateTime.now,
@@ -44,35 +45,55 @@ class MediaDiskCache {
     @visibleForTesting int fileBudget = maxFiles,
     @visibleForTesting Duration? evictionDelay,
     @visibleForTesting int evictionsPerPass = maxEvictionsPerPass,
+    @visibleForTesting Duration openTimeout = _openTimeout,
   }) : _now = now {
+    CacheManager? openNow(Directory directory) {
+      if (isClosed) return null;
+      _path = directory.path;
+      final (manager, index) = _openManager(
+        directory,
+        byteBudget: byteBudget,
+        fileBudget: fileBudget,
+        evictionDelay: evictionDelay,
+        evictionsPerPass: evictionsPerPass,
+      );
+      _index = index;
+      return manager;
+    }
+
     _manager = Future.value(directory)
         // Images wait for the disk, so never wait on it for long.
-        .timeout(_openTimeout, onTimeout: () => null)
+        .timeout(openTimeout, onTimeout: () => null)
         .then((directory) async {
           if (directory == null || isClosed) return null;
           // A cache on this directory that is still closing, after a switch
           // away and back, may hold saves its index has not recorded yet.
-          // Opening after it keeps this one's sweep from deleting them.
-          // If it never finishes, both would write one index, so go without
-          // the disk instead.
+          // Opening after it keeps this one's sweep from deleting them, and
+          // keeps its final flush from overwriting this one's index.
+          final previous = _closing[directory.path];
+          if (previous == null) return openNow(directory);
           var closed = true;
-          await _closing[directory.path]?.timeout(
-            _openTimeout,
+          await previous.timeout(
+            openTimeout,
             onTimeout: () {
               closed = false;
             },
           );
-          if (!closed || isClosed) return null;
-          _path = directory.path;
-          final (manager, index) = _openManager(
-            directory,
-            byteBudget: byteBudget,
-            fileBudget: fileBudget,
-            evictionDelay: evictionDelay,
-            evictionsPerPass: evictionsPerPass,
+          if (closed) return openNow(directory);
+          // Requests waiting now go without the disk. Later ones get it
+          // once the previous cache has closed.
+          unawaited(
+            previous
+                .then((_) {
+                  if (isClosed) return;
+                  final manager = openNow(directory);
+                  if (manager != null) _manager = Future.value(manager);
+                })
+                .catchError((Object error) {
+                  debugPrint('[MediaDiskCache] open failed: $error');
+                }),
           );
-          _index = index;
-          return manager;
+          return null;
         })
         .catchError((Object error) {
           debugPrint('[MediaDiskCache] open failed: $error');
@@ -135,7 +156,9 @@ class MediaDiskCache {
 
   static const _neverStale = Duration(days: 365 * 100);
 
-  late final Future<CacheManager?> _manager;
+  /// Replaced once, when a previous cache on this directory outlasted the
+  /// open wait and has since closed.
+  late Future<CacheManager?> _manager;
   final DateTime Function() _now;
   final _closed = Completer<void>();
 

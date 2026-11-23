@@ -538,6 +538,37 @@ void main() {
       expect(await relaunchedAgain.read('prior-1'), isNotNull);
       await relaunchedAgain.dispose();
 
+      // A cache reopened while the previous one is slow to close goes
+      // without the disk at first, then uses it once that close finishes.
+      final slowDirectory = MediaDiskCache.directoryFor(root, 'slow', 's');
+      final saving = MediaDiskCache.open(slowDirectory);
+      await saving.write('saved', Uint8List(4), immutable: true);
+      await saving.dispose();
+      final gated = _GatedDirectory(slowDirectory);
+      final slow = MediaDiskCache.open(gated);
+      // Opens the index, whose sweep then waits on the gate, and so does
+      // closing.
+      expect(await slow.read('saved'), isNotNull);
+      final slowSave = slow.write('slow-save', Uint8List(4), immutable: true);
+      await Future<void>.delayed(Duration.zero);
+      final slowClosing = slow.dispose();
+      const openTimeout = Duration(milliseconds: 100);
+      final waiting = MediaDiskCache.open(
+        slowDirectory,
+        openTimeout: openTimeout,
+      );
+      expect(await waiting.read('saved'), isNull);
+      gated.release();
+      await Future.wait([slowSave, slowClosing]);
+      await Future<void>.delayed(Duration.zero);
+      expect(await waiting.read('saved'), isNotNull);
+      await waiting.write('after-close', Uint8List(4), immutable: true);
+      await waiting.dispose();
+      final afterSlow = MediaDiskCache.open(slowDirectory);
+      expect(await afterSlow.read('after-close'), isNotNull);
+      expect(await afterSlow.read('slow-save'), isNotNull);
+      await afterSlow.dispose();
+
       // Reads during refreshes see the old bytes or the new ones in full,
       // never part of a file.
       final refreshing = MediaDiskCache.open(
@@ -720,4 +751,33 @@ Future<Object?> _waitError(ImageStream stream) {
   );
   stream.addListener(listener);
   return done.future;
+}
+
+/// [Directory] whose listing waits until [release], to hold a cache's
+/// sweep, and so its close.
+class _GatedDirectory implements Directory {
+  _GatedDirectory(this._inner);
+
+  final Directory _inner;
+  final _gate = Completer<void>();
+
+  void release() => _gate.complete();
+
+  @override
+  String get path => _inner.path;
+
+  @override
+  Future<bool> exists() => _inner.exists();
+
+  @override
+  Stream<FileSystemEntity> list({
+    bool recursive = false,
+    bool followLinks = true,
+  }) async* {
+    await _gate.future;
+    yield* _inner.list(recursive: recursive, followLinks: followLinks);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
