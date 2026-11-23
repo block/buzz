@@ -3816,6 +3816,10 @@ mod external_infra {
         let tip = git(
             push.path(),
             &[
+                "-c",
+                "user.name=land",
+                "-c",
+                "user.email=land@example.invalid",
                 "commit-tree",
                 "refs/heads/main^{tree}",
                 "-p",
@@ -4354,6 +4358,10 @@ mod external_infra {
         let tip = git(
             push.path(),
             &[
+                "-c",
+                "user.name=land",
+                "-c",
+                "user.email=land@example.invalid",
                 "commit-tree",
                 "refs/heads/main^{tree}",
                 "-p",
