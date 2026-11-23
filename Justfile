@@ -485,6 +485,8 @@ test-unit:
         # contract/race tests run in the dedicated CI job below.
         cargo nextest run -p buzz-push-gateway
         cargo nextest run -p buzz-push-gateway --features personal-dev-app-attest
+        # Ingress gateway: config, metrics, and schema-layout tests are infra-free.
+        cargo nextest run -p buzz-ingress-gateway
         # Kubernetes backend provider: the decision layers (state machine, GC
         # planner, env precedence, naming, wire) are pure functions with a fake
         # substrate, so they belong in the unit job. Enumerated explicitly
