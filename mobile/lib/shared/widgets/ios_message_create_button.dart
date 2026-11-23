@@ -37,6 +37,7 @@ class IosMessageCreateButton extends HookConsumerWidget {
     this.enabled = true,
     this.selectedIndex,
     this.eagerGestures = true,
+    this.consumeOutsideTap = false,
     this.deferMenuActions = true,
     this.showIconWithLabel = false,
     this.onMenuVisibilityChanged,
@@ -69,6 +70,7 @@ class IosMessageCreateButton extends HookConsumerWidget {
 
   /// Capture gestures immediately; disable for rows inside a scroll view.
   final bool eagerGestures;
+  final bool consumeOutsideTap;
 
   /// Wait for menu dismissal before actions that navigate to another route.
   final bool deferMenuActions;
@@ -223,6 +225,7 @@ class IosMessageCreateButton extends HookConsumerWidget {
         creationParams: {
           ...content,
           'plain': plain,
+          'consumeOutsideTap': consumeOutsideTap,
           'fillWidth': fillWidth,
           'buttonCenterX': trailingIconSlotWidth == null
               ? width / 2

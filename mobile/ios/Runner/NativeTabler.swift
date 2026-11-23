@@ -77,6 +77,7 @@ enum NativeTabler {
     "person.crop.circle": 0xeb4d, // user
     "arrow.left.arrow.right": 0xf1f4, // arrows-left-right
     "person.badge.plus": 0xeb4b, // user-plus
+    "adjustments-horizontal": 0xec38,
     "gearshape": 0xeb20, // settings
     "person.2": 0xebf2, // users
     "rectangle.stack": 0xeb0a, // photo

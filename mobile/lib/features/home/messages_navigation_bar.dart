@@ -280,7 +280,12 @@ class _MenuNudge extends StatelessWidget {
             axis == Axis.vertical ? offset : 0,
             0,
           )..scaleByDouble(scale, scale, 1, 1),
-          child: child,
+          child: AnimatedOpacity(
+            opacity: menuOpen ? 0 : 1,
+            duration: duration,
+            curve: Curves.easeOutCubic,
+            child: child,
+          ),
         ),
       ),
     );

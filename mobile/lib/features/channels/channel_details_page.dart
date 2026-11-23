@@ -33,23 +33,30 @@ Future<bool?> showChannelDetailsSheet({
   required BuildContext context,
   required Channel channel,
   required String? currentPubkey,
-  required FutureOr<void> Function(BuildContext context, String pubkey)
-  onMemberTap,
+  FutureOr<void> Function(BuildContext context, String pubkey)? onMemberTap,
   String? sectionId,
   bool personalChat = false,
 }) {
-  final native = _usesNativeChannelSheet(context);
-  Widget content(BuildContext context) => ChannelDetailsPage(
-    channel: channel,
-    currentPubkey: currentPubkey,
-    onMemberTap: onMemberTap,
-    sectionId: sectionId,
-    personalChat: personalChat,
-    inSheet: true,
-    nativePresentation: native,
+  return _presentChannelListSheet(
+    context,
+    (context, {nativePresentation = false}) => ChannelDetailsPage(
+      channel: channel,
+      currentPubkey: currentPubkey,
+      onMemberTap:
+          onMemberTap ??
+          (context, pubkey) => showUserProfileSheet(
+            context,
+            pubkey,
+            names: channelIdentityNamesProvider(channel.id),
+            contextualActions: (_) =>
+                ChannelMemberProfileActions(channel: channel, pubkey: pubkey),
+          ),
+      sectionId: sectionId,
+      personalChat: personalChat,
+      inSheet: true,
+      nativePresentation: nativePresentation,
+    ),
   );
-  if (native) return _showNativeChannelSheet(context, content);
-  return _showChannelLongPressSheet(context: context, builder: content);
 }
 
 /// Combined channel identity, membership, organization, and lifecycle page.
@@ -395,7 +402,6 @@ class ChannelDetailsPage extends HookConsumerWidget {
         groups: [
           SheetActionSection(
             children: [
-              action(isStarred ? 'Unstar' : 'Star', BuzzIcons.star, toggleStar),
               action(
                 isMuted ? 'Unmute' : 'Mute',
                 isMuted ? BuzzIcons.bell : BuzzIcons.bellOff,
@@ -449,6 +455,11 @@ class ChannelDetailsPage extends HookConsumerWidget {
                     sectionId: currentSectionId,
                   ),
                 ),
+              action(
+                isStarred ? 'Unpin' : 'Pin',
+                isStarred ? BuzzIcons.pinnedOff : BuzzIcons.pinned,
+                toggleStar,
+              ),
               action(
                 'Copy channel name',
                 BuzzIcons.copy,
@@ -607,21 +618,6 @@ class ChannelDetailsPage extends HookConsumerWidget {
               children: [
                 Expanded(
                   child: BuzzActionTile(
-                    key: const ValueKey('channel-details-star-action'),
-                    icon: null,
-                    iconWidget: TablerStarIcon(
-                      filled: isStarred,
-                      color: isStarred
-                          ? context.colors.primary
-                          : context.colors.onSurface,
-                    ),
-                    label: isStarred ? 'Unstar' : 'Star',
-                    onTap: toggleStar,
-                  ),
-                ),
-                const SizedBox(width: Grid.xxs),
-                Expanded(
-                  child: BuzzActionTile(
                     key: const ValueKey('channel-details-mute-action'),
                     icon: isMuted ? BuzzIcons.bell : BuzzIcons.bellOff,
                     iconColor: isMuted ? context.colors.primary : null,
@@ -740,6 +736,12 @@ class ChannelDetailsPage extends HookConsumerWidget {
                   );
                 },
               ),
+            AppListRow(
+              key: const ValueKey('channel-details-pin-action'),
+              icon: isStarred ? BuzzIcons.pinnedOff : BuzzIcons.pinned,
+              title: isStarred ? 'Unpin' : 'Pin',
+              onTap: toggleStar,
+            ),
             AppListRow(
               icon: BuzzIcons.copy,
               title: 'Copy channel name',

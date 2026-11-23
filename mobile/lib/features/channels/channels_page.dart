@@ -1,3 +1,5 @@
+import 'channel_sections/section_show_more.dart';
+import '../home/home_pins.dart';
 import '../../shared/widgets/native_route_controls.dart';
 import '../../shared/emoji/emoji_picker.dart';
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
@@ -7,7 +9,7 @@ import 'channel_unread.dart';
 import 'channel_filter/channel_filter_activity.dart';
 import 'channel_filter/channel_filter_provider.dart';
 import 'channel_filter/channel_filter_store.dart';
-import '../../shared/widgets/collapsible_section_body.dart';
+import '../../shared/widgets/collapsible_sliver_body.dart';
 import '../../shared/http/app_http_client.dart';
 import '../../shared/me/me_sync.dart';
 import '../../shared/hosted/hosted_relay_auth.dart';
@@ -34,7 +36,8 @@ import 'package:flutter/foundation.dart';
 import 'package:duo_kit/duo_kit.dart';
 import '../../shared/widgets/duo_toolbar.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show ScrollCacheExtent;
+import 'package:flutter/rendering.dart'
+    show PaintingContext, RenderRepaintBoundary, ScrollCacheExtent;
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -64,13 +67,12 @@ import '../../shared/widgets/buzz_setting_menu.dart';
 import '../../shared/widgets/buzz_titled_sheet_layout.dart';
 import '../../shared/widgets/ios_glass_navigation_action.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
-import '../../shared/widgets/ios_message_create_button.dart';
+import '../../shared/widgets/buzz_navigation_metrics.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/confirmation_dialog.dart';
 import '../../shared/widgets/skeleton.dart';
-import '../../shared/widgets/tabler_star_icon.dart';
 import '../profile/profile_provider.dart';
 import '../profile/presence_cache_provider.dart';
 import '../../shared/identity_names/identity_names_provider.dart';
@@ -91,7 +93,6 @@ import 'dm_channel_labels.dart';
 import 'ephemeral_channel_display.dart';
 import 'channel_mutes/channel_mutes_provider.dart';
 import 'channel_sections/section_options_button.dart';
-import 'channel_sections/filtered_channel_section_body.dart';
 import 'channel_sections/channel_sections_provider.dart';
 import 'channel_sections/workspace_layout.dart';
 import 'channel_sections/section_reorder_sheet.dart';
@@ -110,6 +111,7 @@ import '../../shared/read_state/read_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
 
 part 'channels_page/body.dart';
+part 'channels_page/home_buckets.dart';
 part 'channels_page/activity_recovery.dart';
 part 'channels_page/sections.dart';
 part 'channels_page/rename_section.dart';
@@ -126,14 +128,13 @@ part 'channels_page/header_actions.dart';
 enum _QuickAction { createChannel, newDm }
 
 const double _kChannelSectionInset = Grid.gutter;
-const double _kChannelLeadingWidth = 24.0;
-const double _kChannelIconSize = 20.0;
+const double _kChannelLeadingWidth = _kChannelIconSize;
+const double _kChannelIconSize = Grid.inventoryIconSize;
 const double _kChannelLabelGap = Grid.inventoryLabelGap;
 const double _kChannelRowVerticalPadding = Grid.inventoryRowInset;
 // Keep section controls at a full touch target without adding a second row
 // of vertical padding around their quiet desktop-style label.
 const double _kSectionHeaderVerticalPadding = 0;
-const double _kChannelLabelInset = _kChannelSectionInset;
 
 /// Compact avatars remain on direct-message rows.
 const double _kDmAvatarSize = _kChannelIconSize;
@@ -198,25 +199,28 @@ class ChannelsPage extends HookConsumerWidget {
         .watch(profileProvider)
         .whenData((value) => value?.pubkey)
         .value;
+    final messages = messagesActionsBuilder != null;
     final headerTitleStyle = context.textTheme.titleMedium?.copyWith(
-      fontSize: 22,
+      fontSize: messages ? 17 : 22,
       fontWeight: FontWeight.w600,
       color: navigationPrimaryForeground(context),
     );
-    final messages = messagesActionsBuilder != null;
-    final nativeDuoTitle =
-        messages &&
-        defaultTargetPlatform == TargetPlatform.iOS &&
-        (DuoToolbarScope.maybeStripOf(context) ??
-                FoldGeometry.of(context).strip) !=
-            null;
+    final largeMessagesTitle =
+        messages && defaultTargetPlatform == TargetPlatform.iOS;
+    final strip =
+        DuoToolbarScope.maybeStripOf(context) ?? FoldGeometry.of(context).strip;
+    final coverOptions =
+        largeMessagesTitle && strip != null && isCompactDuoWindow(context);
+    final headerBottomPadding =
+        _kTopSectionBottomPadding + (largeMessagesTitle ? 2 * Grid.quarter : 0);
     final topSectionHeight = frostedAppBarHeight(
       context,
       titleStyle: headerTitleStyle,
 
-      bottomHeight: _kTopSectionBottomPadding,
-      useNativeNavigation: !messages,
-      alignWithStatusRegion: messages,
+      bottomHeight: headerBottomPadding,
+      useNativeNavigation: !messages || largeMessagesTitle,
+      nativeLargeTitle: largeMessagesTitle,
+      alignWithStatusRegion: messages && !largeMessagesTitle,
     );
     // A sheet's dim barrier can't composite over Home's native soft edge, so
     // use the Flutter backdrop while another route covers this page.
@@ -224,15 +228,23 @@ class ChannelsPage extends HookConsumerWidget {
     final routeCurrent = useValueNotifier(true);
     final communityAvatarKey = useMemoized(GlobalKey.new);
     final nativeCommunityAvatarBounds = useRef<Rect?>(null);
+    final optionsKey = useMemoized(GlobalKey.new);
     final headerKey = useMemoized(GlobalKey.new);
     final nativeHeaderReady = useRef(false);
     final bodyReady = useRef(false);
     final communityFlightActive = useState(false);
     final channelsScrollController = useScrollController();
     // Scroll updates belong to the header, not the channel inventory below it.
+    final listDepth = useValueNotifier(0.0);
     final headerFrost = useValueNotifier(0.0);
     useEffect(() {
       void updateHeaderFrost() {
+        if (channelsScrollController.hasClients) {
+          listDepth.value = channelsScrollController.offset.clamp(
+            0.0,
+            double.infinity,
+          );
+        }
         final next = !channelsScrollController.hasClients
             ? 0.0
             : (channelsScrollController.offset / _kHeaderFrostScrollDistance)
@@ -605,11 +617,14 @@ class ChannelsPage extends HookConsumerWidget {
       return () => active = false;
     }, [newChannelAction, newDmAction, currentPubkey]);
 
+    void displayOptions() =>
+        showMessagesDisplayOptions(optionsKey.currentContext ?? context);
     final page = ValueListenableBuilder(
       valueListenable: headerFrost,
       // Retain the inventory during header animation. Provider and parent
       // updates still construct a fresh body with current channel data.
       child: _ChannelsBody(
+        optionsKey: messages ? optionsKey : null,
         soloSliver: soloSliver,
         onInbox: onInbox,
         onReadyChanged: (ready) => bodyReady.value = ready,
@@ -618,7 +633,11 @@ class ChannelsPage extends HookConsumerWidget {
         showError: showError.value,
         sessionStatus: sessionState.status,
         currentPubkey: currentPubkey,
-        topSectionHeight: topSectionHeight,
+        // Match the visible glass-button-to-title gap below the native title.
+        topSectionHeight:
+            topSectionHeight +
+            (largeMessagesTitle ? 11.0 : 0) -
+            (coverOptions ? buzzNavigationActionSize : 0),
         usesPinnedGradient: usesPinnedGradient,
         scrollController: channelsScrollController,
         onRefresh: () async {
@@ -634,6 +653,7 @@ class ChannelsPage extends HookConsumerWidget {
         onSelectChannel: openChannel,
       ),
       builder: (context, frostProgress, child) => FrostedScaffold(
+        navigationScrollOffset: largeMessagesTitle ? listDepth : null,
         backgroundColor: usesPinnedGradient
             ? Colors.transparent
             : context.colors.surface,
@@ -641,11 +661,20 @@ class ChannelsPage extends HookConsumerWidget {
         appBar: FrostedAppBar(
           key: headerKey,
           onNativeReadyChanged: (ready) => nativeHeaderReady.value = ready,
-          nativeTitle: nativeDuoTitle ? 'Messages' : '',
-          useNativeNavigation: !messages,
-          alignWithStatusRegion: messages,
+          nativeTitle: messages ? 'Messages' : '',
+          nativeLargeTitleWithActions: largeMessagesTitle,
+          useNativeNavigation: !messages || largeMessagesTitle,
+          nativeLargeTitle: largeMessagesTitle,
+          alignWithStatusRegion: messages && !largeMessagesTitle,
           nativeViewSuppressed: headerNativeSuppressed,
-          nativeLeading: messages
+          alignLargeTitleWithActions: coverOptions,
+          nativeLeading: coverOptions
+              ? IosNavigationAction(
+                  label: 'Messages options',
+                  symbol: 'ellipsis',
+                  onPressed: displayOptions,
+                )
+              : messages
               ? null
               : IosNavigationAction(
                   label: 'Community settings',
@@ -698,7 +727,7 @@ class ChannelsPage extends HookConsumerWidget {
                     ],
                   ),
                 ],
-          horizontalInset: _kTopSectionInset,
+          horizontalInset: messages ? Grid.gutter : _kTopSectionInset,
           // Let the full Buzz gradient show at rest. Once the list begins to
           // move beneath this row, build up blur over the first 64dp of scroll
           // without adding the usual white frosted wash. The Buzz list is
@@ -706,22 +735,24 @@ class ChannelsPage extends HookConsumerWidget {
           // pinned gradient instead of turning into a white header.
           frosted: messages || !usesPinnedGradient || frostProgress > 0,
           alwaysFrosted: messages,
-          leading: messages
+          leading: coverOptions
               ? null
+              : messages
+              ? _MessagesOptionsButton(
+                  controlSize: strip != null ? buzzNavigationActionSize : 40,
+                  onPressed: displayOptions,
+                )
               : _CommunityIndicator(
                   onTap: openCommunitySwitcher,
                   avatarKey: communityAvatarKey,
                   hidden: communityFlightActive.value,
                 ),
-          centerTitle: false,
+          centerTitle: messages,
           titleStyle: headerTitleStyle,
 
           automaticallyImplyLeading: !messages,
           title: messages
-              ? Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text('Messages', style: headerTitleStyle),
-                )
+              ? Text('Messages', style: headerTitleStyle)
               : const SizedBox.shrink(),
           actions: messages
               ? messagesActionsBuilder?.call(
@@ -735,7 +766,7 @@ class ChannelsPage extends HookConsumerWidget {
                     onCreate: openCreateMenu,
                   ),
                 ],
-          bottomHeight: _kTopSectionBottomPadding,
+          bottomHeight: headerBottomPadding,
           bottom: const SizedBox.expand(),
         ),
         body: child!,

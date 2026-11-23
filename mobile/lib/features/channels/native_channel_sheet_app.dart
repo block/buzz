@@ -36,7 +36,7 @@ class _ChannelSheetApp extends HookWidget {
     Color color(String key, Color fallback) =>
         colors[key] is int ? Color(colors[key] as int) : fallback;
     final scheme = base.colorScheme;
-    final theme = utilitySurfaceThemeData(
+    final theme = utilitySheetThemeData(
       base.copyWith(
         colorScheme: scheme.copyWith(
           surface: color('surface', scheme.surface),
@@ -45,6 +45,7 @@ class _ChannelSheetApp extends HookWidget {
             scheme.surfaceContainerHighest,
           ),
           surfaceContainer: color('control', scheme.surfaceContainer),
+          surfaceContainerHigh: color('high', scheme.surfaceContainerHigh),
           onSurface: color('onSurface', scheme.onSurface),
           onSurfaceVariant: color('onSurfaceVariant', scheme.onSurfaceVariant),
           primary: color('primary', scheme.primary),
@@ -140,18 +141,6 @@ class ChannelSheetContent extends HookWidget {
                                   : null,
                               isEnabled: select(sections[index][i]) != null,
                               onTap: select(sections[index][i]) ?? () {},
-                              iconWidget: sections[index][i]['symbol'] == 'star'
-                                  ? TablerStarIcon(
-                                      filled:
-                                          sections[index][i]['label'] ==
-                                          'Unstar',
-                                      color:
-                                          sections[index][i]['label'] ==
-                                              'Unstar'
-                                          ? context.colors.primary
-                                          : context.colors.onSurface,
-                                    )
-                                  : null,
                             ),
                           ),
                         ],
@@ -253,7 +242,8 @@ class ChannelSheetContent extends HookWidget {
 }
 
 IconData _sheetIcon(Object? symbol) => switch (symbol) {
-  'star' => BuzzIcons.star,
+  'pin' => BuzzIcons.pinned,
+  'pin.slash' => BuzzIcons.pinnedOff,
   'checkmark' => BuzzIcons.checkCheck,
   'folder' => BuzzIcons.folderInput,
   'bell' => BuzzIcons.bell,

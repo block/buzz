@@ -14,6 +14,31 @@ import 'package:nostr/nostr.dart' as nostr;
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   test(
+    'section count survives Active and is independent of other sections',
+    () {
+      var store = ChannelFilterStore.empty();
+      expect(store.limitFor('channels'), 5);
+      for (final count in sectionCounts) {
+        store = store.edit(
+          'channels',
+          ChannelFilterMode.unreads,
+          previewCount: count,
+        );
+        store = ChannelFilterStore.parse(store.toJson());
+        expect(store.limitFor('channels'), count == 0 ? isNull : count);
+        store = store.edit(
+          'channels',
+          ChannelFilterMode.active,
+          windowSeconds: 86400,
+        );
+        expect(store.limitFor('channels'), isNull);
+        store = store.edit('channels', ChannelFilterMode.all);
+        expect(store.countFor('channels'), count);
+        expect(store.limitFor('dms'), 5);
+      }
+    },
+  );
+  test(
     'activity provider reads history and excludes a quiet channel from Active',
     () async {
       final keys = nostr.Keys.generate();

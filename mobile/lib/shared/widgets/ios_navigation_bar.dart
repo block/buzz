@@ -142,6 +142,7 @@ class IosNavigationBar extends HookConsumerWidget {
     this.titleRefreshing = false,
     this.onTitlePressed,
     this.largeTitle = false,
+    this.externalExpandedTitle = false,
     this.alwaysFrosted = false,
     this.backdropOnly = false,
     this.standaloneControl = false,
@@ -150,6 +151,9 @@ class IosNavigationBar extends HookConsumerWidget {
     this.centerTitleInPane = false,
     this.titleInsets = EdgeInsets.zero,
     this.alignCollapsedTitleToLeading = false,
+    this.prefersSoftTopEdge = false,
+    this.leadingTitleRowTop,
+    this.leadingTitleTopPadding = 24,
     this.leading,
     this.actions = const [],
     this.onBack,
@@ -173,6 +177,7 @@ class IosNavigationBar extends HookConsumerWidget {
   final bool titleRefreshing;
   final VoidCallback? onTitlePressed;
   final bool largeTitle;
+  final bool externalExpandedTitle;
 
   /// Keeps the navigation backdrop visible before the first scroll update.
   final bool alwaysFrosted;
@@ -193,6 +198,9 @@ class IosNavigationBar extends HookConsumerWidget {
   /// Content-area insets for a title whose backdrop spans the whole window.
   final EdgeInsets titleInsets;
   final bool alignCollapsedTitleToLeading;
+  final bool prefersSoftTopEdge;
+  final double? leadingTitleRowTop;
+  final double leadingTitleTopPadding;
   final IosNavigationAction? leading;
   final List<IosNavigationAction> actions;
   final VoidCallback? onBack;
@@ -392,6 +400,7 @@ class IosNavigationBar extends HookConsumerWidget {
       'titleRefreshColor': ChatColors.of(context).outgoing.toARGB32(),
       'titleEnabled': onTitlePressed != null,
       'largeTitle': largeTitle,
+      'externalExpandedTitle': externalExpandedTitle,
       'alwaysFrosted': alwaysFrosted,
       'backdropOnly': backdropOnly,
       'standaloneControl': standaloneControl,
@@ -401,6 +410,9 @@ class IosNavigationBar extends HookConsumerWidget {
       'titleInsetLeft': titleInsets.left,
       'titleInsetRight': titleInsets.right,
       'alignCollapsedTitleToLeading': alignCollapsedTitleToLeading,
+      'prefersSoftTopEdge': prefersSoftTopEdge,
+      'leadingTitleRowTop': leadingTitleRowTop,
+      'leadingTitleTopPadding': leadingTitleTopPadding,
       'back': onBack != null,
       'leading': leading == null ? null : encodeAction(leading!, 'leading'),
       'actions': [
@@ -607,7 +619,10 @@ class IosNavigationBar extends HookConsumerWidget {
     final nativeBar = UiKitView(
       key: viewKey,
       viewType: viewType,
-      creationParams: payload,
+      creationParams: {
+        ...payload,
+        if (largeTitle) 'initialScrollOffset': offset?.value ?? 0.0,
+      },
       creationParamsCodec: const StandardMessageCodec(),
       onPlatformViewCreated: (id) {
         channel.value = MethodChannel('$viewType/$id');

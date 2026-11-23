@@ -131,11 +131,6 @@ class _NativeChannelActions extends HookConsumerWidget {
       if (group is _ChannelQuickActionsRow) {
         sections.add([
           entry(
-            group.isStarred ? 'Unstar' : 'Star',
-            group.onToggleStar,
-            icon: BuzzIcons.star,
-          ),
-          entry(
             group.isUnread ? 'Mark Read' : 'Mark Unread',
             group.onToggleRead,
             icon: BuzzIcons.checkCheck,
@@ -199,6 +194,7 @@ class _NativeChannelActions extends HookConsumerWidget {
           'surface': context.colors.surface,
           'container': context.colors.surfaceContainerHighest,
           'control': context.colors.surfaceContainer,
+          'high': context.colors.surfaceContainerHigh,
           'onSurface': context.colors.onSurface,
           'onSurfaceVariant': context.colors.onSurfaceVariant,
           'primary': context.colors.primary,
@@ -238,7 +234,9 @@ class _NativeChannelActions extends HookConsumerWidget {
             );
           }
         } on MissingPluginException {
-          if (context.mounted) {
+          if (route is _NativeChannelSheetRoute && route.hasFallback) {
+            route.unavailable = true;
+          } else if (context.mounted) {
             ScaffoldMessenger.of(context).showFeedbackSnackBar(
               const SnackBar(
                 content: Text('Channel actions are unavailable in this build.'),
@@ -280,7 +278,8 @@ String _channelActionSymbol(IconData? icon) => switch (icon) {
   BuzzIcons.pencil => 'pencil',
   BuzzIcons.plus => 'plus',
   BuzzIcons.users => 'person.2',
-  BuzzIcons.star => 'star',
+  BuzzIcons.pinned => 'pin',
+  BuzzIcons.pinnedOff => 'pin.slash',
   BuzzIcons.checkCheck => 'checkmark',
   BuzzIcons.folderInput => 'folder',
   BuzzIcons.bell => 'bell',

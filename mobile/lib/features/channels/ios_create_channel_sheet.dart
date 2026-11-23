@@ -23,7 +23,7 @@ class IosCreateChannelSheet {
     _open = true;
     Channel? created;
     final session = UniqueKey().toString();
-    final theme = utilitySurfaceThemeData(Theme.of(context));
+    final theme = utilitySheetThemeData(Theme.of(context));
     _channel.setMethodCallHandler((call) async {
       final data = Map<Object?, Object?>.from(call.arguments as Map);
       if (call.method != 'create' || data['session'] != session) return null;

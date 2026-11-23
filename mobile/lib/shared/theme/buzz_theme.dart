@@ -85,3 +85,9 @@ Color navigationMetadataForeground(BuildContext context) =>
     Theme.of(context).brightness == Brightness.dark
     ? const Color(0xFFA4A4A4)
     : const Color(0xFF5F5F5F);
+
+/// Use the secondary navigation ink for glyphs beside a readable row label.
+Color navigationRowIconForeground(BuildContext context) =>
+    MediaQuery.highContrastOf(context)
+    ? navigationMetadataForeground(context)
+    : navigationSecondaryForeground(context);
