@@ -678,6 +678,7 @@ class _Actions implements ChannelActions {
   Future<Channel> openDm({
     required List<String> pubkeys,
     bool waitForChannelList = true,
+    bool includeHistory = false,
   }) async {
     await opening?.future;
     return Channel(
