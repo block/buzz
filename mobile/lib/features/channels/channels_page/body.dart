@@ -357,7 +357,7 @@ class _SliverChannelsList extends HookConsumerWidget {
     final collapseProvider = collapsedSectionsProvider(
       ref.watch(collapsedSectionKeyProvider),
     );
-    final collapsed = ref.watch(collapseProvider).value ?? const <String>{};
+    final collapsed = ref.watch(collapseProvider);
     bool sectionExpanded(String key) => !collapsed.contains(key);
 
     Future<void> toggleSection(String key) async {

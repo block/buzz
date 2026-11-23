@@ -1,7 +1,7 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../shared/relay/relay.dart';
+import '../../../shared/theme/theme_provider.dart';
 
 final collapsedSectionKeyProvider = Provider<String?>((ref) {
   final pubkey = ref.watch(myPubkeyProvider);
@@ -11,32 +11,32 @@ final collapsedSectionKeyProvider = Provider<String?>((ref) {
 });
 
 final collapsedSectionsProvider =
-    AsyncNotifierProvider.family<CollapsedSections, Set<String>, String?>(
+    NotifierProvider.family<CollapsedSections, Set<String>, String?>(
       CollapsedSections.new,
     );
 
-class CollapsedSections extends AsyncNotifier<Set<String>> {
+class CollapsedSections extends Notifier<Set<String>> {
   CollapsedSections(this.key);
   final String? key;
-  late SharedPreferences _prefs;
 
+  // Preferences are preloaded in main(), so the first sidebar frame already
+  // hides saved-collapsed rows instead of mounting and then animating them.
   @override
-  Future<Set<String>> build() async {
+  Set<String> build() {
     final storageKey = key;
     if (storageKey == null) return {};
-    _prefs = await SharedPreferences.getInstance();
-    return {...?_prefs.getStringList(storageKey)};
+    return {...?ref.read(savedPrefsProvider).getStringList(storageKey)};
   }
 
   Future<void> toggle(String section) async {
-    if (!state.hasValue) await future;
-    if (!ref.mounted) return;
-    final next = {...state.requireValue};
+    final next = {...state};
     if (!next.remove(section)) next.add(section);
-    state = AsyncData(next);
+    state = next;
     final storageKey = key;
     if (storageKey != null &&
-        !await _prefs.setStringList(storageKey, next.toList())) {
+        !await ref
+            .read(savedPrefsProvider)
+            .setStringList(storageKey, next.toList())) {
       throw StateError('Could not save collapsed sections');
     }
   }
