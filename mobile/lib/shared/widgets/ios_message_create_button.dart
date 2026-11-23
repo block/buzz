@@ -217,6 +217,9 @@ class IosMessageCreateButton extends HookConsumerWidget {
       width: width,
       height: height,
       child: UiKitView(
+        key: mergingNavigation
+            ? ValueKey((navigationAxis, width, height))
+            : null,
         viewType: 'buzz/navigation_glass',
         gestureRecognizers: {
           if (eagerGestures)
@@ -239,7 +242,9 @@ class IosMessageCreateButton extends HookConsumerWidget {
               navigationAxis == Axis.horizontal &&
               DuoToolbarScope.maybeOf(context)?.strip != null,
           'verticalNavigation': navigationAxis == Axis.vertical,
-          'controlSize': mergingNavigation ? 56.0 : height,
+          'controlSize': mergingNavigation && navigationAxis == Axis.vertical
+              ? width
+              : height,
           'hitTargetWidth': width,
           'hitTargetHeight': height,
           'brightness': brightness.name,

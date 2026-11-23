@@ -24,6 +24,10 @@ FrostedAppBar _threadAppBar(
       Theme.of(context).platform == TargetPlatform.iOS;
 
   return FrostedAppBar(
+    horizontalInset: Theme.of(context).platform == TargetPlatform.android
+        ? Grid.gutter
+        : Grid.xxs,
+    bottomHeight: conversationNavigationBottomPadding(context),
     alwaysFrosted: true,
     nativeViewSuppressed: messageActionBackdropActive,
     nativeTitle: 'Thread',

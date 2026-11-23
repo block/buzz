@@ -8,6 +8,9 @@ class Grid {
   /// Gap from inventory icons to labels.
   static const double inventoryLabelGap = 8.0;
 
+  /// Space above each Messages section label.
+  static const double inventorySectionTopInset = 18.0;
+
   /// Vertical inset for a 44-point inventory row with a 22-point label.
   static const double inventoryRowInset = 11.0;
 

@@ -187,6 +187,7 @@ double _conversationHeaderHeight(
 }) => frostedAppBarHeight(
   context,
   titleContentHeight: titleContentHeight,
+  bottomHeight: conversationNavigationBottomPadding(context),
   alignWithStatusRegion: true,
 );
 
@@ -755,6 +756,10 @@ class _ResolvedChannelDetailPage extends HookConsumerWidget {
       resizeToAvoidBottomInset:
           !usesFixedAndroidImeViewport || resolvedChannel.isForum,
       appBar: FrostedAppBar(
+        horizontalInset: Theme.of(context).platform == TargetPlatform.android
+            ? Grid.gutter
+            : Grid.xxs,
+        bottomHeight: conversationNavigationBottomPadding(context),
         nativePaneSoftEdge: true,
         nativeTitleInsets: duoContentInsetsOf(context),
         alignWithStatusRegion: true,

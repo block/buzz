@@ -185,7 +185,7 @@ void main() {
         );
         expect(
           tester.widget<Text>(find.text('Project')).style?.color,
-          dark ? const Color(0xFFA4A4A4) : const Color(0xFF5F5F5F),
+          Theme.of(tester.element(find.text('Project'))).colorScheme.onSurface,
         );
         expect(find.bySemanticsLabel('Project, unread'), findsNothing);
         typing.show([const TypingEntry(pubkey: 'human', expiresAtMs: 999999)]);

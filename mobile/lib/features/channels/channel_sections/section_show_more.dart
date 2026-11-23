@@ -56,10 +56,7 @@ class SectionShowMore extends StatelessWidget {
             );
             final list = options == null
                 ? page
-                : MessagesSectionOptions(
-                    sectionSpacing: options.sectionSpacing,
-                    child: page,
-                  );
+                : MessagesSectionOptions(child: page);
             return FoldGeometry.of(routeContext).strip == null
                 ? list
                 : AdaptiveConversationDestination(
@@ -233,6 +230,19 @@ class _SectionChatsPage extends HookConsumerWidget {
                                     height: kToolbarHeight,
                                     child: AppBar(
                                       primary: false,
+                                      leading: Center(
+                                        child: IconButton(
+                                          tooltip: MaterialLocalizations.of(
+                                            context,
+                                          ).backButtonTooltip,
+                                          style: androidNavigationButtonStyle(
+                                            context,
+                                          ),
+                                          icon: const BackButtonIcon(),
+                                          onPressed: () =>
+                                              Navigator.maybePop(context),
+                                        ),
+                                      ),
                                       title: Text(title),
                                     ),
                                   ),

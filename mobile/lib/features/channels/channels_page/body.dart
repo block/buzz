@@ -624,9 +624,8 @@ class _SliverChannelsList extends HookConsumerWidget {
     final noticeVisible = readState.syncFailed || readState.syncUnsupported;
     final headingInset =
         nativeMessages && inbox == null && !noticeVisible && sections.isNotEmpty
-        ? 25.0
+        ? 25.0 - Grid.xxs
         : 0.0;
-    const sectionSpacing = Grid.xxs;
     final inventory = SliverMainAxisGroup(
       slivers: [
         if (empty) ...[
@@ -636,7 +635,7 @@ class _SliverChannelsList extends HookConsumerWidget {
         ] else
           for (final (index, section) in sections.indexed) ...[
             if (index > 0)
-              SliverToBoxAdapter(child: SizedBox(height: sectionSpacing)),
+              const SliverToBoxAdapter(child: SizedBox(height: Grid.xxs)),
             if (soloSliver != null) _homeBucket(context, section) else section,
           ],
       ],
@@ -652,11 +651,7 @@ class _SliverChannelsList extends HookConsumerWidget {
           sliver: content,
         );
       }
-      content = MessagesSectionOptions(
-        key: optionsKey,
-        sectionSpacing: sectionSpacing,
-        child: content,
-      );
+      content = MessagesSectionOptions(key: optionsKey, child: content);
     }
     content = SliverMainAxisGroup(
       slivers: [

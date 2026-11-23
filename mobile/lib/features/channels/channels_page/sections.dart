@@ -265,8 +265,7 @@ class _CustomSectionHeader extends StatelessWidget {
 
     final messages = MessagesSectionOptions.active(context);
     final inset = messages
-        ? (sectionIcon?.trim().isNotEmpty == true ? 28.0 : 30.0) -
-              MessagesSectionOptions.headerTrim(context)
+        ? Grid.inventoryRowInset
         : _kSectionHeaderVerticalPadding;
     return GestureDetector(
       onTap: onToggle,
@@ -274,14 +273,12 @@ class _CustomSectionHeader extends StatelessWidget {
       child: Padding(
         padding: EdgeInsets.fromLTRB(
           MessagesSectionOptions.leadingInset(context),
-          inset,
+          messages ? Grid.inventorySectionTopInset : inset,
           Grid.twelve,
-          !expanded && messages ? inset : _kSectionHeaderVerticalPadding,
+          inset,
         ),
         child: Row(
-          crossAxisAlignment: MessagesSectionOptions.active(context)
-              ? CrossAxisAlignment.end
-              : CrossAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             Expanded(
               // The options button stays its own screen-reader stop.
@@ -291,7 +288,8 @@ class _CustomSectionHeader extends StatelessWidget {
                 expanded: expanded,
                 onTap: onToggle,
                 excludeSemantics: true,
-                child: _SectionLabel(
+                child: SectionHeadingLabel(
+                  expanded: expanded,
                   label: hasPrefix
                       ? label.substring(first.length).trimLeft()
                       : label,
@@ -517,7 +515,7 @@ class _SectionHeader extends StatelessWidget {
 
     final messages = MessagesSectionOptions.active(context);
     final inset = messages
-        ? 30.0 - MessagesSectionOptions.headerTrim(context)
+        ? Grid.inventoryRowInset
         : _kSectionHeaderVerticalPadding;
     return GestureDetector(
       onTap: onToggle,
@@ -525,14 +523,12 @@ class _SectionHeader extends StatelessWidget {
       child: Padding(
         padding: EdgeInsets.fromLTRB(
           MessagesSectionOptions.leadingInset(context),
-          inset,
+          messages ? Grid.inventorySectionTopInset : inset,
           Grid.twelve,
-          !expanded && messages ? inset : _kSectionHeaderVerticalPadding,
+          inset,
         ),
         child: Row(
-          crossAxisAlignment: MessagesSectionOptions.active(context)
-              ? CrossAxisAlignment.end
-              : CrossAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             Expanded(
               child: Semantics(
@@ -541,7 +537,7 @@ class _SectionHeader extends StatelessWidget {
                 label: label,
                 excludeSemantics: true,
                 onTap: onToggle,
-                child: _SectionLabel(label: label),
+                child: SectionHeadingLabel(label: label, expanded: expanded),
               ),
             ),
             if (sortMode case final mode? when !messages) ...[
@@ -560,33 +556,8 @@ class _SectionHeader extends StatelessWidget {
   }
 }
 
-class _SectionLabel extends StatelessWidget {
-  const _SectionLabel({required this.label, this.icon});
-  final String label;
-  final Widget? icon;
-
-  @override
-  Widget build(BuildContext context) => Row(
-    children: [
-      ?icon,
-      Flexible(
-        child: Text(
-          label,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: navigationBucketHeadingStyle(context),
-        ),
-      ),
-    ],
-  );
-}
-
 class _MessagesOptionsButton extends StatelessWidget {
-  const _MessagesOptionsButton({
-    required this.onPressed,
-    required this.controlSize,
-  });
-  final double controlSize;
+  const _MessagesOptionsButton({required this.onPressed});
   final VoidCallback onPressed;
 
   @override
@@ -595,7 +566,7 @@ class _MessagesOptionsButton extends StatelessWidget {
       return IosGlassNavigationButton(
         icon: IosGlassNavigationIcon.more,
         semanticLabel: 'Messages options',
-        controlSize: controlSize,
+        controlSize: buzzNavigationActionSize,
         onPressed: onPressed,
       );
     }

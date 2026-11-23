@@ -65,12 +65,7 @@ Future<void> showMessagesDisplayOptions(BuildContext context) async {
 }
 
 class MessagesSectionOptions extends InheritedWidget {
-  const MessagesSectionOptions({
-    super.key,
-    required super.child,
-    required this.sectionSpacing,
-  });
-  final double sectionSpacing;
+  const MessagesSectionOptions({super.key, required super.child});
 
   static double messagesGutter(BuildContext context) {
     if (defaultTargetPlatform != TargetPlatform.iOS) return Grid.xs;
@@ -83,18 +78,11 @@ class MessagesSectionOptions extends InheritedWidget {
   static double leadingInset(BuildContext context) =>
       active(context) ? messagesGutter(context) : Grid.gutter;
 
-  static double headerTrim(BuildContext context) =>
-      (context
-              .dependOnInheritedWidgetOfExactType<MessagesSectionOptions>()
-              ?.sectionSpacing ??
-          0) +
-      Grid.half;
   static bool active(BuildContext context) =>
       context.dependOnInheritedWidgetOfExactType<MessagesSectionOptions>() !=
       null;
   @override
-  bool updateShouldNotify(MessagesSectionOptions oldWidget) =>
-      sectionSpacing != oldWidget.sectionSpacing;
+  bool updateShouldNotify(MessagesSectionOptions oldWidget) => false;
 }
 
 const showMessagesLayoutBounds = bool.fromEnvironment(

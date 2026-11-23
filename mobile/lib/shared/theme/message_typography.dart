@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 
 import 'grid.dart';
-import 'buzz_theme.dart';
 import 'text_theme.dart';
 
 const _fontFamily = 'Inter';
@@ -31,7 +30,7 @@ const messageBodyTextStyle = TextStyle(
   fontFamily: _fontFamily,
   fontSize: 17,
   fontWeight: FontWeight.w400,
-  height: 20 / 17,
+  height: 23 / 17,
   letterSpacing: _messageLetterSpacing,
 );
 
@@ -136,6 +135,8 @@ const navigationSectionTextStyle = TextStyle(
   fontWeight: FontWeight.w500,
 );
 
-TextStyle navigationBucketHeadingStyle(BuildContext context) => textTheme
-    .labelMedium!
-    .copyWith(color: navigationMetadataForeground(context));
+TextStyle navigationBucketHeadingStyle(BuildContext context) =>
+    navigationChatTitleTextStyle.copyWith(
+      fontWeight: FontWeight.w600,
+      color: Theme.of(context).colorScheme.onSurface,
+    );
