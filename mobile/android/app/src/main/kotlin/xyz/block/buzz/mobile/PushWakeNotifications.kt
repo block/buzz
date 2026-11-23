@@ -3,6 +3,7 @@ package xyz.block.buzz.mobile
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -16,10 +17,22 @@ internal object NotificationOpen {
     private const val EVENT_ID = "eventId"
     private const val THREAD_ROOT_ID = "threadRootId"
 
-    fun intent(context: Context, target: Map<String, String>): Intent =
+    /**
+     * [identity] tells one notification's tap apart from another's: a
+     * PendingIntent matches by action, data and component, not by extras, so
+     * without it two conversations would share one and open the same target.
+     */
+    fun intent(context: Context, identity: String, target: Map<String, String>): Intent =
         Intent(context, MainActivity::class.java)
             .setAction(ACTION)
+            .setData(Uri.fromParts(IDENTITY_SCHEME, identity, null))
+            // A picker or Custom Tab in Buzz's task can sit above MainActivity.
+            // These deliver the tap to the running MainActivity's onNewIntent
+            // instead of starting a second one, or only raising the task.
+            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
             .apply { target.forEach { (key, value) -> putExtra(key, value) } }
+
+    private const val IDENTITY_SCHEME = "buzz-notification"
 
     /** The arguments `buzz/push` hands Dart, or null when [intent] is not a notification tap. */
     fun arguments(intent: Intent?): Map<String, String>? {
@@ -150,8 +163,8 @@ internal class WakeNotifier(private val context: Context) {
             }
             val tap = PendingIntent.getActivity(
                 context,
-                tag.hashCode(),
-                NotificationOpen.intent(context, newest.target),
+                0,
+                NotificationOpen.intent(context, tag, newest.target),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
             val notification = NotificationCompat.Builder(context, newest.category.channelId)
