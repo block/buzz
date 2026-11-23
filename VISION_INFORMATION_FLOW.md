@@ -240,7 +240,7 @@ One thing assumes that the owner is a person, and it moves: the join alert goes 
 
 1. ✅ Announce channels: guests are read-only everywhere ([#8143](https://github.com/block/buzz/pull/8143)).
 2. Refuse private-to-open visibility changes ([#9307](https://github.com/block/buzz/pull/9307)), except in an unlabelled channel where every current and former member is the person opening it or one of that person's agents.
-3. Add policies, labels and clearances, all at *none*.
+3. Add policies, labels and clearances, all at *none*. Agent clearances stay at *none* until steps 5 and 6 are live; the relay pieces can ship before that.
 4. Enforce rule 1 and hidden labels.
 5. Enforce rule 2 and the cleared-agent rules: only the owner adds a cleared agent to a channel or opens a DM that includes it, the agent adds only its owner, and a channel it creates gets its clearance as its label. The audio relay enforces the same rules for Huddle rooms.
 6. For cleared agents: refuse events that the relay would store outside a channel, after checking what agents publish now, and require profile approval.
