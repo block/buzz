@@ -355,6 +355,7 @@ class ComposeBar extends HookConsumerWidget {
         final editingValue = controller.value;
         final previousValue = lastObservedEditingValue.value;
         lastObservedEditingValue.value = editingValue;
+        emojiQuery.value = _emojiQuery(editingValue);
         if (isModifyingText.value || editingValue == previousValue) return;
         final text = editingValue.text;
         final sel = editingValue.selection;
@@ -373,8 +374,6 @@ class ComposeBar extends HookConsumerWidget {
             );
           }
         }
-
-        emojiQuery.value = _emojiQuery(editingValue);
 
         // Channel autocomplete detection — only when no @mention is active.
         if (mentionChooser.track(previousValue, editingValue) ||
@@ -410,18 +409,27 @@ class ComposeBar extends HookConsumerWidget {
     final dataset = emojiQuery.value == null
         ? null
         : ref.watch(emojiDatasetOrEmptyProvider);
+    final emojiIndex = useMemoized(
+      () => dataset == null
+          ? null
+          : ShortcodeIndex<_EmojiChoice>([
+              for (final entry in customEmoji)
+                (
+                  code: entry.shortcode,
+                  text: ':${entry.shortcode}:',
+                  url: entry.url,
+                ),
+              for (final entry in dataset.all)
+                if (entry.skinIndex == 0)
+                  (code: entry.id, text: entry.native, url: null),
+            ], (entry) => entry.code),
+      [dataset, customEmoji],
+    );
     final emojiSuggestions = useMemoized(() {
       final query = emojiQuery.value;
-      if (query == null || dataset == null) return const <_EmojiChoice>[];
-      final choices = <_EmojiChoice>[
-        for (final entry in customEmoji)
-          (code: entry.shortcode, text: ':${entry.shortcode}:', url: entry.url),
-        for (final entry in dataset.all)
-          if (entry.skinIndex == 0)
-            (code: entry.id, text: entry.native, url: null),
-      ];
-      return rankByShortcode(query, choices, (entry) => entry.code);
-    }, [emojiQuery.value, dataset, customEmoji]);
+      if (query == null || emojiIndex == null) return const <_EmojiChoice>[];
+      return emojiIndex.rank(query, limit: _emojiSuggestionLimit);
+    }, [emojiQuery.value, emojiIndex]);
 
     void selectEmoji(_EmojiChoice choice) {
       final query = _emojiQuery(controller.value);
@@ -947,7 +955,7 @@ class ComposeBar extends HookConsumerWidget {
               labelStyle: context.textTheme.bodyLarge?.copyWith(fontSize: 14),
               leading: (_, entry) => entry.url == null
                   ? Text(entry.text, style: const TextStyle(fontSize: 26))
-                  : CustomEmojiImage(
+                  : _CachedCustomEmojiPreview(
                       shortcode: entry.code,
                       url: entry.url!,
                       size: 26,
@@ -1079,7 +1087,7 @@ class ComposeBar extends HookConsumerWidget {
             !interactionLocked &&
             !voiceNote.isRecording,
         suggestions:
-            emojiSuggestions.isNotEmpty ||
+            (chooserOpen && emojiSuggestions.isNotEmpty) ||
                 mentionChooser.query != null ||
                 channelQuery.value != null
             ? suggestionPanel

@@ -56,6 +56,7 @@ import 'package:buzz/features/channels/voice_note_recording.dart';
 import 'package:buzz/features/channels/voice_note_waveform.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji_render.dart';
 import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/mentions/mention_bindings.dart';
@@ -2074,6 +2075,224 @@ void main() {
         TargetPlatform.android,
       }),
     );
+
+    testWidgets(
+      'colon search ranks the palette once and starts no image requests',
+      (tester) async {
+        final mediaRequests = <Uri>[];
+        final palette = _CountingCustomEmojiList([
+          for (var i = 0; i < 30; i++)
+            CustomEmoji(
+              shortcode: 'blob-$i',
+              url: 'https://example.com/blob-$i.gif',
+            ),
+        ]);
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            overrides: [
+              emojiDatasetOrEmptyProvider.overrideWithValue(
+                const EmojiDataset(
+                  categories: [],
+                  nativeToShortcode: {'😄': 'smile'},
+                  all: [
+                    EmojiEntry(
+                      id: 'smile',
+                      name: 'Smile',
+                      keywords: [],
+                      native: '😄',
+                      categoryId: 'people',
+                    ),
+                  ],
+                ),
+              ),
+              mediaHttpClientProvider.overrideWithValue(
+                http_testing.MockClient((request) async {
+                  mediaRequests.add(request.url);
+                  return http.Response('', 404);
+                }),
+              ),
+            ],
+            customEmoji: palette,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        final field = find.byType(TextField);
+        final panel = find.byKey(const ValueKey('emoji-suggestions-popover'));
+
+        // The palette is indexed once, not ranked again per keystroke.
+        await tester.enterText(field, ':sm');
+        await tester.pump();
+        final iterations = palette.iterations;
+        for (final text in [':smi', ':smil']) {
+          await tester.enterText(field, text);
+          await tester.pump();
+        }
+        expect(palette.iterations, iterations);
+
+        // Uncached custom emoji show placeholders; typing fetches nothing.
+        await tester.enterText(field, ':bl');
+        await tester.pumpAndSettle();
+        expect(
+          find.descendant(of: panel, matching: find.text(':blob-0:')),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(of: panel, matching: find.byIcon(BuzzIcons.sparkles)),
+          findsWidgets,
+        );
+        expect(mediaRequests, isEmpty);
+
+        // An emoji another surface already downloaded shows its image, and
+        // the row reads its shortcode once.
+        final container = ProviderScope.containerOf(tester.element(field));
+        container
+            .read(customEmojiBytesCacheProvider)
+            .remember('https://example.com/blob-0.gif', _pngBytes);
+        await tester.enterText(field, ':blo');
+        await tester.pumpAndSettle();
+        final firstRow = find.descendant(
+          of: panel,
+          matching: find.widgetWithText(ListTile, ':blob-0:'),
+        );
+        expect(
+          find.descendant(of: firstRow, matching: find.byType(Image)),
+          findsOneWidget,
+        );
+        expect(tester.getSemantics(firstRow), isSemantics(label: ':blob-0:'));
+        expect(mediaRequests, isEmpty);
+      },
+    );
+
+    testWidgets('iOS hides colon suggestions with the keyboard', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        var outsideTaps = 0;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            overrides: [
+              emojiDatasetOrEmptyProvider.overrideWithValue(
+                const EmojiDataset(
+                  categories: [],
+                  nativeToShortcode: {'😄': 'smile'},
+                  all: [
+                    EmojiEntry(
+                      id: 'smile',
+                      name: 'Smile',
+                      keywords: [],
+                      native: '😄',
+                      categoryId: 'people',
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            wrapPage: (page) => Column(
+              children: [
+                SafeArea(
+                  child: TextButton(
+                    onPressed: () => outsideTaps += 1,
+                    child: const Text('Outside'),
+                  ),
+                ),
+                Expanded(child: page),
+              ],
+            ),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        final field = find.byType(TextField);
+        await tester.enterText(field, ':sm');
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('emoji-suggestions-popover')),
+          findsOneWidget,
+        );
+
+        tester.widget<TextField>(field).focusNode!.unfocus();
+        await tester.pumpAndSettle();
+        expect(find.text('No matching results'), findsNothing);
+        await tester.tap(find.text('Outside'));
+        await tester.pumpAndSettle();
+        expect(outsideTaps, 1);
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('formatting a colon token closes its suggestions', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        final sent = <String>[];
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            overrides: [
+              emojiDatasetOrEmptyProvider.overrideWithValue(
+                const EmojiDataset(
+                  categories: [],
+                  nativeToShortcode: {'😄': 'smile'},
+                  all: [
+                    EmojiEntry(
+                      id: 'smile',
+                      name: 'Smile',
+                      keywords: [],
+                      native: '😄',
+                      categoryId: 'people',
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {
+                  sent.add(content);
+                },
+          ),
+        );
+        await _expandComposer(tester);
+        final field = find.byType(TextField);
+        final panel = find.byKey(const ValueKey('emoji-suggestions-popover'));
+        await tester.enterText(field, ':sm');
+        await tester.pumpAndSettle();
+        expect(panel, findsOneWidget);
+
+        await tester.tap(find.byIcon(BuzzIcons.aLargeSmall));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(BuzzIcons.bold));
+        await tester.pumpAndSettle();
+        expect(panel, findsNothing);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pumpAndSettle();
+        expect(sent, hasLength(1));
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
 
     testWidgets('iOS measures each character only of shorter drafts', (
       tester,
@@ -8421,4 +8640,31 @@ Future<void> _selectComposerAttachment(
     find.byKey(ValueKey('attachment-menu-item-${label.toLowerCase()}')),
   );
   await tester.pumpAndSettle();
+}
+
+/// A custom-emoji palette that counts how often it is iterated.
+class _CountingCustomEmojiList extends ListBase<CustomEmoji> {
+  _CountingCustomEmojiList(this._items);
+
+  final List<CustomEmoji> _items;
+  var iterations = 0;
+
+  @override
+  int get length => _items.length;
+
+  @override
+  set length(int value) => throw UnsupportedError('read-only');
+
+  @override
+  CustomEmoji operator [](int index) => _items[index];
+
+  @override
+  void operator []=(int index, CustomEmoji value) =>
+      throw UnsupportedError('read-only');
+
+  @override
+  Iterator<CustomEmoji> get iterator {
+    iterations += 1;
+    return super.iterator;
+  }
 }
