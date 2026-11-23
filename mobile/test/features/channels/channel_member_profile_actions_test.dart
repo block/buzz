@@ -6,6 +6,8 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_member_profile_actions.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -65,6 +67,7 @@ Future<ProviderContainer> _pump(
   String actorRole = 'owner',
   String targetRole = 'member',
   String target = 'alice',
+  String actor = 'self',
   bool dm = false,
   bool archived = false,
   bool inSheet = false,
@@ -76,11 +79,11 @@ Future<ProviderContainer> _pump(
   await tester.pumpWidget(
     ProviderScope(
       overrides: [
-        currentPubkeyProvider.overrideWithValue('self'),
+        currentPubkeyProvider.overrideWithValue(actor),
         channelsProvider.overrideWith(() => _Channels(channel)),
         channelMembersProvider('test').overrideWith(
           (ref) async => load == null
-              ? [_member('self', actorRole), _member('alice', targetRole)]
+              ? [_member(actor, actorRole), _member('alice', targetRole)]
               : await load(),
         ),
         agentOwnersProvider.overrideWith((ref) async => owners),
@@ -258,16 +261,34 @@ void main() {
     expect(find.text('Make channel admin'), findsOneWidget);
   });
   group('in a DM', () {
+    // Ownership comes from verified naming facts, which need hex keys.
+    final me = 'e' * 64, agent = 'c' * 64;
+    Future<ProviderContainer> pumpDm(
+      WidgetTester tester, {
+      String targetRole = 'bot',
+      Map<String, String> owners = const {},
+      bool inSheet = false,
+      _Actions? actions,
+    }) => _pump(
+      tester,
+      dm: true,
+      actor: me,
+      target: agent,
+      actorRole: 'member',
+      targetRole: targetRole,
+      owners: owners,
+      inSheet: inSheet,
+      actions: actions,
+      load: () async => [_member(me, 'member'), _member(agent, targetRole)],
+    );
+
     testWidgets('the owner removes their own agent after confirming', (
       tester,
     ) async {
       final actions = _Actions();
-      await _pump(
+      await pumpDm(
         tester,
-        dm: true,
-        actorRole: 'member',
-        targetRole: 'bot',
-        owners: {'alice': 'SELF'},
+        owners: {agent: me.toUpperCase()},
         inSheet: true,
         actions: actions,
       );
@@ -279,22 +300,37 @@ void main() {
       expect(find.textContaining('from this DM?'), findsOneWidget);
       await tester.tap(find.text('Remove'));
       await tester.pumpAndSettle();
-      expect(actions.calls, ['test:alice:remove']);
+      expect(actions.calls, ['test:$agent:remove']);
       expect(find.byType(ChannelMemberProfileActions), findsNothing);
     });
 
+    testWidgets(
+      'an owned agent outside the directory gets Remove once its verified profile loads',
+      (tester) async {
+        final container = await pumpDm(tester);
+        await tester.pumpAndSettle();
+        expect(find.text('Remove from DM'), findsNothing);
+        container
+            .read(userCacheProvider.notifier)
+            .put(
+              UserProfile(pubkey: agent, displayName: 'Scout', ownerPubkey: me),
+            );
+        await tester.pumpAndSettle();
+        expect(find.text('Remove from DM'), findsOneWidget);
+      },
+    );
+
     for (final scenario in ['other owner', 'unowned', 'person']) {
       testWidgets('no Remove for $scenario', (tester) async {
-        await _pump(
+        await pumpDm(
           tester,
-          dm: true,
-          actorRole: 'owner',
           targetRole: scenario == 'person' ? 'member' : 'bot',
           owners: {
-            if (scenario == 'other owner') 'alice': 'bob',
+            if (scenario == 'other owner') agent: 'd' * 64,
             // A person has no verified owner; even an admin viewer is no use.
           },
         );
+        await tester.pumpAndSettle();
         expect(find.text('Remove from DM'), findsNothing);
         expect(find.text('Remove from channel'), findsNothing);
       });

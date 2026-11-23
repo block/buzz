@@ -3,7 +3,9 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
-import '../../shared/mentions/agent_identity_provider.dart';
+import '../../shared/identity_names/identity_names.dart';
+import '../../shared/identity_names/identity_names_provider.dart';
+import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list.dart';
 import '../../shared/widgets/app_list_card.dart';
@@ -30,7 +32,7 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
     final error = useState<String?>(null);
     final actor = ref.watch(currentPubkeyProvider)?.toLowerCase();
     final roster = ref.watch(channelMembersProvider(channel.id));
-    final agentOwners = ref.watch(agentOwnersProvider).asData?.value;
+    final names = ref.watch(identityNameSourcesProvider);
     final channels = ref.watch(channelsProvider).asData?.value;
     final currentChannel =
         channels
@@ -38,13 +40,26 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
             .firstOrNull ??
         channel;
     final target = pubkey.toLowerCase();
+    final isDm = currentChannel.isDm;
+    // DM removal needs the target's verified owner; load its profile so the
+    // action appears once it arrives, whether or not the directory lists it.
+    useEffect(() {
+      if (isDm) {
+        ref
+            .read(userCacheProvider.notifier)
+            .resolve([target])
+            .then<void>((_) {})
+            .catchError((Object _) {});
+      }
+      return null;
+    }, [target, isDm]);
 
     // A DM has no admins: its owner may only remove their own agent.
     ChannelMember? manageableMember(
       AsyncValue<List<ChannelMember>> snapshot,
       String? currentActor,
       Channel current,
-      Map<String, String>? owners,
+      IdentityNameSources sources,
     ) {
       if (current.isArchived ||
           snapshot.isLoading ||
@@ -62,15 +77,16 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
           .firstOrNull;
       if (member == null) return null;
       if (current.isDm) {
-        return owners?[target]?.toLowerCase() == currentActor ? member : null;
+        return sources.factFor(target)?.ownerPubkey == currentActor
+            ? member
+            : null;
       }
       if (viewer?.isElevated != true || member.isOwner) return null;
       return member;
     }
 
-    final member = manageableMember(roster, actor, currentChannel, agentOwners);
+    final member = manageableMember(roster, actor, currentChannel, names);
     if (member == null) return const SizedBox.shrink();
-    final isDm = currentChannel.isDm;
 
     bool stillAllowed() {
       final latest =
@@ -86,7 +102,7 @@ class ChannelMemberProfileActions extends HookConsumerWidget {
                 ref.read(channelMembersProvider(channel.id)),
                 actor,
                 latest,
-                ref.read(agentOwnersProvider).asData?.value,
+                ref.read(identityNameSourcesProvider),
               )?.role ==
               member.role;
     }
