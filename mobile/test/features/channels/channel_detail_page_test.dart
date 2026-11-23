@@ -12629,6 +12629,141 @@ void main() {
     );
 
     testWidgets(
+      'a Huddle join that settles after the next Huddle is admitted leaves '
+      "that Huddle's membership alone",
+      (tester) async {
+        const secondId = 'd88a88c2-6c9c-48b7-a901-e021b20896f5';
+        final firstGate = Completer<void>();
+        final first = _HuddleTestTransport(
+          connectGate: firstGate.future,
+          connectError: const HuddleTransportError(
+            code: HuddleTransportErrorCode.connectionFailed,
+            message: 'Unable to connect to the Huddle audio relay.',
+          ),
+        );
+        final leaves = <String>[];
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            users: const {'self': UserProfile(pubkey: 'self')},
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            relaySessionNotifier: _ReconnectingRelaySession(),
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: _HuddleTestMedia.new,
+            huddleTransportFactory: (parameters) =>
+                parameters.ephemeralChannelId == secondId
+                ? _HuddleTestTransport()
+                : first,
+            huddleHumanCountLoader: (_) async => 2,
+            createChannelActions: (ref) => _FakeChannelActions(
+              ref,
+              onLeaveChannel: (id) async => leaves.add(id),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MobileHuddleShell)),
+        );
+        final controller = container.read(
+          mobileHuddleControllerProvider.notifier,
+        );
+
+        // Huddle A's connect is still pending when the user hangs up.
+        final firstJoin = controller.join(
+          parentChannelId: _channelId,
+          ephemeralChannelId: _huddleChannelId,
+          startedBy: 'desktop',
+          startedEventId: 'A',
+        );
+        await tester.pump();
+        await tester.pump();
+        expect(first.connectCalls, 1);
+        await controller.leave();
+
+        await controller.join(
+          parentChannelId: _channelId,
+          ephemeralChannelId: secondId,
+          startedBy: 'desktop',
+          startedEventId: 'B',
+        );
+        expect(container.read(huddleSessionProvider).wasAdmitted, isTrue);
+
+        // A's join returns only now, while B is the admitted Huddle.
+        firstGate.complete();
+        await firstJoin;
+        await controller.leave();
+
+        expect(leaves, [secondId]);
+        await tester.pump(const Duration(seconds: 1));
+      },
+    );
+
+    testWidgets(
+      'a native audio stop failure during a community switch reaches the '
+      'switch, not the zone',
+      (tester) async {
+        final archiveGate = Completer<void>();
+        final connectGate = Completer<void>();
+        final media = _HuddleTestMedia(
+          stopError: PlatformException(code: 'audio_session_stop_failed'),
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            users: const {'self': UserProfile(pubkey: 'self')},
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            relaySessionNotifier: _ReconnectingRelaySession(),
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: () => media,
+            huddleTransportFactory: (_) => _HuddleTestTransport(
+              connectGate: connectGate.future,
+              connectError: const HuddleTransportError(
+                code: HuddleTransportErrorCode.connectionFailed,
+                message: 'Unable to connect to the Huddle audio relay.',
+              ),
+            ),
+            createChannelActions: (ref) => _FakeChannelActions(
+              ref,
+              onArchiveChannel: (_) => archiveGate.future,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MobileHuddleShell)),
+        );
+
+        final start = expectLater(
+          container
+              .read(mobileHuddleControllerProvider.notifier)
+              .start(parentChannelId: _channelId),
+          throwsA(anything),
+        );
+        await tester.pump();
+        await tester.pump();
+        expect(media.state.phase, HuddleMediaPhase.active);
+
+        var switched = false;
+        final transition = container
+            .read(communityTransitionProvider)
+            .run()
+            .then((_) => switched = true);
+        await tester.pump();
+        connectGate.complete();
+        await tester.pump();
+        await tester.pump();
+        expect(switched, isFalse);
+
+        archiveGate.complete();
+        await start;
+        await transition;
+        expect(switched, isTrue);
+        await tester.pump(const Duration(seconds: 1));
+      },
+    );
+
+    testWidgets(
       'keeps an admitted iOS Huddle active across pause and resume until detach',
       (tester) async {
         final media = _HuddleTestMedia();
@@ -23695,10 +23830,12 @@ class _HuddleRelayConfigNotifier extends RelayConfigNotifier {
 final class _HuddleTestMedia implements HuddleMedia {
   _HuddleTestMedia({
     this.stopGate,
+    this.stopError,
     this.permission = HuddleMicrophonePermission.granted,
   });
 
   final Future<void>? stopGate;
+  final Object? stopError;
   final HuddleMicrophonePermission permission;
   final stopStarted = Completer<void>();
   final _states = StreamController<HuddleMediaState>.broadcast(sync: true);
@@ -23817,6 +23954,7 @@ final class _HuddleTestMedia implements HuddleMedia {
   Future<void> stop() async {
     if (!stopStarted.isCompleted) stopStarted.complete();
     if (stopGate case final gate?) await gate;
+    if (stopError case final error?) throw error;
     scheduleMicrotask(() {
       _emit(
         HuddleMediaState(

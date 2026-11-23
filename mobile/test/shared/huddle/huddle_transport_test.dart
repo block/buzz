@@ -469,6 +469,57 @@ void main() {
     });
   }
 
+  // A channel whose upgrade fails never completes `sink.close()`, so leaving
+  // during a pending upgrade must not wait for it, and a socket that opens
+  // after the leave must still be closed.
+  for (final upgradeAccepted in [false, true]) {
+    test('dispose during a pending upgrade completes when the upgrade '
+        '${upgradeAccepted ? 'succeeds late' : 'is refused'}', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(() => server.close(force: true));
+      final requestSeen = Completer<void>();
+      final respond = Completer<void>();
+      final serverSocketClosed = Completer<void>();
+      server.listen((request) async {
+        requestSeen.complete();
+        await respond.future;
+        if (!upgradeAccepted) {
+          request.response.statusCode = HttpStatus.forbidden;
+          await request.response.close();
+          return;
+        }
+        final socket = await WebSocketTransformer.upgrade(request);
+        socket.listen(
+          (_) {},
+          onDone: serverSocketClosed.complete,
+          onError: (Object _) {},
+        );
+      });
+      final transport = HuddleTransport(
+        parameters: HuddleConnectionParameters(
+          relayWebSocketUrl: 'ws://127.0.0.1:${server.port}',
+          nsec: _privateKey,
+          parentChannelId: _parentChannelId,
+          ephemeralChannelId: _ephemeralChannelId,
+        ),
+        connectTimeout: const Duration(seconds: 5),
+      );
+      final connect = transport.connect().then<Object?>(
+        (_) => null,
+        onError: (Object error) => error,
+      );
+      await requestSeen.future;
+
+      final disposed = transport.dispose();
+      respond.complete();
+      await disposed.timeout(const Duration(seconds: 2));
+      expect(await connect, isA<HuddleTransportError>());
+      if (upgradeAccepted) {
+        await serverSocketClosed.future.timeout(const Duration(seconds: 2));
+      }
+    });
+  }
+
   test('bounds transport audio ingress', () async {
     final channel = _ControlledWebSocketChannel();
     final transport = _transport(channel);

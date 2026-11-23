@@ -411,6 +411,8 @@ final class MobileHuddleController extends Notifier<bool> {
       // Stop local audio first, so the microphone and any pending admission
       // retry end now rather than when the start gives up on the old relay.
       final localLeave = _leaveLocalAudio();
+      // Its error is still delivered by the await below, after the rollback.
+      localLeave.ignore();
       try {
         await startFuture;
       } catch (_) {

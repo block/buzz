@@ -293,6 +293,35 @@ void main() {
     );
   });
 
+  test('a refusal that lands after leaving does not arm a retry', () async {
+    final media = _FakeMedia();
+    final gate = Completer<void>();
+    final transport = _FakeTransport()
+      ..refusals = 1
+      ..connectGate = gate.future;
+    final container = ProviderContainer(
+      overrides: [
+        huddleMediaFactoryProvider.overrideWithValue(() => media),
+        huddleTransportFactoryProvider.overrideWithValue((_) => transport),
+        huddleAdmissionRetryDelaysProvider.overrideWithValue(const [
+          Duration(hours: 1),
+        ]),
+      ],
+    );
+    addTearDown(container.dispose);
+    final notifier = container.read(huddleSessionProvider.notifier);
+
+    final join = notifier.join(_parameters());
+    while (transport.connectCalls == 0) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    await notifier.leave();
+    gate.complete();
+    await join.timeout(const Duration(seconds: 1));
+
+    expect(transport.connectCalls, 1);
+  });
+
   test('surfaces native audio interruptions without leaving', () async {
     final media = _FakeMedia();
     final transport = _FakeTransport();
@@ -624,6 +653,9 @@ final class _FakeTransport implements HuddleTransportClient {
   /// Connects that the relay refuses, as it does while it can't check
   /// authorization, before one succeeds.
   var refusals = 0;
+
+  /// Holds each connect until completed, as a slow relay answer does.
+  Future<void>? connectGate;
   HuddleTransportState _state = HuddleTransportState.idle();
 
   void emitRemote(HuddleRemoteAudioFrame frame) => _remoteFrames.add(frame);
@@ -669,6 +701,7 @@ final class _FakeTransport implements HuddleTransportClient {
   Future<void> connect({bool freshDiscovery = true}) async {
     connectCalls += 1;
     this.freshDiscovery.add(freshDiscovery);
+    if (connectGate case final gate?) await gate;
     if (refusals > 0) {
       refusals -= 1;
       const error = HuddleTransportError(

@@ -651,6 +651,9 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
       } on HuddleTransportError catch (error) {
         if (!_admissionRetryable(error) || attempt >= delays.length) rethrow;
       }
+      // A refusal that lands after a hang-up must not arm a wait that the
+      // teardown has already passed.
+      _ensureCurrent(generation);
       final wait = _admissionWait = Completer<void>();
       final timer = Timer(delays[attempt], () {
         if (!wait.isCompleted) wait.complete();

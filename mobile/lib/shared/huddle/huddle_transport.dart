@@ -359,7 +359,14 @@ final class HuddleTransport implements HuddleTransportClient {
     await subscription?.cancel();
     final channel = _channel;
     _channel = null;
-    await channel?.sink.close();
+    if (subscription == null) {
+      // The upgrade is still pending. A channel whose upgrade then fails never
+      // completes sink.close(), so don't wait for it; the channel still closes
+      // a socket that opens late.
+      unawaited(channel?.sink.close().catchError((Object _) {}));
+    } else {
+      await channel?.sink.close();
+    }
     _handshakeCompleter = null;
     _emitState(HuddleTransportState(phase: HuddleTransportPhase.disconnected));
   }
