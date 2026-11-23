@@ -1,4 +1,5 @@
 import 'message_reply_drag_target.dart';
+
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'dart:async';
@@ -282,7 +283,6 @@ class MessageContent extends HookConsumerWidget {
       content,
       mentionNames,
       signedMentionPubkeys,
-      mentionLabels,
     );
     final resolvedAgentMentionPubkeys = {
       ...agentMentionPubkeys.map((pubkey) => pubkey.toLowerCase()),
@@ -401,7 +401,7 @@ class MessageContent extends HookConsumerWidget {
         }
         return segment;
       });
-    }, [markdownContent, mentionPresentationKey, mentionLabels]);
+    }, [markdownContent, mentionPresentationKey]);
 
     final inlinePatterns = _useMessageInlinePatterns(
       ownBubble: bubble && ownMessage,

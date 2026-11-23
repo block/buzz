@@ -185,29 +185,16 @@ class _ComposeBarLayout extends HookWidget {
                         ),
                         child: Align(
                           alignment: Alignment.centerLeft,
-                          child: controller.bindings.isEmpty
-                              ? Text(
-                                  collapsedText,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: context.textTheme.bodyLarge?.copyWith(
-                                    color: trimmedDraft.isEmpty
-                                        ? context.colors.onSurfaceVariant
-                                        : context.colors.onSurface,
-                                  ),
-                                )
-                              : Text.rich(
-                                  controller.buildTextSpan(
-                                    context: context,
-                                    style: context.textTheme.bodyLarge
-                                        ?.copyWith(
-                                          color: context.colors.onSurface,
-                                        ),
-                                    withComposing: false,
-                                  ),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
+                          child: Text(
+                            collapsedText,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: context.textTheme.bodyLarge?.copyWith(
+                              color: trimmedDraft.isEmpty
+                                  ? context.colors.onSurfaceVariant
+                                  : context.colors.onSurface,
+                            ),
+                          ),
                         ),
                       ),
                     ),
@@ -446,10 +433,6 @@ class _ComposeBarLayout extends HookWidget {
         allowedMimeTypes: _pastedImageMimeTypes,
         onContentInserted: onContentInserted,
       ),
-      // Give wrapped mention chips room above and below their baseline.
-      strutStyle: controller.bindings.isEmpty
-          ? null
-          : const StrutStyle(forceStrutHeight: false),
       minLines: 1,
       maxLines: 5,
       style: context.textTheme.bodyLarge,

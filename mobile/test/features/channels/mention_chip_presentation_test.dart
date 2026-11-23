@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/message_mention_pill.dart';
+import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/widgets/avatar_image.dart';
@@ -14,18 +15,10 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
-const _personKey =
-    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
-const _agentKey =
-    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-
 class _Profiles extends UserCacheNotifier {
   @override
   Map<String, UserProfile> build() => const {
-    _personKey: UserProfile(
-      pubkey: _personKey,
-      avatarUrl: 'https://example.org/bob.png',
-    ),
+    'bob': UserProfile(pubkey: 'bob', avatarUrl: 'https://example.org/bob.png'),
   };
 }
 
@@ -43,17 +36,71 @@ class _TwoProfiles extends UserCacheNotifier {
   };
 }
 
+const _owner =
+    'a1000000000000000000000000000000000000000000000000000000000000aa';
+const _helper =
+    'b2000000000000000000000000000000000000000000000000000000000000bb';
+
+class _NoPicture extends UserCacheNotifier {
+  @override
+  Map<String, UserProfile> build() => const {
+    _owner: UserProfile(pubkey: _owner, displayName: 'Alice'),
+  };
+}
+
+Widget _content(
+  Widget content, {
+  List<String>? requests,
+  TextScaler textScaler = TextScaler.noScaling,
+}) => ProviderScope(
+  overrides: [
+    myPubkeyProvider.overrideWithValue('viewer'),
+    userCacheProvider.overrideWith(_NoPicture.new),
+    mentionSearchCacheProvider.overrideWithValue(
+      MentionSearchCache()..put('alice', const [
+        UserProfile(
+          pubkey: _owner,
+          displayName: 'Alice',
+          avatarUrl: 'https://example.org/removed.png',
+        ),
+      ]),
+    ),
+    mediaGetAuthServiceProvider.overrideWithValue(
+      MediaGetAuthService(baseUrl: 'https://relay.example.org', nsec: null),
+    ),
+    mediaDiskCacheProvider.overrideWithValue(null),
+    mediaHttpClientProvider.overrideWithValue(
+      MockClient((request) async {
+        requests?.add(request.url.toString());
+        return http.Response('', 404);
+      }),
+    ),
+  ],
+  child: MaterialApp(
+    theme: AppTheme.light(),
+    home: Scaffold(
+      body: MediaQuery(
+        data: MediaQueryData(
+          size: const Size(800, 600),
+          textScaler: textScaler,
+        ),
+        child: AppMarkdownTheme(child: SizedBox(width: 600, child: content)),
+      ),
+    ),
+  ),
+);
+
 void main() {
   testWidgets(
     'mentions follow identity, bubble, and appearance while staying tappable',
     (tester) async {
       final profiles = userCacheProvider.overrideWith(_Profiles.new);
       final container = ProviderContainer(
-        overrides: [myPubkeyProvider.overrideWithValue(_agentKey), profiles],
+        overrides: [myPubkeyProvider.overrideWithValue('alice'), profiles],
       );
       addTearDown(container.dispose);
       String? tapped;
-      const names = {_agentKey: 'Alice', _personKey: 'Bob'};
+      const names = {'alice': 'Alice', 'bob': 'Bob'};
       for (final brightness in Brightness.values) {
         for (final own in [false, true]) {
           final theme = mobileAppearanceTheme(brightness, '#c0a2f1');
@@ -73,16 +120,7 @@ void main() {
                       child: SizedBox(
                         width: 320,
                         child: MessageContent(
-                          content: '@Helper @Bob Smith',
-                          mentionLabels: const {
-                            _personKey: 'Bob Smith',
-                            _agentKey: 'Helper',
-                          },
-                          tags: const [
-                            ['p', _personKey],
-                            ['p', _agentKey],
-                          ],
-                          agentMentionPubkeys: const {_agentKey},
+                          content: 'Hello @Alice and @Bob',
                           mentionNames: names,
                           bubble: true,
                           ownMessage: own,
@@ -108,59 +146,38 @@ void main() {
           }
 
           expect(
-            fill('Helper'),
+            fill('Alice'),
             own ? chatCodeTint(chat.foreground, .18) : chat.outgoing,
           );
           expect(
-            fill('Bob Smith'),
+            fill('Bob'),
             own
                 ? chatCodeTint(chat.foreground, .18)
                 : (brightness == Brightness.dark
                       ? Colors.white.withValues(alpha: .16)
                       : Colors.black.withValues(alpha: .10)),
           );
-          final chips = find.byType(MessageMentionPill);
-          expect(
-            tester.widget<MessageMentionPill>(chips.first).isAgent,
-            isTrue,
-          );
-          expect(
-            tester.widget<MessageMentionPill>(chips.last).isAgent,
-            isFalse,
-          );
-          Rect paintedChip(Finder chip) => tester.getRect(
-            find
-                .descendant(of: chip, matching: find.byType(DecoratedBox))
-                .first,
-          );
-          final agentRect = paintedChip(chips.first);
-          final personRect = paintedChip(chips.last);
-          expect(
-            agentRect.right < personRect.left ||
-                agentRect.bottom < personRect.top,
-            isTrue,
-          );
           final portrait = tester.widget<AvatarImage>(find.byType(AvatarImage));
           expect(portrait.imageUrl, 'https://example.org/bob.png');
           expect(portrait.isAgent, isFalse);
           tapped = null;
-          await tester.tap(find.text('Bob Smith'));
-          expect(tapped, _personKey);
+          await tester.tap(find.text('Bob'));
+          expect(tapped, 'bob');
           expect(tester.takeException(), isNull);
 
           // Switching identity updates already-parsed spans, without new content.
           container.updateOverrides([
             profiles,
-            myPubkeyProvider.overrideWithValue(_personKey),
+            myPubkeyProvider.overrideWithValue('bob'),
           ]);
           await tester.pump();
           if (!own) {
-            expect(fill('Bob Smith'), chat.outgoing);
-            expect(fill('Helper'), isNot(chat.outgoing));
+            expect(fill('Bob'), chat.outgoing);
+            expect(fill('Alice'), isNot(chat.outgoing));
           }
           container.updateOverrides([
             profiles,
-            myPubkeyProvider.overrideWithValue(_agentKey),
+            myPubkeyProvider.overrideWithValue('alice'),
           ]);
           await tester.pump();
         }
@@ -243,4 +260,109 @@ void main() {
       await tester.pumpAndSettle();
     },
   );
+
+  testWidgets('a contextual label never takes over a signed mention', (
+    tester,
+  ) async {
+    final tapped = <String>[];
+    await tester.pumpWidget(
+      _content(
+        MessageContent(
+          content: '@Helper, please inspect @Alice’s Helper logs.',
+          tags: const [
+            ['p', _helper],
+            ['p', _owner],
+          ],
+          mentionNames: const {_owner: 'Alice', _helper: 'Helper'},
+          mentionLabels: const {_owner: 'Alice', _helper: 'Alice’s Helper'},
+          agentMentionPubkeys: const {_helper},
+          onMentionTap: tapped.add,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final chips = find.byType(MessageMentionPill);
+    expect(chips, findsNWidgets(2));
+    await tester.tap(chips.last);
+    expect(tapped, [_owner]);
+  });
+
+  testWidgets('a profile without a picture ignores an older search portrait', (
+    tester,
+  ) async {
+    final requests = <String>[];
+    await tester.pumpWidget(
+      _content(
+        const MessageContent(
+          content: 'Ask @Alice about this.',
+          tags: [
+            ['p', _owner],
+          ],
+          mentionNames: {_owner: 'Alice'},
+        ),
+        requests: requests,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(MessageMentionPill), findsOneWidget);
+    expect(find.byType(AvatarImage), findsNothing);
+    expect(requests, isEmpty);
+
+    // A picked portrait gives way once the profile loads without a picture.
+    const picked =
+        'c3000000000000000000000000000000000000000000000000000000000000cc';
+    await tester.pumpWidget(
+      _content(
+        const MessageMentionPill(
+          label: 'Sam',
+          pubkey: picked,
+          isAgent: false,
+          composer: true,
+          candidateAvatar: 'https://example.org/picked.png',
+        ),
+        requests: requests,
+      ),
+    );
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(MessageMentionPill)),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(AvatarImage), findsOneWidget);
+    final before = requests.length;
+    container
+        .read(userCacheProvider.notifier)
+        .put(const UserProfile(pubkey: picked, displayName: 'Sam'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AvatarImage), findsNothing);
+    expect(requests, hasLength(before));
+  });
+
+  testWidgets('a line with a mention is as tall as a plain line', (
+    tester,
+  ) async {
+    for (final scale in [1.0, 1.353]) {
+      double height() => tester.getSize(find.byType(MessageContent)).height;
+      Future<void> pump(String content) async {
+        await tester.pumpWidget(
+          _content(
+            MessageContent(
+              content: content,
+              tags: const [
+                ['p', _owner],
+              ],
+              mentionNames: const {_owner: 'Alice'},
+            ),
+            textScaler: TextScaler.linear(scale),
+          ),
+        );
+        await tester.pumpAndSettle();
+      }
+
+      await pump('Ask Alice about this.');
+      final plain = height();
+      await pump('Ask @Alice about this.');
+      expect(find.byType(MessageMentionPill), findsOneWidget);
+      expect(height(), plain, reason: 'at $scale×');
+    }
+  });
 }

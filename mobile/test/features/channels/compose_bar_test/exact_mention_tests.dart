@@ -843,6 +843,42 @@ void exactMentionTests() {
     expect(sentText, '@Sam ($first) @ſam ($second)');
   });
 
+  testWidgets('picked multi-word namesakes each carry their key on send', (
+    tester,
+  ) async {
+    ChannelMember named(String key) => ChannelMember(
+      pubkey: key,
+      displayName: 'Alex Smith',
+      role: 'member',
+      joinedAt: DateTime(2025),
+    );
+    String? sentText;
+    await mountComposer(tester, [named(first), named(second)], (
+      text,
+      _, {
+      mediaTags = const [],
+    }) async {
+      sentText = text;
+    });
+    Finder rows() => find.descendant(
+      of: find.byKey(const ValueKey('mention-suggestions-popover')),
+      matching: find.textContaining('Alex Smith'),
+    );
+    final field = find.byType(TextField);
+    await tester.enterText(field, '@Alex');
+    await tester.pumpAndSettle();
+    await tester.tap(rows().first);
+    await tester.pumpAndSettle();
+    final controller = tester.widget<TextField>(field).controller!;
+    await tester.enterText(field, '${controller.text}@Alex');
+    await tester.pumpAndSettle();
+    await tester.tap(rows().last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+    await tester.pumpAndSettle();
+    expect(sentText, '@Alex Smith ($first) @Alex Smith ($second)');
+  });
+
   testWidgets('closing punctuation never selects a shared name', (
     tester,
   ) async {

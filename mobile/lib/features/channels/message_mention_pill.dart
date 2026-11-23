@@ -90,11 +90,17 @@ class MessageMentionPill extends ConsumerWidget {
     final fontSize = style.fontSize ?? 16;
 
     final key = pubkey?.toLowerCase();
-    final picture = key == null || !showPortrait
+    final cached = key == null || !showPortrait
         ? null
         : ref.watch(
-                userCacheProvider.select((cache) => cache[key]?.avatarUrl),
-              ) ??
+            userCacheProvider.select(
+              (cache) =>
+                  (known: cache.containsKey(key), url: cache[key]?.avatarUrl),
+            ),
+          );
+    final picture = cached == null
+        ? null
+        : cached.url ??
               (isAgent
                   ? ref.watch(
                       agentDirectoryPicturesProvider.select(
@@ -102,10 +108,16 @@ class MessageMentionPill extends ConsumerWidget {
                       ),
                     )
                   : null) ??
-              candidateAvatar ??
-              (isAgent
+              // The picker's and search's portraits stand in only until the
+              // profile loads, so a profile without a picture stays without one.
+              (cached.known
                   ? null
-                  : ref.watch(mentionSearchCacheProvider).portraitFor(key));
+                  : candidateAvatar ??
+                        (isAgent
+                            ? null
+                            : ref
+                                  .watch(mentionSearchCacheProvider)
+                                  .portraitFor(key!)));
     final hasPicture = picture != null && picture.isNotEmpty;
     // The enclosing span already scales the chip.
     final size = fontSize;
@@ -116,10 +128,7 @@ class MessageMentionPill extends ConsumerWidget {
         : BuzzAgentIcon(size: size, color: ink);
 
     return Container(
-      margin: EdgeInsets.symmetric(
-        horizontal: fontSize / 17,
-        vertical: 2 * fontSize / 17,
-      ),
+      margin: EdgeInsets.symmetric(horizontal: fontSize / 17),
       padding: EdgeInsetsDirectional.fromSTEB(
         hasPicture ? Grid.quarter : Grid.quarter * 1.5,
         Grid.quarter,
