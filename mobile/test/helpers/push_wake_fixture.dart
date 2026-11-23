@@ -45,9 +45,11 @@ class PushWakeFixture {
   Future<PushWakeResult> wake({
     ShownMessageStore? store,
     PushWakeTimeouts timeouts = const PushWakeTimeouts(),
+    Future<List<Community>> Function()? loadCommunities,
   }) => resolvePushWake(
     store: store ?? openStore(),
-    loadCommunities: () async => [for (final r in relays) r.community],
+    loadCommunities:
+        loadCommunities ?? () async => [for (final r in relays) r.community],
     httpClient: client,
     timeouts: timeouts,
     now: () => pushWakeClock,
@@ -281,16 +283,20 @@ class FakePushRelay {
   }
 }
 
-/// A store whose claims take [delay], as slow storage would.
+/// A store whose claims take [delay], as slow storage would, and whose
+/// [newestShown] waits for [newestGate].
 class SlowShownMessageStore implements ShownMessageStore {
-  SlowShownMessageStore(this._inner, this.delay);
+  SlowShownMessageStore(this._inner, this.delay, {this.newestGate});
 
   final ShownMessageStore _inner;
   final Duration delay;
+  final Future<void>? newestGate;
 
   @override
-  Future<DateTime?> newestShown(String community) =>
-      _inner.newestShown(community);
+  Future<DateTime?> newestShown(String community) async {
+    await newestGate;
+    return _inner.newestShown(community);
+  }
 
   @override
   Future<bool> claim(
@@ -320,6 +326,28 @@ class FailingShownMessageStore implements ShownMessageStore {
   Future<bool> claim(String community, String eventId, DateTime createdAt) {
     if (community == this.community && succeed-- <= 0) {
       throw const FileSystemException('No space left on device');
+    }
+    return _inner.claim(community, eventId, createdAt);
+  }
+}
+
+/// A store whose claims for [community] never answer after [succeed] of them,
+/// as storage that hangs midway through a wake.
+class StalledShownMessageStore implements ShownMessageStore {
+  StalledShownMessageStore(this._inner, this.community, {this.succeed = 0});
+
+  final ShownMessageStore _inner;
+  final String community;
+  int succeed;
+
+  @override
+  Future<DateTime?> newestShown(String community) =>
+      _inner.newestShown(community);
+
+  @override
+  Future<bool> claim(String community, String eventId, DateTime createdAt) {
+    if (community == this.community && succeed-- <= 0) {
+      return Completer<bool>().future;
     }
     return _inner.claim(community, eventId, createdAt);
   }

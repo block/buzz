@@ -192,7 +192,9 @@ class PushWakeTimeouts {
   /// inside [total], and a slow lookup costs only the names.
   final Duration metadata;
 
-  /// Longest the whole wake may take. At this point it returns what it has.
+  /// Longest the whole wake may take, from the moment it starts, reading the
+  /// community list included. At this point it returns what it has, after a
+  /// short grace for claims already running.
   final Duration total;
 }
 
@@ -216,57 +218,81 @@ Future<PushWakeResult> resolvePushWake({
   DateTime Function()? now,
 }) async {
   final clock = now ?? DateTime.now;
-  final communities = await (loadCommunities ?? CommunityStorage().loadAll)();
-  final eligible = [
-    for (final community in communities)
-      if (community.pushNotificationsEnabled &&
-          (community.nsec?.isNotEmpty ?? false) &&
-          community.pushSubscriptionState.authoritative.isNotEmpty)
-        community,
-  ];
-  final client = RelayHttpQueryClient(client: httpClient);
+  // The budget starts here, so reading the community list spends it too.
   final run = _WakeRun();
-  final tasks = [
-    for (final community in eligible)
-      _resolveCommunity(
-        community,
-        run: run,
-        store: store,
-        client: client,
-        timeouts: timeouts,
-        clock: clock,
-      ).catchError((Object _) {
-        run.failed.add(community.id);
-      }),
-  ];
   final deadline = Completer<void>();
   final timer = Timer(timeouts.total, deadline.complete);
+  final client = RelayHttpQueryClient(client: httpClient);
   try {
+    final communities = await Future.any<List<Community>?>([
+      (loadCommunities ?? CommunityStorage().loadAll)(),
+      deadline.future.then((_) => null),
+    ]);
+    // Not even the list could be read, so no community was looked at.
+    if (communities == null) {
+      return const PushWakeResult(notifications: [], interrupted: true);
+    }
+    final eligible = [
+      for (final community in communities)
+        if (community.pushNotificationsEnabled &&
+            (community.nsec?.isNotEmpty ?? false) &&
+            community.pushSubscriptionState.authoritative.isNotEmpty)
+          community,
+    ];
+    final tasks = [
+      for (final community in eligible)
+        _resolveCommunity(
+          community,
+          run: run,
+          store: store,
+          client: client,
+          timeouts: timeouts,
+          clock: clock,
+        ).catchError((Object _) {
+          run.failed.add(community.id);
+        }),
+    ];
     await Future.any([Future.wait(tasks), deadline.future]);
+    // From here no task may start claiming. A claim already running gets a
+    // short grace to finish, so its message is returned, but a stalled one
+    // (storage that never answers) can't hold back the other communities.
+    run.closed = true;
+    await Future.wait(
+      run.claims,
+    ).timeout(_claimGrace, onTimeout: () => const []);
+    for (final community in eligible) {
+      if (!run.done.contains(community.id)) run.failed.add(community.id);
+    }
+    // A community still working was cut short. What it claimed is already
+    // recorded as shown, so it is returned, with short keys for titles.
+    for (final claimed in run.claimed.values) {
+      run.notifications.addAll(claimed);
+    }
+    return PushWakeResult(
+      notifications: capPushWakeNotifications(run.notifications),
+      failedCommunityIds: run.failed.toSet().toList()..sort(),
+    );
   } finally {
     timer.cancel();
+    // The caller may be in a long-lived process, and a request that outlived
+    // the budget must not keep holding the connection.
+    client.close();
   }
-  // From here no task may start claiming. A claim already running finishes,
-  // so no message is recorded as shown without being returned.
-  run.closed = true;
-  await Future.wait(run.claims);
-  for (final community in eligible) {
-    if (!run.done.contains(community.id)) run.failed.add(community.id);
-  }
-  // The caller may be in a long-lived process, and a request that outlived
-  // the budget must not keep holding the connection.
-  client.close();
-  return PushWakeResult(
-    notifications: capPushWakeNotifications(run.notifications),
-    failedCommunityIds: run.failed.toSet().toList()..sort(),
-  );
 }
+
+/// How long claims already running get to finish once the wake's budget is
+/// spent. Bounded, so a claim that never answers can't hold the wake.
+const _claimGrace = Duration(milliseconds: 250);
 
 class _WakeRun {
   final notifications = <PushWakeNotification>[];
   final failed = <String>[];
   final done = <String>{};
   final claims = <Future<void>>[];
+
+  /// What each community running now has claimed so far, which is returned if
+  /// the wake ends before the community does.
+  final claimed = <String, List<PushWakeNotification>>{};
   bool closed = false;
   final _clock = Stopwatch()..start();
 
@@ -301,6 +327,12 @@ Future<void> _resolveCommunity(
     List<Map<String, dynamic>> filters, {
     required Duration timeout,
   }) async {
+    // Whatever a request is allowed, it ends with the wake: once the budget
+    // is spent nothing is sent.
+    final left = run.remaining(timeouts);
+    if (run.expired(timeouts) || left == Duration.zero) {
+      throw TimeoutException('The wake has no time left');
+    }
     final body = utf8.encode(jsonEncode(filters));
     final request = http.Request('POST', url)
       ..headers.addAll({
@@ -320,7 +352,7 @@ Future<void> _resolveCommunity(
     final response = await client.sendBounded(
       request,
       maxBytes: pushWakeMaxResponseBytes,
-      timeout: timeout,
+      timeout: timeout < left ? timeout : left,
     );
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw RelayException(response.statusCode, '');
@@ -359,7 +391,7 @@ Future<void> _resolveCommunity(
     var limit = pushWakeMessagePageSize;
     var pages = 0;
     while (until.isNotEmpty) {
-      if (pages == pushWakeMaxMessagePages || run.expired(timeouts)) {
+      if (pages == pushWakeMaxMessagePages) {
         return (events: found.values.toList(), complete: false);
       }
       final List<NostrEvent> page;
@@ -447,7 +479,7 @@ Future<void> _resolveCommunity(
     // Claim first, so a message already shown costs no further requests: the
     // fetch overlaps the last shown messages by the reorder window, so most
     // wakes see messages they have already shown.
-    final claimed = <PushWakeNotification>[];
+    final claimed = run.claimed[community.id] = <PushWakeNotification>[];
     final senders = <String, String>{};
     var complete = fetch.complete;
     for (final (:event, :category) in selected) {
@@ -543,6 +575,7 @@ Future<void> _resolveCommunity(
               : channels[n.target.channelId],
         ),
     ]);
+    run.claimed.remove(community.id);
     // A wake cut short leaves the community unfinished, so it is reported as
     // incomplete and the next wake looks again.
     if (complete) run.done.add(community.id);

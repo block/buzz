@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/push/push_wake_resolver.dart';
 
 import 'package:buzz/shared/push/push_wake_runner.dart';
@@ -550,6 +551,17 @@ void main() {
 
       expect(result.notifications, isEmpty);
       expect(result.incomplete, isTrue);
+
+      // The budget starts with the wake, so a community list that never
+      // loads can't hold it past that either.
+      final unloaded = await fixture
+          .wake(
+            timeouts: timeouts,
+            loadCommunities: () => Completer<List<Community>>().future,
+          )
+          .timeout(const Duration(seconds: 2));
+      expect(unloaded.notifications, isEmpty);
+      expect(unloaded.interrupted, isTrue);
     });
 
     test('the whole wake stops at its total budget, claims included', () async {
@@ -608,6 +620,53 @@ void main() {
       final unnamed = await fixture.wake(timeouts: tight);
       expect(lookup.elapsed, lessThan(const Duration(seconds: 2)));
       expect(unnamed.notifications.map((n) => n.eventId), [late.id]);
+
+      // Storage that never answers for one community holds back neither the
+      // others nor what it claimed before it stalled, and the community is
+      // left for the next wake.
+      final healthy = fixture.addCommunity();
+      final stalled = fixture.addCommunity();
+      final healthyFriend = healthy.person('Friend');
+      final stalledFriend = stalled.person('Friend');
+      final healthyDm = healthy.dmChannel();
+      final stalledDm = stalled.dmChannel();
+      final fine = healthy.message(healthyDm, healthyFriend, 'fine');
+      final claimedFirst = stalled.message(stalledDm, stalledFriend, 'first');
+      stalled.message(stalledDm, stalledFriend, 'second');
+      final hung = Stopwatch()..start();
+      final cutShort = await fixture
+          .wake(
+            store: StalledShownMessageStore(
+              fixture.openStore(),
+              stalled.communityId,
+              succeed: 1,
+            ),
+            timeouts: tight,
+          )
+          .timeout(const Duration(seconds: 3));
+      expect(hung.elapsed, lessThan(const Duration(seconds: 2)));
+      expect(cutShort.failedCommunityIds, [stalled.communityId]);
+      expect(cutShort.notifications.map((n) => n.eventId).toSet(), {
+        fine.id,
+        claimedFirst.id,
+      });
+
+      // Once the budget is spent, nothing more is sent to a relay.
+      final gate = Completer<void>();
+      int queried() => fixture.relays.fold(0, (n, r) => n + r.queries.length);
+      final before = queried();
+      final gated = await fixture.wake(
+        store: SlowShownMessageStore(
+          fixture.openStore(),
+          Duration.zero,
+          newestGate: gate.future,
+        ),
+        timeouts: const PushWakeTimeouts(total: Duration(milliseconds: 300)),
+      );
+      expect(gated.notifications, isEmpty);
+      gate.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(queried(), before);
     });
   });
 
