@@ -32,6 +32,7 @@ import '../../shared/widgets/tabler_star_icon.dart';
 import '../../shared/widgets/modal_presentation.dart';
 import '../../shared/widgets/duo_toolbar.dart';
 import 'channel.dart';
+import 'channel_detail_page.dart';
 import 'add_members_sheet.dart';
 import 'channel_identity_names_provider.dart';
 import 'channel_management_provider.dart';
@@ -46,6 +47,8 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import '../activity/inbox_local_state_provider.dart';
 import '../../shared/read_state/read_state_time.dart';
+import '../../shared/community/community_provider.dart';
+import '../../shared/relay/relay_author_provider.dart';
 import '../../shared/widgets/covered_route_keyboard_insets.dart';
 
 part 'channel_details_page.dart';

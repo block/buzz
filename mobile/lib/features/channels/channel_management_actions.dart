@@ -14,6 +14,10 @@ List<List<String>> buildDeleteChannelTags(String channelId) => [
   ['h', channelId],
 ];
 
+/// Why the relay refuses a history tag from an agent signer.
+const _onlyPeopleShareHistory =
+    "forbidden: only people can share a DM's history";
+
 /// Re-read schedule while confirming a join, matching desktop's.
 const _joinConfirmationDelays = [
   Duration.zero,
@@ -31,6 +35,18 @@ class ChannelJoinUnconfirmed implements Exception {
 
   @override
   String toString() => 'Join was sent but is not confirmed yet';
+}
+
+/// An add to a DM the relay accepted into another DM, [channelId], that
+/// this client could not yet confirm or show. [ChannelActions.openAddedDm]
+/// checks again without sending the add again.
+class DmAddUnconfirmed implements Exception {
+  const DmAddUnconfirmed(this.channelId);
+
+  final String channelId;
+
+  @override
+  String toString() => 'Added. Tap Add again to open the DM.';
 }
 
 class ChannelActions {
@@ -146,16 +162,38 @@ class ChannelActions {
   /// since a full reload can take many seconds on a large account or slow
   /// connection. Callers that depend on fresh list state, such as hidden-DM
   /// resurfacing, keep the default.
+  ///
+  /// With [includeHistory], as New Message opens, the relay picks the DM
+  /// these people already share, and named agents it lacks join it with its
+  /// history; the returned channel is that DM. A relay from before history
+  /// ignores the tag and opens the DM of exactly these members. The relay
+  /// lets only people share a DM's history, so when it refuses the tag to a
+  /// signed-in agent, the open is resent without it and opens that DM too.
   Future<Channel> openDm({
     required List<String> pubkeys,
     bool waitForChannelList = true,
+    bool includeHistory = false,
   }) async {
     _ensureCommunityValid();
-    final result = await _signedEventRelay.submit(
-      kind: 41010,
-      content: '',
-      tags: pubkeys.map((pk) => ['p', pk]).toList(),
-    );
+    Future<NostrEvent> submit({required bool includeHistory}) =>
+        _signedEventRelay.submit(
+          kind: 41010,
+          content: '',
+          tags: [
+            for (final pk in pubkeys) ['p', pk],
+            if (includeHistory) ['history', 'include'],
+          ],
+        );
+    NostrEvent result;
+    try {
+      result = await submit(includeHistory: includeHistory);
+    } catch (error) {
+      if (!includeHistory || relayErrorText(error) != _onlyPeopleShareHistory) {
+        rethrow;
+      }
+      _ensureCommunityValid();
+      result = await submit(includeHistory: false);
+    }
     _ensureCommunityValid();
     final response = parseCommandResponse(result.content);
     final channelId = response?['channel_id'] as String?;
@@ -227,6 +265,92 @@ class ChannelActions {
     if (failures.isNotEmpty) {
       throw AddMembersException(failures);
     }
+  }
+
+  /// Adds [pubkeys] to the DM [channelId] (kind:41011) and returns the DM
+  /// they ended up in. With [DmHistory.include] they join this DM and can read
+  /// it, unless the grown group already has a DM, which is returned instead.
+  /// With [DmHistory.startNew], or when a person joins a DM of at most one
+  /// person, they start a new DM of its people and them. [DmHistory.ask]
+  /// throws [DmNeedsHistoryChoice] when a person would join a DM of two or
+  /// more people. When that other DM cannot be confirmed yet, throws
+  /// [DmAddUnconfirmed] with its id. The relay lets only people share a DM's
+  /// history, so when it refuses the history tag to a signed-in agent, the add
+  /// is resent as [DmHistory.startNew].
+  Future<Channel> addToDm({
+    required String channelId,
+    required List<String> pubkeys,
+    required DmHistory history,
+  }) async {
+    _ensureCommunityValid();
+    Future<NostrEvent> submit(DmHistory history) => _signedEventRelay.submit(
+      kind: 41011,
+      content: '',
+      tags: [
+        ['h', channelId],
+        for (final pubkey in pubkeys) ['p', pubkey],
+        if (history != DmHistory.startNew)
+          ['history', history == DmHistory.ask ? 'ask' : 'include'],
+      ],
+    );
+    NostrEvent result;
+    try {
+      try {
+        result = await submit(history);
+      } catch (error) {
+        if (history == DmHistory.startNew ||
+            relayErrorText(error) != _onlyPeopleShareHistory) {
+          rethrow;
+        }
+        _ensureCommunityValid();
+        result = await submit(DmHistory.startNew);
+      }
+    } on StateError {
+      rethrow;
+    } catch (error) {
+      final reason = relayErrorText(error);
+      // A relay from before "ask" refuses it by name; it needs the choice too.
+      if (history == DmHistory.ask &&
+          (reason == 'needs-choice: history' ||
+              reason == 'invalid: history must be "include", got "ask"')) {
+        throw const DmNeedsHistoryChoice();
+      }
+      throw Exception(
+        reason.contains('at most 9 people')
+            ? dmAdditionFailedMessage
+            : 'Couldn’t add them. Try again.',
+      );
+    }
+    _ensureCommunityValid();
+    final id = parseCommandResponse(result.content)?['channel_id'] as String?;
+    if (id == null || id.isEmpty) {
+      throw Exception('Relay did not return a DM channel id');
+    }
+    await _refreshChannelState(channelId);
+    if (id == channelId) {
+      return (await _ref.read(channelsProvider.future)).firstWhere(
+        (channel) => channel.id == channelId,
+        orElse: () => throw Exception('DM is not visible yet'),
+      );
+    }
+    return openAddedDm(id);
+  }
+
+  /// Confirms through the writer that the current user is in the DM
+  /// [channelId] an add landed in, and returns it, without sending the add
+  /// again. Throws [DmAddUnconfirmed] when it cannot be confirmed or shown.
+  Future<Channel> openAddedDm(String channelId) async {
+    try {
+      await recheckJoin(channelId);
+    } on ChannelJoinUnconfirmed {
+      throw DmAddUnconfirmed(channelId);
+    }
+    final channels = await _ref.read(channelsProvider.future);
+    _ensureCommunityValid();
+    return channels.firstWhere(
+      (channel) => channel.id == channelId,
+      orElse: () => throw DmAddUnconfirmed(channelId),
+    );
   }
 
   void _ensureCommunityValid() {

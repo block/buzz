@@ -1,5 +1,7 @@
 import 'package:buzz/shared/widgets/feedback_snackbar.dart';
+
 import 'dart:async';
+
 import 'package:duo_kit/duo_kit.dart';
 
 import 'package:flutter/foundation.dart';
@@ -11,7 +13,6 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/profile/user_profile.dart';
 import '../../shared/relay/relay.dart';
-import '../../shared/emoji/emoji_data_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_editor_options_scope.dart';
 import '../../shared/widgets/app_list.dart';
@@ -95,9 +96,6 @@ class ProfileEditPage extends HookConsumerWidget {
       });
       return null;
     }, const []);
-    // Warm the emoji index while the profile is visible so the first editor
-    // transition never waits for asset decoding.
-    ref.watch(emojiDatasetProvider);
 
     Future<void> showFlutterFieldEditor({
       required String title,
