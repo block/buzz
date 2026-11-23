@@ -1053,7 +1053,12 @@ async fn handle_approval_grant(
         .await
         .map_err(|_| IngestError::Rejected("invalid: approval not found".into()))?;
 
-    // 3. Validate approval is pending and not expired
+    // 3. Validate caller is authorized approver, before any write and before
+    //    revealing the gate's state: an unauthorized caller learns nothing
+    //    about whether it is still pending (same order as the HTTP path).
+    authorize_approval_command(tenant, state, &approval, auth.pubkey()).await?;
+
+    // 4. Validate approval is pending and not expired
     if approval.status != ApprovalStatus::Pending {
         return Err(IngestError::Rejected(format!(
             "invalid: approval already {}",
@@ -1065,9 +1070,6 @@ async fn handle_approval_grant(
             "invalid: approval token has expired".into(),
         ));
     }
-
-    // 4. Validate caller is authorized approver (before any write)
-    authorize_approval_command(tenant, state, &approval, auth.pubkey()).await?;
 
     // Persist the command event — returns open transaction
     let tx = match persist_command_event(&state.db, tenant, event, None).await? {
@@ -1164,7 +1166,12 @@ async fn handle_approval_deny(
         .await
         .map_err(|_| IngestError::Rejected("invalid: approval not found".into()))?;
 
-    // 3. Validate approval is pending and not expired
+    // 3. Validate caller is authorized approver, before any write and before
+    //    revealing the gate's state: an unauthorized caller learns nothing
+    //    about whether it is still pending (same order as the HTTP path).
+    authorize_approval_command(tenant, state, &approval, auth.pubkey()).await?;
+
+    // 4. Validate approval is pending and not expired
     if approval.status != ApprovalStatus::Pending {
         return Err(IngestError::Rejected(format!(
             "invalid: approval already {}",
@@ -1176,9 +1183,6 @@ async fn handle_approval_deny(
             "invalid: approval token has expired".into(),
         ));
     }
-
-    // 4. Validate caller is authorized approver (before any write)
-    authorize_approval_command(tenant, state, &approval, auth.pubkey()).await?;
 
     // Persist the command event — returns open transaction
     let tx = match persist_command_event(&state.db, tenant, event, None).await? {

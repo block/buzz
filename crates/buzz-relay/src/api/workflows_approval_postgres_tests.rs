@@ -728,9 +728,41 @@ async fn nostr_command_path_enforces_the_same_policy() {
         .await
         .expect("approver grant");
     assert_eq!(approval(&f, &gate).await.status, ApprovalStatus::Granted);
+    assert_eq!(settled_run(&f, gate.run).await.status, RunStatus::Completed);
     assert_eq!(
         decide(&f, &f.approver, &gate, "denied").await,
         StatusCode::CONFLICT
     );
-    assert_eq!(approval(&f, &gate).await.status, ApprovalStatus::Granted);
+    // Repeats and flips over the command kinds change nothing either, and an
+    // unauthorized caller is refused before learning the gate's state.
+    for kind in [46030, 46031] {
+        let error = command(&f, &f.approver, &gate, kind).await.unwrap_err();
+        assert!(error.contains("already granted"), "kind {kind}: {error}");
+        let error = command(&f, &f.member, &gate, kind).await.unwrap_err();
+        assert!(error.contains("forbidden"), "kind {kind}: {error}");
+    }
+    let record = approval(&f, &gate).await;
+    assert_eq!(record.status, ApprovalStatus::Granted);
+    assert_eq!(
+        record.approver_pubkey,
+        Some(f.approver.public_key().to_bytes().to_vec())
+    );
+
+    // An authorized denial over the command kinds ends the run without
+    // resuming it, and is final.
+    let denied = park_gate(&f, &f.approver.public_key().to_hex()).await;
+    command(&f, &f.approver, &denied, 46031)
+        .await
+        .expect("approver deny");
+    assert_eq!(approval(&f, &denied).await.status, ApprovalStatus::Denied);
+    let run = settled_run(&f, denied.run).await;
+    assert_eq!(run.status, RunStatus::Cancelled);
+    assert_eq!(run.error_code.as_deref(), Some("approval_denied"));
+    let error = command(&f, &f.approver, &denied, 46030).await.unwrap_err();
+    assert!(error.contains("already denied"), "{error}");
+    assert_eq!(
+        decide(&f, &f.approver, &denied, "granted").await,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(approval(&f, &denied).await.status, ApprovalStatus::Denied);
 }
