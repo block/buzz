@@ -325,14 +325,18 @@ impl AuthorityStore for PostgresAuthorityStore {
             .await?
             .ok_or(AuthorityError::Rejected);
         };
-        if ts(expires_at) < now {
-            return Err(AuthorityError::Rejected);
-        }
         sqlx::query("DELETE FROM push_gateway_challenges WHERE id=$1")
             .bind(challenge_id)
             .execute(&mut *tx)
             .await
             .map_err(db)?;
+        if ts(expires_at) < now {
+            // Retire the expired challenge before refusing, so a slower
+            // request for it that read its clock earlier cannot spend it after
+            // this refusal.
+            tx.commit().await.map_err(db)?;
+            return Err(AuthorityError::Rejected);
+        }
         let created = Installation {
             id: n.id,
             platform: n.platform,
@@ -1303,6 +1307,78 @@ mod postgres_tests {
             pool.close().await;
             drop_schema(&schema).await;
         }
+    }
+
+    // An expired replay that reaches the store before a slower original
+    // request (which read its clock inside the window) retires the challenge,
+    // so both are refused and nothing holds the token.
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn expired_replay_first_retires_the_challenge() {
+        let (pool, schema) = full_schema(1).await;
+        let store = PostgresAuthorityStore::new(pool.clone());
+        let now = Utc::now().timestamp();
+        let challenge_id = Uuid::new_v4();
+        seed_enrollment_challenge(&store, challenge_id, now).await;
+
+        let replay = store
+            .enroll_installation(
+                challenge_id,
+                [6; 32],
+                enrollment(Uuid::new_v4(), now),
+                now + 301,
+            )
+            .await;
+        assert_eq!(replay.map(|i| i.id), Err(AuthorityError::Rejected));
+        let original = store
+            .enroll_installation(
+                challenge_id,
+                [6; 32],
+                enrollment(Uuid::new_v4(), now),
+                now + 299,
+            )
+            .await;
+        assert_eq!(original.map(|i| i.id), Err(AuthorityError::Rejected));
+        let installations: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM push_gateway_installations")
+                .fetch_one(&pool)
+                .await
+                .expect("count installations");
+        assert_eq!(installations, 0);
+
+        pool.close().await;
+        drop_schema(&schema).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires PostgreSQL"]
+    async fn refused_enrollment_leaves_its_challenge_unspent() {
+        let (pool, schema) = full_schema(1).await;
+        let store = PostgresAuthorityStore::new(pool.clone());
+        let now = Utc::now().timestamp();
+        store
+            .create_installation(enrollment(Uuid::new_v4(), now), now)
+            .await
+            .expect("live installation holds the token");
+        let challenge_id = Uuid::new_v4();
+        seed_enrollment_challenge(&store, challenge_id, now).await;
+        // Same token, different key: the live installation wins.
+        let mut other_key = enrollment(Uuid::new_v4(), now);
+        other_key.app_attest_key_id = vec![10];
+        assert_eq!(
+            store
+                .enroll_installation(challenge_id, [6; 32], other_key, now)
+                .await
+                .map(|i| i.id),
+            Err(AuthorityError::Conflict)
+        );
+        store
+            .consume_challenge(challenge_id, [6; 32], now)
+            .await
+            .expect("the refused enrollment left its challenge unspent");
+
+        pool.close().await;
+        drop_schema(&schema).await;
     }
 
     // The schema has no foreign keys, so these tests prove the reference

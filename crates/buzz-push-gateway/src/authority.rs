@@ -338,11 +338,18 @@ impl AuthorityStore for MemoryAuthorityStore {
         now: i64,
     ) -> Result<Installation, AuthorityError> {
         let mut s = self.0.lock().map_err(|_| AuthorityError::Unavailable)?;
-        let live_challenge = s
+        let found = s
             .challenges
             .get(&challenge_id)
-            .is_some_and(|c| c.value == challenge && c.expires_at >= now);
-        if !live_challenge {
+            .filter(|c| c.value == challenge)
+            .map(|c| c.expires_at);
+        if found.is_some_and(|expires_at| expires_at < now) {
+            // Like PostgreSQL: an expired challenge is retired by the refusal,
+            // so a request that read its clock earlier cannot spend it later.
+            s.challenges.remove(&challenge_id);
+            return Err(AuthorityError::Rejected);
+        }
+        if found.is_none() {
             return s
                 .matching_installation(
                     &n.app_attest_key_id,
@@ -881,6 +888,25 @@ mod tests {
                 .consume_challenge(Uuid::from_u128(31), [6; 32], 1_000)
                 .await,
             Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_replay_first_retires_the_challenge() {
+        let store = MemoryAuthorityStore::default();
+        enrollment_challenge(&store, 40).await;
+        assert_eq!(
+            store
+                .enroll_installation(Uuid::from_u128(40), [6; 32], enrollment(41, 6), 1_301)
+                .await,
+            Err(AuthorityError::Rejected)
+        );
+        // A slower original that read its clock inside the window.
+        assert_eq!(
+            store
+                .enroll_installation(Uuid::from_u128(40), [6; 32], enrollment(42, 6), 1_299)
+                .await,
+            Err(AuthorityError::Rejected)
         );
     }
 
