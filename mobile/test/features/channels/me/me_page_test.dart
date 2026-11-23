@@ -74,6 +74,15 @@ class _MenuChannelActions extends ChannelActions {
       );
   final List<String> actions;
   @override
+  Future<void> updateChannel({
+    required String channelId,
+    String? name,
+    String? description,
+  }) async {
+    actions.add('rename $channelId');
+  }
+
+  @override
   Future<void> archiveChannel(String channelId) async {
     actions.add('archive $channelId');
   }
@@ -307,6 +316,7 @@ void main() {
     final pane = ConversationPaneController()
       ..open('loose', (_) => const SizedBox());
     final actions = <String>[];
+    var communityActions = actions;
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
@@ -323,7 +333,7 @@ void main() {
           savedPrefsProvider.overrideWithValue(prefs),
           readStateProvider.overrideWith(() => _MenuReadState(actions)),
           channelActionsProvider.overrideWith(
-            (ref) => _MenuChannelActions(ref, actions),
+            (ref) => _MenuChannelActions(ref, communityActions),
           ),
           defaultAgentProvider.overrideWith((ref) => Stream.value(null)),
           myPubkeyProvider.overrideWithValue('owner'),
@@ -407,6 +417,19 @@ void main() {
     await tester.pumpAndSettle();
     expect(actions.last, 'unread loose');
     expect(pane.selectedId, isNull);
+
+    await tester.longPress(find.text('Unfiled labeled chat'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Rename'));
+    await tester.pumpAndSettle();
+    communityActions = <String>[];
+    container.invalidate(channelActionsProvider);
+    await tester.enterText(find.byType(TextField).last, 'New name');
+    await tester.pump();
+    await tester.tap(find.text('Save').last);
+    await tester.pumpAndSettle();
+    expect(actions.last, 'rename loose');
+    expect(communityActions, isEmpty);
 
     await tester.longPress(find.text('Open shared Solo'));
     await tester.pumpAndSettle();

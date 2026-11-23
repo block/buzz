@@ -195,14 +195,18 @@ class ChannelDetailsPage extends HookConsumerWidget {
     final canDelete =
         !resolvedChannel.isArchived &&
         (currentMember?.isOwner == true || ownsOwnerAgent);
+    final soleOwner =
+        currentMember?.isOwner == true &&
+        !members.any((member) => member.isOwner && member != currentMember);
     final canLeave =
         resolvedChannel.isMember &&
         !resolvedChannel.isArchived &&
-        ((!solo && resolvedChannel.isDm) ||
-            (currentMember != null &&
-                !currentMember.isOwner &&
-                !ownsOwnerAgent &&
-                agentOwnersAsync.hasValue));
+        (solo
+            ? currentMember != null &&
+                  !currentMember.isOwner &&
+                  !ownsOwnerAgent &&
+                  agentOwnersAsync.hasValue
+            : resolvedChannel.isDm || !soleOwner);
     final lifecycleCapabilitiesLoading =
         membersAsync.isLoading || agentOwnersAsync.isLoading;
     final lifecycleCapabilitiesUnavailable =

@@ -46,11 +46,13 @@ class _ChannelTile extends ConsumerWidget {
         ConversationPaneScope.maybeOf(context)?.selectedId == channel.id;
     // The gutter insets only the selection paint; the whole row width
     // still opens the channel and its actions.
+    final nativeHold =
+        usesIosConversationMenu && (!channel.isDm || channel.isSolo);
     final row = GestureDetector(
       behavior: HitTestBehavior.opaque,
       excludeFromSemantics: true,
       onTap: onTap,
-      onLongPress: () => _showChannelActions(context, ref),
+      onLongPress: nativeHold ? null : () => _showChannelActions(context, ref),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: Grid.gutter - Grid.xxs),
         child: DecoratedBox(
@@ -59,12 +61,17 @@ class _ChannelTile extends ConsumerWidget {
             borderRadius: BorderRadius.circular(Radii.container),
           ),
           child: Semantics(
+            onLongPress: nativeHold
+                ? () => _showChannelActions(context, ref)
+                : null,
             selected: selected,
             value: hasAttention ? 'Needs your attention' : null,
             child: InkWell(
               borderRadius: BorderRadius.circular(Radii.container),
               onTap: onTap,
-              onLongPress: () => _showChannelActions(context, ref),
+              onLongPress: nativeHold
+                  ? null
+                  : () => _showChannelActions(context, ref),
               child: Padding(
                 padding: const EdgeInsets.only(
                   left: Grid.xxs,
@@ -214,7 +221,6 @@ class _ChannelTile extends ConsumerWidget {
     );
     if (channel.isDm && !channel.isSolo) return row;
     return IosConversationMenuRow(
-      onTap: onTap,
       onMenu: (session) => _showChannelActions(context, ref, session),
       child: row,
     );

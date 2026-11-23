@@ -1,9 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
-import 'package:flutter/gestures.dart';
+import 'package:flutter/gestures.dart' show kTouchSlop;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -19,71 +18,104 @@ class ConversationMenuSession {
   }
 }
 
+/// Flutter hit-tests the touch once. UIKit has one interaction on the host
+/// view, independent of how many conversation rows are built or scrolling.
+class _IosConversationMenu {
+  static const channel = MethodChannel('buzz/conversation_menu');
+  static ValueChanged<ConversationMenuSession>? target;
+  static ConversationMenuSession? session;
+  static int touchId = 0;
+  static final initialized = _initialize();
+
+  static Future<void> _initialize() async {
+    channel.setMethodCallHandler((call) async {
+      if (call.method == 'prepare') {
+        final request = target;
+        if (request == null || call.arguments != touchId) return <String>[];
+        session?.close();
+        final next = ConversationMenuSession(bridge: channel);
+        session = next;
+        request(next);
+        return next.labels.future;
+      }
+      if (call.method == 'end') {
+        session?.close(call.arguments as String?);
+        session = null;
+      }
+      return null;
+    });
+    await channel.invokeMethod<void>('attach');
+  }
+}
+
+bool get usesIosConversationMenu => Platform.isIOS;
+
 class IosConversationMenuRow extends HookWidget {
   const IosConversationMenuRow({
     super.key,
     required this.child,
-    required this.onTap,
     required this.onMenu,
   });
   final Widget child;
-  final VoidCallback onTap;
   final ValueChanged<ConversationMenuSession> onMenu;
 
   @override
   Widget build(BuildContext context) {
-    if (!Platform.isIOS) return child;
-    final bridge = useRef<MethodChannel?>(null);
-    final session = useRef<ConversationMenuSession?>(null);
-    final tapped = useRef(onTap)..value = onTap;
-    final requested = useRef(onMenu)..value = onMenu;
-    useEffect(
-      () => () {
-        bridge.value?.setMethodCallHandler(null);
-        session.value?.close();
+    if (!usesIosConversationMenu) return child;
+    final latest = useRef(onMenu)..value = onMenu;
+    final request = useMemoized(
+      () => (ConversationMenuSession session) {
+        if (context.mounted) latest.value(session);
       },
-      const [],
     );
-    void bind(int id) {
-      final channel = MethodChannel('buzz/conversation_row/$id');
-      bridge.value = channel;
-      channel.setMethodCallHandler((call) async {
-        if (!context.mounted) return null;
-        switch (call.method) {
-          case 'tap':
-            tapped.value();
-          case 'prepare':
-            session.value?.close();
-            final next = ConversationMenuSession(bridge: channel);
-            session.value = next;
-            requested.value(next);
-            return next.labels.future;
-          case 'end':
-            session.value?.close(call.arguments as String?);
-            session.value = null;
-        }
-        return null;
-      });
+    final down = useRef<Offset?>(null);
+    void clear() {
+      if (down.value == null) return;
+      down.value = null;
+      if (_IosConversationMenu.target != request) return;
+      unawaited(_IosConversationMenu.channel.invokeMethod<void>('disarm'));
     }
 
-    return Stack(
-      children: [
-        child,
-        Positioned.fill(
-          child: ExcludeSemantics(
-            child: UiKitView(
-              viewType: 'buzz/conversation_row',
-              onPlatformViewCreated: bind,
-              gestureRecognizers: {
-                Factory<TapGestureRecognizer>(TapGestureRecognizer.new),
-                Factory<LongPressGestureRecognizer>(
-                  LongPressGestureRecognizer.new,
-                ),
-              },
-            ),
-          ),
-        ),
-      ],
+    useEffect(() {
+      unawaited(_IosConversationMenu.initialized);
+      return () {
+        clear();
+        if (_IosConversationMenu.target == request) {
+          _IosConversationMenu.target = null;
+          if (_IosConversationMenu.session != null) {
+            unawaited(
+              _IosConversationMenu.channel.invokeMethod<void>('dismiss'),
+            );
+          }
+        }
+      };
+    }, const []);
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (event) {
+        down.value = event.position;
+        final box = context.findRenderObject() as RenderBox;
+        final rect = box.localToGlobal(Offset.zero) & box.size;
+        _IosConversationMenu.target = request;
+        unawaited(
+          _IosConversationMenu.channel.invokeMethod<void>('arm', [
+            rect.left,
+            rect.top,
+            rect.width,
+            rect.height,
+            ++_IosConversationMenu.touchId,
+          ]),
+        );
+      },
+      onPointerMove: (event) {
+        final start = down.value;
+        if (start != null && (event.position - start).distance > kTouchSlop) {
+          clear();
+        }
+      },
+      onPointerUp: (_) => clear(),
+      onPointerCancel: (_) => clear(),
+      child: child,
     );
   }
 }

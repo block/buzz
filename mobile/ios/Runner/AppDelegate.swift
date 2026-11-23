@@ -49,6 +49,7 @@ import os.log
   private var ageSignalRequestID: UUID?
   private var ageSignalResult: FlutterResult?
   private var concentricSheetSurfaceChannel: FlutterMethodChannel?
+  private var conversationMenu: ConversationMenu?
   private var nativePhotoZoomCoordinator: NativePhotoZoomCoordinator?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
   private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
@@ -86,7 +87,7 @@ import os.log
     }
 
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "ConversationMenuRow") {
-      registrar.register(ConversationMenuRowFactory(registrar.messenger()), withId: "buzz/conversation_row")
+      conversationMenu = ConversationMenu(messenger: registrar.messenger()) { registrar.viewController }
     }
     let messenger = engineBridge.applicationRegistrar.messenger()
     let keyboardChannel = FlutterMethodChannel(

@@ -217,7 +217,9 @@ AppListRow channelHuddleActionRow(
             final config = ref.read(relayConfigProvider);
             try {
               final history =
-                  session.isInSession && session.parentChannelId == channel.id
+                  container.exists(provider) ||
+                      (session.isInSession &&
+                          session.parentChannelId == channel.id)
                   ? const <NostrEvent>[]
                   : await ref
                         .read(relaySessionProvider.notifier)

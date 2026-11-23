@@ -6198,6 +6198,29 @@ void main() {
       expect(find.byKey(const ValueKey('channel-join-button')), findsNothing);
     });
 
+    testWidgets('a regular channel co-owner can leave', (tester) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          members: [
+            for (final key in ['self', 'other'])
+              ChannelMember(
+                pubkey: key,
+                role: 'owner',
+                joinedAt: DateTime(2025),
+              ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('channel-header-settings-trigger')),
+      );
+      await tester.pumpAndSettle();
+      await _scrollDetailsTo(tester, find.text('Leave channel'));
+      expect(find.text('Leave channel'), findsOneWidget);
+    });
+
     testWidgets('Leave lives on the detail page instead of Manage', (
       tester,
     ) async {
@@ -12539,9 +12562,11 @@ void main() {
         await tester.pumpAndSettle();
         await _scrollDetailsTo(tester, find.text('Start a huddle'));
         // A stray tap asks first; Cancel leaves no Huddle behind.
+        final readsBeforeTap = relaySession.lifecycleReads;
         await tester.tap(find.text('Start a huddle'));
         await tester.pumpAndSettle();
         expect(find.text('Start a Huddle?'), findsOneWidget);
+        expect(relaySession.lifecycleReads, readsBeforeTap);
         await tester.tap(find.widgetWithText(TextButton, 'Cancel'));
         await tester.pumpAndSettle();
         expect(find.text('Start a Huddle?'), findsNothing);
@@ -22873,6 +22898,7 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
   final huddleCreatePublishStarted = Completer<void>();
   final huddleEndPublishStarted = Completer<void>();
   final List<int> publishedKinds = [];
+  int lifecycleReads = 0;
 
   @override
   SessionState build() => SessionState(status: initialStatus);
@@ -22881,7 +22907,10 @@ class _ReconnectingRelaySession extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => [];
+  }) async {
+    if (filter.kinds.contains(EventKind.huddleStarted)) lifecycleReads++;
+    return [];
+  }
 
   @override
   Future<NostrEvent> publish(

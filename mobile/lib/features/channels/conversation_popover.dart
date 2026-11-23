@@ -5,24 +5,25 @@ Future<void> _renameConversation(
   WidgetRef ref,
   Channel channel, {
   ValueChanged<String>? onRenamed,
-}) => showTextEditor(
-  context: context,
-  title: 'Rename',
-  hintText: 'Name',
-  initialValue: channel.name,
-  requireNonEmpty: true,
-  onSave: (name) async {
-    final trimmed = name.trim().replaceFirst(RegExp(r'^#+'), '').trim();
-    if (trimmed.isEmpty) {
-      throw const FormatException('Channel name is required.');
-    }
-    if (trimmed == channel.name) return;
-    await ref
-        .read(channelActionsProvider)
-        .updateChannel(channelId: channel.id, name: trimmed);
-    if (context.mounted) onRenamed?.call(trimmed);
-  },
-);
+}) {
+  final actions = ref.read(channelActionsProvider);
+  return showTextEditor(
+    context: context,
+    title: 'Rename',
+    hintText: 'Name',
+    initialValue: channel.name,
+    requireNonEmpty: true,
+    onSave: (name) async {
+      final trimmed = name.trim().replaceFirst(RegExp(r'^#+'), '').trim();
+      if (trimmed.isEmpty) {
+        throw const FormatException('Channel name is required.');
+      }
+      if (trimmed == channel.name) return;
+      await actions.updateChannel(channelId: channel.id, name: trimmed);
+      if (context.mounted) onRenamed?.call(trimmed);
+    },
+  );
+}
 
 Future<bool?> showConversationPopover({
   required BuildContext anchorContext,

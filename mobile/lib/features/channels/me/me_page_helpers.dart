@@ -77,7 +77,6 @@ class SoloChatTile extends ConsumerWidget {
     );
     return IosConversationMenuRow(
       onMenu: openMenu,
-      onTap: openChat,
       child: DecoratedBox(
         decoration: BoxDecoration(
           color: selected ? context.colors.primaryContainer : null,
@@ -126,7 +125,7 @@ class _MeChatRow extends ConsumerWidget {
       child: InkWell(
         borderRadius: BorderRadius.circular(Radii.container),
         onTap: onTap,
-        onLongPress: onLongPress,
+        onLongPress: usesIosConversationMenu ? null : onLongPress,
         child: Padding(
           padding: const EdgeInsets.fromLTRB(
             Grid.xxs,
