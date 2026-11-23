@@ -226,6 +226,42 @@ void main() {
     expect(media.startCalls, 1);
   });
 
+  test('a first join waits out a relay that cannot check authorization yet, '
+      'within the reconnect schedule', () async {
+    final media = _FakeMedia();
+    final transport = _FakeTransport()..refusals = 2;
+    final container = ProviderContainer(
+      overrides: [
+        huddleMediaFactoryProvider.overrideWithValue(() => media),
+        huddleTransportFactoryProvider.overrideWithValue((_) => transport),
+        huddleReconnectDelaysProvider.overrideWithValue(const [
+          Duration.zero,
+          Duration.zero,
+        ]),
+      ],
+    );
+    addTearDown(container.dispose);
+    final notifier = container.read(huddleSessionProvider.notifier);
+
+    await notifier.join(_parameters());
+
+    expect(transport.connectCalls, 3);
+    expect(
+      container.read(huddleSessionProvider).phase,
+      HuddleSessionPhase.connected,
+    );
+    expect(media.startCalls, 1);
+    await notifier.leave();
+
+    // Past the schedule the join fails, and the user can try again.
+    transport.refusals = 3;
+    await notifier.join(_parameters());
+    final failed = container.read(huddleSessionProvider);
+    expect(failed.phase, HuddleSessionPhase.failed);
+    expect(failed.error, 'Huddle authorization is temporarily unavailable.');
+    expect(transport.connectCalls, 6);
+  });
+
   test('surfaces native audio interruptions without leaving', () async {
     final media = _FakeMedia();
     final transport = _FakeTransport();
@@ -552,6 +588,10 @@ final class _FakeTransport implements HuddleTransportClient {
   final List<HuddleLocalAudioFrame> sentFrames = [];
   var connectCalls = 0;
   var disposeCalls = 0;
+
+  /// Connects that the relay refuses, as it does while it can't check
+  /// authorization, before one succeeds.
+  var refusals = 0;
   HuddleTransportState _state = HuddleTransportState.idle();
 
   void emitRemote(HuddleRemoteAudioFrame frame) => _remoteFrames.add(frame);
@@ -596,6 +636,19 @@ final class _FakeTransport implements HuddleTransportClient {
   @override
   Future<void> connect() async {
     connectCalls += 1;
+    if (refusals > 0) {
+      refusals -= 1;
+      const error = HuddleTransportError(
+        code: HuddleTransportErrorCode.authorizationUnavailable,
+        message: 'Huddle authorization is temporarily unavailable.',
+      );
+      _state = HuddleTransportState(
+        phase: HuddleTransportPhase.failed,
+        error: error,
+      );
+      _states.add(_state);
+      throw error;
+    }
     _state = HuddleTransportState(
       phase: HuddleTransportPhase.connected,
       localPeerIndex: 2,

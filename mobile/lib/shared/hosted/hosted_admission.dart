@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
+import 'package:web_socket_channel/status.dart' as ws_status;
 import 'package:buzz/shared/http/app_http_client.dart';
 
 import '../community/community.dart';
@@ -155,13 +156,23 @@ class HostedAdmission {
     return community;
   }
 
+  /// Only a refusal means no access: a 401/403 upgrade, an AUTH answered OK
+  /// false, a `restricted:` NOTICE, or a 1008 close. NIP-FI's `authorization
+  /// unavailable` and any other failure leave the join retryable.
   Future<void> _authenticateRelay(Community community) async {
+    var refused = false;
     final socket = RelaySocket(
       wsUrl: community.relayUrl,
       nsec: community.nsec,
-      onMessage: (_) {},
+      onMessage: (frame) => refused |=
+          frame.length > 1 &&
+          frame[0] == 'NOTICE' &&
+          frame[1] is String &&
+          (frame[1] as String).startsWith('restricted:') &&
+          frame[1] != 'restricted: authorization unavailable',
       onConnected: () {},
-      onDisconnected: (_) {},
+      onDisconnected: (error) => refused |=
+          relayUpgradeRefused(error) || error is RelayAuthRejectedException,
     );
     try {
       socket.headers = await relayAuth.headers(
@@ -174,7 +185,11 @@ class HostedAdmission {
         signer: pubkeyFromNsec(community.nsec),
       );
       await socket.connect().timeout(const Duration(seconds: 30));
-      if (socket.state != SocketState.connected) throw AccountFailure.denied;
+      if (socket.state == SocketState.connected) return;
+      if (refused || socket.closeCode == ws_status.policyViolation) {
+        throw AccountFailure.denied;
+      }
+      throw AccountFailure.unavailable;
     } finally {
       socket.dispose();
     }

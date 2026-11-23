@@ -311,7 +311,7 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
         phase: HuddleSessionPhase.connecting,
         isMuted: false,
       );
-      await transport.connect();
+      await _admit(transport, generation);
       _ensureCurrent(generation);
       state = state.copyWith(
         phase: media.state.isInterrupted
@@ -472,7 +472,7 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
             transportState.error?.message ?? 'Huddle connection failed.';
         if (_wasConnected) {
           _scheduleReconnect(transport, generation, message);
-        } else {
+        } else if (!_admissionRetryable(transportState.error)) {
           unawaited(_fail(message, generation));
         }
       }
@@ -624,6 +624,26 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
       state = state.copyWith(speakerLevels: Map.unmodifiable(levels));
     });
   }
+
+  /// First admission. A relay that can't check authorization yet refuses
+  /// briefly, so that refusal is retried on the reconnect schedule; [join]
+  /// returns only once admitted or failed.
+  Future<void> _admit(HuddleTransportClient transport, int generation) async {
+    final delays = ref.read(huddleReconnectDelaysProvider);
+    for (var attempt = 0; ; attempt++) {
+      try {
+        await transport.connect();
+        return;
+      } on HuddleTransportError catch (error) {
+        if (!_admissionRetryable(error) || attempt >= delays.length) rethrow;
+      }
+      await Future<void>.delayed(delays[attempt]);
+      _ensureCurrent(generation);
+    }
+  }
+
+  static bool _admissionRetryable(HuddleTransportError? error) =>
+      error?.code == HuddleTransportErrorCode.authorizationUnavailable;
 
   void _scheduleReconnect(
     HuddleTransportClient transport,

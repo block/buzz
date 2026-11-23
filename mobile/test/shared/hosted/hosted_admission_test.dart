@@ -3,6 +3,7 @@ import 'dart:async';
 import 'hosted_http_fixture.dart';
 import 'package:buzz/shared/hosted/hosted_join_policy.dart';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:buzz/shared/deeplink/deep_link.dart';
 import 'package:buzz/shared/hosted/account_identity_store.dart';
@@ -240,6 +241,58 @@ void main() {
     expect(claims, isEmpty);
   });
 
+  // The relay check before a join: only a refusal of this identity means no
+  // access; a relay that can't check authorization yet leaves Retry.
+  group('the relay check', () {
+    setUp(() {
+      final overrides = HttpOverrides.current;
+      HttpOverrides.global = null;
+      addTearDown(() => HttpOverrides.global = overrides);
+    });
+
+    const link = AddCommunityDeepLink(
+      relayUrl: 'wss://example.communities.buzz.xyz',
+      name: 'Example',
+    );
+    final cases = <(String, _Relay, AccountFailure?)>[
+      ('admits', _Relay.admit, null),
+      ('a 503 upgrade', _Relay.upgrade503, AccountFailure.unavailable),
+      ('a 403 upgrade', _Relay.upgrade403, AccountFailure.denied),
+      ('AUTH answered OK false', _Relay.okFalse, AccountFailure.denied),
+      (
+        'authorization unavailable',
+        _Relay.unavailable,
+        AccountFailure.unavailable,
+      ),
+      ('authorization denied', _Relay.denied, AccountFailure.denied),
+      ('evidence rejected', _Relay.evidenceRejected, AccountFailure.denied),
+    ];
+    for (final (name, relay, failure) in cases) {
+      test('$name: ${failure?.name ?? 'joins'}', () async {
+        await store.create(keys.nsec);
+        await backup();
+        final server = await _loopbackRelay(relay);
+        final probing = HostedAdmission(
+          account: account,
+          relayAuth: HostedRelayAuth(account, enabled: false),
+          store: store,
+        );
+        addTearDown(probing.dispose);
+
+        final result = HttpOverrides.runWithHttpOverrides(
+          () => probing.prepare(link, 'owner', keys.public),
+          LoopbackHttpOverrides(server.port),
+        );
+
+        if (failure == null) {
+          expect((await result).pubkey, keys.public);
+        } else {
+          await expectLater(result, throwsA(failure));
+        }
+      });
+    }
+  });
+
   test('different account and untrusted host cannot claim', () async {
     await store.create(keys.nsec);
     await backup();
@@ -278,4 +331,59 @@ class _Account extends BuilderlabAccountClient {
       'identity': {'pubkey_hex': bound},
     };
   }
+}
+
+enum _Relay {
+  admit,
+  upgrade503,
+  upgrade403,
+  okFalse,
+  unavailable,
+  denied,
+  evidenceRejected,
+}
+
+/// A loopback relay that answers the NIP-42 AUTH the way [relay] names.
+Future<HttpServer> _loopbackRelay(_Relay relay) async {
+  final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+  addTearDown(() => server.close(force: true));
+  server.listen((request) async {
+    final status = switch (relay) {
+      _Relay.upgrade503 => HttpStatus.serviceUnavailable,
+      _Relay.upgrade403 => HttpStatus.forbidden,
+      _ => null,
+    };
+    if (status != null) {
+      request.response.statusCode = status;
+      await request.response.close();
+      return;
+    }
+    final ws = await WebSocketTransformer.upgrade(request);
+    ws.listen((raw) async {
+      final frame = jsonDecode(raw as String) as List<dynamic>;
+      if (frame.first != 'AUTH') return;
+      final id = (frame[1] as Map<String, dynamic>)['id'];
+      switch (relay) {
+        case _Relay.admit:
+          ws.add(jsonEncode(['OK', id, true, '']));
+        case _Relay.okFalse:
+          ws.add(jsonEncode(['OK', id, false, 'restricted: not a member']));
+        case _Relay.unavailable:
+          ws.add(
+            jsonEncode(['NOTICE', 'restricted: authorization unavailable']),
+          );
+          await ws.close();
+        case _Relay.denied:
+          ws.add(jsonEncode(['NOTICE', 'restricted: authorization denied']));
+          await ws.close(WebSocketStatus.policyViolation);
+        case _Relay.evidenceRejected:
+          ws.add(jsonEncode(['NOTICE', 'restricted: evidence rejected']));
+          await ws.close();
+        case _Relay.upgrade503 || _Relay.upgrade403:
+          break;
+      }
+    });
+    ws.add(jsonEncode(['AUTH', 'challenge']));
+  });
+  return server;
 }

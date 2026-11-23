@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:buzz/shared/huddle/huddle_auth.dart';
@@ -406,6 +407,60 @@ void main() {
     );
     expect(transport.state.phase, HuddleTransportPhase.failed);
   });
+
+  // NIP-FI refuses audio at the upgrade or with a frame after AUTH; only
+  // `authorization unavailable` is temporary.
+  for (final (refusal, upgradeError, frame, code) in [
+    (
+      'a 503 upgrade',
+      const WebSocketException('503', 503),
+      null,
+      HuddleTransportErrorCode.authorizationUnavailable,
+    ),
+    (
+      'a 403 upgrade',
+      const WebSocketException('403', 403),
+      null,
+      HuddleTransportErrorCode.connectionFailed,
+    ),
+    (
+      'authorization unavailable',
+      null,
+      'restricted: authorization unavailable',
+      HuddleTransportErrorCode.authorizationUnavailable,
+    ),
+    (
+      'authorization denied',
+      null,
+      'restricted: authorization denied',
+      HuddleTransportErrorCode.relayRejected,
+    ),
+  ]) {
+    test('$refusal fails the join as ${code.name}', () async {
+      final channel = _ControlledWebSocketChannel()
+        ..readyError = upgradeError == null
+            ? null
+            : WebSocketChannelException.from(upgradeError);
+      final transport = _transport(channel);
+      addTearDown(transport.dispose);
+
+      final connect = transport.connect();
+      if (frame != null) {
+        await _waitForPhase(transport, HuddleTransportPhase.awaitingChallenge);
+        channel.emitText(jsonEncode({'type': 'challenge', 'challenge': 'abc'}));
+        await _waitForPhase(transport, HuddleTransportPhase.authenticating);
+        channel.emitText(jsonEncode({'type': 'restricted', 'message': frame}));
+      }
+
+      await expectLater(
+        connect,
+        throwsA(
+          isA<HuddleTransportError>().having((e) => e.code, 'code', code),
+        ),
+      );
+      expect(transport.state.phase, HuddleTransportPhase.failed);
+    });
+  }
 
   test('bounds transport audio ingress', () async {
     final channel = _ControlledWebSocketChannel();
@@ -873,8 +928,12 @@ final class _ControlledWebSocketChannel implements WebSocketChannel {
   void emitBinary(Uint8List value) => _streamController.add(value);
   void emitError(Object error) => _streamController.addError(error);
 
+  /// What the upgrade fails with, if it does.
+  Object? readyError;
+
   @override
-  Future<void> get ready => Future.value();
+  Future<void> get ready =>
+      readyError == null ? Future.value() : Future.error(readyError!);
 
   @override
   Stream<dynamic> get stream => _streamController.stream;

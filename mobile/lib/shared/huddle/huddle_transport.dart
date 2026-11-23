@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:web_socket_channel/io.dart';
@@ -29,6 +30,10 @@ enum HuddleTransportErrorCode {
   handshakeTimeout,
   authenticationFailed,
   relayRejected,
+
+  /// The relay can't check authorization right now, for example while it
+  /// restores its revocation list; the same join can succeed shortly.
+  authorizationUnavailable,
   protocolViolation,
   socketClosed,
   sendFailed,
@@ -282,11 +287,17 @@ final class HuddleTransport implements HuddleTransportClient {
     } on HuddleTransportError {
       rethrow;
     } catch (error) {
-      final failure = HuddleTransportError(
-        code: HuddleTransportErrorCode.connectionFailed,
-        message: 'Unable to connect to the Huddle audio relay.',
-        cause: error,
-      );
+      final failure = _upgradeUnavailable(error)
+          ? HuddleTransportError(
+              code: HuddleTransportErrorCode.authorizationUnavailable,
+              message: 'Huddle authorization is temporarily unavailable.',
+              cause: error,
+            )
+          : HuddleTransportError(
+              code: HuddleTransportErrorCode.connectionFailed,
+              message: 'Unable to connect to the Huddle audio relay.',
+              cause: error,
+            );
       _fail(failure, generation);
       throw failure;
     }
@@ -399,6 +410,8 @@ final class HuddleTransport implements HuddleTransportClient {
         _handleRoster(message, generation);
       case 'error':
         _handleRelayError(message, generation);
+      case 'restricted':
+        _handleRestricted(message, generation);
       default:
         _handleProtocolProblem('Unknown Huddle control message.', generation);
     }
@@ -872,6 +885,31 @@ final class HuddleTransport implements HuddleTransportClient {
     if (_audioIngress.isNotEmpty) {
       _audioIngressTimer = Timer(Duration.zero, _drainAudioIngress);
     }
+  }
+
+  /// A 503 upgrade is the HTTP form of the same temporary refusal.
+  static bool _upgradeUnavailable(Object error) {
+    final inner = error is WebSocketChannelException ? error.inner : error;
+    return inner is WebSocketException &&
+        inner.httpStatusCode == HttpStatus.serviceUnavailable;
+  }
+
+  /// NIP-FI's audio refusal frame. Only `authorization unavailable` is
+  /// temporary; any other refusal is final for this join.
+  void _handleRestricted(Map<String, dynamic> message, int generation) {
+    final unavailable =
+        message['message'] == 'restricted: authorization unavailable';
+    _fail(
+      HuddleTransportError(
+        code: unavailable
+            ? HuddleTransportErrorCode.authorizationUnavailable
+            : HuddleTransportErrorCode.relayRejected,
+        message: unavailable
+            ? 'Huddle authorization is temporarily unavailable.'
+            : 'Huddle access was denied.',
+      ),
+      generation,
+    );
   }
 
   void _handleProtocolProblem(String message, int generation) {
