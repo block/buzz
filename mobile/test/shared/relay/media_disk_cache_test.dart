@@ -354,6 +354,84 @@ void main() {
           .where((entry) => !p.basename(entry.path).startsWith('index.json'));
       expect(files, hasLength(1));
       await overlapping.dispose();
+
+      // A large save into a cache full of small files evicts them over
+      // several passes, with no later reads to schedule them, until the
+      // directory is back in budget.
+      List<String> filesIn(Directory directory) => [
+        for (final entry in directory.listSync())
+          if (!p.basename(entry.path).startsWith('index.json'))
+            p.basename(entry.path),
+      ];
+      final passesDirectory = MediaDiskCache.directoryFor(root, 'passes', 's');
+      const passDelay = Duration(milliseconds: 500);
+      final passes = MediaDiskCache.open(
+        passesDirectory,
+        byteBudget: 20,
+        evictionDelay: passDelay,
+        evictionsPerPass: 2,
+      );
+      for (var i = 0; i < 5; i++) {
+        await passes.write('small-$i', Uint8List(4), immutable: true);
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      await passes.write('large', Uint8List(16), immutable: true);
+      await Future<void>.delayed(passDelay * 1.5);
+      expect(filesIn(passesDirectory), hasLength(4), reason: 'one pass');
+      await Future<void>.delayed(passDelay * 2);
+      expect(filesIn(passesDirectory), hasLength(2), reason: 'all passes');
+      expect(await passes.read('large'), isNotNull);
+      expect(await passes.read('small-4'), isNotNull);
+      await passes.dispose();
+
+      // Files the index doesn't track, such as a save cut short by a full
+      // disk or by the app exiting, are deleted on the next launch.
+      final sweptDirectory = MediaDiskCache.directoryFor(root, 'swept', 's');
+      final first = MediaDiskCache.open(sweptDirectory);
+      await first.write('kept', Uint8List(4), immutable: true);
+      await first.dispose();
+      final earlier = DateTime.now().subtract(const Duration(minutes: 1));
+      for (final name in ['untracked.file', 'interrupted.file.part']) {
+        File(p.join(sweptDirectory.path, name))
+          ..writeAsBytesSync(Uint8List(4))
+          ..setLastModifiedSync(earlier);
+      }
+      final relaunched = MediaDiskCache.open(sweptDirectory);
+      expect(await relaunched.read('kept'), isNotNull);
+      expect(filesIn(sweptDirectory), hasLength(1));
+      await relaunched.dispose();
+
+      // Reads during refreshes see the old bytes or the new ones in full,
+      // never part of a file.
+      final refreshing = await open('refreshing');
+      const sizes = [1024, 8 * 1024 * 1024];
+      await refreshing.write('image', Uint8List(sizes[0]), immutable: false);
+      final lengths = <int?>{};
+      Future<void> refreshRepeatedly() async {
+        for (var i = 1; i <= 10; i++) {
+          await refreshing.write(
+            'image',
+            Uint8List(sizes[i % 2]),
+            immutable: false,
+          );
+        }
+      }
+
+      // A bounded number of reads: each one marks the file used, and a
+      // reader that never stops keeps the index save, and so the refresh,
+      // from finishing.
+      Future<void> readRepeatedly() async {
+        for (var i = 0; i < 20; i++) {
+          lengths.add((await refreshing.read('image'))?.bytes.length);
+        }
+      }
+
+      await Future.wait([
+        refreshRepeatedly(),
+        for (var i = 0; i < 3; i++) readRepeatedly(),
+      ]);
+      expect(lengths, everyElement(isIn(sizes)));
+      await refreshing.dispose();
     },
   );
 
