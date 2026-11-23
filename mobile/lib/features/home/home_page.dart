@@ -1,4 +1,5 @@
 import '../../shared/widgets/native_route_controls.dart';
+
 import 'dart:ui' as ui;
 
 import 'package:duo_kit/duo_kit.dart';
@@ -31,6 +32,7 @@ import '../channels/channels_page.dart';
 import '../search/search_page.dart';
 import 'home_screen_shortcut_host.dart';
 import 'messages_navigation_bar.dart';
+import 'messages_rail_controls.dart';
 import '../../shared/widgets/covered_route_keyboard_insets.dart';
 
 class HomePage extends HookConsumerWidget {
@@ -365,28 +367,30 @@ class HomePage extends HookConsumerWidget {
       ],
     );
     final bottom = mobileTabBarBottom(context);
-    Widget navigationBar(Axis axis) => MessagesNavigationBar(
-      axis: axis,
-      onRecordingChanged: (value) => recordingFocus.value = value,
-      onSearch: openSearch,
-      agent: ConversationPaneScope(
-        controller: conversations,
-        child: Builder(builder: defaultAgentBuilder),
+    final creationActions = [
+      (
+        label: 'New chat',
+        symbol: 'square.and.pencil',
+        onPressed: newChat.value,
       ),
-      creationActions: [
-        (
-          label: 'New chat',
-          symbol: 'square.and.pencil',
-          onPressed: newChat.value,
-        ),
-        (
-          label: 'New workspace',
-          symbol: 'workspace',
-          onPressed: newWorkspace.value,
-        ),
-        (label: 'New DM', symbol: 'bubble.left', onPressed: newDm.value),
-        (label: 'New channel', symbol: 'number', onPressed: newChannel.value),
-      ],
+      (
+        label: 'New workspace',
+        symbol: 'workspace',
+        onPressed: newWorkspace.value,
+      ),
+      (label: 'New DM', symbol: 'bubble.left', onPressed: newDm.value),
+      (label: 'New channel', symbol: 'number', onPressed: newChannel.value),
+    ];
+    Widget agent() => ConversationPaneScope(
+      controller: conversations,
+      child: Builder(builder: defaultAgentBuilder),
+    );
+    void recordingChanged(bool value) => recordingFocus.value = value;
+    Widget navigationBar() => MessagesNavigationBar(
+      onRecordingChanged: recordingChanged,
+      onSearch: openSearch,
+      agent: agent(),
+      creationActions: creationActions,
     );
     return DuoWorkspaceScaffold(
       navigationOverflow: 100,
@@ -397,34 +401,27 @@ class HomePage extends HookConsumerWidget {
                 !nativeControlsVisible ||
                 communitySurfaceProgress.value != 0
             ? const SizedBox.shrink()
-            : Transform.translate(
-                offset: Offset(
-                  IosNavigationMetrics.of(context).railCenter(
-                        MediaQuery.sizeOf(context),
-                        strip!.rect.center.dx,
-                      ) -
-                      strip.rect.center.dx -
-                      // The vertical bar is 256 points wide with its controls
-                      // on the right edge. Center the controls on the rail.
-                      (256 - MessagesNavigationBar.railControlSize) / 2,
-                  0,
-                ),
-                child: SafeArea(
-                  bottom: false,
-                  child: Padding(
-                    // Match the compact composer's safe-area gutter and its
-                    // downward resting offset in _ComposerDockFrame.
-                    padding: EdgeInsets.only(
-                      bottom:
-                          (MediaQuery.viewPaddingOf(context).bottom +
-                                  Grid.xxs -
-                                  Grid.twelve -
-                                  Grid.quarter)
-                              .clamp(0.0, double.infinity),
-                    ),
-                    child: Align(
-                      alignment: Alignment.bottomCenter,
-                      child: navigationBar(Axis.vertical),
+            : SafeArea(
+                bottom: false,
+                child: Padding(
+                  // Match the compact composer's safe-area gutter and its
+                  // downward resting offset in _ComposerDockFrame.
+                  padding: EdgeInsets.only(
+                    bottom:
+                        (MediaQuery.viewPaddingOf(context).bottom +
+                                Grid.xxs -
+                                Grid.twelve -
+                                Grid.quarter)
+                            .clamp(0.0, double.infinity),
+                  ),
+                  child: Align(
+                    alignment: Alignment.bottomCenter,
+                    child: MessagesRailControls(
+                      strip: strip!,
+                      onRecordingChanged: recordingChanged,
+                      onSearch: openSearch,
+                      agent: agent(),
+                      creationActions: creationActions,
                     ),
                   ),
                 ),
@@ -442,7 +439,7 @@ class HomePage extends HookConsumerWidget {
                     builder: (_, nativeControlsVisible) =>
                         (defaultTargetPlatform != TargetPlatform.iOS ||
                             nativeControlsVisible)
-                        ? Center(child: navigationBar(Axis.horizontal))
+                        ? Center(child: navigationBar())
                         : const SizedBox.shrink(),
                   ),
                 ),
@@ -553,11 +550,7 @@ class HomePage extends HookConsumerWidget {
                                   child: _NativeControlsGate(
                                     builder: (_, nativeControlsVisible) =>
                                         nativeControlsVisible
-                                        ? Center(
-                                            child: navigationBar(
-                                              Axis.horizontal,
-                                            ),
-                                          )
+                                        ? Center(child: navigationBar())
                                         : const SizedBox.shrink(),
                                   ),
                                 ),

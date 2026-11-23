@@ -14,6 +14,7 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/agent_navigation_icon.dart';
 import '../../shared/widgets/agent_navigation_overlay.dart';
+import '../../shared/widgets/ios_navigation_bar.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/preset_agent_avatar.dart';
 import '../../shared/widgets/buzz_callout.dart';
@@ -100,6 +101,53 @@ class DefaultAgentLauncher extends HookConsumerWidget {
         if (context.mounted) opening.value = false;
       }
     }
+
+    // On a Duo rail a native control stands in for this button. Publish it
+    // whenever what it shows changes, never on a mere rebuild: Home rebuilds
+    // this launcher each time the published control arrives. Publishing waits
+    // for the frame's end, since the rail rebuilds in response.
+    final railLink = AgentNavigationOverlay.railLinkOf(context);
+    final latestOpen = useRef(open)..value = open;
+    final railEnabled = !(opening.value || preference.isLoading);
+    final railHold = pubkey != null && scope.config.nsec?.isNotEmpty == true;
+    void publishToRail(IosNavigationAction? action) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        railLink?.action.value = action;
+      });
+      WidgetsBinding.instance.ensureVisualUpdate();
+    }
+
+    useEffect(
+      () {
+        if (railLink == null) return null;
+        publishToRail(
+          IosNavigationAction(
+            label: label,
+            symbol: 'agent',
+            avatarInitial: pubkey == null ? null : profile?.initial ?? 'A',
+            avatarIdentity: pubkey,
+            avatarIsAgent: true,
+            imageUrl: pubkey == null ? null : profile?.avatarUrl,
+            onPressed: railEnabled ? () => latestOpen.value() : null,
+            onLongPress: railEnabled && railHold ? railLink.hold : null,
+          ),
+        );
+        return null;
+      },
+      [
+        railLink,
+        label,
+        pubkey,
+        profile?.initial,
+        profile?.avatarUrl,
+        railEnabled,
+        railHold,
+      ],
+    );
+    // Withdraw the control when this shortcut leaves, never between updates.
+    useEffect(() => railLink == null ? null : () => publishToRail(null), [
+      railLink,
+    ]);
 
     Widget withTranscription(Widget child) {
       if (scope.config.nsec?.isNotEmpty != true) return child;

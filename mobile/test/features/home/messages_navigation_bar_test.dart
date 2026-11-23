@@ -15,8 +15,7 @@ void main() {
     ),
   );
 
-  Widget bar(Axis axis, {Widget? agent}) => MessagesNavigationBar(
-    axis: axis,
+  Widget bar({Widget? agent}) => MessagesNavigationBar(
     onSearch: () {},
     creationActions: const [],
     agent:
@@ -29,35 +28,10 @@ void main() {
         ),
   );
 
-  testWidgets("Duo's vertical rail group uses the native rail control size", (
-    tester,
-  ) async {
-    await tester.pumpWidget(app(bar(Axis.vertical)));
-    final group = find.byType(MessagesNavigationBar);
-    // Three 48-point controls with the rail's 12-point gaps.
-    expect(tester.getSize(group).height, 48 * 3 + 12 * 2);
-    final create = tester.widget<IosMessageCreateButton>(
-      find.byType(IosMessageCreateButton),
-    );
-    expect(create.width, 48);
-    expect(create.height, 168);
-    expect(create.navigationControlSize, 48);
-    expect(create.navigationGap, 12);
-    final search = find.ancestor(
-      of: find.byTooltip('Search'),
-      matching: find.byType(SizedBox),
-    );
-    expect(tester.getSize(search.first), const Size.square(48));
-    final agent = find.byKey(const ValueKey('agent'));
-    expect(tester.getSize(agent), const Size.square(48));
-    expect(tester.getBottomRight(agent), tester.getBottomRight(group));
-    expect(tester.getTopRight(search.first), tester.getTopRight(group));
-  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
-
   testWidgets('the horizontal group keeps its 56-point controls', (
     tester,
   ) async {
-    await tester.pumpWidget(app(bar(Axis.horizontal)));
+    await tester.pumpWidget(app(bar()));
     expect(tester.getSize(find.byType(MessagesNavigationBar)).height, 56);
     final create = tester.widget<IosMessageCreateButton>(
       find.byType(IosMessageCreateButton),
@@ -70,7 +44,7 @@ void main() {
     );
   }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
 
-  testWidgets('the Bestie recording pill keeps the rail control height', (
+  testWidgets('the Bestie recording pill follows the control size', (
     tester,
   ) async {
     Widget surface({required bool recording}) => BestieTranscriptionSurface(
@@ -94,14 +68,19 @@ void main() {
       child: const SizedBox.expand(key: ValueKey('bestie')),
     );
     final pill = find.byKey(const ValueKey('default-agent-voice-pill'));
-    for (final (axis, size) in [
-      (Axis.vertical, 48.0),
-      (Axis.horizontal, 56.0),
-    ]) {
+    // The Duo rail hosts the surface in a 48-point overlay; the bar keeps 56.
+    Widget hosted(double size, bool recording) => app(
+      size == 48
+          ? AgentNavigationOverlay(
+              active: ValueNotifier(false),
+              controlSize: size,
+              child: surface(recording: recording),
+            )
+          : bar(agent: surface(recording: recording)),
+    );
+    for (final size in [48.0, 56.0]) {
       for (final recording in [false, true]) {
-        await tester.pumpWidget(
-          app(bar(axis, agent: surface(recording: recording))),
-        );
+        await tester.pumpWidget(hosted(size, recording));
         await tester.pumpAndSettle();
         expect(tester.getSize(pill).height, size);
         expect(tester.getSize(pill).width, recording ? 256 : size);

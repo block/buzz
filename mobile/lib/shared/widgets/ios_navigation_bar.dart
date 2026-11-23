@@ -20,6 +20,13 @@ import 'bottom_up_page_route.dart';
 import 'ios_navigation_metrics.dart';
 export 'ios_navigation_metrics.dart';
 
+/// Where a native press-and-hold stands, as reported by its UIKit recognizer.
+enum IosNavigationLongPressPhase { start, move, end, cancel }
+
+/// Receives a native press-and-hold, with the finger's travel since it began.
+typedef IosNavigationLongPressCallback =
+    void Function(IosNavigationLongPressPhase phase, Offset offsetFromOrigin);
+
 /// A UIKit bar item or menu item, with its action owned by the Flutter route.
 class IosNavigationAction {
   const IosNavigationAction({
@@ -33,6 +40,7 @@ class IosNavigationAction {
     this.activityColor,
     this.activityLabel,
     this.onPressed,
+    this.onLongPress,
     this.children = const [],
     this.selected = false,
     this.onAvatarBoundsChanged,
@@ -58,6 +66,11 @@ class IosNavigationAction {
   final Color? activityColor;
   final String? activityLabel;
   final VoidCallback? onPressed;
+
+  /// Press-and-hold, recognized natively so that it survives the platform view
+  /// owning the touch. A tap still reaches [onPressed]. Changing whether this
+  /// is set rebuilds the native control, which cancels a hold in progress.
+  final IosNavigationLongPressCallback? onLongPress;
   final List<IosNavigationAction> children;
   final bool selected;
 
@@ -84,6 +97,7 @@ class IosNavigationAction {
     'activityLabel': activityLabel,
     'imageUrl': imageUrl,
     'enabled': onPressed != null || children.isNotEmpty,
+    'longPress': onLongPress != null,
     'selected': selected,
     'tracksAvatarBounds': onAvatarBoundsChanged != null,
     'avatarHidden': avatarHidden,
@@ -96,14 +110,26 @@ class IosNavigationAction {
     ],
   };
 
-  void _dispatch(List<String> path) {
+  void _dispatch(
+    List<String> path, {
+    IosNavigationLongPressPhase? longPress,
+    Offset offset = Offset.zero,
+  }) {
     if (path.isEmpty) {
-      onPressed?.call();
+      if (longPress == null) {
+        onPressed?.call();
+      } else {
+        onLongPress?.call(longPress, offset);
+      }
       return;
     }
     final index = int.tryParse(path.first);
     if (index != null && index >= 0 && index < children.length) {
-      children[index]._dispatch(path.sublist(1));
+      children[index]._dispatch(
+        path.sublist(1),
+        longPress: longPress,
+        offset: offset,
+      );
     }
   }
 }
@@ -477,8 +503,24 @@ class IosNavigationBar extends HookConsumerWidget {
           }
           return;
         }
-        if (call.method != 'action') return;
-        final id = call.arguments as String;
+        final isLongPress = call.method == 'actionLongPress';
+        if (call.method != 'action' && !isLongPress) return;
+        IosNavigationLongPressPhase? phase;
+        var offset = Offset.zero;
+        final String id;
+        if (isLongPress) {
+          final values = call.arguments as Map<Object?, Object?>;
+          id = values['id'] as String;
+          phase = IosNavigationLongPressPhase.values
+              .asNameMap()[values['phase']];
+          if (phase == null) return;
+          offset = Offset(
+            (values['dx'] as num).toDouble(),
+            (values['dy'] as num).toDouble(),
+          );
+        } else {
+          id = call.arguments as String;
+        }
         final config = latest.value;
         if (id == 'title') {
           config.onTitlePressed?.call();
@@ -487,11 +529,19 @@ class IosNavigationBar extends HookConsumerWidget {
         } else {
           final path = id.split('.');
           if (path.first == 'leading') {
-            config.leading?._dispatch(path.sublist(1));
+            config.leading?._dispatch(
+              path.sublist(1),
+              longPress: phase,
+              offset: offset,
+            );
           } else {
             final index = int.tryParse(path.first);
             if (index != null && index >= 0 && index < config.actions.length) {
-              config.actions[index]._dispatch(path.sublist(1));
+              config.actions[index]._dispatch(
+                path.sublist(1),
+                longPress: phase,
+                offset: offset,
+              );
             }
           }
         }

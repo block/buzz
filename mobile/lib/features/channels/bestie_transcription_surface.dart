@@ -1,13 +1,16 @@
 import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+
 import '../../shared/recording_haptics.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/navigation_button_surface.dart';
 import '../../shared/widgets/concentric_sheet_surface.dart';
 import '../../shared/widgets/agent_navigation_overlay.dart';
+import '../../shared/widgets/ios_navigation_bar.dart';
 import 'bestie_transcription_loading_indicator.dart';
 import 'voice_note_recording.dart';
 import 'voice_note_waveform.dart';
@@ -101,6 +104,45 @@ class BestieTranscriptionSurface extends HookWidget {
     }, [recording, overlay]);
     final canRecord =
         enabled && !active && !restoring && !finalizing && !sending;
+    // The hold is recognized by the pill itself, or natively when a Duo rail
+    // control stands in for this button and forwards it through the link.
+    void holdMoved(double dy) {
+      if (!recording) return;
+      final willCancel = dy < -64;
+      if (dy < -24 && !cancelHapticPrepared.value) {
+        cancelHapticPrepared.value = true;
+        unawaited(prepareRecordingHaptic(cancel: true));
+      } else if (dy >= -24) {
+        cancelHapticPrepared.value = false;
+      }
+      if (willCancel && !cancelled.value) {
+        unawaited(recordingHaptic(cancel: true));
+      }
+      cancelled.value = willCancel;
+    }
+
+    final railLink = AgentNavigationOverlay.railLinkOf(context);
+    final latestHold = useRef<IosNavigationLongPressCallback?>(null);
+    latestHold.value = (phase, offset) {
+      switch (phase) {
+        case IosNavigationLongPressPhase.start:
+          if (!enabled) return;
+          if (canRecord) unawaited(prepareRecordingHaptic());
+          unawaited(start());
+        case IosNavigationLongPressPhase.move:
+          holdMoved(offset.dy);
+        case IosNavigationLongPressPhase.end:
+          unawaited(finish());
+        case IosNavigationLongPressPhase.cancel:
+          unawaited(cancel());
+      }
+    };
+    useEffect(
+      () => railLink?.attachHold(
+        (phase, offset) => latestHold.value?.call(phase, offset),
+      ),
+      [railLink],
+    );
     final recoveryPortal = useMemoized(OverlayPortalController.new);
     final recoveryLink = useMemoized(LayerLink.new);
     final recoveryAnchor = useMemoized(GlobalKey.new);
@@ -165,22 +207,8 @@ class BestieTranscriptionSurface extends HookWidget {
           excludeFromSemantics: true,
           behavior: HitTestBehavior.opaque,
           onLongPressStart: enabled ? (_) => unawaited(start()) : null,
-          onLongPressMoveUpdate: (details) {
-            if (recording) {
-              final willCancel = details.offsetFromOrigin.dy < -64;
-              if (details.offsetFromOrigin.dy < -24 &&
-                  !cancelHapticPrepared.value) {
-                cancelHapticPrepared.value = true;
-                unawaited(prepareRecordingHaptic(cancel: true));
-              } else if (details.offsetFromOrigin.dy >= -24) {
-                cancelHapticPrepared.value = false;
-              }
-              if (willCancel && !cancelled.value) {
-                unawaited(recordingHaptic(cancel: true));
-              }
-              cancelled.value = willCancel;
-            }
-          },
+          onLongPressMoveUpdate: (details) =>
+              holdMoved(details.offsetFromOrigin.dy),
           onLongPressEnd: (_) => unawaited(finish()),
           onLongPressCancel: () => unawaited(cancel()),
           child: AnimatedContainer(
@@ -323,11 +351,27 @@ class BestieTranscriptionSurface extends HookWidget {
                                   ),
                                   child: finalizing || sending
                                       ? Center(
-                                          child:
-                                              BestieTranscriptionLoadingIndicator(
-                                                semanticLabel: processingLabel,
-                                                size: 28,
+                                          child: DecoratedBox(
+                                            // Cover the native rail avatar
+                                            // that this progress replaces.
+                                            decoration: BoxDecoration(
+                                              shape: BoxShape.circle,
+                                              color: railLink == null
+                                                  ? null
+                                                  : context.controlSurface,
+                                            ),
+                                            child: SizedBox.square(
+                                              dimension: controlSize,
+                                              child: Center(
+                                                child:
+                                                    BestieTranscriptionLoadingIndicator(
+                                                      semanticLabel:
+                                                          processingLabel,
+                                                      size: 28,
+                                                    ),
                                               ),
+                                            ),
+                                          ),
                                         )
                                       : recovering
                                       ? const SizedBox.shrink()
@@ -449,8 +493,32 @@ class BestieTranscriptionSurface extends HookWidget {
       child: CompositedTransformTarget(
         key: recoveryAnchor,
         link: recoveryLink,
-        child: recovering ? child : pill,
+        // A native rail control is the visible, accessible button while idle,
+        // so this one only shows while it has progress of its own to present.
+        child: railLink == null
+            ? (recovering ? child : pill)
+            : _HostedVisibility(
+                visible: recording || preparing || finalizing || sending,
+                child: recovering ? child : pill,
+              ),
       ),
     );
   }
+}
+
+/// Keeps [child] mounted and laid out, but unseen, unheard and untouchable.
+class _HostedVisibility extends StatelessWidget {
+  const _HostedVisibility({required this.visible, required this.child});
+
+  final bool visible;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => ExcludeSemantics(
+    excluding: !visible,
+    child: IgnorePointer(
+      ignoring: !visible,
+      child: Opacity(opacity: visible ? 1 : 0, child: child),
+    ),
+  );
 }
