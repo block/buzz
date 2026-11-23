@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/push/android_push_authority.dart';
 import 'package:buzz/shared/push/android_push_gateway.dart';
 import 'package:buzz/shared/push/android_push_keystore.dart';
@@ -8,8 +10,10 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 import '../../helpers/android_push_fakes.dart';
+import '../../helpers/recording_diagnostics.dart';
 
 const _channel = MethodChannel('buzz/push_registration');
 
@@ -191,6 +195,48 @@ void main() {
     );
 
     expect(pushUnavailableReason.value, isNotNull);
+  });
+
+  test('only a gateway reply the app cannot read is reported', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    fcmDeviceToken.value = 'fcm-token';
+    final diagnostics = RecordingDiagnostics();
+
+    Future<void> enroll() => enrollBuzzPush(
+      'wss://relay.example/',
+      'https://gateway.example/',
+      relayOrigin: 'wss://relay.example',
+      relayPubkey: 'a' * 64,
+      desiredRelays: () => {'wss://relay.example'},
+      diagnostics: diagnostics,
+    ).then((_) {});
+
+    for (final (reply, reported) in [
+      // A refusal and gateway trouble are routine.
+      (http.Response(jsonEncode({'error': 'unavailable'}), 503), false),
+      // A challenge with no fields, and a body that is not JSON, are not.
+      (http.Response(jsonEncode({}), 200), true),
+      (http.Response('<html>', 200), true),
+    ]) {
+      diagnostics.errors.clear();
+      debugAndroidPushAuthority = AndroidPushAuthority(
+        keystore: FakeAndroidKeystore(),
+        gateway: AndroidPushGatewayClient(
+          baseUrl: Uri.parse('https://push.example'),
+          client: MockClient((_) async => reply),
+        ),
+        store: _MemoryStore(),
+        sleep: (_) async {},
+      );
+      await expectLater(enroll(), throwsA(anything));
+      expect(diagnostics.errors, [
+        if (reported)
+          (
+            AndroidPushGatewayResponseInvalid,
+            DiagnosticOperation.pushGatewayResponse,
+          ),
+      ], reason: reply.body);
+    }
   });
 
   test('a gateway call that times out is aborted, not abandoned', () async {

@@ -355,7 +355,7 @@ class AndroidPushAuthority {
     final handle = response['installation_handle'];
     final expiresAt = response['expires_at'];
     if (handle is! String || expiresAt is! int) {
-      throw const FormatException(
+      throw const AndroidPushGatewayResponseInvalid(
         'Push gateway returned a malformed installation.',
       );
     }
@@ -563,7 +563,9 @@ class AndroidPushAuthority {
     );
     final endpointGrant = response['endpoint_grant'];
     if (endpointGrant is! String || endpointGrant.isEmpty) {
-      throw const FormatException('Push gateway returned a malformed grant.');
+      throw const AndroidPushGatewayResponseInvalid(
+        'Push gateway returned a malformed grant.',
+      );
     }
     state = await _load();
     final granted = delegation.copyWith(
@@ -686,7 +688,7 @@ class AndroidPushAuthority {
     final id = response['challenge_id'];
     final text = response['challenge'];
     if (id is! String || text is! String) {
-      throw const FormatException(
+      throw const AndroidPushGatewayResponseInvalid(
         'Push gateway returned a malformed challenge.',
       );
     }

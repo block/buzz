@@ -30,6 +30,13 @@ class AndroidPushGatewayRejection implements Exception {
   String toString() => 'Push gateway refused $route: $status ${code ?? ''}';
 }
 
+/// The gateway answered with something the app cannot read: no JSON object,
+/// or one missing a field the call needs. Unlike a refusal, this points at a
+/// gateway or protocol defect, so it is reported to diagnostics.
+class AndroidPushGatewayResponseInvalid extends FormatException {
+  const AndroidPushGatewayResponseInvalid(super.message);
+}
+
 /// One round trip to the gateway's JSON API.
 class AndroidPushGatewayClient {
   AndroidPushGatewayClient({
@@ -51,13 +58,21 @@ class AndroidPushGatewayClient {
     Map<String, Object?> body, {
     int expectedStatus = 200,
   }) async {
-    final response = await boundedHttpResponse(
-      _client,
-      http.Request('POST', baseUrl.resolve(route))
-        ..headers['content-type'] = 'application/json'
-        ..body = jsonEncode(body),
-      timeout: timeout,
-    );
+    final http.Response response;
+    try {
+      response = await boundedHttpResponse(
+        _client,
+        http.Request('POST', baseUrl.resolve(route))
+          ..headers['content-type'] = 'application/json'
+          ..body = jsonEncode(body),
+        timeout: timeout,
+      );
+    } on FormatException catch (error) {
+      // The only one a bounded read throws: a body over its limit.
+      throw AndroidPushGatewayResponseInvalid(
+        'Push gateway answered $route unreadably: ${error.message}',
+      );
+    }
     final decoded = _object(response.bodyBytes);
     if (response.statusCode != expectedStatus) {
       throw AndroidPushGatewayRejection(
@@ -67,7 +82,7 @@ class AndroidPushGatewayClient {
       );
     }
     if (decoded == null) {
-      throw FormatException(
+      throw AndroidPushGatewayResponseInvalid(
         'Push gateway answered $route without a JSON object.',
       );
     }
