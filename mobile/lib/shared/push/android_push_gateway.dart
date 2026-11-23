@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../hosted/bounded_http_response.dart';
 import '../http/app_http_client.dart';
 
 /// The gateway answered with a refusal. Signed installation calls answer every
@@ -42,19 +43,21 @@ class AndroidPushGatewayClient {
   final http.Client _client;
 
   /// Posts [body] to [route] and returns the JSON object answered with
-  /// [expectedStatus]. Transport failures propagate unchanged.
+  /// [expectedStatus]. Transport failures propagate unchanged. At [timeout]
+  /// the request is aborted, not just abandoned, so a retry never races a
+  /// copy of itself still on its way to the gateway.
   Future<Map<String, Object?>> post(
     String route,
     Map<String, Object?> body, {
     int expectedStatus = 200,
   }) async {
-    final response = await _client
-        .post(
-          baseUrl.resolve(route),
-          headers: const {'content-type': 'application/json'},
-          body: jsonEncode(body),
-        )
-        .timeout(timeout);
+    final response = await boundedHttpResponse(
+      _client,
+      http.Request('POST', baseUrl.resolve(route))
+        ..headers['content-type'] = 'application/json'
+        ..body = jsonEncode(body),
+      timeout: timeout,
+    );
     final decoded = _object(response.bodyBytes);
     if (response.statusCode != expectedStatus) {
       throw AndroidPushGatewayRejection(

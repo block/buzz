@@ -1,9 +1,13 @@
+import 'dart:async';
+
 import 'package:buzz/shared/push/android_push_authority.dart';
+import 'package:buzz/shared/push/android_push_gateway.dart';
 import 'package:buzz/shared/push/android_push_keystore.dart';
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 
 import '../../helpers/android_push_fakes.dart';
 
@@ -189,6 +193,21 @@ void main() {
     expect(pushUnavailableReason.value, isNotNull);
   });
 
+  test('a gateway call that times out is aborted, not abandoned', () async {
+    final aborted = Completer<void>();
+    final gateway = AndroidPushGatewayClient(
+      baseUrl: Uri.parse('https://push.example'),
+      timeout: const Duration(milliseconds: 10),
+      client: _HangingClient(aborted),
+    );
+
+    await expectLater(
+      gateway.post('/v1/installations/challenges', {'v': 1}),
+      throwsA(isA<TimeoutException>()),
+    );
+    await aborted.future.timeout(const Duration(seconds: 1));
+  });
+
   test('enrolling without a token fails loudly', () async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
 
@@ -213,4 +232,20 @@ class _MemoryStore implements AndroidPushStateStore {
 
   @override
   Future<void> write(String? next) async => value = next;
+}
+
+/// Never answers, and completes [aborted] when the request's abort trigger
+/// fires.
+class _HangingClient extends http.BaseClient {
+  _HangingClient(this.aborted);
+
+  final Completer<void> aborted;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) {
+    final trigger = (request as http.Abortable).abortTrigger;
+    if (trigger == null) throw StateError('the request is not abortable');
+    trigger.then((_) => aborted.complete());
+    return Completer<http.StreamedResponse>().future;
+  }
 }
