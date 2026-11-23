@@ -1,5 +1,6 @@
 import '../hosted/known_community_sync_provider.dart';
 import '../hosted/hosted_relay_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -8,6 +9,7 @@ import '../community/community_provider.dart';
 import '../diagnostics/diagnostic_reporter.dart';
 import '../hosted/community_entry_requirements.dart';
 import '../relay/relay_provider.dart' show pubkeyFromNsec;
+import '../hosted/known_communities_sync.dart';
 
 enum AuthStatus { unknown, unauthenticated, authenticated }
 
@@ -87,6 +89,10 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
             .setMember(pubkeyFromNsec(community.nsec));
       }
       sync?.trigger();
+      // The saved membership comes first: an intent that fails to record is
+      // recovered by the next account list merge, which uploads unsynced
+      // memberships, so the join never waits on or fails for sync.
+      await recordKnownCommunityJoin(ref, community.relayUrl);
       await syncStoredCommunitySnapshot(ref);
 
       // Invalidate community providers so other consumers pick up the new data.
@@ -116,3 +122,31 @@ bool _hasValidNsec(String? nsec) {
 final authProvider = AsyncNotifierProvider<AuthNotifier, AuthState>(
   AuthNotifier.new,
 );
+
+/// Queues the upload of a saved membership to the Builderlab account. Joining
+/// never waits for sync, so a record that will not write is only logged; the
+/// next account list merge uploads the membership instead.
+Future<void> recordKnownCommunityJoin(Ref ref, String relayUrl) =>
+    _recordKnownCommunity(ref, relayUrl, removed: false);
+
+/// Queues the removal of a forgotten membership from the Builderlab account.
+/// Leaving never waits for sync either: a record that will not write is only
+/// logged, and the next sign-in may list the community again.
+Future<void> recordKnownCommunityLeave(Ref ref, String relayUrl) =>
+    _recordKnownCommunity(ref, relayUrl, removed: true);
+
+Future<void> _recordKnownCommunity(
+  Ref ref,
+  String relayUrl, {
+  required bool removed,
+}) async {
+  try {
+    await ref
+        .read(knownCommunitiesOutboxProvider)
+        .record(relayUrl, removed: removed);
+  } catch (error) {
+    debugPrint(
+      'Known-communities ${removed ? 'leave' : 'join'} record failed: $error',
+    );
+  }
+}

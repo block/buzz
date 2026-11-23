@@ -32,8 +32,10 @@ enum AccountFailure {
   /// Login completed for a different account than the stored session.
   differentAccount,
 
-  /// The server definitively refused this request (400/404/409/422); sending
-  /// it again unchanged cannot succeed.
+  /// The server definitively refused this request: a client error other
+  /// than a timeout (408) or a rate limit (429), which are retried as
+  /// unavailable. Sending it again unchanged cannot succeed. The status is
+  /// in [BuilderlabAccountClient.lastRejectedRequest].
   rejected,
 }
 
@@ -394,18 +396,6 @@ class BuilderlabAccountClient {
   Future<Map<String, dynamic>> currentIdentity({String? signer}) =>
       post('/v1/buzz/nostr-identities/current', {}, signer: signer);
 
-  /// Saves a successfully admitted destination to the same account, even if
-  /// another session operation was queued before this request runs.
-  Future<void> rememberCommunity(
-    String relay, {
-    required String expectedSubject,
-  }) async {
-    final result = await _post('/v1/buzz/known-communities/add', {
-      'community_url': relay,
-    }, expectedSubject: expectedSubject);
-    if (result['error'] != null) throw AccountFailure.rejected;
-  }
-
   /// Edits only the account's saved destination list; relay membership and
   /// credentials are unchanged. Both operations are idempotent.
   Future<void> updateKnownCommunity(
@@ -662,15 +652,16 @@ class BuilderlabAccountClient {
               );
             }
           }
-          if (const {401, 403, 400, 404, 409, 422}.contains(status) &&
-              kDebugMode) {
+          if (status >= 400 && kDebugMode) {
             debugPrint(
               'Builderlab ${accountOrigin.host} ${request.method} $path: HTTP $status contentType=${headers.headers['content-type']?.split(';').first}',
             );
           }
           if (status == 401) throw AccountFailure.signedOut;
           if (status == 403) throw AccountFailure.denied;
-          if (const {400, 404, 409, 422}.contains(status)) {
+          if (status >= 400 &&
+              status < 500 &&
+              !const {408, 429}.contains(status)) {
             lastRejectedRequest = (path: path, status: status);
             throw AccountFailure.rejected;
           }
