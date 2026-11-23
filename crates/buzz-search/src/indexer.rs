@@ -1,15 +1,9 @@
 //! The indexer: drains `search_outbox` into the OpenSearch index.
 //!
-//! One relay instance holds the indexer lease (a session advisory lock) at a
-//! time; when it stops, its lock connection closes and another instance takes
-//! over on its next attempt. Rows are claimed with `SKIP LOCKED`, so more
-//! workers can run without a redesign.
-//!
-//! Each batch re-reads its events from Postgres, writes them (or removes the
-//! documents of events that are gone) in one bulk request, and only then
-//! deletes the rows it claimed. A failed request leaves the rows queued for
-//! the next attempt. A batch the cluster rejects outright skips its community
-//! for the rest of the pass, so one community cannot hold back the others.
+//! One relay at a time holds the indexer lease (a session advisory lock);
+//! when it stops, its lock connection closes and another relay takes over.
+//! Rows are deleted only once the index holds their events, so a failed
+//! request leaves them queued.
 //!
 //! A batch holds its community's admission open for up to one request
 //! timeout. Community deletion's quiesce step waits for that batch, and once

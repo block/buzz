@@ -149,8 +149,7 @@ services:
       com.buzz.env: "dev"
     restart: "no"
 
-  # Message search engine. Opt-in: `docker compose up -d opensearch`, then set
-  # BUZZ_OPENSEARCH_URL=http://localhost:9200 for the relay.
+  # Opt-in message index; see docs/opensearch-search-deployment.md.
   opensearch:
     image: opensearchproject/opensearch:2.19.3@sha256:e96cc6ae1500a073d973c0906f30f7cf4d9c461f32f855f9242a2da933660cdd
     container_name: buzz-opensearch

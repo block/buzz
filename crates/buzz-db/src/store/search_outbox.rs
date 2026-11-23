@@ -8,11 +8,8 @@
 //! rolled-back write never does. The write makes no call to the search
 //! engine.
 //!
-//! The indexer drains the queue one community at a time with
-//! [`claim_batch`]: it locks rows other workers don't hold, re-reads the
-//! events they name, writes the index, and calls [`SearchOutboxBatch::complete`]
-//! to delete exactly the rows it claimed. Because the indexer re-reads
-//! `events`, the order and number of rows for one event don't matter.
+//! The indexer re-reads `events` for every row it claims, so duplicate or
+//! out-of-order rows for one event are harmless.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
