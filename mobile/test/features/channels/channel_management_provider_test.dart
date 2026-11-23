@@ -869,6 +869,66 @@ void main() {
     });
   });
 
+  test('convert the existing Solo with one signed metadata edit', () async {
+    final relay = FakeRelay();
+    relay.seed([
+      relay.sign(
+        kind: 39000,
+        content: '',
+        createdAt: 1,
+        tags: [
+          ['d', _channelId],
+          ['t', 'stream'],
+          ['t', 'buzz.solo'],
+          ['t', 'project'],
+          ['private'],
+          ['P', relay.pubkey],
+        ],
+      ),
+      relay.sign(
+        kind: 39002,
+        content: '',
+        createdAt: 1,
+        tags: [
+          ['d', _channelId],
+          ['p', relay.pubkey, '', 'owner'],
+        ],
+      ),
+    ]);
+    final container = ProviderContainer(
+      overrides: [
+        ...relay.overrides,
+        channelsProvider.overrideWith(_ChannelsAfterLeave.new),
+      ],
+    );
+    addTearDown(container.dispose);
+    final connected = Completer<void>();
+    container.listen(relaySessionProvider, (_, state) {
+      if (state.status == SessionStatus.connected && !connected.isCompleted) {
+        connected.complete();
+      }
+    }, fireImmediately: true);
+    await connected.future;
+    await container
+        .read(channelActionsProvider)
+        .convertSolo(_channelId, personalChat: false);
+    expect(relay.published.single.kind, 9002);
+    expect(relay.published.single.tags, [
+      ['h', _channelId],
+      ['unlisted', 'false'],
+      ['t', 'project'],
+    ]);
+  });
+
+  test('conversion keeps unrelated labels and preserves access settings', () {
+    expect(buildSoloConversionTags(_channelId, ['buzz.solo', 'project']), [
+      ['h', _channelId],
+      ['unlisted', 'false'],
+      ['t', 'project'],
+    ]);
+    expect(buildSoloConversionTags(_channelId, ['buzz.solo']).last, ['t', '']);
+  });
+
   test(
     'stale channel actions cannot publish after a community switch',
     () async {
@@ -890,6 +950,7 @@ void main() {
       final operations = <Future<void> Function()>[
         () =>
             staleActions.updateChannel(channelId: _channelId, name: 'renamed'),
+        () => staleActions.convertSolo(_channelId, personalChat: true),
         () => staleActions.archiveChannel(_channelId),
         () => staleActions.unarchiveChannel(_channelId),
         () => staleActions.deleteChannel(_channelId),

@@ -15,6 +15,32 @@ class _MeRetry extends StatelessWidget {
   );
 }
 
+/// Opens the list-row action popover and clears the matching pane when requested.
+Future<bool?> openConversationListDetails(
+  BuildContext context,
+  Channel channel,
+  String? viewer, {
+  required bool personal,
+  bool isUnread = false,
+  String? sectionId,
+  ConversationMenuSession? nativeSession,
+}) async {
+  final pane = ConversationPaneScope.maybeOf(context);
+  final result = await showConversationPopover(
+    anchorContext: context,
+    channel: channel,
+    viewer: viewer,
+    personal: personal,
+    isUnread: isUnread,
+    sectionId: sectionId,
+    nativeSession: nativeSession,
+  );
+  if (result == true && context.mounted && pane?.selectedId == channel.id) {
+    pane!.clear();
+  }
+  return result;
+}
+
 /// A Solo chat row. It opens as a personal chat in whichever sidebar
 /// section the chat is filed.
 class SoloChatTile extends ConsumerWidget {
@@ -32,37 +58,38 @@ class SoloChatTile extends ConsumerWidget {
     );
     final pane = ConversationPaneScope.maybeOf(context);
     final selected = pane?.selectedId == channel.id;
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: selected ? context.colors.primaryContainer : null,
-        borderRadius: BorderRadius.circular(Radii.container),
-      ),
-      child: Semantics(
-        selected: selected,
-        child: _MeChatRow(
-          channelId: channel.id,
-          name: channel.name,
+    void openMenu(ConversationMenuSession? session) =>
+        openConversationListDetails(
+          context,
+          channel,
+          viewer,
+          personal: channel.isPersonalChat(viewer, legacyChannels),
           isUnread: isUnread,
-          onLongPress: () => showChannelDetailsSheet(
-            context: context,
-            channel: channel,
-            currentPubkey: viewer,
-            onMemberTap: (context, pubkey) => showUserProfileSheet(
-              context,
-              pubkey,
-              names: channelIdentityNamesProvider(channel.id),
-              contextualActions: (_) =>
-                  ChannelMemberProfileActions(channel: channel, pubkey: pubkey),
-            ),
-            personalChat: true,
-          ),
-          onTap: () => openConversationPane(
-            context,
-            channel.id,
-            (_) => ChannelDetailPage(
-              channel: channel,
-              personalChat: channel.isPersonalChat(viewer, legacyChannels),
-            ),
+          nativeSession: session,
+        );
+    void openChat() => openConversationPane(
+      context,
+      channel.id,
+      (_) => ChannelDetailPage(
+        channel: channel,
+        personalChat: channel.isPersonalChat(viewer, legacyChannels),
+      ),
+    );
+    return IosConversationMenuRow(
+      onMenu: openMenu,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: selected ? context.colors.primaryContainer : null,
+          borderRadius: BorderRadius.circular(Radii.container),
+        ),
+        child: Semantics(
+          selected: selected,
+          child: _MeChatRow(
+            channelId: channel.id,
+            name: channel.name,
+            isUnread: isUnread,
+            onLongPress: () => openMenu(null),
+            onTap: openChat,
           ),
         ),
       ),
@@ -98,7 +125,7 @@ class _MeChatRow extends ConsumerWidget {
       child: InkWell(
         borderRadius: BorderRadius.circular(Radii.container),
         onTap: onTap,
-        onLongPress: onLongPress,
+        onLongPress: usesIosConversationMenu ? null : onLongPress,
         child: Padding(
           padding: const EdgeInsets.fromLTRB(
             Grid.xxs,

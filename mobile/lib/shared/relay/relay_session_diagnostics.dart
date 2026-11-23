@@ -27,6 +27,24 @@ extension _RelaySessionDiagnostics on RelaySessionNotifier {
     );
   }
 
+  /// Counts a connection completing AUTH, and the recovery it ends when an
+  /// open connection was lost before it.
+  void _noteConnected() {
+    _noteNetwork(NetworkEndpoint.relayConnection, since: _connectStartedAt);
+    final lost = _connectionLost;
+    _connectionLost = null;
+    // A loss in another community's connection, or before a move to the
+    // background, is not this one's recovery.
+    if (lost != null &&
+        lost.context == _contextGeneration &&
+        lost.pauses == _pauses) {
+      _noteNetwork(
+        NetworkEndpoint.relayRecovery,
+        duration: _elapsed() - lost.at,
+      );
+    }
+  }
+
   /// Counts the end of a connect attempt or of an open connection, once: a
   /// socket that fails while authenticating reports it twice.
   ///
@@ -35,6 +53,19 @@ extension _RelaySessionDiagnostics on RelaySessionNotifier {
   void _noteDisconnected(Object? error, {bool denied = false}) {
     final since = _connectStartedAt;
     if (since == null && _connectedAt == null) return;
+    // Recovery runs from the last frame, since a dead socket can look open
+    // for a while. Pongs never reach here, but one is due every ping
+    // interval, so a quiet socket was alive until at most two intervals
+    // before the loss. Failed attempts after the loss keep the first time.
+    if (_connectedAt != null && _backgroundedAt == null) {
+      final provenAlive = _elapsed() - RelaySocket.pingInterval * 2;
+      final inbound = _lastFrameElapsed;
+      _connectionLost ??= (
+        at: inbound != null && inbound > provenAlive ? inbound : provenAlive,
+        context: _contextGeneration,
+        pauses: _pauses,
+      );
+    }
     _connectStartedAt = null;
     _noteNetwork(
       NetworkEndpoint.relayConnection,
@@ -97,6 +128,11 @@ extension _RelaySessionDiagnostics on RelaySessionNotifier {
     return classifyTransportError(error) ?? NetworkFailure.disconnected;
   }
 }
+
+/// The session's default clock for durations. Unlike the wall clock, a device
+/// clock correction does not move it.
+Duration _monotonic() => _uptime.elapsed;
+final _uptime = Stopwatch()..start();
 
 /// The relay's NOTICE for a refused or expired authorization, sent just before
 /// it closes the connection with 1008.

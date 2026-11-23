@@ -22,8 +22,8 @@ typedef MediaDiskCacheHit = ({Uint8List bytes, bool isStale});
 /// Built on `flutter_cache_manager`. It keeps the bytes each URL served, so a
 /// relay thumbnail and its original are separate entries. Each community and
 /// account has its own directory under the caches root (see
-/// [mediaCacheRootProvider]), deleted with the community or account. Least recently used files are evicted once
-/// the directory holds more than [maxBytes].
+/// [mediaCacheRootProvider]), deleted with its community. Least recently used
+/// files are evicted once the directory holds more than [maxBytes].
 ///
 /// Relay media URLs are content hashes and never go stale. Other URLs can
 /// change in place, so they are served from disk but refetched in the
@@ -133,32 +133,19 @@ class MediaDiskCache {
     p.join(communityDirectory(root, communityId).path, 'media', signer),
   );
 
-  /// Keeps only each retained community's cache for its current signer
-  /// (community id to signer pubkey) and deletes every other directory under
-  /// [root]: removed communities and replaced accounts, including writes
-  /// that landed after their removal. A failed delete is retried on the
-  /// next call.
+  /// Deletes every directory under [root] except the [retained] communities'
+  /// (by id), including writes that landed after their removal. A failed
+  /// delete is retried on the next call.
   ///
-  /// [retained] is read again before each delete, so a community or account
-  /// added while the sweep runs is kept.
+  /// [retained] is read again before each delete, so a community added while
+  /// the sweep runs is kept.
   static Future<void> removeOrphans(
     Directory root,
-    Map<String, String?> Function() retained,
-  ) async {
-    Set<String> keep() => {
-      for (final MapEntry(key: id, value: signer) in retained().entries)
-        if (signer != null) directoryFor(root, id, signer).path,
-    };
-    final communities = Directory(p.join(root.path, 'communities'));
-    await _deleteExcept(communities, () {
-      return {for (final path in keep()) p.dirname(p.dirname(path))};
-    });
-    if (!await communities.exists()) return;
-    await for (final community in communities.list(followLinks: false)) {
-      if (community is! Directory) continue;
-      await _deleteExcept(Directory(p.join(community.path, 'media')), keep);
-    }
-  }
+    Set<String> Function() retained,
+  ) => _deleteExcept(
+    Directory(p.join(root.path, 'communities')),
+    () => {for (final id in retained()) communityDirectory(root, id).path},
+  );
 
   /// Deletes the entries of [parent] whose paths are not in [keep].
   static Future<void> _deleteExcept(
