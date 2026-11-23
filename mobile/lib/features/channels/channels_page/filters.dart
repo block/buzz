@@ -149,8 +149,10 @@ class _SectionViewSheet extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final group = this.group;
     final global = group == null;
-    final display = ref.watch(messagesDisplayProvider);
-    final scope = ref.watch(mobileSectionOrderKeyProvider);
+    final display = global
+        ? ref.watch(messagesDisplayProvider)
+        : const MessagesDisplay();
+    final scope = global ? ref.watch(mobileSectionOrderKeyProvider) : null;
     final initialScope = useRef(scope);
     final manager = global
         ? null
