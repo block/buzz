@@ -56,9 +56,7 @@ pub(super) async fn dispatch(
         preview_handler(db, &request, &row.stage, row.target_community_id, options).await
     };
     match result {
-        Ok(mut value) => {
-            value["execution_mode"] = "rehearsal".into();
-            value["account_erasure_complete"] = false.into();
+        Ok(value) => {
             store.save_stage_success(lease, row.id, value).await?;
             if row.stage == "purge_media" && !options.next_step {
                 use std::io::Write;
@@ -90,11 +88,11 @@ pub(super) async fn preview_handler(
     let subject = Inventory::subject(request)?;
     let users = db.user_deletion_store();
     let mut output = std::io::stderr();
-    match stage {
-        "gate_user" | "global_cleanup" => Ok(json!({
+    let mut result = match stage {
+        "gate_user" | "global_cleanup" => json!({
             "simulated":true,"stage":stage,"source_data_unchanged":true,
             "detail":"dummy rehearsal stage; no gate or global cleanup performed"
-        })),
+        }),
         "purge_media" => {
             let configured;
             let media = match options.media.as_deref() {
@@ -105,9 +103,9 @@ pub(super) async fn preview_handler(
                 }
             };
             if options.read_only {
-                super::media::stage_preview(db, media, subject).await
+                super::media::stage_preview(db, media, subject).await?
             } else {
-                super::media::handle_with_storage(db, media, subject, false, &mut output).await
+                super::media::handle_with_storage(db, media, subject, false, &mut output).await?
             }
         }
         "purge_content" => {
@@ -125,7 +123,7 @@ pub(super) async fn preview_handler(
                     &mut output,
                 )
                 .await?;
-            Ok(json!({"content":summary,"account_erasure_complete":false}))
+            json!({"content":summary,"account_erasure_complete":false})
         }
         "purge_account" => {
             let summary = users
@@ -145,7 +143,7 @@ pub(super) async fn preview_handler(
                 summary.supported_scope_exhausted,
                 "account preview limit reached; increase --max-items and retry"
             );
-            Ok(serde_json::to_value(summary)?)
+            serde_json::to_value(summary)?
         }
         "purge_profile" => {
             let profile = ProfileBatchOptions {
@@ -162,14 +160,19 @@ pub(super) async fn preview_handler(
             } else {
                 users.preview_profile_plan(&profile, &mut output).await?
             };
-            Ok(serde_json::to_value(summary)?)
+            serde_json::to_value(summary)?
         }
-        "delete_owned_community" => Ok(
+        "delete_owned_community" => {
             json!({"community":community,"would_submit_or_adopt_child":true,
-            "child_submitted":false,"detail":"stateless preview; persisted rehearsal records actual handoff"}),
-        ),
+            "child_submitted":false,"detail":"stateless preview; persisted rehearsal records actual handoff"})
+        }
         _ => bail!("unsupported rehearsal preview stage {stage}"),
+    };
+    if options.read_only {
+        result["execution_mode"] = "rehearsal".into();
+        result["account_erasure_complete"] = false.into();
     }
+    Ok(result)
 }
 
 async fn report(store: &EntityDeletionStore, request: &EntityRequest) -> Result<Value> {
@@ -197,7 +200,7 @@ async fn report(store: &EntityDeletionStore, request: &EntityRequest) -> Result<
             "status": stage.status, "result": result,
         }));
     }
-    let report = json!({"record":"rehearsal_report","request_id":request.id,
+    let report = json!({"record":"rehearsal_report","execution_mode":"rehearsal","request_id":request.id,
         "run_id":request.inventory_manifest.as_ref().map(|m| &m["run_id"]),
         "subject":Inventory::subject(request)?,"source_data_unchanged":true,
         "account_erasure_complete":false,"stages":stages,

@@ -151,6 +151,26 @@ async fn rehearsal_resumes_real_previews_delegates_owner_and_finishes_without_de
     let done = f.store.inspect(request.id).await.unwrap();
     assert_eq!(done.request.status, "completed");
     assert!(done.execution.completed_at.is_some());
+    for stage in &done.stage_history {
+        let saved: serde_json::Value = sqlx::query_scalar(
+            "SELECT metadata_json FROM entity_deletion_stage_history WHERE id=$1",
+        )
+        .bind(stage.id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(stage.metadata_json, saved, "{}", stage.stage);
+        assert_eq!(
+            saved["result"]["execution_mode"], "rehearsal",
+            "{}",
+            stage.stage
+        );
+        assert_eq!(
+            saved["result"]["account_erasure_complete"], false,
+            "{}",
+            stage.stage
+        );
+    }
     assert!(done
         .stage_history
         .iter()
