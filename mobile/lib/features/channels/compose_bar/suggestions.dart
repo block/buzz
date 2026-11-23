@@ -1,5 +1,11 @@
 part of '../compose_bar.dart';
 
+/// A mention row with its info line: a dense, compact two-line `ListTile`.
+const _mentionRowHeight = 59.0;
+
+/// The chooser shows at most three rows, then scrolls.
+const _mentionChooserHeight = _mentionRowHeight * 3 + Grid.xxs * 2;
+
 class _MentionSuggestions extends StatelessWidget {
   final List<MentionCandidate> suggestions;
 
@@ -8,6 +14,14 @@ class _MentionSuggestions extends StatelessWidget {
 
   /// The directory search failed: show its error and a retry below the rows.
   final bool searchFailed;
+
+  /// Hold the full height, rows at the top, so rows that join late fill
+  /// empty space instead of pushing the shown rows up.
+  final bool reserveHeight;
+
+  /// The directory search is still running: show a thin progress bar on the
+  /// top edge. It overlays the rows, so it never changes the height.
+  final bool searching;
   final VoidCallback? onRetry;
   final Map<String, UserProfile> userCache;
   final String? currentPubkey;
@@ -18,6 +32,8 @@ class _MentionSuggestions extends StatelessWidget {
     required this.suggestions,
     this.unavailable = const {},
     this.searchFailed = false,
+    this.reserveHeight = false,
+    this.searching = false,
     this.onRetry,
     required this.userCache,
     required this.currentPubkey,
@@ -30,79 +46,114 @@ class _MentionSuggestions extends StatelessWidget {
     return Material(
       key: const ValueKey('mention-suggestions-popover'),
       type: MaterialType.card,
-      color: appPopoverColor(context),
+      color: _ComposerGlassScope.of(context)
+          ? Colors.transparent
+          : appPopoverColor(context),
       surfaceTintColor: Colors.transparent,
-      elevation: appPopoverElevation,
+      elevation: _ComposerGlassScope.of(context) ? 0 : appPopoverElevation,
       shadowColor: appPopoverShadowColor(context),
       shape: appPopoverShape(context),
       clipBehavior: Clip.hardEdge,
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxHeight: 240),
-        child: ListView.separated(
-          shrinkWrap: true,
-          padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
-          itemCount: suggestions.length + (searchFailed ? 1 : 0),
-          separatorBuilder: (_, _) => const SizedBox.shrink(),
-          itemBuilder: (context, index) {
-            if (index == suggestions.length) {
-              return ListTile(
-                key: const ValueKey('mention-search-error'),
-                dense: true,
-                visualDensity: VisualDensity.compact,
-                title: Text(
-                  'Could not search community people.',
-                  style: context.textTheme.bodySmall?.copyWith(
-                    color: context.colors.error,
-                  ),
-                ),
-                trailing: TextButton(
-                  onPressed: onRetry == null
-                      ? null
-                      : () => _runComposerAction(onRetry!),
-                  child: const Text('Retry'),
-                ),
-              );
-            }
-            final candidate = suggestions[index];
-            final name = candidate.pickerLabel;
-            final avatarUrl =
-                candidate.avatarUrl ?? userCache[candidate.pubkey]?.avatarUrl;
+      child: Stack(
+        children: [
+          _rows(context),
+          if (searching)
+            const Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: LinearProgressIndicator(
+                key: ValueKey('mention-search-progress'),
+                minHeight: 2,
+                backgroundColor: Colors.transparent,
+                semanticsLabel: 'Searching people',
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 
-            final available = !unavailable.contains(candidate.pubkey);
+  Widget _rows(BuildContext context) {
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        minHeight: reserveHeight ? _mentionChooserHeight : 0,
+        maxHeight: _mentionChooserHeight,
+      ),
+      child: ListView.separated(
+        shrinkWrap: true,
+        padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+        itemCount: suggestions.length + (searchFailed ? 1 : 0),
+        separatorBuilder: (_, _) => const SizedBox.shrink(),
+        itemBuilder: (context, index) {
+          if (index == suggestions.length) {
             return ListTile(
-              enabled: available,
+              key: const ValueKey('mention-search-error'),
               dense: true,
               visualDensity: VisualDensity.compact,
-              leading: AvatarImage(
-                imageUrl: avatarUrl,
-                radius: 18,
-                backgroundColor: context.controlSurface,
-                fallback: Text(
-                  // Name-derived for named candidates; keyed to the hex
-                  // public key for unnamed ones so the compact-npub label
-                  // doesn't render `N` for everyone.
-                  candidate.initial,
-                  style: context.textTheme.labelMedium?.copyWith(
-                    color: context.colors.onPrimaryContainer,
-                    fontWeight: FontWeight.w600,
+              title: Text(
+                'Could not search community people.',
+                style: context.textTheme.bodySmall?.copyWith(
+                  color: context.colors.error,
+                ),
+              ),
+              trailing: TextButton(
+                onPressed: onRetry == null
+                    ? null
+                    : () => _runComposerAction(onRetry!),
+                child: const Text('Retry'),
+              ),
+            );
+          }
+          final candidate = suggestions[index];
+          final name = candidate.pickerLabel;
+          final avatarUrl =
+              candidate.avatarUrl ?? userCache[candidate.pubkey]?.avatarUrl;
+
+          final available = !unavailable.contains(candidate.pubkey);
+          return ListTile(
+            enabled: available,
+            dense: true,
+            visualDensity: VisualDensity.compact,
+            leading: AvatarImage(
+              imageUrl: avatarUrl,
+              radius: 18,
+              backgroundColor: context.controlSurface,
+              fallback: Text(
+                // Name-derived for named candidates; keyed to the hex
+                // public key for unnamed ones so the compact-npub label
+                // doesn't render `N` for everyone.
+                candidate.initial,
+                style: context.textTheme.labelMedium?.copyWith(
+                  color: context.colors.onPrimaryContainer,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              isAgent: candidate.isAgent,
+            ),
+            title: Row(
+              children: [
+                Flexible(
+                  child: Text(
+                    name,
+                    style: context.textTheme.titleSmall,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
-                isAgent: candidate.isAgent,
-              ),
-              title: Text(name, style: context.textTheme.titleSmall),
-              subtitle: _MentionSuggestionInfo.build(
-                context,
-                candidate: candidate,
-                currentPubkey: currentPubkey,
-                isDmChannel: isDmChannel,
-                userCache: userCache,
-              ),
-              onTap: available
-                  ? () => _runComposerAction(() => onSelect(candidate))
-                  : null,
-            );
-          },
-        ),
+              ],
+            ),
+            subtitle: _MentionSuggestionInfo.build(
+              context,
+              candidate: candidate,
+              currentPubkey: currentPubkey,
+              isDmChannel: isDmChannel,
+              userCache: userCache,
+            ),
+            onTap: available
+                ? () => _runComposerAction(() => onSelect(candidate))
+                : null,
+          );
+        },
       ),
     );
   }
@@ -191,11 +242,86 @@ List<Channel> filterChannels(List<Channel> channels, String? query) {
       .toList();
 }
 
-class _ChannelSuggestions extends StatelessWidget {
-  final List<Channel> suggestions;
-  final void Function(Channel) onSelect;
+typedef _EmojiChoice = ({String code, String text, String? url});
 
-  const _ChannelSuggestions({
+// Enough rows to scroll through without ranking the whole catalog into a list.
+const _emojiSuggestionLimit = 50;
+
+final _emojiToken = RegExp(r'(?:^|[\s(\[{]):([a-zA-Z0-9_+-]{2,64})$');
+
+final _emojiSuffix = RegExp(r'[a-zA-Z0-9_+-]*:?');
+
+String? _emojiQuery(TextEditingValue value) {
+  final caret = value.selection;
+  if (!caret.isValid || !caret.isCollapsed || caret.end > value.text.length) {
+    return null;
+  }
+  return _emojiToken.firstMatch(value.text.substring(0, caret.end))?.group(1);
+}
+
+Widget _emojiSuggestionPreview(BuildContext context, _EmojiChoice entry) =>
+    entry.url == null
+    ? ExcludeSemantics(
+        child: Text(entry.text, style: const TextStyle(fontSize: 26)),
+      )
+    : _CachedCustomEmojiPreview(
+        shortcode: entry.code,
+        url: entry.url!,
+        size: 26,
+      );
+
+/// A custom emoji in the suggestion list, drawn only from bytes another
+/// surface already downloaded. Typing a shortcode starts no image request: an
+/// emoji not seen yet shows the placeholder. The row's label already reads
+/// the shortcode, so the preview adds nothing for screen readers.
+class _CachedCustomEmojiPreview extends ConsumerWidget {
+  final String shortcode;
+  final String url;
+  final double size;
+
+  const _CachedCustomEmojiPreview({
+    required this.shortcode,
+    required this.url,
+    required this.size,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final bytes = ref.watch(customEmojiBytesCacheProvider).lookup(url);
+    return ExcludeSemantics(
+      child: bytes == null
+          ? CustomEmojiPlaceholder(shortcode: shortcode, size: size)
+          : Image.memory(
+              bytes,
+              width: size,
+              height: size,
+              cacheWidth: (size * MediaQuery.devicePixelRatioOf(context))
+                  .ceil(),
+              fit: BoxFit.contain,
+              filterQuality: FilterQuality.medium,
+            ),
+    );
+  }
+}
+
+class _ComposerSearchSuggestions<T> extends StatelessWidget {
+  final Key surfaceKey;
+  final List<T> suggestions;
+  final void Function(T) onSelect;
+
+  final Widget Function(BuildContext, T) leading;
+  final String Function(T) label;
+  final TextStyle? labelStyle;
+  final double horizontalTitleGap;
+  final bool singleLineLabel;
+
+  const _ComposerSearchSuggestions({
+    required this.surfaceKey,
+    required this.leading,
+    required this.label,
+    this.labelStyle,
+    this.horizontalTitleGap = 0,
+    this.singleLineLabel = false,
     required this.suggestions,
     required this.onSelect,
   });
@@ -203,11 +329,13 @@ class _ChannelSuggestions extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      key: const ValueKey('channel-suggestions-popover'),
+      key: surfaceKey,
       type: MaterialType.card,
-      color: appPopoverColor(context),
+      color: _ComposerGlassScope.of(context)
+          ? Colors.transparent
+          : appPopoverColor(context),
       surfaceTintColor: Colors.transparent,
-      elevation: appPopoverElevation,
+      elevation: _ComposerGlassScope.of(context) ? 0 : appPopoverElevation,
       shadowColor: appPopoverShadowColor(context),
       shape: appPopoverShape(context),
       clipBehavior: Clip.hardEdge,
@@ -219,21 +347,22 @@ class _ChannelSuggestions extends StatelessWidget {
           itemCount: suggestions.length,
           separatorBuilder: (_, _) => const SizedBox.shrink(),
           itemBuilder: (context, index) {
-            final channel = suggestions[index];
+            final item = suggestions[index];
             return ListTile(
               dense: true,
               visualDensity: VisualDensity.compact,
-              horizontalTitleGap: 0,
+              horizontalTitleGap: horizontalTitleGap,
               leading: SizedBox.square(
                 dimension: 36,
-                child: Icon(
-                  BuzzIcons.hash,
-                  size: 20,
-                  color: context.colors.onSurfaceVariant,
-                ),
+                child: Center(child: leading(context, item)),
               ),
-              title: Text(channel.name, style: context.textTheme.bodyLarge),
-              onTap: () => _runComposerAction(() => onSelect(channel)),
+              title: Text(
+                label(item),
+                style: labelStyle ?? context.textTheme.bodyLarge,
+                maxLines: singleLineLabel ? 1 : null,
+                overflow: singleLineLabel ? TextOverflow.ellipsis : null,
+              ),
+              onTap: () => _runComposerAction(() => onSelect(item)),
             );
           },
         ),

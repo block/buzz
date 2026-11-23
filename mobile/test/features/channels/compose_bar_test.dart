@@ -1,21 +1,51 @@
+import 'package:buzz/features/channels/voice_note_composer_recorder.dart';
+import 'package:clock/clock.dart';
+import 'package:buzz/features/channels/composer_transcription.dart';
+import 'package:buzz/shared/transcription/device_transcription.dart';
+import 'package:buzz/shared/emoji/emoji_data.dart';
+import 'package:buzz/shared/emoji/emoji_data_provider.dart';
+import 'package:buzz/shared/emoji/emoji_picker.dart';
+import 'package:buzz/shared/widgets/concentric_sheet_surface.dart';
+import 'package:flutter/scheduler.dart';
+import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
+import 'package:buzz/shared/utils/stylus_handwriting.dart';
+
 import 'dart:async';
+
 import 'package:buzz/features/channels/composer_send_origin.dart';
+
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 import 'package:image_picker/image_picker.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/deep_link_dispatcher.dart';
+import 'package:buzz/features/channels/open_channel_routes.dart';
+import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/deeplink/deep_link.dart';
+import 'package:buzz/shared/verified_profiles/verified_profile.dart';
+import 'package:buzz/shared/verified_profiles/verified_profile_directory.dart';
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+import 'package:buzz/shared/deeplink/pending_deep_link_provider.dart';
+
+import '../../shared/community/community_storage_test.dart';
+
 import 'package:buzz/features/channels/channel_management_provider.dart';
+import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
 import 'package:buzz/features/channels/send_message_provider.dart';
@@ -26,8 +56,13 @@ import 'package:buzz/features/channels/voice_note_recording.dart';
 import 'package:buzz/features/channels/voice_note_waveform.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji_render.dart';
+import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
+import 'package:buzz/shared/mentions/mention_bindings.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/share/pending_share.dart';
+import 'package:buzz/shared/drafts/compose_drafts_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -38,7 +73,20 @@ import 'package:buzz/shared/widgets/mobile_tab_footer_backdrop.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 part 'compose_bar_test/exact_mention_tests.dart';
+part 'compose_bar_test/ios_controls_tests.dart';
+part 'compose_bar_test/mixed_gallery_tests.dart';
+part 'compose_bar_test/solo_draft_tests.dart';
 part 'compose_bar_test/durable_mention_tests.dart';
+part 'compose_bar_test/agent_prefill_tests.dart';
+part 'compose_bar_test/share_delivery_tests.dart';
+part 'compose_bar_test/mention_chip_tests.dart';
+part 'compose_bar_test/mention_search_tests.dart';
+part 'compose_bar_test/large_roster_tests.dart';
+
+/// A complete 1x1 PNG, for tests that need a frame to decode.
+final _decodablePngBytes = base64Decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+);
 
 final _pngBytes = Uint8List.fromList([
   0x89,
@@ -180,8 +228,11 @@ Future<void> _sendNativeAttachmentPopoverCall(
 late SharedPreferences _testPrefs;
 
 Widget _buildComposeBar({
+  String? hintText,
   required MediaUploadService uploadService,
   required ComposeBarOnSend onSend,
+  List<ChannelMember>? draftMembers,
+  ValueChanged<bool>? onSendingChanged,
   List<ChannelMember> members = const <ChannelMember>[],
   Future<List<ChannelMember>>? membersFuture,
   Future<List<ChannelMember>> Function()? loadMembers,
@@ -207,14 +258,58 @@ Widget _buildComposeBar({
   VoiceNoteRecorder Function()? voiceNoteRecorderFactory,
   VoiceNotePlayerController Function()? voiceNotePlayerFactory,
   Future<List<UserProfile>> Function(String query)? searchPeople,
+  List<OwnedAgentDirectoryEntry>? ownedAgents,
+  bool ownedAgentsUnknown = false,
+  List<TimelineMessage>? prefillScopeMessages,
+  List<Override> overrides = const [],
+  Widget Function(Widget page)? wrapPage,
 }) {
+  final page = Scaffold(
+    body: SafeArea(
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        child: Builder(
+          builder: (context) {
+            final composeBar = ComposeBar(
+              hintText: hintText,
+              key: ValueKey(composeBarKey),
+              channelId: 'channel-1',
+              draftMembers: draftMembers,
+              onSendingChanged: onSendingChanged,
+              threadHeadId: threadHeadId,
+              focusNode: focusNode,
+              onFocusRestorerChanged: onFocusRestorerChanged,
+              onFocusRequested: onFocusRequested,
+              prefillScopeMessages: prefillScopeMessages,
+              onSend: onSend,
+            );
+            if (viewPadding == null) return composeBar;
+            return MediaQuery(
+              data: MediaQuery.of(context).copyWith(viewPadding: viewPadding),
+              child: composeBar,
+            );
+          },
+        ),
+      ),
+    ),
+  );
   return ProviderScope(
     overrides: [
+      ...overrides,
+      if (ownedAgents != null)
+        ownedAgentDirectoryProvider.overrideWith((ref) async => ownedAgents),
+      if (ownedAgentsUnknown)
+        ownedAgentDirectoryProvider.overrideWith(
+          (ref) => Completer<List<OwnedAgentDirectoryEntry>>().future,
+        ),
       // Directory people by exact query, found after the real typing pause.
       if (searchPeople != null)
         mentionUserSearchProvider.overrideWith((ref, query) async {
           await Future<void>.delayed(mentionSearchDebounce);
-          return searchPeople(query.trim());
+          final people = await searchPeople(query.trim());
+          // Like the real search, a finished page is cached by query.
+          ref.read(mentionSearchCacheProvider).put(query.trim(), people);
+          return people;
         }),
       customEmojiListProvider.overrideWithValue(customEmoji),
       mediaUploadServiceProvider.overrideWithValue(uploadService),
@@ -270,81 +365,7 @@ Widget _buildComposeBar({
               ),
               child: child!,
             ),
-      home: Scaffold(
-        body: SafeArea(
-          child: Align(
-            alignment: Alignment.bottomCenter,
-            child: Builder(
-              builder: (context) {
-                final composeBar = ComposeBar(
-                  key: ValueKey(composeBarKey),
-                  channelId: 'channel-1',
-                  threadHeadId: threadHeadId,
-                  focusNode: focusNode,
-                  onFocusRestorerChanged: onFocusRestorerChanged,
-                  onFocusRequested: onFocusRequested,
-                  onSend: onSend,
-                );
-                if (viewPadding == null) return composeBar;
-                return MediaQuery(
-                  data: MediaQuery.of(
-                    context,
-                  ).copyWith(viewPadding: viewPadding),
-                  child: composeBar,
-                );
-              },
-            ),
-          ),
-        ),
-      ),
-    ),
-  );
-}
-
-Widget _buildNativePopoverOwnershipHarness({
-  required MediaUploadService uploadService,
-  required bool includeFirstComposer,
-}) {
-  return ProviderScope(
-    overrides: [
-      customEmojiListProvider.overrideWithValue(const []),
-      mediaUploadServiceProvider.overrideWithValue(uploadService),
-      photoLibraryProvider.overrideWithValue(const _EmptyPhotoLibrary()),
-      currentPubkeyProvider.overrideWith((ref) => null),
-      channelMembersProvider(
-        'channel-1',
-      ).overrideWith((ref) => Future.value(const <ChannelMember>[])),
-      agentDirectoryProvider.overrideWith(
-        (ref) async => const <AgentDirectoryEntry>[],
-      ),
-      agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
-      relayClientProvider.overrideWithValue(
-        RelayClient(baseUrl: 'http://localhost:3000'),
-      ),
-      relayConfigProvider.overrideWith(_FakeRelayConfigNotifier.new),
-      savedPrefsProvider.overrideWithValue(_testPrefs),
-      channelsProvider.overrideWith(() => _FakeChannelsNotifier(const [])),
-    ],
-    child: MaterialApp(
-      theme: AppTheme.light(),
-      home: Scaffold(
-        body: Column(
-          mainAxisAlignment: MainAxisAlignment.end,
-          children: [
-            if (includeFirstComposer)
-              ComposeBar(
-                key: const ValueKey('first-composer'),
-                channelId: 'channel-1',
-                onSend: (_, _, {mediaTags = const []}) async {},
-              ),
-            ComposeBar(
-              key: const ValueKey('second-composer'),
-              channelId: 'channel-1',
-              onSend: (_, _, {mediaTags = const []}) async {},
-            ),
-          ],
-        ),
-      ),
+      home: wrapPage?.call(page) ?? page,
     ),
   );
 }
@@ -389,6 +410,9 @@ class _FakeVideoUploadService extends MediaUploadService {
 
   @override
   Future<XFile?> pickGalleryVideo() async => video;
+
+  @override
+  Future<List<XFile>> pickGalleryImages() async => [video];
 
   @override
   Future<BlobDescriptor> uploadVideo(
@@ -532,7 +556,7 @@ class _FakeVoiceNotePlayer extends VoiceNotePlayerController {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) => loadLocal(url, fallbackDuration: fallbackDuration);
 
@@ -677,11 +701,153 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
   void notifyWithCopy() {
     state = AsyncData([..._channels]);
   }
+
+  void replaceChannels(List<Channel> channels) {
+    state = AsyncData(channels);
+  }
+}
+
+/// A channel list that counts how many times it is iterated.
+class _IterationCountingChannels extends ListBase<Channel> {
+  _IterationCountingChannels(this._channels);
+
+  final List<Channel> _channels;
+  int iterations = 0;
+
+  @override
+  Iterator<Channel> get iterator {
+    iterations++;
+    return _channels.iterator;
+  }
+
+  @override
+  int get length => _channels.length;
+
+  @override
+  set length(int value) => throw UnsupportedError('read-only');
+
+  @override
+  Channel operator [](int index) => _channels[index];
+
+  @override
+  void operator []=(int index, Channel value) =>
+      throw UnsupportedError('read-only');
+}
+
+Widget _buildNativePopoverOwnershipHarness({
+  required MediaUploadService uploadService,
+  required bool includeFirstComposer,
+}) {
+  return ProviderScope(
+    overrides: [
+      customEmojiListProvider.overrideWithValue(const []),
+      mediaUploadServiceProvider.overrideWithValue(uploadService),
+      photoLibraryProvider.overrideWithValue(const _EmptyPhotoLibrary()),
+      currentPubkeyProvider.overrideWith((ref) => null),
+      channelMembersProvider(
+        'channel-1',
+      ).overrideWith((ref) => Future.value(const <ChannelMember>[])),
+      agentDirectoryProvider.overrideWith(
+        (ref) async => const <AgentDirectoryEntry>[],
+      ),
+      agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
+      relayClientProvider.overrideWithValue(
+        RelayClient(baseUrl: 'http://localhost:3000'),
+      ),
+      relayConfigProvider.overrideWith(_FakeRelayConfigNotifier.new),
+      savedPrefsProvider.overrideWithValue(_testPrefs),
+      channelsProvider.overrideWith(() => _FakeChannelsNotifier(const [])),
+    ],
+    child: MaterialApp(
+      theme: AppTheme.light(),
+      home: Scaffold(
+        body: Column(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            if (includeFirstComposer)
+              ComposeBar(
+                key: const ValueKey('first-composer'),
+                channelId: 'channel-1',
+                onSend: (_, _, {mediaTags = const []}) async {},
+              ),
+            ComposeBar(
+              key: const ValueKey('second-composer'),
+              channelId: 'channel-1',
+              onSend: (_, _, {mediaTags = const []}) async {},
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 void main() {
+  for (final isDictation in [false, true]) {
+    testWidgets('recording duration limit: dictation=$isDictation', (
+      tester,
+    ) async {
+      var now = DateTime(2026);
+      await withClock(Clock(() => now), () async {
+        final recorder = _FakeVoiceNoteRecorder();
+        var completed = 0;
+        await tester.pumpWidget(
+          ProviderScope(
+            overrides: [
+              voiceNoteRecorderFactoryProvider.overrideWithValue(
+                () => recorder,
+              ),
+            ],
+            child: MaterialApp(
+              home: Scaffold(
+                body: VoiceNoteComposerRecorder(
+                  isDictation: isDictation,
+                  onCancel: () {},
+                  onRecorded: (_) => completed++,
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        now = now.add(const Duration(minutes: 5));
+        await tester.pump(const Duration(milliseconds: 200));
+        expect(completed, isDictation ? 0 : 1);
+        expect(
+          find.byKey(const ValueKey('voice-note-recorder-duration')),
+          isDictation ? findsNothing : findsOneWidget,
+        );
+        if (!isDictation) expect(find.text('5:00 / 5:00'), findsOneWidget);
+        if (isDictation) {
+          now = now.add(const Duration(minutes: 5));
+          await tester.pump(const Duration(milliseconds: 200));
+          expect(completed, 0);
+          expect(
+            find.byKey(const ValueKey('voice-note-recorder-duration')),
+            findsNothing,
+          );
+          await tester.tap(
+            find.byKey(const ValueKey('voice-note-recorder-stop')),
+          );
+          await tester.pump();
+          expect(completed, 1);
+        }
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      });
+    });
+  }
+
+  iosControlsTests();
+  _mixedGalleryTests();
+  soloDraftTests();
   exactMentionTests();
   durableMentionTests();
+  agentPrefillTests();
+  shareDeliveryTests();
+  mentionChipTests();
+  mentionSearchTests();
+  largeRosterTests();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() async {
@@ -734,10 +900,7 @@ void main() {
         matching: find.byType(MobileTabFooterBackdrop),
       );
       expect(composerBackdrop, findsOneWidget);
-      expect(
-        tester.getSize(composerBackdrop).height,
-        mobileTabFooterBackdropHeight(tester.element(composerBackdrop)),
-      );
+      expect(tester.getSize(composerBackdrop).height, 180);
       final compactDecoration =
           tester
                   .widget<Container>(
@@ -805,7 +968,7 @@ void main() {
         ),
       );
 
-      await tester.tap(find.text('Message\u2026'));
+      await tester.tap(find.text('Message'));
       expect(focusRequested, isTrue);
       await tester.pump();
       await tester.pump();
@@ -833,7 +996,7 @@ void main() {
         ),
       );
 
-      await tester.tap(find.text('Message\u2026'));
+      await tester.tap(find.text('Message'));
       await tester.pump();
       await tester.pump();
 
@@ -864,7 +1027,7 @@ void main() {
         ),
       );
 
-      await tester.tap(find.text('Message\u2026'));
+      await tester.tap(find.text('Message'));
       await tester.pump();
       await tester.pump();
       focusNode.unfocus();
@@ -1017,7 +1180,7 @@ void main() {
         );
         final compactWidth = tester.getSize(widthFinder).width;
 
-        await tester.tap(find.text('Message\u2026'));
+        await tester.tap(find.text('Message'));
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 80));
 
@@ -1061,7 +1224,7 @@ void main() {
         );
         final compactWidth = tester.getSize(widthFinder).width;
 
-        await tester.tap(find.text('Message\u2026'));
+        await tester.tap(find.text('Message'));
         await tester.pumpAndSettle();
 
         expect(tester.getSize(widthFinder).width, greaterThan(compactWidth));
@@ -1089,8 +1252,68 @@ void main() {
           .widget<TextField>(find.byType(TextField))
           .focusNode!;
       expect(focusNode.hasFocus, isTrue);
-      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
       addTearDown(tester.view.reset);
+
+      final backdrop = find.descendant(
+        of: find.byKey(const ValueKey('composer-footer-gradient')),
+        matching: find.byType(MobileTabFooterBackdrop),
+      );
+      // The fade gives up one point per point of keyboard inset (logical)
+      // until it reaches 100, in both directions and at any keyboard height.
+      for (final (inset, height) in [
+        (0.0, 180.0),
+        (1.0, 179.0),
+        (30.0, 150.0),
+        (150.0, 100.0),
+        (336.0, 100.0),
+        (300.0, 100.0),
+        (40.0, 140.0),
+        (300.0, 100.0),
+      ]) {
+        tester.view.viewInsets = FakeViewPadding(
+          bottom: inset * tester.view.devicePixelRatio,
+        );
+        await tester.pump();
+        expect(
+          tester.getSize(backdrop).height,
+          height,
+          reason: 'keyboard inset $inset',
+        );
+      }
+
+      // iOS drops the inset while Control Center or the app switcher covers
+      // the app, reports `resumed` with it still at zero, and restores the
+      // keyboard natively a moment later. That is not a dismissal.
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.view.viewInsets = FakeViewPadding.zero;
+      await tester.pumpAndSettle();
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump(const Duration(milliseconds: 400));
+      tester.view.viewInsets = const FakeViewPadding(bottom: 40);
+      await tester.pump();
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsOneWidget);
+      expect(focusNode.hasFocus, isTrue);
+
+      // A keyboard that stays down after the app resumes still collapses the
+      // composer once the restore grace has passed.
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.view.viewInsets = FakeViewPadding.zero;
+      await tester.pumpAndSettle();
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byType(TextField), findsOneWidget);
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pumpAndSettle();
+      expect(find.byType(TextField), findsNothing);
+      expect(focusNode.hasFocus, isFalse);
+      expect(tester.getSize(backdrop).height, 180);
+
+      await tester.tap(find.text('Message'));
+      await tester.pumpAndSettle();
+      tester.view.viewInsets = const FakeViewPadding(bottom: 300);
       await tester.pump();
 
       tester.view.viewInsets = FakeViewPadding.zero;
@@ -1110,7 +1333,7 @@ void main() {
         BorderRadius.circular(Radii.dialog + Grid.quarter),
       );
 
-      await tester.tap(find.text('Message\u2026'));
+      await tester.tap(find.text('Message'));
       await tester.pumpAndSettle();
       expect(find.byType(TextField), findsOneWidget);
       expect(
@@ -1242,45 +1465,196 @@ void main() {
       );
     });
 
-    testWidgets('a failed send does not overwrite a new draft', (tester) async {
-      final delivery = Completer<void>();
-      await tester.pumpWidget(
-        _buildComposeBar(
-          uploadService: _testUploadService(nostr.Keys.generate().nsec),
-          onSend:
-              (content, mentionPubkeys, {mediaTags = const <List<String>>[]}) =>
-                  delivery.future,
-        ),
-      );
+    for (final recovered in [false, true]) {
+      testWidgets('a failed send does not overwrite a new draft '
+          '${recovered ? 'recovered from elsewhere' : 'typed during it'}', (
+        tester,
+      ) async {
+        final delivery = Completer<void>();
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) => delivery.future,
+          ),
+        );
 
-      await _expandComposer(tester);
-      await tester.enterText(find.byType(TextField), 'first draft');
-      await tester.pumpAndSettle();
-      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-      for (var i = 0; i < 20; i++) {
-        await tester.pump(const Duration(milliseconds: 20));
-        if (tester
-            .widget<TextField>(find.byType(TextField))
-            .controller!
-            .text
-            .isEmpty) {
-          break;
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), 'first draft');
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        for (var i = 0; i < 20; i++) {
+          await tester.pump(const Duration(milliseconds: 20));
+          if (tester
+              .widget<TextField>(find.byType(TextField))
+              .controller!
+              .text
+              .isEmpty) {
+            break;
+          }
         }
-      }
-      expect(
-        tester.widget<TextField>(find.byType(TextField)).controller!.text,
-        '',
-      );
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          '',
+        );
 
-      await tester.enterText(find.byType(TextField), 'new draft');
-      delivery.completeError(StateError('relay rejected'));
-      await tester.pumpAndSettle();
+        if (recovered) {
+          // Such as an unsent notification reply for this conversation.
+          final container = ProviderScope.containerOf(
+            tester.element(find.byType(ComposeBar)),
+          );
+          container
+              .read(composeDraftsProvider.notifier)
+              .append(
+                config: container.read(relayConfigProvider),
+                key: composeDraftKey('channel-1'),
+                channelId: 'channel-1',
+                text: 'new draft',
+              );
+          await tester.pump();
+        } else {
+          await tester.enterText(find.byType(TextField), 'new draft');
+        }
+        delivery.completeError(StateError('relay rejected'));
+        await tester.pumpAndSettle();
 
-      expect(
-        tester.widget<TextField>(find.byType(TextField)).controller!.text,
-        'new draft',
-      );
-    });
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          'new draft',
+        );
+      });
+    }
+
+    const unsentEvent = NostrEvent(
+      id: 'event-1',
+      pubkey: 'pubkey-1',
+      createdAt: 0,
+      kind: 9,
+      tags: [],
+      content: 'hello',
+      sig: 'sig-1',
+    );
+
+    // Each failure runs against the real relay session. `socket` records
+    // published EVENTs and never acknowledges them unless the case says so.
+    for (final (name, fail, message, publishes)
+        in <
+          (
+            String,
+            Future<void> Function(RelaySessionNotifier session),
+            String,
+            bool,
+          )
+        >[
+          (
+            'a disconnected relay',
+            (session) {
+              session.debugPauseNow();
+              return session.publish(unsentEvent);
+            },
+            'Not sent. No connection.',
+            false,
+          ),
+          (
+            'a timeout before anything was published',
+            // A pre-send roster lookup that times out, like the Solo chat
+            // recipients refresh, before the message EVENT is signed.
+            (session) => session
+                .fetchHistory(
+                  const NostrFilter(kinds: [39002]),
+                  timeout: const Duration(milliseconds: 1),
+                )
+                .then((_) => session.publish(unsentEvent)),
+            "Not sent. The relay didn't respond.",
+            false,
+          ),
+          (
+            'an unacknowledged publish',
+            (session) => session.publish(
+              unsentEvent,
+              timeout: const Duration(milliseconds: 1),
+            ),
+            "Not confirmed. The relay didn't respond.",
+            true,
+          ),
+          (
+            'a connection lost before acknowledgement',
+            (session) {
+              final delivery = session.publish(unsentEvent);
+              session.debugPauseNow();
+              return delivery;
+            },
+            'Not confirmed. Connection lost.',
+            true,
+          ),
+          (
+            'a relay rejection',
+            (_) => Future.error(Exception('restricted: not a member')),
+            'Not sent: restricted: not a member',
+            false,
+          ),
+          (
+            'any other named error',
+            (_) => Future.error(const FormatException('bad relay frame')),
+            'Not sent: FormatException: bad relay frame',
+            false,
+          ),
+          (
+            'any other state error',
+            (_) => Future.error(StateError('Relay session is disposed')),
+            'Not sent: Relay session is disposed',
+            false,
+          ),
+        ]) {
+      testWidgets('reports $name as itself, not a community switch', (
+        tester,
+      ) async {
+        final publishedEvents = <Map<String, dynamic>>[];
+        late final RelaySessionNotifier session;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) => fail(session),
+          ),
+        );
+        session = ProviderScope.containerOf(
+          tester.element(find.byType(ComposeBar)),
+        ).read(relaySessionProvider.notifier);
+        session.debugAttachSocketForTest(
+          _RecordingRelaySocket(
+            publishedEvents,
+            session.debugHandleSocketMessageForTest,
+            beforeAcknowledged: (_) => Completer<void>().future,
+          ),
+        );
+
+        await _expandComposer(tester);
+        await tester.enterText(find.byType(TextField), 'hello');
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        await tester.pump(const Duration(milliseconds: 10));
+        await tester.pumpAndSettle();
+
+        expect(find.widgetWithText(SnackBar, message), findsOneWidget);
+        expect(
+          publishedEvents.where((event) => event['id'] == unsentEvent.id),
+          hasLength(publishes ? 1 : 0),
+        );
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller!.text,
+          'hello',
+        );
+      });
+    }
 
     testWidgets('smoothly resizes the text field when a new line is added', (
       tester,
@@ -1365,7 +1739,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.text('Message\u2026'));
+        await tester.tap(find.text('Message'));
         await tester.pump();
         tester.view.viewInsets = const FakeViewPadding(bottom: 300);
         addTearDown(tester.view.reset);
@@ -1378,6 +1752,106 @@ void main() {
       } finally {
         debugDefaultTargetPlatformOverride = previousPlatform;
       }
+    });
+
+    testWidgets('a composer covered by another for the same conversation '
+        'takes its text with the keys its mentions are bound to', (
+      tester,
+    ) async {
+      final first = 'a' * 64;
+      final second = 'b' * 64;
+      List<String>? sent;
+      Future<void> onSend(
+        String content,
+        List<String> mentions, {
+        List<List<String>> mediaTags = const [],
+      }) async {
+        sent = mentions;
+      }
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          members: [
+            for (final key in [first, second])
+              ChannelMember(
+                pubkey: key,
+                displayName: 'Scout',
+                role: 'member',
+                joinedAt: DateTime.utc(2026),
+              ),
+          ],
+          channels: [_makeCurrentChannel()],
+          onSend: onSend,
+        ),
+      );
+      Finder scouts() => find.descendant(
+        of: find.byKey(const ValueKey('mention-suggestions-popover')),
+        matching: find.textContaining('Scout'),
+      );
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      List<String>? storedKeys() => container
+          .read(composeDraftsProvider.notifier)
+          .draftFor('channel-1')
+          ?.mentions
+          .map((m) => m.pubkey)
+          .toList();
+
+      // The first composer mentions one of two people named Scout.
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), '@');
+      await tester.pumpAndSettle();
+      await tester.tap(scouts().first);
+      await tester.pumpAndSettle();
+      expect(storedKeys(), [first]);
+
+      // A second composer for the same conversation, such as the page a
+      // notification opens, replaces it with the other Scout.
+      final navigator = Navigator.of(tester.element(find.byType(ComposeBar)));
+      unawaited(
+        navigator.push<void>(
+          MaterialPageRoute(
+            builder: (_) => Scaffold(
+              body: Align(
+                alignment: Alignment.bottomCenter,
+                child: ComposeBar(channelId: 'channel-1', onSend: onSend),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('@Scout'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), '');
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), '@');
+      await tester.pumpAndSettle();
+      await tester.tap(scouts().last);
+      await tester.pumpAndSettle();
+      final text =
+          '${tester.widget<TextField>(find.byType(TextField)).controller!.text}'
+          'hello';
+      await tester.enterText(find.byType(TextField), text);
+      await tester.pumpAndSettle();
+      expect(storedKeys(), [second]);
+
+      // Back on the first composer, the text it shows goes to that Scout.
+      navigator.pop();
+      await tester.pumpAndSettle();
+      if (find.byType(TextField).evaluate().isEmpty) {
+        await tester.tap(find.textContaining('@Scout').first);
+        await tester.pumpAndSettle();
+      }
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        text,
+      );
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await tester.pumpAndSettle();
+      expect(sent, [second]);
     });
 
     testWidgets('mounted composer does not carry draft text across an in-place '
@@ -1459,6 +1933,39 @@ void main() {
       await tester.pumpAndSettle();
       expect(textField.controller!.text, 'identity A secret draft');
       expect(storedText(keysB), 'identity B text');
+
+      // Text added to this draft from elsewhere, such as an unsent
+      // notification reply, appears in the mounted composer, so the next
+      // edit keeps it. Text added to another identity's store doesn't.
+      final raw = _testPrefs.getString(
+        'compose_drafts_v1:$relayUrl:${keysA.public}',
+      )!;
+      final draft = (jsonDecode(raw) as List).first as Map<String, dynamic>;
+      final drafts = container.read(composeDraftsProvider.notifier);
+      void append(nostr.Keys keys, String text) => drafts.append(
+        config: RelayConfig(baseUrl: relayUrl, nsec: keys.nsec),
+        key: draft['key'] as String,
+        channelId: draft['channel_id'] as String,
+        threadHeadId: draft['thread_head_id'] as String?,
+        text: text,
+      );
+      append(keysB, 'reply for B');
+      append(keysA, 'notification reply');
+      await tester.pump();
+      expect(
+        textField.controller!.text,
+        'identity A secret draft\n\nnotification reply',
+      );
+      await tester.enterText(
+        find.byType(TextField),
+        '${textField.controller!.text} continued',
+      );
+      await tester.pump();
+      expect(
+        storedText(keysA),
+        'identity A secret draft\n\nnotification reply continued',
+      );
+      expect(storedText(keysB), 'identity B text\n\nreply for B');
     });
 
     testWidgets('inserts a community emoji at the cursor from the action row', (
@@ -1497,6 +2004,537 @@ void main() {
       expect(textField.controller!.selection.baseOffset, 12);
       expect(find.byType(TextField), findsOneWidget);
       expect(textField.focusNode!.hasFocus, isTrue);
+    });
+
+    testWidgets(
+      'colon search replaces only the emoji token at the caret',
+      (tester) async {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            overrides: [
+              emojiDatasetOrEmptyProvider.overrideWithValue(
+                const EmojiDataset(
+                  categories: [],
+                  nativeToShortcode: {'😄': 'smile'},
+                  all: [
+                    EmojiEntry(
+                      id: 'smile',
+                      name: 'Smile',
+                      keywords: [],
+                      native: '😄',
+                      categoryId: 'people',
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            customEmoji: const [
+              CustomEmoji(
+                shortcode: 'blob-prayge',
+                url: 'https://example.com/blob.png',
+              ),
+            ],
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        final field = find.byType(TextField);
+        final controller = tester.widget<TextField>(field).controller!;
+        final panel = find.byKey(const ValueKey('emoji-suggestions-popover'));
+        for (final text in [':', ':s', '10:30', 'https://']) {
+          await tester.enterText(field, text);
+          await tester.pump();
+          expect(panel, findsNothing);
+        }
+        await tester.enterText(field, ':sm');
+        await tester.pumpAndSettle();
+        expect(
+          find.descendant(of: panel, matching: find.text(':smile:')),
+          findsOneWidget,
+        );
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.pumpAndSettle();
+        expect(controller.text, '😄');
+        await tester.enterText(field, 'try :smile: later');
+        controller.selection = const TextSelection.collapsed(offset: 7);
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.descendant(of: panel, matching: find.text(':smile:')),
+        );
+        await tester.pumpAndSettle();
+        expect(controller.text, 'try 😄 later');
+        expect(controller.selection.extentOffset, 'try 😄'.length);
+        await tester.enterText(field, 'try :blob-pr later');
+        controller.selection = const TextSelection.collapsed(offset: 12);
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.descendant(
+            of: panel,
+            matching: find.widgetWithText(ListTile, ':blob-prayge:').first,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(controller.text, 'try :blob-prayge: later');
+        expect(controller.selection.extentOffset, 17);
+        expect(panel, findsNothing);
+      },
+      variant: TargetPlatformVariant({
+        TargetPlatform.iOS,
+        TargetPlatform.android,
+      }),
+    );
+
+    testWidgets(
+      'colon search ranks the palette once and starts no image requests',
+      (tester) async {
+        final mediaRequests = <Uri>[];
+        final palette = _CountingCustomEmojiList([
+          for (var i = 0; i < 30; i++)
+            CustomEmoji(
+              shortcode: 'blob-$i',
+              url: 'https://example.com/blob-$i.gif',
+            ),
+        ]);
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            overrides: [
+              emojiDatasetOrEmptyProvider.overrideWithValue(
+                const EmojiDataset(
+                  categories: [],
+                  nativeToShortcode: {'😄': 'smile'},
+                  all: [
+                    EmojiEntry(
+                      id: 'smile',
+                      name: 'Smile',
+                      keywords: [],
+                      native: '😄',
+                      categoryId: 'people',
+                    ),
+                  ],
+                ),
+              ),
+              mediaHttpClientProvider.overrideWithValue(
+                http_testing.MockClient((request) async {
+                  mediaRequests.add(request.url);
+                  return http.Response('', 404);
+                }),
+              ),
+            ],
+            customEmoji: palette,
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        final field = find.byType(TextField);
+        final panel = find.byKey(const ValueKey('emoji-suggestions-popover'));
+
+        // The palette is indexed once, not ranked again per keystroke or
+        // rebuilt for the next token.
+        await tester.enterText(field, ':sm');
+        await tester.pump();
+        final iterations = palette.iterations;
+        for (final text in [':smi', ':smil', ':smil ', ':smil :bl']) {
+          await tester.enterText(field, text);
+          await tester.pump();
+        }
+        expect(palette.iterations, iterations);
+
+        // Uncached custom emoji show placeholders; typing fetches nothing.
+        await tester.enterText(field, ':bl');
+        await tester.pumpAndSettle();
+        expect(
+          find.descendant(of: panel, matching: find.text(':blob-0:')),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(of: panel, matching: find.byIcon(BuzzIcons.sparkles)),
+          findsWidgets,
+        );
+        expect(mediaRequests, isEmpty);
+
+        // An emoji another surface already downloaded shows its image, and
+        // the row reads its shortcode once.
+        final container = ProviderScope.containerOf(tester.element(field));
+        container
+            .read(customEmojiBytesCacheProvider)
+            .remember('https://example.com/blob-0.gif', _decodablePngBytes);
+        await tester.enterText(field, ':blo');
+        await tester.pumpAndSettle();
+        final firstRow = find.descendant(
+          of: panel,
+          matching: find.widgetWithText(ListTile, ':blob-0:'),
+        );
+        final preview = find.descendant(
+          of: firstRow,
+          matching: find.byType(Image),
+        );
+        expect(preview, findsOneWidget);
+        await tester.runAsync(
+          () => precacheImage(
+            tester.widget<Image>(preview).image,
+            tester.element(preview),
+          ),
+        );
+        await tester.pump();
+        expect(
+          tester
+              .widget<RawImage>(
+                find.descendant(of: firstRow, matching: find.byType(RawImage)),
+              )
+              .image,
+          isNotNull,
+        );
+        expect(tester.getSemantics(firstRow), isSemantics(label: ':blob-0:'));
+        expect(mediaRequests, isEmpty);
+      },
+    );
+
+    testWidgets('iOS hides colon suggestions with the keyboard', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        var outsideTaps = 0;
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            overrides: [
+              emojiDatasetOrEmptyProvider.overrideWithValue(
+                const EmojiDataset(
+                  categories: [],
+                  nativeToShortcode: {'😄': 'smile'},
+                  all: [
+                    EmojiEntry(
+                      id: 'smile',
+                      name: 'Smile',
+                      keywords: [],
+                      native: '😄',
+                      categoryId: 'people',
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            wrapPage: (page) => Column(
+              children: [
+                SafeArea(
+                  child: TextButton(
+                    onPressed: () => outsideTaps += 1,
+                    child: const Text('Outside'),
+                  ),
+                ),
+                Expanded(child: page),
+              ],
+            ),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        final field = find.byType(TextField);
+        await tester.enterText(field, ':sm');
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('emoji-suggestions-popover')),
+          findsOneWidget,
+        );
+
+        // An outside tap dismisses the query, and a notify without an edit,
+        // such as new channel names, does not bring it back.
+        await tester.tap(find.text('Outside'));
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('emoji-suggestions-popover')),
+          findsNothing,
+        );
+        final container = ProviderScope.containerOf(tester.element(field));
+        (container.read(channelsProvider.notifier) as _FakeChannelsNotifier)
+            .replaceChannels([
+              Channel(
+                id: 'general',
+                name: 'general',
+                channelType: 'stream',
+                visibility: 'open',
+                description: '',
+                createdBy: 'creator',
+                createdAt: DateTime(2026),
+                memberCount: 1,
+                isMember: true,
+              ),
+            ]);
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('emoji-suggestions-popover')),
+          findsNothing,
+        );
+
+        await tester.enterText(field, ':smi');
+        await tester.pumpAndSettle();
+        tester.widget<TextField>(field).focusNode!.unfocus();
+        await tester.pumpAndSettle();
+        expect(find.text('No matching results'), findsNothing);
+        final tapsBefore = outsideTaps;
+        await tester.tap(find.text('Outside'));
+        await tester.pumpAndSettle();
+        expect(outsideTaps, tapsBefore + 1);
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('formatting a colon token closes its suggestions', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      try {
+        final sent = <String>[];
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            overrides: [
+              emojiDatasetOrEmptyProvider.overrideWithValue(
+                const EmojiDataset(
+                  categories: [],
+                  nativeToShortcode: {'😄': 'smile'},
+                  all: [
+                    EmojiEntry(
+                      id: 'smile',
+                      name: 'Smile',
+                      keywords: [],
+                      native: '😄',
+                      categoryId: 'people',
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {
+                  sent.add(content);
+                },
+          ),
+        );
+        await _expandComposer(tester);
+        final field = find.byType(TextField);
+        final panel = find.byKey(const ValueKey('emoji-suggestions-popover'));
+        await tester.enterText(field, ':sm');
+        await tester.pumpAndSettle();
+        expect(panel, findsOneWidget);
+
+        await tester.tap(find.byIcon(BuzzIcons.aLargeSmall));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byIcon(BuzzIcons.bold));
+        await tester.pumpAndSettle();
+        expect(panel, findsNothing);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pumpAndSettle();
+        expect(sent, hasLength(1));
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('iOS measures each character only of shorter drafts', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        Future<List<int>> sentSelectionRectCounts(String text) async {
+          tester.testTextInput.log.clear();
+          await tester.enterText(find.byType(TextField), text);
+          await tester.pump();
+          await tester.pump();
+          return [
+            for (final call in tester.testTextInput.log)
+              if (call.method == 'TextInput.setSelectionRects')
+                (call.arguments as List).length,
+          ];
+        }
+
+        // The keyboard trackpad's two-finger selection uses these rectangles.
+        expect(await sentSelectionRectCounts('abc def ghi'), [11]);
+        // Measuring a long draft one character at a time froze the app, so
+        // iOS gets no rectangles, and drops the ones from the shorter draft.
+        expect(
+          await sentSelectionRectCounts('a' * (stylusHandwritingMaxLength + 1)),
+          [0],
+        );
+        expect(await sentSelectionRectCounts('abc def'), [7]);
+        expect(
+          await sentSelectionRectCounts('a' * (stylusHandwritingMaxLength + 1)),
+          [0],
+        );
+        // Flutter skips a list equal to the last one it sent, so iOS has no
+        // rectangles back at the identical draft until the next edit.
+        expect(await sentSelectionRectCounts('abc def'), isEmpty);
+        expect(await sentSelectionRectCounts('abc def g'), [9]);
+
+        // iOS holds rectangles only for the focused field, which may be
+        // another one, so a draft crossing the cutoff without focus sends none.
+        final controller = tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!;
+        FocusManager.instance.primaryFocus?.unfocus();
+        await tester.pump();
+        tester.testTextInput.log.clear();
+        controller.text = 'a' * (stylusHandwritingMaxLength + 1);
+        await tester.pump();
+        await tester.pump();
+        expect(
+          tester.testTextInput.log.map((call) => call.method),
+          isNot(contains('TextInput.setSelectionRects')),
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('iOS closes a Scribble writing gap when a draft gets long', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        Future<void> sendScribble(
+          String method, [
+          List<Object> size = const [],
+        ]) => tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+          SystemChannels.textInput.name,
+          SystemChannels.textInput.codec.encodeMethodCall(
+            MethodCall('TextInputClient.$method', <Object>[-1, ...size]),
+          ),
+          (_) {},
+        );
+        bool hasWritingGap() {
+          var found = false;
+          tester
+              .state<EditableTextState>(find.byType(EditableText))
+              .renderEditable
+              .text
+              ?.visitChildren((span) {
+                found = found || span is WidgetSpan;
+                return !found;
+              });
+          return found;
+        }
+
+        await tester.enterText(find.byType(TextField), 'abc');
+        await tester.pump();
+        await sendScribble('insertTextPlaceholder', [300, 0]);
+        await tester.pump();
+        expect(hasWritingGap(), isTrue);
+
+        // Pencil writing pushes the draft past the cutoff while the gap is
+        // open. Flutter ignores iOS closing the gap once handwriting is off,
+        // so a gap left open would stay in the draft.
+        await tester.enterText(
+          find.byType(TextField),
+          'a' * (stylusHandwritingMaxLength + 1),
+        );
+        await tester.pump();
+        expect(hasWritingGap(), isFalse);
+        await sendScribble('removeTextPlaceholder');
+        await tester.enterText(find.byType(TextField), 'abc');
+        await tester.pump();
+        expect(hasWritingGap(), isFalse);
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
+    });
+
+    testWidgets('Android starts stylus handwriting in a long draft', (
+      tester,
+    ) async {
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      final scribeCalls = <String>[];
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.scribe,
+        (call) async {
+          scribeCalls.add(call.method);
+          return call.method == 'Scribe.isFeatureAvailable' ? true : null;
+        },
+      );
+      try {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        await tester.enterText(
+          find.byType(TextField),
+          'a' * (stylusHandwritingMaxLength + 1),
+        );
+        await tester.pump();
+        // The keyboard inset covers the field's lower half.
+        await tester.tapAt(
+          tester.getTopLeft(find.byType(EditableText)) + const Offset(8, 8),
+          kind: PointerDeviceKind.stylus,
+        );
+        await tester.pump(const Duration(milliseconds: 500));
+        expect(scribeCalls, contains('Scribe.startStylusHandwriting'));
+      } finally {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.scribe,
+          null,
+        );
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
     });
 
     testWidgets('iOS selection handles resize a draft with the system menu', (
@@ -1881,6 +2919,124 @@ void main() {
         expect(find.text('Mary Jane'), findsOneWidget);
       });
 
+      testWidgets('a late directory person does not move the shown rows', (
+        tester,
+      ) async {
+        const saba = UserProfile(
+          pubkey:
+              'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+          displayName: 'Saba Saba',
+        );
+        await pumpMembers(tester, [
+          'Sam',
+        ], searchPeople: (query) async => query == 'S' ? [saba] : const []);
+        await tester.enterText(find.byType(TextField), '@S');
+        await tester.pump();
+        expect(find.text('Saba Saba'), findsNothing);
+        final samTop = tester.getTopLeft(find.text('Sam')).dy;
+        final height = tester.getSize(popover()).height;
+
+        await settleSearch(tester);
+        expect(find.text('Saba Saba'), findsOneWidget);
+        // The late row filled reserved space: nothing shown moved.
+        expect(tester.getTopLeft(find.text('Sam')).dy, samTop);
+        expect(tester.getSize(popover()).height, height);
+      });
+
+      testWidgets('a cached query\'s refresh does not move the shown rows', (
+        tester,
+      ) async {
+        const saba = UserProfile(
+          pubkey:
+              'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+          displayName: 'Saba Saba',
+        );
+        var searches = 0;
+        await pumpMembers(
+          tester,
+          ['Sam'],
+          searchPeople: (query) async =>
+              query == 'S' && searches++ > 0 ? [saba] : const [],
+        );
+        await tester.enterText(find.byType(TextField), '@S');
+        await tester.pump();
+        await settleSearch(tester);
+        expect(find.text('Saba Saba'), findsNothing);
+        await tester.enterText(find.byType(TextField), '');
+        await tester.pump();
+
+        // A new opening shows the cached page at once, then refreshes.
+        await tester.enterText(find.byType(TextField), '@S');
+        await tester.pump();
+        expect(find.text('Saba Saba'), findsNothing);
+        final samTop = tester.getTopLeft(find.text('Sam')).dy;
+        final height = tester.getSize(popover()).height;
+
+        await settleSearch(tester);
+        expect(find.text('Saba Saba'), findsOneWidget);
+        expect(tester.getTopLeft(find.text('Sam')).dy, samTop);
+        expect(tester.getSize(popover()).height, height);
+      });
+
+      testWidgets(
+        'a short landscape view keeps the reserved chooser on screen',
+        (tester) async {
+          tester.view.devicePixelRatio = 1;
+          tester.view.physicalSize = const Size(844, 390);
+          tester.view.viewInsets = const FakeViewPadding(bottom: 170);
+          addTearDown(tester.view.reset);
+          await pumpMembers(tester, ['Sam']);
+          await tester.enterText(find.byType(TextField), '@S');
+          await tester.pump();
+
+          // The search is still running, so the chooser reserves its height,
+          // but no more than fits above the composer.
+          expect(
+            find.byKey(const ValueKey('mention-search-progress')),
+            findsOneWidget,
+          );
+          final sam = tester.getRect(find.widgetWithText(ListTile, 'Sam'));
+          expect(sam.top, greaterThanOrEqualTo(0));
+          expect(tester.getRect(popover()).top, greaterThanOrEqualTo(0));
+          await tester.tap(find.text('Sam'));
+          await tester.pump();
+          expect(find.textContaining('@Sam'), findsWidgets);
+          await settleSearch(tester);
+        },
+      );
+
+      testWidgets('the chooser shows at most three rows, then scrolls', (
+        tester,
+      ) async {
+        final people = [
+          for (final (i, name) in ['Saba', 'Sage', 'Sasha', 'Selma'].indexed)
+            UserProfile(pubkey: '${'a' * 63}$i', displayName: '$name Person'),
+        ];
+        await pumpMembers(tester, [
+          'Sam',
+        ], searchPeople: (query) async => query == 'S' ? people : const []);
+        await tester.enterText(find.byType(TextField), '@S');
+        await tester.pump();
+        await settleSearch(tester);
+        final row = tester.getSize(
+          find.widgetWithText(ListTile, 'Saba Person'),
+        );
+        expect(tester.getSize(popover()).height, row.height * 3 + Grid.xxs * 2);
+      });
+
+      testWidgets('a running search shows a progress bar on the chooser', (
+        tester,
+      ) async {
+        final progress = find.byKey(const ValueKey('mention-search-progress'));
+        await pumpMembers(tester, ['Sam']);
+        await tester.enterText(find.byType(TextField), '@S');
+        await tester.pump();
+        expect(progress, findsOneWidget);
+        expect(tester.getTopLeft(progress).dy, tester.getTopLeft(popover()).dy);
+        await settleSearch(tester);
+        expect(progress, findsNothing);
+      });
+
       testWidgets('a DM finds directory people too, marked not in DM', (
         tester,
       ) async {
@@ -1912,6 +3068,625 @@ void main() {
         await tester.pump();
         expect(popover(), findsNothing);
         await settleSearch(tester);
+      });
+    });
+
+    group('hardware keyboard', () {
+      final sent = <String>[];
+      Future<TextEditingController> pumpComposer(
+        WidgetTester tester, {
+        FocusNode? focusNode,
+        Future<List<ChannelMember>>? membersFuture,
+        Future<List<UserProfile>> Function(String query)? searchPeople,
+      }) async {
+        sent.clear();
+        final members = [
+          for (final (i, name) in ['Alice', 'Bob'].indexed)
+            ChannelMember(
+              pubkey: '${i + 1}' * 64,
+              role: 'member',
+              joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+              displayName: name,
+            ),
+        ];
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            membersFuture: membersFuture ?? Future.value(members),
+            cachedMembers: members,
+            channels: [_makeCurrentChannel()],
+            focusNode: focusNode,
+            onSend: (content, _, {mediaTags = const <List<String>>[]}) async {
+              sent.add(content);
+            },
+            searchPeople: searchPeople ?? (_) async => const [],
+          ),
+        );
+        await _expandComposer(tester);
+        return tester.widget<TextField>(find.byType(TextField)).controller!;
+      }
+
+      Finder popover() =>
+          find.byKey(const ValueKey('mention-suggestions-popover'));
+
+      // Android IMEs may send KEYCODE_ENTER (66) with scan code zero.
+      // Flutter maps it onto the Android physical-key plane, not USB Enter.
+      // The caller sets the Android platform override.
+      Future<void> sendAndroidImeEnter(WidgetTester tester) async {
+        for (final down in [true, false]) {
+          tester.binding.platformDispatcher.onKeyData!(
+            ui.KeyData(
+              type: down ? ui.KeyEventType.down : ui.KeyEventType.up,
+              physical: 0x1100000042,
+              logical: LogicalKeyboardKey.enter.keyId,
+              timeStamp: Duration.zero,
+              character: null,
+              synthesized: false,
+            ),
+          );
+          await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+            SystemChannels.keyEvent.name,
+            SystemChannels.keyEvent.codec.encodeMessage({
+              'type': down ? 'keydown' : 'keyup',
+              'keymap': 'android',
+              'keyCode': 66,
+              'scanCode': 0,
+              'metaState': 0,
+              'flags': 2,
+              'source': 257,
+              'deviceId': -1,
+            }),
+            (_) {},
+          );
+        }
+      }
+
+      testWidgets('Tab and Enter accept the top mention suggestion', (
+        tester,
+      ) async {
+        final controller = await pumpComposer(tester);
+        await tester.enterText(find.byType(TextField), 'hi @a');
+        await tester.pump();
+        expect(popover(), findsOneWidget);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.pump();
+
+        expect(controller.text, 'hi @Alice ');
+        expect(popover(), findsNothing);
+
+        await tester.enterText(find.byType(TextField), 'yo @b');
+        await tester.pump();
+        expect(popover(), findsOneWidget);
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+
+        expect(controller.text, 'yo @Bob ');
+        expect(sent, isEmpty);
+        expect(popover(), findsNothing);
+        await tester.pump(mentionSearchDebounce * 2);
+      });
+
+      testWidgets(
+        'keyboard suggestion acceptance and send use selection haptics',
+        (tester) async {
+          final calls = <Object?>[];
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+                if (call.method == 'HapticFeedback.vibrate') {
+                  calls.add(call.arguments);
+                }
+                return null;
+              });
+          addTearDown(
+            () => TestDefaultBinaryMessengerBinding
+                .instance
+                .defaultBinaryMessenger
+                .setMockMethodCallHandler(SystemChannels.platform, null),
+          );
+          final controller = await pumpComposer(tester);
+          calls.clear();
+          for (final (draft, key, expected) in [
+            ('hi @a', LogicalKeyboardKey.tab, 'hi @Alice '),
+            ('yo @b', LogicalKeyboardKey.enter, 'yo @Bob '),
+            ('#cur', LogicalKeyboardKey.tab, '#current '),
+            ('hello', LogicalKeyboardKey.enter, ''),
+          ]) {
+            await tester.enterText(find.byType(TextField), draft);
+            await tester.pump();
+            calls.clear();
+            await tester.sendKeyEvent(key);
+            await tester.pump();
+            expect(controller.text, expected);
+            expect(calls, ['HapticFeedbackType.selectionClick'], reason: draft);
+          }
+          for (final draft in ['', '   ']) {
+            await tester.enterText(find.byType(TextField), draft);
+            await tester.pump();
+            calls.clear();
+            for (final key in [
+              LogicalKeyboardKey.enter,
+              LogicalKeyboardKey.numpadEnter,
+            ]) {
+              await tester.sendKeyEvent(key);
+              await tester.pump();
+              expect(controller.text, draft);
+              expect(calls, isEmpty, reason: 'disabled send: $draft / $key');
+              expect(sent, ['hello']);
+            }
+          }
+          await tester.pump(mentionSearchDebounce * 2);
+        },
+      );
+
+      testWidgets('a picker with no selectable row consumes Tab and Enter', (
+        tester,
+      ) async {
+        final controller = await pumpComposer(
+          tester,
+          searchPeople: (_) async => throw StateError('relay down'),
+        );
+        await tester.enterText(find.byType(TextField), 'hi @zz');
+        await tester.pump();
+        await tester.pump(mentionSearchDebounce * 2);
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('mention-search-error')),
+          findsOneWidget,
+        );
+
+        for (final key in [LogicalKeyboardKey.enter, LogicalKeyboardKey.tab]) {
+          await tester.sendKeyEvent(key);
+          await tester.pumpAndSettle();
+          expect(controller.text, 'hi @zz', reason: '$key');
+          expect(sent, isEmpty, reason: '$key');
+        }
+      });
+
+      testWidgets('Enter that is not a plain hardware Enter skips the picker', (
+        tester,
+      ) async {
+        final controller = await pumpComposer(tester);
+        await tester.enterText(find.byType(TextField), 'hi @a');
+        await tester.pump();
+        expect(popover(), findsOneWidget);
+
+        for (final modifier in [
+          LogicalKeyboardKey.shiftLeft,
+          LogicalKeyboardKey.controlLeft,
+          LogicalKeyboardKey.altLeft,
+          LogicalKeyboardKey.metaLeft,
+        ]) {
+          await tester.sendKeyDownEvent(modifier);
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+          await tester.sendKeyUpEvent(modifier);
+          await tester.pump();
+          expect(controller.text, 'hi @a', reason: '$modifier');
+        }
+
+        controller.value = controller.value.copyWith(
+          composing: const TextRange(start: 3, end: 5),
+        );
+        await tester.pump();
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        expect(controller.text, 'hi @a', reason: 'active composition');
+        controller.clearComposing();
+        await tester.pump();
+
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        try {
+          await sendAndroidImeEnter(tester);
+          await tester.pump();
+          expect(controller.text, 'hi @a', reason: 'Android IME Return');
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+        expect(sent, isEmpty);
+        expect(popover(), findsOneWidget);
+        controller.value = controller.value.copyWith(
+          composing: const TextRange(start: 3, end: 5),
+        );
+        await tester.pump();
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.pump();
+        expect(controller.text, 'hi @a', reason: 'Tab during composition');
+        expect(sent, isEmpty);
+        await tester.pump(mentionSearchDebounce * 2);
+      });
+
+      testWidgets(
+        'attachment menu blocks keyboard sending and suggestion acceptance',
+        (tester) async {
+          final previousPlatform = debugDefaultTargetPlatformOverride;
+          debugDefaultTargetPlatformOverride = TargetPlatform.android;
+          try {
+            final focus = FocusNode();
+            addTearDown(focus.dispose);
+            final controller = await pumpComposer(tester, focusNode: focus);
+            await tester.enterText(find.byType(TextField), 'hi @a');
+            await tester.pumpAndSettle();
+            expect(popover(), findsOneWidget);
+
+            await _openAttachmentMenu(tester);
+            expect(popover(), findsNothing);
+            expect(find.text('Files'), findsOneWidget);
+            expect(focus.hasFocus, isTrue);
+
+            for (final key in [
+              LogicalKeyboardKey.enter,
+              LogicalKeyboardKey.numpadEnter,
+              LogicalKeyboardKey.tab,
+            ]) {
+              await tester.sendKeyEvent(key);
+              await tester.pump();
+              expect(controller.text, 'hi @a', reason: '$key');
+              expect(sent, isEmpty, reason: '$key');
+            }
+            await tester.pumpWidget(const SizedBox.shrink());
+            await tester.pumpAndSettle();
+          } finally {
+            debugDefaultTargetPlatformOverride = previousPlatform;
+          }
+        },
+      );
+
+      for (final modifier in [
+        LogicalKeyboardKey.controlLeft,
+        LogicalKeyboardKey.altLeft,
+        LogicalKeyboardKey.metaLeft,
+      ]) {
+        testWidgets(
+          'modified Tab leaves the picker draft unchanged ($modifier)',
+          (tester) async {
+            final controller = await pumpComposer(tester);
+            await tester.enterText(find.byType(TextField), 'hi @a');
+            await tester.pump();
+            expect(popover(), findsOneWidget);
+            await tester.sendKeyDownEvent(modifier);
+            await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+            await tester.sendKeyUpEvent(modifier);
+            await tester.pump();
+            expect(controller.text, 'hi @a');
+            expect(sent, isEmpty);
+            await tester.pump(mentionSearchDebounce * 2);
+          },
+        );
+      }
+
+      testWidgets(
+        'native attachment popover owns Tab and Enter until dismissal',
+        (tester) async {
+          final previousPlatform = debugDefaultTargetPlatformOverride;
+          debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+          var presentCalls = 0;
+          _setMockNativeAttachmentPopoverHandler((call) async {
+            if (call.method == 'isSupported') return true;
+            if (call.method == 'present') {
+              presentCalls += 1;
+              return true;
+            }
+            return null;
+          });
+          try {
+            final controller = await pumpComposer(tester);
+            await tester.enterText(find.byType(TextField), 'hi @a');
+            await tester.pumpAndSettle();
+            expect(popover(), findsOneWidget);
+            await _tapComposerControl(tester, 'Attachments');
+            await tester.pumpAndSettle();
+            expect(presentCalls, 1);
+            // Native presentation hides the software keyboard. Exercise keys
+            // reaching Flutter while the popover still owns input.
+            tester
+                .widget<TextField>(find.byType(TextField))
+                .focusNode!
+                .requestFocus();
+            // Opening attachments intentionally dismisses the old suggestions.
+            // Recreate a query to test ownership of a fresh keyboard event.
+            controller.value = const TextEditingValue(
+              text: 'hi @al',
+              selection: TextSelection.collapsed(offset: 6),
+            );
+            await tester.pumpAndSettle();
+            for (final key in [
+              LogicalKeyboardKey.tab,
+              LogicalKeyboardKey.enter,
+            ]) {
+              await tester.sendKeyEvent(key);
+              await tester.pump();
+              expect(controller.text, 'hi @al', reason: '$key');
+              expect(sent, isEmpty);
+            }
+            await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+            await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+            await tester.pump();
+            expect(controller.text, 'hi @Alice ');
+          } finally {
+            await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
+            await tester.pumpWidget(const SizedBox.shrink());
+            await tester.pumpAndSettle();
+            _setMockNativeAttachmentPopoverHandler(null);
+            debugDefaultTargetPlatformOverride = previousPlatform;
+          }
+        },
+      );
+
+      testWidgets('keyboard actions follow query changes before a frame', (
+        tester,
+      ) async {
+        for (final key in [LogicalKeyboardKey.tab, LogicalKeyboardKey.enter]) {
+          final controller = await pumpComposer(tester);
+          await tester.enterText(find.byType(TextField), 'hi @a');
+          await tester.pump();
+          controller.value = const TextEditingValue(
+            text: 'edited',
+            selection: TextSelection.collapsed(offset: 6),
+          );
+          await tester.sendKeyEvent(key);
+          await tester.pump();
+          expect(
+            controller.text,
+            key == LogicalKeyboardKey.tab ? 'edited' : '',
+          );
+          expect(sent, key == LogicalKeyboardKey.tab ? isEmpty : ['edited']);
+          await tester.pump(mentionSearchDebounce * 2);
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+        }
+      });
+
+      testWidgets('native emoji picker owns keyboard input until dismissal', (
+        tester,
+      ) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        const channel = MethodChannel('buzz/native_emoji_picker');
+        var presented = false;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, (call) async {
+              if (call.method == 'present') {
+                presented = true;
+                return true;
+              }
+              return null;
+            });
+        try {
+          final controller = await pumpComposer(tester);
+          await tester.enterText(find.byType(TextField), 'hello');
+          await tester.pumpAndSettle();
+          await tester.tap(find.byIcon(BuzzIcons.smilePlus));
+          await tester.pumpAndSettle();
+          expect(presented, isTrue);
+          for (final key in [
+            LogicalKeyboardKey.enter,
+            LogicalKeyboardKey.tab,
+          ]) {
+            await tester.sendKeyEvent(key);
+            await tester.pump();
+            expect(controller.text, 'hello');
+            expect(sent, isEmpty);
+          }
+          await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+            channel.name,
+            channel.codec.encodeMethodCall(const MethodCall('dismissed')),
+            (_) {},
+          );
+          await tester.pump();
+          await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+          await tester.pump();
+          expect(sent, ['hello']);
+        } finally {
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+              .setMockMethodCallHandler(channel, null);
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      });
+
+      testWidgets('rapid Enter sends once while member scanning is pending', (
+        tester,
+      ) async {
+        final members = Completer<List<ChannelMember>>();
+        final controller = await pumpComposer(
+          tester,
+          membersFuture: members.future,
+        );
+        await tester.enterText(find.byType(TextField), 'hi @a');
+        await tester.pump();
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.pump();
+        expect(controller.text, 'hi @Alice ');
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pump();
+        expect(sent, isEmpty);
+        members.complete([
+          ChannelMember(
+            pubkey: '1' * 64,
+            role: 'member',
+            joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+            displayName: 'Alice',
+          ),
+        ]);
+        await tester.pumpAndSettle();
+        expect(sent, ['hi @Alice']);
+      });
+
+      testWidgets('Tab cannot edit a Solo draft frozen by Paste Image', (
+        tester,
+      ) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        final clipboard = Completer<Uint8List?>();
+        var busy = false;
+        final focus = FocusNode();
+        addTearDown(focus.dispose);
+        final members = [
+          ChannelMember(
+            pubkey: '1' * 64,
+            role: 'member',
+            joinedAt: DateTime.fromMillisecondsSinceEpoch(1000),
+            displayName: 'Alice',
+          ),
+        ];
+        try {
+          await tester.pumpWidget(
+            _buildComposeBar(
+              uploadService: MediaUploadService(
+                baseUrl: 'https://relay.example',
+                nsec: nostr.Keys.generate().nsec,
+                pickGalleryVideo: () async => null,
+                pickGalleryImage: () async => null,
+                readClipboardImage: () => clipboard.future,
+              ),
+              focusNode: focus,
+              draftMembers: members,
+              members: members,
+              cachedMembers: members,
+              channels: [_makeCurrentChannel()],
+              searchPeople: (_) async => const [],
+              onSendingChanged: (value) => busy = value,
+              onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+            ),
+          );
+          await _expandComposer(tester);
+          await tester.enterText(find.byType(TextField), 'hi @a');
+          await tester.pumpAndSettle();
+          final field = tester.widget<TextField>(find.byType(TextField));
+          final controller = field.controller!;
+          expect(popover(), findsOneWidget);
+
+          tester
+              .state<EditableTextState>(find.byType(EditableText))
+              .showToolbar();
+          await tester.pumpAndSettle();
+          final menu = tester.widget<AdaptiveTextSelectionToolbar>(
+            find.byType(AdaptiveTextSelectionToolbar),
+          );
+          menu.buttonItems!
+              .singleWhere((item) => item.label == 'Paste Image')
+              .onPressed!();
+          await tester.pump();
+          expect(busy, isTrue);
+          expect(
+            tester.widget<TextField>(find.byType(TextField)).readOnly,
+            isTrue,
+          );
+          expect(focus.hasFocus, isTrue);
+
+          await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+          await tester.pump();
+          expect(controller.text, 'hi @a');
+
+          clipboard.complete(null);
+          await tester.pumpAndSettle();
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+        } finally {
+          if (!clipboard.isCompleted) clipboard.complete(null);
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      });
+
+      testWidgets('Tab without an open picker leaves the draft alone', (
+        tester,
+      ) async {
+        final controller = await pumpComposer(tester);
+        await tester.enterText(find.byType(TextField), 'hi');
+        await tester.pump();
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.pump();
+
+        expect(controller.text, 'hi');
+        expect(sent, isEmpty);
+      });
+
+      testWidgets('Shift+Tab does not accept a mention', (tester) async {
+        final focus = FocusNode();
+        addTearDown(focus.dispose);
+        final controller = await pumpComposer(tester, focusNode: focus);
+        await tester.enterText(find.byType(TextField), 'hi @a');
+        await tester.pump();
+        expect(popover(), findsOneWidget);
+
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.pumpAndSettle();
+
+        // Shift+Tab traverses focus away from the field, so the chooser
+        // follows it; the query stays live and the chooser returns with it.
+        expect(controller.text, 'hi @a');
+        expect(focus.hasFocus, isFalse);
+        expect(popover(), findsNothing);
+        await tester.tap(find.text('hi @a'));
+        await tester.pumpAndSettle();
+        expect(focus.hasFocus, isTrue);
+        expect(controller.text, 'hi @a');
+        expect(popover(), findsOneWidget);
+        await tester.pump(mentionSearchDebounce * 2);
+      });
+
+      testWidgets('Enter sends the message', (tester) async {
+        final controller = await pumpComposer(tester);
+        await tester.enterText(find.byType(TextField), 'hello');
+        await tester.pump();
+
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.pumpAndSettle();
+
+        expect(sent, ['hello']);
+        expect(controller.text, isEmpty);
+      });
+
+      testWidgets('Shift+Enter does not send', (tester) async {
+        await pumpComposer(tester);
+        await tester.enterText(find.byType(TextField), 'hello');
+        await tester.pump();
+
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+        await tester.pumpAndSettle();
+
+        expect(sent, isEmpty);
+      });
+
+      testWidgets('the software return key does not send', (tester) async {
+        await pumpComposer(tester);
+        await tester.enterText(find.byType(TextField), 'hello');
+        await tester.pump();
+
+        await tester.testTextInput.receiveAction(TextInputAction.newline);
+        await tester.pumpAndSettle();
+        expect(sent, isEmpty);
+
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        try {
+          await sendAndroidImeEnter(tester);
+          await tester.pumpAndSettle();
+          expect(sent, isEmpty);
+          expect(
+            tester.widget<TextField>(find.byType(TextField)).controller!.text,
+            'hello',
+          );
+
+          await tester.sendKeyEvent(
+            LogicalKeyboardKey.enter,
+            platform: 'android',
+            physicalKey: PhysicalKeyboardKey.enter,
+          );
+          await tester.pumpAndSettle();
+          expect(sent, ['hello']);
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
       });
     });
 
@@ -2043,13 +3818,13 @@ void main() {
           ),
         );
 
-        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await _tapComposerControl(tester, 'Attachments', index: 0);
         await tester.pumpAndSettle();
         await _sendNativeAttachmentPopoverCall(tester, 'pickAllPhotos');
         await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
         await tester.pumpAndSettle();
 
-        expect(find.text('Unable to open your photo library.'), findsOneWidget);
+        expect(find.text('Couldn’t open photo library'), findsOneWidget);
       } finally {
         await _sendNativeAttachmentPopoverCall(tester, 'dismissed');
         await tester.pumpWidget(const SizedBox.shrink());
@@ -2097,7 +3872,7 @@ void main() {
         final textField = tester.widget<TextField>(find.byType(TextField));
         expect(textField.focusNode?.hasFocus, isTrue);
 
-        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await _tapComposerControl(tester, 'Attachments', index: 0);
         await tester.pumpAndSettle();
 
         expect(presentCalls, 1);
@@ -2140,7 +3915,7 @@ void main() {
           );
 
           await _expandComposer(tester);
-          await tester.tap(find.byTooltip('Add attachment').hitTestable());
+          await _tapComposerControl(tester, 'Attachments', index: 0);
           await tester.pumpAndSettle();
           await _sendNativeAttachmentPopoverCall(tester, 'recordVoiceNote');
           await tester.pump();
@@ -2225,7 +4000,7 @@ void main() {
             .focusNode!;
         expect(focusNode.hasFocus, isTrue);
 
-        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await _tapComposerControl(tester, 'Attachments', index: 0);
         await tester.pumpAndSettle();
         expect(focusNode.hasFocus, isTrue);
 
@@ -2275,7 +4050,7 @@ void main() {
           final textField = tester.widget<TextField>(find.byType(TextField));
           expect(textField.focusNode?.hasFocus, isTrue);
 
-          await tester.tap(find.byTooltip('Add attachment').hitTestable());
+          await _tapComposerControl(tester, 'Attachments', index: 0);
           await tester.pumpAndSettle();
 
           expect(textField.focusNode?.hasFocus, isFalse);
@@ -2328,7 +4103,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.byTooltip('Add attachment').hitTestable().at(1));
+        await _tapComposerControl(tester, 'Attachments', index: 1);
         await tester.pumpAndSettle();
         expect(presentCalls, 1);
 
@@ -2391,13 +4166,9 @@ void main() {
             ),
           );
 
-          await tester.tap(
-            find.byTooltip('Add attachment').hitTestable().at(0),
-          );
+          await _tapComposerControl(tester, 'Attachments', index: 0);
           await tester.pump();
-          await tester.tap(
-            find.byTooltip('Add attachment').hitTestable().at(1),
-          );
+          await _tapComposerControl(tester, 'Attachments', index: 1);
           await tester.pumpAndSettle();
 
           expect(supportCalls, 1);
@@ -2474,9 +4245,9 @@ void main() {
           ),
         );
 
-        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await _tapComposerControl(tester, 'Attachments', index: 0);
         await tester.pump();
-        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await _tapComposerControl(tester, 'Attachments', index: 0);
         await tester.pumpAndSettle();
 
         expect(supportCalls, 1);
@@ -2532,7 +4303,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.byTooltip('Add attachment').hitTestable().at(0));
+        await _tapComposerControl(tester, 'Attachments', index: 0);
         await tester.pumpAndSettle();
         expect(presentCalls, 1);
 
@@ -2545,7 +4316,7 @@ void main() {
         await tester.pumpAndSettle();
         expect(dismissCalls, 1);
 
-        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await _tapComposerControl(tester, 'Attachments', index: 0);
         await tester.pumpAndSettle();
         expect(presentCalls, 2);
       } finally {
@@ -2590,7 +4361,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.byTooltip('Add attachment').hitTestable().at(0));
+        await _tapComposerControl(tester, 'Attachments', index: 0);
         await tester.pumpAndSettle();
         expect(presentCalls, 1);
 
@@ -2602,7 +4373,7 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        await tester.tap(find.byTooltip('Add attachment').hitTestable());
+        await _tapComposerControl(tester, 'Attachments', index: 0);
         await tester.pumpAndSettle();
         expect(presentCalls, 2);
       } finally {
@@ -2664,7 +4435,7 @@ void main() {
 
       await _expandComposer(tester);
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-      await tester.pump();
+      await _pumpUntilUpload(tester, () => sentContent != null);
       await tester.pumpAndSettle();
 
       expect(sentContent, '\n![image](https://relay.example/media/test.png)');
@@ -2735,6 +4506,7 @@ void main() {
 
       await _expandComposer(tester);
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await _pumpUntilUpload(tester, () => sentContent != null);
       await tester.pumpAndSettle();
 
       expect(
@@ -2913,15 +4685,10 @@ void main() {
       final menu = find.byKey(const ValueKey('attachment-menu'));
       final surface = find.byKey(const ValueKey('attachment-surface-popover'));
       final rows = [
-        for (final label in [
-          'camera',
-          'photos',
-          'video',
-          'voice note',
-          'files',
-        ])
+        for (final label in ['camera', 'photos', 'voice note', 'files'])
           find.byKey(ValueKey('attachment-menu-item-$label')),
       ];
+      expect(find.text('Video'), findsNothing);
       final menuRect = tester.getRect(menu);
 
       final material = tester.widget<Material>(surface);
@@ -2933,41 +4700,23 @@ void main() {
         material.shadowColor,
         appPopoverShadowColor(tester.element(surface)),
       );
-      expect(menuRect.size, const Size(216, 324));
+      expect(menuRect.size, const Size(216, 264));
       for (final row in rows) {
         expect(tester.getSize(row).height, 52);
         expect(tester.getRect(row).left - menuRect.left, Grid.xs);
         expect(menuRect.right - tester.getRect(row).right, Grid.xs);
       }
-      for (final label in [
-        'Camera',
-        'Photos',
-        'Video',
-        'Voice note',
-        'Files',
-      ]) {
+      for (final label in ['Camera', 'Photos', 'Voice note', 'Files']) {
         final text = tester.widget<Text>(find.text(label));
         expect(text.style?.fontSize, 20);
         expect(text.style?.fontFamily, 'Inter');
       }
       final icons = [
-        for (final label in [
-          'camera',
-          'photos',
-          'video',
-          'voice note',
-          'files',
-        ])
+        for (final label in ['camera', 'photos', 'voice note', 'files'])
           find.byKey(ValueKey('attachment-menu-icon-$label')),
       ];
       final labels = [
-        for (final label in [
-          'camera',
-          'photos',
-          'video',
-          'voice note',
-          'files',
-        ])
+        for (final label in ['camera', 'photos', 'voice note', 'files'])
           find.byKey(ValueKey('attachment-menu-label-$label')),
       ];
       for (final icon in icons) {
@@ -3062,13 +4811,7 @@ void main() {
 
         final menu = find.byKey(const ValueKey('attachment-menu'));
         final rows = [
-          for (final label in [
-            'camera',
-            'photos',
-            'video',
-            'voice note',
-            'files',
-          ])
+          for (final label in ['camera', 'photos', 'voice note', 'files'])
             find.byKey(ValueKey('attachment-menu-item-$label')),
         ];
         final scrollView = tester.widget<ListView>(
@@ -3186,12 +4929,16 @@ void main() {
       tester,
     ) async {
       final uploadResponse = Completer<http.Response>();
+      var requestReceived = false;
       Rect? submittedOrigin;
       var sent = false;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
         nsec: nostr.Keys.generate().nsec,
-        httpClient: http_testing.MockClient((_) => uploadResponse.future),
+        httpClient: http_testing.MockClient((_) {
+          requestReceived = true;
+          return uploadResponse.future;
+        }),
         pickGalleryVideo: () async => null,
         pickGalleryImage: () async => null,
         pickGalleryImages: () async => [
@@ -3227,6 +4974,7 @@ void main() {
             .hitTestable(),
       );
       await tester.pump(const Duration(seconds: 5));
+      await _pumpUntilUpload(tester, () => requestReceived);
       expect(sent, isFalse);
       // Layout changes during upload must not replace the submitted geometry.
       tester.view.physicalSize = Size(
@@ -3297,7 +5045,10 @@ void main() {
 
         await _expandComposer(tester);
         await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-        await tester.pump();
+        await _pumpUntilUpload(
+          tester,
+          () => find.text('100%').evaluate().isNotEmpty,
+        );
 
         expect(
           find.byKey(const ValueKey('compose-upload-progress')),
@@ -3424,11 +5175,10 @@ void main() {
       );
 
       await _expandComposer(tester);
-      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.enterText(find.byType(TextField), 'hello @hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await _inviteOutside(tester);
       await tester.pumpAndSettle();
@@ -3446,10 +5196,7 @@ void main() {
       // that state on the very next frame, so the surface must outlive the
       // switch.
       expect(
-        find.widgetWithText(
-          SnackBar,
-          'Message not sent: the community changed',
-        ),
+        find.widgetWithText(SnackBar, 'Not sent. Community changed.'),
         findsOneWidget,
       );
       // Characterization, not a fix: the unsent text is already retained in
@@ -3465,7 +5212,7 @@ void main() {
         (jsonDecode(storedDrafts!) as List)
             .map((d) => (d as Map<String, dynamic>)['text'])
             .toList(),
-        contains('hello @Helper Bot'),
+        contains('hello @Helper Bot '),
       );
     });
 
@@ -3557,11 +5304,10 @@ void main() {
         await _openSystemPhotoPicker(tester);
         await tester.pumpAndSettle();
         await _expandComposer(tester);
-        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.enterText(find.byType(TextField), 'hello @hel');
         await tester.pumpAndSettle();
         await tester.tap(find.text('Helper Bot'));
         await tester.pumpAndSettle();
-        await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
         await tester.tap(find.byIcon(BuzzIcons.arrowUp));
         await _inviteOutside(tester);
         await tester.pump();
@@ -3672,6 +5418,86 @@ void main() {
       );
     });
 
+    testWidgets('builds channel names once per channel list, not per build', (
+      tester,
+    ) async {
+      final channels = _IterationCountingChannels([
+        _makeChannel(name: 'engineering', channelType: 'stream'),
+      ]);
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          channels: channels,
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+      await _expandComposer(tester);
+      await tester.pump();
+      expect(channels.iterations, greaterThan(0));
+      final settled = channels.iterations;
+
+      // Typing and keyboard frames rebuild the composer without changing the
+      // channel list.
+      addTearDown(tester.view.resetViewInsets);
+      for (var i = 1; i <= 5; i++) {
+        tester.view.viewInsets = FakeViewPadding(bottom: i * 40.0);
+        await tester.enterText(find.byType(TextField), 'draft $i');
+        await tester.pump();
+      }
+
+      expect(channels.iterations, settled);
+    });
+
+    testWidgets('composer channel chips follow channel list changes', (
+      tester,
+    ) async {
+      const channelId = '580ca78b-9dae-46f3-8854-bd671853ba32';
+      Channel named(String name) => Channel(
+        id: channelId,
+        name: name,
+        channelType: 'stream',
+        visibility: 'open',
+        description: '',
+        createdBy: 'creator',
+        createdAt: DateTime(2026),
+        memberCount: 1,
+        isMember: true,
+      );
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          channels: [named('engineering')],
+          onSend: (_, _, {mediaTags = const <List<String>>[]}) async {},
+        ),
+      );
+      await _expandComposer(tester);
+      await tester.enterText(
+        find.byType(TextField),
+        'buzz://channel/$channelId',
+      );
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('composer-buzz-link-chip:engineering')),
+        findsOneWidget,
+      );
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(ComposeBar)),
+      );
+      (container.read(channelsProvider.notifier) as _FakeChannelsNotifier)
+          .replaceChannels([named('platform')]);
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('composer-buzz-link-chip:platform')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('composer-buzz-link-chip:engineering')),
+        findsNothing,
+      );
+    });
+
     testWidgets('renders all five permalink types as composer chips', (
       tester,
     ) async {
@@ -3706,19 +5532,18 @@ void main() {
       );
 
       await _expandComposer(tester);
-      await tester.enterText(find.byType(TextField), urls.join(' '));
+      final full = '${urls.join(' ')} ';
+      await tester.enterText(find.byType(TextField), full);
       await tester.pump();
 
-      expect(
-        find.byWidgetPredicate(
-          (widget) =>
-              widget.key is ValueKey<String> &&
-              (widget.key! as ValueKey<String>).value.startsWith(
-                'composer-buzz-link-chip:',
-              ),
-        ),
-        findsNWidgets(5),
+      Finder linkChips() => find.byWidgetPredicate(
+        (widget) =>
+            widget.key is ValueKey<String> &&
+            (widget.key! as ValueKey<String>).value.startsWith(
+              'composer-buzz-link-chip:',
+            ),
       );
+      expect(linkChips(), findsNWidgets(5));
       expect(
         find.byKey(
           const ValueKey('composer-buzz-link-chip:engineering · cdcdcdcd'),
@@ -3737,10 +5562,238 @@ void main() {
         find.byKey(const ValueKey('composer-buzz-link-chip:buzz · cdcdcdcd')),
         findsNWidgets(2),
       );
-      expect(
-        tester.widget<TextField>(find.byType(TextField)).controller!.text,
-        urls.join(' '),
+      final controller = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      expect(controller.text, full);
+      Future<void> setValue(String text, int caret) async {
+        controller.value = TextEditingValue(
+          text: text,
+          selection: TextSelection.collapsed(offset: caret),
+        );
+        await tester.pump();
+      }
+
+      // An IME edit that leaves text composing is never rewritten, so the
+      // composition stays intact.
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: full.substring(0, full.length - 1),
+          selection: TextSelection.collapsed(offset: full.length - 1),
+          composing: TextRange(start: full.length - 2, end: full.length - 1),
+        ),
       );
+      await tester.pump();
+      expect(controller.text, full.substring(0, full.length - 1));
+      await setValue(full, full.length);
+
+      // Soft-keyboard backspace removes the space, which reveals the link's
+      // URL; the next backspace edits it one character at a time.
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: urls.join(' '),
+          selection: TextSelection.collapsed(offset: full.length - 1),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, urls.join(' '));
+      expect(linkChips(), findsNWidgets(4));
+      await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+      await tester.pump();
+      expect(controller.text, full.substring(0, full.length - 2));
+      expect(linkChips(), findsNWidgets(4));
+
+      // Moving the caret back past the space reveals the link too, and
+      // moving it away turns the link back into a chip.
+      await setValue(full, full.length);
+      expect(linkChips(), findsNWidgets(5));
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.pump();
+      expect(controller.selection.baseOffset, full.length - 1);
+      expect(linkChips(), findsNWidgets(4));
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+      expect(linkChips(), findsNWidgets(5));
+
+      // Hardware backspace right after a chip, with the caret past the space
+      // next to it, still removes only the space.
+      final secondEnd = urls[0].length + 1 + urls[1].length;
+      await setValue(full, secondEnd + 1);
+      await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+      await tester.pump();
+      expect(controller.text, full.replaceRange(secondEnd, secondEnd + 1, ''));
+      expect(controller.selection.baseOffset, secondEnd);
+
+      // A chip draws as one glyph at its first offset. A tap on its left
+      // half lands before it, and one on its right half (just after the
+      // glyph) goes after it, wherever the caret was.
+      await setValue(full, full.length);
+      controller.selection = const TextSelection.collapsed(offset: 1);
+      await tester.pump();
+      expect(controller.selection.baseOffset, urls[0].length);
+      controller.selection = const TextSelection.collapsed(offset: 0);
+      await tester.pump();
+      controller.selection = const TextSelection.collapsed(offset: 1);
+      await tester.pump();
+      expect(controller.selection.baseOffset, urls[0].length);
+      // A move left into the hidden source, such as a word left, steps over
+      // the chip to its start, and an arrow right from its start steps over
+      // it to its end.
+      await setValue(full, full.length);
+      controller.selection = const TextSelection.collapsed(offset: 3);
+      await tester.pump();
+      expect(controller.selection, const TextSelection.collapsed(offset: 0));
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+      expect(controller.selection.baseOffset, urls[0].length);
+      // A selection that covers part of a chip grows to cover all of it.
+      await setValue(full, full.length);
+      controller.selection = TextSelection(
+        baseOffset: urls[0].length - 3,
+        extentOffset: urls[0].length + 4,
+      );
+      await tester.pump();
+      expect(
+        controller.selection,
+        TextSelection(
+          baseOffset: 0,
+          extentOffset: urls[0].length + 1 + urls[1].length,
+        ),
+      );
+
+      // A word delete that runs from past a chip into it removes the whole
+      // chip, not just the end of its hidden URL.
+      await setValue('a ${urls[1]} b', 3 + urls[1].length);
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: 'a ${urls[1].substring(0, urls[1].length - 4)}b',
+          selection: TextSelection.collapsed(offset: urls[1].length - 2),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, 'a b');
+      expect(controller.selection.baseOffset, 2);
+
+      // Forward delete before a chip removes it whole, and stays forward
+      // when the character before the caret matches the chip's first
+      // character (`b|buzz://...`).
+      await setValue(full, 0);
+      await tester.sendKeyEvent(LogicalKeyboardKey.delete);
+      await tester.pump();
+      expect(controller.text, full.substring(urls[0].length));
+      expect(controller.selection.baseOffset, 0);
+      expect(linkChips(), findsNWidgets(4));
+      await setValue('b${urls[1]} ', 1);
+      await tester.sendKeyEvent(LogicalKeyboardKey.delete);
+      await tester.pump();
+      expect(controller.text, 'b ');
+      expect(controller.selection.baseOffset, 1);
+
+      // Pasting exactly one link adds a space so it is a chip at once.
+      await setValue('see ', 4);
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: 'see ${urls[2]}',
+          selection: TextSelection.collapsed(offset: 4 + urls[2].length),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, 'see ${urls[2]} ');
+      expect(controller.selection.baseOffset, controller.text.length);
+      expect(linkChips(), findsOneWidget);
+      // A paste that already has a boundary after it, such as punctuation
+      // ending a sentence, leaves the surrounding text alone.
+      await setValue('See word. ', 4);
+      controller.selection = const TextSelection(
+        baseOffset: 4,
+        extentOffset: 8,
+      );
+      await tester.pump();
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: 'See ${urls[2]}. ',
+          selection: TextSelection.collapsed(offset: 4 + urls[2].length),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, 'See ${urls[2]}. ');
+      // A link pasted into code stays exactly as pasted; code never shows
+      // chips.
+      await setValue('``', 1);
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: '`${urls[2]}`',
+          selection: TextSelection.collapsed(offset: 1 + urls[2].length),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, '`${urls[2]}`');
+      // So does a link the composer can't show as a chip.
+      await setValue('', 0);
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: 'buzz://repo?x=1',
+          selection: TextSelection.collapsed(offset: 15),
+        ),
+      );
+      await tester.pump();
+      expect(controller.text, 'buzz://repo?x=1');
+      // A selection that leaves a revealed link, which turns it back into a
+      // chip, still covers the whole chip.
+      final revealedText = 'see ${urls[1]} end';
+      await setValue(revealedText, 4 + urls[1].length);
+      await setValue(revealedText, 14);
+      expect(linkChips(), findsNothing);
+      controller.selection = TextSelection(
+        baseOffset: 14,
+        extentOffset: revealedText.length,
+      );
+      await tester.pump();
+      expect(
+        controller.selection,
+        TextSelection(baseOffset: 4, extentOffset: revealedText.length),
+      );
+      expect(linkChips(), findsOneWidget);
+
+      await setValue('see ${urls[2]} ', 5 + urls[2].length);
+
+      // Undo after typing at the end of a revealed link restores it rather
+      // than deleting the link.
+      await tester.sendKeyEvent(LogicalKeyboardKey.backspace);
+      await tester.pump(const Duration(seconds: 1));
+      expect(controller.text, 'see ${urls[2]}');
+      await tester.enterText(find.byType(TextField), 'see ${urls[2]}x');
+      await tester.pump(const Duration(seconds: 1));
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pump();
+      expect(controller.text, 'see ${urls[2]}');
+
+      // Undo that removes part of a chip along with what follows it restores
+      // the shorter text instead of deleting the whole link.
+      await tester.enterText(find.byType(TextField), 'buzz://channel/580c');
+      await tester.pump(const Duration(seconds: 1));
+      await tester.enterText(find.byType(TextField), '${urls[1]} ');
+      await tester.pump(const Duration(seconds: 1));
+      expect(linkChips(), findsOneWidget);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pump();
+      expect(controller.text, 'buzz://channel/580c');
+
+      // Undo that brings back a whole link restores it as it was, without
+      // the space a paste would add.
+      await tester.enterText(find.byType(TextField), 'see ${urls[1]}');
+      await tester.pump(const Duration(seconds: 1));
+      await tester.enterText(find.byType(TextField), 'see ');
+      await tester.pump(const Duration(seconds: 1));
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pump();
+      expect(controller.text, 'see ${urls[1]}');
     });
 
     testWidgets('preserves underscore d-tags and Markdown delimiters', (
@@ -3771,6 +5824,85 @@ void main() {
       expect(
         tester.widget<TextField>(find.byType(TextField)).controller!.text,
         source,
+      );
+
+      // A caret after a closing italic or strikethrough delimiter is past the
+      // link, so the link stays a chip.
+      final plain = 'buzz://repo?owner=$owner&d=buzz';
+      for (final wrapped in ['_${plain}_', '~~$plain~~']) {
+        await tester.enterText(find.byType(TextField), wrapped);
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('composer-buzz-link-chip:buzz')),
+          findsOneWidget,
+          reason: wrapped,
+        );
+      }
+
+      // A link pasted over a formatted word already ends at the closing
+      // delimiter, so the paste adds no space before the prose after it.
+      for (final (open, close) in [('**', '**'), ('_', '_'), ('~~', '~~')]) {
+        final before = '${open}word${close}more';
+        await tester.enterText(find.byType(TextField), before);
+        await tester.pump();
+        final controller = tester
+            .widget<TextField>(find.byType(TextField))
+            .controller!;
+        controller.selection = TextSelection(
+          baseOffset: open.length,
+          extentOffset: open.length + 4,
+        );
+        await tester.pump();
+        final pasted = '$open$plain${close}more';
+        tester.testTextInput.updateEditingValue(
+          TextEditingValue(
+            text: pasted,
+            selection: TextSelection.collapsed(
+              offset: open.length + plain.length,
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(controller.text, pasted, reason: before);
+        controller.selection = const TextSelection.collapsed(offset: 0);
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('composer-buzz-link-chip:buzz')),
+          findsOneWidget,
+          reason: before,
+        );
+      }
+
+      // Selection updates can arrive before a frame draws a pasted link as a
+      // chip. They still snap to the whole chip.
+      await tester.enterText(find.byType(TextField), '');
+      await tester.pump();
+      tester.testTextInput.updateEditingValue(
+        TextEditingValue(
+          text: plain,
+          selection: TextSelection.collapsed(offset: plain.length),
+        ),
+      );
+      final pastedText = '$plain ';
+      for (final extent in [plain.length, plain.length - 1]) {
+        tester.testTextInput.updateEditingValue(
+          TextEditingValue(
+            text: pastedText,
+            selection: TextSelection(
+              baseOffset: pastedText.length,
+              extentOffset: extent,
+            ),
+          ),
+        );
+      }
+      await tester.pump();
+      final pasteController = tester
+          .widget<TextField>(find.byType(TextField))
+          .controller!;
+      expect(pasteController.text, pastedText);
+      expect(
+        pasteController.selection,
+        TextSelection(baseOffset: pastedText.length, extentOffset: 0),
       );
     });
 
@@ -3832,19 +5964,25 @@ void main() {
         },
       );
 
+      var busy = false;
+      final delivery = Completer<void>();
       String? sentContent;
       List<List<String>> sentMediaTags = const [];
       await tester.pumpWidget(
         _buildComposeBar(
           uploadService: uploadService,
+          draftMembers: const [],
+          onSendingChanged: (value) => busy = value,
           onSend:
               (
                 content,
                 mentionPubkeys, {
                 mediaTags = const <List<String>>[],
               }) async {
+                expect(busy, isTrue);
                 sentContent = content;
                 sentMediaTags = mediaTags;
+                await delivery.future;
               },
         ),
       );
@@ -3878,8 +6016,14 @@ void main() {
       );
 
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
-      await tester.pumpAndSettle();
+      await _pumpUntilUpload(tester, () => sentContent != null);
+      expect(sentContent, isNotNull);
 
+      expect(busy, isTrue);
+      delivery.completeError(Exception('First send failed'));
+      await tester.pumpAndSettle();
+      expect(busy, isFalse);
+      expect(find.byTooltip('Remove attachment'), findsOneWidget);
       expect(uploadedBytes, _pngBytes);
       expect(uploadedMimeType, 'image/png');
       expect(sentContent, '\n![image](https://relay.example/media/pasted.png)');
@@ -3893,6 +6037,7 @@ void main() {
     testWidgets('iOS native context menu preserves defaults and pastes image', (
       tester,
     ) async {
+      final menus = _captureNativeComposerMenus();
       final previousPlatform = debugDefaultTargetPlatformOverride;
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       try {
@@ -3930,33 +6075,26 @@ void main() {
         );
 
         await _expandComposer(tester);
-        final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
         );
-        final defaultItems = SystemContextMenu.getDefaultItems(
-          editableTextState,
+        editableTextState.widget.controller.value = const TextEditingValue(
+          text: 'Draft',
+          selection: TextSelection(baseOffset: 0, extentOffset: 5),
         );
-        final menu =
-            textField.contextMenuBuilder!(
-                  tester.element(find.byType(TextField)),
-                  editableTextState,
-                )
-                as SystemContextMenu;
-        final pasteImage = menu.items.first as IOSSystemContextMenuItemCustom;
-        final rebuiltMenu =
-            textField.contextMenuBuilder!(
-                  tester.element(find.byType(TextField)),
-                  editableTextState,
-                )
-                as SystemContextMenu;
-        final rebuiltPasteImage =
-            rebuiltMenu.items.first as IOSSystemContextMenuItemCustom;
-
-        expect(pasteImage.title, 'Paste Image');
-        expect(rebuiltPasteImage.onPressed, same(pasteImage.onPressed));
-        expect(menu.items.skip(1), orderedEquals(defaultItems));
-        pasteImage.onPressed();
+        await tester.pump();
+        editableTextState.showToolbar();
+        await tester.pumpAndSettle();
+        final items = menus.last;
+        final pasteImage = items.singleWhere(
+          (item) => item['title'] == 'Paste Image',
+        );
+        expect(pasteImage['title'], 'Paste Image');
+        expect(items.skip(1).any((item) => item['type'] != 'custom'), isTrue);
+        await _nativeComposerMenuEvent('ContextMenu.onPerformCustomAction', [
+          null,
+          pasteImage['id'] as String,
+        ]);
         await tester.pumpAndSettle();
 
         expect(find.byTooltip('Remove attachment'), findsOneWidget);
@@ -3968,6 +6106,7 @@ void main() {
     testWidgets('iOS hides Paste Image when clipboard has no image', (
       tester,
     ) async {
+      final menus = _captureNativeComposerMenus();
       final previousPlatform = debugDefaultTargetPlatformOverride;
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       _setMockMediaUploadPlatformHandler((call) async {
@@ -3996,18 +6135,17 @@ void main() {
         await tester.pump();
 
         await _expandComposer(tester);
-        final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
         );
-        final menu =
-            textField.contextMenuBuilder!(
-                  tester.element(find.byType(TextField)),
-                  editableTextState,
-                )
-                as SystemContextMenu;
-
-        expect(menu.items.whereType<IOSSystemContextMenuItemCustom>(), isEmpty);
+        editableTextState.showToolbar();
+        await tester.pumpAndSettle();
+        expect(
+          menus
+              .expand((items) => items)
+              .where((item) => item['title'] == 'Paste Image'),
+          isEmpty,
+        );
       } finally {
         _setMockMediaUploadPlatformHandler((call) async {
           switch (call.method) {
@@ -4065,16 +6203,14 @@ void main() {
         );
 
         await _expandComposer(tester);
-        final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
         );
-        final menu =
-            textField.contextMenuBuilder!(
-                  tester.element(find.byType(TextField)),
-                  editableTextState,
-                )
-                as AdaptiveTextSelectionToolbar;
+        editableTextState.showToolbar();
+        await tester.pumpAndSettle();
+        final menu = tester.widget<AdaptiveTextSelectionToolbar>(
+          find.byType(AdaptiveTextSelectionToolbar),
+        );
         final pasteImage = menu.buttonItems!.singleWhere(
           (item) => item.label == 'Paste Image',
         );
@@ -4127,6 +6263,7 @@ void main() {
     ) async {
       final previousPlatform = debugDefaultTargetPlatformOverride;
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      var busy = false;
       try {
         final uploadService = MediaUploadService(
           baseUrl: 'https://relay.example',
@@ -4138,6 +6275,8 @@ void main() {
         await tester.pumpWidget(
           _buildComposeBar(
             uploadService: uploadService,
+            draftMembers: const [],
+            onSendingChanged: (value) => busy = value,
             onSend:
                 (
                   content,
@@ -4148,21 +6287,20 @@ void main() {
         );
 
         await _expandComposer(tester);
-        final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
         );
-        final menu =
-            textField.contextMenuBuilder!(
-                  tester.element(find.byType(TextField)),
-                  editableTextState,
-                )
-                as AdaptiveTextSelectionToolbar;
+        editableTextState.showToolbar();
+        await tester.pumpAndSettle();
+        final menu = tester.widget<AdaptiveTextSelectionToolbar>(
+          find.byType(AdaptiveTextSelectionToolbar),
+        );
         menu.buttonItems!
             .singleWhere((item) => item.label == 'Paste Image')
             .onPressed!();
         await tester.pumpAndSettle();
 
+        expect(busy, isFalse);
         expect(find.text('Unable to read pasted image'), findsOneWidget);
         expect(find.byTooltip('Remove attachment'), findsNothing);
       } finally {
@@ -4192,16 +6330,14 @@ void main() {
       );
 
       await _expandComposer(tester);
-      final textField = tester.widget<TextField>(find.byType(TextField));
       final editableTextState = tester.state<EditableTextState>(
         find.byType(EditableText),
       );
-      final menu =
-          textField.contextMenuBuilder!(
-                tester.element(find.byType(TextField)),
-                editableTextState,
-              )
-              as AdaptiveTextSelectionToolbar;
+      editableTextState.showToolbar();
+      await tester.pumpAndSettle();
+      final menu = tester.widget<AdaptiveTextSelectionToolbar>(
+        find.byType(AdaptiveTextSelectionToolbar),
+      );
 
       expect(
         menu.buttonItems!.where((item) => item.label == 'Paste Image'),
@@ -4309,11 +6445,59 @@ void main() {
       await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), 'Keep this draft');
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await _pumpUntilUpload(
+        tester,
+        () => find.textContaining('upload failed').evaluate().isNotEmpty,
+      );
       await tester.pumpAndSettle();
 
       expect(find.textContaining('upload failed'), findsOneWidget);
       expect(find.text('Keep this draft'), findsOneWidget);
       expect(find.byTooltip('Remove attachment'), findsOneWidget);
+    });
+
+    testWidgets('shows a failed upload connection error with its name', (
+      tester,
+    ) async {
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient(
+          (request) async => throw http.ClientException('Connection reset'),
+        ),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async =>
+            XFile.fromData(_pngBytes, name: 'tiny.png'),
+      );
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _openSystemPhotoPicker(tester);
+      await tester.pumpAndSettle();
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'Keep this draft');
+      await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+      await _pumpUntilUpload(
+        tester,
+        () => find.textContaining('Connection reset').evaluate().isNotEmpty,
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.textContaining('ClientException: Connection reset'),
+        findsOneWidget,
+      );
+      expect(find.text('Keep this draft'), findsOneWidget);
     });
 
     for (final statusCode in [
@@ -4354,12 +6538,11 @@ void main() {
         await tester.pumpAndSettle();
         await _expandComposer(tester);
         await tester.tap(find.byIcon(BuzzIcons.arrowUp));
+        final error = find.text("We couldn't prepare this image for upload.");
+        await _pumpUntilUpload(tester, () => error.evaluate().isNotEmpty);
         await tester.pumpAndSettle();
 
-        expect(
-          find.text("We couldn't prepare this image for upload."),
-          findsOneWidget,
-        );
+        expect(error, findsOneWidget);
         expect(find.textContaining('media contains metadata'), findsNothing);
         expect(find.textContaining('$statusCode'), findsNothing);
       });
@@ -4458,7 +6641,7 @@ void main() {
       session.debugAttachSocketForTest(socket);
 
       await _expandComposer(tester);
-      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.enterText(find.byType(TextField), 'hello @hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
@@ -4467,7 +6650,6 @@ void main() {
         find.byKey(const ValueKey('composer-agent-mention-chip')),
         findsOneWidget,
       );
-      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await _inviteOutside(tester);
       await tester.pumpAndSettle();
@@ -4532,11 +6714,10 @@ void main() {
       );
 
       await _expandComposer(tester);
-      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.enterText(find.byType(TextField), 'hello @hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await _inviteOutside(tester);
       await tester.pump();
@@ -4611,6 +6792,12 @@ void main() {
           findsNothing,
         );
 
+        // Text typed after a picked chip, even while the IME composes it,
+        // leaves the chip drawn.
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
         await tester.enterText(find.byType(TextField), '@Helper Bot typing');
         final textField = tester.widget<TextField>(find.byType(TextField));
         textField.controller!.value = textField.controller!.value.copyWith(
@@ -4621,6 +6808,240 @@ void main() {
           find.byKey(const ValueKey('composer-agent-mention-chip')),
           findsOneWidget,
         );
+
+        // Backspace right after the chip removes the whole `@label`.
+        textField.controller!.value = const TextEditingValue(
+          text: '@Helper Bot typing',
+          selection: TextSelection.collapsed(offset: 11),
+        );
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper Bo typing',
+            selection: TextSelection.collapsed(offset: 10),
+          ),
+        );
+        await tester.pump();
+        expect(textField.controller!.text, ' typing');
+        expect(textField.controller!.selection.baseOffset, 0);
+        expect(
+          find.byKey(const ValueKey('composer-agent-mention-chip')),
+          findsNothing,
+        );
+
+        // A word left from after the chip steps over it, and a word delete
+        // that runs past it removes the whole mention.
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        textField.controller!.value = const TextEditingValue(
+          text: '@Helper Bot typing',
+          selection: TextSelection.collapsed(offset: 11),
+        );
+        await tester.pump();
+        textField.controller!.selection = const TextSelection.collapsed(
+          offset: 8,
+        );
+        await tester.pump();
+        expect(textField.controller!.selection.baseOffset, 0);
+        textField.controller!.selection = const TextSelection.collapsed(
+          offset: 12,
+        );
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper typing',
+            selection: TextSelection.collapsed(offset: 8),
+          ),
+        );
+        await tester.pump();
+        expect(textField.controller!.text, 'typing');
+        expect(textField.controller!.selection.baseOffset, 0);
+
+        // Gboard composes the word before the caret, here the chip's hidden
+        // label. The chip still draws, and backspace still removes it whole.
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        textField.controller!.value = const TextEditingValue(
+          text: '@Helper Bot ',
+          selection: TextSelection.collapsed(offset: 12),
+        );
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper Bot',
+            selection: TextSelection.collapsed(offset: 11),
+            composing: TextRange(start: 8, end: 11),
+          ),
+        );
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('composer-agent-mention-chip')),
+          findsOneWidget,
+        );
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper Bo',
+            selection: TextSelection.collapsed(offset: 10),
+            composing: TextRange(start: 8, end: 10),
+          ),
+        );
+        await tester.pump();
+        expect(textField.controller!.text, '');
+        expect(textField.controller!.value.composing, TextRange.empty);
+
+        // Two backspaces can arrive before a frame redraws the composer.
+        // The second still removes the whole chip.
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        textField.controller!.value = const TextEditingValue(
+          text: '@Helper Bot ',
+          selection: TextSelection.collapsed(offset: 12),
+        );
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper Bot',
+            selection: TextSelection.collapsed(offset: 11),
+          ),
+        );
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper Bo',
+            selection: TextSelection.collapsed(offset: 10),
+          ),
+        );
+        await tester.pump();
+        expect(textField.controller!.text, '');
+
+        // A selection covering part of a chip grows to cover all of it, and
+        // edits over a selection replace exactly the selection, so typed
+        // text is kept and Cut removes only what it copies.
+        Future<void> typeOver(TextSelection selected, String typed) async {
+          await tester.enterText(find.byType(TextField), '@hel');
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('Helper Bot'));
+          await tester.pumpAndSettle();
+          textField.controller!.value = const TextEditingValue(
+            text: '@Helper Bot typing',
+            selection: TextSelection.collapsed(offset: 18),
+          );
+          await tester.pump();
+          expect(
+            find.byKey(const ValueKey('composer-agent-mention-chip')),
+            findsOneWidget,
+          );
+          textField.controller!.selection = selected;
+          await tester.pump();
+          final selection = textField.controller!.selection;
+          tester.testTextInput.updateEditingValue(
+            TextEditingValue(
+              text: '@Helper Bot typing'.replaceRange(
+                selection.start,
+                selection.end,
+                typed,
+              ),
+              selection: TextSelection.collapsed(
+                offset: selection.start + typed.length,
+              ),
+            ),
+          );
+          await tester.pump();
+        }
+
+        await typeOver(
+          const TextSelection(baseOffset: 0, extentOffset: 18),
+          '@',
+        );
+        expect(textField.controller!.text, '@');
+        await typeOver(
+          const TextSelection(baseOffset: 5, extentOffset: 13),
+          'x',
+        );
+        expect(textField.controller!.text, 'xyping');
+
+        // A typed namesake of a picked chip stays plain text, and Undo after
+        // typing its last letter restores the partial name instead of
+        // removing the picked chip.
+        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Helper Bot'));
+        await tester.pumpAndSettle();
+        textField.controller!.value = const TextEditingValue(
+          text: '@Helper Bot @Helper Bo and some more words',
+          selection: TextSelection.collapsed(offset: 22),
+        );
+        await tester.pump(const Duration(seconds: 1));
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '@Helper Bot @Helper Bot and some more words',
+            selection: TextSelection.collapsed(offset: 23),
+          ),
+        );
+        await tester.pump(const Duration(seconds: 1));
+        expect(
+          find.byKey(const ValueKey('composer-agent-mention-chip')),
+          findsOneWidget,
+        );
+        // Moving the selection around a lot first changes nothing.
+        for (var base = 24; base < 43; base++) {
+          for (var extent = base + 1; extent <= 43; extent++) {
+            textField.controller!.selection = TextSelection(
+              baseOffset: base,
+              extentOffset: extent,
+            );
+          }
+        }
+        textField.controller!.selection = const TextSelection.collapsed(
+          offset: 23,
+        );
+        await tester.pump();
+        // So do many later edits, undone back to the completed mention.
+        const edits = 101;
+        for (var i = 1; i <= edits; i++) {
+          tester.testTextInput.updateEditingValue(
+            TextEditingValue(
+              text: '@Helper Bot @Helper Bot and some more words${'.' * i}',
+              selection: TextSelection.collapsed(offset: 43 + i),
+            ),
+          );
+          await tester.pump(const Duration(seconds: 1));
+        }
+        for (var i = 0; i < edits; i++) {
+          await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+          await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+          await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+          await tester.pump();
+        }
+        expect(
+          textField.controller!.text,
+          '@Helper Bot @Helper Bot and some more words',
+        );
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await tester.pump();
+        expect(
+          textField.controller!.text,
+          '@Helper Bot @Helper Bo and some more words',
+        );
+
+        // Text that is not drawn as a chip still deletes one character.
+        await tester.enterText(find.byType(TextField), '`@Helper Bot`');
+        await tester.pump();
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '`@Helper Bo`',
+            selection: TextSelection.collapsed(offset: 11),
+          ),
+        );
+        await tester.pump();
+        expect(textField.controller!.text, '`@Helper Bo`');
         await tester.pump(const Duration(milliseconds: 250));
         semantics.dispose();
       },
@@ -4640,13 +7061,12 @@ void main() {
 
       Future<void> mentionMaryAndSend(WidgetTester tester) async {
         await _expandComposer(tester);
-        await tester.enterText(find.byType(TextField), '@Mary J');
+        await tester.enterText(find.byType(TextField), 'hello @Mary J');
         await tester.pump();
         await tester.pump(mentionSearchDebounce * 2);
         await tester.pumpAndSettle();
         await tester.tap(find.text('Mary Jane'));
         await tester.pumpAndSettle();
-        await tester.enterText(find.byType(TextField), 'hello @Mary Jane');
         await tester.tap(find.byIcon(BuzzIcons.arrowUp));
         await tester.pumpAndSettle();
       }
@@ -4781,10 +7201,7 @@ void main() {
         await tester.tap(find.byIcon(BuzzIcons.arrowUp));
         await tester.pumpAndSettle();
 
-        expect(
-          find.text('Message not sent: could not check who is in this channel'),
-          findsNothing,
-        );
+        expect(find.text('Not sent. Couldn’t check members.'), findsNothing);
         expect(sentRecipients, contains(pat));
         expect(sentTags, isNot(contains(orderedEquals(['mention', pat]))));
       });
@@ -4813,12 +7230,9 @@ void main() {
         await mentionMaryAndSend(tester);
 
         expect(sendCount, 0);
-        expect(
-          find.text('Message not sent: could not check who is in this channel'),
-          findsOneWidget,
-        );
+        expect(find.text('Not sent. Couldn’t check members.'), findsOneWidget);
         final field = tester.widget<TextField>(find.byType(TextField));
-        expect(field.controller!.text, 'hello @Mary Jane');
+        expect(field.controller!.text, 'hello @Mary Jane ');
 
         // The membership comes back, as after the relay's own retry.
         membersReady = true;
@@ -4984,11 +7398,10 @@ void main() {
       session.debugAttachSocketForTest(socket);
 
       await _expandComposer(tester);
-      await tester.enterText(find.byType(TextField), '@hel');
+      await tester.enterText(find.byType(TextField), 'hello @hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
       await tester.tap(find.byIcon(BuzzIcons.arrowUp));
       await tester.pump();
 
@@ -5060,11 +7473,10 @@ void main() {
         session.debugAttachSocketForTest(socket);
 
         await _expandComposer(tester);
-        await tester.enterText(find.byType(TextField), '@hel');
+        await tester.enterText(find.byType(TextField), 'hello @hel');
         await tester.pumpAndSettle();
         await tester.tap(find.text('Helper Bot'));
         await tester.pumpAndSettle();
-        await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
         await tester.tap(find.byIcon(BuzzIcons.arrowUp));
         await _inviteOutside(tester);
         await tester.pumpAndSettle();
@@ -5125,7 +7537,7 @@ void main() {
       expect(find.byTooltip('Remove attachment'), findsOneWidget);
     });
 
-    testWidgets('taps Video in chooser sheet and uploads video', (
+    testWidgets('selects a video through Photos and uploads video', (
       tester,
     ) async {
       final pickedVideo = XFile.fromData(
@@ -5150,8 +7562,7 @@ void main() {
         ),
       );
 
-      await _openAttachmentMenu(tester);
-      await tester.tap(find.text('Video'));
+      await _openSystemPhotoPicker(tester);
       await tester.pumpAndSettle();
 
       expect(find.byIcon(BuzzIcons.video), findsOneWidget);
@@ -5857,7 +8268,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text('Message\u2026'));
+      await tester.tap(find.text('Message'));
       await tester.pump();
       await tester.pump();
 
@@ -6105,8 +8516,23 @@ AgentDirectoryEntry _testAgent(String pubkey) {
 
 Future<void> _expandComposer(WidgetTester tester) async {
   if (find.byType(TextField).evaluate().isNotEmpty) return;
-  await tester.tap(find.text('Message\u2026'));
+  await tester.tap(find.text('Message'));
   await tester.pumpAndSettle();
+}
+
+Future<void> _pumpUntilUpload(
+  WidgetTester tester,
+  bool Function() isReady,
+) async {
+  final stopwatch = Stopwatch()..start();
+  while (!isReady()) {
+    if (stopwatch.elapsed >= const Duration(seconds: 5)) {
+      fail('Timed out waiting for attachment upload');
+    }
+    // Let the hash isolate reply on the real event loop before pumping a frame.
+    await tester.runAsync(() => Future<void>(() {}));
+    await tester.pump();
+  }
 }
 
 Future<void> _openAttachmentMenu(WidgetTester tester) async {
@@ -6123,11 +8549,10 @@ Future<void> _openSystemPhotoPicker(WidgetTester tester) async {
 
 Future<void> _selectAndSendAgentMention(WidgetTester tester) async {
   await _expandComposer(tester);
-  await tester.enterText(find.byType(TextField), '@hel');
+  await tester.enterText(find.byType(TextField), 'hello @hel');
   await tester.pumpAndSettle();
   await tester.tap(find.text('Helper Bot'));
   await tester.pumpAndSettle();
-  await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
   await tester.tap(find.byIcon(BuzzIcons.arrowUp));
   await tester.pumpAndSettle();
 }
@@ -6216,4 +8641,93 @@ Channel _makeChannel({required String name, required String channelType}) {
 Future<void> _inviteOutside(WidgetTester tester) async {
   await tester.pumpAndSettle();
   await tester.tap(find.widgetWithText(TextButton, 'Invite'));
+}
+
+List<List<Map<dynamic, dynamic>>> _captureNativeComposerMenus() {
+  final menus = <List<Map<dynamic, dynamic>>>[];
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'ContextMenu.showSystemContextMenu') {
+          menus.add(((call.arguments as Map)['items'] as List).cast<Map>());
+        }
+        return null;
+      });
+  addTearDown(
+    () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, null),
+  );
+  return menus;
+}
+
+Future<void> _nativeComposerMenuEvent(
+  String method, [
+  Object? arguments,
+]) async {
+  await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .handlePlatformMessage(
+        SystemChannels.platform.name,
+        SystemChannels.platform.codec.encodeMethodCall(
+          MethodCall(method, arguments),
+        ),
+        (_) {},
+      );
+}
+
+Future<void> _tapComposerControl(
+  WidgetTester tester,
+  String label, {
+  int index = 0,
+}) async {
+  final semanticLabel = label == 'Attachments' ? 'Add attachment' : label;
+  final native = find.byWidgetPredicate(
+    (widget) =>
+        widget is IosGlassNavigationButton &&
+        widget.semanticLabel == semanticLabel,
+  );
+  if (native.evaluate().isNotEmpty) {
+    tester.widget<IosGlassNavigationButton>(native.at(index)).onPressed?.call();
+  } else {
+    await tester.tap(find.byTooltip(semanticLabel));
+  }
+}
+
+Future<void> _selectComposerAttachment(
+  WidgetTester tester,
+  String label,
+) async {
+  if (find.byKey(const ValueKey('attachment-menu')).evaluate().isEmpty) {
+    await _tapComposerControl(tester, 'Attachments');
+    await tester.pumpAndSettle();
+  }
+  await tester.tap(
+    find.byKey(ValueKey('attachment-menu-item-${label.toLowerCase()}')),
+  );
+  await tester.pumpAndSettle();
+}
+
+/// A custom-emoji palette that counts how often it is iterated.
+class _CountingCustomEmojiList extends ListBase<CustomEmoji> {
+  _CountingCustomEmojiList(this._items);
+
+  final List<CustomEmoji> _items;
+  var iterations = 0;
+
+  @override
+  int get length => _items.length;
+
+  @override
+  set length(int value) => throw UnsupportedError('read-only');
+
+  @override
+  CustomEmoji operator [](int index) => _items[index];
+
+  @override
+  void operator []=(int index, CustomEmoji value) =>
+      throw UnsupportedError('read-only');
+
+  @override
+  Iterator<CustomEmoji> get iterator {
+    iterations += 1;
+    return super.iterator;
+  }
 }

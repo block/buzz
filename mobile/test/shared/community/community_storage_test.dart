@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_storage.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
@@ -12,6 +13,7 @@ import 'package:buzz/shared/push/push_subscription.dart';
 class FakeSecureStorage extends Fake implements FlutterSecureStorage {
   final Map<String, String> _data = {};
   final Map<String, int> _writeCounts = {};
+  bool failPendingInviteDeletes = false;
 
   @override
   Future<String?> read({
@@ -52,7 +54,12 @@ class FakeSecureStorage extends Fake implements FlutterSecureStorage {
     WebOptions? webOptions,
     AppleOptions? mOptions,
     WindowsOptions? wOptions,
-  }) async => _data.remove(key);
+  }) async {
+    if (failPendingInviteDeletes && key.startsWith('buzz_pending_invite_')) {
+      throw StateError('Secure storage deletion unavailable');
+    }
+    _data.remove(key);
+  }
 
   @override
   Future<Map<String, String>> readAll({
@@ -104,6 +111,20 @@ void main() {
     test('loadAll returns empty list when no data', () async {
       final result = await storage.loadAll();
       expect(result, isEmpty);
+    });
+
+    test('saved communities that cannot be read back are reported', () async {
+      final reporter = _RecordingDiagnostics();
+      final reporting = CommunityStorage(
+        secure: fakeSecure,
+        diagnostics: reporter,
+      );
+      await fakeSecure.write(key: 'buzz_communities', value: '{"oops"');
+
+      await expectLater(reporting.loadAll(), throwsFormatException);
+      expect(reporter.errors, [
+        (FormatException, DiagnosticOperation.storedData),
+      ]);
     });
 
     test('save and loadAll round-trips a community', () async {
@@ -346,4 +367,15 @@ void main() {
       });
     });
   });
+}
+
+class _RecordingDiagnostics extends NoopDiagnosticReporter {
+  final errors = <(Type, DiagnosticOperation)>[];
+
+  @override
+  void reportError(
+    Object error,
+    StackTrace? stackTrace, {
+    required DiagnosticOperation operation,
+  }) => errors.add((error.runtimeType, operation));
 }

@@ -57,8 +57,9 @@ class _InviteLinkSection extends HookConsumerWidget {
         await ref.read(shareCommunityInviteProvider)(url, origin);
       } catch (_) {
         if (!context.mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context).showFeedbackSnackBar(
           const SnackBar(content: Text('Could not share invite link')),
+          kind: ToastKind.error,
         );
       }
     }
@@ -169,11 +170,15 @@ void _showInviteOptionSheet<T>({
   showBuzzModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
-    builder: (_) => _InviteOptionSheet<T>(
-      title: title,
-      value: value,
-      options: options,
-      onSelected: onSelected,
+    useDuoFullWidth: false,
+    isScrollControlled: true,
+    builder: (_) => SingleChildScrollView(
+      child: _InviteOptionSheet<T>(
+        title: title,
+        value: value,
+        options: options,
+        onSelected: onSelected,
+      ),
     ),
   );
 }

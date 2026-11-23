@@ -1,73 +1,53 @@
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/push/dev_push_lease.dart';
 import 'package:buzz/shared/push/push_relay_capability_provider.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test(
-    'valid capability starts independent permission and APNs registration',
-    () async {
-      var requests = 0;
-
-      await startBuzzPushRegistrationIfCapable(
-        _descriptor,
-        startRegistration: () async {
-          requests += 1;
-        },
-      );
-
-      expect(requests, 1);
-    },
-  );
-
-  test(
-    'missing capability cannot start permission or APNs registration',
-    () async {
-      var requests = 0;
-
-      await startBuzzPushRegistrationIfCapable(
-        null,
-        startRegistration: () async {
-          requests += 1;
-        },
-      );
-
-      expect(requests, 0);
-    },
-  );
-
-  for (final failure in <Object>[
-    const FormatException('malformed descriptor'),
-    StateError('relay unreachable'),
+  for (final (failure, reported) in <(Object, bool)>[
+    (const FormatException('malformed descriptor'), true),
+    (const BuzzPushNotAdvertised(), false),
+    (StateError('relay unreachable'), false),
   ]) {
-    test('$failure keeps capability inactive without registration', () async {
+    test('$failure keeps capability inactive'
+        '${reported ? ' and is reported' : ''}', () async {
+      final reporter = _RecordingDiagnostics();
       final descriptor = await discoverBuzzPushRelayCapability(
         'https://relay.example',
         fetchDescriptor: (_) async => throw failure,
-      );
-      var requests = 0;
-
-      await startBuzzPushRegistrationIfCapable(
-        descriptor,
-        startRegistration: () async {
-          requests += 1;
-        },
+        diagnostics: reporter,
       );
 
       expect(descriptor, isNull);
-      expect(requests, 0);
+      expect(reporter.operations, [
+        if (reported) DiagnosticOperation.pushGatewayResponse,
+      ]);
     });
   }
+
+  test('a malformed descriptor that arrives after a switch began is not '
+      'reported', () async {
+    final reporter = _RecordingDiagnostics();
+    final descriptor = await discoverBuzzPushRelayCapability(
+      'https://relay.example',
+      fetchDescriptor: (_) async =>
+          throw const FormatException('malformed descriptor'),
+      diagnostics: reporter,
+      isCurrent: () => false,
+    );
+
+    expect(descriptor, isNull);
+    expect(reporter.operations, isEmpty);
+  });
 }
 
-const _descriptor = BuzzPushLeaseDescriptor(
-  origin: 'wss://relay.example',
-  executorKeyId: 'relay-v1',
-  executorPubkey:
-      'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-  transport: 'apns',
-  maxLeaseTtlSeconds: 3600,
-  maxContentLength: 4096,
-  maxPlaintextLength: 4096,
-  maxEndpointLength: 2048,
-  maxStringLength: 512,
-);
+class _RecordingDiagnostics extends NoopDiagnosticReporter {
+  final operations = <DiagnosticOperation>[];
+
+  @override
+  void reportError(
+    Object error,
+    StackTrace? stackTrace, {
+    required DiagnosticOperation operation,
+  }) => operations.add(operation);
+}

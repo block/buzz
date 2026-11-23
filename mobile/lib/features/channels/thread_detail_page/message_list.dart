@@ -1,6 +1,7 @@
 part of '../thread_detail_page.dart';
 
 class _ThreadMessageList extends HookWidget {
+  final DateHeaderScrollActivity dateScrollActivity;
   final double headHeight;
   final ValueChanged<double> onHeadHeightChanged;
   final LaidOutViewport viewport;
@@ -11,12 +12,18 @@ class _ThreadMessageList extends HookWidget {
   final ItemPositionsListener itemPositionsListener;
   final double bottomInset;
   final List<TimelineMessage> replies;
+  final List<TypingEntry> inlineTyping;
+  final Set<String> knownAgents;
   final AsyncValue<List<NostrEvent>> relayReplyState;
+  final bool showingSavedReplies;
+  final Set<String> savedOnlyIds;
+  final bool accessDenied;
   final VoidCallback onRetryReplies;
   final Map<String, DateTime> localSendAnimations;
   final Widget Function(Widget child) trackActiveScrollPosition;
   final bool headIsDeleted;
-  final TimelineMessage head;
+  final String headId;
+  final TimelineMessage? head;
   final ValueNotifier<int?> stickyDayTimestamp;
   final Map<String, String> channelNames;
   final String channelId;
@@ -26,10 +33,11 @@ class _ThreadMessageList extends HookWidget {
   final bool isMember;
   final bool isArchived;
   final FocusNode composerFocusNode;
-  final VoidCallback restoreComposerFocus;
+  final VoidCallback? restoreComposerFocus;
   final Map<String, List<TimelineMessage>> childrenByParent;
 
   const _ThreadMessageList({
+    required this.dateScrollActivity,
     required this.headHeight,
     required this.onHeadHeightChanged,
     required this.viewport,
@@ -40,11 +48,17 @@ class _ThreadMessageList extends HookWidget {
     required this.itemPositionsListener,
     required this.bottomInset,
     required this.replies,
+    required this.inlineTyping,
+    required this.knownAgents,
     required this.relayReplyState,
+    required this.showingSavedReplies,
+    required this.savedOnlyIds,
+    required this.accessDenied,
     required this.onRetryReplies,
     required this.localSendAnimations,
     required this.trackActiveScrollPosition,
     required this.headIsDeleted,
+    required this.headId,
     required this.head,
     required this.stickyDayTimestamp,
     required this.channelNames,
@@ -60,6 +74,11 @@ class _ThreadMessageList extends HookWidget {
   });
 
   String get _replySummary {
+    if (showingSavedReplies) {
+      return relayReplyState.hasError && !relayReplyState.isLoading
+          ? 'Showing saved replies. Refresh failed.'
+          : 'Showing saved replies.';
+    }
     if (!relayReplyState.hasValue && replies.isEmpty) {
       return relayReplyState.isLoading
           ? 'Loading replies…'
@@ -71,45 +90,67 @@ class _ThreadMessageList extends HookWidget {
     return '$count · ${relayReplyState.isLoading ? 'Retrying…' : 'Couldn’t refresh'}';
   }
 
-  Widget _buildHead(BuildContext context) => _ThreadHeadLayout(
-    onHeightChanged: onHeadHeightChanged,
-    child: _buildHeadContent(context),
-  );
+  Widget _buildHead(BuildContext context, List<TimelineMessage> liveMessages) =>
+      _ThreadHeadLayout(
+        onHeightChanged: onHeadHeightChanged,
+        child: _buildHeadContent(context, liveMessages),
+      );
 
-  Widget _buildHeadContent(BuildContext context) {
-    if (headIsDeleted) {
-      return const Padding(
-        key: ValueKey('thread-message-deleted'),
-        padding: EdgeInsets.only(bottom: Grid.xs),
-        child: Text('This message was deleted'),
+  Widget _buildHeadContent(
+    BuildContext context,
+    List<TimelineMessage> liveMessages,
+  ) {
+    if (accessDenied) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: Grid.xs),
+        child: Semantics(
+          liveRegion: true,
+          child: const Text('This thread is unavailable'),
+        ),
       );
     }
+    final head = this.head;
     return Padding(
-      key: ValueKey('thread-message-group-${head.id}'),
+      key: head == null || headIsDeleted
+          ? null
+          : ValueKey('thread-message-group-${head.id}'),
       padding: const EdgeInsets.only(bottom: Grid.xs),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          DayDivider(
-            label: formatDayHeading(head.createdAt),
-            dayTimestamp: head.createdAt,
-            stickyDayTimestamp: stickyDayTimestamp,
-          ),
-          _ThreadMessage(
-            message: head,
-            startsDay: true,
-            channelNames: channelNames,
-            channelId: channelId,
-            currentPubkey: currentPubkey,
-            showAuthor: true,
-            isHighlighted: head.id == highlightedMessageId,
-            allMessages: allMessages,
-            isMember: isMember,
-            isArchived: isArchived,
-            isThreadHead: true,
-            composerFocusNode: composerFocusNode,
-            restoreComposerFocus: restoreComposerFocus,
-          ),
+          if (headIsDeleted)
+            const Padding(
+              key: ValueKey('thread-message-deleted'),
+              padding: EdgeInsets.only(bottom: Grid.xs),
+              child: Text('This message was deleted'),
+            )
+          else if (head == null)
+            const Text('This message is unavailable')
+          else ...[
+            DayDivider(
+              label: formatDayHeading(head.createdAt),
+              dayTimestamp: head.createdAt,
+              stickyDayTimestamp: stickyDayTimestamp,
+              scrollVisible: dateScrollActivity,
+            ),
+            _ThreadMessage(
+              message: head,
+              startsDay: true,
+              channelNames: channelNames,
+              channelId: channelId,
+              currentPubkey: currentPubkey,
+              showAuthor: true,
+              isHighlighted: head.id == highlightedMessageId,
+              allMessages: liveMessages.any((message) => message.id == head.id)
+                  ? liveMessages
+                  : null,
+              isMember: isMember,
+              isArchived: isArchived,
+              isThreadHead: true,
+              composerFocusNode: composerFocusNode,
+              restoreComposerFocus: restoreComposerFocus,
+            ),
+          ],
           Padding(
             padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
             child: Row(
@@ -138,6 +179,12 @@ class _ThreadMessageList extends HookWidget {
               ],
             ),
           ),
+          if (replies.isEmpty && inlineTyping.isNotEmpty)
+            InlineAgentTyping(
+              channelId: channelId,
+              entries: inlineTyping,
+              knownAgents: knownAgents,
+            ),
         ],
       ),
     );
@@ -145,6 +192,11 @@ class _ThreadMessageList extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
+    final liveMessages = savedOnlyIds.isEmpty
+        ? allMessages
+        : allMessages
+              .where((message) => !savedOnlyIds.contains(message.id))
+              .toList();
     final headLink = useMemoized(LayerLink.new);
     final loadingHeadLink = useMemoized(LayerLink.new);
     final headScrollPosition = useRef<ScrollPosition?>(null);
@@ -172,7 +224,7 @@ class _ThreadMessageList extends HookWidget {
       }
     });
 
-    return LaidOutViewportReporter(
+    final content = LaidOutViewportReporter(
       viewport: viewport,
       child: KeyboardDismissOnDrag(
         onUserScrollStart: onUserScrollStart,
@@ -238,10 +290,12 @@ class _ThreadMessageList extends HookWidget {
                             ? replies[chronologicalIndex - 1]
                             : null;
                         final previousMessage = previousReply ?? head;
-                        final showDayDivider = !isSameDay(
-                          previousMessage.createdAt,
-                          reply.createdAt,
-                        );
+                        final showDayDivider =
+                            previousMessage == null ||
+                            !isSameDay(
+                              previousMessage.createdAt,
+                              reply.createdAt,
+                            );
                         final showAuthor =
                             reply.hasAttachments ||
                             previousReply?.hasAttachments == true ||
@@ -265,7 +319,13 @@ class _ThreadMessageList extends HookWidget {
                             nextReply.createdAt - reply.createdAt > 300;
 
                         // Check if this reply itself has children (nested thread).
-                        final nestedChildren = childrenByParent[reply.id];
+                        final nestedChildren = savedOnlyIds.contains(reply.id)
+                            ? null
+                            : childrenByParent[reply.id]
+                                  ?.where(
+                                    (child) => !savedOnlyIds.contains(child.id),
+                                  )
+                                  .toList();
                         final nestedSummary =
                             nestedChildren != null && nestedChildren.isNotEmpty
                             ? _buildNestedSummary(reply.id, nestedChildren)
@@ -275,7 +335,7 @@ class _ThreadMessageList extends HookWidget {
                           LocalMessageSendTransition(
                             messageId: reply.id,
                             channelId: channelId,
-                            threadHeadId: head.id,
+                            threadHeadId: headId,
                             key: ValueKey('thread-message-send-${reply.id}'),
                             animate: isRecentLocalMessageSendAnimation(
                               localSendAnimations,
@@ -298,6 +358,7 @@ class _ThreadMessageList extends HookWidget {
                                       label: formatDayHeading(reply.createdAt),
                                       dayTimestamp: reply.createdAt,
                                       stickyDayTimestamp: stickyDayTimestamp,
+                                      scrollVisible: dateScrollActivity,
                                     ),
                                   _ThreadMessage(
                                     message: reply,
@@ -315,7 +376,9 @@ class _ThreadMessageList extends HookWidget {
                                     showAvatar: showAvatar,
                                     isHighlighted:
                                         reply.id == highlightedMessageId,
-                                    allMessages: allMessages,
+                                    allMessages: savedOnlyIds.contains(reply.id)
+                                        ? null
+                                        : liveMessages,
                                     isMember: isMember,
                                     isArchived: isArchived,
                                     composerFocusNode: composerFocusNode,
@@ -325,11 +388,18 @@ class _ThreadMessageList extends HookWidget {
                                     _NestedThreadSummaryRow(
                                       summary: nestedSummary,
                                       replyMessage: reply,
-                                      allMessages: allMessages,
+                                      allMessages: liveMessages,
                                       channelId: channelId,
                                       currentPubkey: currentPubkey,
                                       isMember: isMember,
                                       isArchived: isArchived,
+                                    ),
+                                  if (nextReply == null &&
+                                      inlineTyping.isNotEmpty)
+                                    InlineAgentTyping(
+                                      channelId: channelId,
+                                      entries: inlineTyping,
+                                      knownAgents: knownAgents,
                                     ),
                                 ],
                               ),
@@ -384,7 +454,7 @@ class _ThreadMessageList extends HookWidget {
                           physics: visible
                               ? const NeverScrollableScrollPhysics()
                               : null,
-                          child: _buildHead(context),
+                          child: _buildHead(context, liveMessages),
                         ),
                       ),
                     ),
@@ -395,6 +465,10 @@ class _ThreadMessageList extends HookWidget {
           ),
         ),
       ),
+    );
+    return NotificationListener<ScrollNotification>(
+      onNotification: dateScrollActivity.onNotification,
+      child: content,
     );
   }
 }

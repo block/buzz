@@ -16,6 +16,12 @@ class MessageAuthorMeta extends StatelessWidget {
   /// Whether metadata includes the timestamp alongside the author.
   final bool showTimestamp;
 
+  /// Whether the name and username are visible.
+  final bool showIdentity;
+
+  /// Space before the timestamp when the author is visible.
+  final double timestampGap;
+
   /// Color applied to [displayName].
   final Color nameColor;
 
@@ -49,6 +55,9 @@ class MessageAuthorMeta extends StatelessWidget {
   /// Positions the metadata within the available message width.
   final MainAxisAlignment alignment;
 
+  /// Whether the row fills the available width or wraps its metadata.
+  final MainAxisSize mainAxisSize;
+
   /// Creates an inline author row with optional username and tap handling.
   const MessageAuthorMeta({
     super.key,
@@ -58,8 +67,11 @@ class MessageAuthorMeta extends StatelessWidget {
     required this.metadataColor,
     this.username,
     this.alignment = MainAxisAlignment.start,
+    this.mainAxisSize = MainAxisSize.max,
     this.reversed = false,
     this.showTimestamp = true,
+    this.showIdentity = true,
+    this.timestampGap = Grid.xxs,
     this.onAuthorTap,
     this.displayNameKey,
     this.usernameKey,
@@ -100,8 +112,8 @@ class MessageAuthorMeta extends StatelessWidget {
             : double.infinity;
 
         final children = <Widget>[
-          Flexible(child: authorName),
-          if (showUsername) ...[
+          if (showIdentity) Flexible(child: authorName),
+          if (showIdentity && showUsername) ...[
             const SizedBox(width: Grid.half),
             ConstrainedBox(
               constraints: BoxConstraints(maxWidth: metadataMaxWidth),
@@ -115,7 +127,7 @@ class MessageAuthorMeta extends StatelessWidget {
             ),
           ],
           if (showTimestamp) ...[
-            const SizedBox(width: Grid.xxs),
+            if (showIdentity) SizedBox(width: timestampGap),
             ConstrainedBox(
               constraints: BoxConstraints(maxWidth: metadataMaxWidth),
               child: Text(
@@ -128,10 +140,14 @@ class MessageAuthorMeta extends StatelessWidget {
             ),
           ],
         ];
-        return Row(
-          mainAxisAlignment: alignment,
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: reversed ? children.reversed.toList() : children,
+        return Semantics(
+          label: showIdentity ? null : displayName,
+          child: Row(
+            mainAxisAlignment: alignment,
+            mainAxisSize: mainAxisSize,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: reversed ? children.reversed.toList() : children,
+          ),
         );
       },
     );

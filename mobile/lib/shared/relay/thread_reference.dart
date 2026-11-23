@@ -3,7 +3,17 @@
 /// The last valid 64-character ASCII-hex marker wins. IDs are lowercased for
 /// client lookup. Root-only events remain top-level; a reply without a valid
 /// root uses its parent as root.
+///
+/// Timeline and thread-summary code reads this many times per event, so the
+/// result is kept per tag list. Event tags are never changed after an event is
+/// built.
 ({String? parentId, String? rootId}) parseThreadReference(
+  List<List<String>> tags,
+) => _threadReferences[tags] ??= _parseThreadReference(tags);
+
+final _threadReferences = Expando<({String? parentId, String? rootId})>();
+
+({String? parentId, String? rootId}) _parseThreadReference(
   List<List<String>> tags,
 ) {
   String? parentId;

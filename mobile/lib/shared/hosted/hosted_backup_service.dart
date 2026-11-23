@@ -9,7 +9,6 @@ import '../storage/secure_storage.dart';
 
 import 'account_identity_store.dart';
 import 'builderlab_account.dart';
-import 'hosted_environment.dart';
 import 'hpke_backup.dart';
 
 enum HostedBackupFailure {
@@ -32,15 +31,25 @@ class HostedBackupService {
        _storage = storage ?? accountSecureStorage;
 
   final BuilderlabAccountClient account;
-  final AccountIdentityStore identity;
+  final BackupIdentity identity;
   final HpkeBackup _hpke;
   final FlutterSecureStorage _storage;
-  static final _queue = SerialQueue();
-  static String pendingKey(String subject, String pubkey) =>
-      'buzz_backup_pending_v2_${sha256.convert(utf8.encode(jsonEncode([HostedEnvironment.origin.origin, subject, pubkey])))}';
+
+  /// One queue per account origin: a stalled organization backup must not
+  /// hold up the hosted backup onboarding waits on.
+  static final _queues = <String, SerialQueue>{};
+
+  /// Scoped to the account's own origin, so hosted and organization backups
+  /// of one key never share a pending envelope.
+  static String pendingKey(String backend, String subject, String pubkey) =>
+      'buzz_backup_pending_v2_${sha256.convert(utf8.encode(jsonEncode([backend, subject, pubkey])))}';
 
   Future<void> backup({bool Function()? isCurrent}) {
-    final result = _queue.run(() => _backup(isCurrent: isCurrent));
+    final queue = _queues.putIfAbsent(
+      account.accountOrigin.origin,
+      SerialQueue.new,
+    );
+    final result = queue.run(() => _backup(isCurrent: isCurrent));
     return result;
   }
 
@@ -58,8 +67,8 @@ class HostedBackupService {
     if (subject == null || local == null) {
       throw HostedBackupFailure.identityMismatch;
     }
-    final backend = HostedEnvironment.origin.origin;
-    final key = pendingKey(subject, local.pubkey);
+    final backend = account.accountOrigin.origin;
+    final key = pendingKey(backend, subject, local.pubkey);
     if (local.hasBackupFor(backend: backend, subject: subject)) return;
     void checkAccount() {
       if (account.account?.subject != subject) {
@@ -93,7 +102,11 @@ class HostedBackupService {
     if (envelope == null) {
       final Map<String, dynamic> enrollment;
       try {
-        enrollment = await account.post('/v1/buzz/nsec-backups/enrollment', {});
+        enrollment = await account.post(
+          '/v1/buzz/nsec-backups/enrollment',
+          {},
+          expectedSubject: subject,
+        );
       } on AccountFailure catch (failure) {
         if (failure == AccountFailure.rejected) {
           throw HostedBackupFailure.unavailable;
@@ -128,7 +141,11 @@ class HostedBackupService {
     final pending = envelope!;
     final Map<String, dynamic> result;
     try {
-      result = await account.post('/v1/buzz/nsec-backups', pending);
+      result = await account.post(
+        '/v1/buzz/nsec-backups',
+        pending,
+        expectedSubject: subject,
+      );
     } on AccountFailure catch (failure) {
       if (failure != AccountFailure.rejected) rethrow;
       checkAccount();

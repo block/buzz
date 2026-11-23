@@ -18,6 +18,7 @@ pub mod deny_map;
 pub mod discovery;
 pub mod jwks;
 pub mod provision;
+pub mod public_profile;
 pub mod startup;
 pub mod verifier;
 

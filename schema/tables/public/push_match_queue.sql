@@ -3,7 +3,7 @@
 -- authoritative. Legacy writers may still enqueue in their event transaction.
 -- Processing is idempotent through the outbox endpoint/event unique key.
 CREATE TABLE push_match_queue (
-    community_id UUID NOT NULL REFERENCES communities(id),
+    community_id UUID NOT NULL,
     event_id BYTEA NOT NULL CHECK (length(event_id) = 32),
     state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','matching')),
     attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),

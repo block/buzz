@@ -1,16 +1,22 @@
+import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/agents/agents_surface.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/deeplink/pending_deep_link_provider.dart';
 import '../../shared/relay/relay.dart';
+import '../../shared/share/pending_share.dart';
+import '../../shared/drafts/compose_drafts_provider.dart';
 import '../invites/invite_join_provider.dart';
 import '../invites/invite_join_sheet.dart';
 import 'channel.dart';
 import 'channel_detail_page.dart';
 import 'channels_provider.dart';
+import 'me/me_page.dart';
+import 'open_channel_routes.dart';
 
 /// Routes pending `buzz://message` deep links into the channel view.
 ///
@@ -45,6 +51,10 @@ class DeepLinkDispatcher extends ConsumerStatefulWidget {
 
 class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
   bool _preparingInvite = false;
+  bool _preparingShare = false;
+
+  /// Manifests of share links, read once the link reaches dispatch.
+  final Map<ShareDeepLink, PendingShare> _shares = {};
   bool _handlingOnboarding = false;
   bool _resolvingLink = false;
   bool _lookupInterrupted = false;
@@ -88,6 +98,12 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
 
   void _maybeDispatch(BuzzDeepLink? link) {
     if (link == null || _preparingInvite || _handlingOnboarding) return;
+    if (link is AgentCreationDeepLink) {
+      // Held until signed in and the community is hydrated.
+      if (!widget.dispatchMessageLinks) return;
+      unawaited(_dispatchAgentCreation(link));
+      return;
+    }
     if (widget.onboardingHandler != null &&
         (link is InviteDeepLink ||
             link is NostrBindDeepLink ||
@@ -97,6 +113,10 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     }
     if (link is InviteDeepLink) {
       _maybeDispatchInvite(link);
+      return;
+    }
+    if (link is ShareDeepLink) {
+      if (widget.dispatchMessageLinks) unawaited(_dispatchShare(link));
       return;
     }
     if ((link is! MessageDeepLink && link is! ChannelDeepLink) ||
@@ -109,6 +129,41 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     }
 
     _dispatchNavigableLink(link);
+  }
+
+  Future<void> _dispatchAgentCreation(AgentCreationDeepLink link) async {
+    _handlingOnboarding = true;
+    try {
+      final handler = ref.read(agentCreationSurfaceProvider);
+      if (handler == null) {
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+          const SnackBar(
+            content: Text('Agent creation is unavailable in this build.'),
+          ),
+          kind: ToastKind.error,
+        );
+      } else {
+        await handler(context, link);
+      }
+    } catch (error) {
+      debugPrint('deep-link: agent draft failed: $error');
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+          const SnackBar(
+            content: Text('Couldn’t open this agent card. Reopen the link.'),
+          ),
+          kind: ToastKind.error,
+        );
+      }
+    } finally {
+      if (mounted) {
+        if (ref.read(pendingDeepLinkProvider) == link) {
+          ref.read(pendingDeepLinkProvider.notifier).consume();
+        }
+        _handlingOnboarding = false;
+        _maybeDispatch(ref.read(pendingDeepLinkProvider));
+      }
+    }
   }
 
   Future<void> _dispatchOnboarding(BuzzDeepLink link) async {
@@ -135,12 +190,11 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
           ref.read(pendingDeepLinkProvider.notifier).consume();
           consumed = true;
         }
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
           const SnackBar(
-            content: Text(
-              'Could not open setup. Re-open the link to try again.',
-            ),
+            content: Text('Couldn’t open setup. Reopen the link.'),
           ),
+          kind: ToastKind.error,
         );
       }
     } finally {
@@ -154,7 +208,7 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
   Future<void> _dispatchNotificationLink(MessageDeepLink link) async {
     final preparation = await ref
         .read(pendingDeepLinkProvider.notifier)
-        .prepareCommunity(link);
+        .prepareCommunity(link.communityId);
     if (!mounted || ref.read(pendingDeepLinkProvider) != link) return;
     switch (preparation) {
       case DeepLinkCommunityPreparation.ready:
@@ -165,18 +219,81 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
         return;
       case DeepLinkCommunityPreparation.unavailable:
         ref.read(pendingDeepLinkProvider.notifier).consume();
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(
-            content: Text('Notification community is no longer available'),
-          ),
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+          const SnackBar(content: Text('Community unavailable')),
+          kind: ToastKind.error,
         );
       case DeepLinkCommunityPreparation.failed:
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(
-            content: Text('Could not open the notification community'),
-          ),
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+          const SnackBar(content: Text('Couldn’t open community')),
+          kind: ToastKind.error,
         );
     }
+  }
+
+  Future<void> _dispatchShare(ShareDeepLink link) async {
+    if (_preparingShare || _resolvingLink) return;
+    _preparingShare = true;
+    DeepLinkCommunityPreparation? preparation;
+    try {
+      final share = _shares[link] ??= await loadPendingShare(link.shareId);
+      final target = share.target;
+      if (target != null) {
+        preparation = await ref
+            .read(pendingDeepLinkProvider.notifier)
+            .prepareCommunity(target.communityId);
+      }
+    } catch (error) {
+      debugPrint('share: ${link.shareId} unavailable: $error');
+    } finally {
+      _preparingShare = false;
+    }
+    if (!mounted || ref.read(pendingDeepLinkProvider) != link) return;
+    final share = _shares[link];
+    if (share == null) {
+      ref.read(pendingDeepLinkProvider.notifier).consume();
+      _rejectShare(link);
+      _maybeDispatch(ref.read(pendingDeepLinkProvider));
+      return;
+    }
+    if (share.target == null) {
+      ref.read(pendingDeepLinkProvider.notifier).consume();
+      _shares.remove(link);
+      ref
+          .read(composerShareInboxProvider.notifier)
+          .deliver(composeDraftKey(newSoloComposerKey), share);
+      // Completes only when the chat closes; later links needn't wait.
+      unawaited(openNewSoloChat(context, ref));
+      _maybeDispatch(ref.read(pendingDeepLinkProvider));
+      return;
+    }
+    switch (preparation) {
+      case DeepLinkCommunityPreparation.ready:
+        _dispatchNavigableLink(link);
+      case DeepLinkCommunityPreparation.switched:
+        // The community-scoped subtree remounts and dispatches the link again.
+        return;
+      case DeepLinkCommunityPreparation.unavailable:
+        ref.read(pendingDeepLinkProvider.notifier).consume();
+        _rejectShare(link);
+        _maybeDispatch(ref.read(pendingDeepLinkProvider));
+      case DeepLinkCommunityPreparation.failed || null:
+        ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+          const SnackBar(content: Text('Couldn’t open community')),
+          kind: ToastKind.error,
+        );
+    }
+  }
+
+  /// Reports a share whose items or conversation can't be opened, and drops
+  /// its copied items.
+  void _rejectShare(ShareDeepLink link) {
+    _shares.remove(link);
+    unawaited(deletePendingShare(link.shareId));
+    ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+      const SnackBar(content: Text('That conversation isn’t available')),
+      kind: ToastKind.error,
+    );
   }
 
   void _dispatchNavigableLink(BuzzDeepLink link) {
@@ -184,6 +301,7 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     final channelId = switch (link) {
       MessageDeepLink(:final channelId) => channelId,
       ChannelDeepLink(:final channelId) => channelId,
+      ShareDeepLink() => _shares[link]!.target!.channelId,
       _ => throw StateError('unsupported navigable deep link: $link'),
     };
     final channels = ref.read(channelsProvider).asData?.value;
@@ -258,23 +376,52 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
       return;
     }
     ref.read(pendingDeepLinkProvider.notifier).consume();
+    if (link is ShareDeepLink) {
+      debugPrint('share: channel $channelId unavailable: $failure');
+      _rejectShare(link);
+      return;
+    }
     if (failure != null) {
       debugPrint('deep-link: channel $channelId lookup failed: $failure');
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
         const SnackBar(content: Text('Could not open the channel')),
+        kind: ToastKind.error,
       );
     } else {
       debugPrint(
         'deep-link: channel $channelId not found in workspace; dropping link',
       );
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        const SnackBar(content: Text('Channel not found in this workspace')),
+      ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+        const SnackBar(content: Text('Channel not found here')),
+        kind: ToastKind.error,
       );
     }
   }
 
   void _pushChannel(Channel channel, BuzzDeepLink link) {
-    Navigator.of(context).push(
+    final navigator = Navigator.of(context);
+    if (link is ShareDeepLink) {
+      ref
+          .read(composerShareInboxProvider.notifier)
+          .deliver(composeDraftKey(channel.id), _shares.remove(link)!);
+      // A page already open for the conversation keeps the draft and its
+      // attachments with one composer. Nothing covering it is closed, since
+      // that could discard another draft; its composer takes the share once
+      // the person goes back to it.
+      final open = ref.read(openChannelRoutesProvider).latest(channel.id);
+      if (open != null) {
+        if (!isOpenChannelShown(open, navigator)) {
+          ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+            const SnackBar(
+              content: Text('Go back to that conversation to finish sharing'),
+            ),
+            kind: ToastKind.generic,
+          );
+        }
+        return;
+      }
+    }
+    navigator.push(
       MaterialPageRoute<void>(
         builder: (_) =>
             widget.destinationBuilder?.call(channel, link) ??
@@ -327,19 +474,19 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
             }
           }
         } else if (status == InviteJoinStatus.switchedExisting) {
-          messenger?.showSnackBar(
-            const SnackBar(content: Text('Switched to this community')),
+          messenger?.showFeedbackSnackBar(
+            const SnackBar(content: Text('Community switched')),
+            kind: ToastKind.generic,
           );
         }
       } catch (error) {
         debugPrint('deep-link: failed to prepare invite: $error');
         if (navigatorContext.mounted) {
-          messenger?.showSnackBar(
+          messenger?.showFeedbackSnackBar(
             const SnackBar(
-              content: Text(
-                'Could not open this invite. Re-open the invite link to try again.',
-              ),
+              content: Text('Couldn’t open invite. Reopen the link.'),
             ),
+            kind: ToastKind.error,
           );
         }
       } finally {

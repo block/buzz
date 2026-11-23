@@ -186,10 +186,7 @@ void main() {
       expect(pending.consumeCalls, 1);
       if (visibility == 'private') {
         expect(find.byType(_CapturedDestination), findsNothing);
-        expect(
-          find.text('Channel not found in this workspace'),
-          findsOneWidget,
-        );
+        expect(find.text('Channel not found here'), findsOneWidget);
         return;
       }
       final destination = tester.widget<_CapturedDestination>(
@@ -248,7 +245,7 @@ void main() {
 
     expect(find.byType(_CapturedDestination), findsNothing);
     expect(pending.consumeCalls, 0);
-    expect(find.text('Channel not found in this workspace'), findsNothing);
+    expect(find.text('Channel not found here'), findsNothing);
 
     // Setup closes: the parked link opens without a new link or channel event.
     dispatch.value = true;
@@ -700,12 +697,7 @@ void main() {
 
     expect(container.read(pendingDeepLinkProvider), same(link));
     expect(container.read(inviteJoinProvider).status, InviteJoinStatus.idle);
-    expect(
-      find.text(
-        'Could not open this invite. Re-open the invite link to try again.',
-      ),
-      findsOneWidget,
-    );
+    expect(find.text('Couldn’t open invite. Reopen the link.'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -827,7 +819,7 @@ void main() {
       );
       await tester.pump();
       await tester.pump();
-      await recovery.started.future;
+      expect(recovery.started.isCompleted, isTrue);
 
       expect(find.text('Finish setting up'), findsOneWidget);
       expect(find.text('Finishing setup…'), findsOneWidget);
@@ -879,6 +871,9 @@ void main() {
           ),
         ),
         inviteJoinRecoveryProvider.overrideWithValue((_) => recovery),
+        channelsProvider.overrideWith(
+          () => _FakeChannelsNotifier(Future.value(const [])),
+        ),
       ],
     );
     addTearDown(container.dispose);
@@ -893,7 +888,7 @@ void main() {
     );
     await tester.pump();
     await tester.pump();
-    await recovery.started.future;
+    expect(recovery.started.isCompleted, isTrue);
 
     recovery.completeError(Exception('relay did not respond'));
     await tester.pumpAndSettle();

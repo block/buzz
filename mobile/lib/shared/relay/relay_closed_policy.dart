@@ -45,6 +45,90 @@ bool isRelayDeadlineError(Object error) {
       message.startsWith(_queryTimedOutPrefix);
 }
 
+/// Reported when the relay says a request the app sent is invalid. It never
+/// reaches callers, and it carries no relay text: the reason is free text.
+/// Not const: Sentry drops a repeat of the last error object.
+class RelayInvalidRequest implements Exception {
+  RelayInvalidRequest();
+
+  @override
+  String toString() => 'RelayInvalidRequest';
+}
+
+/// How the relay begins a refusal for a timestamp outside its clock window.
+/// It has one wording per kind of event: ordinary events, canvas events,
+/// relay-admin, moderation and identity archive commands (followed by the
+/// timing details), leave requests (likewise) and observer frames. Matched from
+/// the start of the reason, so a reason about something else that mentions a
+/// timestamp, or echoes a value that does, is still reported.
+const _clockWindowRefusals = [
+  'invalid: event timestamp too far from server time',
+  'invalid: canvas event timestamp too far in the future',
+  'invalid: event timestamp out of range',
+  'invalid: leave request timestamp out of range',
+  'invalid: observer frame timestamp outside',
+];
+
+/// Whether [message], a relay `OK` or `CLOSED` reason, says the app sent
+/// something invalid. Refusals the app handles as expected outcomes, an
+/// archived channel, an Unarchive of a channel that is no longer archived, an
+/// open channel name that is taken, an agent whose policy refuses the
+/// addition, a guest adding people, a sole owner leaving or an event whose
+/// timestamp is outside the relay's window, are not. The timestamp refusal is
+/// left out for every event, not only read-state updates: a device clock that
+/// is off would otherwise report every publish, though this also hides a
+/// signed event retried after the window has passed.
+bool isInvalidRequestRejection(String message) {
+  final normalized = message.trim().toLowerCase();
+  return normalized.startsWith('invalid:') &&
+      !normalized.startsWith('invalid: channel is archived') &&
+      !normalized.startsWith('invalid: channel is not archived') &&
+      !normalized.startsWith('invalid: an open channel named') &&
+      !normalized.startsWith('invalid: policy:') &&
+      !normalized.startsWith(
+        'invalid: only members can add people in this channel',
+      ) &&
+      !normalized.startsWith('invalid: cannot remove the last owner') &&
+      !_clockWindowRefusals.any(normalized.startsWith);
+}
+
+/// Explicit access refusal; cached private history must not mask this error.
+bool isRelayAccessDenied(Object error) {
+  if (error is RelayException && error.statusCode == 403) return true;
+  final message = error.toString().toLowerCase().replaceFirst(
+    RegExp(r'^exception:\s*'),
+    '',
+  );
+  return message.startsWith('restricted:') || message.startsWith('blocked:');
+}
+
+/// A channel-level refusal, distinct from a session authorization failure.
+bool isRelayChannelAccessDenied(Object error) {
+  var reason = error.toString();
+  if (error is RelayException) {
+    if (error.statusCode != 403) return false;
+    reason = error.body;
+    try {
+      final decoded = jsonDecode(reason);
+      if (decoded is Map<String, dynamic> && decoded['error'] is String) {
+        reason = decoded['error'] as String;
+      }
+    } on FormatException {
+      // Relay admission can return plain text.
+    }
+  }
+  final message = reason.trim().toLowerCase().replaceFirst(
+    RegExp(r'^exception:\s*'),
+    '',
+  );
+  return message == 'restricted: not a channel member' ||
+      isRelayChannelSubscriptionRevoked(message);
+}
+
+/// The relay ends live delivery on archive as well as on membership loss.
+bool isRelayChannelSubscriptionRevoked(String message) =>
+    message.trim().toLowerCase() == 'restricted: channel access revoked';
+
 /// Recovery policy for a relay `CLOSED` subscription message.
 enum RelayClosedClass {
   /// A transient failure that may recover when the same REQ is retried.
@@ -78,6 +162,30 @@ RelayClosedClass classifyRelayClosed(String message) {
     return RelayClosedClass.terminal;
   }
   return RelayClosedClass.retryable;
+}
+
+final _relayErrorPrefixPattern = RegExp(
+  r'^(?:exception:\s*)?(?:(?:invalid|blocked|restricted|duplicate|pow|unsupported|error|rate-limited|auth-required):\s*)?',
+  caseSensitive: false,
+);
+
+/// User-facing text for a failed relay publish or request.
+///
+/// Drops the Dart `Exception: ` wrapper and a leading NIP-01 machine prefix
+/// (`invalid: `, `blocked: `, `error: `, ...) so a relay refusal such as
+/// `invalid: an open channel named "Launch" already exists` reads as
+/// `An open channel named "Launch" already exists`.
+///
+/// Use this for a relay publish or request whose refusal is the message.
+/// To keep any error's text whole, minus only a plain [Exception]'s
+/// `Exception: `, use `relayErrorText` instead.
+String relayErrorMessage(Object error) {
+  final text = error.toString().trim().replaceFirst(
+    _relayErrorPrefixPattern,
+    '',
+  );
+  if (text.isEmpty) return error.toString().trim();
+  return text[0].toUpperCase() + text.substring(1);
 }
 
 final _rateLimitRetryPattern = RegExp(r'retry in (\d+)s', caseSensitive: false);

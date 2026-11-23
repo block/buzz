@@ -1,3 +1,4 @@
+import Flutter
 import UIKit
 import ImageIO
 import CoreText
@@ -202,7 +203,7 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     button.accessibilityLabel = reaction.map { "\($0["label"] as? String ?? emoji ?? "") \(title)" } ?? title
     if selected { button.accessibilityTraits.insert(.selected) }
     if let reaction {
-      let glyph = NativeMessageGlyph(data: reaction, size: 22)
+      let glyph = NativeMessageGlyph(data: reaction, size: 22, isReaction: true)
       glyph.isUserInteractionEnabled = false
       glyph.translatesAutoresizingMaskIntoConstraints = false
       button.addSubview(glyph)
@@ -292,6 +293,18 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     table.reloadData()
   }
 
+  /// A failed toggle leaves the sheet as it was, so say why above it.
+  func showNotice(_ message: String) {
+    guard presentedViewController == nil else {
+      UIAccessibility.post(notification: .announcement, argument: message)
+      return
+    }
+    let alert = UIAlertController(title: nil, message: message, preferredStyle: .alert)
+    alert.view.tintColor = .label
+    alert.addAction(UIAlertAction(title: "OK", style: .default))
+    present(alert, animated: !UIAccessibility.isReduceMotionEnabled)
+  }
+
   func updateProfiles(_ profiles: [String: [String: Any]]) {
     self.profiles.merge(profiles) { _, new in new }
     guard isViewLoaded else { return }
@@ -326,7 +339,7 @@ final class NativeReactionDetailsViewController: UIViewController, UITableViewDa
     label.font = .preferredFont(forTextStyle: .body)
     label.adjustsFontForContentSizeCategory = true
     label.numberOfLines = 0
-    let emoji = NativeMessageGlyph(data: reaction, size: 26)
+    let emoji = NativeMessageGlyph(data: reaction, size: 26, isReaction: true)
     let row = UIStackView(arrangedSubviews: [avatar, label, emoji])
     row.alignment = .center
     row.spacing = 12
@@ -357,14 +370,22 @@ private final class NativeReactionCloseButton: UIButton {
 
 /// Short-lived image loader. Auth is supplied for the specific URL by Buzz's
 /// existing media auth service; redirects are refused to avoid forwarding it.
+/// Encoded `bytes` Flutter already downloaded are shown without a fetch. A
+/// custom emoji ([isReaction] with a `url`, or flagged `isShortcode`) never
+/// shows its `:shortcode:` text, which is illegible at this size: it stays blank
+/// while loading and shows sparkles, like the native emoji picker, if there is
+/// no image or it cannot be loaded. An avatar keeps its initial behind the
+/// image.
 final class NativeMessageGlyph: UIView {
   private var cancelLoad: (() -> Void)?
   private let label = UILabel()
   private let image = UIImageView()
 
-  init(data: [String: Any], size: CGFloat) {
+  init(data: [String: Any], size: CGFloat, isReaction: Bool = false) {
     super.init(frame: .zero)
-    label.text = data["emoji"] as? String
+    let raw = data["url"] as? String
+    let customEmoji = isReaction && (raw != nil || data["isShortcode"] as? Bool == true)
+    label.text = customEmoji ? nil : data["emoji"] as? String
     label.textAlignment = .center
     label.font = .systemFont(ofSize: size)
     label.adjustsFontSizeToFitWidth = true
@@ -380,16 +401,37 @@ final class NativeMessageGlyph: UIView {
         child.bottomAnchor.constraint(equalTo: bottomAnchor),
       ])
     }
-    guard let raw = data["url"] as? String, let url = URL(string: raw),
-      ["https", "http"].contains(url.scheme?.lowercased() ?? "") else { return }
+    let fallback = { [weak self] in
+      guard let self, customEmoji else { return }
+      image.image = NativeTabler.image("sparkles", size: size)
+      image.tintColor = .secondaryLabel
+      image.contentMode = .center
+    }
+    guard let raw else { fallback(); return }
+    if let bytes = data["bytes"] as? FlutterStandardTypedData {
+      DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        let decoded = NativeMessageImageLoader.decode(bytes.data)
+        DispatchQueue.main.async {
+          guard let self else { return }
+          if let decoded { self.show(decoded) } else { fallback() }
+        }
+      }
+      return
+    }
+    guard let url = URL(string: raw),
+      ["https", "http"].contains(url.scheme?.lowercased() ?? "") else { fallback(); return }
     var request = URLRequest(url: url)
     request.allHTTPHeaderFields = data["headers"] as? [String: String]
     request.timeoutInterval = 10
     cancelLoad = NativeMessageImageLoader.shared.load(request) { [weak self] loaded in
-      guard let self, let loaded else { return }
-      image.image = UIAccessibility.isReduceMotionEnabled ? loaded.images?.first ?? loaded : loaded
-      label.isHidden = true
+      guard let self else { return }
+      if let loaded { show(loaded) } else { fallback() }
     }
+  }
+
+  private func show(_ loaded: UIImage) {
+    image.image = UIAccessibility.isReduceMotionEnabled ? loaded.images?.first ?? loaded : loaded
+    label.isHidden = true
   }
 
   @available(*, unavailable)
@@ -470,7 +512,9 @@ final class NativeMessageImageLoader: NSObject, URLSessionDataDelegate {
     queue.removeAll { $0 === download }
     if let task = download.task { active.removeValue(forKey: task.taskIdentifier) }
     if let image {
-      let frames = image.images ?? [image]
+      // A frame held for several time units repeats; count its pixels once.
+      var seen = Set<ObjectIdentifier>()
+      let frames = (image.images ?? [image]).filter { seen.insert(ObjectIdentifier($0)).inserted }
       let cost = frames.reduce(0) { $0 + ($1.cgImage.map { $0.bytesPerRow * $0.height } ?? 0) }
       cache.setObject(image, forKey: download.request as NSURLRequest, cost: cost)
     }
@@ -527,26 +571,56 @@ final class NativeMessageImageLoader: NSObject, URLSessionDataDelegate {
     completionHandler(nil) // Never forward supplied auth to another URL.
   }
 
-  private static func decode(_ bytes: Data) -> UIImage? {
+  /// Decodes up to 60 frames, each holding the delays of the frames it stands
+  /// for. `isCancelled` is checked before each frame; a cancelled decode
+  /// returns nil.
+  static func decode(
+    _ bytes: Data, maximumPixelSize: Int = 120, isCancelled: () -> Bool = { false }
+  ) -> UIImage? {
     guard let source = CGImageSourceCreateWithData(bytes as CFData, nil) else { return nil }
     let count = CGImageSourceGetCount(source)
     let step = max(1, Int(ceil(Double(count) / 60)))
     var frames: [UIImage] = []
-    var duration: TimeInterval = 0
-    for index in stride(from: 0, to: count, by: step) {
-      guard let image = CGImageSourceCreateThumbnailAtIndex(source, index, [
-        kCGImageSourceCreateThumbnailFromImageAlways: true,
-        kCGImageSourceThumbnailMaxPixelSize: 120,
-        kCGImageSourceCreateThumbnailWithTransform: true,
-      ] as CFDictionary) else { continue }
-      frames.append(UIImage(cgImage: image))
-      let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [String: Any]
-      let animation = (properties?[kCGImagePropertyGIFDictionary as String]
-        ?? properties?[kCGImagePropertyPNGDictionary as String] ?? properties?["{WebP}"]) as? [String: Any]
-      let delay = (animation?["UnclampedDelayTime"] ?? animation?["DelayTime"]) as? Double ?? 0.1
-      duration += max(0.02, delay) * Double(step)
+    var delays: [TimeInterval] = []
+    for index in 0..<count {
+      if index % step == 0 {
+        if isCancelled() { return nil }
+        if let image = CGImageSourceCreateThumbnailAtIndex(source, index, [
+          kCGImageSourceCreateThumbnailFromImageAlways: true,
+          kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize,
+          kCGImageSourceCreateThumbnailWithTransform: true,
+        ] as CFDictionary) {
+          frames.append(UIImage(cgImage: image))
+          delays.append(0)
+        }
+      }
+      if !delays.isEmpty { delays[delays.count - 1] += delay(source, at: index) }
     }
     guard let first = frames.first else { return nil }
-    return frames.count > 1 ? UIImage.animatedImage(with: frames, duration: duration) : first
+    guard frames.count > 1 else { return first }
+    // UIKit shows every frame of an animated image for the same time, so a
+    // frame repeats once per time unit it holds. The unit divides every delay
+    // to the nearest 10 ms, coarsened to keep the sequence within 600 entries.
+    let centiseconds = delays.map { max(1, Int(($0 * 100).rounded())) }
+    let total = centiseconds.reduce(0, +)
+    let unit = max(centiseconds.reduce(0, gcd), Int(ceil(Double(total) / 600)))
+    var sequence: [UIImage] = []
+    for (frame, held) in zip(frames, centiseconds) {
+      sequence += repeatElement(frame, count: max(1, Int((Double(held) / Double(unit)).rounded())))
+    }
+    return UIImage.animatedImage(with: sequence, duration: Double(total) / 100)
   }
+
+  private static func delay(_ source: CGImageSource, at index: Int) -> TimeInterval {
+    let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [String: Any]
+    let animation = (properties?[kCGImagePropertyGIFDictionary as String]
+      ?? properties?[kCGImagePropertyPNGDictionary as String] ?? properties?["{WebP}"]) as? [String: Any]
+    let delay = (animation?["UnclampedDelayTime"] ?? animation?["DelayTime"]) as? Double ?? 0.1
+    // Frames asking for 10 ms or less show for 100 ms, as in browsers and
+    // the Flutter timeline (MediaImageProvider), so the sheet plays an
+    // emoji at the same speed as the chip that opened it.
+    return delay <= 0.01 ? 0.1 : delay
+  }
+
+  private static func gcd(_ a: Int, _ b: Int) -> Int { b == 0 ? a : gcd(b, a % b) }
 }

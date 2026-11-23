@@ -19,6 +19,8 @@ pub enum NipFiUnbind {
     NotBound,
     /// The issuer is the community's last one and was kept.
     LastIssuer,
+    /// The last issuer is required by durable community policy, even with `allow_last`.
+    RequiredIssuer,
 }
 
 /// A community's stored NIP-FI binding, as returned to the operator route.
@@ -94,10 +96,11 @@ impl Db {
     }
 
     /// Remove one issuer from a community, refusing to remove its last one
-    /// unless `allow_last`.
+    /// unless `allow_last` and the community does not require NIP-FI.
     ///
-    /// The bound rows are locked first, so two concurrent unbinds of a
-    /// community's two issuers cannot both succeed and leave it empty. An
+    /// The community row is locked before issuer rows, serializing with policy
+    /// acceptance and binding edits. Two concurrent unbinds of a community's
+    /// two issuers cannot both succeed and leave it empty. An
     /// empty community looks never-provisioned and the next backfill would
     /// rebind it; archive or delete the community to stop it logging in.
     #[datastore_span(name = "unbind_nip_fi_issuer", system = "postgresql")]
@@ -116,6 +119,12 @@ impl Db {
         self.deletion_store()
             .guard_transaction(&mut tx, community)
             .await?;
+        let requires_nip_fi: Option<bool> = sqlx::query_scalar(
+            "SELECT requires_nip_fi FROM communities WHERE id = $1 FOR NO KEY UPDATE",
+        )
+        .bind(community.as_uuid())
+        .fetch_optional(&mut *tx)
+        .await?;
         let bound: Vec<String> = sqlx::query_scalar(
             "SELECT issuer FROM community_nip_fi_issuers WHERE community_id = $1 FOR UPDATE",
         )
@@ -124,6 +133,8 @@ impl Db {
         .await?;
         let outcome = if !bound.iter().any(|bound| bound == issuer) {
             NipFiUnbind::NotBound
+        } else if bound.len() == 1 && requires_nip_fi == Some(true) {
+            NipFiUnbind::RequiredIssuer
         } else if bound.len() == 1 && !allow_last {
             NipFiUnbind::LastIssuer
         } else {
@@ -234,7 +245,8 @@ impl Db {
     /// than aborting the batch. The community rows are then locked, as
     /// [`Db::bind_nip_fi_issuers`] does, so an operator bind that commits after
     /// the caller listed the community wins and the default is not added
-    /// beside it. Returns the number of new rows.
+    /// beside it. Required communities need explicit operator repair and are
+    /// never rebound by this bulk backfill. Returns the number of new rows.
     #[datastore_span(name = "bind_nip_fi_issuers_to_active", system = "postgresql")]
     pub async fn bind_nip_fi_issuers_to_active(
         &self,
@@ -245,6 +257,13 @@ impl Db {
             return Ok(0);
         }
         let ids: Vec<uuid::Uuid> = communities.iter().map(|id| *id.as_uuid()).collect();
+        // Lock in community-id order; `Uuid` and Postgres `uuid` both order bytewise.
+        let mut sorted = communities.to_vec();
+        sorted.sort_unstable();
+        let lock_keys: Vec<String> = sorted
+            .into_iter()
+            .map(crate::deletion::community_deletion_lock_key)
+            .collect();
         let connection = crate::observability::acquire_writer(
             &self.pool,
             crate::observability::WriterOperation::Authorization,
@@ -252,10 +271,10 @@ impl Db {
         .await?;
         let mut tx = Transaction::begin(connection, None).await?;
         sqlx::query(
-            "SELECT pg_advisory_xact_lock_shared(community_deletion_lock_key(id)) \
-             FROM unnest($1::uuid[]) AS id ORDER BY id",
+            "SELECT pg_advisory_xact_lock_shared(hashtextextended(key, 0)) \
+             FROM unnest($1::text[]) WITH ORDINALITY AS k(key, ord) ORDER BY ord",
         )
-        .bind(&ids)
+        .bind(&lock_keys)
         .execute(&mut *tx)
         .await?;
         sqlx::query("SELECT 1 FROM communities WHERE id = ANY($1) ORDER BY id FOR NO KEY UPDATE")
@@ -270,6 +289,7 @@ impl Db {
             WHERE c.id = ANY($1)
               AND c.deletion_state = 'active'
               AND c.deleted_at IS NULL
+              AND NOT c.requires_nip_fi
               AND NOT EXISTS (
                   SELECT 1 FROM community_nip_fi_issuers b WHERE b.community_id = c.id
               )
@@ -600,6 +620,99 @@ mod postgres_tests {
         assert!(!community_exists(&db, &bootstrap).await);
     }
 
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn initial_policy_is_atomic_and_replays_preserve_current_state() {
+        let db = setup_db().await;
+        let keys = nostr::Keys::generate();
+        for required in [false, true] {
+            let host = unique_host("initial-policy");
+            let owner = nostr::Keys::generate().public_key().to_hex();
+            let write = db
+                .create_community_with_owner_and_nip_fi_policy(
+                    &host,
+                    &owner,
+                    &issuers(),
+                    required,
+                    &keys,
+                )
+                .await
+                .unwrap();
+            let CreateCommunityWithOwnerResult::Created(record) = write.outcome else {
+                panic!("not created")
+            };
+            assert!(record.created);
+            assert_eq!(record.requires_nip_fi, required);
+            let before = db.community_auth_policy(record.id).await.unwrap().unwrap();
+            assert_eq!(before.requires_nip_fi, required);
+            assert_eq!(before.policy_generation, i64::from(required));
+            assert_eq!(bound(&db, &host).await, Some(issuers()));
+            let owners = db.list_communities_owned_by(&owner).await.unwrap();
+            assert_eq!(owners.communities[0].id, record.id);
+            // Changed policy and issuer configuration never rewrite a committed row.
+            let changed = ["https://other.example".to_owned()];
+            for bindings in [&[][..], changed.as_slice()] {
+                let retry = db
+                    .create_community_with_owner_and_nip_fi_policy(
+                        &host, &owner, bindings, !required, &keys,
+                    )
+                    .await
+                    .unwrap();
+                let CreateCommunityWithOwnerResult::Created(retry) = retry.outcome else {
+                    panic!("not replayed")
+                };
+                assert!(!retry.created);
+                assert_eq!(retry.requires_nip_fi, required);
+                assert_eq!(
+                    db.community_auth_policy(record.id).await.unwrap().unwrap(),
+                    before
+                );
+                assert_eq!(bound(&db, &host).await, Some(issuers()));
+            }
+            // Model an operator disable. A later true replay must report the stored false.
+            sqlx::query("UPDATE communities SET requires_nip_fi = false, policy_generation = policy_generation + 1 WHERE id = $1")
+                .bind(record.id.as_uuid()).execute(&db.pool).await.unwrap();
+            let disabled = db.community_auth_policy(record.id).await.unwrap().unwrap();
+            let replay = db
+                .create_community_with_owner_and_nip_fi_policy(&host, &owner, &[], true, &keys)
+                .await
+                .unwrap();
+            let CreateCommunityWithOwnerResult::Created(replay) = replay.outcome else {
+                panic!("not replayed")
+            };
+            assert!(!replay.created);
+            assert!(!replay.requires_nip_fi);
+            assert_eq!(
+                db.community_auth_policy(record.id).await.unwrap().unwrap(),
+                disabled
+            );
+            assert_eq!(bound(&db, &host).await, Some(issuers()));
+            let conflict = db
+                .create_community_with_owner_and_nip_fi_policy(
+                    &host,
+                    &nostr::Keys::generate().public_key().to_hex(),
+                    &[],
+                    true,
+                    &keys,
+                )
+                .await
+                .unwrap();
+            assert_eq!(conflict.outcome, CreateCommunityWithOwnerResult::HostExists);
+        }
+        for bindings in [vec![], vec![String::new()]] {
+            let host = unique_host("refused-initial-policy");
+            let refusal = db
+                .create_community_with_owner_and_nip_fi_policy(&host, OWNER, &bindings, true, &keys)
+                .await;
+            if bindings.is_empty() {
+                assert!(matches!(refusal, Err(crate::DbError::NipFiBindingRequired)));
+            } else {
+                assert!(refusal.is_err());
+            }
+            assert!(!community_exists(&db, &host).await);
+        }
+    }
+
     // Deletion takes its exclusive lock, then the community row. A bind that
     // held the row while waiting for that lock would deadlock with it.
     // Mutation: locking the row before `guard_transaction` in
@@ -618,8 +731,8 @@ mod postgres_tests {
             .fetch_one(&mut *deletion)
             .await
             .expect("pid");
-        sqlx::query("SELECT pg_advisory_xact_lock(community_deletion_lock_key($1))")
-            .bind(id.as_uuid())
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(crate::deletion::community_deletion_lock_key(id))
             .execute(&mut *deletion)
             .await
             .expect("exclusive deletion lock");
@@ -739,8 +852,8 @@ mod postgres_tests {
     }
 
     /// Move `host`'s community out of `active` the way the deletion executor
-    /// does: the tombstone trigger admits the state change only under the
-    /// executor's community and fence-generation settings.
+    /// does, retaining transaction-scoped executor settings for older catalogs
+    /// that still enforce lifecycle changes in the database.
     async fn start_deleting(db: &Db, host: &str) {
         let mut tx = db.pool.begin().await.expect("begin");
         let id: Uuid = sqlx::query_scalar("SELECT id FROM communities WHERE host = $1")

@@ -91,9 +91,6 @@ export const nodeTestArgs = (file) =>
         "--test",
       ]
     : ["--import", "./test-loader.mjs", "--experimental-strip-types", "--test"];
-// Mirrors the mobile test shards in .github/workflows/_ci-clients.yml.
-export const dartDefine =
-  "--dart-define=BUZZ_PUSH_GATEWAY_URL=https://push.example";
 // Mirrors the postgres-ci default-filter in .config/nextest.toml
 // (`test(/postgres_tests::/)`, `binary(/^postgres_/)` and
 // `test(/(^|::)external_infra[^:]*::/)`): those tests need Postgres, Redis,
@@ -1115,6 +1112,9 @@ function repeatNode(files, iterations) {
 
 // Per-test statuses of a `dart test` JSON report (one event per line), keyed
 // `<file> › <name>`. Hidden entries are the runner's own file-loading steps.
+// A test declared through a helper (every `testWidgets` is) has the helper's
+// `package:` URL as its `url`, so its file comes from its suite, else from
+// `root_url`.
 export function parseDartReport(text, mobileRoot = `${root}mobile/`) {
   const started = new Map();
   const suites = new Map();
@@ -1131,8 +1131,9 @@ export function parseDartReport(text, mobileRoot = `${root}mobile/`) {
     if (event.type !== "testDone" || event.hidden) continue;
     const test = started.get(event.testID);
     if (!test) continue;
+    const url = test.root_url ?? test.url;
     const source = suites.get(test.suiteID) ??
-      (test.url?.startsWith("file:") ? fileURLToPath(test.url) : test.url ?? "unknown");
+      (url?.startsWith("file:") ? fileURLToPath(url) : url ?? "unknown");
     const file = source.replace(mobileRoot, "");
     statuses.set(
       `${file} › ${test.name}`,
@@ -1159,7 +1160,6 @@ function repeatDart(files, iterations) {
       "flutter",
       [
         "test",
-        dartDefine,
         `--file-reporter=json:${reportFile}`,
         ...files.map((file) => file.replace(/^mobile\//, "")),
       ],

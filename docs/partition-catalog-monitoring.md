@@ -1,6 +1,6 @@
 # Partition catalog monitoring
 
-The relay audits the `events` and `delivery_log` partition catalogs at startup
+The relay audits the `events` partition catalog at startup
 and every `BUZZ_PARTITION_AUDIT_INTERVAL_SECS` (default 900 seconds). Results are
 diagnostic only. They appear in `/_status.partition_catalog` and in the metrics
 below, and they never change `/_readiness` or `/_liveness`. Alert on them; do not
@@ -30,6 +30,23 @@ later. Once its upper bound is at or before the start of the current month, it i
 historical. It remains in the per-child report as `legacy_leaf` but no longer
 degrades the table.
 
+## Reader grants on new partitions
+
+When maintenance creates a monthly partition or replaces the empty catch-all,
+it copies explicit table-level `SELECT` grants from that parent to the new
+children before committing. Group roles and explicit `PUBLIC` grants are
+included; the owner's ACL entry, column-only grants, writes, and grant options
+are not copied. No additional relay setting is needed. A grant failure rolls
+back that table's entire maintenance transaction.
+
+Existing children and manually created or attached partitions still need their
+own grants. Maintenance does not reconcile grants on existing tables or revoke
+old grants when the parent ACL changes. Replacing the catch-all drops and
+recreates it, so grants added directly to the old catch-all are lost; only the
+parent's `SELECT` grants carry over. Keep those permissions aligned through
+the database's provisioning process. Initial schema bootstrap runs before
+deployment-specific reader grants are provisioned.
+
 ## Metrics
 
 Per-table gauges are set only by a successful audit of that table:
@@ -51,7 +68,7 @@ timestamp disappears only when audits stop running for longer than the idle
 timeout; the other per-table gauges can be evicted during sustained failures.
 
 Counters are not idle-evicted while the process runs. The relay exports every
-run outcome for both managed tables, and the failure counter, at 0 when its
+run outcome for each managed table, and the failure counter, at 0 when its
 metrics exporter starts, so `increase()` counts the first failure and the first
 run with a new outcome:
 

@@ -1,12 +1,27 @@
-//! Read-only user inventory and synthetic user-deletion workflow commands.
+//! User inventory, offline account cleanup and persisted deletion workflows.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
+use buzz_db::user_deletion::ExecutionMode;
 use clap::Subcommand;
 use uuid::Uuid;
 
-/// Preview real memberships or prepare and execute synthetic deletion requests.
+/// Inspect user data, run account cleanup or execute persisted workflows.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Inspect or delete one human's community content.
+    ContentBatches(content_batches::Args),
+    /// Run media cleanup directly, without a workflow request.
+    MediaBatches(media::Args),
+    /// Preview or delete profiles in one community; deletion requires stopped writers.
+    ProfileBatches(profile_batches::Args),
+    /// Print account-table batches for one community; --delete executes offline.
+    AccountBatches(account_batches::Args),
+    /// Capture frozen human/agent inputs across stored communities, read-only.
+    AccountScope {
+        /// Human public key, hex or npub.
+        #[arg(long, value_parser = inventory::parse_subject)]
+        pubkey: String,
+    },
     /// Print real current memberships as JSON; does not save or execute a request.
     Inventory {
         /// Demo fixture (default), hex public key, or npub. Current memberships only.
@@ -39,10 +54,22 @@ pub enum Command {
         #[arg(long)]
         inventory_digest: String,
     },
-    /// Run dummy stages for an approved request; no real user data is changed.
+    /// Run an approved workflow; real handlers require explicit --delete.
     Run {
         /// Approved request UUID.
         id: Uuid,
+        /// Execute implemented real handlers; stop relay and external writers first.
+        #[arg(long)]
+        delete: bool,
+        /// Trusted relay signer for historical content attribution.
+        #[arg(long, value_parser=content_batches::parse_pubkey)]
+        relay_pubkey: Option<String>,
+        /// Maximum explicit row operations per batch.
+        #[arg(long, default_value_t=100, value_parser=clap::value_parser!(u16).range(1..=100))]
+        batch_size: u16,
+        /// Maximum row operations in one handler invocation.
+        #[arg(long, default_value_t=100_000, value_parser=clap::value_parser!(u32).range(1..=1_000_000))]
+        max_items: u32,
         /// Worker identity; defaults to hostname and process id.
         #[arg(long)]
         executor_id: Option<String>,
@@ -72,9 +99,44 @@ pub enum Command {
     },
 }
 
-/// Run inventory discovery or synthetic workflow commands against PostgreSQL.
+/// Run the selected user-deletion command against PostgreSQL.
 pub async fn run(command: Command) -> Result<i32> {
-    let db = if matches!(command, Command::Inventory { .. }) {
+    let command = match command {
+        Command::ContentBatches(args) => return content_batches::run_command(args).await,
+        Command::MediaBatches(args) => return media::run(args).await,
+        Command::ProfileBatches(args) => return profile_batches::run(args).await,
+        command => command,
+    };
+    if let Command::AccountBatches(args) = command {
+        let mode = if args.delete {
+            ExecutionMode::Delete
+        } else {
+            ExecutionMode::ReadOnly
+        };
+        // Command setup stays outside the handler. Neither mode runs startup
+        // migrations or connects to Redis; preview defaults to read-only SQL.
+        let db = buzz_db::Db::connect_cold_start(
+            buzz_db::DbConfig {
+                database_url: crate::required_env("DATABASE_URL")?,
+                max_connections: 1,
+                min_connections: 0,
+                default_transaction_read_only: mode == ExecutionMode::ReadOnly,
+                ..buzz_db::DbConfig::default()
+            },
+            "user_account_batches",
+        )
+        .await?;
+        let summary = account_batches::run_command(&db, args, mode).await?;
+        return Ok(if summary.supported_scope_exhausted {
+            0
+        } else {
+            2
+        });
+    }
+    let db = if matches!(
+        command,
+        Command::Inventory { .. } | Command::AccountScope { .. }
+    ) {
         buzz_db::Db::connect_cold_start(
             buzz_db::DbConfig {
                 database_url: crate::required_env("DATABASE_URL")?,
@@ -91,6 +153,17 @@ pub async fn run(command: Command) -> Result<i32> {
     };
     let store = db.entity_deletion_store();
     match command {
+        Command::ContentBatches(_) | Command::MediaBatches(_) | Command::ProfileBatches(_) => {
+            bail!("direct cleanup command dispatched above")
+        }
+        Command::AccountBatches(_) => anyhow::bail!("account command dispatched above"),
+        Command::AccountScope { pubkey } => {
+            crate::print_json(
+                &db.user_deletion_store()
+                    .generate_account_scope(&pubkey)
+                    .await?,
+            )?;
+        }
         Command::Inventory { pubkey } => {
             crate::print_json(&inventory::generate(&db, &pubkey).await?)?;
         }
@@ -122,17 +195,36 @@ pub async fn run(command: Command) -> Result<i32> {
         }
         Command::Run {
             id,
+            delete,
+            relay_pubkey,
+            batch_size,
+            max_items,
             executor_id,
             next_step,
             fail_stage,
             stage_delay_ms,
             demo_no_agents_in,
         } => {
+            let request = store.get(id).await?;
+            let real = !request.target.starts_with("demo:");
+            if real {
+                anyhow::ensure!(delete, "real workflow execution requires --delete; use account-batches --read-only to preview");
+                anyhow::ensure!(
+                    fail_stage.is_none() && stage_delay_ms == 0 && demo_no_agents_in.is_empty(),
+                    "dummy controls cannot be used for real deletion"
+                );
+            }
             let code = worker::run(
                 &store,
                 id,
                 &executor_id.unwrap_or_else(crate::default_executor_id),
                 &worker::RunOptions {
+                    db: real.then(|| buzz_db::Db::from_pool(db.pool().clone())),
+                    media: None,
+                    delete,
+                    relay_pubkey,
+                    batch_size,
+                    max_items,
                     next_step,
                     fail_stage,
                     stage_delay: std::time::Duration::from_millis(stage_delay_ms),
@@ -150,8 +242,17 @@ pub async fn run(command: Command) -> Result<i32> {
     Ok(0)
 }
 
+mod account_batches;
+mod content_batches;
 mod handlers;
 mod inventory;
+/// Direct upload-only media cleanup and its workflow handler.
+pub mod media;
+/// Standalone delegation of an owned community to community deletion.
+pub mod owned_community;
+mod profile_batches;
+/// Read-only summaries of locally saved request progress and external waits.
+pub mod summary;
 mod transition;
 mod worker;
 mod workflow;

@@ -41,7 +41,22 @@ class FakeRegistry extends BuilderlabAccountClient {
   @override
   ValueListenable<String?> get subjectChanges => _changes;
   bool failInstructions = false;
+  bool ignoreModelUpdate = false;
+  List<Map<String, dynamic>> models = [
+    {
+      'id': 'test-model',
+      'display_name': 'Test model',
+      'supported_reasoning_efforts': ['low', 'high'],
+    },
+    {
+      'id': 'other-model',
+      'display_name': 'Other model',
+      'supported_reasoning_efforts': ['max'],
+    },
+  ];
+  Map<String, dynamic>? recommendedSelection;
   Completer<void>? catalogGate;
+  bool failCatalog = false;
   bool failListing = false;
   bool rejectRegistration = false;
   bool loseRegistration = false;
@@ -55,35 +70,39 @@ class FakeRegistry extends BuilderlabAccountClient {
   BuilderlabAccount? get account => signedIn
       ? BuilderlabAccount(subject: subject, expiresAt: DateTime.utc(2030))
       : null;
+
+  /// Holds [restore] open so a test can observe a cold-start restoration.
+  Completer<void>? restoreGate;
+
   @override
-  Future<BuilderlabAccount?> restore() async => account;
+  Future<BuilderlabAccount?> restore() async {
+    await restoreGate?.future;
+    return account;
+  }
+
   @override
-  Future<Map<String, dynamic>> currentIdentity() async => {
+  Future<Map<String, dynamic>> currentIdentity({String? signer}) async => {
     'identity': {'pubkey_hex': bound},
   };
   @override
   Future<Map<String, dynamic>> post(
     String path,
-    Map<String, dynamic> body,
-  ) async {
+    Map<String, dynamic> body, {
+    String? expectedSubject,
+    String? signer,
+  }) async {
+    if (expectedSubject != null && account?.subject != expectedSubject) {
+      throw AccountFailure.differentAccount;
+    }
     calls.add(path.split('/').last);
     bodies[path] = body;
     switch (path) {
       case '/v3/beekeeper/get-model-catalog':
         await catalogGate?.future;
+        if (failCatalog) throw StateError('Catalog unavailable.');
         return {
-          'models': [
-            {
-              'id': 'test-model',
-              'display_name': 'Test model',
-              'supported_reasoning_efforts': ['high', 'low'],
-            },
-            {
-              'id': 'other-model',
-              'display_name': 'Other model',
-              'supported_reasoning_efforts': ['max'],
-            },
-          ],
+          'models': models,
+          'recommended_selection': ?recommendedSelection,
         };
       case '/v3/beekeeper/list-agents':
         if (failListing) throw StateError('Registry unavailable.');
@@ -106,6 +125,20 @@ class FakeRegistry extends BuilderlabAccountClient {
         return {'status': 'ATTEST_AGENT_STATUS_ACTIVE'};
       case '/v3/beekeeper/update-agent':
         if (failInstructions) throw StateError('instructions unavailable');
+        if (body.containsKey('model_id') && !ignoreModelUpdate) {
+          listed = [
+            for (final row in listed)
+              if (row['agent_pubkey'] == body['agent_pubkey'])
+                {
+                  ...row,
+                  'model_id': body['model_id'],
+                  'reasoning_effort': body['reasoning_effort'],
+                  'model_selection_status': 1,
+                }
+              else
+                row,
+          ];
+        }
         return {};
       case '/v3/beekeeper/delete-agent':
         expect(body, {'agent_id': 'remote-id'});
@@ -118,7 +151,7 @@ class FakeRegistry extends BuilderlabAccountClient {
 
 /// Fakes only relay publication; registry logic stays real.
 class RelayFakeController extends RemoteAgentController {
-  RelayFakeController(FakeRegistry account)
+  RelayFakeController(FakeRegistry account, {super.onCreated})
     : super(
         account: account,
         keys: AccountIdentityStore(),

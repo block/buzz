@@ -24,10 +24,9 @@ final class NativeCommunityEntryCoordinator: NSObject, UIAdaptivePresentationCon
       let root = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         .filter { $0.activationState == .foregroundActive }.flatMap(\.windows)
         .first(where: \.isKeyWindow)?.rootViewController
-      guard var presenter = root else {
+      guard let presenter = root, presenter.presentedViewController == nil else {
         result(FlutterError(code: "presentation_failed", message: nil, details: nil)); return
       }
-      while let presented = presenter.presentedViewController { presenter = presented }
       let controller = NativeCommunityEntryController(configuration: args)
       controller.action = { [weak self] method, payload, completion in
         guard let self, self.session == session else { return }
@@ -47,6 +46,10 @@ final class NativeCommunityEntryCoordinator: NSObject, UIAdaptivePresentationCon
       self.navigation = navigation
       controller.configureDetents()
       presenter.present(navigation, animated: !UIAccessibility.isReduceMotionEnabled)
+      guard presenter.presentedViewController === navigation else {
+        self.complete(FlutterError(code: "presentation_failed", message: nil, details: nil))
+        return
+      }
       navigation.presentationController?.delegate = self
     }
   }
@@ -71,12 +74,12 @@ final class NativeCommunityEntryCoordinator: NSObject, UIAdaptivePresentationCon
     }
   }
 
-  private func complete(_ joined: Bool) {
+  private func complete(_ value: Any?) {
     let result = pending
     pending = nil
     navigation = nil
     session = nil
-    result?(joined)
+    result?(value)
   }
 }
 
@@ -118,15 +121,17 @@ private final class NativeCommunityEntryController: UIViewController, UITextFiel
     navigationItem.rightBarButtonItem = UIBarButtonItem(systemItem: .close,
       primaryAction: UIAction { [weak self] _ in self?.close() })
     if #available(iOS 17.0, *) { view.keyboardLayoutGuide.usesBottomSafeArea = false }
-    scroll.contentInsetAdjustmentBehavior = .never
+    scroll.contentInsetAdjustmentBehavior = .always
     scroll.translatesAutoresizingMaskIntoConstraints = false
     stack.translatesAutoresizingMaskIntoConstraints = false
     stack.axis = .vertical
     stack.spacing = 12
+    NavigationTopEdge.configure(scroll, item: navigationItem)
+    if #available(iOS 15.0, *) { setContentScrollView(scroll) }
     view.addSubview(scroll)
     scroll.addSubview(stack)
     NSLayoutConstraint.activate([
-      scroll.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+      scroll.topAnchor.constraint(equalTo: view.topAnchor),
       scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
       scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
       scroll.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
@@ -231,9 +236,10 @@ private final class NativeCommunityEntryController: UIViewController, UITextFiel
       ])
       stack.addArrangedSubview(card)
       if invite {
-        addButton("Join community", primary: true) { [weak self] in
+        submit = addButton("Join community", primary: true) { [weak self] in
           self?.request("join", [:])
         }
+        submit?.accessibilityIdentifier = "community-invite-join"
       } else {
         for choice in choices {
           addButton("\(choice["label"] ?? "Saved identity")\n\(choice["npub"] ?? "")") { [weak self] in
@@ -254,7 +260,12 @@ private final class NativeCommunityEntryController: UIViewController, UITextFiel
 
   @discardableResult
   private func addButton(_ title: String, primary: Bool = false, action: @escaping () -> Void) -> UIButton {
-    let config = onboardingButtonConfiguration(title, primary: primary)
+    var config = onboardingButtonConfiguration(title, primary: primary)
+    if primary, let argb = (configuration["onPrimaryArgb"] as? NSNumber)?.uint32Value {
+      config.baseBackgroundColor = view.tintColor
+      config.baseForegroundColor = UIColor(red: CGFloat((argb >> 16) & 255) / 255,
+        green: CGFloat((argb >> 8) & 255) / 255, blue: CGFloat(argb & 255) / 255, alpha: 1)
+    }
     let button = UIButton(configuration: config, primaryAction: UIAction { _ in action() })
     button.titleLabel?.numberOfLines = 0
     button.titleLabel?.adjustsFontForContentSizeCategory = true
@@ -315,6 +326,9 @@ private final class NativeCommunityEntryController: UIViewController, UITextFiel
     action?(method, args) { [weak self] result in
       guard let self, self.generation == attempt else { return }
       self.setBusy(false)
+      if let title = result["actionTitle"] as? String {
+        self.submit?.configuration?.title = title
+      }
       self.status.text = result["error"] as? String
       self.status.isHidden = self.status.text == nil
       if let error = self.status.text {
@@ -324,6 +338,8 @@ private final class NativeCommunityEntryController: UIViewController, UITextFiel
       if result["joined"] as? Bool == true {
         self.input.text = nil
         self.finish?(true)
+      } else if result["redirected"] as? Bool == true {
+        self.finish?(false)
       } else { completion?(result) }
     }
   }

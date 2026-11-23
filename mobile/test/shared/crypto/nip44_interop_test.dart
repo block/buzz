@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -19,21 +21,20 @@ void main() {
     );
   });
 
-  test('predicts the encrypted payload length at every padding boundary', () {
-    final key = getConversationKey(
-      '0000000000000000000000000000000000000000000000000000000000000001',
-      '79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798',
+  test('decrypts a nostr-tools payload with the extended length prefix', () {
+    // nostr-tools writes plaintexts of 64 KiB or more with a zero u16 and a
+    // u32 length; large desktop workspace records use it.
+    const privateKey =
+        '0000000000000000000000000000000000000000000000000000000000000001';
+    const publicKey =
+        '79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798';
+    final ciphertext = File(
+      'test/fixtures/nip44_extended_length.txt',
+    ).readAsStringSync();
+
+    expect(
+      nip44Decrypt(getConversationKey(privateKey, publicKey), ciphertext),
+      'a' * 65536,
     );
-    for (final length in [
-      1, 32, 33, 256, 257, 4096, 4097, 32768, 32769, 65535, //
-    ]) {
-      expect(
-        nip44PayloadLength(length),
-        nip44Encrypt(key, 'x' * length).length,
-        reason: '$length bytes',
-      );
-    }
-    expect(nip44PayloadLength(0), isNull);
-    expect(nip44PayloadLength(65536), isNull);
   });
 }

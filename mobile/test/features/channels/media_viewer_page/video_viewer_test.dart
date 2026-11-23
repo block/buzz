@@ -57,9 +57,12 @@ import '../../../helpers/widget_helpers.dart';
 class _FakePathProviderPlatform extends Fake
     with MockPlatformInterfaceMixin
     implements PathProviderPlatform {
+  _FakePathProviderPlatform(this.temporaryPath);
+
+  final String temporaryPath;
+
   @override
-  Future<String?> getTemporaryPath() async =>
-      Directory.systemTemp.resolveSymbolicLinksSync();
+  Future<String?> getTemporaryPath() async => temporaryPath;
 }
 
 /// Fake VideoPlayerPlatform that tracks `dispose` calls and optionally
@@ -370,7 +373,16 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   setUp(() {
-    PathProviderPlatform.instance = _FakePathProviderPlatform();
+    // The viewer's async delete of its downloaded buzz-video-* file never
+    // completes under FakeAsync, so give each test its own temp dir and
+    // remove it synchronously.
+    final temporaryDirectory = Directory(
+      Directory.systemTemp.resolveSymbolicLinksSync(),
+    ).createTempSync('video_viewer_test_');
+    addTearDown(() => temporaryDirectory.deleteSync(recursive: true));
+    PathProviderPlatform.instance = _FakePathProviderPlatform(
+      temporaryDirectory.path,
+    );
   });
 
   // Transport: request sink must be closed before send().

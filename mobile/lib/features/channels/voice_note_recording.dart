@@ -10,6 +10,7 @@ import 'package:just_audio/just_audio.dart' as audio;
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 
+import '../../shared/http/app_http_client.dart';
 import '../../shared/relay/media_image.dart';
 import '../../shared/widgets/app_route_observer.dart';
 
@@ -114,9 +115,21 @@ class DeviceVoiceNoteRecorder implements VoiceNoteRecorder {
   DeviceVoiceNoteRecorder({
     VoiceNoteRecorderBackend? backend,
     Future<Directory> Function()? temporaryDirectory,
+    this.recordConfig = const RecordConfig(
+      encoder: AudioEncoder.aacLc,
+      bitRate: 96000,
+      sampleRate: 44100,
+      numChannels: 1,
+      autoGain: true,
+      echoCancel: true,
+      noiseSuppress: true,
+    ),
+    this.fileExtension = 'm4a',
   }) : _recorder = backend ?? _DeviceVoiceNoteRecorderBackend(),
        _temporaryDirectory = temporaryDirectory ?? getTemporaryDirectory;
 
+  final RecordConfig recordConfig;
+  final String fileExtension;
   final VoiceNoteRecorderBackend _recorder;
   final Future<Directory> Function() _temporaryDirectory;
   final StreamController<double> _levels = StreamController.broadcast();
@@ -166,19 +179,8 @@ class DeviceVoiceNoteRecorder implements VoiceNoteRecorder {
     _ensureStartupActive(generation);
     final path =
         '${directory.path}${Platform.pathSeparator}'
-        'voice-note-${DateTime.now().millisecondsSinceEpoch}.m4a';
-    await _recorder.start(
-      const RecordConfig(
-        encoder: AudioEncoder.aacLc,
-        bitRate: 96000,
-        sampleRate: 44100,
-        numChannels: 1,
-        autoGain: true,
-        echoCancel: true,
-        noiseSuppress: true,
-      ),
-      path: path,
-    );
+        'voice-note-${DateTime.now().microsecondsSinceEpoch}.$fileExtension';
+    await _recorder.start(recordConfig, path: path);
     _nativeStarted = true;
     _ensureStartupActive(generation);
     _path = path;
@@ -333,7 +335,7 @@ abstract class VoiceNotePlayerController extends ChangeNotifier {
 
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   });
 
@@ -525,7 +527,7 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
   VoiceNotePlaybackState _state = const VoiceNotePlaybackState();
   ({
     String url,
-    Map<String, String> Function() headers,
+    FutureOr<Map<String, String>> Function() headers,
     Duration fallbackDuration,
   })?
   _pendingRemote;
@@ -561,7 +563,7 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
   @override
   Future<void> loadRemote(
     String url, {
-    required Map<String, String> Function() headers,
+    required FutureOr<Map<String, String>> Function() headers,
     required Duration fallbackDuration,
   }) {
     _replaceSource();
@@ -601,6 +603,9 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
     _downloadAbort = requestAbort;
     File? file;
     try {
+      // Awaited first: a hosted relay may need a fresh assertion, and a newer
+      // operation started meanwhile must win.
+      final headers = await remote.headers();
       if (playbackOperationGeneration != _playbackOperationGeneration) {
         if (!requestAbort.isCompleted) requestAbort.complete();
         return null;
@@ -609,12 +614,13 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
         'GET',
         uri,
         abortTrigger: requestAbort.future,
-      )..headers.addAll(remote.headers());
+      )..headers.addAll(headers);
       final response = await _client
           .send(request)
           .timeout(
             _downloadTimeout,
             onTimeout: () {
+              noteHttpDeadline(request);
               if (!requestAbort.isCompleted) requestAbort.complete();
               throw TimeoutException('Voice note download timed out');
             },
@@ -839,7 +845,17 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
           }
         } else {
           await _load(
-            () => _player.setUrl(remote.url, headers: remote.headers()),
+            () async {
+              final headers = await remote.headers();
+              // A cancel or new source while a slow assertion renews must
+              // not start the stale native load.
+              if (_disposed ||
+                  sourceGeneration != _sourceGeneration ||
+                  playbackOperationGeneration != _playbackOperationGeneration) {
+                return null;
+              }
+              return _player.setUrl(remote.url, headers: headers);
+            },
             fallbackDuration: remote.fallbackDuration,
             sourceGeneration: sourceGeneration,
             playbackOperationGeneration: playbackOperationGeneration,

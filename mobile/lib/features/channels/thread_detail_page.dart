@@ -1,7 +1,12 @@
+import 'message_author_visibility.dart';
+
+import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
+
 import 'message_swipe_reply.dart';
 import '../../shared/widgets/ios_scroll_to_top.dart';
 import 'message_footer_layout.dart';
 import 'reply_summary_link.dart';
+
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -34,7 +39,8 @@ import 'channel_identity_names_provider.dart';
 import 'channel_link_navigation.dart';
 import 'channel_messages_provider.dart';
 import 'channel_typing_provider.dart';
-import 'channel_typing_indicator.dart';
+import 'inline_agent_typing.dart';
+import '../../shared/me/me_assistants.dart';
 import 'thread_replies_provider.dart';
 import 'channel_ids_by_name_provider.dart';
 import 'channels_provider.dart';
@@ -54,13 +60,17 @@ import '../profile/user_profile_sheet.dart';
 import 'message_actions.dart';
 import 'message_action_backdrop_state.dart';
 import 'message_long_press_region.dart';
+import 'message_reply_drag_target.dart';
 import 'message_content.dart';
+import 'message_mention_pill.dart';
 import 'message_media_avatar.dart';
 import 'reaction_row.dart';
 import '../../shared/read_state/read_state_provider.dart';
 import 'send_message_provider.dart';
 import 'sticky_date_header.dart';
+import 'date_header_scroll_activity.dart';
 import 'reading_marks.dart';
+import 'saved_channel_page.dart';
 import 'timeline_message.dart';
 
 part 'thread_detail_page/nested_thread_summary_row.dart';
@@ -84,6 +94,7 @@ const _landingHighlightOpacity = 0.12;
 /// the thread, and a compose bar for replying.
 class ThreadDetailPage extends HookConsumerWidget {
   final TimelineMessage threadHead;
+  final bool headFromSavedPage;
   final List<TimelineMessage> allMessages;
   final String channelId;
   final String? currentPubkey;
@@ -98,6 +109,7 @@ class ThreadDetailPage extends HookConsumerWidget {
   const ThreadDetailPage({
     super.key,
     required this.threadHead,
+    this.headFromSavedPage = false,
     required this.allMessages,
     required this.channelId,
     required this.currentPubkey,
@@ -113,6 +125,11 @@ class ThreadDetailPage extends HookConsumerWidget {
     // signing identity instead of freezing that incomplete route snapshot.
     final currentPubkey =
         ref.watch(currentPubkeyProvider) ?? this.currentPubkey;
+    // A Solo chat's threads are read-only: its agents answer at top level.
+    final canReply =
+        isMember &&
+        !isArchived &&
+        ref.watch(channelStartsThreadsProvider(channelId));
     final appView = View.of(context);
     final composerDockHeight = useState(0.0);
     final composerFocusNode = useFocusNode();
@@ -138,54 +155,25 @@ class ThreadDetailPage extends HookConsumerWidget {
       channelId: channelId,
       rootId: queryRootId,
     );
-    final relayReplyState = ref.watch(threadRepliesProvider(repliesArgs));
-    final repliesState = ref.watch(threadRepliesWithLocalProvider(repliesArgs));
-    final relayRepliesAvailable = relayReplyState.value != null;
-    // The thread query is one-shot and asks only for content kinds, so a
-    // reaction, edit, or deletion that lands while the thread is open never
-    // reaches it — a new pill (and its burst) only showed up after leaving and
-    // re-entering, which refetched. The channel socket already receives those
-    // events, so union the two sources and format once.
-    final liveChannelEvents =
-        ref.watch(channelMessagesProvider(channelId)).value ??
-        const <NostrEvent>[];
-    // Loading/error states can still carry replies from the last query.
-    // whenData drops that retained value during retries.
-    final replyEvents = repliesState.value;
-    final fetchedReplies = replyEvents == null
-        ? null
-        : formatTimeline(
-            mergeThreadEvents(replyEvents, liveChannelEvents),
-            currentPubkey: currentPubkey,
-          );
-    final hasFetchedReplies = fetchedReplies != null;
-    // A terminal query error cannot produce a more authoritative list. Keep
-    // loading states provisional, but let the hydrated route snapshot drive
-    // the one-shot target jump when the relay query has definitively failed.
-    final canUseMessagesForInitialTarget =
-        relayReplyState.value != null ||
-        (relayReplyState.hasError && !relayReplyState.retrying);
-    final liveDeletionHidesHead = _isDeletedBy(
-      liveChannelEvents,
-      threadHead.id,
+    final (
+      :relayReplyState,
+      :allMsgs,
+      :savedHead,
+      :savedOnlyIds,
+      :accessDenied,
+      :liveDeletionHidesHead,
+      :hasFetchedReplies,
+      :canUseMessagesForInitialTarget,
+    ) = _watchThreadMessages(
+      ref,
+      repliesArgs,
+      threadHead,
+      allMessages,
+      currentPubkey,
+      headFromSavedPage: headFromSavedPage,
+      initialMessageId: initialMessageId,
     );
-    final allMsgs = fetchedReplies == null || !relayRepliesAvailable
-        ? _provisionalThreadMessages(
-            allMessages,
-            fetchedReplies ??
-                formatTimeline(liveChannelEvents, currentPubkey: currentPubkey),
-            liveChannelEvents,
-          )
-        : [
-            // Only fall back to the pushed-route snapshot when neither source
-            // carries the head, and no live deletion has suppressed it. That
-            // keeps a temporarily unavailable head visible without restoring
-            // a head that was deleted while this page was open.
-            if (!liveDeletionHidesHead &&
-                !fetchedReplies.any((message) => message.id == threadHead.id))
-              threadHead,
-            ...fetchedReplies,
-          ];
+    final relayRepliesAvailable = relayReplyState.value != null;
     final routeAnimation = ModalRoute.of(context)?.animation;
     final reducedLandingHighlightMotion = MediaQuery.disableAnimationsOf(
       context,
@@ -259,12 +247,20 @@ class ThreadDetailPage extends HookConsumerWidget {
     }
 
     final replies = childrenByParent[threadHead.id] ?? const [];
+    final showingSavedReplies = replies.any(
+      (reply) => savedOnlyIds.contains(reply.id),
+    );
+    final previewCanSettle = initialMessageId == null && showingSavedReplies;
+    final canSettleInitialTail = hasFetchedReplies || previewCanSettle;
     final liveHead =
-        allMsgs.where((m) => m.id == threadHead.id).firstOrNull ?? threadHead;
+        allMsgs.where((m) => m.id == threadHead.id).firstOrNull ??
+        savedHead ??
+        (headFromSavedPage ? null : threadHead);
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final listViewport = useMemoized(LaidOutViewport.new);
     useEffect(() => listViewport.dispose, [listViewport]);
+    final dateScrollActivity = useDateHeaderScrollActivity(threadHead.id);
     final stickyDateHeaderState = useValueNotifier(
       StickyDateHeaderState.hidden,
     );
@@ -288,6 +284,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     final tailCorrectionInProgress = useRef(false);
     final tailCorrectionGeneration = useRef(0);
     final activeThreadScrollPosition = useRef<ScrollPosition?>(null);
+    final threadMaxScrollExtents = useMemoized(Expando<double>.new);
     final composerHasFocus = useListenable(composerFocusNode).hasFocus;
     final viewportHeight = useListenable(listViewport.height).value;
     final previousViewportHeight = useRef(viewportHeight);
@@ -307,14 +304,16 @@ class ThreadDetailPage extends HookConsumerWidget {
     // settles, the message-list view keeps the original message visible and
     // reveals the positioned list in one frame, for empty and populated threads.
     final threadViewportVisible =
-        !relayRepliesAvailable || initialViewportReady.value;
+        accessDenied ||
+        !(relayRepliesAvailable || previewCanSettle) ||
+        initialViewportReady.value;
 
     // Item 0 is the thread head; reply `i` lives at `i + 1`.
     const headIndex = 0;
     int indexForReply(int chronologicalIndex) => chronologicalIndex + 1;
     final tailAnchorIndex = replies.length + 1;
     final stickyDateIndex = _ThreadStickyDateIndex(
-      head: liveHead,
+      head: liveHead ?? threadHead,
       replies: replies,
     );
 
@@ -344,8 +343,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     );
 
     bool threadTailIsVisible() {
-      if (isMember &&
-          !isArchived &&
+      if (canReply &&
           (!viewportHeight.isFinite ||
               viewportHeight <= 0 ||
               composerDockHeight.value <= 0)) {
@@ -485,7 +483,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       [
         itemPositionsListener,
         replies.length,
-        liveHead.createdAt,
+        liveHead?.createdAt,
         viewportHeight,
       ],
     );
@@ -535,10 +533,6 @@ class ThreadDetailPage extends HookConsumerWidget {
     useEffect(
       () {
         final messageId = initialMessageId;
-        // Wait for either the authoritative thread query or a terminal query
-        // error before consuming the one-shot jump. During loading, the fallback
-        // main-timeline list can contain only the linked reply; after an error,
-        // that hydrated snapshot is the best available target list.
         if (messageId == null ||
             !canUseMessagesForInitialTarget ||
             headHeight.value == null) {
@@ -585,7 +579,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         initialMessageId,
         headHeight.value,
         canUseMessagesForInitialTarget,
-        fetchedReplies,
+        allMsgs,
         replies.length,
       ],
     );
@@ -636,84 +630,144 @@ class ThreadDetailPage extends HookConsumerWidget {
       settledImeLift,
       viewportHeight,
     );
-    useEffect(() {
-      if (!hasFetchedReplies ||
-          viewportHeight <= 0 ||
-          headHeight.value == null) {
-        return null;
-      }
-      if (initialMessageId != null) {
-        initialTailSettle.abandon();
+    final previousPreview = useRef<List<TimelineMessage>?>(null);
+    if (!relayRepliesAvailable) {
+      previousPreview.value = showingSavedReplies ? replies : null;
+    }
+    useEffect(
+      () {
+        if (!canSettleInitialTail ||
+            viewportHeight <= 0 ||
+            headHeight.value == null) {
+          return null;
+        }
+        // A targeted entry starts at its target, not the tail. Absorb the
+        // replies it hydrates with (a provisional list, then the relay's) until
+        // the target jump reveals the list; a tail correction scheduled earlier
+        // would cancel that one-shot jump and leave the list hidden. Later
+        // arrivals use the ordinary rules below, so a sent reply comes into view.
+        if (initialMessageId != null && !initialViewportReady.value) {
+          initialTailSettle.abandon();
+          previousReplyCount.value = replies.length;
+          return null;
+        }
+        if (canReply && composerDockHeight.value <= 0) {
+          return null;
+        }
+        if (!initialTailSettle.isComplete) {
+          previousReplyCount.value = replies.length;
+          followsThreadTail.value = true;
+          initialTailSettle.schedule(
+            context: context,
+            controller: itemScrollController,
+            positionsListener: itemPositionsListener,
+            targetIndex: replies.isEmpty
+                ? null
+                : indexForReply(replies.length - 1),
+            hiddenTopFraction: topOverlayFraction,
+            hiddenBottomFraction:
+                (composerDockHeight.value + settledImeLift) / viewportHeight,
+            onSettled: () {
+              if (context.mounted) initialViewportReady.value = true;
+            },
+          );
+          return null;
+        }
+
+        final previous = previousReplyCount.value;
         previousReplyCount.value = replies.length;
-        return null;
-      }
-      if (isMember && !isArchived && composerDockHeight.value <= 0) {
-        return null;
-      }
-      if (!initialTailSettle.isComplete) {
-        previousReplyCount.value = replies.length;
+        final preview = previousPreview.value;
+        if (relayRepliesAvailable && preview != null) {
+          previousPreview.value = null;
+          if (!followsThreadTail.value) {
+            final anchor = _threadPreviewAnchor(
+              itemPositionsListener.itemPositions.value,
+              preview,
+              replies,
+              topOverlayFraction,
+            );
+            if (anchor != null) {
+              tailIntent.scheduleNextFrame(
+                allowed: true,
+                revalidate: () =>
+                    context.mounted &&
+                    itemScrollController.isAttached &&
+                    !tailIntent.isDragging,
+                action: () => itemScrollController.jumpTo(
+                  index: anchor.index,
+                  alignment: anchor.alignment,
+                ),
+              );
+            }
+            return null;
+          }
+        }
+        if (replies.length <= previous && preview == null) return null;
+        final positions = itemPositionsListener.itemPositions.value;
+        // Positions still describe the list as it was *before* these replies, so
+        // compare against the old tail. Measuring against the new one only reads
+        // as "at the tail" when exactly one reply arrived.
+        final previousTailAnchorIndex = previous + 1;
+        final wasAtTail =
+            (preview != null && followsThreadTail.value) ||
+            positions.isEmpty ||
+            positions.any(
+              (position) => position.index >= previousTailAnchorIndex,
+            );
+        final localPubkey = currentPubkey?.toLowerCase();
+        final hasNewLocalReply =
+            localPubkey != null &&
+            replies
+                .skip(previous)
+                .any((reply) => reply.pubkey.toLowerCase() == localPubkey);
+        // A reply the current user just sent must be visible even if they were
+        // reading at the head of a long thread. Remote arrivals still respect
+        // the user's scroll position.
+        if (tailIntent.isDragging) return null;
+        if (!hasNewLocalReply &&
+            (userOptedOutOfTailFollow.value || !wasAtTail)) {
+          return null;
+        }
+        if (hasNewLocalReply) {
+          userOptedOutOfTailFollow.value = false;
+          userDragDetachedTailFollow.value = false;
+        }
         followsThreadTail.value = true;
-        initialTailSettle.schedule(
-          context: context,
-          controller: itemScrollController,
-          positionsListener: itemPositionsListener,
-          targetIndex: replies.isEmpty
-              ? null
-              : indexForReply(replies.length - 1),
-          hiddenTopFraction: topOverlayFraction,
-          hiddenBottomFraction:
-              (composerDockHeight.value + settledImeLift) / viewportHeight,
-          onSettled: () {
-            if (context.mounted) initialViewportReady.value = true;
-          },
+        tailIntent.scheduleNextFrame(
+          allowed: true,
+          revalidate: () =>
+              context.mounted &&
+              itemScrollController.isAttached &&
+              !tailIntent.isDragging &&
+              !userOptedOutOfTailFollow.value,
+          // A reply arrival changes list geometry. Keep this correction instant;
+          // only an explicit tap on Latest should animate navigation.
+          action: correctThreadTailInstantly,
         );
         return null;
-      }
-
-      final previous = previousReplyCount.value;
-      previousReplyCount.value = replies.length;
-      if (replies.length <= previous) return null;
-      final positions = itemPositionsListener.itemPositions.value;
-      // Positions still describe the list as it was *before* these replies, so
-      // compare against the old tail. Measuring against the new one only reads
-      // as "at the tail" when exactly one reply arrived.
-      final previousTailAnchorIndex = previous + 1;
-      final wasAtTail =
-          positions.isEmpty ||
-          positions.any(
-            (position) => position.index >= previousTailAnchorIndex,
-          );
-      final localPubkey = currentPubkey?.toLowerCase();
-      final hasNewLocalReply =
-          localPubkey != null &&
-          replies
-              .skip(previous)
-              .any((reply) => reply.pubkey.toLowerCase() == localPubkey);
-      // A reply the current user just sent must be visible even if they were
-      // reading at the head of a long thread. Remote arrivals still respect
-      // the user's scroll position.
-      if (tailIntent.isDragging) return null;
-      if (!hasNewLocalReply && (userOptedOutOfTailFollow.value || !wasAtTail)) {
-        return null;
-      }
-      if (hasNewLocalReply) {
-        userOptedOutOfTailFollow.value = false;
-        userDragDetachedTailFollow.value = false;
-      }
-      followsThreadTail.value = true;
-      tailIntent.scheduleNextFrame(
-        allowed: true,
-        revalidate: () =>
-            context.mounted &&
-            itemScrollController.isAttached &&
-            !tailIntent.isDragging &&
-            !userOptedOutOfTailFollow.value,
-        // A reply arrival changes list geometry. Keep this correction instant;
-        // only an explicit tap on Latest should animate navigation.
-        action: correctThreadTailInstantly,
-      );
-      return null;
-    }, [hasFetchedReplies, replies.length, settleGeometry, headHeight.value]);
+      },
+      [
+        canSettleInitialTail,
+        relayRepliesAvailable,
+        replies.length,
+        settleGeometry,
+        headHeight.value,
+      ],
+    );
+    // Reading starts once the thread holds still for the dwell while this
+    // page is in front and the app is in use.
+    final appInUse = isAppInUse(useAppLifecycleState());
+    final readStateReady = ref.watch(
+      readStateProvider.select((state) => state.isReady),
+    );
+    final readingActive =
+        threadViewportVisible &&
+        !accessDenied &&
+        readStateReady &&
+        appInUse &&
+        (ModalRoute.of(context)?.isCurrent ?? true) &&
+        ConversationPaneScope.isActiveOf(context);
+    final clearCovered = useClearsCoveredUnread(ref, active: readingActive);
     void readVisibleReplies() {
       final readState = ref.read(readStateProvider);
       if (!context.mounted ||
@@ -730,35 +784,56 @@ class ThreadDetailPage extends HookConsumerWidget {
           1 - ((Grid.xs + navigationBottomInset) / viewportHeight) + 0.01;
       final visible = <TimelineMessage>[];
       for (final position in itemPositionsListener.itemPositions.value) {
-        if (position.itemLeadingEdge < topEdge ||
-            position.itemTrailingEdge > bottomEdge) {
-          continue;
-        }
-        if (position.index == headIndex) {
-          // The head is read like a reply. A thread opened directly, from
-          // a link or a notification, may be the only place it is seen.
-          if (!liveDeletionHidesHead) visible.add(liveHead);
-          continue;
-        }
+        // The head is read like a reply. A thread opened directly, from a
+        // link or a notification, may be the only place it is seen.
         final replyIndex = position.index - indexForReply(0);
-        if (replyIndex < 0 || replyIndex >= replies.length) continue;
-        visible.add(replies[replyIndex]);
+        final message = position.index == headIndex
+            ? (liveDeletionHidesHead || identical(liveHead, savedHead)
+                  ? null
+                  : liveHead)
+            : replyIndex < 0 || replyIndex >= replies.length
+            ? null
+            : replies[replyIndex];
+        if (message != null &&
+            !savedOnlyIds.contains(message.id) &&
+            isReadableRow(
+              position,
+              start: topEdge,
+              end: bottomEdge,
+              linked: message.id == initialMessageId,
+            )) {
+          visible.add(message);
+        }
       }
+      // The tail can sit at the scroll end while the keyboard still covers
+      // it, so it counts as the bottom only when its end is above the
+      // keyboard and composer.
+      final tailIndex = _threadTailIndex(replies.length);
+      final atBottom =
+          savedOnlyIds.isEmpty &&
+          replies.isNotEmpty &&
+          threadTailIsVisible() &&
+          itemPositionsListener.itemPositions.value.any(
+            (position) =>
+                position.index == tailIndex &&
+                position.itemTrailingEdge <= bottomEdge,
+          );
       final isDm =
           ref.read(channelsProvider.notifier).channelById(channelId)?.isDm ??
           false;
+      // Displaying a row ends its device-local unread before it is read.
+      final endCatchUp = clearCovered(visible);
       final marks = readingMarks(
-        readState: readState,
+        readState: ref.read(readStateProvider),
         channelId: channelId,
         isDm: isDm,
         currentPubkey: currentPubkey,
         loaded: allMsgs,
         visible: visible,
-        bottom: replies.isNotEmpty && threadTailIsVisible()
-            ? replies.last
-            : null,
+        bottom: atBottom ? replies.last : null,
         threadRootId: queryRootId,
         isRootThread: threadHead.parentId == null,
+        onCatchUp: endCatchUp,
       );
       final notifier = ref.read(readStateProvider.notifier);
       for (final mark in marks.entries) {
@@ -766,33 +841,29 @@ class ThreadDetailPage extends HookConsumerWidget {
       }
     }
 
-    // Reading starts once the thread holds still for the dwell while this
-    // page is in front and the app is in use.
-    final appInUse = isAppInUse(useAppLifecycleState());
-    final readStateReady = ref.watch(
-      readStateProvider.select((state) => state.isReady),
-    );
     useReadingDwell(
       positions: itemPositionsListener.itemPositions,
-      active:
-          threadViewportVisible &&
-          readStateReady &&
-          appInUse &&
-          (ModalRoute.of(context)?.isCurrent ?? true),
+      active: readingActive,
       onDwell: readVisibleReplies,
-      keys: [threadHead.id, readingContentKey(allMsgs), navigationBottomInset],
+      keys: [
+        threadHead.id,
+        readingContentKey(
+          allMsgs.where((message) => !savedOnlyIds.contains(message.id)),
+        ),
+        navigationBottomInset,
+      ],
     );
 
     // Thread-scoped typing indicators (exclude self).
-    final allTyping = ref.watch(channelTypingProvider(channelId));
-    final threadTyping = allTyping
-        .where((e) => e.threadHeadId == threadHead.id)
-        .where(
-          (e) =>
-              currentPubkey == null ||
-              e.pubkey.toLowerCase() != currentPubkey.toLowerCase(),
+    final threadTyping = ref
+        .watch(
+          visibleTypingProvider(
+            channelId,
+            selfPubkey: currentPubkey,
+            include: (e) => e.threadHeadId == threadHead.id,
+          ),
         )
-        .toList();
+        .entries;
 
     // The root of the entire thread chain. If the current thread head is
     // itself a root message its rootId is null, so fall back to its own id.
@@ -852,6 +923,33 @@ class ThreadDetailPage extends HookConsumerWidget {
       return null;
     }, [viewportHeight]);
 
+    // Typing now occupies the timeline, so follow its changing height only
+    // when the reader was already following the tail.
+    useEffect(() {
+      final shouldFollow =
+          isMember &&
+          !isArchived &&
+          initialTailSettle.isComplete &&
+          !tailIntent.isDragging &&
+          !userOptedOutOfTailFollow.value &&
+          (followsThreadTail.value || threadTailIsVisible());
+      if (shouldFollow) followsThreadTail.value = true;
+      // Positioned-list item positions still describe the old row height in
+      // this frame. Correct after layout rather than accepting that stale
+      // tail position as proof the new typing group is visible.
+      tailIntent.schedule(
+        allowed: shouldFollow,
+        revalidate: () =>
+            context.mounted &&
+            itemScrollController.isAttached &&
+            !tailIntent.isDragging &&
+            !userOptedOutOfTailFollow.value &&
+            followsThreadTail.value,
+        action: correctThreadTailInstantly,
+      );
+      return null;
+    }, [threadTyping.isNotEmpty]);
+
     void updateComposerDockHeight(double height) {
       listViewport.reportAfterLayout();
       final previousHeight = composerDockHeight.value;
@@ -909,6 +1007,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                   child: StickyDateHeader(
                     key: const ValueKey('thread-sticky-date-header'),
                     state: stickyDateHeaderState,
+                    scrollVisible: dateScrollActivity,
                   ),
                 ),
               ],
@@ -922,80 +1021,113 @@ class ThreadDetailPage extends HookConsumerWidget {
           Column(
             children: [
               Expanded(
-                child: _ThreadMessageList(
-                  headHeight: headHeight.value ?? 0,
-                  onHeadHeightChanged: (height) {
-                    if (context.mounted) headHeight.value = height;
+                child: NotificationListener<ScrollMetricsNotification>(
+                  onNotification: (notification) {
+                    if (notification.depth == 0) {
+                      _followThreadTailOnMetricsChange(
+                        notification,
+                        activePosition: activeThreadScrollPosition.value,
+                        previousMaxExtents: threadMaxScrollExtents,
+                        followsTail: () =>
+                            followsThreadTail.value &&
+                            initialTailSettle.isComplete &&
+                            !tailIntent.isDragging &&
+                            !userOptedOutOfTailFollow.value &&
+                            !isNavigatingToThreadTail.value &&
+                            // A jump away from the tail can briefly leave the
+                            // position at an estimated end; only content
+                            // growing at the real tail should be followed.
+                            itemPositionsListener.itemPositions.value.any(
+                              (item) =>
+                                  item.index ==
+                                  _threadTailIndex(replies.length),
+                            ),
+                      );
+                    }
+                    return false;
                   },
-                  viewport: listViewport,
-                  onUserScrollStart: () {
-                    hidesLatestForInitialTailSettle.value = false;
-                    hidesLatestForComposerTailCorrection.value = false;
-                    initialTailSettle.abandon();
-                    initialViewportReady.value = true;
-                    tailCorrectionInProgress.value = false;
-                    isNavigatingToThreadTail.value = false;
-                    tailIntent.beginDrag();
-                    userOptedOutOfTailFollow.value = true;
-                    userDragDetachedTailFollow.value = true;
-                    followsThreadTail.value = false;
-                  },
-                  onUserScrollEnd: () {
-                    tailIntent.endDrag();
-                    tailIntent.schedule(
-                      allowed: userOptedOutOfTailFollow.value,
-                      revalidate: () =>
-                          context.mounted &&
-                          itemScrollController.isAttached &&
-                          !tailIntent.isDragging &&
-                          userOptedOutOfTailFollow.value,
-                      action: () {
-                        _resumeThreadTailFollow(
-                          isVisible: threadTailIsVisible,
-                          userOptedOut: userOptedOutOfTailFollow,
-                          followsTail: followsThreadTail,
-                        );
-                        if (!userOptedOutOfTailFollow.value) {
-                          userDragDetachedTailFollow.value = false;
-                        }
-                      },
-                    );
-                  },
-                  visible: threadViewportVisible,
-                  itemScrollController: itemScrollController,
-                  itemPositionsListener: itemPositionsListener,
-                  bottomInset: timelineBottomInset,
-                  replies: replies,
-                  relayReplyState: relayReplyState,
-                  onRetryReplies: () =>
-                      ref.invalidate(threadRepliesProvider(repliesArgs)),
-                  localSendAnimations: localSendAnimations,
-                  trackActiveScrollPosition: trackActiveScrollPosition,
-                  headIsDeleted: liveDeletionHidesHead,
-                  head: liveHead,
-                  stickyDayTimestamp: stickyDayTimestamp,
-                  channelNames: channelNamesMap,
-                  channelId: channelId,
-                  currentPubkey: currentPubkey,
-                  highlightedMessageId: highlightedMessageId.value,
-                  allMessages: allMsgs,
-                  isMember: isMember,
-                  isArchived: isArchived,
-                  composerFocusNode: composerFocusNode,
-                  restoreComposerFocus: () =>
-                      restoreComposerFocus.value?.call(),
-                  childrenByParent: childrenByParent,
+                  child: _ThreadMessageList(
+                    dateScrollActivity: dateScrollActivity,
+                    headHeight: headHeight.value ?? 0,
+                    onHeadHeightChanged: (height) {
+                      if (context.mounted) headHeight.value = height;
+                    },
+                    viewport: listViewport,
+                    onUserScrollStart: () {
+                      hidesLatestForInitialTailSettle.value = false;
+                      hidesLatestForComposerTailCorrection.value = false;
+                      initialTailSettle.abandon();
+                      initialViewportReady.value = true;
+                      didJumpToInitialMessage.value = true;
+                      tailCorrectionInProgress.value = false;
+                      isNavigatingToThreadTail.value = false;
+                      tailIntent.beginDrag();
+                      userOptedOutOfTailFollow.value = true;
+                      userDragDetachedTailFollow.value = true;
+                      followsThreadTail.value = false;
+                    },
+                    onUserScrollEnd: () {
+                      tailIntent.endDrag();
+                      tailIntent.schedule(
+                        allowed: userOptedOutOfTailFollow.value,
+                        revalidate: () =>
+                            context.mounted &&
+                            itemScrollController.isAttached &&
+                            !tailIntent.isDragging &&
+                            userOptedOutOfTailFollow.value,
+                        action: () {
+                          _resumeThreadTailFollow(
+                            isVisible: threadTailIsVisible,
+                            userOptedOut: userOptedOutOfTailFollow,
+                            followsTail: followsThreadTail,
+                          );
+                          if (!userOptedOutOfTailFollow.value) {
+                            userDragDetachedTailFollow.value = false;
+                          }
+                        },
+                      );
+                    },
+                    visible: threadViewportVisible,
+                    itemScrollController: itemScrollController,
+                    itemPositionsListener: itemPositionsListener,
+                    bottomInset: timelineBottomInset,
+                    replies: replies,
+                    knownAgents: threadTyping.isEmpty
+                        ? const {}
+                        : ref.watch(meAgentInventoryProvider).value ?? const {},
+                    inlineTyping: isMember && !isArchived
+                        ? threadTyping
+                        : const [],
+                    relayReplyState: relayReplyState,
+                    showingSavedReplies: showingSavedReplies,
+                    savedOnlyIds: savedOnlyIds,
+                    accessDenied: accessDenied,
+                    onRetryReplies: () =>
+                        ref.invalidate(threadRepliesProvider(repliesArgs)),
+                    localSendAnimations: localSendAnimations,
+                    trackActiveScrollPosition: trackActiveScrollPosition,
+                    headIsDeleted: liveDeletionHidesHead,
+                    headId: threadHead.id,
+                    head: liveHead,
+                    stickyDayTimestamp: stickyDayTimestamp,
+                    channelNames: channelNamesMap,
+                    channelId: channelId,
+                    currentPubkey: currentPubkey,
+                    highlightedMessageId: highlightedMessageId.value,
+                    allMessages: allMsgs,
+                    isMember: isMember,
+                    isArchived: isArchived,
+                    composerFocusNode: composerFocusNode,
+                    restoreComposerFocus: canReply
+                        ? () => restoreComposerFocus.value?.call()
+                        : null,
+                    childrenByParent: childrenByParent,
+                  ),
                 ),
               ),
-              if (!isMember || isArchived)
-                _ThreadTypingIndicator(
-                  channelId: channelId,
-                  entries: threadTyping,
-                  animated: false,
-                ),
             ],
           ),
-          if (isMember && !isArchived)
+          if (canReply && !accessDenied)
             AndroidImeLift(
               child: Align(
                 alignment: Alignment.bottomCenter,
@@ -1005,10 +1137,6 @@ class ThreadDetailPage extends HookConsumerWidget {
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      _ThreadTypingIndicator(
-                        channelId: channelId,
-                        entries: threadTyping,
-                      ),
                       ComposeBar(
                         channelId: channelId,
                         focusNode: composerFocusNode,
@@ -1017,6 +1145,13 @@ class ThreadDetailPage extends HookConsumerWidget {
                         hintText: 'Reply in thread\u2026',
                         threadHeadId: threadHead.id,
                         rootId: effectiveRootId,
+                        prefillScopeMessages: channel?.isDm ?? true
+                            ? null
+                            : [
+                                if (!liveDeletionHidesHead && liveHead != null)
+                                  liveHead,
+                                ...replies,
+                              ],
                         onFocusRequested: followThreadTailFromComposer,
                         onSend:
                             (
@@ -1047,7 +1182,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                 id: 'thread',
                 visible:
                     threadViewportVisible &&
-                    hasFetchedReplies &&
+                    (hasFetchedReplies || showingSavedReplies) &&
                     !isNavigatingToThreadTail.value &&
                     !hidesLatestForInitialTailSettle.value &&
                     !hidesLatestForComposerTailCorrection.value &&

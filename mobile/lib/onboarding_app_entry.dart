@@ -1,15 +1,22 @@
 import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import 'features/pairing/pairing_page.dart';
+import 'organization_app_entry.dart';
 import 'features/pairing/pairing_provider.dart';
 import 'shared/hosted/hosted_flow_provider.dart';
+import 'shared/hosted/account_community_sync_status.dart';
 import 'shared/hosted/hosted_flow.dart';
+import 'shared/hosted/hosted_communities.dart';
+import 'shared/hosted/use_known_communities.dart';
 import 'shared/hosted/hosted_environment.dart';
+import 'shared/hosted/organization_environment.dart';
 import 'shared/hosted/hosted_community_creation.dart';
 import 'shared/hosted/hosted_flow_problem_message.dart';
+import 'shared/widgets/confirmation_dialog.dart';
 
 /// Navigation over the existing branded welcome surface.
 class OnboardingAppEntry extends HookConsumerWidget {
@@ -17,14 +24,24 @@ class OnboardingAppEntry extends HookConsumerWidget {
     super.key,
     this.addingCommunity = false,
     this.restoreAccount = true,
+    this.showFindCommunities = true,
     this.onExit,
+    this.onComplete,
   });
   final bool addingCommunity;
   final bool restoreAccount;
+
+  /// The switcher already lists account destinations above its Add action.
+  final bool showFindCommunities;
   final VoidCallback? onExit;
+
+  /// Continues picker restoration before the completed Add route is removed.
+  final VoidCallback? onComplete;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Fixed per build, so the hooks below always run in the same order.
+    if (OrganizationEnvironment.enabled) return const OrganizationAppEntry();
     final existingUser = useState(false);
     final creating = useState(false);
     final enteringCommunityLink = useState(false);
@@ -32,18 +49,26 @@ class OnboardingAppEntry extends HookConsumerWidget {
         ? ref.watch(hostedFlowProvider)
         : null;
     useListenable(flow);
+    useListenable(flow?.account.subjectChanges);
     useEffect(() {
       if (flow == null || !restoreAccount) return null;
       Future<void> restore() async {
         await flow.initialize();
+        if (!context.mounted) return;
+        if (addingCommunity && flow.stage == HostedFlowStage.complete) {
+          await flow.leave();
+        }
         if (context.mounted) await flow.signInAccount(openBrowser: false);
       }
 
       unawaited(restore());
       return null;
     }, [flow]);
+    final finishing = useRef(false);
     void finishEntry() {
-      if (!addingCommunity) return;
+      if (!addingCommunity || finishing.value) return;
+      finishing.value = true;
+      onComplete?.call();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!context.mounted) return;
         final route = ModalRoute.of(context);
@@ -83,7 +108,22 @@ class OnboardingAppEntry extends HookConsumerWidget {
         flow.accountOnly &&
         (flow.stage == HostedFlowStage.working ||
             flow.stage == HostedFlowStage.signIn);
-    final connected = flow?.account.account != null;
+    final account = flow?.account.account;
+    final connected = account != null;
+    final signedInLanding = connected && !addingCommunity && !signingIn;
+    final email = account?.email?.trim();
+    final hasKnownCommunities = useKnownCommunities(
+      accountKey: flow?.account.account?.subject,
+      active:
+          showFindCommunities &&
+          !existingUser.value &&
+          !enteringCommunityLink.value &&
+          !creating.value &&
+          flow?.stage == HostedFlowStage.idle &&
+          (ModalRoute.of(context)?.isCurrent ?? true),
+      load: () async =>
+          (await loadKnownAccountCommunities(flow!.account)).isNotEmpty,
+    );
     final problem = flow != null && flow.accountOnly ? flow.problem : null;
     final status = flow == null
         ? null
@@ -91,19 +131,59 @@ class OnboardingAppEntry extends HookConsumerWidget {
         ? hostedFlowProblemMessage(problem)
         : busy
         ? null
+        : connected
+        ? email != null && email.isNotEmpty
+              ? 'Signed in as $email'
+              : 'Signed in to BuilderLab'
         : flow.noCommunitiesToAdd
         ? 'No communities available to add. Scan a QR code or use an invite link.'
-        : connected
-        ? 'Connected to Builderlab.'
         : null;
+    final confirmingSignOut = useRef(false);
+    Future<void> confirmSignOut() async {
+      if (confirmingSignOut.value) return;
+      confirmingSignOut.value = true;
+      try {
+        final confirmed = await showDestructiveConfirmation(
+          context: context,
+          title: 'Sign out of BuilderLab?',
+          message:
+              '${email != null && email.isNotEmpty ? 'You’re signed in as $email. ' : ''}'
+              'Your saved Buzz identities will stay on this device.',
+          confirmLabel: 'Sign out',
+        );
+        if (!context.mounted ||
+            !confirmed ||
+            flow?.account.account?.subject != account?.subject) {
+          return;
+        }
+        await flow?.signOutAccount();
+      } finally {
+        confirmingSignOut.value = false;
+      }
+    }
+
     final handlingBack = useRef(false);
     void back() {
+      final pairingStatus = ref.read(pairingProvider).status;
+      if (pairingStatus == PairingStatus.transferring ||
+          pairingStatus == PairingStatus.storing ||
+          pairingStatus == PairingStatus.success) {
+        return;
+      }
       // Nested page and entry PopScopes receive the same system Back event.
       if (handlingBack.value) return;
       handlingBack.value = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         handlingBack.value = false;
       });
+      if (signedInLanding &&
+          !busy &&
+          !existingUser.value &&
+          !enteringCommunityLink.value &&
+          !creating.value) {
+        unawaited(confirmSignOut());
+        return;
+      }
       if (!existingUser.value &&
           !enteringCommunityLink.value &&
           !creating.value &&
@@ -125,6 +205,7 @@ class OnboardingAppEntry extends HookConsumerWidget {
 
     return PopScope(
       canPop:
+          !signedInLanding &&
           onExit == null &&
           !existingUser.value &&
           !enteringCommunityLink.value &&
@@ -139,49 +220,71 @@ class OnboardingAppEntry extends HookConsumerWidget {
           return;
         }
         if (!didPop &&
-            (existingUser.value ||
+            (signedInLanding ||
+                existingUser.value ||
                 creating.value ||
                 enteringCommunityLink.value)) {
           back();
         }
       },
-      child: PairingPage(
-        connectionLanding: true,
-        showConnectionOptions:
-            !HostedEnvironment.enabled || addingCommunity || connected,
-        addingCommunity: addingCommunity,
-        existingUser: existingUser.value,
-        enteringCommunityLink: enteringCommunityLink.value,
-        creatingCommunity: creating.value,
-        onSubmitCommunity: flow == null
-            ? null
-            : (name) {
-                creating.value = false;
-                unawaited(flow.start(HostedCreateCommunity(name)));
-              },
-        onCommunityLink: () => enteringCommunityLink.value = true,
-        onCreateCommunity: flow == null || busy
-            ? null
-            : () => creating.value = true,
-        onBuilderlab: flow == null
-            ? null
-            : signingIn
-            ? () => unawaited(flow.leave())
-            : busy
-            ? null
-            : () => unawaited(flow.signInAccount()),
-        accountStatus: status,
-        builderlabBusy: busy,
-        signInPending: signingIn || busy,
-        builderlabLabel: signingIn
-            ? 'Cancel sign-in'
-            : busy
-            ? 'Connecting…'
-            : connected
-            ? 'Continue with Builderlab'
-            : 'Sign in with email',
-        onWelcomeBack: back,
-        onAlreadyUseBuzz: () => existingUser.value = true,
+      child: Column(
+        children: [
+          Expanded(
+            child: PairingPage(
+              connectionLanding: true,
+              showConnectionOptions:
+                  !HostedEnvironment.enabled || addingCommunity || connected,
+              addingCommunity: addingCommunity,
+              signedInOnboarding: connected && !addingCommunity && !signingIn,
+              hasKnownCommunities: showFindCommunities && hasKnownCommunities,
+              existingUser: existingUser.value,
+              enteringCommunityLink: enteringCommunityLink.value,
+              creatingCommunity: creating.value,
+              onSubmitCommunity: flow == null
+                  ? null
+                  : (name) {
+                      creating.value = false;
+                      unawaited(flow.start(HostedCreateCommunity(name)));
+                    },
+              onCommunityLink: () => enteringCommunityLink.value = true,
+              onCreateCommunity: flow == null || busy
+                  ? null
+                  : () => creating.value = true,
+              onFindCommunities: flow == null || busy
+                  ? null
+                  : () => unawaited(flow.signInAccount(discoverOnly: true)),
+              onBuilderlab: flow == null
+                  ? null
+                  : signingIn
+                  ? () => unawaited(flow.leave())
+                  : busy
+                  ? null
+                  : () => unawaited(flow.signInAccount()),
+              onImportIdentity: flow == null || busy
+                  ? null
+                  : () => unawaited(flow.signInAccount(importIdentity: true)),
+              accountStatus: status,
+              builderlabBusy: busy && !signingIn,
+              signInPending: signingIn || busy,
+              builderlabLabel: signingIn
+                  ? 'Cancel sign-in'
+                  : busy
+                  ? 'Connecting…'
+                  : connected
+                  ? 'Continue with Builderlab'
+                  : 'Sign in with email',
+              onWelcomeBack: back,
+              onAlreadyUseBuzz: () => existingUser.value = true,
+            ),
+          ),
+          if (connected)
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 180),
+              child: const SingleChildScrollView(
+                child: Material(child: AccountCommunitySyncStatus()),
+              ),
+            ),
+        ],
       ),
     );
   }

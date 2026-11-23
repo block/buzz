@@ -104,19 +104,26 @@ class ReminderService {
   }) : _signedEventRelay = signedEventRelay,
        _crypto = crypto;
 
-  /// Encrypt, sign, and publish a new pending reminder. [notBefore] is a Unix
+  /// Encrypt, sign, and publish a pending reminder. [notBefore] is a Unix
   /// timestamp in seconds after which clients surface the reminder.
+  ///
+  /// Pass [replacingDTag] to reschedule an existing reminder: kind 30300 is
+  /// addressable, so reusing its `d` tag replaces it instead of adding one.
   Future<void> createReminder({
     required ReminderTarget target,
     required int notBefore,
     String? note,
+    String? replacingDTag,
   }) async {
     final plaintext = buildReminderPlaintext(target: target, note: note);
     final ciphertext = _crypto.encrypt(plaintext);
     await _signedEventRelay.submit(
       kind: EventKind.eventReminder,
       content: ciphertext,
-      tags: buildReminderTags(dTag: randomReminderDTag(), notBefore: notBefore),
+      tags: buildReminderTags(
+        dTag: replacingDTag ?? randomReminderDTag(),
+        notBefore: notBefore,
+      ),
     );
   }
 }

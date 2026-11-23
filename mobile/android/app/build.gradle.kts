@@ -43,6 +43,26 @@ fun isValidPushGatewayOrigin(value: String, requireHttps: Boolean): Boolean {
         (if (requireHttps) uri.port == -1 else uri.port == -1 || uri.port in 1..65535)
 }
 
+// Firebase Cloud Messaging is configured per distributor at build time and
+// nothing is committed. Supply all four values from the distributor's Firebase
+// project (its Android app's settings), or none: a build without them has no
+// push wake and everything else works.
+val firebaseValues =
+    mapOf(
+        "google_app_id" to providers.environmentVariable("BUZZ_FIREBASE_APP_ID").orNull,
+        "google_api_key" to providers.environmentVariable("BUZZ_FIREBASE_API_KEY").orNull,
+        "project_id" to providers.environmentVariable("BUZZ_FIREBASE_PROJECT_ID").orNull,
+        "gcm_defaultSenderId" to providers.environmentVariable("BUZZ_FIREBASE_SENDER_ID").orNull,
+    )
+val suppliedFirebaseValues = firebaseValues.filterValues { !it.isNullOrBlank() }
+if (suppliedFirebaseValues.isNotEmpty() && suppliedFirebaseValues.size != firebaseValues.size) {
+    throw GradleException(
+        "Firebase configuration needs BUZZ_FIREBASE_APP_ID, BUZZ_FIREBASE_API_KEY, " +
+            "BUZZ_FIREBASE_PROJECT_ID and BUZZ_FIREBASE_SENDER_ID together; supplied only: " +
+            suppliedFirebaseValues.keys.sorted().joinToString(", "),
+    )
+}
+
 tasks.matching { it.name.startsWith("compileFlutterBuild") }.configureEach {
     doFirst {
         val requireHttps = !name.endsWith("Debug", ignoreCase = true)
@@ -160,6 +180,11 @@ android {
         versionName = flutter.versionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         resValue("string", "app_name", "Buzz")
+        // Firebase reads its options from these resources when no
+        // google-services file is processed.
+        suppliedFirebaseValues.forEach { (name, value) ->
+            resValue("string", name, requireNotNull(value))
+        }
     }
 
     signingConfigs {
@@ -197,8 +222,12 @@ android {
 }
 
 dependencies {
+    implementation(platform("com.google.firebase:firebase-bom:35.2.0"))
+    implementation("com.google.firebase:firebase-messaging")
+    implementation("androidx.lifecycle:lifecycle-process:2.10.0")
     implementation("com.google.android.play:age-signals:0.0.4")
     implementation("androidx.appcompat:appcompat:1.6.1")
+    implementation("androidx.browser:browser:1.9.0")
 
     testImplementation(kotlin("test"))
 

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use buzz_core::channel::CHANNEL_CREATED_AT_TAG;
 use buzz_core::kind::{
     KIND_MANAGED_AGENT, KIND_PRESENCE_SNAPSHOT, KIND_PRESENCE_UPDATE, KIND_TEAM,
 };
@@ -8,102 +9,153 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::client::{
-    extract_d_tag, extract_p_tags, extract_tag_value, normalize_write_response,
-    print_create_response, BuzzClient,
+    extract_d_tag, extract_p_tags, normalize_write_response, print_create_response, BuzzClient,
 };
 use crate::commands::agents::fetch_archived_snapshot;
 use crate::commands::channel_templates::{self, ChannelTemplateRecord, TemplateAgentRoster};
 use crate::commands::users::presence_subject;
 use crate::error::CliError;
-use crate::validate::{parse_uuid, read_or_stdin, validate_hex64, validate_uuid};
+use crate::validate::{
+    parse_uuid, read_file_or_stdin, read_or_stdin, validate_hex64, validate_uuid,
+};
 
-fn extract_channel_metadata(e: &serde_json::Value) -> serde_json::Value {
-    serde_json::json!({
-        "channel_id": extract_d_tag(e),
-        "name": extract_tag_value(e, "name"),
-        "description": extract_tag_value(e, "about"),
-        "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
-    })
+/// Stable, scriptable projection of a kind:39000 channel-metadata event: the
+/// JSON object `channels list`, `get` and `search` print for each channel.
+#[derive(Debug, Default, serde::Serialize)]
+struct ChannelSummary {
+    channel_id: String,
+    name: Option<String>,
+    /// Value of the first `t` tag (`stream`, `forum`, `dm`, `workflow`, `system`).
+    channel_type: Option<String>,
+    /// `open` or `private`, from the single-element `["public"]` or
+    /// `["private"]` tag; the same values `--visibility` takes.
+    visibility: Option<String>,
+    /// Values of the `t` tags after the first, in event order.
+    labels: Vec<String>,
+    /// Whether the relay marked the channel `["archived", "true"]`.
+    archived: bool,
+    /// The NIP-29 `about` tag.
+    description: Option<String>,
+    topic: Option<String>,
+    purpose: Option<String>,
+    /// Seconds without a message before the channel archives, from `["ttl", ...]`.
+    ttl_seconds: Option<i64>,
+    /// When the channel was created, from the `created_at` tag (NIP-CL).
+    created_at: Option<u64>,
+    /// When the channel metadata last changed: the event's own `created_at`.
+    updated_at: Option<u64>,
 }
+
+impl ChannelSummary {
+    fn from_event(event: &serde_json::Value) -> Self {
+        let mut summary = Self {
+            updated_at: event.get("created_at").and_then(|v| v.as_u64()),
+            ..Self::default()
+        };
+        let mut seen_type = false;
+        let tags = event.get("tags").and_then(|t| t.as_array());
+        for tag in tags.into_iter().flatten().filter_map(|t| t.as_array()) {
+            let key = tag.first().and_then(|v| v.as_str()).unwrap_or("");
+            let val = tag.get(1).and_then(|v| v.as_str());
+            match key {
+                "d" => summary.channel_id = val.unwrap_or_default().to_string(),
+                "name" => summary.name = val.map(str::to_string),
+                // The first `t` is the channel type, as in buzz-core's
+                // `channel_type_from_group_state_tags`; later `t` tags are labels.
+                "t" if !seen_type => {
+                    seen_type = true;
+                    summary.channel_type = val.map(str::to_string);
+                }
+                "t" => summary.labels.extend(val.map(str::to_string)),
+                // NIP-29 marks private channels; Buzz adds `public` for open ones.
+                // The presence of either tag is the source of truth; tag value is unused.
+                "private" => summary.visibility = Some("private".to_string()),
+                "public" => summary.visibility = Some("open".to_string()),
+                "archived" => summary.archived = val == Some("true"),
+                "about" => summary.description = val.map(str::to_string),
+                "topic" => summary.topic = val.map(str::to_string),
+                "purpose" => summary.purpose = val.map(str::to_string),
+                "ttl" => summary.ttl_seconds = val.and_then(|value| value.parse().ok()),
+                CHANNEL_CREATED_AT_TAG => summary.created_at = val.and_then(|v| v.parse().ok()),
+                _ => {}
+            }
+        }
+        summary
+    }
+}
+
+/// Most kind:39002 memberships `channels list --member` reads.
+const MAX_LISTED_MEMBERSHIPS: u32 = 10_000;
 
 pub async fn cmd_list_channels(
     client: &BuzzClient,
     visibility: Option<&str>,
     member: Option<bool>,
+    include_archived: bool,
     limit: Option<u32>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     let effective_limit = limit.unwrap_or(500);
+    let keep = |c: &ChannelSummary| is_listed(c, visibility, include_archived);
+    // `--limit` counts the channels printed, so both paths keep reading past
+    // the ones the filters drop.
     let events = if member == Some(true) {
-        // Step 1: find channel IDs where we're a member (kind:39002)
-        let my_pk = client.keys().public_key().to_hex();
+        // Step 1: find channel IDs where we're a member (kind:39002). Read up
+        // to a fixed bound rather than `--limit`, since some may be filtered.
+        let my_pk = client.public_key().to_hex();
         let member_filter = serde_json::json!({
             "kinds": [39002],
             "#p": [my_pk],
         });
         let member_events = client
-            .query_paginated(member_filter, effective_limit)
+            .query_paginated(member_filter, MAX_LISTED_MEMBERSHIPS)
             .await?;
         let channel_ids: Vec<String> = member_events
             .iter()
             .map(extract_d_tag)
             .filter(|id| !id.is_empty())
             .collect();
-        if channel_ids.is_empty() {
-            println!("[]");
-            return Ok(());
+        // Step 2: fetch kind:39000 metadata one bounded chunk of IDs at a
+        // time, until `--limit` channels pass the filters.
+        let mut kept = Vec::new();
+        for chunk in channel_ids.chunks(crate::client::QUERY_PAGE_SIZE as usize) {
+            let metadata_filter = serde_json::json!({
+                "kinds": [39000],
+                "#d": chunk,
+            });
+            let page = client
+                .query_paginated(metadata_filter, chunk.len() as u32)
+                .await?;
+            kept.extend(
+                page.into_iter()
+                    .filter(|e| keep(&ChannelSummary::from_event(e))),
+            );
+            if kept.len() >= effective_limit as usize {
+                break;
+            }
         }
-        // Step 2: fetch kind:39000 metadata for those channels.
-        let metadata_filter = serde_json::json!({
-            "kinds": [39000],
-            "#d": channel_ids,
-        });
-        client
-            .query_paginated(metadata_filter, effective_limit)
-            .await?
+        kept.truncate(effective_limit as usize);
+        kept
     } else {
         let filter = serde_json::json!({
             "kinds": [39000],
         });
-        client.query_paginated(filter, effective_limit).await?
+        client
+            .query_paginated_keeping(filter, effective_limit, |e| {
+                keep(&ChannelSummary::from_event(e))
+            })
+            .await?
     };
 
-    let channels: Vec<serde_json::Value> = events
-        .iter()
-        .filter(|e| {
-            if let Some(vis) = visibility {
-                // NIP-29: relay emits ["public"] or ["private"] single-element tags
-                let nip29_tag = match vis {
-                    "open" => "public",
-                    _ => vis,
-                };
-                e.get("tags")
-                    .and_then(|t| t.as_array())
-                    .map(|tags| {
-                        tags.iter().any(|tag| {
-                            tag.as_array()
-                                .map(|a| {
-                                    a.len() == 1
-                                        && a.first().and_then(|v| v.as_str()) == Some(nip29_tag)
-                                })
-                                .unwrap_or(false)
-                        })
-                    })
-                    .unwrap_or(false)
-            } else {
-                true
-            }
-        })
-        .map(extract_channel_metadata)
-        .collect();
+    let channels: Vec<ChannelSummary> = events.iter().map(ChannelSummary::from_event).collect();
     let output = match format {
         crate::OutputFormat::Compact => {
             let compact: Vec<serde_json::Value> = channels
                 .iter()
                 .map(|c| {
                     serde_json::json!({
-                        "channel_id": c.get("channel_id").cloned().unwrap_or_default(),
-                        "name": c.get("name").cloned().unwrap_or_default(),
+                        "channel_id": c.channel_id,
+                        "name": c.name.as_deref().unwrap_or_default(),
                     })
                 })
                 .collect();
@@ -138,89 +190,44 @@ pub async fn cmd_search_channels(
     });
     let arr = client.query_paginated(filter, limit).await?;
 
-    let needle = query.to_ascii_lowercase();
-    let mut matches: Vec<ChannelSummary> = arr
+    let matches = search_matches(&arr, &query.to_ascii_lowercase(), exact, include_archived);
+    let output = serde_json::to_string(&matches).expect("serializing ChannelSummary");
+    println!("{output}");
+    Ok(())
+}
+
+/// Whether `channels list` prints a channel: archived ones only with
+/// `include_archived`, and only `visibility` (`open`/`private`) if given.
+fn is_listed(channel: &ChannelSummary, visibility: Option<&str>, include_archived: bool) -> bool {
+    (visibility.is_none() || channel.visibility.as_deref() == visibility)
+        && (include_archived || !channel.archived)
+}
+
+/// The channels `channels search` prints, sorted by name then ID. Events
+/// without a channel ID or a name never match.
+fn search_matches(
+    events: &[serde_json::Value],
+    needle_lower: &str,
+    exact: bool,
+    include_archived: bool,
+) -> Vec<ChannelSummary> {
+    let mut matches: Vec<ChannelSummary> = events
         .iter()
-        .filter_map(ChannelSummary::from_event)
-        .filter(|c| if include_archived { true } else { !c.archived })
-        .filter(|c| name_matches(&c.name, &needle, exact))
+        .map(ChannelSummary::from_event)
+        .filter(|c| !c.channel_id.is_empty())
+        .filter(|c| include_archived || !c.archived)
+        .filter(|c| {
+            c.name
+                .as_deref()
+                .is_some_and(|name| name_matches(name, needle_lower, exact))
+        })
         .collect();
     matches.sort_by(|a, b| {
         a.name
             .cmp(&b.name)
             .then_with(|| a.channel_id.cmp(&b.channel_id))
     });
-
-    let output = serde_json::to_string(&matches).expect("serializing ChannelSummary");
-    println!("{output}");
-    Ok(())
-}
-
-/// Stable, scriptable projection of a kind:39000 channel-metadata event.
-#[derive(serde::Serialize)]
-struct ChannelSummary {
-    channel_id: String,
-    name: String,
-    channel_type: Option<String>,
-    visibility: Option<String>,
-    archived: bool,
-    about: Option<String>,
-    topic: Option<String>,
-    purpose: Option<String>,
-    ttl_seconds: Option<i64>,
-}
-
-impl ChannelSummary {
-    /// Parse a kind:39000 event JSON value into a summary. Returns `None` if the
-    /// event lacks the required `d` (channel UUID) or `name` tags.
-    fn from_event(event: &serde_json::Value) -> Option<Self> {
-        let tags = event.get("tags")?.as_array()?;
-        let mut channel_id: Option<String> = None;
-        let mut name: Option<String> = None;
-        let mut channel_type: Option<String> = None;
-        let mut visibility: Option<String> = None;
-        let mut archived = false;
-        let mut about: Option<String> = None;
-        let mut topic: Option<String> = None;
-        let mut purpose: Option<String> = None;
-        let mut ttl_seconds: Option<i64> = None;
-
-        for tag in tags {
-            let Some(tag_arr) = tag.as_array() else {
-                continue;
-            };
-            let key = tag_arr.first().and_then(|v| v.as_str()).unwrap_or("");
-            let val = tag_arr.get(1).and_then(|v| v.as_str());
-            match key {
-                "d" => channel_id = val.map(str::to_string),
-                "name" => name = val.map(str::to_string),
-                // The first `t` is the channel type; later `t` tags are labels.
-                "t" if channel_type.is_none() => channel_type = val.map(str::to_string),
-                // NIP-29 emits both `private` and `public` (Buzz adds the latter).
-                // The presence of either tag is the source of truth; tag value is unused.
-                "private" => visibility = Some("private".to_string()),
-                "public" => visibility = Some("public".to_string()),
-                "about" => about = val.map(str::to_string),
-                "topic" => topic = val.map(str::to_string),
-                "purpose" => purpose = val.map(str::to_string),
-                "ttl" => ttl_seconds = val.and_then(|value| value.parse().ok()),
-                "archived" => archived = val == Some("true"),
-                _ => {}
-            }
-        }
-
-        Some(ChannelSummary {
-            channel_id: channel_id?,
-            name: name?,
-            channel_type,
-            visibility,
-            archived,
-            about,
-            topic,
-            purpose,
-            ttl_seconds,
-        })
-    }
+    matches
 }
 
 fn name_matches(name: &str, needle_lower: &str, exact: bool) -> bool {
@@ -242,9 +249,9 @@ pub async fn cmd_get_channel(client: &BuzzClient, channel_id: &str) -> Result<()
     let resp = client.query(&filter).await?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     if let Some(e) = events.first() {
-        let mut normalized = extract_channel_metadata(e);
-        normalized["pubkey"] =
-            serde_json::json!(e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""));
+        let mut normalized = serde_json::to_value(ChannelSummary::from_event(e))
+            .map_err(|err| CliError::Other(format!("serializing channel: {err}")))?;
+        normalized["pubkey"] = e.get("pubkey").cloned().unwrap_or(serde_json::Value::Null);
         println!("{normalized}");
     } else {
         println!("null");
@@ -457,7 +464,7 @@ pub async fn cmd_restore_canvas(
     let builder =
         buzz_sdk::build_set_canvas_after_head(channel_uuid, &content, head_id, head_created_at)
             .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let our_id = event.id.to_hex();
     let submit_result = client.submit_event(event).await;
 
@@ -733,7 +740,7 @@ pub async fn cmd_create_channel(
     )
     .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     print_create_response(&resp, "channel_id", &channel_uuid.to_string());
     Ok(())
@@ -1493,7 +1500,7 @@ pub async fn cmd_create_channel_from_template(
     // be selected.
     let owner = client
         .auth_tag_owner_hex()
-        .unwrap_or_else(|| client.keys().public_key().to_hex());
+        .unwrap_or_else(|| client.public_key().to_hex());
 
     let resolved = build_roster_resolution(client, &owner, &template.agents).await?;
 
@@ -1519,7 +1526,7 @@ pub async fn cmd_create_channel_from_template(
         unlisted,
     )
     .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     client.submit_event(event).await?;
 
     let mut canvas_applied = false;
@@ -1532,7 +1539,7 @@ pub async fn cmd_create_channel_from_template(
             // `Some("none")` to match the create-assertion convention.
             let builder = buzz_sdk::build_set_canvas(channel_uuid, &content, Some("none"))
                 .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
-            let event = client.sign_event(builder)?;
+            let event = client.sign_event(builder).await?;
             client.submit_event(event).await?;
             Ok(())
         }
@@ -1554,7 +1561,7 @@ pub async fn cmd_create_channel_from_template(
                 Some(buzz_sdk::MemberRole::Bot),
             )
             .map_err(|e| CliError::Other(format!("build_add_member failed: {e}")))?;
-            let event = client.sign_event(builder)?;
+            let event = client.sign_event(builder).await?;
             client.submit_event(event).await?;
             Ok(())
         }
@@ -1640,6 +1647,7 @@ fn validate_update_channel_fields(
     ttl_change: Option<Option<i32>>,
     join_role: Option<buzz_sdk::ChannelJoinRole>,
     unlisted: Option<bool>,
+    auto_join: Option<bool>,
 ) -> Result<(), CliError> {
     if name.is_none()
         && description.is_none()
@@ -1647,9 +1655,10 @@ fn validate_update_channel_fields(
         && ttl_change.is_none()
         && join_role.is_none()
         && unlisted.is_none()
+        && auto_join.is_none()
     {
         return Err(CliError::Usage(
-            "at least one field required (--name, --description, --visibility, --ttl, --no-ttl, --join-role, --unlisted)"
+            "at least one field required (--name, --description, --visibility, --ttl, --no-ttl, --join-role, --unlisted, --auto-join)"
                 .into(),
         ));
     }
@@ -1667,6 +1676,7 @@ pub async fn cmd_update_channel(
     no_ttl: bool,
     join_role: Option<buzz_sdk::ChannelJoinRole>,
     unlisted: Option<bool>,
+    auto_join: Option<bool>,
 ) -> Result<(), CliError> {
     // Outer Option: None leaves TTL unchanged. Inner: Some(secs) sets it,
     // None (from --no-ttl) clears it, making the channel permanent.
@@ -1683,6 +1693,7 @@ pub async fn cmd_update_channel(
         ttl_change,
         join_role,
         unlisted,
+        auto_join,
     )?;
     let channel_uuid = parse_uuid(channel_id)?;
     // `--unlisted false` needs no check: a relay without the extension lists
@@ -1699,10 +1710,11 @@ pub async fn cmd_update_channel(
         ttl_change,
         join_role,
         unlisted,
+        auto_join,
     )
     .map_err(|e| CliError::Other(format!("build_update_channel failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1718,7 +1730,7 @@ pub async fn cmd_set_channel_topic(
     let builder = buzz_sdk::build_set_topic(channel_uuid, topic)
         .map_err(|e| CliError::Other(format!("build_set_topic failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1734,7 +1746,7 @@ pub async fn cmd_set_channel_purpose(
     let builder = buzz_sdk::build_set_purpose(channel_uuid, purpose)
         .map_err(|e| CliError::Other(format!("build_set_purpose failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1746,7 +1758,7 @@ pub async fn cmd_join_channel(client: &BuzzClient, channel_id: &str) -> Result<(
     let builder = buzz_sdk::build_join(channel_uuid)
         .map_err(|e| CliError::Other(format!("build_join failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1758,7 +1770,7 @@ pub async fn cmd_leave_channel(client: &BuzzClient, channel_id: &str) -> Result<
     let builder = buzz_sdk::build_leave(channel_uuid)
         .map_err(|e| CliError::Other(format!("build_leave failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1770,7 +1782,7 @@ pub async fn cmd_archive_channel(client: &BuzzClient, channel_id: &str) -> Resul
     let builder = buzz_sdk::build_archive(channel_uuid)
         .map_err(|e| CliError::Other(format!("build_archive failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1782,7 +1794,7 @@ pub async fn cmd_unarchive_channel(client: &BuzzClient, channel_id: &str) -> Res
     let builder = buzz_sdk::build_unarchive(channel_uuid)
         .map_err(|e| CliError::Other(format!("build_unarchive failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1794,7 +1806,7 @@ pub async fn cmd_delete_channel(client: &BuzzClient, channel_id: &str) -> Result
     let builder = buzz_sdk::build_delete_channel(channel_uuid)
         .map_err(|e| CliError::Other(format!("build_delete_channel failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1803,10 +1815,14 @@ pub async fn cmd_delete_channel(client: &BuzzClient, channel_id: &str) -> Result
 pub async fn cmd_add_channel_member(
     client: &BuzzClient,
     channel_id: &str,
-    pubkey: &str,
+    pubkeys: &[String],
+    pubkeys_file: Option<&str>,
     role: Option<&str>,
 ) -> Result<(), CliError> {
-    validate_hex64(pubkey)?;
+    // A lone `--pubkey` keeps the single-add output and errors unchanged.
+    let single_add = pubkeys.len() == 1 && pubkeys_file.is_none();
+    let file_text = pubkeys_file.map(read_file_or_stdin).transpose()?;
+    let pubkeys = collect_member_pubkeys(pubkeys, file_text.as_deref())?;
     let channel_uuid = parse_uuid(channel_id)?;
 
     let typed_role = match role {
@@ -1822,13 +1838,188 @@ pub async fn cmd_add_channel_member(
             )))
         }
     };
-    let builder = buzz_sdk::build_add_member(channel_uuid, pubkey, typed_role)
-        .map_err(|e| CliError::Other(format!("build_add_member failed: {e}")))?;
+    if let (true, [pubkey]) = (single_add, pubkeys.as_slice()) {
+        let resp = send_add_members(
+            client,
+            channel_uuid,
+            std::slice::from_ref(pubkey),
+            typed_role,
+        )
+        .await?;
+        println!("{}", normalize_write_response(&resp));
+        return Ok(());
+    }
 
-    let event = client.sign_event(builder)?;
-    let resp = client.submit_event(event).await?;
-    println!("{}", normalize_write_response(&resp));
-    Ok(())
+    // Chunks go out in order: concurrent kind:9000 writes race on the relay.
+    let mut report = AddMembersReport::default();
+    let mut chunks = pubkeys.chunks(buzz_sdk::MAX_MEMBERS_PER_ADD);
+    while let Some(chunk) = chunks.next() {
+        let outcome = send_add_members(client, channel_uuid, chunk, typed_role).await;
+        if !report.record(chunk, outcome) {
+            // A relay from before block/buzz#8575 applies only the first
+            // person of a chunk, so sending the rest would only add more
+            // unknowns.
+            report.unknown.extend(chunks.flatten().cloned());
+            break;
+        }
+    }
+    println!("{}", report.to_json());
+    if report.is_ok() {
+        Ok(())
+    } else {
+        Err(CliError::Other(
+            "some people were not added; see `rejected`, `failed` and `unknown`".into(),
+        ))
+    }
+}
+
+async fn send_add_members(
+    client: &BuzzClient,
+    channel_uuid: Uuid,
+    pubkeys: &[String],
+    role: Option<buzz_sdk::MemberRole>,
+) -> Result<String, CliError> {
+    let refs: Vec<&str> = pubkeys.iter().map(String::as_str).collect();
+    let builder = buzz_sdk::build_add_members(channel_uuid, &refs, role)
+        .map_err(|e| CliError::Other(format!("build_add_members failed: {e}")))?;
+    let event = client.sign_event(builder).await?;
+    client.submit_event(event).await
+}
+
+/// Merge `--pubkey` values and `--pubkeys-file` lines (blank lines skipped)
+/// into one validated, lowercased list without duplicates, in input order.
+fn collect_member_pubkeys(
+    flags: &[String],
+    file_text: Option<&str>,
+) -> Result<Vec<String>, CliError> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let file_lines = file_text
+        .into_iter()
+        .flat_map(str::lines)
+        .enumerate()
+        .map(|(i, line)| (Some(i + 1), line.trim()))
+        .filter(|(_, line)| !line.is_empty());
+    for (line_no, pubkey) in flags.iter().map(|p| (None, p.as_str())).chain(file_lines) {
+        validate_hex64(pubkey).map_err(|e| match line_no {
+            Some(n) => CliError::Usage(format!("--pubkeys-file line {n}: {e}")),
+            None => e,
+        })?;
+        let pubkey = pubkey.to_ascii_lowercase();
+        if seen.insert(pubkey.clone()) {
+            out.push(pubkey);
+        }
+    }
+    if out.is_empty() {
+        return Err(CliError::Usage("no pubkeys given".into()));
+    }
+    Ok(out)
+}
+
+/// The combined report of a multi-person `channels add-member` run.
+#[derive(Default)]
+struct AddMembersReport {
+    added: Vec<String>,
+    updated: Vec<String>,
+    already_member: Vec<String>,
+    /// People in a one-person chunk: the relay accepted them without saying
+    /// whether they were added, updated or already members.
+    accepted: Vec<String>,
+    /// Outcome uncertain: people the relay's reply doesn't account for (a
+    /// multi-person chunk accepted without per-person results, a key missing
+    /// from the results, or a reply that isn't JSON), people in a chunk whose
+    /// receipt was lost, and people never sent to a relay too old for
+    /// multi-person adds.
+    unknown: Vec<String>,
+    rejected: Vec<serde_json::Value>,
+    failed: Vec<serde_json::Value>,
+}
+
+impl AddMembersReport {
+    /// Fold in one chunk's outcome: the relay's raw response, or the error
+    /// that kept the chunk from being applied. Returns false when the relay
+    /// accepted a multi-person chunk without per-person results, which means
+    /// it is too old to apply more than the first person.
+    fn record(&mut self, chunk: &[String], outcome: Result<String, CliError>) -> bool {
+        let raw = match outcome {
+            Ok(raw) => raw,
+            Err(CliError::DeliveryUnknown(_)) => {
+                self.unknown.extend_from_slice(chunk);
+                return true;
+            }
+            Err(error) => {
+                self.fail(chunk, error.to_string());
+                return true;
+            }
+        };
+        let Ok(resp) = serde_json::from_str::<serde_json::Value>(&normalize_write_response(&raw))
+        else {
+            self.unknown.extend_from_slice(chunk);
+            return true;
+        };
+        let message = resp["message"].as_str().unwrap_or("");
+        if resp["accepted"] != true {
+            self.fail(chunk, format!("relay rejected the event: {message}"));
+            return true;
+        }
+        let Some(members) = message
+            .strip_prefix("members: ")
+            .and_then(|m| serde_json::from_str::<serde_json::Value>(m).ok())
+        else {
+            if chunk.len() == 1 {
+                self.accepted.extend_from_slice(chunk);
+                return true;
+            }
+            self.unknown.extend_from_slice(chunk);
+            return message.starts_with("duplicate:");
+        };
+        let mut reported = HashSet::new();
+        let names = |v: &serde_json::Value| {
+            v.as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect::<Vec<_>>()
+        };
+        for (key, list) in [
+            ("added", &mut self.added),
+            ("updated", &mut self.updated),
+            ("already_member", &mut self.already_member),
+        ] {
+            let found = names(&members[key]);
+            reported.extend(found.iter().cloned());
+            list.extend(found);
+        }
+        for rejected in members["rejected"].as_array().into_iter().flatten() {
+            reported.extend(names(&rejected["pubkeys"]));
+            self.rejected.push(rejected.clone());
+        }
+        self.unknown
+            .extend(chunk.iter().filter(|p| !reported.contains(*p)).cloned());
+        true
+    }
+
+    fn fail(&mut self, chunk: &[String], error: String) {
+        self.failed
+            .push(serde_json::json!({ "error": error, "pubkeys": chunk }));
+    }
+
+    fn is_ok(&self) -> bool {
+        self.rejected.is_empty() && self.failed.is_empty() && self.unknown.is_empty()
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "status": if self.is_ok() { "ok" } else { "partial" },
+            "added": self.added,
+            "updated": self.updated,
+            "already_member": self.already_member,
+            "accepted": self.accepted,
+            "unknown": self.unknown,
+            "rejected": self.rejected,
+            "failed": self.failed,
+        })
+    }
 }
 
 pub async fn cmd_remove_channel_member(
@@ -1842,7 +2033,7 @@ pub async fn cmd_remove_channel_member(
     let builder = buzz_sdk::build_remove_member(channel_uuid, pubkey)
         .map_err(|e| CliError::Other(format!("build_remove_member failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1886,7 +2077,7 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
         &content,
     )
     .tags([]);
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
 
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
@@ -1927,7 +2118,7 @@ pub async fn cmd_set_canvas(
     }
     .map_err(|e| CliError::Other(format!("build_set_canvas failed: {e}")))?;
 
-    let event = client.sign_event(builder)?;
+    let event = client.sign_event(builder).await?;
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
@@ -1943,10 +2134,22 @@ pub async fn dispatch(
         ChannelsCmd::List {
             visibility,
             member,
+            include_archived,
             limit,
         } => {
             let vis_str = visibility.as_ref().map(|v| v.to_string());
-            cmd_list_channels(client, vis_str.as_deref(), Some(member), limit, format).await
+            cmd_list_channels(
+                client,
+                vis_str.as_deref(),
+                Some(member),
+                include_archived,
+                limit,
+                format,
+            )
+            .await
+        }
+        ChannelsCmd::Unread { channel, limit } => {
+            crate::commands::channel_unread::cmd_unread(client, &channel, limit).await
         }
         ChannelsCmd::Get { channel } => cmd_get_channel(client, &channel).await,
         ChannelsCmd::Search {
@@ -2006,6 +2209,7 @@ pub async fn dispatch(
             no_ttl,
             join_role,
             unlisted,
+            auto_join,
         } => {
             let visibility = visibility.as_ref().map(|v| v.to_string());
             cmd_update_channel(
@@ -2018,6 +2222,7 @@ pub async fn dispatch(
                 no_ttl,
                 join_role.map(Into::into),
                 unlisted,
+                auto_join,
             )
             .await
         }
@@ -2036,8 +2241,18 @@ pub async fn dispatch(
         ChannelsCmd::AddMember {
             channel,
             pubkey,
+            pubkeys_file,
             role,
-        } => cmd_add_channel_member(client, &channel, &pubkey, role.as_deref()).await,
+        } => {
+            cmd_add_channel_member(
+                client,
+                &channel,
+                &pubkey,
+                pubkeys_file.as_deref(),
+                role.as_deref(),
+            )
+            .await
+        }
         ChannelsCmd::RemoveMember { channel, pubkey } => {
             cmd_remove_channel_member(client, &channel, &pubkey).await
         }
@@ -2064,9 +2279,10 @@ mod tests {
     use super::{
         apply_cardinality_rule, assemble_roster_resolution, build_hint_map, build_template_report,
         cmd_set_add_policy, fetch_candidate_hints, finalize_roster_resolution, format_candidate,
-        hints_from_results, join_bounded_queries, name_matches, resolve_roster_with_archive_filter,
-        validate_ttl_seconds, validate_update_channel_fields, ArchivedExclusion, CandidateHint,
-        ChannelSummary, ResolvedAgent, RosterResolution, SkippedSlug,
+        hints_from_results, is_listed, join_bounded_queries, name_matches,
+        resolve_roster_with_archive_filter, search_matches, validate_ttl_seconds,
+        validate_update_channel_fields, ArchivedExclusion, CandidateHint, ChannelSummary,
+        ResolvedAgent, RosterResolution, SkippedSlug,
     };
     use crate::client::BuzzClient;
     use crate::CliError;
@@ -2097,32 +2313,101 @@ mod tests {
             ["t", "workspace"],
             ["P", "ab".repeat(32)],
         ]));
-        let s = ChannelSummary::from_event(&ev).expect("parse");
+        let s = ChannelSummary::from_event(&ev);
         assert_eq!(s.channel_type.as_deref(), Some("forum"));
+        assert_eq!(s.labels, vec!["workspace".to_string()]);
+    }
+
+    /// The channel identity tags the relay signs for a real Solo chat.
+    fn solo_metadata_event() -> serde_json::Value {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../test-fixtures/solo-creation.json"))
+                .expect("solo fixture");
+        let mut tags = vec![
+            json!(["d", "11111111-1111-4111-8111-111111111111"]),
+            json!(["name", "Desktop Solo"]),
+            json!(["private"]),
+        ];
+        tags.extend(fixture["identity_tags"].as_array().expect("tags").clone());
+        json!({ "tags": tags, "created_at": 42 })
+    }
+
+    #[test]
+    fn from_event_reads_labels_after_the_type() {
+        let out = serde_json::to_value(ChannelSummary::from_event(&solo_metadata_event()))
+            .expect("serialize");
+        assert_eq!(
+            out["channel_id"],
+            json!("11111111-1111-4111-8111-111111111111")
+        );
+        assert_eq!(out["name"], json!("Desktop Solo"));
+        assert_eq!(out["channel_type"], json!("stream"));
+        assert_eq!(out["visibility"], json!("private"));
+        assert_eq!(out["labels"], json!(["buzz.solo"]));
+        assert_eq!(out["archived"], json!(false));
     }
 
     #[test]
     fn from_event_extracts_known_tags() {
-        let ev = event(json!([
-            ["d", "11111111-1111-1111-1111-111111111111"],
-            ["name", "buzz-chat-composer"],
-            ["t", "stream"],
-            ["public"],
-            ["about", "About text"],
-            ["topic", "Composer work"],
-            ["purpose", "Track UI for the composer"],
-            ["ttl", "3600"],
-        ]));
-        let s = ChannelSummary::from_event(&ev).expect("parse");
-        assert_eq!(s.channel_id, "11111111-1111-1111-1111-111111111111");
-        assert_eq!(s.name, "buzz-chat-composer");
-        assert_eq!(s.channel_type.as_deref(), Some("stream"));
-        assert_eq!(s.visibility.as_deref(), Some("public"));
-        assert!(!s.archived);
-        assert_eq!(s.about.as_deref(), Some("About text"));
-        assert_eq!(s.topic.as_deref(), Some("Composer work"));
-        assert_eq!(s.purpose.as_deref(), Some("Track UI for the composer"));
-        assert_eq!(s.ttl_seconds, Some(3600));
+        let ev = json!({
+            "created_at": 1_800_000_000,
+            "tags": [
+                ["d", "11111111-1111-1111-1111-111111111111"],
+                ["name", "buzz-chat-composer"],
+                ["t", "stream"],
+                ["public"],
+                ["about", "About text"],
+                ["topic", "Composer work"],
+                ["purpose", "Track UI for the composer"],
+                ["ttl", "3600"],
+                ["created_at", "1700000000"],
+            ],
+        });
+        let out = serde_json::to_value(ChannelSummary::from_event(&ev)).expect("serialize");
+        assert_eq!(
+            out,
+            json!({
+                "channel_id": "11111111-1111-1111-1111-111111111111",
+                "name": "buzz-chat-composer",
+                "channel_type": "stream",
+                "visibility": "open",
+                "labels": [],
+                "archived": false,
+                "description": "About text",
+                "topic": "Composer work",
+                "purpose": "Track UI for the composer",
+                "ttl_seconds": 3600,
+                "created_at": 1_700_000_000,
+                "updated_at": 1_800_000_000,
+            })
+        );
+    }
+
+    #[test]
+    fn from_event_without_optional_tags_prints_nulls() {
+        let out = serde_json::to_value(ChannelSummary::from_event(&event(json!([[
+            "d",
+            "11111111-1111-1111-1111-111111111111"
+        ]]))))
+        .expect("serialize");
+        assert_eq!(
+            out,
+            json!({
+                "channel_id": "11111111-1111-1111-1111-111111111111",
+                "name": null,
+                "channel_type": null,
+                "visibility": null,
+                "labels": [],
+                "archived": false,
+                "description": null,
+                "topic": null,
+                "purpose": null,
+                "ttl_seconds": null,
+                // No `created_at` tag: unknown, never the edit time.
+                "created_at": null,
+                "updated_at": null,
+            })
+        );
     }
 
     #[test]
@@ -2132,8 +2417,7 @@ mod tests {
             ["name", "old-channel"],
             ["archived", "true"],
         ]));
-        let s = ChannelSummary::from_event(&ev).expect("parse");
-        assert!(s.archived);
+        assert!(ChannelSummary::from_event(&ev).archived);
     }
 
     #[test]
@@ -2143,18 +2427,82 @@ mod tests {
             ["name", "secret"],
             ["private"],
         ]));
-        let s = ChannelSummary::from_event(&ev).expect("parse");
+        let s = ChannelSummary::from_event(&ev);
         assert_eq!(s.visibility.as_deref(), Some("private"));
     }
 
     #[test]
-    fn from_event_returns_none_without_required_tags() {
-        // missing `name`
-        let ev = event(json!([["d", "11111111-1111-1111-1111-111111111111"]]));
-        assert!(ChannelSummary::from_event(&ev).is_none());
-        // missing `d`
-        let ev = event(json!([["name", "no-id"]]));
-        assert!(ChannelSummary::from_event(&ev).is_none());
+    fn a_valueless_first_t_tag_is_still_the_type_slot() {
+        let s = ChannelSummary::from_event(&event(json!([["t"], ["t", "buzz.solo"], ["public"]])));
+        assert_eq!(s.channel_type, None);
+        assert_eq!(s.labels, vec!["buzz.solo".to_string()]);
+        assert_eq!(s.visibility.as_deref(), Some("open"));
+    }
+
+    fn channel(id: &str, name: &str, extra: serde_json::Value) -> serde_json::Value {
+        let mut tags = vec![json!(["d", id]), json!(["name", name])];
+        tags.extend(extra.as_array().expect("tags").iter().cloned());
+        json!({ "tags": tags })
+    }
+
+    fn ids(channels: &[ChannelSummary]) -> Vec<&str> {
+        channels.iter().map(|c| c.channel_id.as_str()).collect()
+    }
+
+    fn listed(
+        events: &[serde_json::Value],
+        visibility: Option<&str>,
+        include_archived: bool,
+    ) -> Vec<String> {
+        events
+            .iter()
+            .map(ChannelSummary::from_event)
+            .filter(|c| is_listed(c, visibility, include_archived))
+            .map(|c| c.channel_id)
+            .collect()
+    }
+
+    #[test]
+    fn list_hides_archived_channels_unless_asked() {
+        let events = vec![
+            channel("live", "a", json!([["public"]])),
+            channel("old", "b", json!([["public"], ["archived", "true"]])),
+        ];
+        assert_eq!(listed(&events, None, false), vec!["live"]);
+        assert_eq!(listed(&events, None, true), vec!["live", "old"]);
+    }
+
+    #[test]
+    fn list_filters_by_the_visibility_it_prints() {
+        let events = vec![
+            channel("open", "a", json!([["public"]])),
+            channel("secret", "b", json!([["private"]])),
+        ];
+        assert_eq!(listed(&events, Some("open"), false), vec!["open"]);
+        assert_eq!(listed(&events, Some("private"), false), vec!["secret"]);
+    }
+
+    #[test]
+    fn search_hides_archived_and_unnamed_channels() {
+        let events = vec![
+            channel("b", "Design-B", json!([])),
+            channel("a", "design-a", json!([])),
+            channel("old", "design-old", json!([["archived", "true"]])),
+            event(json!([["d", "unnamed"]])),
+            event(json!([["name", "design-no-id"]])),
+        ];
+        assert_eq!(
+            ids(&search_matches(&events, "design", false, false)),
+            vec!["b", "a"]
+        );
+        assert_eq!(
+            ids(&search_matches(&events, "design", false, true)),
+            vec!["b", "a", "old"]
+        );
+        assert_eq!(
+            ids(&search_matches(&events, "design-a", true, false)),
+            vec!["a"]
+        );
     }
 
     #[test]
@@ -2166,9 +2514,11 @@ mod tests {
             ["name"],
             ["d", "11111111-1111-1111-1111-111111111111"],
             ["name", "fine"],
+            ["created_at", "not-a-number"],
         ]));
-        let s = ChannelSummary::from_event(&ev).expect("parse");
-        assert_eq!(s.name, "fine");
+        let s = ChannelSummary::from_event(&ev);
+        assert_eq!(s.name.as_deref(), Some("fine"));
+        assert_eq!(s.created_at, None);
     }
 
     // `name_matches` takes a pre-lowercased needle (caller responsibility, set in
@@ -2207,7 +2557,7 @@ mod tests {
 
     #[test]
     fn update_channel_fields_rejects_empty_update() {
-        let result = validate_update_channel_fields(None, None, None, None, None, None);
+        let result = validate_update_channel_fields(None, None, None, None, None, None, None);
         assert!(matches!(result, Err(CliError::Usage(_))));
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("at least one field required"));
@@ -2216,7 +2566,8 @@ mod tests {
 
     #[test]
     fn update_channel_fields_accepts_visibility_only_update() {
-        let result = validate_update_channel_fields(None, None, Some("open"), None, None, None);
+        let result =
+            validate_update_channel_fields(None, None, Some("open"), None, None, None, None);
         assert!(result.is_ok(), "visibility-only update should be accepted");
     }
 
@@ -2283,8 +2634,11 @@ mod tests {
         let keys =
             nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000001")
                 .expect("valid test key");
-        BuzzClient::new("ws://localhost:3000".to_string(), keys, None, None)
-            .expect("client construction should not fail")
+        BuzzClient::new(
+            "ws://localhost:3000".to_string(),
+            crate::credentials::Credentials::from_keys(keys),
+        )
+        .expect("client construction should not fail")
     }
 
     #[tokio::test]
@@ -3391,8 +3745,11 @@ mod tests {
         let keys =
             nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000001")
                 .expect("valid test key");
-        let client = BuzzClient::new(format!("http://{addr}"), keys, None, None)
-            .expect("client construction should not fail");
+        let client = BuzzClient::new(
+            format!("http://{addr}"),
+            crate::credentials::Credentials::from_keys(keys),
+        )
+        .expect("client construction should not fail");
 
         let map = fetch_candidate_hints(
             &client,
@@ -3509,7 +3866,11 @@ mod set_canvas_tests {
     }
 
     fn client(base_url: &str) -> BuzzClient {
-        BuzzClient::new(base_url.to_string(), Keys::generate(), None, None).unwrap()
+        BuzzClient::new(
+            base_url.to_string(),
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap()
     }
 
     fn tag_value(event: &Value, key: &str) -> Option<String> {
@@ -3878,7 +4239,11 @@ mod restore_canvas_tests {
     }
 
     fn client(base_url: &str) -> BuzzClient {
-        BuzzClient::new(base_url.to_string(), Keys::generate(), None, None).unwrap()
+        BuzzClient::new(
+            base_url.to_string(),
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap()
     }
 
     /// Return all filter objects from all /query calls flattened into one vec.
@@ -4704,7 +5069,11 @@ mod restore_canvas_already_current_tests {
     }
 
     fn client(base_url: &str) -> BuzzClient {
-        BuzzClient::new(base_url.to_string(), Keys::generate(), None, None).unwrap()
+        BuzzClient::new(
+            base_url.to_string(),
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap()
     }
 
     /// The already-current short-circuit must return Ok (exit 0) AND emit
@@ -4792,7 +5161,11 @@ mod unlisted_support_tests {
     }
 
     fn client(base_url: &str) -> BuzzClient {
-        BuzzClient::new(base_url.to_string(), Keys::generate(), None, None).unwrap()
+        BuzzClient::new(
+            base_url.to_string(),
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap()
     }
 
     fn has_unlisted_true(event: &Value) -> bool {
@@ -4823,6 +5196,7 @@ mod unlisted_support_tests {
             false,
             None,
             Some(true),
+            None,
         )
         .await
         .unwrap_err();
@@ -4849,6 +5223,7 @@ mod unlisted_support_tests {
             false,
             None,
             Some(true),
+            None,
         )
         .await
         .unwrap();
@@ -4877,10 +5252,308 @@ mod unlisted_support_tests {
             false,
             None,
             Some(false),
+            None,
         )
         .await
         .unwrap();
 
         assert_eq!(submitted.lock().unwrap().len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod add_members_tests {
+    use super::{cmd_add_channel_member, collect_member_pubkeys, AddMembersReport};
+    use crate::error::CliError;
+    use serde_json::json;
+
+    fn pk(i: usize) -> String {
+        format!("{i:064x}")
+    }
+
+    #[test]
+    fn collects_flags_and_file_in_order_without_duplicates() {
+        let flags = vec![pk(1), pk(2).to_ascii_uppercase()];
+        let file = format!("{}\n\n  {}  \n{}\n", pk(3), pk(2), pk(1));
+        let got = collect_member_pubkeys(&flags, Some(&file)).unwrap();
+        assert_eq!(got, vec![pk(1), pk(2), pk(3)]);
+    }
+
+    #[test]
+    fn reads_pubkeys_file_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys.txt");
+        std::fs::write(&path, format!("{}\n{}\n", pk(7), pk(8))).unwrap();
+        let text = crate::validate::read_file_or_stdin(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            collect_member_pubkeys(&[], Some(&text)).unwrap(),
+            vec![pk(7), pk(8)]
+        );
+    }
+
+    #[test]
+    fn bad_file_line_names_the_line() {
+        let file = format!("{}\nnope\n", pk(1));
+        let err = collect_member_pubkeys(&[], Some(&file)).unwrap_err();
+        assert!(err.to_string().contains("line 2"), "{err}");
+    }
+
+    #[test]
+    fn empty_input_is_a_usage_error() {
+        assert!(collect_member_pubkeys(&[], Some("\n\n")).is_err());
+    }
+
+    #[test]
+    fn chunks_at_the_relay_limit() {
+        for (n, want) in [
+            (0, vec![]),
+            (100, vec![100]),
+            (101, vec![100, 1]),
+            (250, vec![100, 100, 50]),
+        ] {
+            let pubkeys: Vec<String> = (0..n).map(pk).collect();
+            let sizes: Vec<usize> = pubkeys
+                .chunks(buzz_sdk::MAX_MEMBERS_PER_ADD)
+                .map(<[String]>::len)
+                .collect();
+            assert_eq!(sizes, want, "{n} people");
+        }
+    }
+
+    fn ok_response(members: serde_json::Value) -> String {
+        json!({
+            "event_id": "e",
+            "accepted": true,
+            "message": format!("members: {members}"),
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn merges_chunks_and_keeps_going_after_a_failed_one() {
+        let mut report = AddMembersReport::default();
+        report.record(
+            &[pk(1), pk(2), pk(3)],
+            Ok(ok_response(json!({
+                "added": [pk(1)],
+                "updated": [pk(2)],
+                "already_member": [pk(3)],
+            }))),
+        );
+        report.record(
+            &[pk(4), pk(5)],
+            Err(CliError::Other("relay error 403: denied".into())),
+        );
+        report.record(
+            &[pk(6), pk(7)],
+            Ok(ok_response(json!({
+                "added": [pk(6)],
+                "rejected": [{ "reason": "archived", "pubkeys": [pk(7)] }],
+            }))),
+        );
+        report.record(
+            &[pk(8)],
+            Ok(json!({ "event_id": "e", "accepted": true, "message": "" }).to_string()),
+        );
+        assert!(!report.is_ok());
+        assert_eq!(
+            report.to_json(),
+            json!({
+                "status": "partial",
+                "added": [pk(1), pk(6)],
+                "updated": [pk(2)],
+                "already_member": [pk(3)],
+                "accepted": [pk(8)],
+                "unknown": [],
+                "rejected": [{ "reason": "archived", "pubkeys": [pk(7)] }],
+                "failed": [{ "error": "relay error 403: denied", "pubkeys": [pk(4), pk(5)] }],
+            })
+        );
+    }
+
+    #[test]
+    fn duplicate_reply_to_a_multi_person_chunk_is_unknown() {
+        let mut report = AddMembersReport::default();
+        report.record(
+            &[pk(1), pk(2)],
+            Ok(json!({ "event_id": "e", "accepted": true, "message": "duplicate:" }).to_string()),
+        );
+        let out = report.to_json();
+        assert_eq!(out["status"], "partial");
+        assert_eq!(out["unknown"], json!([pk(1), pk(2)]));
+        assert_eq!(out["accepted"], json!([]));
+    }
+
+    #[test]
+    fn lost_receipt_is_unknown_not_failed() {
+        let mut report = AddMembersReport::default();
+        report.record(
+            &[pk(1), pk(2)],
+            Err(CliError::DeliveryUnknown("receipt lost".into())),
+        );
+        let out = report.to_json();
+        assert_eq!(out["status"], "partial");
+        assert_eq!(out["unknown"], json!([pk(1), pk(2)]));
+        assert_eq!(out["failed"], json!([]));
+    }
+
+    /// A one-key `--pubkeys-file` gets the bulk report: a refused send is
+    /// recorded under `failed`, not returned as the single-add error.
+    #[tokio::test]
+    async fn one_key_file_gets_the_bulk_report() {
+        use axum::routing::post;
+        let app = axum::Router::new().route(
+            "/events",
+            post(|| async { (axum::http::StatusCode::FORBIDDEN, "denied") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = crate::client::BuzzClient::new(
+            format!("http://{addr}"),
+            crate::credentials::Credentials::from_keys(nostr::Keys::generate()),
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys.txt");
+        std::fs::write(&path, format!("{}\n", pk(1))).unwrap();
+
+        let err = cmd_add_channel_member(
+            &client,
+            "326d56bc-c96c-4af0-86a1-5e804cd1b467",
+            &[],
+            Some(path.to_str().unwrap()),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("some people were not added"),
+            "{err}"
+        );
+
+        // Two identical `--pubkey` flags also get the bulk report.
+        let err = cmd_add_channel_member(
+            &client,
+            "326d56bc-c96c-4af0-86a1-5e804cd1b467",
+            &[pk(1), pk(1)],
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("some people were not added"),
+            "{err}"
+        );
+
+        // The same key as a lone `--pubkey` keeps the single-add error.
+        let err = cmd_add_channel_member(
+            &client,
+            "326d56bc-c96c-4af0-86a1-5e804cd1b467",
+            &[pk(1)],
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            !err.to_string().contains("some people were not added"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn refused_reply_is_failed() {
+        let mut report = AddMembersReport::default();
+        report.record(
+            &[pk(1)],
+            Ok(json!({ "event_id": "e", "accepted": false, "message": "blocked: no" }).to_string()),
+        );
+        let out = report.to_json();
+        assert_eq!(out["status"], "partial");
+        assert_eq!(out["accepted"], json!([]));
+        assert_eq!(
+            out["failed"],
+            json!([{ "error": "relay rejected the event: blocked: no", "pubkeys": [pk(1)] }])
+        );
+    }
+
+    #[test]
+    fn keys_missing_from_the_results_are_unknown() {
+        let mut report = AddMembersReport::default();
+        report.record(&[pk(1), pk(2)], Ok(ok_response(json!({}))));
+        report.record(
+            &[pk(3), pk(4), pk(5)],
+            Ok(ok_response(json!({
+                "added": [pk(3)],
+                "rejected": [{ "reason": "archived", "pubkeys": [pk(4)] }],
+            }))),
+        );
+        let out = report.to_json();
+        assert_eq!(out["status"], "partial");
+        assert_eq!(out["unknown"], json!([pk(1), pk(2), pk(5)]));
+    }
+
+    #[test]
+    fn non_json_reply_is_unknown_not_accepted() {
+        let mut report = AddMembersReport::default();
+        report.record(&[pk(1)], Ok("<html>oops</html>".into()));
+        let out = report.to_json();
+        assert_eq!(out["status"], "partial");
+        assert_eq!(out["accepted"], json!([]));
+        assert_eq!(out["unknown"], json!([pk(1)]));
+    }
+
+    /// A relay that answers a multi-person chunk without per-person results
+    /// is too old for them: later chunks are marked unknown, not sent.
+    #[tokio::test]
+    async fn stops_sending_to_a_relay_too_old_for_multi_person_adds() {
+        use axum::routing::post;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let sends = Arc::new(AtomicUsize::new(0));
+        let counter = sends.clone();
+        let app = axum::Router::new().route(
+            "/events",
+            post(move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { axum::Json(json!({ "event_id": "e", "accepted": true, "message": "" })) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = crate::client::BuzzClient::new(
+            format!("http://{addr}"),
+            crate::credentials::Credentials::from_keys(nostr::Keys::generate()),
+        )
+        .unwrap();
+        let keys: Vec<String> = (0..250).map(pk).collect();
+        let err = cmd_add_channel_member(
+            &client,
+            "326d56bc-c96c-4af0-86a1-5e804cd1b467",
+            &keys,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("some people were not added"),
+            "{err}"
+        );
+        assert_eq!(sends.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn all_chunks_applied_is_ok() {
+        let mut report = AddMembersReport::default();
+        report.record(
+            &[pk(1), pk(2)],
+            Ok(ok_response(json!({ "added": [pk(1), pk(2)] }))),
+        );
+        assert!(report.is_ok());
+        assert_eq!(report.to_json()["status"], "ok");
     }
 }

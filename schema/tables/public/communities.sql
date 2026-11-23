@@ -16,6 +16,8 @@ CREATE TABLE communities (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     host            VARCHAR(255) NOT NULL,
     signing_key     BYTEA,
+    requires_nip_fi BOOLEAN NOT NULL DEFAULT false,
+    policy_generation BIGINT NOT NULL DEFAULT 0,
     -- Per-community workspace icon (NIP-11 `icon`), set via kind:9033.
     -- Added by migration 0003; kept here so desired-state applies match.
     icon            TEXT,
@@ -24,6 +26,7 @@ CREATE TABLE communities (
     deletion_state  TEXT NOT NULL DEFAULT 'active' CHECK (deletion_state IN ('active', 'quiescing', 'fenced', 'tombstone')),
     deletion_fence_generation BIGINT NOT NULL DEFAULT 0 CHECK (deletion_fence_generation >= 0),
     deleted_at      TIMESTAMPTZ,
+    artifact_policy_modified_at TIMESTAMPTZ NOT NULL DEFAULT 'epoch',
     CONSTRAINT chk_communities_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
 );
 

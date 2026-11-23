@@ -6,7 +6,6 @@ import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
 import 'package:buzz/shared/push/dev_push_lease.dart';
-import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/push_relay_capability_provider.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
 import 'package:buzz/shared/relay/app_lifecycle_provider.dart';
@@ -86,9 +85,6 @@ void main() {
               return Future.value(null);
             }),
             appLifecycleProvider.overrideWith(_Lifecycle.new),
-            buzzPushAuthorizationStatusReaderProvider.overrideWithValue(
-              () async => BuzzPushAuthorizationStatus.denied,
-            ),
           ],
           child: MaterialApp(
             theme: AppTheme.light(),

@@ -1,0 +1,119 @@
+import Flutter
+import UIKit
+
+private final class SettingMenuMessenger: NSObject, FlutterBinaryMessenger {
+  var selections: [Int] = []
+  func send(onChannel channel: String, message: Data?) {
+    guard let message else { return }
+    let call = FlutterStandardMethodCodec.sharedInstance().decodeMethodCall(message)
+    if call.method == "menuAction", let index = call.arguments as? Int {
+      selections.append(index)
+    }
+  }
+  func send(onChannel channel: String, message: Data?, binaryReply callback: FlutterBinaryReply?) {
+    send(onChannel: channel, message: message)
+    callback?(nil)
+  }
+  func setMessageHandlerOnChannel(
+    _ channel: String, binaryMessageHandler handler: FlutterBinaryMessageHandler?
+  ) -> FlutterBinaryMessengerConnection { 1 }
+  func cleanUpConnection(_ connection: FlutterBinaryMessengerConnection) {}
+}
+
+@main
+struct SettingMenuSelectionTests {
+  @MainActor static func main() async {
+    let merging = MergingNavigationGlass(frame: CGRect(x: 0, y: 0, width: 256, height: 56))
+    merging.layoutIfNeeded()
+    UIView.setAnimationsEnabled(false)
+    merging.setMenuOpen(true, animator: nil)
+    precondition(merging.leftSurface.transform.tx == 100)
+    precondition(merging.rightSurface.transform.tx == -100)
+    precondition(merging.leftSurface.transform.a == 0.9)
+    precondition(merging.leftSurface.alpha == 0 && merging.rightSurface.alpha == 0)
+    precondition(merging.centerSurface.alpha == 1)
+    merging.setMenuOpen(false, animator: nil)
+    precondition(merging.leftSurface.transform == .identity)
+    precondition(merging.rightSurface.transform == .identity)
+    precondition(merging.leftSurface.alpha == 1 && merging.rightSurface.alpha == 1)
+    UIView.setAnimationsEnabled(true)
+
+    let aligned = NavigationGlassButtonPlatformView(
+      frame: CGRect(x: 0, y: 0, width: 44, height: 44),
+      viewIdentifier: 22,
+      arguments: ["plain": true, "icon": "more", "iconSize": 14,
+                   "buttonCenterX": 34, "controlWidth": 20, "controlSize": 44,
+                   "hitTargetWidth": 44, "hitTargetHeight": 44],
+      messenger: SettingMenuMessenger()
+    )
+    let alignedButton = aligned.view().subviews.compactMap { $0 as? NavigationGlassButton }.first!
+    aligned.view().layoutIfNeeded()
+    precondition(alignedButton.center.x == 34)
+    for x in [CGFloat(1), 22, 43] {
+      let point = alignedButton.convert(CGPoint(x: x, y: 22), from: aligned.view())
+      precondition(alignedButton.point(inside: point, with: nil))
+    }
+
+    for deferred in [false, true] {
+      let messenger = SettingMenuMessenger()
+      let view = NavigationGlassButtonPlatformView(
+        frame: CGRect(x: 0, y: 0, width: 340, height: 56),
+        viewIdentifier: 1,
+        arguments: [
+          "fillWidth": true, "plain": true, "label": "", "enabled": true,
+          "deferMenuActions": deferred,
+          "menu": [
+            ["id": 0, "label": "Low", "enabled": true, "checked": false],
+            ["id": 1, "label": "High", "enabled": true, "checked": true],
+          ],
+        ],
+        messenger: messenger
+      )
+      let button = view.view().subviews.compactMap { $0 as? NavigationGlassButton }.first!
+      view.view().layoutIfNeeded()
+      view.view().frame.size.width = 600
+      view.view().layoutIfNeeded()
+      precondition(button.bounds.width == 600)
+      precondition(button.point(inside: CGPoint(x: 570, y: 28), with: nil))
+      let group = button.menu!.children.first as! UIMenu
+      let choices = group.children.compactMap { $0 as? UIAction }
+      precondition(choices[0].state == .off && choices[1].state == .on)
+      // Invoke the actual menu UIAction through UIKit, without synthesizing a
+      // Flutter method-channel message or depending on dismissal callback order.
+      let selection = UIButton(primaryAction: choices[0])
+      let interaction = UIContextMenuInteraction(delegate: button)
+      let configuration = UIContextMenuConfiguration(identifier: nil, previewProvider: nil, actionProvider: nil)
+      button.contextMenuInteraction(interaction, willDisplayMenuFor: configuration, animator: nil)
+      selection.sendActions(for: .touchUpInside)
+      precondition(messenger.selections == (deferred ? [] : [0]))
+      if deferred {
+        button.contextMenuInteraction(interaction, willEndFor: configuration, animator: nil)
+        // The no-animator dismissal queues delivery on the main dispatch queue.
+        await withCheckedContinuation { continuation in
+          DispatchQueue.main.async { continuation.resume() }
+        }
+        precondition(messenger.selections == [0])
+      }
+    }
+    let messenger = SettingMenuMessenger()
+    let grouped = NavigationGlassButtonPlatformView(
+      frame: CGRect(x: 0, y: 0, width: 112, height: 56),
+      viewIdentifier: 2,
+      arguments: ["deferMenuActions": false, "fixedMenuOrder": true, "menu": [
+        ["id": 0, "label": "New chat", "symbol": "message.circle", "enabled": true],
+        ["id": 1, "label": "New channel", "symbol": "number", "enabled": true],
+        ["id": 2, "label": "New DM", "symbol": "person.circle", "enabled": true],
+        ["id": 3, "label": "New workspace", "symbol": "folder", "dividerBefore": true, "enabled": true],
+      ]], messenger: messenger
+    )
+    let button = grouped.view().subviews.compactMap { $0 as? NavigationGlassButton }.first!
+    precondition(button.preferredMenuElementOrder == .fixed)
+    let groups = button.menu!.children.compactMap { $0 as? UIMenu }
+    precondition(groups.map(\.title) == ["", ""])
+    precondition(groups.map { $0.children.count } == [3, 1])
+    let workspaceAction = groups[1].children[0] as! UIAction
+    UIButton(primaryAction: workspaceAction).sendActions(for: .touchUpInside)
+    precondition(messenger.selections == [3])
+    print("Native setting menu selection checks passed")
+  }
+}

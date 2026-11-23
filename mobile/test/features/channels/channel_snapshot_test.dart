@@ -13,6 +13,43 @@ import 'package:shared_preferences/shared_preferences.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test(
+    'offline restart hides generated Huddles saved by older clients',
+    () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final storage = ChannelListSnapshotStorage(prefs);
+      await storage.write(
+        storage.capture('me', 'https://a.example'),
+        ChannelListSnapshot(
+          channels: [
+            _channel('alpha').toJson(),
+            {
+              ..._channel('22222222-room').toJson(),
+              'name': 'huddle-22222222',
+              'visibility': 'private',
+              'ttl_seconds': 3600,
+            },
+            {
+              ..._channel('ordinary').toJson(),
+              'visibility': 'private',
+              'ttl_seconds': 3600,
+            },
+          ],
+          hiddenDmIds: {},
+        ),
+      );
+      final session = _SnapshotSession([], connected: false);
+      final container = _container(prefs, session);
+      addTearDown(container.dispose);
+      expect((await container.read(channelsProvider.future)).map((c) => c.id), [
+        'alpha',
+        'ordinary',
+      ]);
+      expect(session.membershipRequests, 0);
+    },
+  );
+
   test('fresh read retries a failed initial list', () async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -102,6 +139,13 @@ void main() {
         clock.flushMicrotasks();
         final latestReads = session.latestReads;
         final gate = session.gate = Completer<void>();
+        // A live notice marks the list changed, so the next tick reads it.
+        session.emit(
+          session.event(EventKind.memberAddedNotification, [
+            ['p', 'me'],
+            ['h', 'alpha'],
+          ]),
+        );
         clock.elapse(const Duration(minutes: 1));
         clock.flushMicrotasks();
         final parkedRequests = session.membershipRequests;
@@ -202,18 +246,16 @@ void main() {
         clock.flushMicrotasks();
         clock.elapse(const Duration(minutes: 2));
         clock.flushMicrotasks();
-        expect(
-          offline.membershipRequests,
-          3,
-        ); // One bounded attempt per minute.
+        // Retried ever less often: 5s doubling, +/-25%.
+        expect(offline.membershipRequests, inInclusiveRange(5, 6));
         expect(offline.listeners, isEmpty);
-        // A slow attempt cannot accumulate overlapping periodic retries.
+        // A slow attempt cannot accumulate overlapping retries.
         final gate = Completer<void>();
         offline.gate = gate;
-        clock.elapse(const Duration(minutes: 1));
+        clock.elapse(const Duration(minutes: 7));
         clock.flushMicrotasks();
         final parkedRequests = offline.membershipRequests;
-        clock.elapse(const Duration(minutes: 2));
+        clock.elapse(const Duration(minutes: 7));
         clock.flushMicrotasks();
         expect(offline.membershipRequests, parkedRequests);
         gate.complete();
@@ -224,7 +266,7 @@ void main() {
 
         offline.fail = false;
         offline.ids = ['bravo'];
-        clock.elapse(const Duration(minutes: 1));
+        clock.elapse(const Duration(minutes: 7));
         clock.flushMicrotasks();
         expect(
           container.read(channelsProvider).requireValue.single.id,
@@ -414,6 +456,13 @@ class _SnapshotSession extends RelaySessionNotifier {
   int membershipRequests = 0;
   int latestReads = 0;
   final listeners = <void Function(NostrEvent)>[];
+  final noticeListeners = <void Function(NostrEvent)>[];
+  void emit(NostrEvent event) {
+    for (final listener in [...listeners, ...noticeListeners]) {
+      listener(event);
+    }
+  }
+
   @override
   SessionState build() => SessionState(
     status: connected ? SessionStatus.connected : SessionStatus.disconnected,
@@ -486,13 +535,26 @@ class _SnapshotSession extends RelaySessionNotifier {
   }
 
   @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus) onStatusChanged,
+    bool resumeSince = true,
+  }) => subscribe(filter, onEvent, onClosed: onClosed);
+
+  @override
   Future<void Function()> subscribe(
     NostrFilter filter,
     void Function(NostrEvent) onEvent, {
     void Function(String)? onClosed,
   }) async {
-    listeners.add(onEvent);
-    return () => listeners.remove(onEvent);
+    // The channel list notices are not a live channel subscription.
+    final target = filter.kinds.contains(EventKind.memberAddedNotification)
+        ? noticeListeners
+        : listeners;
+    target.add(onEvent);
+    return () => target.remove(onEvent);
   }
 }
 

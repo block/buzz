@@ -10,6 +10,9 @@ library;
 import '../relay/relay_validation.dart';
 import '../hosted/hosted_environment.dart';
 
+part 'agent_creation_link.dart';
+part 'share_link.dart';
+
 /// A parsed deep link supported by the app.
 sealed class BuzzDeepLink {
   const BuzzDeepLink();
@@ -297,11 +300,13 @@ InviteDeepLink? parseInviteDeepLink(Uri uri) {
 
 /// Parse any supported Buzz deep link.
 BuzzDeepLink? parseBuzzDeepLink(Uri uri) =>
+    parseAgentCreationDeepLink(uri) ??
     parseNostrBindDeepLink(uri) ??
     parseAddCommunityDeepLink(uri) ??
     parseInviteDeepLink(uri) ??
     parseChannelDeepLink(uri) ??
-    parseMessageDeepLink(uri);
+    parseMessageDeepLink(uri) ??
+    parseShareDeepLink(uri);
 
 /// A validated Buzz repository, pull request, or issue permalink.
 class EntityDeepLink extends BuzzDeepLink {
@@ -375,8 +380,14 @@ class NostrBindDeepLink extends BuzzDeepLink {
 class AddCommunityDeepLink extends BuzzDeepLink {
   @override
   final String relayUrl;
-  final String name;
-  const AddCommunityDeepLink({required this.relayUrl, required this.name});
+
+  final String _name;
+
+  /// User-facing label, shortening hosted host-name fallbacks like [Community].
+  String get name => HostedEnvironment.communityDisplayName(_name, relayUrl);
+
+  const AddCommunityDeepLink({required this.relayUrl, required String name})
+    : _name = name;
 }
 
 bool _webHandoffShape(Uri uri, String host, Set<String> allowed) =>

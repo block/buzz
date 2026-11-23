@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../../shared/me/me_assistant_names.dart';
 import '../../../shared/mentions/agent_identity_provider.dart';
 import '../../../shared/profile/user_cache_provider.dart';
 import '../../../shared/theme/theme.dart';
@@ -15,19 +16,28 @@ class MeAssistantList extends ConsumerWidget {
     super.key,
     required this.choices,
     required this.selected,
+    this.onSelected,
   });
 
   final List<AgentDirectoryEntry> choices;
   final String? selected;
+  final ValueChanged<String>? onSelected;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final profiles = ref.watch(userCacheProvider);
-    return SizedBox(
-      height: (MediaQuery.sizeOf(context).height * 0.6).clamp(0.0, 400.0),
+    final names = watchMeAssistantNames(ref, choices);
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(context).height * 0.6,
+      ),
       child: choices.isEmpty
-          ? const Center(child: Text('No agents are available.'))
+          ? const Padding(
+              padding: EdgeInsets.all(Grid.gutter),
+              child: Text('No agents are available.'),
+            )
           : ListView(
+              shrinkWrap: true,
               padding: const EdgeInsets.fromLTRB(
                 Grid.gutter,
                 0,
@@ -60,11 +70,13 @@ class MeAssistantList extends ConsumerWidget {
                                   : 'A',
                             ),
                           ),
-                          title: Text(agent.displayName ?? 'Agent'),
+                          title: Text(names.labelFor(agent.pubkey)),
                           trailing: agent.pubkey == selected
                               ? const Icon(BuzzIcons.check)
                               : null,
-                          onTap: () => Navigator.pop(context, agent.pubkey),
+                          onTap: () => onSelected != null
+                              ? onSelected!(agent.pubkey)
+                              : Navigator.pop(context, agent.pubkey),
                         ),
                       ),
                   ],

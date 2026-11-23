@@ -493,8 +493,8 @@ async fn create_managed_agent_in<R: tauri::Runtime>(
     // ── Phase 2: compute NIP-OA auth tag (sync) ──────────────────────────────
     // Agents authenticate via the auth tag in their kind:0 profile event.
     // No tokens are minted. Fail closed: bad auth tag → don't create agent.
+    let (owner_keys, creation_relay) = profile::creation_authority(state, &resolved_relay_url)?;
     let auth_tag = {
-        let owner_keys = state.signing_keys()?;
         // Bridge nostr 0.37 → 0.36 (buzz-sdk) via hex round-trip.
         let compat_owner = nostr::Keys::parse(&owner_keys.secret_key().to_secret_hex())
             .map_err(|e| format!("failed to bridge owner keys: {e}"))?;
@@ -809,11 +809,11 @@ async fn create_managed_agent_in<R: tauri::Runtime>(
     try_regenerate_nest(&app);
 
     // ── Phase 4: sync agent profile on relay (async, outside lock) ───────────
-    // Use the avatar persisted on the record so the published profile and any
-    // later reconciliation agree on the same value.
-    let mut profile_sync_error = profile::publish_agent_profile_with_about(
+    // Publish the saved avatar after transferring its bytes to the new signer.
+    let mut profile_sync_error = profile::publish_created_agent_profile(
         state,
-        &resolved_relay_url,
+        &creation_relay,
+        &owner_keys,
         &agent_keys,
         &name,
         resolved_avatar_url.as_deref(),

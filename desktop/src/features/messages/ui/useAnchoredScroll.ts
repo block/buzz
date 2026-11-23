@@ -8,6 +8,7 @@ import {
   shouldSettleForSplitPanel,
   shouldSettleVirtualizedBottom,
 } from "./anchoredScrollPolicy";
+import { listenForReaderScroll } from "./useVirtualizedBottomSettle";
 import { useVirtualizedViewportResize } from "./useVirtualizedViewportResize";
 
 /**
@@ -23,6 +24,14 @@ type AnchorState =
   | { kind: "message"; messageId: string; topOffset: number }
   | { kind: "pinned-center"; messageId: string; contentTop: number };
 
+type AnchoredMessage = {
+  id: string;
+  /** Unix seconds. Lets a held route target count live arrivals. */
+  createdAt?: number;
+  /** Identity that survives an optimistic send's relay ack. */
+  renderKey?: string;
+};
+
 type UseAnchoredScrollOptions = {
   /** Scroll container. Owned by the parent so external refs still compose. */
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
@@ -35,7 +44,7 @@ type UseAnchoredScrollOptions = {
   isLoading: boolean;
   /** Source of truth for the rendered list. Used to detect new-at-bottom
    *  arrivals and to seed/refresh the anchor pre-render. */
-  messages: Array<{ id: string }>;
+  messages: AnchoredMessage[];
   splitPanelOpen?: boolean;
 
   /** When set, scroll to this message on mount and on change. */
@@ -77,8 +86,18 @@ type UseAnchoredScrollResult = {
    *  the hook handled the settlement, including a preserved pinned target. */
   settleAtBottomAfterLayout: () => boolean;
   /** Arm a one-shot scroll-to-bottom that fires on the next appended message
-   *  (used by the composer's send flow). */
-  scrollToBottomOnNextUpdate: () => void;
+   *  (used by the composer's send flow), for a send to `sendChannelId`.
+   *  Returns false without arming when this timeline shows another channel. */
+  scrollToBottomOnNextUpdate: (sendChannelId: string) => boolean;
+  /** True from that arming until the first append lands, whether or not the
+   *  append moves the tail and fires the one-shot. */
+  isOwnSendPending: () => boolean;
+  /** The virtualizer's last bottom report, cleared early by a target jump or
+   *  a live row under a held target, and reset by a channel change. */
+  isVirtualizerAtBottom: () => boolean;
+  /** Disarm that one-shot and the pending send without moving the view, for
+   *  a send that failed. */
+  cancelScrollToBottomOnNextUpdate: () => void;
   /** Imperative: scroll a specific message into view; optionally pulse it.
    *  Returns true if the row was found and scrolled, false otherwise. */
   scrollToMessage: (
@@ -153,6 +172,31 @@ function computeAnchor(
   return { kind: "at-bottom" };
 }
 
+/**
+ * Counts the rows in `current` that arrived live since `previous`: new rows
+ * stamped in the previous newest row's second or later. A same-second arrival
+ * can sort ahead of that row and leave the last id unchanged, so position
+ * can't tell. History only adds older rows, including a page that fills the
+ * gap between a cold target and the head window. Rows without `createdAt`
+ * never count, and a live row stamped earlier (sender clock skew) doesn't
+ * either.
+ */
+function countLiveArrivals(
+  previous: readonly AnchoredMessage[],
+  current: readonly AnchoredMessage[],
+) {
+  const newest = previous[previous.length - 1]?.createdAt;
+  if (newest === undefined) return 0;
+  const rowKey = (message: AnchoredMessage) => message.renderKey ?? message.id;
+  const previousKeys = new Set(previous.map(rowKey));
+  return current.filter(
+    (message) =>
+      message.createdAt !== undefined &&
+      message.createdAt >= newest &&
+      !previousKeys.has(rowKey(message)),
+  ).length;
+}
+
 export function useAnchoredScroll({
   scrollContainerRef,
   contentRef,
@@ -178,9 +222,21 @@ export function useAnchoredScroll({
   // restoration). useState would force re-renders we don't want.
   const anchorRef = React.useRef<AnchorState>({ kind: "at-bottom" });
   const virtualizerAtBottomRef = React.useRef(true);
+  // An accepted virtual route target (targetMessageId) owns the viewport until
+  // the reader scrolls, sends, jumps to latest, or changes channel. Layout
+  // passes in between (history prepends, row measurement, the thread panel
+  // opening) can report the floor; none of them may turn that report into a
+  // bottom settle. The unread pill and find jumps don't hold.
+  const targetHoldRef = React.useRef(false);
   const [isAtBottom, setIsAtBottom] = React.useState(true);
   React.useLayoutEffect(() => {
-    if (shouldSettleForSplitPanel({ isAtBottom, splitPanelOpen })) {
+    if (
+      shouldSettleForSplitPanel({
+        isAtBottom,
+        splitPanelOpen,
+        targetHeld: targetHoldRef.current,
+      })
+    ) {
       virtualSettleAtBottom?.();
     }
   }, [isAtBottom, splitPanelOpen, virtualSettleAtBottom]);
@@ -193,7 +249,7 @@ export function useAnchoredScroll({
   const prevLastMessageIdRef = React.useRef<string | undefined>(undefined);
   const prevFirstMessageIdRef = React.useRef<string | undefined>(undefined);
   const prevMessageCountRef = React.useRef(0);
-  const prevMessagesRef = React.useRef<Array<{ id: string }>>([]);
+  const prevMessagesRef = React.useRef<AnchoredMessage[]>([]);
   const handledTargetIdRef = React.useRef<string | null>(null);
   const highlightTimeoutRef = React.useRef<number | null>(null);
   // Tracks a pending rAF queued by pinToBottomOnMount so it can be cancelled
@@ -204,6 +260,15 @@ export function useAnchoredScroll({
   // appends, we snap to bottom even if they had scrolled up to read history.
   // Consumed (and cleared) by the next append in the restoration effect.
   const forceBottomOnNextAppendRef = React.useRef(false);
+  // Set with the one-shot, but any append clears it, including one that sorts
+  // above the current tail (a sender whose clock runs ahead, a same-second
+  // row) and so leaves the one-shot armed for a later tail. MessageTimeline
+  // holds its tail open only while this is set.
+  const ownSendPendingRef = React.useRef(false);
+  // The channel the state above belongs to, updated when the reset below
+  // runs. A send can settle after a channel switch, and its arm must not land
+  // on the channel shown now.
+  const channelIdRef = React.useRef(channelId);
   // True from a programmatic bottom pin until the list's row measurement settles
   // and the view reaches a true physical bottom. During this window `onScroll`
   // ignores transient gaps and keeps chasing the floor. A `ref`, not state — the
@@ -225,10 +290,11 @@ export function useAnchoredScroll({
   // Reset everything when the channel changes — the layout effect that runs
   // immediately after this reset is responsible for either jumping to bottom
   // or to the target message for the new channel.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: channelId is intentionally the sole trigger — we want this effect to fire exactly when the channel changes (and on mount).
   React.useLayoutEffect(() => {
+    channelIdRef.current = channelId;
     anchorRef.current = { kind: "at-bottom" };
     virtualizerAtBottomRef.current = true;
+    targetHoldRef.current = false;
     setIsAtBottom(true);
     setNewMessageCount(0);
     setHighlightedMessageId(null);
@@ -239,6 +305,7 @@ export function useAnchoredScroll({
     prevMessagesRef.current = [];
     handledTargetIdRef.current = null;
     forceBottomOnNextAppendRef.current = false;
+    ownSendPendingRef.current = false;
     settlingRef.current = false;
     programmaticScrollTopRef.current = null;
     isWritingScrollRef.current = false;
@@ -368,6 +435,7 @@ export function useAnchoredScroll({
       const container = scrollContainerRef.current;
       if (!container) return;
       anchorRef.current = { kind: "at-bottom" };
+      targetHoldRef.current = false;
       // A programmatic jump-to-bottom is not atomic, even for `behavior: "auto"`:
       // the browser can emit `scroll` while the list is still settling row
       // measurements. During that window `computeAnchor` may read the transient
@@ -394,8 +462,28 @@ export function useAnchoredScroll({
   // Arm a one-shot: the next append snaps to bottom regardless of where the
   // user is. The consumer calls this right before sending so their own
   // outbound message pulls the view down even if they'd scrolled up.
-  const scrollToBottomOnNextUpdate = React.useCallback(() => {
-    forceBottomOnNextAppendRef.current = true;
+  const scrollToBottomOnNextUpdate = React.useCallback(
+    (sendChannelId: string) => {
+      if (sendChannelId !== channelIdRef.current) return false;
+      forceBottomOnNextAppendRef.current = true;
+      ownSendPendingRef.current = true;
+      return true;
+    },
+    [],
+  );
+  const isOwnSendPending = React.useCallback(
+    () => ownSendPendingRef.current,
+    [],
+  );
+  const isVirtualizerAtBottom = React.useCallback(
+    () => virtualizerAtBottomRef.current,
+    [],
+  );
+  // A send that fails may never add a row here, so nothing else would clear
+  // these.
+  const cancelScrollToBottomOnNextUpdate = React.useCallback(() => {
+    forceBottomOnNextAppendRef.current = false;
+    ownSendPendingRef.current = false;
   }, []);
 
   const settleAtBottomAfterLayout = React.useCallback(() => {
@@ -443,7 +531,12 @@ export function useAnchoredScroll({
   const scrollToMessageImperative = React.useCallback(
     (
       messageId: string,
-      options: { highlight?: boolean; behavior?: ScrollBehavior } = {},
+      options: {
+        highlight?: boolean;
+        behavior?: ScrollBehavior;
+        /** Route targets only: hold the viewport against bottom settles. */
+        holdTarget?: boolean;
+      } = {},
     ): boolean => {
       const container = scrollContainerRef.current;
       if (!container) return false;
@@ -468,9 +561,12 @@ export function useAnchoredScroll({
           // A target that is not loaded yet leaves the bottom pin alone.
           return false;
         }
-        // An accepted target supersedes every pending bottom pin.
+        // An accepted target supersedes every pending bottom pin. A route
+        // target also holds the viewport until the reader takes it back; any
+        // other jump replaces an earlier hold.
         virtualCancelBottomIntent?.();
         cancelMountBottomPin();
+        targetHoldRef.current = options.holdTarget === true;
         anchorRef.current = { kind: "message", messageId, topOffset: 0 };
         virtualizerAtBottomRef.current = false;
         setIsAtBottom(false);
@@ -640,6 +736,7 @@ export function useAnchoredScroll({
         if (
           scrollToMessageImperative(targetMessageId, {
             highlight: highlightTargetMessage,
+            holdTarget: true,
           })
         ) {
           handledTargetIdRef.current = targetMessageId;
@@ -676,6 +773,10 @@ export function useAnchoredScroll({
       previous: prevMessages,
     });
     const isPrepend = messageDelta === "prepend";
+    // The first append ends a pending send, wherever its row sorts.
+    if (newLatestArrived || messageDelta === "append") {
+      ownSendPendingRef.current = false;
+    }
 
     // One-shot: an outbound send armed `scrollToBottomOnNextUpdate`. When the
     // resulting append lands, snap to bottom regardless of the current anchor,
@@ -684,6 +785,7 @@ export function useAnchoredScroll({
     if (newLatestArrived && forceBottomOnNextAppendRef.current) {
       forceBottomOnNextAppendRef.current = false;
       anchorRef.current = { kind: "at-bottom" };
+      targetHoldRef.current = false;
       settlingRef.current = true;
       if (virtualizerOwnsPrependAnchoring && virtualScrollToBottom) {
         virtualScrollToBottom("auto");
@@ -757,6 +859,18 @@ export function useAnchoredScroll({
       if (!isPrepend) {
         setNewMessageCount((current) => current + messagesArrived);
       }
+    } else if (targetHoldRef.current && messages !== prevMessages) {
+      // A held target keeps its message anchor through floor reports, so
+      // isAtBottom can still read true when a live row lands below it. Virtua
+      // reports bottom state only from scroll events, and an append emits
+      // none, so raise the new-message pill here. A same-second arrival can
+      // land without changing the last id, so count arrivals by timestamp.
+      const rowsBelow = countLiveArrivals(prevMessages, messages);
+      if (rowsBelow > 0) {
+        virtualizerAtBottomRef.current = false;
+        setIsAtBottom(false);
+        setNewMessageCount((current) => current + rowsBelow);
+      }
     }
 
     prevLastMessageIdRef.current = lastMessage?.id;
@@ -819,11 +933,43 @@ export function useAnchoredScroll({
     virtualizerOwnsPrependAnchoring,
   ]);
 
+  // Viewport reflow (the thread panel opening or closing, a window resize)
+  // rewraps rows around a held target without a scroll event, so neither the
+  // target's place nor the bottom state would follow. Re-centre the target:
+  // the scroll that follows refreshes the bottom state too.
+  const reanchorHeldTarget = React.useCallback(() => {
+    const anchor = anchorRef.current;
+    if (!targetHoldRef.current || anchor.kind !== "message") return;
+    virtualScrollToMessage?.(anchor.messageId);
+  }, [virtualScrollToMessage]);
+  const splitPanelOpenRef = React.useRef(splitPanelOpen);
+  React.useLayoutEffect(() => {
+    if (splitPanelOpenRef.current === splitPanelOpen) return;
+    splitPanelOpenRef.current = splitPanelOpen;
+    reanchorHeldTarget();
+  }, [reanchorHeldTarget, splitPanelOpen]);
   useVirtualizedViewportResize(
     scrollContainerRef,
     virtualizerAtBottomRef,
+    targetHoldRef,
     virtualizerOwnsPrependAnchoring ? virtualSettleAtBottom : undefined,
+    reanchorHeldTarget,
   );
+
+  // Reader scroll input releases a held target. The floor reports that
+  // arrived while it was held then take effect, so a reader already at the
+  // bottom follows new messages again.
+  React.useLayoutEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!virtualizerOwnsPrependAnchoring || !container) return;
+    return listenForReaderScroll(container, () => {
+      if (!targetHoldRef.current) return;
+      targetHoldRef.current = false;
+      if (virtualizerAtBottomRef.current) {
+        anchorRef.current = { kind: "at-bottom" };
+      }
+    });
+  }, [scrollContainerRef, virtualizerOwnsPrependAnchoring]);
 
   // Pinned centers survive our own corrections but release as soon as the
   // reader deliberately takes control of the scroll position or the caller
@@ -898,6 +1044,7 @@ export function useAnchoredScroll({
     if (
       !scrollToMessageImperative(targetMessageId, {
         highlight: highlightTargetMessage,
+        holdTarget: true,
       })
     ) {
       // Not loaded yet. A cold deep-link target is fetched by id and spliced
@@ -937,7 +1084,10 @@ export function useAnchoredScroll({
       if (!virtualizerOwnsPrependAnchoring) return;
       virtualizerAtBottomRef.current = atBottom;
       if (atBottom) {
-        anchorRef.current = { kind: "at-bottom" };
+        // A held target keeps its anchor. The report still updates the
+        // affordances, but must not become bottom-follow ownership. A live
+        // append under the hold raises them again (restoration effect).
+        if (!targetHoldRef.current) anchorRef.current = { kind: "at-bottom" };
         setNewMessageCount(0);
       }
       setIsAtBottom(atBottom);
@@ -953,6 +1103,9 @@ export function useAnchoredScroll({
     scrollToBottom: scrollToBottomImperative,
     settleAtBottomAfterLayout,
     scrollToBottomOnNextUpdate,
+    isOwnSendPending,
+    isVirtualizerAtBottom,
+    cancelScrollToBottomOnNextUpdate,
     scrollToMessage: scrollToMessageImperative,
     onVirtualizerAtBottomStateChange,
   };

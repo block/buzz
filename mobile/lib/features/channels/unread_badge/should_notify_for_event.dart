@@ -1,3 +1,4 @@
+import '../../../shared/mentions/mention_tags.dart';
 import '../../../shared/relay/nostr_models.dart';
 
 bool shouldNotifyForEvent(
@@ -22,14 +23,7 @@ bool shouldNotifyForEvent(
     }
   }
 
-  final normalizedPk = myPubkey.toLowerCase();
-  for (final tag in event.tags) {
-    if (tag.length >= 2 &&
-        tag[0] == 'p' &&
-        tag[1].toLowerCase() == normalizedPk) {
-      return true;
-    }
-  }
+  if (tagsAddress(event.tags, myPubkey)) return true;
 
   final eventChannelId = channelId ?? event.channelId;
   if (eventChannelId != null && mutedChannelIds.contains(eventChannelId)) {
@@ -43,8 +37,23 @@ bool shouldNotifyForEvent(
     return false;
   }
 
-  return rootId != null &&
-      (participatedRootIds.contains(rootId) ||
-          followedRootIds.contains(rootId) ||
-          authoredRootIds.contains(rootId));
+  return isInViewerThread(
+    rootId,
+    participatedRootIds: participatedRootIds,
+    followedRootIds: followedRootIds,
+    authoredRootIds: authoredRootIds,
+  );
 }
+
+/// Whether [rootId] is one of the viewer's threads: they replied in it,
+/// follow it, or started it.
+bool isInViewerThread(
+  String? rootId, {
+  required Set<String> participatedRootIds,
+  required Set<String> followedRootIds,
+  required Set<String> authoredRootIds,
+}) =>
+    rootId != null &&
+    (participatedRootIds.contains(rootId) ||
+        followedRootIds.contains(rootId) ||
+        authoredRootIds.contains(rootId));

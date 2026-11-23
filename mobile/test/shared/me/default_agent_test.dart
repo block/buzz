@@ -63,6 +63,29 @@ void main() {
   });
 
   test(
+    'first-agent selection never replaces an existing choice or clear',
+    () async {
+      for (final choice in ['b' * 64, null]) {
+        final previous = signed(choice, 1);
+        final relay = FakeRelay()..events = [previous];
+        await saveDefaultAgent(
+          MeSync(relay, config),
+          'a' * 64,
+          onlyIfUnset: true,
+        );
+        expect(relay.events.single.id, previous.id);
+      }
+      final relay = FakeRelay();
+      final sync = MeSync(relay, config);
+      await saveDefaultAgent(sync, 'a' * 64, onlyIfUnset: true);
+      expect(decodeDefaultAgent(relay.events.single, sync), 'a' * 64);
+      // Retrying a completed setup must be idempotent even in the same second.
+      await saveDefaultAgent(sync, 'a' * 64, onlyIfUnset: true);
+      expect(relay.events, hasLength(1));
+    },
+  );
+
+  test(
     'only signed owner preferences at the desktop coordinate and exact schema are accepted',
     () {
       final sync = MeSync(FakeRelay(), config);

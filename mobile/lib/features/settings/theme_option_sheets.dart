@@ -7,6 +7,8 @@ import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/duo_toolbar.dart';
+import '../../shared/widgets/adaptive_conversation_pane.dart';
 
 const appearanceModeOptions = <({ThemeMode mode, String label, IconData icon})>[
   (mode: ThemeMode.light, label: 'Light', icon: BuzzIcons.sun),
@@ -16,18 +18,6 @@ const appearanceModeOptions = <({ThemeMode mode, String label, IconData icon})>[
 
 String appearanceModeLabel(ThemeMode mode) =>
     appearanceModeOptions.firstWhere((option) => option.mode == mode).label;
-
-Future<void> showAppearanceModePickerSheet({
-  required BuildContext context,
-  required ThemeMode selectedMode,
-  required ValueChanged<ThemeMode> onSelected,
-}) => showBuzzModalBottomSheet<void>(
-  context: context,
-  title: 'Appearance',
-  showDragHandle: true,
-  builder: (_) =>
-      _AppearanceModePicker(initialMode: selectedMode, onSelected: onSelected),
-);
 
 Future<void> showAccentColorPickerSheet({
   required BuildContext context,
@@ -39,146 +29,25 @@ Future<void> showAccentColorPickerSheet({
   title: 'Chat color',
   showDragHandle: true,
   builder: (_) => _AccentColorPicker(
+    compact:
+        DuoToolbarScope.maybeOf(context)?.strip != null &&
+        usesConversationPanes(context),
     colorScheme: colorScheme,
     initialIndex: selectedIndex,
     onSelected: onSelected,
   ),
 );
 
-class _AppearanceModePicker extends HookWidget {
-  const _AppearanceModePicker({
-    required this.initialMode,
-    required this.onSelected,
-  });
-
-  final ThemeMode initialMode;
-  final ValueChanged<ThemeMode> onSelected;
-
-  @override
-  Widget build(BuildContext context) {
-    final selected = useState(initialMode);
-    return SafeArea(
-      top: false,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(
-          Grid.gutter,
-          Grid.xxs,
-          Grid.gutter,
-          Grid.xs,
-        ),
-        child: SizedBox(
-          height: 132,
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              for (
-                var index = 0;
-                index < appearanceModeOptions.length;
-                index++
-              ) ...[
-                if (index > 0) const SizedBox(width: Grid.xxs),
-                Expanded(
-                  child: _AppearanceModeOption(
-                    option: appearanceModeOptions[index],
-                    selected:
-                        appearanceModeOptions[index].mode == selected.value,
-                    onTap: () {
-                      final mode = appearanceModeOptions[index].mode;
-                      unawaited(HapticFeedback.selectionClick());
-                      selected.value = mode;
-                      onSelected(mode);
-                    },
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _AppearanceModeOption extends StatelessWidget {
-  const _AppearanceModeOption({
-    required this.option,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final ({ThemeMode mode, String label, IconData icon}) option;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) => Semantics(
-    button: true,
-    selected: selected,
-    label: '${option.label} appearance',
-    child: Container(
-      key: ValueKey('appearance-mode-${option.mode.name}'),
-      decoration: BoxDecoration(
-        color: context.colors.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(Radii.container),
-      ),
-      foregroundDecoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(Radii.container),
-        border: selected
-            ? Border.all(color: context.colors.primary, width: 2)
-            : null,
-      ),
-      child: Material(
-        color: Colors.transparent,
-        borderRadius: BorderRadius.circular(Radii.container),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onTap,
-          child: Stack(
-            alignment: Alignment.center,
-            children: [
-              Transform.translate(
-                offset: const Offset(0, -Grid.twelve),
-                child: Icon(
-                  option.icon,
-                  key: ValueKey('appearance-mode-${option.mode.name}-icon'),
-                  size: 34,
-                  color: selected
-                      ? context.colors.primary
-                      : context.colors.onSurface,
-                ),
-              ),
-              Positioned(
-                left: Grid.xxs,
-                right: Grid.xxs,
-                bottom: Grid.xxs,
-                child: Text(
-                  option.label,
-                  key: ValueKey('appearance-mode-${option.mode.name}-label'),
-                  textAlign: TextAlign.center,
-                  style: context.textTheme.labelLarge?.copyWith(
-                    color: selected
-                        ? context.colors.primary
-                        : context.colors.onSurface,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    ),
-  );
-}
-
 class _AccentColorPicker extends HookWidget {
   const _AccentColorPicker({
     required this.colorScheme,
+    required this.compact,
     required this.initialIndex,
     required this.onSelected,
   });
 
   final ColorScheme colorScheme;
+  final bool compact;
   final int initialIndex;
   final ValueChanged<int> onSelected;
 
@@ -194,26 +63,34 @@ class _AccentColorPicker extends HookWidget {
           Grid.gutter,
           Grid.xs,
         ),
-        child: GridView.builder(
-          key: const ValueKey('accent-selection-grid'),
-          shrinkWrap: true,
-          primary: false,
-          padding: EdgeInsets.zero,
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 4,
-            crossAxisSpacing: Grid.xxs,
-            mainAxisSpacing: Grid.xs,
-          ),
-          itemCount: chatColorChoices.length,
-          itemBuilder: (context, index) => _AccentSheetOption(
-            index: index,
-            color: chatColorForScheme(colorScheme, index),
-            selected: selected.value == index,
-            onTap: () {
-              unawaited(HapticFeedback.selectionClick());
-              selected.value = index;
-              onSelected(index);
-            },
+        child: Align(
+          heightFactor: 1,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: compact ? 320 : double.infinity,
+            ),
+            child: GridView.builder(
+              key: const ValueKey('accent-selection-grid'),
+              shrinkWrap: true,
+              primary: false,
+              padding: EdgeInsets.zero,
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 4,
+                crossAxisSpacing: Grid.xxs,
+                mainAxisSpacing: Grid.xs,
+              ),
+              itemCount: chatColorChoices.length,
+              itemBuilder: (context, index) => _AccentSheetOption(
+                index: index,
+                color: chatColorForScheme(colorScheme, index),
+                selected: selected.value == index,
+                onTap: () {
+                  unawaited(HapticFeedback.selectionClick());
+                  selected.value = index;
+                  onSelected(index);
+                },
+              ),
+            ),
           ),
         ),
       ),

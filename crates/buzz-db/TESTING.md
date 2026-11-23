@@ -21,6 +21,12 @@ The wrapper isolates destructive tests by dropping the entire per-test
 database after the process exits. It does not `DELETE` rows or `TRUNCATE`
 shared tables, so tests may run concurrently without coordinating cleanup.
 
+The wrapper drops only that per-test database. A test that needs another
+database or role on the server creates it with `test_support::ScratchDb` or
+`test_support::ScratchRole`, whose `Drop` removes it even when the test
+panics. Do not end a test with a manual `DROP DATABASE` or `DROP ROLE`: a
+failed assertion skips it and leaves the object behind.
+
 ## Choose the schema intentionally
 
 Most tests use the committed desired-state schema from `schema/schema.sql`,

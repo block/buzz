@@ -5,7 +5,12 @@ use serde_json::{json, Value};
 use std::{collections::BTreeSet, future::Future, time::Duration};
 use tokio_tungstenite::{
     connect_async_tls_with_config,
-    tungstenite::{client::IntoClientRequest, protocol::WebSocketConfig, Message},
+    tungstenite::{
+        client::IntoClientRequest,
+        http::{header::USER_AGENT, HeaderValue},
+        protocol::WebSocketConfig,
+        Message,
+    },
     Connector, MaybeTlsStream, WebSocketStream,
 };
 
@@ -96,11 +101,15 @@ async fn control(socket: &mut AudioSocket) -> Result<Value, String> {
     }
 }
 
+/// `User-Agent` sent on the upgrade unless the request already carries one.
+const DEFAULT_USER_AGENT: &str = concat!("buzz-audio-client/", env!("CARGO_PKG_VERSION"));
+
 /// Connect and authenticate using a host-provided asynchronous signer.
 ///
 /// The host validates the destination before calling, and constructs the NIP-42
 /// event (including its exact relay tag) from the challenge. `request` is the
-/// audio URL, or a request carrying host-supplied upgrade headers. No private key is
+/// audio URL, or a request carrying host-supplied upgrade headers; without a
+/// `User-Agent` it sends `buzz-audio-client/<version>`. No private key is
 /// accepted. Dropping this future cancels connection/admission; the entire
 /// operation is bounded to 15 seconds, including signing.
 pub async fn connect<F, Fut>(
@@ -117,6 +126,13 @@ where
         let config = WebSocketConfig::default()
             .max_message_size(Some(65_536))
             .max_frame_size(Some(65_536));
+        let mut request = request
+            .into_client_request()
+            .map_err(|e| format!("audio WS connect failed: {e}"))?;
+        request
+            .headers_mut()
+            .entry(USER_AGENT)
+            .or_insert(HeaderValue::from_static(DEFAULT_USER_AGENT));
         let (mut socket, _) =
             connect_async_tls_with_config(request, Some(config), false, connector)
                 .await

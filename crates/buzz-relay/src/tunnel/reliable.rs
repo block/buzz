@@ -676,18 +676,16 @@ mod tests {
         RuntimeId([byte; 32])
     }
 
-    fn pool() -> deadpool_redis::Pool {
+    fn pool() -> buzz_pubsub::RedisConnection {
         let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
-        deadpool_redis::Config::from_url(url)
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("create redis pool")
+        buzz_pubsub::redis_connection(&url).expect("create redis pool")
     }
 
     async fn redis_directory_if_available() -> Option<SessionDirectory> {
         let pool = pool();
-        let mut conn = pool.get().await.ok()?;
+        let mut conn = pool.clone();
         redis::cmd("PING")
-            .query_async::<String>(&mut *conn)
+            .query_async::<String>(&mut conn)
             .await
             .ok()?;
         Some(SessionDirectory::with_lease_ttl(
@@ -707,11 +705,11 @@ mod tests {
                 profile: Profile::ReliableStream,
             })
             .await;
-        let mut conn = pool().get().await.expect("redis conn");
+        let mut conn = pool().clone();
         let _: () = redis::cmd("DEL")
             .arg(format!("{base}:lease"))
             .arg(format!("{base}:generation"))
-            .query_async(&mut *conn)
+            .query_async(&mut conn)
             .await
             .expect("clear keys");
     }

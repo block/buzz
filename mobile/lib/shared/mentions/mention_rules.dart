@@ -1,7 +1,10 @@
 import 'package:flutter/foundation.dart';
 
+import '../utils/string_utils.dart';
+import 'name_match.dart';
+
 /// One key the user can mention. The fields are the inputs of the portable
-/// mention rules (buzz-app `src/bundled/mentions/README.md`, version 1).
+/// mention rules (buzz-app `src/bundled/mentions/README.md`, version 4).
 @immutable
 class MentionChoice {
   /// Lowercase 64-hex public key.
@@ -22,6 +25,10 @@ class MentionChoice {
   final bool owned;
   final bool managed;
 
+  /// The other community this agent of the viewer's comes from, or null for
+  /// a choice of this community (section 4, rule 2).
+  final String? elsewhere;
+
   const MentionChoice({
     required this.pubkey,
     required this.name,
@@ -31,24 +38,14 @@ class MentionChoice {
     this.agent = false,
     this.owned = false,
     this.managed = false,
+    this.elsewhere,
   });
+
+  /// Every name of this choice: its aliases and its label.
+  List<String> get _names => [...aliases, label];
 }
 
-String _normalized(String text) => text.trim().toLowerCase();
-
-final _whitespace = RegExp(r'\s+', unicode: true);
-
-/// Tier 0 to 3 from section 3, or null for no match.
-int? _nameMatch(String text, String needle) {
-  if (needle.isEmpty) return 0;
-  final name = _normalized(text);
-  if (name == needle) return 0;
-  if (name.startsWith(needle)) return 1;
-  final words = name.split(_whitespace);
-  if (words.contains(needle)) return 2;
-  if (words.any((word) => word.startsWith(needle))) return 3;
-  return null;
-}
+List<int> _runes(String needle) => needle.runes.toList();
 
 int? _min(Iterable<int?> values) {
   int? best;
@@ -58,27 +55,52 @@ int? _min(Iterable<int?> values) {
   return best;
 }
 
-int? _baseMatch(MentionChoice choice, String needle) =>
-    _min(choice.aliases.map((name) => _nameMatch(name, needle)));
+int? _baseMatch(MentionChoice choice, List<int> needle) =>
+    _min(choice.aliases.map((name) => foldedNameMatchTier(name, needle)));
 
-/// A choice's match (section 3): the label tier, else 4 plus the best alias
-/// tier. Null means the choice does not match. Keys are never searchable.
-@visibleForTesting
-int? mentionMatch(MentionChoice choice, String query) {
-  final needle = _normalized(query);
-  if (needle.isEmpty) return 0;
+/// [mentionMatch] for a normalized, non-empty [needle] and the query's
+/// exact public [key], if it is one.
+int? _labelMatch(MentionChoice choice, List<int> needle, String? key) {
+  // An exact public key is not a name: it matches only its owner.
+  if (key != null) return choice.pubkey == key ? 0 : null;
   // No known name: the label is only a key fallback.
   if (choice.aliases.isEmpty) return null;
-  final visible = _nameMatch(choice.label, needle);
+  final visible = foldedNameMatchTier(choice.label, needle);
   if (visible != null) return visible;
   final base = _baseMatch(choice, needle);
   return base == null ? null : 4 + base;
 }
 
+/// A choice's match (section 3): the label tier, else 4 plus the best alias
+/// tier. Null means the choice does not match. Keys are never searchable,
+/// except an exact public key, which matches only the choice it names.
+@visibleForTesting
+int? mentionMatch(MentionChoice choice, String query) {
+  final needle = normalizeName(query);
+  if (needle.isEmpty) return 0;
+  return _labelMatch(choice, _runes(needle), typedPublicKey(query));
+}
+
+/// Section 4 rule 3: a choice whose shown label matches the query leads when
+/// one of its names (aliases, never generated label parts) is the query, or,
+/// for the viewer's own agent, continues it with a new word (`Sol 6` for
+/// `sol`, not `Solana`). [needle] is normalized and non-empty.
+bool _leads(MentionChoice choice, String needle, List<int> needleRunes) {
+  if (choice.agent && !choice.owned) return false;
+  if (foldedNameMatchTier(choice.label, needleRunes) == null) return false;
+  return choice.aliases.any(
+    (name) =>
+        normalizeName(name) == needle ||
+        (choice.agent && nameContinues(name, needle)),
+  );
+}
+
 int _compare(String a, String b) => a.compareTo(b);
 
 /// Section 4 order. Every rule is a key of one choice, so the result is the
-/// same for any input order. Agents that share a name form one block at its
+/// same for any input order. Another community's agents follow everyone
+/// here; an exact person and the viewer's own agents that start with the
+/// query's words lead. Agents that share a name form one block at its
 /// lowest label; recency, managed and presence order only that block.
 List<MentionChoice> rankMentions(
   Iterable<MentionChoice> choices,
@@ -86,10 +108,12 @@ List<MentionChoice> rankMentions(
   Map<String, int> history = const {},
   String Function(String pubkey)? presence,
 }) {
-  final needle = _normalized(query);
+  final needle = normalizeName(query);
+  final needleRunes = _runes(needle);
+  final key = typedPublicKey(query);
   final keyed = <_Keyed>[];
   for (final choice in choices) {
-    final match = mentionMatch(choice, query);
+    final match = needle.isEmpty ? 0 : _labelMatch(choice, needleRunes, key);
     if (match == null) continue;
     final status = presence?.call(choice.pubkey);
     keyed.add(
@@ -97,13 +121,15 @@ List<MentionChoice> rankMentions(
         choice: choice,
         tier: [
           choice.member ? 0 : 1,
+          choice.elsewhere == null ? 0 : 1,
+          needle.isNotEmpty && _leads(choice, needle, needleRunes) ? 0 : 1,
           match,
           // No aliases: after every named choice, even for the empty query.
-          _baseMatch(choice, needle) ?? 1 << 30,
+          _baseMatch(choice, needleRunes) ?? 1 << 30,
           choice.agent && choice.owned ? 0 : 1,
         ],
-        label: _normalized(choice.label),
-        blockName: choice.agent ? _normalized(choice.name) : null,
+        label: normalizeName(choice.label),
+        blockName: choice.agent ? normalizeName(choice.name) : null,
         recent: history[choice.pubkey] ?? 0,
         online: switch (status) {
           'online' => 0,
@@ -171,23 +197,67 @@ class _Keyed {
       : '1${tier.join(',')}\u0000$blockName';
 }
 
+bool _hasExactName(MentionChoice choice, String needle) =>
+    choice._names.any((name) => normalizeName(name) == needle);
+
+/// Section 5: whether a known longer name keeps the query's exact name from
+/// selecting. Once a member has the exact name, only another member's longer
+/// name does: a choice outside the channel never makes a member's name
+/// ambiguous. A choice's own longer name does not count when that same
+/// choice also has the exact name (`Example Agent` beside `Example`), nor
+/// does a generated `(agent)` suffix on its label.
+bool _continued(Iterable<MentionChoice> choices, String needle) {
+  final member = choices.any(
+    (c) => c.member && c.aliases.isNotEmpty && _hasExactName(c, needle),
+  );
+  for (final choice in choices) {
+    if (member && !choice.member) continue;
+    if (_hasExactName(choice, needle)) continue;
+    final longer =
+        choice.agent &&
+            choice.aliases.any(
+              (name) => '${name.trim()} (agent)' == choice.label,
+            )
+        ? choice.aliases
+        : choice._names;
+    if (longer.any((name) => nameContinues(name, needle))) return true;
+  }
+  return false;
+}
+
 /// Section 5: the key Space selects, or null. Checked against the full,
-/// uncapped choice set.
+/// uncapped choice set. An exact public key names only its owner, even one
+/// with no known name, and no name continues it.
 String? exactMention(Iterable<MentionChoice> choices, String query) {
-  final needle = _normalized(query);
-  if (needle.isEmpty) return null;
+  final key = typedPublicKey(query);
+  if (key != null) {
+    return choices.where((choice) => choice.pubkey == key).firstOrNull?.pubkey;
+  }
+  final needle = normalizeName(query);
+  if (needle.isEmpty || _continued(choices, needle)) return null;
   String? found;
   var count = 0;
   for (final choice in choices) {
-    final names = [...choice.aliases, choice.label].map(_normalized);
-    if (names.any((name) => name.startsWith('$needle '))) return null;
-    if (choice.aliases.isNotEmpty && names.contains(needle)) {
+    if (choice.aliases.isNotEmpty && _hasExactName(choice, needle)) {
       count++;
       found = choice.pubkey;
     }
   }
   return count == 1 ? found : null;
 }
+
+final _mentionTerminators = RegExp(r'''^[ .,!?;:)\]}'’"”]$''', unicode: true);
+
+/// Section 5: whether [character], typed straight after a query, selects
+/// its exact, unique name as Space does. Besides Space: closing punctuation,
+/// a closing bracket for the ones a query opens after, or a closing quote,
+/// so `@Bob,` and `@Bob's` mention Bob. The client keeps the character after
+/// the mention in place of the space. Where Space would not select, the
+/// character is typed into the query instead: `'` after `Pat O` while
+/// `Pat O'Brien` is known stays in the query. Any other character, such as
+/// a hyphen, is never a terminator.
+bool mentionTerminator(String character) =>
+    _mentionTerminators.hasMatch(character);
 
 /// An open `@` query: `[start, end)` covers `@` and the query text.
 typedef MentionQuery = ({int start, int end, String query});
@@ -210,14 +280,13 @@ MentionQuery? findMentionQuery(String text, int caret) {
 }
 
 /// Section 2 multi-word rule: a query with a space stays open only while it
-/// is still the start of a known name. A complete name plus a trailing space
-/// is prose.
+/// is still the start of a known name, compared after section 3 folding of
+/// the names. The query itself is not trimmed: a complete name plus a
+/// trailing space is prose.
 bool matchesMentionQuery(String query, Iterable<String> names) {
   if (!query.contains(' ')) return true;
-  final lower = query.toLowerCase();
-  if (lower.endsWith(' ') &&
-      names.any((name) => name.toLowerCase() == lower.trimRight())) {
-    return false;
-  }
-  return names.any((name) => name.toLowerCase().startsWith(lower));
+  final folded = foldName(query);
+  final known = names.map(normalizeName).toList();
+  if (folded.endsWith(' ') && known.contains(folded.trimRight())) return false;
+  return known.any((name) => name.startsWith(folded));
 }

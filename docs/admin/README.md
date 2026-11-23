@@ -393,7 +393,11 @@ not the JSON error envelope, before authentication). All four accept a signed
   owner's.
 - `GET /api/admin/v1/events/{id}?communityHost=`
   Reads a single event scoped to that community, including soft-deleted
-  ones. Response: `{"id", "authorPubkey", "kind", "content", "createdAt",
+  ones. A relay-signed list (kinds 13534, 13535, and 39000–39002) that a
+  newer list replaced is deleted, so its ID returns `404 event_not_found`.
+  A list retired another way (channel deletion, NIP-09, or a replacement
+  written before this behavior) stays soft-deleted and is returned with
+  `deletedAt` set. Response: `{"id", "authorPubkey", "kind", "content", "createdAt",
   "deletedAt"|null, "channelId"|null}`. Never returns author-only kinds
   (event reminders, push leases, private managed agents) or result-gated
   kinds (DM visibility, agent turn metrics). Absent, other-community,

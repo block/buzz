@@ -1,6 +1,41 @@
 part of '../channel_detail_page_test.dart';
 
 void bubbleLayoutTests() {
+  messageAuthorVisibilityTests();
+  testWidgets('reply footer does not add reaction padding inside the bubble', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _buildTestable(
+        messages: [
+          _textMsg(id: 'plain', pubkey: 'alice', content: 'Same text'),
+          _textMsg(id: threadIdRoot, pubkey: 'alice', content: 'Same text'),
+          _textMsg(
+            id: threadIdR1,
+            pubkey: 'bob',
+            content: 'Reply',
+            extraTags: [
+              ['e', threadIdRoot, '', 'reply'],
+            ],
+          ),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+    Finder bubble(String id) => find
+        .descendant(
+          of: find.byKey(ValueKey('message-row-$id')),
+          matching: find.byType(LocalSendBubbleSurface),
+        )
+        .first;
+    expect(find.text('1 reply'), findsOneWidget);
+    expect(
+      tester.getSize(bubble(threadIdRoot)).height,
+      closeTo(tester.getSize(bubble('plain')).height, 0.01),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   for (final author in ['self', 'alice']) {
     testWidgets('date divider owns equal space around $author messages', (
       tester,
@@ -145,13 +180,16 @@ void bubbleLayoutTests() {
             find.byType(MessageMediaAvatar),
           );
           expect(incomingAvatar.right, lessThan(incoming.left));
-          final outgoingAvatar = bounds(
-            'outgoing',
-            find.byType(MessageMediaAvatar),
-          );
-          expect(outgoingAvatar.left, greaterThan(outgoing.right));
+          expect(incomingAvatar.size, const Size.square(36));
           expect(
-            outgoingAvatar.right,
+            find.descendant(
+              of: find.byKey(const ValueKey('message-row-outgoing')),
+              matching: find.byType(MessageMediaAvatar),
+            ),
+            findsNothing,
+          );
+          expect(
+            outgoing.right,
             closeTo(
               tester
                   .getRect(find.byKey(const ValueKey('message-row-outgoing')))
@@ -378,6 +416,65 @@ void bubbleLayoutTests() {
   );
 
   testWidgets(
+    'a failed grouped quick reaction still shows its notice after the row '
+    'is rebuilt away',
+    (tester) async {
+      final removals = [
+        for (var index = 0; index < 3; index++)
+          _systemMsg(
+            id: 'removal-$index',
+            payload: {
+              'type': 'member_removed',
+              'actor': 'alice',
+              'target': 'target-$index',
+            },
+            createdAt: 1000 + index,
+          ),
+      ];
+      final notifier = _FakeMessagesNotifier(removals);
+      final actions = _OfflineGroupedReactionActions();
+      await tester.pumpWidget(
+        _buildTestable(
+          toastHost: true,
+          signingPubkey: 'self',
+          messages: const [],
+          messagesNotifier: notifier,
+          createChannelActions: (_) => actions,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.longPress(
+        find.byKey(const ValueKey('system-message-row-removal-0')),
+      );
+      await tester.pumpAndSettle();
+
+      // A new message shifts the timeline while the sheet is open.
+      notifier.setMessages([
+        _textMsg(
+          id: 'newer',
+          pubkey: 'alice',
+          content: 'Newer',
+          createdAt: 2000,
+        ),
+      ]);
+      await tester.pump();
+      expect(
+        find.byKey(const ValueKey('system-message-row-removal-0')),
+        findsNothing,
+      );
+      await tester.tap(find.byKey(const ValueKey('quick-reaction-👍')));
+      await tester.pumpAndSettle();
+
+      expect(actions.attempts, 1);
+      expect(
+        find.text('Couldn’t add reaction. No connection.'),
+        findsOneWidget,
+      );
+      await tester.pumpAndSettle(const Duration(seconds: 10));
+    },
+  );
+
+  testWidgets(
     'status bar navigation fetches short history and stops on failure',
     (tester) async {
       for (final fail in [false, true]) {
@@ -585,7 +682,7 @@ void bubbleLayoutTests() {
         messages: [
           _systemMsg(
             id: 'single-line',
-            payload: {'type': 'member_left', 'actor': 'alice'},
+            payload: {'type': 'channel_archived', 'actor': 'alice'},
           ),
         ],
         users: {
@@ -597,7 +694,7 @@ void bubbleLayoutTests() {
     final card = find.byKey(const ValueKey('activity-card-single-line'));
     final icon = find.descendant(of: card, matching: find.byType(Icon));
     expect(icon, findsNothing);
-    expect(findRichText('left the channel'), findsOneWidget);
+    expect(findRichText('archived this channel'), findsOneWidget);
   });
 
   testWidgets(
@@ -613,7 +710,7 @@ void bubbleLayoutTests() {
           messages: [
             _systemMsg(
               id: 'sys-accessible',
-              payload: {'type': 'member_left', 'actor': 'alice'},
+              payload: {'type': 'channel_archived', 'actor': 'alice'},
               createdAt:
                   DateTime(2026, 7, 28, 12, 34).millisecondsSinceEpoch ~/ 1000,
             ),
@@ -944,7 +1041,27 @@ class _GroupedReactionActions implements ChannelActions {
   @override
   Future<void> removeReaction(String id, String emoji) async => removed.add(id);
   @override
-  Future<void> addReaction(String id, String emoji) async => added.add(id);
+  Future<void> addReaction(
+    String id,
+    String emoji, {
+    required String targetAuthor,
+  }) async => added.add(id);
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _OfflineGroupedReactionActions implements ChannelActions {
+  var attempts = 0;
+  @override
+  Future<void> addReaction(
+    String id,
+    String emoji, {
+    required String targetAuthor,
+  }) {
+    attempts += 1;
+    return Future.error(RelayNotConnectedError());
+  }
+
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

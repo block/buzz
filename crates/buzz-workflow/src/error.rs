@@ -60,6 +60,12 @@ pub enum WorkflowError {
     #[error("unauthorized: {0}")]
     Unauthorized(String),
 
+    /// The workflow's owner, or the human owner of an agent owner, is banned
+    /// from the community. An expected, repeating denial for as long as the
+    /// ban lasts, so callers may log it at a lower rate than `Unauthorized`.
+    #[error("unauthorized: workflow owner is banned from the community")]
+    OwnerBanned,
+
     /// The action is defined but not yet implemented.
     #[error("action not implemented: {0}")]
     NotImplemented(String),
@@ -78,7 +84,22 @@ impl WorkflowError {
             Self::CapacityExceeded => "capacity_exceeded",
             Self::Database(_) => "database_error",
             Self::Unauthorized(_) => "owner_unauthorized",
+            Self::OwnerBanned => "owner_banned",
             Self::NotImplemented(_) => "action_not_implemented",
+        }
+    }
+
+    /// Text safe for logs. A condition error can quote message text through
+    /// the expression context, a webhook error can carry a secret webhook
+    /// URL, and a database error can repeat bound values, so those log as
+    /// their code; other errors keep their diagnostics. The run record still
+    /// stores the full `Display`.
+    pub fn log_text(&self) -> std::borrow::Cow<'_, str> {
+        match self {
+            Self::ConditionError(_) | Self::WebhookError(_) | Self::Database(_) => {
+                self.code().into()
+            }
+            other => other.to_string().into(),
         }
     }
 }
@@ -105,6 +126,11 @@ mod tests {
         let webhook = WorkflowError::WebhookError("secret-bearing detail".to_owned());
         assert_eq!(webhook.code(), "webhook_failed");
         assert!(!webhook.code().contains("secret-bearing detail"));
+        assert_eq!(webhook.log_text(), "webhook_failed");
+        assert_eq!(
+            WorkflowError::Database("value \"secret\"".to_owned()).log_text(),
+            "database_error"
+        );
 
         assert_eq!(
             WorkflowError::NotImplemented("SendDm".to_owned()).code(),

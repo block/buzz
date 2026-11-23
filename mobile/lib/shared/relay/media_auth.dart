@@ -1,6 +1,5 @@
 import 'dart:convert';
 
-import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
@@ -140,18 +139,6 @@ final mediaGetAuthServiceProvider = Provider<MediaGetAuthService>((ref) {
     pubkey: ref.watch(myPubkeyProvider),
   );
 });
-
-Map<String, String> mediaGetHeadersFor(WidgetRef ref, String url) {
-  return ref.read(mediaGetAuthServiceProvider).headersFor(url);
-}
-
-Map<String, String> mediaGetHeadersForContext(
-  BuildContext context,
-  String url,
-) {
-  final container = ProviderScope.containerOf(context, listen: false);
-  return container.read(mediaGetAuthServiceProvider).headersFor(url);
-}
 
 String? extractServerAuthority(String baseUrl) {
   final uri = Uri.parse(baseUrl);

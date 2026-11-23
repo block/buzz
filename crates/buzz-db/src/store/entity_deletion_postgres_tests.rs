@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Duration;
 
 async fn store() -> EntityDeletionStore {
     EntityDeletionStore {
@@ -444,6 +445,85 @@ async fn approval_refuses_to_repair_missing_evidence() {
         serde_json::to_value(store.inspect(request.id).await.unwrap()).unwrap(),
         serde_json::to_value(before).unwrap()
     );
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn dropped_heartbeat_leaves_no_open_transaction_for_the_release() {
+    let store = store().await;
+    let request = users(&store)
+        .submit("demo:dropped-heartbeat", "operator-a", None)
+        .await
+        .unwrap();
+    store
+        .approve(
+            request.id,
+            "operator-b",
+            request.inventory_digest.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+    let lease = store
+        .claim(request.id, "worker", Duration::from_secs(60))
+        .await
+        .unwrap()
+        .expect("claim approved request");
+
+    let direct = store.pool.connect_options();
+    let proxy =
+        crate::test_support::PausingProxy::spawn(direct.get_host().to_owned(), direct.get_port())
+            .await;
+    // One connection, so the release reuses the heartbeat's. No acquire ping,
+    // so the heartbeat's first statement is the one in flight when it drops.
+    let proxied = EntityDeletionStore {
+        pool: sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .test_before_acquire(false)
+            .connect_with((*direct).clone().host("127.0.0.1").port(proxy.port))
+            .await
+            .expect("connect through proxy"),
+    };
+    sqlx::query("SELECT 1")
+        .execute(&proxied.pool)
+        .await
+        .expect("warm proxied connection");
+    // sqlx returns the connection from a spawned task after a ping; pausing
+    // before it lands would stall the heartbeat in `acquire` instead.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while proxied.pool.num_idle() != 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("warm connection returned to the pool");
+
+    // The worker's stage `select!` drops the heartbeat whenever the handler
+    // wins. Holding the bytes drops it with its first round trip in flight.
+    proxy.set_paused(true);
+    assert!(tokio::time::timeout(
+        Duration::from_millis(100),
+        proxied.heartbeat(&lease, Duration::from_secs(60)),
+    )
+    .await
+    .is_err());
+    proxy.set_paused(false);
+    assert!(proxied.release(&lease).await.unwrap());
+
+    let lease_owner: Option<String> =
+        sqlx::query_scalar("SELECT lease_owner FROM entity_deletion_requests WHERE id = $1")
+            .bind(request.id)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+    assert_eq!(lease_owner, None, "the reported release must be committed");
+    let open: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_stat_activity
+         WHERE datname = current_database() AND state = 'idle in transaction'",
+    )
+    .fetch_one(&store.pool)
+    .await
+    .unwrap();
+    assert_eq!(open, 0, "no pooled session may sit inside a transaction");
 }
 
 fn users(store: &EntityDeletionStore) -> crate::user_deletion::UserDeletionStore {

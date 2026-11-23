@@ -373,6 +373,8 @@ s3:
 
 # Isolated S3 accounting worker. Disabled by default. The relay is ready to
 # consume snapshots whenever an operator enables a worker in this environment.
+# To push each new snapshot's per-community totals to a usage endpoint, set
+# BUZZ_STORAGE_USAGE_URL through relay.extraEnv (see .env.example).
 storageAccounting:
   enabled: false
   schedule: "0 3 * * *"
@@ -395,6 +397,68 @@ storageAccounting:
     limits:
       cpu: "1"
       memory: 20Gi
+
+# Relay acceptance probe: a CronJob that runs `buzz-acceptance` from the relay
+# image, checks the relay's core jobs once per run, and exits (see README
+# "Acceptance probe"). Requires image.tag or image.digest: the chart's default
+# appVersion image does not include the probe.
+acceptance:
+  enabled: false
+  schedule: "*/5 * * * *"
+  # Bounds the whole run, including init containers. backoffLimit is 0: a
+  # retry would hide a failed run.
+  activeDeadlineSeconds: 240
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  relayUrl: ""                   # empty → relayUrl
+  # Plaintext host:port to dial instead of the relay URL's host, such as the
+  # relay's in-cluster service. The URL still sets the Host header and the
+  # NIP-42 relay tag. Empty → dial the URL.
+  connectAddr: ""
+  # A run has 13 serial stage timeouts of this length. Keep activeDeadlineSeconds
+  # above 13 × stageTimeoutSeconds + 30 s plus pull and init time: a run killed
+  # at the deadline sends no metrics.
+  stageTimeoutSeconds: 10
+  # Secret holding the probe's key (hex or nsec). Set this or privateKeyFile
+  # (exactly one) when enabled. On a members-only relay the key must be a
+  # relay member.
+  privateKeySecret:
+    name: ""
+    key: BUZZ_PRIVATE_KEY
+  # Key file path in the probe container, for a key an init container writes
+  # with its assertion (for example one new identity per run, which needs an
+  # agent assertion; see README). Set this or privateKeySecret, not both.
+  privateKeyFile: ""
+  # NIP-FI assertion path in the probe container. Pair with extraInitContainers,
+  # extraVolumes and extraVolumeMounts to mint it before the run.
+  assertionFile: ""
+  # DogStatsD address. `$(HOST_IP)` expands to the node IP, e.g.
+  # "$(HOST_IP):8125" for a node-local agent. Empty → no metrics.
+  statsdAddr: ""
+  metricPrefix: buzz.acceptance
+  # Extra `key:value` metric tags. Keys are lowercase [a-z0-9_./-], start with
+  # a letter, and have no `__` or trailing `_`. The chart always adds
+  # `probe_revision:<probe image identity>`. The keys probe_revision,
+  # relay_version, check, stage and result are probe-owned and rejected here.
+  # Each key may appear once.
+  tags: []
+  # Empty → the namespace default service account, not the relay's. The token
+  # is never mounted.
+  serviceAccountName: ""
+  # May not set app.kubernetes.io/name, /instance or /component.
+  # tags.datadoghq.com/version is chart-owned; see README "Datadog version label".
+  podLabels: {}
+  podAnnotations: {}
+  extraInitContainers: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
 
 # Typed, one-shot operator jobs. The chart intentionally exposes no generic
 # command or environment registry: each job has a reviewed executable and

@@ -101,23 +101,40 @@ impl EntityDeletionStore {
         }))
     }
 
-    /// Renew an unexpired lease. An expired or superseded worker cannot revive it.
+    /// Renew this lease. A superseded lease is never renewed; an expired lease
+    /// can be renewed only while nobody has reclaimed it.
+    ///
+    /// One autocommit statement: the worker drops this future whenever its
+    /// stage handler finishes first, so the renewal leaves no transaction
+    /// to roll back.
     pub async fn heartbeat(&self, lease: &EntityLease, duration: Duration) -> Result<()> {
         let millis = duration_millis(duration)?;
-        let mut tx = self.pool.begin().await?;
-        lock_owned(&mut tx, lease).await?;
-        sqlx::query(
+        // `lock_owned`'s predicate. After a row-lock wait, Postgres re-checks it
+        // only if the holder committed an update of this row, so a reclaim's new
+        // generation always wins. A holder that only locked the row (e.g.
+        // `save_stage_success`) or rolled back leaves the pre-wait expiry check
+        // in force, so a heartbeat that waits past expiry still renews. No one
+        // can reclaim in that window: `claim` skips locked rows.
+        let renewed = sqlx::query(
             "UPDATE entity_deletion_requests
-             SET lease_expires_at = clock_timestamp() + $2 * interval '1 millisecond',
+             SET lease_expires_at = clock_timestamp() + $4 * interval '1 millisecond',
                  heartbeat_at = clock_timestamp()
-             WHERE id = $1",
+             WHERE id = $1 AND lease_owner = $2 AND lease_generation = $3
+               AND status IN ('approved', 'running', 'retry_wait', 'completed')
+               AND lease_expires_at > clock_timestamp()",
         )
         .bind(lease.request_id)
+        .bind(&lease.owner)
+        .bind(lease.generation)
         .bind(millis)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(())
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if renewed == 1 {
+            Ok(())
+        } else {
+            Err(stale_lease(lease))
+        }
     }
 
     /// Release this live claim after a pause or shutdown, without advancing its stage.
@@ -141,7 +158,7 @@ impl EntityDeletionStore {
 }
 
 pub(in crate::store) async fn lock_owned(
-    tx: &mut Tx<'_>,
+    tx: &mut sqlx::PgConnection,
     lease: &EntityLease,
 ) -> Result<EntityRequest> {
     // Lock by id first, then check expiry after any wait for that lock. An old
@@ -151,7 +168,7 @@ pub(in crate::store) async fn lock_owned(
          FROM entity_deletion_requests WHERE id = $1 FOR UPDATE",
     )))
     .bind(lease.request_id)
-    .fetch_optional(&mut **tx)
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| stale_lease(lease))?;
     let owned: bool = sqlx::query_scalar(
@@ -162,7 +179,7 @@ pub(in crate::store) async fn lock_owned(
     .bind(lease.request_id)
     .bind(&lease.owner)
     .bind(lease.generation)
-    .fetch_one(&mut **tx)
+    .fetch_one(&mut *tx)
     .await?;
     if !owned {
         return Err(stale_lease(lease));
@@ -171,7 +188,7 @@ pub(in crate::store) async fn lock_owned(
 }
 
 pub(in crate::store) async fn validate_approved_inventory(
-    tx: &mut Tx<'_>,
+    tx: &mut sqlx::PgConnection,
     request: &EntityRequest,
 ) -> Result<()> {
     let digest = validated_inventory_digest(request)?;
@@ -181,7 +198,7 @@ pub(in crate::store) async fn validate_approved_inventory(
     )
     .bind(request.id)
     .bind(digest)
-    .fetch_one(&mut **tx)
+    .fetch_one(&mut *tx)
     .await?;
     if !approved {
         return Err(DbError::DeletionSafety(

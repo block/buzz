@@ -378,7 +378,7 @@ This prevents a race where a non-member receives live fan-out events from a priv
 
 ### Historical Query (EOSE)
 
-After registering, the REQ handler queries Postgres for stored events matching the filters (up to 500 per filter, hard cap). These are sent as `["EVENT", sub_id, event]` frames before `["EOSE", sub_id]`. New events arriving after EOSE are delivered via the fan-out path.
+After registering, the REQ handler queries Postgres for stored events matching the filters (up to 500 per filter, hard cap). These are sent as `["EVENT", sub_id, event]` frames before `["EOSE", sub_id]`. New events arriving after EOSE are delivered via the fan-out path. For an ordinary (non-search) REQ, EOSE marks a successful bounded history query, so a failed history read never ends in EOSE: it retires the subscription with `["CLOSED", sub_id, "error: query timed out"]` for a statement timeout or `"error: database error"` for anything else.
 
 **Client consumption invariant.** A client rebuilding channel state must
 open its live subscription before (or overlapping) the finite history
@@ -467,7 +467,7 @@ All database access. Uses `sqlx::query()` (runtime, not compile-time macros) —
 | `channel.rs` | Channel CRUD, membership management, role enforcement (transactional) |
 | `feed.rs` | `query_mentions` (INNER JOIN event_mentions), `query_needs_action`, `query_activity` |
 | `workflow.rs` | Full workflow/run/approval CRUD; SHA-256 hashed approval tokens |
-| `partition.rs` | Monthly range partitioning for `events` and `delivery_log` tables: read-only catalog audit plus advisory-locked, time-bounded maintenance that creates uncovered months and advances an empty catch-all (`partition/maintenance.rs`) |
+| `partition.rs` | Monthly range partitioning for the `events` table: read-only catalog audit plus advisory-locked, time-bounded maintenance that creates uncovered months and advances an empty catch-all (`partition/maintenance.rs`) |
 | `dm.rs` | DM channel management |
 | `reaction.rs` | Reaction storage and retrieval |
 | `thread.rs` | Thread/reply tracking |
@@ -489,42 +489,41 @@ All database access. Uses `sqlx::query()` (runtime, not compile-time macros) —
 - Approval tokens: `create_approval` receives the raw token and hashes it internally with SHA-256.
 - DDL injection protection in partition manager: allowlist of table names + strict suffix/date validators.
 
-### Supported Writer Contract (transition state)
+### Supported Writer Contract
 
-The repository is moving toward a **supported-writer contract** where relay-owned
-write APIs provide the only supported mutation path for tenant data. The current
-shape is an explicit transition, not a flag day:
+Relay-owned write APIs provide the supported mutation path for tenant data:
 
-- **Trajectory:** converge from trigger/function/FK-enforced fencing toward
-  application-owned transaction protocols, while keeping existing DB backstops
-  in place until coverage and fleet gates are proven.
-- **Community fence (transition foundation):** runtime admission APIs now offer
-  one shared community deletion lock per transaction, while deletion lifecycle
-  transitions take the matching exclusive lock. A supported serving transaction
-  never spans communities. Serving leases use the same application admission.
-  Startup and deletion catalog validation tolerate the universal fence objects
-  being absent; inventories still record live fences for older executors.
-  Desired-state bootstraps install only explicitly declared legacy fences.
-  New tenant-owned tables rely on application admission, without a fence trigger.
-- **Replica floor (transition foundation):** runtime now provides a shared
-  replica-floor lock helper for compliant channel-event writers, and the writer
-  probe handshake takes the exclusive counterpart before sampling `S`, scanning
-  activity, and committing the heartbeat token last. `probe_once` remains the
-  sole token/fence-wall publication path; there is no separately persisted active
-  floor cutoff. Commit-time trigger+GUC enforcement remains authoritative for all
-  paths.
-- **Dual enforcement (current):** application-owned lock+precheck paths run in
-  front of the existing trigger/function enforcement; commit-time trigger checks
-  remain authoritative during this phase. Removing those backstops is a separate
-  gated migration, after every pod tolerates their absence and no rollback below
-  that version is expected.
+- **Community fence:** supported serving writers admit each tenant transaction
+  through the runtime API, which takes one shared community deletion lock and
+  checks active, undeleted state. Deletion lifecycle transitions take the
+  matching exclusive lock. A serving transaction never spans communities.
+  The universal per-table write-fence triggers and their functions have been
+  retired after writer coverage and fleet gates. New tenant-owned tables rely
+  on this admission alone.
+- **Replica floor:** supported channel-event insertions check `created_at`
+  against `clock_timestamp()` on their admitted transaction using the shared
+  960-second floor. The ordered heartbeat handshake and activity scan retain
+  the same fence-wall calculation. Migration 0089 retires only the deferred
+  floor trigger/function; writer connections no longer arm its GUC and probe
+  startup no longer requires those objects.
+- **Floor retirement deploy gate:** phase 1 must be deployed to every writer
+  pod/job, with no rollback expected, before applying the destructive contract.
+  Drain old connections/in-flight transactions, stop out-of-band writers, and
+  hold the replica breaker closed through the drop until replay catches up.
+  Already-running old pods do not reverify the trigger on each heartbeat.
+- **Single-table guards:** channel tenant binding, community lifecycle,
+  request/approval evidence and manifest chunks are owned by application writers.
+  Serving/deletion catalog validation tolerates the five legacy guards being
+  absent. Their contract migration is gated on the writer and catalog-expand
+  release (#8320) being deployed fleet-wide.
 - **Role separation:** relay/runtime code owns admission and lock protocols;
   operator maintenance/backfill workflows must either use those protocols or run
   under explicit reviewed procedures that keep routing fences closed.
 - **Unsupported shape:** direct owner SQL that bypasses supported transaction and
   lock protocols is not a supported write path.
-- **Fleet gates and reconciliation:** startup/fence probes verify guard catalog +
-  behavior, pgschema bootstraps run reconciliation, and lock/pool metrics remain
+- **Fleet gates and reconciliation:** retained guards keep their catalog and
+  behavior checks; heartbeat/epoch and activity checks still fail closed.
+  pgschema bootstraps run reconciliation, and lock/pool metrics remain
   the operational evidence path for rollout safety.
 
 The database end state (a declarative schema source, applied out of band at
@@ -550,7 +549,7 @@ Subscriber → dedicated PubSub  → PSUBSCRIBE buzz:channel:*
 
 The subscriber uses a **dedicated** `redis::aio::PubSub` connection — not from the pool. This is intentional: pool connections cannot hold `PSUBSCRIBE` state.
 
-**Current state:** The subscriber loop is spawned in `buzz-relay/src/main.rs` and populates the broadcast channel. A consumer task subscribes via `pubsub.subscribe_local()`, calls `sub_registry.fan_out()` on each received event, and delivers matches to local WebSocket connections via `conn_manager.send_to()`. Multi-node fan-out is now wired end-to-end. Local-echo deduplication is implemented via `AppState.local_event_ids` — events published by the local relay instance are tracked and skipped when received via the Redis round-trip.
+**Current state:** The subscriber loop is spawned in `buzz-relay/src/main.rs` and populates the broadcast channel. A dispatcher task subscribes via `pubsub.subscribe_local()` and routes each event to one of 16 delivery workers by `(community, topic)`, so one channel's events keep their order while channels deliver concurrently (`handlers/multinode_fanout.rs`). Each worker calls `sub_registry.fan_out()`, applies the access gate (one bulk membership read for the recipients the membership cache lacks), and delivers matches to local WebSocket connections via `conn_manager.send_to()`. A slow delivery holds only its own worker and arrives late; falling behind never closes a connection, because a database stall slows every node at once and closing recipients then would send the whole fleet back to that database together. An event is dropped on this node only when its worker's bounded queue is full, one delivery attempt runs past 30 s from when the worker starts it (so a database connection that stops answering cannot hold the worker forever), or the dispatcher lags the broadcast; both are counted (`buzz_multinode_fanout_dropped_total`, `buzz_multinode_fanout_lag_total`), and the affected syncs get `CLOSED "resync: ..."` (NIP-AR Sync rule 5). A recipient the access gate cannot check misses that event. Multi-node fan-out is now wired end-to-end. Local-echo deduplication is implemented via `AppState.local_event_ids` — events published by the local relay instance are tracked and skipped when received via the Redis round-trip.
 
 **Reconnection:** exponential backoff 1s → 30s (`backoff_secs * 2`). Backoff resets to 1s only after a clean stream end, not on each reconnect attempt.
 
@@ -579,15 +578,25 @@ multi-community mode every query filter includes `community_id`, so the shared
 `events` table is infrastructure, not a cross-community result space; the relay
 re-authorizes every candidate hit before returning it.
 
+A database built from `migrations/0008_fresh_install_search_allowlist.sql` indexes
+only an allowlist of kinds, and so does one converted by
+`scripts/maintenance/nip_rs_search_allowlist.sql`. Such a database does not index
+kind 30180 (custom emoji entries) until an operator runs the updated maintenance
+script, which must happen before the emoji migration rollout.
+
 **Key behaviors:**
 - `SearchService::new(pool)` wraps a `PgPool`; `search(&SearchQuery)` runs a
   parameterized FTS query against the `events.search_tsv` GIN index and returns
-  `SearchResult` (candidate `SearchHit`s).
+  `SearchResult` (candidate `SearchHit`s). Prefix-mode relevance (outside
+  profile search) ranks only the newest 1000 matches, which Postgres may read
+  from the primary key backward instead of the GIN index.
 - `ChannelScope` makes the channel constraint explicit (`Any` /
   `ChannelLessOnly` / `Channels` / `ChannelsOrChannelLess`), closing the
   ambiguity the old `Option<Vec<Uuid>> + bool` matrix could not express.
-- Every query carries `community_id`; the FTS predicate is BitmapAnd-ed with
-  the community-leading btree filters so a query never crosses tenants.
+- Every query carries `community_id`, and every access path leads with it (the
+  FTS predicate BitmapAnd-ed with community-leading btree filters, or the
+  `(community_id, created_at, id)` primary key read backward), so a query never
+  crosses tenants.
 - Permission filtering is **caller's responsibility** — `buzz-search` returns
   candidate hits; the relay re-authorizes each one (channel membership, `#p`,
   owner gates) before delivering it.
@@ -756,6 +765,8 @@ pub struct ConnectionState {
 }
 pub enum AuthState { Pending { challenge: String }, Authenticated(AuthContext), Failed }
 ```
+
+**Community FI admission:** Protected HTTP and root/audio WebSocket requests read the normalized Host's active authentication policy from the primary database. Stored `requires_nip_fi` OR global enforce requires FI; repair mode denies first. HTTP middleware shares one request-local policy read with handlers. Root NIP-11 and `/info` publish a no-store host-specific requirement and compatible capability fields. Policy lookup failure is unavailable, never optional. See [community auth upgrades](docs/community-auth-upgrades.md); completed activation additionally requires existing-session drain evidence.
 
 **HTTP endpoints:**
 
@@ -982,7 +993,10 @@ kinds via `CASE WHEN kind IN (1059, 30300, 30622) THEN NULL`, so those rows are
 storage-level unsearchable (a `NULL` tsvector never matches `@@`). A GIN index
 (`idx_events_search_tsv`) backs the `@@` probe; in multi-community mode the
 community-leading btree filters BitmapAnd with the GIN probe so every query is
-fenced to its `community_id`.
+fenced to its `community_id`. Prefix-mode relevance ranks only the newest 1000
+matches; for a common prefix Postgres reads the `(community_id, created_at, id)`
+primary key backward and stops there, still fenced by its leading
+`community_id`.
 
 ---
 

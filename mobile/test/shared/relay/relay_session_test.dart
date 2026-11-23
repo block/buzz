@@ -12,6 +12,8 @@ import 'package:buzz/features/age_gate/age_signal_provider.dart';
 import 'package:buzz/features/channels/agent_activity/observer_subscription.dart';
 import 'package:buzz/features/channels/agent_activity/observer_models.dart';
 import 'package:buzz/shared/auth/auth_provider.dart';
+import 'package:buzz/shared/community/community.dart';
+import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/relay/relay_query_response.dart';
 
@@ -677,6 +679,23 @@ void main() {
       );
     });
 
+    test('a body that fails to decode is reported', () async {
+      final reporter = _RecordingDiagnostics();
+      final harness = _queryHarness(
+        client: http_testing.MockClient((_) async => json('{"oops"')),
+        diagnostics: reporter,
+      );
+      addTearDown(harness.container.dispose);
+
+      await expectLater(
+        harness.session.queryRelay(const []),
+        throwsA(isA<FormatException>()),
+      );
+      expect(reporter.errors, [
+        (FormatException, DiagnosticOperation.relayQuery),
+      ]);
+    });
+
     test('an error status keeps its body and skips decoding', () async {
       var decodes = 0;
       const body = '{"error":"nope"}';
@@ -720,10 +739,12 @@ void main() {
     });
 
     test('a retired session reports retirement, not a decode error', () async {
+      final reporter = _RecordingDiagnostics();
       final decoder = _GatedDecoder();
       final harness = _queryHarness(
         client: http_testing.MockClient((_) async => json('{"oops"')),
         queryDecoder: decoder.call,
+        diagnostics: reporter,
       );
       addTearDown(harness.container.dispose);
 
@@ -734,6 +755,7 @@ void main() {
       decoder.gate.complete();
 
       await outcome;
+      expect(reporter.errors, isEmpty);
     });
 
     test('an age restriction during decoding discards the events', () async {
@@ -832,7 +854,12 @@ void main() {
     test('posts the name query to /profiles/search with NIP-98 auth', () async {
       final h = harness(
         (_) => http.Response(
-          jsonEncode([profileJson(0, 'wes'), profileJson(1, 'note')]),
+          jsonEncode([
+            profileJson(0, 'wes'),
+            profileJson(1, 'note'),
+            // A person with no kind:0 is found by their verified head.
+            profileJson(30382, 'head'),
+          ]),
           200,
         ),
       );
@@ -841,7 +868,7 @@ void main() {
           .read(relaySessionProvider.notifier)
           .searchProfiles('  wes ', limit: 8);
 
-      expect(events.map((event) => event.kind), [0]);
+      expect(events.map((event) => event.kind), [0, 30382]);
       expect(h.requests, hasLength(1));
       final request = h.requests.single;
       expect(request.method, 'POST');
@@ -1016,7 +1043,6 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       expect(session.state.status, SessionStatus.disconnected);
-      expect(auth.signOutCount, 0);
     },
   );
 
@@ -1073,6 +1099,92 @@ void main() {
     sockets.last.connectSuccessfully();
     expect(session.state.status, SessionStatus.connected);
   });
+
+  test(
+    'auth reloads keep the socket until status or identity changes',
+    () async {
+      final sockets = <_ControlledRelaySocket>[];
+      final keychain = nostr.Keys.generate();
+      final auth = _ReloadingAuthNotifier()..pubkey = keychain.public;
+      final session = RelaySessionNotifier(
+        socketFactory:
+            ({
+              required wsUrl,
+              required nsec,
+              required onMessage,
+              required onConnected,
+              required onDisconnected,
+            }) {
+              final socket = _ControlledRelaySocket(
+                wsUrl: wsUrl,
+                nsec: nsec,
+                onMessage: onMessage,
+                onConnected: onConnected,
+                onDisconnected: onDisconnected,
+              );
+              sockets.add(socket);
+              return socket;
+            },
+      );
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => session),
+          relayConfigProvider.overrideWith(
+            () => _FakeRelayConfigNotifier(
+              baseUrl: 'https://relay.example',
+              nsec: keychain.nsec,
+            ),
+          ),
+          authProvider.overrideWith(() => auth),
+        ],
+      );
+      addTearDown(container.dispose);
+      await container.read(authProvider.future);
+      final listener = container.listen(relaySessionProvider, (_, _) {});
+      addTearDown(listener.close);
+      await Future<void>.delayed(Duration.zero);
+      sockets.single.connectSuccessfully();
+
+      final events = <NostrEvent>[];
+      final subscribed = session.subscribe(_channelFilter, events.add);
+      await Future<void>.delayed(Duration.zero);
+      final subId = sockets.single.sent.single[1];
+      session.debugHandleSocketMessageForTest(['EOSE', subId]);
+      await subscribed;
+
+      // An invite join reloads auth twice for the same signed-in identity.
+      for (var i = 0; i < 2; i++) {
+        container.invalidate(authProvider);
+        await container.read(authProvider.future);
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      expect(sockets, hasLength(1));
+      expect(sockets.single.disposeCalls, 0);
+      expect(session.state.status, SessionStatus.connected);
+      session.debugHandleSocketMessageForTest([
+        'EVENT',
+        subId,
+        _event().toJson(),
+      ]);
+      session.debugFlushEventBuffer();
+      expect(events.map((event) => event.id), ['event-1']);
+
+      auth.pubkey = nostr.Keys.generate().public;
+      container.invalidate(authProvider);
+      await container.read(authProvider.future);
+      await Future<void>.delayed(Duration.zero);
+      expect(sockets, hasLength(2));
+      expect(sockets.first.disposeCalls, 1);
+
+      auth.status = AuthStatus.unauthenticated;
+      container.invalidate(authProvider);
+      await container.read(authProvider.future);
+      await Future<void>.delayed(Duration.zero);
+      expect(sockets, hasLength(2));
+      expect(sockets.last.disposeCalls, 1);
+    },
+  );
 
   test('does not schedule reconnects after background disconnect', () {
     final session = RelaySessionNotifier();
@@ -1216,6 +1328,39 @@ void main() {
       expect(sockets, hasLength(1));
       expect(sockets.single.disposeCalls, 0);
       expect(session.state.status, SessionStatus.connected);
+    },
+  );
+
+  test(
+    'a subscriber that throws is reported and the rest of its batch still arrives',
+    () async {
+      final reporter = _RecordingDiagnostics();
+      final delivered = <String>[];
+      final flush = await _batchWithThrowingSubscriber(reporter, delivered);
+
+      flush();
+
+      expect(delivered, ['event-2']);
+      expect(reporter.errors, [
+        (StateError, DiagnosticOperation.eventSubscriber),
+      ]);
+    },
+  );
+
+  test(
+    'with no destination, a throwing subscriber surfaces as uncaught and the batch still arrives',
+    () async {
+      final delivered = <String>[];
+      final flush = await _batchWithThrowingSubscriber(
+        const NoopDiagnosticReporter(),
+        delivered,
+      );
+      final uncaught = <Object>[];
+
+      runZonedGuarded(flush, (error, _) => uncaught.add(error));
+
+      expect(delivered, ['event-2']);
+      expect(uncaught, [isA<StateError>()]);
     },
   );
 
@@ -1836,6 +1981,26 @@ void main() {
     session.debugDispose();
   });
 
+  test('gated history cannot register on a replacement relay', () async {
+    final gate = RelayRateLimitGate();
+    final harness = _queryHarness(
+      gate: gate,
+      client: http_testing.MockClient((_) async => http.Response('[]', 200)),
+    );
+    addTearDown(harness.container.dispose);
+    gate.activate(4);
+    final retired = expectLater(
+      harness.session.fetchHistory(_channelFilter),
+      throwsStateError,
+    );
+    harness.container.invalidate(relayConfigProvider);
+    harness.container.read(relaySessionProvider);
+    final replacement = _RecordingRelaySocket();
+    harness.session.debugAttachSocketForTest(replacement);
+    await retired;
+    expect(_reqs(replacement), isEmpty);
+  });
+
   test('rate-limited history CLOSED gates the next REQ', () async {
     final gateTimers = <_ManualTimer>[];
     final gate = RelayRateLimitGate(
@@ -2146,6 +2311,75 @@ void main() {
       reason: 'only `rate-limited:` rejections signal back-pressure',
     );
   });
+
+  test('an invalid rejection is reported without the relay text', () async {
+    final reporter = _RecordingDiagnostics();
+    final harness = _queryHarness(
+      client: http_testing.MockClient((_) async => http.Response('[]', 200)),
+      diagnostics: reporter,
+    );
+    addTearDown(harness.container.dispose);
+    final session = harness.session;
+    session.debugAttachSocketForTest(_RecordingRelaySocket());
+
+    final archived = session.publish(_event(id: 'event-1'));
+    session.debugHandleMessage([
+      'OK',
+      'event-1',
+      false,
+      'invalid: channel is archived',
+    ]);
+    await expectLater(archived, throwsA(isA<Exception>()));
+    // A read-state retry past the relay's clock window, which the app
+    // recovers from.
+    final stale = session.publish(_event(id: 'event-stale'));
+    session.debugHandleMessage([
+      'OK',
+      'event-stale',
+      false,
+      'invalid: event timestamp too far from server time',
+    ]);
+    await expectLater(stale, throwsA(isA<Exception>()));
+    // Ordinary outcomes of Add Members (for an agent's policy or a guest) and
+    // of a sole owner's Leave.
+    for (final (id, reason) in [
+      ('event-policy', 'invalid: policy:nobody'),
+      ('event-owner-only', 'invalid: policy:owner_only'),
+      ('event-last-owner', 'invalid: cannot remove the last owner'),
+      (
+        'event-guest-add',
+        'invalid: only members can add people in this channel',
+      ),
+    ]) {
+      final refused = session.publish(_event(id: id));
+      session.debugHandleMessage(['OK', id, false, reason]);
+      await expectLater(refused, throwsA(isA<Exception>()));
+    }
+    expect(reporter.errors, isEmpty);
+
+    final invalid = session.publish(_event(id: 'event-2'));
+    session.debugHandleMessage([
+      'OK',
+      'event-2',
+      false,
+      'invalid: bad signature',
+    ]);
+    await expectLater(invalid, throwsA(isA<Exception>()));
+    session.debugHandleMessage(['CLOSED', 'sub-1', 'invalid: bad filter']);
+    // No pending publish, as for a typing indicator or a reply after timeout.
+    session.debugHandleMessage([
+      'OK',
+      'event-3',
+      false,
+      'invalid: bad signature',
+    ]);
+
+    expect(reporter.errors, [
+      (RelayInvalidRequest, DiagnosticOperation.relayRejection),
+      (RelayInvalidRequest, DiagnosticOperation.relayRejection),
+      (RelayInvalidRequest, DiagnosticOperation.relayRejection),
+    ]);
+  });
 }
 
 class _ControlledHttpClient extends http.BaseClient {
@@ -2228,6 +2462,7 @@ _QueryHarness _queryHarness({
   required http.Client client,
   RelayQueryDecoder? queryDecoder,
   AgeSignalNotifier? age,
+  DiagnosticReporter? diagnostics,
 }) {
   final session = RelaySessionNotifier(
     httpClient: client,
@@ -2237,6 +2472,8 @@ _QueryHarness _queryHarness({
   final container = ProviderContainer(
     overrides: [
       if (age != null) ageSignalProvider.overrideWith(() => age),
+      if (diagnostics != null)
+        diagnosticReporterProvider.overrideWithValue(diagnostics),
       authProvider.overrideWith(() => _PendingAuthNotifier()),
       relaySessionProvider.overrideWith(() => session),
       relayConfigProvider.overrideWith(
@@ -2252,22 +2489,32 @@ _QueryHarness _queryHarness({
 }
 
 class _FakeAuthNotifier extends AuthNotifier {
-  int signOutCount = 0;
-
   @override
   Future<AuthState> build() async =>
       const AuthState(status: AuthStatus.unauthenticated);
-
-  @override
-  Future<void> signOut() async {
-    signOutCount++;
-  }
 }
 
 class _AuthenticatedAuthNotifier extends AuthNotifier {
   @override
   Future<AuthState> build() async =>
       const AuthState(status: AuthStatus.authenticated);
+}
+
+class _ReloadingAuthNotifier extends AuthNotifier {
+  AuthStatus status = AuthStatus.authenticated;
+  String? pubkey;
+
+  @override
+  Future<AuthState> build() async => AuthState(
+    status: status,
+    community: Community(
+      id: 'community-1',
+      name: 'Example',
+      relayUrl: 'https://relay.example',
+      pubkey: pubkey,
+      addedAt: DateTime(2026),
+    ),
+  );
 }
 
 class _ControlledRelaySocket extends RelaySocket {
@@ -2410,4 +2657,83 @@ class _MutableAgeNotifier extends AgeSignalNotifier {
 class _PendingAuthNotifier extends AuthNotifier {
   @override
   Future<AuthState> build() => Completer<AuthState>().future;
+}
+
+class _RecordingDiagnostics extends NoopDiagnosticReporter {
+  final errors = <(Type, DiagnosticOperation)>[];
+
+  @override
+  void reportError(
+    Object error,
+    StackTrace? stackTrace, {
+    required DiagnosticOperation operation,
+  }) => errors.add((error.runtimeType, operation));
+}
+
+/// Subscribes a handler that throws on `event-1` and buffers `event-1` and
+/// `event-2`. Returns the flush that delivers them.
+Future<void Function()> _batchWithThrowingSubscriber(
+  DiagnosticReporter reporter,
+  List<String> delivered,
+) async {
+  final sockets = <_ControlledRelaySocket>[];
+  final keychain = nostr.Keys.generate();
+  final auth = _ReloadingAuthNotifier()..pubkey = keychain.public;
+  final session = RelaySessionNotifier(
+    socketFactory:
+        ({
+          required wsUrl,
+          required nsec,
+          required onMessage,
+          required onConnected,
+          required onDisconnected,
+        }) {
+          final socket = _ControlledRelaySocket(
+            wsUrl: wsUrl,
+            nsec: nsec,
+            onMessage: onMessage,
+            onConnected: onConnected,
+            onDisconnected: onDisconnected,
+          );
+          sockets.add(socket);
+          return socket;
+        },
+  );
+  final container = ProviderContainer(
+    overrides: [
+      relaySessionProvider.overrideWith(() => session),
+      relayConfigProvider.overrideWith(
+        () => _FakeRelayConfigNotifier(
+          baseUrl: 'https://relay.example',
+          nsec: keychain.nsec,
+        ),
+      ),
+      authProvider.overrideWith(() => auth),
+      diagnosticReporterProvider.overrideWithValue(reporter),
+    ],
+  );
+  addTearDown(container.dispose);
+  await container.read(authProvider.future);
+  final listener = container.listen(relaySessionProvider, (_, _) {});
+  addTearDown(listener.close);
+  await Future<void>.delayed(Duration.zero);
+  sockets.single.connectSuccessfully();
+
+  final subscribed = session.subscribe(_channelFilter, (event) {
+    if (event.id == 'event-1') throw StateError('handler bug');
+    delivered.add(event.id);
+  });
+  await Future<void>.delayed(Duration.zero);
+  final subId = sockets.single.sent.single[1];
+  session.debugHandleSocketMessageForTest(['EOSE', subId]);
+  await subscribed;
+
+  for (final id in ['event-1', 'event-2']) {
+    session.debugHandleSocketMessageForTest([
+      'EVENT',
+      subId,
+      _event(id: id).toJson(),
+    ]);
+  }
+  return session.debugFlushEventBuffer;
 }

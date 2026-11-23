@@ -1,14 +1,18 @@
 import 'dart:async';
+import 'dart:math';
 
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../community/community.dart';
 import '../community/community_provider.dart';
+import '../diagnostics/diagnostic_reporter.dart';
 import '../relay/relay_provider.dart';
 import '../relay/relay_session.dart';
 import '../relay/signed_event_relay.dart';
+import 'android_push_keystore.dart';
 import 'dev_push_lease.dart';
 import 'push_bridge.dart';
 import 'push_lease_revocation_outbox.dart';
@@ -18,14 +22,27 @@ import 'push_subscription_provider.dart';
 import 'push_setup_recovery.dart';
 
 const _pushBootstrapRetryDelay = Duration(seconds: 5);
+const _pushBootstrapMaxRetryDelay = Duration(minutes: 15);
 
 @visibleForTesting
 class BuzzPushAttemptGate {
-  BuzzPushAttemptGate({this.retryDelay = _pushBootstrapRetryDelay});
+  BuzzPushAttemptGate({
+    this.retryDelay = _pushBootstrapRetryDelay,
+    this.maxRetryDelay = _pushBootstrapMaxRetryDelay,
+    double Function()? jitter,
+  }) : _jitter = jitter ?? Random().nextDouble;
 
+  /// Delay before the first retry of a failing attempt. Each further
+  /// consecutive failure of the same attempt doubles it, up to
+  /// [maxRetryDelay], so a persistent refusal (for example a gateway that
+  /// blocks this device) is not retried every few seconds forever.
   final Duration retryDelay;
+  final Duration maxRetryDelay;
+  final double Function() _jitter;
   String? _attempt;
   Timer? _retryTimer;
+  String? _failingAttempt;
+  int _consecutiveFailures = 0;
 
   bool tryBegin(String attempt) {
     if (_attempt == attempt) return false;
@@ -37,21 +54,27 @@ class BuzzPushAttemptGate {
 
   void failed(String attempt, {required VoidCallback retry}) {
     if (_attempt != attempt) return;
-    _retryTimer?.cancel();
-    _retryTimer = Timer(retryDelay, () {
-      _retryTimer = null;
-      if (_attempt != attempt) return;
-      _attempt = null;
-      retry();
-    });
+    if (_failingAttempt != attempt) {
+      _failingAttempt = attempt;
+      _consecutiveFailures = 0;
+    }
+    _schedule(attempt, _backoff(_consecutiveFailures++), retry);
   }
 
-  void retryAfter(
-    String attempt, {
-    required Duration delay,
-    required VoidCallback retry,
-  }) {
-    if (_attempt != attempt) return;
+  /// Between half and all of the capped exponential delay, so devices that
+  /// failed together do not retry together.
+  Duration _backoff(int priorFailures) {
+    final ceiling = min(
+      maxRetryDelay.inMilliseconds,
+      retryDelay.inMilliseconds * (1 << min(priorFailures, 20)),
+    );
+    final half = ceiling ~/ 2;
+    return Duration(
+      milliseconds: half + (_jitter() * (ceiling - half)).floor(),
+    );
+  }
+
+  void _schedule(String attempt, Duration delay, VoidCallback retry) {
     _retryTimer?.cancel();
     _retryTimer = Timer(delay, () {
       _retryTimer = null;
@@ -61,11 +84,35 @@ class BuzzPushAttemptGate {
     });
   }
 
+  /// Schedules a retry after a success (for example a renewal) or after a
+  /// failure that picks its own delay. Ends any failure streak.
+  void retryAfter(
+    String attempt, {
+    required Duration delay,
+    required VoidCallback retry,
+  }) {
+    if (_attempt != attempt) return;
+    _endFailureStreak();
+    _schedule(attempt, delay, retry);
+  }
+
   void complete(String attempt) {
     if (_attempt != attempt) return;
     _retryTimer?.cancel();
     _retryTimer = null;
     _attempt = null;
+    _endFailureStreak();
+  }
+
+  /// Records that [attempt] succeeded without making it runnable again, so a
+  /// later failure starts from the first retry delay.
+  void succeeded(String attempt) {
+    if (_attempt == attempt) _endFailureStreak();
+  }
+
+  void _endFailureStreak() {
+    _failingAttempt = null;
+    _consecutiveFailures = 0;
   }
 
   void dispose() => _retryTimer?.cancel();
@@ -87,6 +134,14 @@ String buzzPushPublicationAttemptKey({
   descriptor.hGrammar,
   buzzPushSubscriptionsFingerprint(subscriptions),
 ].join('|');
+
+/// Identifies a pass over pending opt-out tombstones by the communities it
+/// covers, so a community whose tombstone appears while another is backing
+/// off runs now instead of waiting out that delay. Not by generation: each
+/// pass advances it, and that must not restart the backoff.
+@visibleForTesting
+String buzzPushTombstoneAttemptKey(Iterable<Community> pending) =>
+    [for (final community in pending) community.id].join('|');
 
 @visibleForTesting
 bool buzzPushLifecycleEnabled({
@@ -123,6 +178,7 @@ class BuzzPushRegistrationBootstrap extends HookWidget {
       unawaited(() async {
         try {
           await startRegistration();
+          attemptGate.succeeded(attemptKey);
         } catch (error, stack) {
           attemptGate.failed(
             attemptKey,
@@ -158,6 +214,7 @@ typedef _PushInputs = ({
   BuzzPushLeaseRevocationOutbox revocationOutbox,
   SessionState session,
   List<Community> communities,
+  bool communitiesLoaded,
   RelayConfig config,
   Community? community,
   String? memberPubkey,
@@ -174,6 +231,7 @@ final _pushInputsProvider = Provider.autoDispose<AsyncValue<_PushInputs>>((
       revocationOutbox: ref.watch(buzzPushLeaseRevocationOutboxProvider),
       session: ref.watch(relaySessionProvider),
       communities: ref.watch(communityListProvider).value ?? const [],
+      communitiesLoaded: ref.watch(communityListProvider).hasValue,
       config: ref.watch(relayConfigProvider),
       community: ref.watch(activeCommunityProvider).value,
       memberPubkey: ref.watch(myPubkeyProvider),
@@ -270,19 +328,40 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     useListenable(apnsDeviceToken);
+    useListenable(fcmDeviceToken);
     final publicationAttempt = useMemoized(BuzzPushAttemptGate.new);
     final tombstoneAttempt = useMemoized(BuzzPushAttemptGate.new);
+    final reconcileAttempt = useMemoized(BuzzPushAttemptGate.new);
     final publicationRetry = useState(0);
     final tombstoneRetry = useState(0);
+    final reconcileRetry = useState(0);
     final (
       :revocationOutbox,
       :session,
       :communities,
+      :communitiesLoaded,
       :config,
       :community,
       :memberPubkey,
       :descriptor,
     ) = inputs;
+    final optedIn =
+        Env.pushGatewayConfigured &&
+        community?.pushNotificationsEnabled == true &&
+        _signedIn(config, community, memberPubkey);
+    final shouldRegister =
+        session.status == SessionStatus.connected &&
+        optedIn &&
+        descriptor != null;
+    // Read by the resume listener, which outlives a build. A resume often
+    // lands while the relay reconnects, when its descriptor is gone, and the
+    // registration attempt after reconnecting reuses its key, so it would not
+    // refresh the token either. Remember instead whether this community's
+    // relay advertised push, so a relay without it never fetches a token.
+    final pushRelay = useRef<String?>(null);
+    if (descriptor != null) pushRelay.value = community?.id;
+    final registering = useRef(false);
+    registering.value = optedIn && pushRelay.value == community?.id;
     final enablementEpoch = useRef(0);
     useEffect(() {
       // Each opt-in needs a fresh active lease even when endpoint, executor,
@@ -296,7 +375,20 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
 
     useEffect(() {
       final listener = AppLifecycleListener(
-        onResume: () => _runRevocationOutbox(revocationOutbox.trigger),
+        onResume: () {
+          _runRevocationOutbox(revocationOutbox.trigger);
+          // FCM rotates its token without telling a stopped app. Only a phone
+          // that registers for push has one to refresh.
+          if (!registering.value) return;
+          unawaited(
+            refreshBuzzPushToken().catchError((
+              Object error,
+              StackTrace stackTrace,
+            ) {
+              debugPrint('FCM token refresh failed: $error');
+            }),
+          );
+        },
       );
       _runRevocationOutbox(revocationOutbox.start);
       return listener.dispose;
@@ -313,6 +405,7 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
       () => () {
         publicationAttempt.dispose();
         tombstoneAttempt.dispose();
+        reconcileAttempt.dispose();
       },
       const [],
     );
@@ -331,7 +424,7 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
             pendingCommunities.isEmpty) {
           return null;
         }
-        const attempt = 'pending-tombstones';
+        final attempt = buzzPushTombstoneAttemptKey(pendingCommunities);
         if (!tombstoneAttempt.tryBegin(attempt)) return null;
         unawaited(() async {
           try {
@@ -376,19 +469,62 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
       ],
     );
 
-    final token = apnsDeviceToken.value;
+    // Removing the last community with push already off leaves the relay set
+    // unchanged (empty), but it is what makes the installation revocable.
+    final noCommunities = communities.isEmpty;
+    final pushRelayUrls = [
+      for (final candidate in communities)
+        if (candidate.pushNotificationsEnabled) candidate.relayUrl,
+    ];
     useEffect(
       () {
-        if (!_ready(session, config, community, memberPubkey) ||
-            !buzzPushLifecycleEnabled(
-              community: community,
-              descriptor: descriptor,
-            ) ||
-            token == null) {
+        // Authority the phone holds for relays no community uses is revoked:
+        // a community whose push is off, or removed, and at last the whole
+        // installation. A list still loading looks empty, so wait for it.
+        if (!communitiesLoaded ||
+            !Env.pushGatewayConfigured ||
+            defaultTargetPlatform != TargetPlatform.android) {
+          return null;
+        }
+        final attempt =
+            '${_pushRelayOrigins(communities).join('|')}|$noCommunities';
+        if (!reconcileAttempt.tryBegin(attempt)) return null;
+        unawaited(() async {
+          try {
+            await reconcileBuzzPushAuthority(
+              desiredRelays: () => _desiredPushRelays(ref),
+              noCommunities: () =>
+                  (ref.read(communityListProvider).value ?? const []).isEmpty,
+            );
+            reconcileAttempt.complete(attempt);
+          } catch (error, stack) {
+            reconcileAttempt.failed(
+              attempt,
+              retry: () {
+                if (context.mounted) reconcileRetry.value += 1;
+              },
+            );
+            reportPushLeaseCleanupError(error, stack);
+          }
+        }());
+        return null;
+      },
+      [
+        communitiesLoaded,
+        pushRelayUrls.join('|'),
+        noCommunities,
+        reconcileRetry.value,
+      ],
+    );
+
+    final token = apnsDeviceToken.value ?? fcmDeviceToken.value;
+    useEffect(
+      () {
+        if (!shouldRegister || token == null) {
           return null;
         }
         final activeCommunity = community!;
-        final activeDescriptor = descriptor!;
+        final activeDescriptor = descriptor;
         final state = activeCommunity.pushSubscriptionState;
         if (state.desired.isEmpty) return null;
         final publicationKey = buzzPushPublicationAttemptKey(
@@ -413,6 +549,12 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
               memberPubkey!,
               relay,
             );
+            if (grant == null) {
+              // Push was turned off, or the community removed, while this
+              // waited. Nothing was published, and the opt-out already ran.
+              publicationAttempt.complete(attempt);
+              return;
+            }
             final renewInMilliseconds =
                 grant.expiresAt * 1000 -
                 DateTime.now().millisecondsSinceEpoch -
@@ -429,17 +571,29 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
               },
             );
           } catch (error, stack) {
-            publicationAttempt.retryAfter(
-              attempt,
+            void retry() {
+              if (context.mounted) publicationRetry.value += 1;
+            }
+
+            if (error is AndroidPushAttestationUnavailable) {
+              // Only a different boot state or gateway configuration changes
+              // this, so look again rarely rather than backing off briefly.
+              publicationAttempt.retryAfter(
+                attempt,
+                delay: const Duration(hours: 1),
+                retry: retry,
+              );
+            } else if (error is BuzzPushChannelGrammarException) {
               // Re-fetch capabilities after a relay upgrade without repeatedly
               // enrolling or publishing a lease the old relay cannot accept.
-              delay: error is BuzzPushChannelGrammarException
-                  ? const Duration(minutes: 5)
-                  : _pushBootstrapRetryDelay,
-              retry: () {
-                if (context.mounted) publicationRetry.value += 1;
-              },
-            );
+              publicationAttempt.retryAfter(
+                attempt,
+                delay: const Duration(minutes: 5),
+                retry: retry,
+              );
+            } else {
+              publicationAttempt.failed(attempt, retry: retry);
+            }
             debugPrint('Push lease bootstrap failed: $error');
             debugPrintStack(stackTrace: stack);
           }
@@ -460,31 +614,26 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     );
 
     return BuzzPushRegistrationBootstrap(
-      shouldRegister:
-          _ready(session, config, community, memberPubkey) &&
-          buzzPushLifecycleEnabled(
-            community: community,
-            descriptor: descriptor,
-          ),
+      shouldRegister: shouldRegister,
       attemptKey: '${community?.id}|${config.baseUrl}',
       child: const SizedBox.shrink(),
     );
   }
 
-  static bool _ready(
-    SessionState session,
+  static bool _signedIn(
     RelayConfig config,
     Community? community,
     String? memberPubkey,
   ) =>
-      session.status == SessionStatus.connected &&
       community != null &&
       config.nsec != null &&
       config.nsec!.isNotEmpty &&
       memberPubkey != null &&
       memberPubkey.isNotEmpty;
 
-  static Future<BuzzPushEndpointGrant> _publish(
+  /// Returns null when the community stopped wanting push before the lease was
+  /// published.
+  static Future<BuzzPushEndpointGrant?> _publish(
     WidgetRef ref,
     RelayConfig config,
     Community community,
@@ -497,12 +646,28 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
       config.baseUrl,
     );
     validateBuzzPushChannelGrammar(descriptor, desired);
+    // The opt-out's revocation may already have run while the descriptor was
+    // fetched or enrollment waited its turn, so enrolling or publishing now
+    // would create authority nothing revokes. Asked again before each step.
+    bool stillWanted() => (ref.read(communityListProvider).value ?? const [])
+        .any((c) => c.id == community.id && c.pushNotificationsEnabled);
     final grant = await enrollBuzzPush(
       config.wsUrl,
       Env.pushGatewayUrl,
       communitiesForSnapshotRefresh:
           ref.read(communityListProvider).value ?? [community],
+      relayOrigin: descriptor.origin,
+      relayPubkey: descriptor.executorPubkey,
+      desiredRelays: () => _desiredPushRelays(ref),
+      stillWanted: stillWanted,
+      // Enrollment can finish after a community switch, when reports already
+      // name the next member.
+      diagnostics: SignerDiagnosticReporter(
+        ref.read(diagnosticReporterProvider),
+        signer: memberPubkey,
+      ),
     );
+    if (grant == null || !stillWanted()) return null;
     // Relay lease replacement and gateway delegation are independent state
     // machines. Subscription changes advance only the kind-30350 generation;
     // the opaque grant remains reusable until its own authority changes.
@@ -528,6 +693,24 @@ class _BuzzPushLifecycle extends HookConsumerWidget {
     );
     return grant;
   }
+}
+
+Set<String> _desiredPushRelays(WidgetRef ref) =>
+    _pushRelayOrigins(ref.read(communityListProvider).value ?? const []);
+
+/// The relays of the communities whose push is on, as grants name them. A
+/// relay URL with no origin (a path, say) never had a grant, so it names none.
+Set<String> _pushRelayOrigins(List<Community> communities) {
+  final origins = <String>{};
+  for (final community in communities) {
+    if (!community.pushNotificationsEnabled) continue;
+    try {
+      origins.add(canonicalBuzzPushRelayOrigin(community.relayUrl));
+    } on FormatException {
+      continue;
+    }
+  }
+  return origins;
 }
 
 void _runRevocationOutbox(Future<void> Function() operation) {

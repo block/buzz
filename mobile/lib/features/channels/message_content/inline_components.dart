@@ -1,6 +1,7 @@
 part of '../message_content.dart';
 
-List<MarkdownComponent> _useMessageInlineComponents({
+List<InlinePattern> _useMessageInlinePatterns({
+  required bool ownBubble,
   required String content,
   required String finalContent,
   required Map<String, String> mentionNames,
@@ -46,11 +47,12 @@ List<MarkdownComponent> _useMessageInlineComponents({
     hasMentionHandler: onMentionTap != null,
   );
 
-  // gpt_markdown compares components by identity. Recreating them on every
+  // gpt_markdown compares patterns by identity. Recreating them on every
   // parent rebuild reparses unchanged message bodies on the UI isolate.
   return useMemoized(
     () => [
       _MentionMd(
+        ownBubble: ownBubble,
         mentionNames: inputs.mentionNames,
         mentionLabels: inputs.mentionLabels,
         bindings: inputs.bindings,
@@ -60,17 +62,18 @@ List<MarkdownComponent> _useMessageInlineComponents({
         },
         agentMentionPubkeys: inputs.agentPubkeys,
         onMentionTap: inputs.hasMentionHandler ? mentionTap : null,
-      ),
-      CustomEmojiMd(inputs.customEmoji, content: finalContent, size: emojiSize),
+      ).pattern,
+      CustomEmojiMd(
+        inputs.customEmoji,
+        content: finalContent,
+        size: emojiSize,
+      ).pattern,
       _ChannelLinkMd(
         channelNames: inputs.channelNames,
         onChannelTap: channelTap,
-      ),
-      _MarkdownLabelEntityMd(),
-      for (final component in MarkdownComponent.inlineComponents)
-        component is ATagMd ? _MessageLinkMd() : component,
+      ).pattern,
     ],
-    [inputs],
+    [inputs, ownBubble],
   );
 }
 
@@ -142,28 +145,4 @@ class _InlineComponentInputs {
   @override
   int get hashCode =>
       Object.hash(content, finalContent, emojiSize, hasMentionHandler);
-}
-
-// Encoded label punctuation must remain literal even inside nested formatting.
-class _MarkdownLabelEntityMd extends InlineMd {
-  @override
-  RegExp get exp => RegExp(r'&#(?:91|92|93);');
-
-  @override
-  Set<MarkdownScope> get scopes => const {MarkdownScope.linkLabel};
-
-  @override
-  InlineSpan span(
-    BuildContext context,
-    String text,
-    GptMarkdownConfig config,
-  ) => TextSpan(text: decodeMarkdownLabelSyntax(text), style: config.style);
-}
-
-// Labels are already normalized, including literal/nested brackets. The
-// package's permissive .*? label matcher can otherwise start at a prose '['
-// and swallow a later image or link before its own component gets to render.
-class _MessageLinkMd extends ATagMd {
-  @override
-  RegExp get exp => RegExp(r'(?<!!)\[[^\[\]\n]*\]\([^\s]*\)');
 }

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:buzz/shared/crypto/event_signing.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -8,11 +9,16 @@ import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
+import '../diagnostics/diagnostic_reporter.dart';
 import '../community/community.dart';
+import 'first_agent_bestie.dart';
+import '../me/default_agent.dart';
+import '../me/me_sync.dart';
 import '../community/community_provider.dart';
 import '../crypto/nip_oa.dart';
 import '../hosted/account_identity_store.dart';
 import '../hosted/builderlab_account.dart';
+import '../hosted/device_identity_source.dart';
 import '../hosted/hosted_environment.dart';
 import '../hosted/hosted_relay_auth.dart';
 import '../relay/nostr_filters.dart';
@@ -22,6 +28,24 @@ import '../relay/relay_session.dart';
 import '../relay/signed_event_relay.dart';
 import '../storage/secure_storage.dart';
 
+/// Last authoritative runtime availability, scoped to the Buzz owner rather
+/// than the Builderlab login so signing out cannot revive a deleted runtime.
+String _availabilityKey(String owner) =>
+    'remote-agent-availability:${HostedEnvironment.origin.host}:$owner';
+
+final savedRemoteAvailabilityProvider = FutureProvider<Set<String>?>((
+  ref,
+) async {
+  final owner = ref.watch(myPubkeyProvider);
+  final controller = ref.watch(remoteAgentControllerProvider);
+  void changed() => ref.invalidateSelf();
+  controller.addListener(changed);
+  ref.onDispose(() => controller.removeListener(changed));
+  if (owner == null) return null;
+  final prefs = await SharedPreferences.getInstance();
+  return prefs.getStringList(_availabilityKey(owner))?.toSet();
+});
+
 /// Remote agents run on Builderlab, so they exist only in builds with
 /// Builderlab enabled and only in hosted communities this build supports.
 bool supportsRemoteAgents(Community? community) =>
@@ -29,6 +53,23 @@ bool supportsRemoteAgents(Community? community) =>
     community != null &&
     community.pubkey != null &&
     HostedEnvironment.supportsRelay(Uri.parse(community.relayUrl));
+
+/// Whether a signed-out Builderlab account hides where this community's agents
+/// run: remote agents are unlistable until the user signs in, so an agent that
+/// is not in the registry is not necessarily desktop-managed.
+bool agentLocationUnknown(
+  Community? community,
+  RemoteAgentController controller,
+) => supportsRemoteAgents(community) && controller.account.account == null;
+
+/// Whether to ask the user to sign in to Builderlab: the agent location is
+/// unknown and no load is in flight. A cold start's saved-session restore
+/// runs inside the controller's refresh, so prompting then would start a
+/// needless browser sign-in for a session that is about to be adopted.
+bool builderlabSignInNeeded(
+  Community? community,
+  RemoteAgentController controller,
+) => agentLocationUnknown(community, controller) && !controller.busy;
 
 /// Restores a saved Builderlab session once, so a cold start with a stored
 /// session shows remote agents without waiting for another sign-in path.
@@ -63,10 +104,34 @@ final remoteAgentControllerProvider = Provider<RemoteAgentController>((ref) {
   final controller = RemoteAgentController(
     account: ref.watch(builderlabAccountProvider),
     keys: AccountIdentityStore(),
+    onCreated: (community, pubkey) async {
+      final sync = ref.read(meSyncProvider);
+      if (sync.pubkey != community.pubkey ||
+          ref.read(activeCommunityProvider).asData?.value?.id != community.id) {
+        throw StateError('The community changed. Resume agent setup there.');
+      }
+      await makeFirstAgentBestie(sync, pubkey);
+      ref.invalidate(defaultAgentProvider);
+    },
     relayAuth: ref.watch(hostedRelayAuthProvider),
+    diagnostics: ref.read(diagnosticReporterProvider),
   );
   ref.onDispose(controller.dispose);
   return controller;
+});
+
+/// Changes when this device publishes or removes a remote agent registration,
+/// so caches of the owner's agent inventory can reload.
+final remoteAgentRegistrationRevisionProvider = Provider<int>((ref) {
+  final controller = ref.watch(remoteAgentControllerProvider);
+  final revision = controller.registrationRevision;
+  void changed() {
+    if (controller.registrationRevision != revision) ref.invalidateSelf();
+  }
+
+  controller.addListener(changed);
+  ref.onDispose(() => controller.removeListener(changed));
+  return revision;
 });
 
 /// The active community's remote agents that the signed-in owner's registry
@@ -149,6 +214,8 @@ class RemoteAgentController extends ChangeNotifier {
     required this.account,
     required AccountIdentityStore keys,
     required this.relayAuth,
+    this.diagnostics = const NoopDiagnosticReporter(),
+    this.onCreated,
   }) : _keys = keys {
     account.subjectChanges.addListener(_accountChanged);
   }
@@ -156,6 +223,10 @@ class RemoteAgentController extends ChangeNotifier {
   final BuilderlabAccountClient account;
   final AccountIdentityStore _keys;
   final HostedRelayAuth relayAuth;
+  final DiagnosticReporter diagnostics;
+
+  /// Completes community preferences before clearing the resumable setup.
+  final Future<void> Function(Community community, String pubkey)? onCreated;
 
   bool busy = false;
   int _operation = 0;
@@ -165,6 +236,10 @@ class RemoteAgentController extends ChangeNotifier {
   String? owner;
   List<Map<String, dynamic>> agents = [];
   Map<String, dynamic>? pending;
+
+  /// The agent the latest successful [create] finished, so its caller can
+  /// hand off to that exact agent rather than infer it from other state.
+  String? created;
   Set<String> deletedAgents = {};
   String? _scope;
   String? _loadedRelay;
@@ -176,6 +251,10 @@ class RemoteAgentController extends ChangeNotifier {
     if (subject == null) throw AccountFailure.signedOut;
     return _keys.forSubject(subject);
   }
+
+  /// Whether the signed-in account's saved state (its binding and any
+  /// unfinished setup) has been read since it signed in.
+  bool get loadedForCurrentAccount => _scope != null && _scope == _currentScope;
 
   /// Empty until the signed-in account's own registry has loaded.
   Set<String> get activeAgents => _scope == null || _scope != _currentScope
@@ -203,6 +282,7 @@ class RemoteAgentController extends ChangeNotifier {
     pending = null;
     deletedAgents = {};
     listingFailed = false;
+    registryLoaded = false;
     _scope = null;
   }
 
@@ -226,6 +306,7 @@ class RemoteAgentController extends ChangeNotifier {
   Future<bool> run(Future<void> Function() action) async {
     if (busy || _disposed) return false;
     busy = true;
+    account.lastRejectedRequest = null;
     failure = '';
     final operation = ++_operation;
     notifyListeners();
@@ -236,6 +317,9 @@ class RemoteAgentController extends ChangeNotifier {
       // Account failures never carry credentials or response bodies.
       failure = switch (error) {
         AccountFailure.signedOut => 'Sign in to Builderlab again.',
+        AccountFailure.rejected when account.lastRejectedRequest != null =>
+          'Builderlab rejected ${account.lastRejectedRequest!.path.split('/').last} '
+              '(HTTP ${account.lastRejectedRequest!.status}). Retry this setup.',
         AccountFailure() => 'Builderlab: ${error.name}. Try again.',
         AccountIdentityFailure() => 'Buzz identity: ${error.name}.',
         StateError() => error.message,
@@ -267,6 +351,9 @@ class RemoteAgentController extends ChangeNotifier {
   /// an empty registry.
   bool listingFailed = false;
 
+  /// Whether this account has returned an authoritative registry snapshot.
+  bool registryLoaded = false;
+
   Future<void> refresh() async {
     try {
       await _refresh();
@@ -284,7 +371,18 @@ class RemoteAgentController extends ChangeNotifier {
       return;
     }
     await ensureBinding();
-    final result = await account.post('/v3/beekeeper/list-agents', {});
+    final boundOwner = owner!;
+    final scope = _storageScope;
+    void check() {
+      if (_currentScope != scope || owner != boundOwner) {
+        throw StateError('Account changed. Reopen Agents.');
+      }
+    }
+
+    final result = await account.post('/v3/beekeeper/list-agents', {
+      'include_instructions': true,
+    }, expectedSubject: session.subject);
+    check();
     requireStatus(result, 'SUCCESS', 1);
     final rows = result['agents'] ?? [];
     if (rows is! List) throw StateError('Invalid agent listing.');
@@ -292,9 +390,9 @@ class RemoteAgentController extends ChangeNotifier {
       for (final row in rows) Map<String, dynamic>.from(row as Map),
     ];
     final prefs = await SharedPreferences.getInstance();
+    check();
     final retries = Map<String, dynamic>.from(
-      jsonDecode(prefs.getString('$_storageScope:delete-retries') ?? '{}')
-          as Map,
+      jsonDecode(prefs.getString('$scope:delete-retries') ?? '{}') as Map,
     );
     // A deletion interrupted after its relay registration was removed keeps
     // its row so Delete can be retried.
@@ -306,9 +404,16 @@ class RemoteAgentController extends ChangeNotifier {
         listed.add(row);
       }
     }
+    registryLoaded = true;
     agents = listed
         .where((row) => !deletedAgents.contains(row['agent_pubkey']))
         .toList();
+    if (!await prefs.setStringList(
+      _availabilityKey(boundOwner),
+      activeAgents.toList(),
+    )) {
+      throw StateError('Could not save agent availability. Retry refresh.');
+    }
   }
 
   /// Requires this account's saved key to be its current server binding.
@@ -316,14 +421,41 @@ class RemoteAgentController extends ChangeNotifier {
     final subject = account.account?.subject;
     if (subject == null) throw AccountFailure.signedOut;
     if (_scope != _storageScope) _clearAccountState();
-    final local = await keys.read();
-    if (local == null) throw AccountIdentityFailure.absent;
+    final slot = keys;
+    var local = await slot.read();
     final response = await account.currentIdentity();
     if (account.account?.subject != subject) {
       throw AccountFailure.differentAccount;
     }
     if (response['error'] != null) throw AccountFailure.invalidResponse;
     final bound = (response['identity'] as Map?)?['pubkey_hex'];
+    // Reconnect restores the login only. A paired/legacy community can already
+    // hold the account's bound identity without an account-scoped key slot.
+    // Adopt only that exact server-confirmed key; never generate or rebind one.
+    if (local == null &&
+        bound is String &&
+        RegExp(r'^[0-9a-f]{64}$').hasMatch(bound)) {
+      void checkCurrent() {
+        if (_disposed || account.account?.subject != subject) {
+          throw AccountFailure.differentAccount;
+        }
+      }
+
+      final device = DeviceIdentitySource();
+      final choices = await device.choices();
+      checkCurrent();
+      if (choices.any((choice) => choice.pubkey == bound)) {
+        local = await device.adopt(bound, slot, checkCurrent: checkCurrent);
+      } else {
+        final paired = await _keys.forPairing(bound).read();
+        checkCurrent();
+        if (paired?.pubkey == bound) {
+          local = await slot.adoptSaved(bound, checkCurrent: checkCurrent);
+        }
+      }
+      checkCurrent();
+    }
+    if (local == null) throw AccountIdentityFailure.absent;
     if (bound != local.pubkey) throw AccountIdentityFailure.mismatch;
     owner = local.pubkey;
     final scope = _storageScope;
@@ -350,6 +482,93 @@ class RemoteAgentController extends ChangeNotifier {
     _scope = scope;
   }
 
+  /// Loads the authenticated service's supported model and effort choices.
+  Future<List<RemoteAgentModel>> modelCatalog() async {
+    final subject = account.account?.subject;
+    if (subject == null) throw AccountFailure.signedOut;
+    final result = await account.post(
+      '/v3/beekeeper/get-model-catalog',
+      {},
+      expectedSubject: subject,
+    );
+    if (account.account?.subject != subject) {
+      throw AccountFailure.differentAccount;
+    }
+    final rows = result['models'];
+    if (rows is! List) throw StateError('Could not load available models.');
+    final recommended = result['recommended_selection'];
+    return rows
+        .map((row) => RemoteAgentModel.fromJson(row, recommended: recommended))
+        .toList();
+  }
+
+  /// Saves only an active agent owned by this account, then verifies readback.
+  Future<bool> updateModel({
+    required Community community,
+    required String pubkey,
+    required RemoteAgentModel model,
+    required String effort,
+    required bool Function() isCurrent,
+  }) => run(() async {
+    final subject = account.account?.subject;
+    void check() {
+      if (subject == null ||
+          account.account?.subject != subject ||
+          !isCurrent()) {
+        throw StateError('Community or account changed. Reopen Agents.');
+      }
+    }
+
+    check();
+    if (!HostedEnvironment.supportsRelay(Uri.parse(community.relayUrl))) {
+      throw StateError('This community does not support remote agents.');
+    }
+    await ensureBinding();
+    check();
+    if (owner != community.pubkey) throw AccountIdentityFailure.mismatch;
+    if (!activeAgents.contains(pubkey)) {
+      throw StateError('Refresh Agents before changing this model.');
+    }
+    final catalog = await modelCatalog();
+    check();
+    if (!catalog.any(
+      (choice) => choice.id == model.id && choice.efforts.contains(effort),
+    )) {
+      throw StateError(
+        'This model or reasoning effort is no longer available.',
+      );
+    }
+    final result = await account.post('/v3/beekeeper/update-agent', {
+      'agent_pubkey': pubkey,
+      'model_id': model.id,
+      'reasoning_effort': effort,
+    }, expectedSubject: subject);
+    check();
+    if (result['error'] != null) throw AccountFailure.rejected;
+    final readback = await account.post('/v3/beekeeper/list-agents', {
+      'include_instructions': true,
+    }, expectedSubject: subject);
+    check();
+    requireStatus(readback, 'SUCCESS', 1);
+    final rows = readback['agents'];
+    if (rows is! List) throw StateError('Invalid agent listing.');
+    agents = [
+      for (final row in rows) Map<String, dynamic>.from(row as Map),
+    ].where((row) => !deletedAgents.contains(row['agent_pubkey'])).toList();
+    final saved = agents
+        .where((row) => row['agent_pubkey'] == pubkey)
+        .firstOrNull;
+    if (saved?['model_id'] != model.id ||
+        saved?['reasoning_effort'] != effort ||
+        !(saved?['model_selection_status'] == 1 ||
+            saved?['model_selection_status'] ==
+                'MODEL_SELECTION_STATUS_VALID')) {
+      throw StateError(
+        'The server has not confirmed this model selection. Refresh and try again.',
+      );
+    }
+  });
+
   Future<void> _savePending(Map<String, dynamic> value) async {
     final scope = _storageScope;
     final prefs = await SharedPreferences.getInstance();
@@ -370,14 +589,6 @@ class RemoteAgentController extends ChangeNotifier {
     pending = value;
   }
 
-  /// Loads only the remote service's offered model and effort combinations.
-  Future<List<RemoteAgentModel>> modelCatalog() async {
-    final response = await account.post('/v3/beekeeper/get-model-catalog', {});
-    final rows = response['models'] ?? [];
-    if (rows is! List) throw StateError('Invalid model catalog.');
-    return rows.map((row) => RemoteAgentModel.fromJson(row)).toList();
-  }
-
   /// Rejects selections absent from the current server catalog.
   Future<void> validateModel(String modelId, String effort) async {
     final catalog = await modelCatalog();
@@ -396,6 +607,7 @@ class RemoteAgentController extends ChangeNotifier {
     Community community,
     String name, {
     String instructions = '',
+    String? pictureUrl,
     String? modelId,
     String? reasoningEffort,
   }) => run(() async {
@@ -409,6 +621,7 @@ class RemoteAgentController extends ChangeNotifier {
       );
     }
     final scope = _storageScope;
+    created = null;
     final resuming = pending != null;
     final selectedModel = modelId ?? pending?['model_id'] as String?;
     final selectedEffort =
@@ -433,6 +646,7 @@ class RemoteAgentController extends ChangeNotifier {
       await _savePending({
         'name': trimmed,
         'instructions': instructions.trim(),
+        'picture': ?pictureUrl,
         'community': community.relayUrl,
         'owner': owner,
         'request': const Uuid().v4(),
@@ -477,6 +691,7 @@ class RemoteAgentController extends ChangeNotifier {
       try {
         result = await account.post('/v3/beekeeper/register-agent', {
           'agent_name': setup['name'],
+          if (setup['picture'] != null) 'agent_picture_url': setup['picture'],
           'idempotency_key': setup['request'],
         });
       } on AccountFailure catch (failure) {
@@ -510,7 +725,7 @@ class RemoteAgentController extends ChangeNotifier {
     final result = await account.post('/v3/beekeeper/attest-agent', {
       'agent_pubkey': pubkey,
       'owner_auth_tag_json': jsonEncode(auth),
-      'community_url': community.relayUrl,
+      'community_url': RelayConfig(baseUrl: community.relayUrl).wsUrl,
     });
     requireStatus(result, 'ACTIVE', 1);
     await account.post('/v3/beekeeper/update-agent', {
@@ -524,6 +739,7 @@ class RemoteAgentController extends ChangeNotifier {
     // Retain the completed registration if the listing refresh fails, so Retry
     // resumes the same identity instead of creating another agent.
     await refresh();
+    await onCreated?.call(community, pubkey);
     // Drop the record before its instructions, so an interrupted cleanup never
     // leaves a pending setup whose instructions are gone.
     final prefs = await SharedPreferences.getInstance();
@@ -534,6 +750,7 @@ class RemoteAgentController extends ChangeNotifier {
     await accountSecureStorage.delete(
       key: '$scope:instructions:${setup['request']}',
     );
+    created = pubkey;
   });
 
   /// Whether [pending] provably has no server identity: registration was never
@@ -577,11 +794,13 @@ class RemoteAgentController extends ChangeNotifier {
       final config = RelayConfig(baseUrl: relay, nsec: key.nsec);
       await submitSignedEventOnce(
         wsUrl: config.wsUrl,
-        headers: await relayAuth.headers(config),
+        headers: await relayAuth.headers(config, fresh: true),
+        diagnostics: diagnostics,
         nsec: key.nsec,
         kind: 30177,
         content: jsonEncode({
           'name': setup['name'],
+          'picture': ?setup['picture'],
           'parallelism': 1,
           'respond_to': 'owner-only',
         }),
@@ -599,7 +818,8 @@ class RemoteAgentController extends ChangeNotifier {
         final config = RelayConfig(baseUrl: relay, nsec: key.nsec);
         await submitSignedEventOnce(
           wsUrl: config.wsUrl,
-          headers: await relayAuth.headers(config),
+          headers: await relayAuth.headers(config, fresh: true),
+          diagnostics: diagnostics,
           nsec: key.nsec,
           kind: 5,
           content: '',
@@ -662,7 +882,10 @@ class RemoteAgentController extends ChangeNotifier {
     final retries = Map<String, dynamic>.from(
       jsonDecode(prefs.getString('$scope:delete-retries') ?? '{}') as Map,
     );
-    retries[pubkey] = agent;
+    // Instructions are private, and this retry journal is plain preferences;
+    // a retry needs only the row's identity.
+    retries[pubkey] = Map<String, dynamic>.from(agent)
+      ..remove('agent_instructions');
     if (!await prefs.setString('$scope:delete-retries', jsonEncode(retries))) {
       throw StateError('Could not save deletion retry. Retry Delete.');
     }
@@ -705,6 +928,17 @@ class RemoteAgentController extends ChangeNotifier {
       );
     }
     deletedAgents = completed;
+    final available =
+        prefs.getStringList(_availabilityKey(member))?.toSet() ?? activeAgents;
+    available.remove(pubkey);
+    if (!await prefs.setStringList(
+      _availabilityKey(member),
+      available.toList(),
+    )) {
+      throw StateError(
+        'Runtime deleted, but local cleanup failed. Retry Delete.',
+      );
+    }
     retries.remove(pubkey);
     if (!await prefs.setString('$scope:delete-retries', jsonEncode(retries))) {
       throw StateError(
@@ -734,7 +968,7 @@ List<String> signOwnerAuthorization(nostr.Keys owner, String agent) {
     'auth',
     owner.public,
     '',
-    nostr.Schnorr.sign(secretKey: owner.secret, message: digest),
+    signSchnorrHex(secretKey: owner.secret, messageHex: digest),
   ];
 }
 
@@ -755,30 +989,50 @@ bool hasStatus(Map<String, dynamic> result, String suffix, int numeric) {
   return status == numeric || (status is String && status.endsWith('_$suffix'));
 }
 
-/// One catalog entry; effort identifiers belong to this model, not a fixed scale.
+/// A service-provided model and its supported reasoning effort values.
 class RemoteAgentModel {
-  const RemoteAgentModel(this.id, this.name, this.efforts);
+  const RemoteAgentModel({
+    required this.id,
+    required this.name,
+    required this.efforts,
+    this.recommendedEffort,
+  });
   final String id;
   final String name;
   final List<String> efforts;
 
-  factory RemoteAgentModel.fromJson(dynamic row) {
-    if (row is! Map ||
-        row['id'] is! String ||
-        (row['id'] as String).trim().isEmpty ||
-        row['display_name'] is! String ||
-        (row['display_name'] as String).trim().isEmpty ||
-        row['supported_reasoning_efforts'] is! List) {
-      throw StateError('Invalid model catalog entry.');
+  /// Set when the service recommends this model, at this effort, for new
+  /// agents. Creation guidance only; it never replaces a saved choice.
+  final String? recommendedEffort;
+
+  /// [recommended] is the catalog's optional `recommended_selection`; a
+  /// malformed one, or one naming a pair this model lacks, is ignored.
+  factory RemoteAgentModel.fromJson(dynamic value, {dynamic recommended}) {
+    if (value is! Map ||
+        value['id'] is! String ||
+        (value['id'] as String).trim().isEmpty ||
+        value['display_name'] is! String ||
+        (value['display_name'] as String).trim().isEmpty ||
+        value['supported_reasoning_efforts'] is! List) {
+      throw StateError('Invalid model catalog.');
     }
-    final efforts = (row['supported_reasoning_efforts'] as List).cast<String>();
-    if (efforts.isEmpty || efforts.any((value) => value.trim().isEmpty)) {
-      throw StateError('Model catalog has no supported reasoning efforts.');
+    final efforts = value['supported_reasoning_efforts'] as List;
+    if (efforts.isEmpty ||
+        efforts.any((item) => item is! String || item.trim().isEmpty)) {
+      throw StateError('Invalid model catalog.');
     }
+    final id = value['id'] as String;
+    final recommendedEffort =
+        recommended is Map && recommended['model_id'] == id
+        ? recommended['reasoning_effort']
+        : null;
     return RemoteAgentModel(
-      row['id'] as String,
-      row['display_name'] as String,
-      efforts,
+      id: id,
+      name: value['display_name'] as String,
+      efforts: List<String>.from(efforts),
+      recommendedEffort: efforts.contains(recommendedEffort)
+          ? recommendedEffort as String
+          : null,
     );
   }
 }

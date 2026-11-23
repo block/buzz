@@ -13,18 +13,17 @@ require_mobile_release_source() {
   fi
 }
 
-# The repository administrator must configure this ruleset without bypass actors.
-# GitHub hides that list from non-admin tokens; check the caller's effective
-# bypass plus every public policy field on each publication.
+# The mobile release managers are the bypass actors of this ruleset and of the
+# mobile tag ruleset, so they can publish from a stable branch. The ruleset
+# still forces review and checks on everyone else. Bypass is deliberately not
+# checked here; verify every other public policy field on each publication.
 require_mobile_release_branch_ruleset() {
   local branch="$1" valid
   [[ "$branch" != main ]] || return 0
   valid="$(gh api repos/block/buzz/rulesets/19321162 --jq '
     .target == "branch" and .enforcement == "active"
-    and .current_user_can_bypass == "never"
     and (.conditions.ref_name.include | index("refs/heads/mobile-v*") != null)
     and (.conditions.ref_name.exclude == [])
-    and ((has("bypass_actors") | not) or .bypass_actors == [])
     and any(.rules[]; .type == "deletion")
     and any(.rules[]; .type == "non_fast_forward")
     and any(.rules[]; .type == "pull_request"
@@ -38,7 +37,7 @@ require_mobile_release_branch_ruleset() {
       and ([.parameters.required_status_checks[].context] | index("DCO Check") != null))
   ')" || { echo "Could not verify mobile stable-branch protection" >&2; return 1; }
   [[ "$valid" == true ]] || {
-    echo "Mobile stable-branch ruleset 19321162 must enforce review and checks on mobile-v* without bypass" >&2
+    echo "Mobile stable-branch ruleset 19321162 must enforce review and checks on mobile-v*" >&2
     return 1
   }
 }

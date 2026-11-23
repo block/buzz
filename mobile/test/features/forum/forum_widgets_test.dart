@@ -95,6 +95,7 @@ Widget _buildPostCard({
 Widget _buildPostsView({
   required ForumPostsResponse postsResponse,
   Channel? channel,
+  double? headerHeight,
   Map<String, UserProfile> users = const {},
 }) {
   final ch = channel ?? _forumChannel;
@@ -110,7 +111,11 @@ Widget _buildPostsView({
     child: MaterialApp(
       theme: AppTheme.light(),
       home: Scaffold(
-        body: ForumPostsView(channel: ch, currentPubkey: 'self'),
+        body: ForumPostsView(
+          channel: ch,
+          currentPubkey: 'self',
+          headerHeight: headerHeight,
+        ),
       ),
     ),
   );
@@ -744,6 +749,7 @@ void main() {
     testWidgets('renders post list', (tester) async {
       await tester.pumpWidget(
         _buildPostsView(
+          headerHeight: 56,
           postsResponse: ForumPostsResponse(
             posts: [
               _makePost(content: 'First post'),
@@ -755,6 +761,9 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      final first = find.byType(ForumPostCard).first;
+      final list = find.byType(ListView).first;
+      expect(tester.getTopLeft(first).dy - tester.getTopLeft(list).dy, 56.0);
       expect(find.text('First post'), findsOneWidget);
       expect(find.text('Second post'), findsOneWidget);
     });

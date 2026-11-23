@@ -3,15 +3,23 @@ import type { Locator, Page } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
+import { openGeneral, pressRowAction } from "../helpers/channelHeadReady";
 import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
 
 async function openMoreActionsMenu(page: Page, messageId: string) {
   const row = page.locator(`[data-message-id="${messageId}"]`);
-  await row.hover();
-  await page.getByTestId(`more-actions-${messageId}`).click();
+  await pressRowAction(row.getByTestId(`more-actions-${messageId}`));
   await expect(page.locator('[role="menuitem"]').first()).toBeVisible({
     timeout: 5_000,
   });
+}
+
+// Leave the bottom of the timeline with real wheel input. A programmatic
+// scrollTop keeps the timeline's bottom intent armed, so the next content
+// resize (the upload card mounting) pins it back down and unmounts the pill.
+async function scrollTimelineUp(page: Page, timeline: Locator) {
+  await timeline.hover();
+  await page.mouse.wheel(0, -2_000);
 }
 
 // Exercises the generic file-attachment UI contract end-to-end through the
@@ -166,7 +174,9 @@ test("opening edit during an immediate photo upload preserves the draft", async 
   page,
 }) => {
   await page.goto("/");
-  await page.getByTestId("channel-general").click();
+  // Open the menu only after history and its head refresh settle, so the row
+  // is not replaced under the keyboard focus.
+  await openGeneral(page);
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   // Hold the upload at the IPC boundary until the edit assertion completes.
   // A fixed delay races menu interaction and CI scheduling, so it can test
@@ -432,10 +442,7 @@ test("upload progress floats above the dock and lifts Jump to latest", async ({
 
   const timeline = page.getByTestId("message-timeline");
   await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
-  await timeline.evaluate((element) => {
-    element.scrollTop = Math.max(500, element.scrollHeight / 2);
-    element.dispatchEvent(new Event("scroll", { bubbles: true }));
-  });
+  await scrollTimelineUp(page, timeline);
   const jumpToLatest = page.getByTestId("message-scroll-to-latest");
   await expect(jumpToLatest).toBeVisible();
   const restingBox = await jumpToLatest.boundingBox();
@@ -444,29 +451,33 @@ test("upload progress floats above the dock and lifts Jump to latest", async ({
   await page.getByTestId("send-message").click();
   const uploadMotion = page.getByTestId("composer-upload-progress-motion");
   await expect(uploadMotion).toBeVisible();
-  await timeline.evaluate((element) => {
-    element.scrollTop = Math.max(500, element.scrollHeight / 2);
-    element.dispatchEvent(new Event("scroll", { bubbles: true }));
-  });
+  await scrollTimelineUp(page, timeline);
   await expect(jumpToLatest).toBeVisible();
-  await page.waitForTimeout(250);
-
-  const [uploadBox, dockBackdropBox, liftedBox] = await Promise.all([
-    uploadMotion.boundingBox(),
-    page.getByTestId("composer-dock-backdrop").boundingBox(),
-    jumpToLatest.boundingBox(),
-  ]);
+  // The upload card slides in and the pill lifts above it, both animated.
+  // Poll the settled layout instead of reading it after a fixed 250 ms.
   expect(restingBox).not.toBeNull();
-  expect(uploadBox).not.toBeNull();
-  expect(dockBackdropBox).not.toBeNull();
-  expect(liftedBox).not.toBeNull();
-  expect((dockBackdropBox?.y ?? 0) + 1).toBeGreaterThanOrEqual(
-    (uploadBox?.y ?? 0) + (uploadBox?.height ?? 0),
-  );
-  expect((liftedBox?.y ?? 0) + (liftedBox?.height ?? 0)).toBeLessThanOrEqual(
-    uploadBox?.y ?? 0,
-  );
-  expect(liftedBox?.y ?? 0).toBeLessThan((restingBox?.y ?? 0) - 10);
+  await expect
+    .poll(async () => {
+      const [uploadBox, dockBackdropBox, liftedBox] = await Promise.all([
+        uploadMotion.boundingBox(),
+        page.getByTestId("composer-dock-backdrop").boundingBox(),
+        jumpToLatest.boundingBox(),
+      ]);
+      if (!uploadBox || !dockBackdropBox || !liftedBox || !restingBox) {
+        return "a box is missing";
+      }
+      return {
+        uploadAboveDockBackdrop:
+          dockBackdropBox.y + 1 >= uploadBox.y + uploadBox.height,
+        pillAboveUpload: liftedBox.y + liftedBox.height <= uploadBox.y,
+        pillLifted: liftedBox.y < restingBox.y - 10,
+      };
+    })
+    .toEqual({
+      uploadAboveDockBackdrop: true,
+      pillAboveUpload: true,
+      pillLifted: true,
+    });
 
   await page.getByTestId("composer-upload-cancel").click();
 });

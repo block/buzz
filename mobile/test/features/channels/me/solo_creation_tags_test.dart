@@ -1,7 +1,12 @@
+import 'package:buzz/features/channels/compose_bar.dart';
+import 'package:buzz/shared/me/default_agent.dart';
+import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'dart:async';
 import 'dart:convert';
 
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_sections/channel_sections_provider.dart';
+import 'package:buzz/features/channels/channel_sections/workspace_layout.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/me/me_page.dart';
@@ -9,12 +14,9 @@ import 'package:buzz/shared/me/me_assistants.dart';
 import 'package:buzz/shared/me/me_chat_creation.dart';
 import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/me/me_groups.dart';
+import 'package:buzz/shared/crypto/nip44.dart';
 import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
-import 'package:buzz/shared/profile/user_cache_provider.dart';
-import 'package:buzz/shared/profile/user_profile.dart';
-import 'package:buzz/shared/widgets/app_list.dart';
-import 'package:flutter/foundation.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:flutter/material.dart';
@@ -30,11 +32,28 @@ class _EmptyChannels extends ChannelsNotifier {
   Future<List<Channel>> build() async => [];
 }
 
+class _Sections extends ChannelSectionsNotifier {
+  @override
+  ChannelSectionsState build() => const ChannelSectionsState(isReady: true);
+
+  void lock() => state = ChannelSectionsState(
+    isReady: true,
+    workspace: WorkspaceRecord.fromJson({
+      'version': 1,
+      'sections': <Object>[],
+      'assignments': <String, Object>{},
+      'sectionOrder': <String>[],
+    }),
+    version: 2,
+  );
+}
+
 class _Relay extends RelaySessionNotifier {
   final NostrEvent profile;
   final submitted = <NostrEvent>[];
   _Relay(this.profile, this.existing);
   final List<NostrEvent> existing;
+  var groups = <NostrEvent>[];
 
   @override
   Future<List<NostrEvent>> queryRelay(
@@ -46,12 +65,16 @@ class _Relay extends RelaySessionNotifier {
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
-  }) async => existing.where((e) => filter.kinds.contains(e.kind)).toList();
+  }) async => [
+    ...existing,
+    ...groups,
+  ].where((e) => filter.kinds.contains(e.kind)).toList();
 
   @override
   Future<NostrEvent> publish(
     NostrEvent event, {
     Duration timeout = const Duration(seconds: 8),
+    Future<bool> Function()? mayPublish,
   }) async {
     submitted.add(event);
     // Stop at the transport boundary: this test covers the real creation
@@ -67,7 +90,17 @@ void main() {
           ? 'interrupted Solo recovery uses fresh membership before creating'
           : 'New Solo chat submits its discovery label through the production action',
       (tester) async {
-        final flutterSheet = defaultTargetPlatform == TargetPlatform.android;
+        const mediaChannel = MethodChannel('buzz/media_upload');
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          mediaChannel,
+          (call) async => call.method == 'clipboardHasImage' ? false : null,
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            mediaChannel,
+            null,
+          ),
+        );
         SharedPreferences.setMockInitialValues({});
         final prefs = await SharedPreferences.getInstance();
         final owner = nostr.Keys.generate(), agent = nostr.Keys.generate();
@@ -159,24 +192,23 @@ void main() {
           }
         });
         final directory = Completer<List<AgentDirectoryEntry>>();
-        if (flutterSheet) directory.complete([]);
-        final draft = Completer<Map<String, String>>();
-        String? presentationId;
-        Map<Object?, Object?>? agentUpdate;
-        Object? savedAssistant;
-        var forms = 0;
+        // A recovered creation keeps its saved agent even when discovery no
+        // longer lists it.
+        directory.complete([
+          if (!recoverExisting)
+            AgentDirectoryEntry(
+              pubkey: agent.public,
+              displayName: 'Owned agent',
+            ),
+        ]);
+        var agentAdded = false;
+        final sections = _Sections();
+        final bridgeCalls = <MethodCall>[];
         tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(bridge, (
           call,
         ) async {
-          if (call.method == 'updateChatAssistants') {
-            agentUpdate = call.arguments as Map<Object?, Object?>;
-            return null;
-          }
-          if (++forms > 1) return null;
-          final arguments = call.arguments as Map;
-          presentationId = arguments['presentationId'] as String;
-          savedAssistant = arguments['savedAssistant'];
-          return draft.future;
+          bridgeCalls.add(call);
+          return null;
         });
         addTearDown(
           () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -187,14 +219,38 @@ void main() {
         await tester.pumpWidget(
           ProviderScope(
             overrides: [
+              savedPrefsProvider.overrideWithValue(prefs),
+              defaultAgentProvider.overrideWith(
+                (ref) => Stream.value(agent.public),
+              ),
+              agentDirectoryProvider.overrideWith((ref) async => []),
+              agentOwnersProvider.overrideWith((ref) async => {}),
+              customEmojiListProvider.overrideWithValue([]),
               meSyncProvider.overrideWithValue(sync),
               relaySessionProvider.overrideWith(() => relay),
+              // The relay's Solo record no longer holds this project.
               meGroupsProvider.overrideWith(
-                (ref) => Stream.value(const MeGroups()),
+                (ref) => Stream.value(
+                  const MeGroups(
+                    groups: [
+                      {'id': 'gone', 'name': 'Gone', 'defaultTemplateId': ''},
+                    ],
+                  ),
+                ),
               ),
+              channelSectionsProvider.overrideWith(() => sections),
               meAssistantsProvider.overrideWith((ref) => directory.future),
               channelsProvider.overrideWith(_EmptyChannels.new),
-              channelMembersProvider(channelId).overrideWith((ref) async => []),
+              channelMembersProvider(channelId).overrideWith(
+                (ref) async => [
+                  if (agentAdded)
+                    ChannelMember(
+                      pubkey: agent.public,
+                      role: 'bot',
+                      joinedAt: DateTime(2026),
+                    ),
+                ],
+              ),
               channelActionsProvider.overrideWith(
                 (ref) => ChannelActions(
                   ref: ref,
@@ -224,70 +280,36 @@ void main() {
           await tester.tap(find.text('Resume'));
           await tester.pumpAndSettle();
         }
-        if (flutterSheet) {
-          final row = find.byKey(const ValueKey('new-session-assistant'));
-          if (!recoverExisting) {
-            expect(find.text('Choose an agent'), findsOneWidget);
-            await tester.enterText(
-              find.byKey(const ValueKey('new-session-name')),
-              'Mobile Solo',
-            );
-            await tester.tap(find.text('Create chat'));
-            await tester.pumpAndSettle();
-            expect(
-              find.text('Enter a name and choose an agent.'),
-              findsOneWidget,
-            );
-            expect(relay.submitted, isEmpty);
-            expect(MeChatCreation.pending(sync), isNull);
-            await tester.pumpWidget(const SizedBox.shrink());
-            await tester.pumpAndSettle();
-            return;
-          }
-          final semantics = tester.ensureSemantics();
-          await tester.pump();
-          expect(find.text('Choose an agent'), findsNothing);
-          expect(find.text(agent.public), findsOneWidget);
-          expect(find.bySemanticsLabel(agent.public), findsOneWidget);
-          expect(tester.widget<AppListRowRaw>(row).onTap, isNull);
-          final container = ProviderScope.containerOf(tester.element(row));
-          container
-              .read(userCacheProvider.notifier)
-              .put(
-                UserProfile(pubkey: agent.public, displayName: 'Saved agent'),
-              );
-          await tester.pumpAndSettle();
-          expect(find.text('Saved agent'), findsOneWidget);
-          expect(find.bySemanticsLabel('Saved agent'), findsOneWidget);
-          expect(tester.widget<AppListRowRaw>(row).onTap, isNull);
-          semantics.dispose();
+        expect(bridgeCalls, isEmpty, reason: 'No native New chat sheet');
+        if (recoverExisting) {
+          expect(find.byType(ComposeBar), findsNothing);
+          expect(
+            tester
+                .widget<FrostedAppBar>(find.byType(FrostedAppBar).last)
+                .nativeActions!
+                .last
+                .onPressed,
+            isNull,
+            reason: 'The saved agent stays locked',
+          );
           await tester.tap(find.text('Retry'));
         } else {
-          expect(
-            forms,
-            1,
-            reason: 'Compose opens even while agents are loading',
-          );
-          if (recoverExisting) {
-            expect(savedAssistant, {
-              'id': agent.public,
-              'name': agent.public,
-              'avatarUrl': '',
-            });
-          }
-          directory.complete([
-            AgentDirectoryEntry(
-              pubkey: agent.public,
-              displayName: 'Owned agent',
-            ),
-          ]);
+          // A project picked before desktop's unified record arrives is
+          // dropped, not checked against a Solo record desktop now owns.
+          tester
+              .widget<FrostedAppBar>(find.byType(FrostedAppBar).last)
+              .nativeActions!
+              .first
+              .children
+              .firstWhere((action) => action.label == 'Gone')
+              .onPressed!();
           await tester.pumpAndSettle();
-          expect(agentUpdate?['presentationId'], presentationId);
-          expect(
-            (agentUpdate?['assistants'] as List).single['id'],
-            agent.public,
+          sections.lock();
+          await tester.pumpAndSettle();
+          final composer = tester.widget<ComposeBar>(find.byType(ComposeBar));
+          unawaited(
+            composer.onSend('Mobile Solo', const []).catchError((_) {}),
           );
-          draft.complete({'name': 'Mobile Solo', 'assistant': agent.public});
         }
         for (
           var attempts = 0;
@@ -308,9 +330,98 @@ void main() {
             9000,
             reason: 'Recovery continues with member setup',
           );
-          expect(MeChatCreation.pending(sync)?.id, channelId);
+          final pending = MeChatCreation.pending(sync)!;
+          expect(pending.id, channelId);
+          expect(pending.name, 'Mobile Solo');
+          expect(
+            pending.initialMessage,
+            isNull,
+            reason: 'A named creation from an older build finishes as saved',
+          );
           expect(command.tags, contains(equals(['p', agent.public])));
+
+          // A conflicting pending Solo edit blocks placement. Retry offers the
+          // recovery choice and keeps the saved creation for the next Retry.
+          agentAdded = true;
+          relay.submitted.clear();
+          MeGroups organization(String group) => MeGroups(
+            groups: [
+              for (final id in ['original', 'phone', 'desktop'])
+                {'id': id, 'name': id, 'defaultTemplateId': ''},
+            ],
+            assignments: {channelId: group},
+            channels: const [channelId],
+          );
+          NostrEvent signed(String group, int timestamp) => NostrEvent.fromJson(
+            nostr.Event.from(
+              kind: 30078,
+              content: nip44Encrypt(
+                sync.key,
+                organization(group).encode(sync.community),
+              ),
+              secretKey: sync.privateHex,
+              createdAt: timestamp,
+              tags: [
+                ['d', MeGroups.coordinate(sync.community)],
+                ['t', MeGroups.tag],
+              ],
+              verify: false,
+            ).toMap(),
+          );
+          await prefs.setString(
+            sync.pendingKey,
+            jsonEncode({
+              'base': signed('original', 1).toJson(),
+              'event': signed('phone', 2).toJson(),
+            }),
+          );
+          relay.groups = [signed('desktop', 3)];
+          await tester.tap(find.text('Retry'));
+          for (
+            var attempts = 0;
+            attempts < 100 &&
+                find.text('Conflicting Solo changes').evaluate().isEmpty;
+            attempts++
+          ) {
+            await tester.pumpAndSettle();
+            await tester.runAsync(
+              () => Future<void>.delayed(const Duration(milliseconds: 50)),
+            );
+          }
+          expect(find.text('Conflicting Solo changes'), findsOneWidget);
+          expect(relay.submitted, isEmpty);
+          await tester.tap(find.text('Discard phone change'));
+          await tester.pumpAndSettle();
+          expect(prefs.getString(sync.pendingKey), isNull);
+          expect(MeChatCreation.pending(sync)?.id, channelId);
+          await tester.tap(find.text('Retry'));
+          for (
+            var attempts = 0;
+            attempts < 100 && MeChatCreation.pending(sync) != null;
+            attempts++
+          ) {
+            await tester.pumpAndSettle();
+            await tester.runAsync(
+              () => Future<void>.delayed(const Duration(milliseconds: 50)),
+            );
+          }
+          await tester.pumpAndSettle();
+          // Desktop already lists the chat, so Retry finishes the creation
+          // without another organization write.
+          expect(MeChatCreation.pending(sync), isNull);
+          expect(relay.submitted, isEmpty);
+          expect(find.text('Retry'), findsNothing);
         } else {
+          final pending = MeChatCreation.pending(sync)!;
+          expect(pending.name, 'Mobile Solo');
+          expect(pending.project, 'gone');
+          expect(pending.initialMessage?.content, 'Mobile Solo');
+          expect(pending.initialMessage?.pubkey, owner.public);
+          expect(
+            pending.initialMessage?.tags,
+            contains(equals(['p', agent.public])),
+          );
+          expect(pending.initialMessage?.getTagValue('h'), pending.id);
           expect(command.kind, 9007);
           expect(command.pubkey, owner.public);
           expect(command.tags, contains(equals(['t', 'buzz.solo'])));

@@ -1,10 +1,13 @@
+import '../hosted/known_community_sync_provider.dart';
 import '../hosted/hosted_relay_auth.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../community/community.dart';
 import '../community/community_provider.dart';
+import '../diagnostics/diagnostic_reporter.dart';
 import '../hosted/community_entry_requirements.dart';
+import '../relay/relay_provider.dart' show pubkeyFromNsec;
 
 enum AuthStatus { unknown, unauthenticated, authenticated }
 
@@ -62,7 +65,9 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     Community community, {
     bool Function()? shouldContinue,
     bool activate = true,
-  }) {
+  }) async {
+    final sync = ref.read(knownCommunitySyncProvider);
+    community = await sync?.prepareAddition(community) ?? community;
     return ref.read(communityTransitionProvider).runExclusive(() async {
       if (shouldContinue != null && !shouldContinue()) return;
       await CommunityEntryRequirements.verify(
@@ -74,7 +79,14 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
       if (shouldContinue != null && !shouldContinue()) return;
       final storage = ref.read(communityStorageProvider);
       await storage.save(community);
-      if (activate) await storage.saveActiveId(community.id);
+      if (activate) {
+        await storage.saveActiveId(community.id);
+        // The derived member settles a frame later; name it on reports now.
+        ref
+            .read(diagnosticReporterProvider)
+            .setMember(pubkeyFromNsec(community.nsec));
+      }
+      sync?.trigger();
       await syncStoredCommunitySnapshot(ref);
 
       // Invalidate community providers so other consumers pick up the new data.
@@ -87,27 +99,6 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
         );
       }
     });
-  }
-
-  Future<void> signOut() {
-    return () async {
-      final storage = ref.read(communityStorageProvider);
-      await ref
-          .read(communityListProvider.notifier)
-          .removeActiveCommunityForSignOut();
-
-      // Community removal already persisted the outbox, deleted credentials,
-      // selected the next active community, and removed NSE state. Authentication
-      // only needs to publish the truthful resulting account state.
-      final remaining = await storage.loadAll();
-      ref.invalidate(activeCommunityProvider);
-      if (remaining.isEmpty) {
-        state = const AsyncData(AuthState(status: AuthStatus.unauthenticated));
-        return;
-      }
-      ref.invalidateSelf();
-      await future;
-    }();
   }
 }
 

@@ -45,11 +45,13 @@ export function settleProgrammaticBottomPin(
 export function shouldSettleForSplitPanel({
   isAtBottom,
   splitPanelOpen,
+  targetHeld,
 }: {
   isAtBottom: boolean;
   splitPanelOpen: boolean;
+  targetHeld: boolean;
 }): boolean {
-  return isAtBottom && splitPanelOpen;
+  return isAtBottom && splitPanelOpen && !targetHeld;
 }
 
 export function shouldSettleVirtualizedBottom({

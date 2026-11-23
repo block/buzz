@@ -1,8 +1,11 @@
 import 'package:buzz/shared/me/me_sync.dart';
 import '../../shared/me/me_sync_test.dart' show FakeRelay;
 import 'dart:async';
+import 'package:buzz/shared/relay/relay_author_provider.dart';
+import 'package:nostr/nostr.dart' as nostr;
 
-import 'package:buzz/features/agents/agents_sheet.dart';
+import 'package:buzz/features/agents/agents_page.dart';
+import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/agents/remote_agents.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
@@ -16,9 +19,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:hooks_riverpod/misc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/remote_agents_fixture.dart';
+
+final existingDesktopKeys = nostr.Keys('0' * 63 + '3');
+final otherAgentKeys = nostr.Keys('0' * 63 + '4');
+final otherOwnerKeys = nostr.Keys('0' * 63 + '5');
+
+/// The owner's agent that only an earlier Buzz runs: its registration has no
+/// `runtime`, so the Agents page leaves it out as desktop does.
+final oldAppAgentKeys = nostr.Keys('0' * 63 + '6');
 
 /// Fakes the relay boundary: owner-attested profiles for registry agents.
 class _Relay extends FakeRelay {
@@ -29,29 +41,76 @@ class _Relay extends FakeRelay {
   SessionState build() => const SessionState(status: SessionStatus.connected);
 
   @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    final handler = harness.onQuery;
+    return handler == null
+        ? super.queryRelay(filters, timeout: timeout)
+        : handler(filters.single);
+  }
+
+  @override
   Future<List<NostrEvent>> fetchHistory(
     NostrFilter filter, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
-    if (filter.kinds.contains(30078)) return events;
-    final agent = filter.authors?.contains(fakeAgent) ?? false;
-    if (agent && harness.relayDown) {
+    if ((filter.authors?.contains(fakeAgent) ?? false) && harness.relayDown) {
       throw TimeoutException('relay unavailable');
     }
-    return [
-      if (agent)
-        signedAgentProfile(
-          fakeAgentKeys,
-          fakeOwner,
-          content: '{"name":"Scout"}',
-        ),
-    ];
+    if (filter.kinds.contains(30177)) {
+      return [
+        for (final pubkey in harness.registered)
+          NostrEvent.fromJson(
+            nostr.Event.from(
+              kind: 30177,
+              content: '{"name":"Agent"}',
+              secretKey: fakeOwner.secret,
+              createdAt: 1,
+              tags: [
+                ['d', pubkey],
+                if (pubkey != oldAppAgentKeys.public)
+                  ['runtime', 'block.claude-code/claude-code'],
+              ],
+            ).toMap(),
+          ),
+      ];
+    }
+    return filter.kinds.contains(30078)
+        ? events
+        : [
+            if (filter.authors?.contains(oldAppAgentKeys.public) ?? false)
+              signedAgentProfile(
+                oldAppAgentKeys,
+                fakeOwner,
+                content: '{"name":"Old app agent"}',
+              ),
+            if (filter.authors?.contains(existingDesktopKeys.public) ?? false)
+              signedAgentProfile(
+                existingDesktopKeys,
+                fakeOwner,
+                content: '{"name":"My desktop agent"}',
+              ),
+            if (filter.authors?.contains(otherAgentKeys.public) ?? false)
+              signedAgentProfile(
+                otherAgentKeys,
+                otherOwnerKeys,
+                content: '{"name":"Other owner agent"}',
+              ),
+            if (filter.authors?.contains(fakeAgent) ?? false)
+              signedAgentProfile(
+                fakeAgentKeys,
+                fakeOwner,
+                content: '{"name":"Scout"}',
+              ),
+          ];
   }
 }
 
 /// Holds creation open so a test can observe the in-flight state.
 class GatedController extends RelayFakeController {
-  GatedController(super.account);
+  GatedController(super.account, {super.onCreated});
   Completer<void>? gate;
   String? submittedName;
   String? submittedInstructions;
@@ -61,6 +120,7 @@ class GatedController extends RelayFakeController {
     Community community,
     String name, {
     String instructions = '',
+    String? pictureUrl,
     String? modelId,
     String? reasoningEffort,
   }) {
@@ -72,6 +132,7 @@ class GatedController extends RelayFakeController {
         community,
         name,
         instructions: instructions,
+        pictureUrl: pictureUrl,
         modelId: modelId,
         reasoningEffort: reasoningEffort,
       );
@@ -89,6 +150,7 @@ class GatedController extends RelayFakeController {
 /// belong to the fake-async zone that created them, so each file holds only
 /// one widget test that touches the store.
 class AgentsHarness {
+  Future<List<NostrEvent>> Function(NostrFilter)? onQuery;
   AgentsHarness._(this.registry, this.controller, this.community);
   final FakeRegistry registry;
   final GatedController controller;
@@ -97,15 +159,23 @@ class AgentsHarness {
 
   /// Fails agent profile fetches until the relay recovers.
   bool relayDown = false;
+  bool authorityDown = false;
 
-  static Future<AgentsHarness> create() async {
+  /// Agents the owner registered in this community (kind:30177).
+  List<String> registered = const [];
+
+  /// [relayUrl] defaults to a hosted community that supports remote agents.
+  static Future<AgentsHarness> create({
+    String? relayUrl,
+    Future<void> Function(Community, String)? onCreated,
+  }) async {
     FlutterSecureStorage.setMockInitialValues({});
     SharedPreferences.setMockInitialValues({});
     final registry = FakeRegistry(bound: fakeOwner.public);
     await AccountIdentityStore()
         .forSubject(registry.account!.subject)
         .create(fakeOwner.nsec);
-    final controller = GatedController(registry);
+    final controller = GatedController(registry, onCreated: onCreated);
     addTearDown(() {
       controller.dispose();
       controller.relayAuth.dispose();
@@ -116,19 +186,25 @@ class AgentsHarness {
       controller,
       Community.create(
         name: 'Test',
-        relayUrl: 'wss://test.${HostedEnvironment.communitySuffix}',
+        relayUrl: relayUrl ?? 'wss://test.${HostedEnvironment.communitySuffix}',
         pubkey: fakeOwner.public,
         nsec: fakeOwner.nsec,
       ),
     );
   }
 
-  /// Opens the Agents sheet over a host page.
+  /// Opens the Agents sheet over a host page. [directory] agents are both
+  /// registered by the owner and listed in the relay agent directory; the
+  /// owner's old-app agent is always registered too.
   Future<void> open(
     WidgetTester tester, {
     required List<String> directory,
     Widget? home,
+    bool createOnOpen = false,
+    bool settle = true,
+    List<Override> overrides = const [],
   }) async {
+    registered = [...directory, oldAppAgentKeys.public];
     final prefs = await SharedPreferences.getInstance();
     final sync = MeSync(
       relay,
@@ -138,9 +214,17 @@ class AgentsHarness {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
+          ownedAgentDirectoryProvider.overrideWith(
+            (ref) =>
+                loadOwnedAgentDirectory(fakeOwner.public, relay.fetchHistory),
+          ),
           builderlabAccountProvider.overrideWithValue(registry),
           remoteAgentControllerProvider.overrideWithValue(controller),
           relaySessionProvider.overrideWith(() => relay),
+          relayAuthorProvider(community.relayUrl).overrideWith((ref) async {
+            if (authorityDown) throw StateError('Relay metadata offline');
+            return 'e' * 64;
+          }),
           meSyncProvider.overrideWithValue(sync),
           activeCommunityProvider.overrideWith((ref) async => community),
           agentDirectoryProvider.overrideWith(
@@ -149,15 +233,21 @@ class AgentsHarness {
                 AgentDirectoryEntry(pubkey: pubkey),
             ],
           ),
+          ...overrides,
         ],
         child: MaterialApp(
           theme: AppTheme.light(),
+          builder: (context, child) => MediaQuery(
+            data: MediaQuery.of(context).copyWith(disableAnimations: true),
+            child: child!,
+          ),
           home:
               home ??
               Builder(
                 builder: (context) => Scaffold(
                   body: TextButton(
-                    onPressed: () => showAgents(context),
+                    onPressed: () =>
+                        showAgents(context, createOnOpen: createOnOpen),
                     child: const Text('Open Agents'),
                   ),
                 ),
@@ -168,7 +258,12 @@ class AgentsHarness {
     await tester.pumpAndSettle();
     if (home == null) {
       await tester.tap(find.text('Open Agents'));
-      await tester.pumpAndSettle();
+      if (settle) {
+        await tester.pumpAndSettle();
+      } else {
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+      }
     }
   }
 }

@@ -15,13 +15,13 @@ use buzz_auth::{
 /// `try_claim` issues `SET buzz:nip-fi:command:{hash} 1 NX EX <ttl>`; `OK`
 /// is a first claim and `nil` is a replay.
 pub struct RedisCommandReplayGuard {
-    pool: deadpool_redis::Pool,
+    pool: crate::RedisConnection,
     prefix: &'static str,
 }
 
 impl RedisCommandReplayGuard {
-    /// Create a new replay guard backed by the given Redis connection pool.
-    pub fn new(pool: deadpool_redis::Pool) -> Self {
+    /// Create a new replay guard backed by the shared Redis connection.
+    pub fn new(pool: crate::RedisConnection) -> Self {
         Self {
             pool,
             prefix: COMMAND_REPLAY_PREFIX,
@@ -30,18 +30,11 @@ impl RedisCommandReplayGuard {
 
     /// A guard for shadow pods: claims live under
     /// `buzz:nip-fi:shadow-command:{hash}`, disjoint from enforce claims.
-    pub fn shadow(pool: deadpool_redis::Pool) -> Self {
+    pub fn shadow(pool: crate::RedisConnection) -> Self {
         Self {
             pool,
             prefix: SHADOW_COMMAND_REPLAY_PREFIX,
         }
-    }
-
-    async fn conn(&self) -> Result<deadpool_redis::Connection, AuthError> {
-        self.pool.get().await.map_err(|e| {
-            tracing::warn!(error = %e, "nip-fi command replay: redis pool acquire failed");
-            AuthError::Internal(format!("Redis pool: {e}"))
-        })
     }
 }
 
@@ -55,14 +48,14 @@ impl CommandReplayGuard for RedisCommandReplayGuard {
     {
         Box::pin(async move {
             let ttl = ttl_secs.clamp(DEFAULT_REPLAY_TTL_SECS, MAX_REPLAY_TTL_SECS);
-            let mut conn = self.conn().await?;
+            let mut conn = self.pool.clone();
             let result: Option<String> = redis::cmd("SET")
                 .arg(namespaced_command_replay_key(self.prefix, issuer, jti))
                 .arg("1")
                 .arg("NX")
                 .arg("EX")
                 .arg(ttl)
-                .query_async(&mut *conn)
+                .query_async(&mut conn)
                 .await
                 .map_err(|e| {
                     tracing::warn!(error = %e, "nip-fi command replay: redis SET NX EX failed");

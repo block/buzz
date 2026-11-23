@@ -35,12 +35,13 @@ pub(super) struct SidebarQuery {
 
 pub(super) async fn sidebar(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
     query: Result<Query<SidebarQuery>, axum::extract::rejection::QueryRejection>,
 ) -> Result<Response, Error> {
     tokio::time::timeout(Duration::from_secs(8), async {
-        let principal = auth::authorize(&state, &headers, &uri, "GET", None).await?;
+        let principal = auth::authorize(&state, &slot, &headers, &uri, "GET", None).await?;
         let Query(query) = query.map_err(|_| Error::invalid())?;
         if query
             .limit
@@ -139,6 +140,7 @@ struct Batch {
 
 pub(super) async fn write(
     State(state): State<Arc<AppState>>,
+    slot: crate::access::AccessSlot,
     headers: HeaderMap,
     OriginalUri(uri): OriginalUri,
     body: Bytes,
@@ -146,7 +148,7 @@ pub(super) async fn write(
     if body.len() > 64 * 1024 {
         return Err(Error::invalid());
     }
-    let principal = auth::authorize(&state, &headers, &uri, "POST", Some(&body)).await?;
+    let principal = auth::authorize(&state, &slot, &headers, &uri, "POST", Some(&body)).await?;
     let batch: Batch = serde_json::from_slice(&body).map_err(|_| Error::invalid())?;
     if batch.intents.is_empty() || batch.intents.len() > MAX_INTENTS {
         return Err(Error::invalid());

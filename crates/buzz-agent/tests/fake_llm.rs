@@ -1521,17 +1521,33 @@ async fn steer_rejected_on_empty_prompt() {
             json!({"sessionId": sid, "expectedRunId": run_id, "prompt": []}),
         )
         .await;
-    let mut saw_reject = false;
+    // The prompt runs in its own task while the steer is answered from the
+    // read loop, so the turn can finish before the steer is even read: wait
+    // for both responses in either order.
+    let (mut steer_reply, mut prompt_done) = (None, false);
     for _ in 0..40 {
-        let v = h.recv().await;
-        if v["id"] == json!(s_id) {
-            assert_eq!(v["error"]["code"], -32602, "empty prompt must be rejected");
-            saw_reject = true;
-        } else if v["id"] == json!(p_id) {
+        if steer_reply.is_some() && prompt_done {
             break;
         }
+        let v = h.recv().await;
+        if v["id"] == json!(s_id) {
+            steer_reply = Some(v);
+        } else if v["id"] == json!(p_id) {
+            prompt_done = true;
+        }
     }
-    assert!(saw_reject, "empty steer prompt was not rejected");
+    let steer_reply = steer_reply.expect("empty steer prompt got no response");
+    assert_eq!(
+        steer_reply["error"]["code"], -32602,
+        "empty prompt must be rejected"
+    );
+    // "no active run" and a run-id mismatch also answer -32602, and either can
+    // win if the turn ends first; the empty-prompt guard runs before both.
+    assert_eq!(
+        steer_reply["error"]["message"], "steer: prompt must not be empty",
+        "the empty-prompt guard must be what rejects the steer"
+    );
+    assert!(prompt_done, "session/prompt did not finish");
     h.shutdown().await;
 }
 

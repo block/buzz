@@ -247,3 +247,26 @@ fn mode_predicates_separate_evaluation_from_authority() {
         assert_eq!(mode.observes_only(), evaluates && !restricts, "{mode:?}");
     }
 }
+
+#[test]
+fn community_requirements_follow_relay_mode() {
+    for stored in [false, true] {
+        assert_eq!(NipFiMode::Off.with_requirement(stored), NipFiMode::Off);
+        assert_eq!(
+            NipFiMode::Shadow.with_requirement(stored),
+            if stored {
+                NipFiMode::Enforce
+            } else {
+                NipFiMode::Shadow
+            }
+        );
+        assert_eq!(
+            NipFiMode::Enforce.with_requirement(stored),
+            NipFiMode::Enforce
+        );
+        assert_eq!(
+            NipFiMode::DenyProtected.with_requirement(stored),
+            NipFiMode::DenyProtected
+        );
+    }
+}

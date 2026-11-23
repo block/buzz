@@ -27,6 +27,11 @@ use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, EventBuilder, Keys, RelayUrl, SecretKey, ToBech32};
 use tokio::time::timeout;
+use tokio_tungstenite::tungstenite::{
+    client::IntoClientRequest,
+    handshake::client::Request,
+    http::{header::USER_AGENT, HeaderValue},
+};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use zeroize::Zeroizing;
 
@@ -133,7 +138,7 @@ async fn cmd_source(relay_url: String, nsec: Option<String>) -> Result<(), CliEr
 
     // Connect to relay and handle NIP-42 auth if required.
     // Auth uses the session's ephemeral keys so the relay accepts our events.
-    let (ws, _) = connect_async(&relay_url).await?;
+    let (ws, _) = connect_async(relay_request(&relay_url)?).await?;
     let (mut write, mut read) = ws.split();
     handle_nip42_auth(&mut read, &mut write, &session, &relay_url).await?;
 
@@ -235,7 +240,7 @@ async fn cmd_target(relay_override: Option<String>, show_secret: bool) -> Result
     let (mut session, offer_event) = PairingSession::new_target(&qr)?;
 
     // Connect to relay and handle NIP-42 auth if required.
-    let (ws, _) = connect_async(&relay_url).await?;
+    let (ws, _) = connect_async(relay_request(&relay_url)?).await?;
     let (mut write, mut read) = ws.split();
     handle_nip42_auth(&mut read, &mut write, &session, &relay_url).await?;
 
@@ -628,4 +633,28 @@ fn hex_to_32(s: &str) -> Result<[u8; 32], CliError> {
     bytes
         .try_into()
         .map_err(|_| CliError::Other(format!("expected 32 bytes, got wrong length for '{s}'")))
+}
+
+/// `User-Agent` sent on the relay WebSocket upgrade.
+const RELAY_USER_AGENT: &str = concat!("buzz-pairing-cli/", env!("CARGO_PKG_VERSION"));
+
+/// The relay upgrade request for `url`, naming this tool and its version.
+fn relay_request(url: &str) -> Result<Request, tokio_tungstenite::tungstenite::Error> {
+    let mut request = url.into_client_request()?;
+    request
+        .headers_mut()
+        .insert(USER_AGENT, HeaderValue::from_static(RELAY_USER_AGENT));
+    Ok(request)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relay_request_carries_user_agent() {
+        let request = relay_request("wss://relay.example.com").unwrap();
+        assert_eq!(request.headers()[USER_AGENT], RELAY_USER_AGENT);
+        assert!(RELAY_USER_AGENT.starts_with("buzz-pairing-cli/"));
+    }
 }

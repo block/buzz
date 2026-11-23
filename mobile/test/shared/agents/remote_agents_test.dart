@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:buzz/features/profile/presence_cache_provider.dart';
 import 'package:buzz/shared/agents/remote_agents.dart';
+import 'package:buzz/shared/agents/owned_agent_directory.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/crypto/nip_oa.dart';
@@ -10,6 +11,9 @@ import 'package:buzz/shared/hosted/account_identity_store.dart';
 import 'package:buzz/shared/hosted/builderlab_account.dart';
 import 'package:buzz/shared/hosted/hosted_environment.dart';
 import 'package:buzz/shared/hosted/hosted_relay_auth.dart';
+import 'package:buzz/shared/identity_archives/identity_archives.dart';
+import 'package:buzz/shared/me/me_assistants.dart';
+import 'package:buzz/shared/me/me_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/storage/secure_storage.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -57,10 +61,256 @@ Future<RelayFakeController> _controller(FakeRegistry registry) async {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  // Registrations go to a real loopback relay. The binding's mocked HTTP
+  // client would reject the WebSocket upgrade.
+  HttpOverrides.global = null;
   setUp(() {
     FlutterSecureStorage.setMockInitialValues({});
     SharedPreferences.setMockInitialValues({});
   });
+
+  Future<(RelayFakeController, FakeRegistry)> editableAgent() async {
+    final registry = FakeRegistry(bound: fakeOwner.public);
+    registry.listed = [
+      {
+        'agent_pubkey': fakeAgent,
+        'agent_name': 'Scout',
+        'agent_id': 'agent',
+        'status': 2,
+        'model_id': 'old-model',
+        'reasoning_effort': 'low',
+      },
+    ];
+    final controller = await _controller(registry);
+    await controller.run(controller.refresh);
+    return (controller, registry);
+  }
+
+  Future<bool> saveModel(
+    RelayFakeController controller, {
+    String effort = 'high',
+    bool current = true,
+    String? key,
+  }) async {
+    final model = (await controller.modelCatalog()).first;
+    return controller.updateModel(
+      community: _community(),
+      pubkey: key ?? fakeAgent,
+      model: model,
+      effort: effort,
+      isCurrent: () => current,
+    );
+  }
+
+  test(
+    'model changes save model and effort and confirm server readback',
+    () async {
+      final (controller, registry) = await editableAgent();
+      expect(await saveModel(controller), isTrue);
+      expect(registry.bodies['/v3/beekeeper/update-agent'], {
+        'agent_pubkey': fakeAgent,
+        'model_id': 'test-model',
+        'reasoning_effort': 'high',
+      });
+      expect(controller.agents.single['model_id'], 'test-model');
+    },
+  );
+
+  test(
+    'rejected model writes preserve the saved model and surface failure',
+    () async {
+      final (controller, registry) = await editableAgent();
+      registry.failInstructions = true;
+      expect(await saveModel(controller), isFalse);
+      expect(controller.agents.single['model_id'], 'old-model');
+      expect(controller.failure, contains('unavailable'));
+    },
+  );
+
+  test('unconfirmed model write does not report success', () async {
+    final (controller, registry) = await editableAgent();
+    registry.ignoreModelUpdate = true;
+    expect(await saveModel(controller), isFalse);
+    expect(controller.failure, contains('not confirmed'));
+    expect(controller.agents.single['model_id'], 'old-model');
+  });
+
+  test(
+    'model writes reject stale community, foreign agent and unsupported effort',
+    () async {
+      final (controller, registry) = await editableAgent();
+      expect(await saveModel(controller, current: false), isFalse);
+      expect(await saveModel(controller, key: 'a' * 64), isFalse);
+      expect(await saveModel(controller, effort: 'invalid'), isFalse);
+      expect(registry.calls, isNot(contains('update-agent')));
+    },
+  );
+
+  test(
+    'model writes require current account binding and community owner',
+    () async {
+      final (controller, registry) = await editableAgent();
+      registry.bound = 'a' * 64;
+      expect(await saveModel(controller), isFalse);
+      expect(registry.calls, isNot(contains('update-agent')));
+    },
+  );
+
+  test('model catalog rejects malformed reasoning choices', () async {
+    final (controller, registry) = await editableAgent();
+    registry.models = [
+      {'id': 'bad', 'display_name': 'Bad', 'supported_reasoning_efforts': []},
+    ];
+    expect(controller.modelCatalog(), throwsStateError);
+  });
+
+  test(
+    'reconnect adopts only the server-bound saved community identity',
+    () async {
+      final raw = jsonEncode([
+        {'name': 'Pilot', 'nsec': fakeOwner.nsec, 'pubkey': fakeOwner.public},
+        {'name': 'Other', 'nsec': fakeAgentKeys.nsec, 'pubkey': fakeAgent},
+      ]);
+      await communitySecureStorage.write(key: 'buzz_communities', value: raw);
+      final registry = FakeRegistry(bound: fakeOwner.public);
+      final controller = RelayFakeController(registry);
+      addTearDown(() {
+        controller.dispose();
+        controller.relayAuth.dispose();
+        registry.dispose();
+      });
+      expect(await controller.run(controller.refresh), isTrue);
+      expect(controller.owner, fakeOwner.public);
+      expect(
+        (await AccountIdentityStore().forSubject(fakeSubject).read())?.pubkey,
+        fakeOwner.public,
+      );
+      expect(await communitySecureStorage.read(key: 'buzz_communities'), raw);
+      expect(registry.calls, ['list-agents']);
+    },
+  );
+
+  test(
+    'reconnect never adopts an unrelated device key or rebinds the account',
+    () async {
+      await communitySecureStorage.write(
+        key: 'buzz_communities',
+        value: jsonEncode([
+          {'name': 'Other', 'nsec': fakeAgentKeys.nsec, 'pubkey': fakeAgent},
+        ]),
+      );
+      final registry = FakeRegistry(bound: fakeOwner.public);
+      final controller = RelayFakeController(registry);
+      addTearDown(() {
+        controller.dispose();
+        controller.relayAuth.dispose();
+        registry.dispose();
+      });
+      expect(await controller.run(controller.refresh), isFalse);
+      expect(
+        await AccountIdentityStore().forSubject(fakeSubject).read(),
+        isNull,
+      );
+      expect(registry.calls, isEmpty);
+      expect(controller.failure, contains('absent'));
+    },
+  );
+
+  test('reconnect adopts a matching retained paired identity', () async {
+    await AccountIdentityStore()
+        .forPairing(fakeOwner.public)
+        .create(fakeOwner.nsec);
+    final registry = FakeRegistry(bound: fakeOwner.public);
+    final controller = RelayFakeController(registry);
+    addTearDown(() {
+      controller.dispose();
+      controller.relayAuth.dispose();
+      registry.dispose();
+    });
+    expect(await controller.run(controller.refresh), isTrue);
+    expect(
+      (await AccountIdentityStore().forSubject(fakeSubject).read())?.pubkey,
+      fakeOwner.public,
+    );
+    expect(
+      (await AccountIdentityStore().forPairing(fakeOwner.public).read())
+          ?.pubkey,
+      fakeOwner.public,
+    );
+  });
+
+  test(
+    'creation normalizes saved HTTPS community URLs for attestation',
+    () async {
+      final registry = FakeRegistry(bound: fakeOwner.public);
+      final controller = await _controller(registry);
+      final community = Community.create(
+        name: 'Pilot',
+        relayUrl: 'https://test.${HostedEnvironment.communitySuffix}',
+        pubkey: fakeOwner.public,
+        nsec: fakeOwner.nsec,
+      );
+      expect(
+        await controller.create(
+          community,
+          'Tester',
+          modelId: 'test-model',
+          reasoningEffort: 'high',
+        ),
+        isTrue,
+      );
+      expect(
+        registry.bodies['/v3/beekeeper/attest-agent']?['community_url'],
+        'wss://test.${HostedEnvironment.communitySuffix}',
+      );
+      expect(
+        registry.calls.where((call) => call == 'register-agent'),
+        hasLength(1),
+      );
+    },
+  );
+
+  test(
+    'Bestie save failure resumes the same completed agent identity',
+    () async {
+      final registry = FakeRegistry(bound: fakeOwner.public);
+      await AccountIdentityStore()
+          .forSubject(fakeSubject)
+          .create(fakeOwner.nsec);
+      var fail = true;
+      var completions = 0;
+      final controller = RelayFakeController(
+        registry,
+        onCreated: (community, pubkey) async {
+          expect(pubkey, fakeAgent);
+          expect(registry.calls, contains('publish-policy'));
+          completions++;
+          if (fail) throw StateError('Bestie save unavailable');
+        },
+      );
+      addTearDown(() {
+        controller.dispose();
+        controller.relayAuth.dispose();
+        registry.dispose();
+      });
+      Future<bool> create() => controller.create(
+        _community(),
+        'Scout',
+        modelId: 'test-model',
+        reasoningEffort: 'high',
+      );
+      expect(await create(), isFalse);
+      expect(controller.pending?['pubkey'], fakeAgent);
+      fail = false;
+      expect(await create(), isTrue);
+      expect(controller.pending, isNull);
+      expect(completions, 2);
+      expect(
+        registry.calls.where((call) => call == 'register-agent'),
+        hasLength(1),
+      );
+    },
+  );
 
   test('model setup requires a catalog-confirmed selection', () async {
     final registry = FakeRegistry(bound: fakeOwner.public);
@@ -221,6 +471,7 @@ void main() {
           modelId: 'test-model',
           reasoningEffort: 'high',
           instructions: 'Reply concisely.',
+          pictureUrl: 'https://example.com/avatar.png',
         ),
         isFalse,
       );
@@ -231,6 +482,11 @@ void main() {
         'update-agent',
       ]);
       expect(controller.pending?['pubkey'], fakeAgent);
+      expect(controller.pending?['picture'], 'https://example.com/avatar.png');
+      expect(
+        registry.bodies['/v3/beekeeper/register-agent']?['agent_picture_url'],
+        'https://example.com/avatar.png',
+      );
       final prefs = await SharedPreferences.getInstance();
       expect(prefs.getString('$_scope:pending'), isNotNull);
       expect(
@@ -266,6 +522,7 @@ void main() {
         registry.bodies['/v3/beekeeper/attest-agent']?['community_url'],
         community.relayUrl,
       );
+      expect(registry.calls, isNot(contains('add-buzz-subscription')));
       expect(
         registry.bodies['/v3/beekeeper/update-agent']?['model_id'],
         'test-model',
@@ -285,7 +542,11 @@ void main() {
       final registry = FakeRegistry(bound: fakeOwner.public);
       final controller = await _controller(registry);
       registry.listed = [
-        {'agent_pubkey': fakeAgent, 'agent_id': 'remote-id'},
+        {
+          'agent_pubkey': fakeAgent,
+          'agent_id': 'remote-id',
+          'agent_instructions': 'Private prompt.',
+        },
       ];
       await controller.run(controller.refresh);
       registry.calls.clear();
@@ -323,6 +584,12 @@ void main() {
       controller.rejectRemoval = true;
       expect(await remove(), isFalse);
       expect(registry.calls, ['remove-registration']);
+      // The retry journal is plain preferences, so it never holds the prompt.
+      final journal = (await SharedPreferences.getInstance()).getString(
+        '$_scope:delete-retries',
+      );
+      expect(journal, contains('remote-id'));
+      expect(journal, isNot(contains('Private prompt.')));
       registry.calls.clear();
       controller.rejectRemoval = false;
       expect(await remove(), isFalse);
@@ -410,6 +677,7 @@ void main() {
       final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       addTearDown(() => server.close(force: true));
       final kinds = <int>[];
+      final registrations = <Map<String, dynamic>>[];
       final published = <NostrEvent>[];
       server.listen((request) async {
         final peer = await WebSocketTransformer.upgrade(request);
@@ -419,6 +687,11 @@ void main() {
           final event = Map<String, dynamic>.from(data[1] as Map);
           if (data.first == 'EVENT') {
             kinds.add(event['kind'] as int);
+            if (event['kind'] == 30177) {
+              registrations.add(
+                jsonDecode(event['content'] as String) as Map<String, dynamic>,
+              );
+            }
             published.add(NostrEvent.fromJson(event));
           }
           peer.add(jsonEncode(['OK', event['id'], true, '']));
@@ -443,7 +716,9 @@ void main() {
       await controller.publishPolicy(relay, {
         'pubkey': fakeAgent,
         'name': 'Scout',
+        'picture': 'https://example.com/avatar.png',
       });
+      expect(registrations.single['picture'], 'https://example.com/avatar.png');
       await controller.removePolicy(relay, fakeAgent);
       expect(kinds, [30177, 5]);
     },
@@ -672,6 +947,8 @@ void main() {
     final relay = _AgentRelay();
     final container = ProviderContainer(
       overrides: [
+        ownedAgentDirectoryProvider.overrideWith((ref) async => []),
+        myPubkeyProvider.overrideWithValue(fakeOwner.public),
         presenceCacheProvider.overrideWith(_AgentPresence.new),
         activeCommunityProvider.overrideWith((ref) async => _community()),
         remoteAgentControllerProvider.overrideWithValue(controller),
@@ -680,7 +957,9 @@ void main() {
     );
     addTearDown(container.dispose);
     await container.read(activeCommunityProvider.future);
-    await controller.run(controller.refresh);
+    expect(controller.registryLoaded, isFalse);
+    await controller.load(_community().relayUrl);
+    expect(controller.registryLoaded, isTrue);
 
     expect(await container.read(availableRemoteAgentsProvider.future), isEmpty);
     expect(container.read(presentedPresenceProvider)[fakeAgent], 'offline');
@@ -726,6 +1005,121 @@ void main() {
     expect(container.read(presentedPresenceProvider)[fakeAgent], 'online');
   }, skip: !HostedEnvironment.enabled);
 
+  test(
+    'Solo agent choices reload after this device creates an agent',
+    () async {
+      final registry = FakeRegistry(bound: fakeOwner.public);
+      final controller = await _controller(registry);
+      final relay = _InventoryRelay();
+      final container = ProviderContainer(
+        overrides: [
+          relaySessionProvider.overrideWith(() => relay),
+          meSyncProvider.overrideWithValue(
+            MeSync(
+              relay,
+              RelayConfig(baseUrl: 'https://relay.test', nsec: fakeOwner.nsec),
+            ),
+          ),
+          identityArchivesProvider.overrideWith((ref) async => {}),
+          remoteAgentControllerProvider.overrideWithValue(controller),
+        ],
+      );
+      addTearDown(container.dispose);
+      final choices = container.listen(meAssistantsProvider, (_, _) {});
+      addTearDown(choices.close);
+      expect(await container.read(meAssistantsProvider.future), isEmpty);
+
+      relay.listed = true;
+      expect(
+        await controller.create(
+          _community(),
+          'Scout',
+          modelId: 'test-model',
+          reasoningEffort: 'high',
+        ),
+        isTrue,
+      );
+      expect(
+        (await container.read(
+          meAssistantsProvider.future,
+        )).map((a) => a.pubkey),
+        [fakeAgent],
+      );
+    },
+    skip: !HostedEnvironment.enabled,
+  );
+
+  test(
+    'runtime absence and deletion survive sign-out and a fresh owner-scoped load',
+    () async {
+      final registry = FakeRegistry(bound: fakeOwner.public);
+      final controller = await _controller(registry);
+      ProviderContainer open(String owner) => ProviderContainer(
+        overrides: [
+          myPubkeyProvider.overrideWithValue(owner),
+          ownedAgentDirectoryProvider.overrideWith(
+            (ref) async => [
+              OwnedAgentDirectoryEntry(
+                pubkey: fakeAgent,
+                runtime: 'block.builderlab/builderlab',
+              ),
+            ],
+          ),
+          presenceCacheProvider.overrideWith(_AgentPresence.new),
+          remoteAgentControllerProvider.overrideWithValue(controller),
+          availableRemoteAgentsProvider.overrideWith((ref) async => {}),
+        ],
+      );
+      final container = open(fakeOwner.public);
+      addTearDown(container.dispose);
+      await container.read(ownedAgentDirectoryProvider.future);
+      await container.read(availableRemoteAgentsProvider.future);
+      await container.read(savedRemoteAvailabilityProvider.future);
+      expect(container.read(presentedPresenceProvider)[fakeAgent], 'online');
+      await controller.run(controller.refresh);
+      await container.pump();
+      expect(controller.registryLoaded, isTrue);
+      expect(container.read(presentedPresenceProvider)[fakeAgent], 'offline');
+      registry.signedIn = false;
+      expect(controller.registryLoaded, isFalse);
+      await container.read(savedRemoteAvailabilityProvider.future);
+      expect(container.read(presentedPresenceProvider)[fakeAgent], 'offline');
+      final restarted = open(fakeOwner.public);
+      addTearDown(restarted.dispose);
+      await restarted.read(ownedAgentDirectoryProvider.future);
+      await restarted.read(savedRemoteAvailabilityProvider.future);
+      expect(restarted.read(presentedPresenceProvider)[fakeAgent], 'offline');
+      final otherOwner = open(_keys('3').public);
+      addTearDown(otherOwner.dispose);
+      await otherOwner.read(ownedAgentDirectoryProvider.future);
+      await otherOwner.read(savedRemoteAvailabilityProvider.future);
+      expect(otherOwner.read(presentedPresenceProvider)[fakeAgent], 'online');
+
+      // A confirmed deletion must also survive an old ACTIVE registry row.
+      registry.signedIn = true;
+      registry.listed = [
+        {
+          'agent_pubkey': fakeAgent,
+          'agent_id': 'remote-id',
+          'status': 'BEEKEEPER_AGENT_STATUS_ACTIVE',
+        },
+      ];
+      await controller.run(controller.refresh);
+      expect(
+        await controller.deleteAgent(
+          pubkey: fakeAgent,
+          community: _community(),
+          isCurrent: () => true,
+          fetch: (_) async => [],
+        ),
+        isTrue,
+      );
+      registry.signedIn = false;
+      await container.read(savedRemoteAvailabilityProvider.future);
+      expect(container.read(presentedPresenceProvider)[fakeAgent], 'offline');
+    },
+  );
+
   test('owner proof verifies for only the provisioned agent key', () {
     final other = nostr.Keys('0' * 63 + '3');
     final auth = signOwnerAuthorization(fakeOwner, fakeAgent);
@@ -753,6 +1147,8 @@ void main() {
     () async {
       final container = ProviderContainer(
         overrides: [
+          ownedAgentDirectoryProvider.overrideWith((ref) async => []),
+          myPubkeyProvider.overrideWithValue(fakeOwner.public),
           presenceCacheProvider.overrideWith(_Presence.new),
           availableRemoteAgentsProvider.overrideWith((ref) async => {'remote'}),
         ],
@@ -804,6 +1200,41 @@ class _AgentRelay extends RelaySessionNotifier {
   }) async => switch (filter.kinds.single) {
     0 => [signedAgentProfile(fakeAgentKeys, fakeOwner)],
     30177 when live => [_registration(fakeAgent)],
+    _ => [],
+  };
+}
+
+/// Serves Solo's inventory reads: the owner's signed registration once
+/// [listed], and the agent's attested profile.
+class _InventoryRelay extends RelaySessionNotifier {
+  bool listed = false;
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => switch (filters.single.kinds.single) {
+    0 => [signedAgentProfile(fakeAgentKeys, fakeOwner)],
+    30177 when listed => [
+      NostrEvent.fromJson(
+        nostr.Event.from(
+          kind: 30177,
+          content: jsonEncode({
+            'name': 'Scout',
+            'parallelism': 1,
+            'respond_to': 'owner-only',
+          }),
+          secretKey: fakeOwner.secret,
+          createdAt: 1,
+          tags: [
+            ['d', fakeAgent],
+          ],
+        ).toMap(),
+      ),
+    ],
     _ => [],
   };
 }
