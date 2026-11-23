@@ -391,6 +391,9 @@ abstract final class BuzzIcons {
   /// Tabler `user`.
   static const user = IconData(0xeb4d, fontFamily: 'BuzzTabler');
 
+  /// Tabler `user-circle`.
+  static const userCircle = IconData(0xef68, fontFamily: 'BuzzTabler');
+
   /// Tabler `user-minus`.
   static const userMinus = IconData(0xeb4a, fontFamily: 'BuzzTabler');
 
