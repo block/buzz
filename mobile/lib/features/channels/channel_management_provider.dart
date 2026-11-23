@@ -10,6 +10,8 @@ import '../../shared/channels/saved_message_store.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/crypto/nip_oa.dart';
+import '../../shared/me/me_sync.dart';
+import '../../shared/me/me_groups.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/relay/relay.dart';
@@ -19,6 +21,7 @@ import '../../shared/verified_profiles/verified_profile_directory.dart';
 import '../profile/profile_provider.dart';
 import 'channel.dart';
 import 'channel_metadata_updates.dart';
+import 'channel_sections/channel_sections_provider.dart';
 import 'channels_provider.dart';
 import 'saved_channel_page.dart';
 

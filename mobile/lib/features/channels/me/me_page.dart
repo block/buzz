@@ -1,3 +1,4 @@
+import '../../../shared/widgets/native_conversation_menu.dart';
 import 'dart:async';
 import 'dart:convert';
 import '../channel_filter/channel_filter_activity.dart';
@@ -49,12 +50,9 @@ import 'me_assistant_picker_sheet.dart';
 import 'new_me_project.dart';
 import 'me_workspace_picker.dart';
 import 'me_recovery_dialog.dart';
-import '../../profile/user_profile_sheet.dart';
 import '../channel_actions_sheet.dart';
 import '../../../shared/share/share_suggestions.dart';
 import '../channel_detail_page.dart';
-import '../channel_identity_names_provider.dart';
-import '../channel_member_profile_actions.dart';
 import '../channel_management_provider.dart';
 import '../channels_provider.dart';
 import '../channel_sections/channel_sections_provider.dart';

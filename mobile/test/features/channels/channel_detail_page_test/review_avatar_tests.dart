@@ -41,7 +41,11 @@ void reviewAvatarTests() {
       expect(find.widgetWithText(FilledButton, 'Join'), findsNothing);
       expect(find.byTooltip('Join Huddle'), findsNothing);
       expect(find.byTooltip('Open Huddle'), findsNothing);
-      expect(find.byTooltip('Start Huddle'), findsOneWidget);
+      await tester.tap(
+        find.byKey(const ValueKey('channel-header-settings-trigger')),
+      );
+      await tester.pumpAndSettle();
+      await _scrollDetailsTo(tester, find.text('Start a huddle'));
     });
   }
   for (final room in [
@@ -52,7 +56,7 @@ void reviewAvatarTests() {
     '{$_huddleChannelId}',
   ]) {
     testWidgets(
-      'relay-valid huddle UUID has row and header invitation: $room',
+      'relay-valid huddle UUID has row and settings invitation: $room',
       (tester) async {
         final event = _huddleMsg(
           id: 'valid-room',
@@ -76,7 +80,11 @@ void reviewAvatarTests() {
           find.byKey(const ValueKey('huddle-Join-$_huddleChannelId')),
           findsOneWidget,
         );
-        expect(find.byTooltip('Open Huddle'), findsOneWidget);
+        await tester.tap(
+          find.byKey(const ValueKey('channel-header-settings-trigger')),
+        );
+        await tester.pumpAndSettle();
+        await _scrollDetailsTo(tester, find.text('Open Huddle'));
       },
     );
   }
