@@ -15,71 +15,76 @@ class _MeRetry extends StatelessWidget {
   );
 }
 
+/// Opens the list-row settings modal and clears the matching pane when requested.
+Future<bool?> openConversationListDetails(
+  BuildContext context,
+  Channel channel,
+  String? viewer, {
+  required bool personal,
+  bool isUnread = false,
+  String? sectionId,
+}) async {
+  final pane = ConversationPaneScope.maybeOf(context);
+  final result = await showChannelDetailsSheet(
+    context: context,
+    channel: channel,
+    currentPubkey: viewer,
+    personalChat: personal,
+    sectionId: sectionId,
+    isUnread: isUnread,
+    onMemberTap: (context, pubkey) => showUserProfileSheet(
+      context,
+      pubkey,
+      names: channelIdentityNamesProvider(channel.id),
+      contextualActions: (_) =>
+          ChannelMemberProfileActions(channel: channel, pubkey: pubkey),
+    ),
+    soloSettings: personal
+        ? (renameRow, render) => HookConsumer(
+            builder: (context, ref, _) {
+              final workspace = useMeWorkspace(
+                context,
+                ref,
+                enabled: true,
+                channelId: channel.id,
+              );
+              final assistant = useMeChatAssistant(
+                context,
+                ref,
+                enabled: true,
+                channelId: channel.id,
+                initial: null,
+                // A list menu resolves the saved choice or unique roster agent.
+                // Reading a dormant timeline would restart its subscription.
+                messages: const [],
+              );
+              return render(
+                MeChatSettings(
+                  renameRow: renameRow,
+                  agentName: assistant.name,
+                  agentAvatarUrl: assistant.nativeAction.imageUrl,
+                  agentInitial: assistant.nativeAction.avatarInitial ?? '?',
+                  hasAgent: assistant.selected != null,
+                  workspaceName: workspace.name,
+                  onAgentTap: assistant.openPicker,
+                  onWorkspaceTap: workspace.openPicker,
+                ),
+              );
+            },
+          )
+        : null,
+  );
+  if (result == true && context.mounted && pane?.selectedId == channel.id) {
+    pane!.clear();
+  }
+  return result;
+}
+
 /// A Solo chat row. It opens as a personal chat in whichever sidebar
 /// section the chat is filed.
 class SoloChatTile extends ConsumerWidget {
   const SoloChatTile({super.key, required this.channel});
   final Channel channel;
-
-  static Future<bool?> openDetails(
-    BuildContext context,
-    Channel channel,
-    String? viewer, {
-    required bool personal,
-  }) async {
-    final pane = ConversationPaneScope.maybeOf(context);
-    final result = await showChannelDetailsSheet(
-      context: context,
-      channel: channel,
-      currentPubkey: viewer,
-      personalChat: personal,
-      onMemberTap: (context, pubkey) => showUserProfileSheet(
-        context,
-        pubkey,
-        names: channelIdentityNamesProvider(channel.id),
-        contextualActions: (_) =>
-            ChannelMemberProfileActions(channel: channel, pubkey: pubkey),
-      ),
-      soloSettings: personal
-          ? (renameRow, render) => HookConsumer(
-              builder: (context, ref, _) {
-                final workspace = useMeWorkspace(
-                  context,
-                  ref,
-                  enabled: true,
-                  channelId: channel.id,
-                );
-                final assistant = useMeChatAssistant(
-                  context,
-                  ref,
-                  enabled: true,
-                  channelId: channel.id,
-                  initial: null,
-                  // A list menu resolves the saved choice or unique roster agent.
-                  // Reading a dormant timeline would restart its subscription.
-                  messages: const [],
-                );
-                return render(
-                  MeChatSettings(
-                    renameRow: renameRow,
-                    agentName: assistant.name,
-                    agentAvatarUrl: assistant.nativeAction.imageUrl,
-                    agentInitial: assistant.nativeAction.avatarInitial ?? '?',
-                    hasAgent: assistant.selected != null,
-                    workspaceName: workspace.name,
-                    onAgentTap: assistant.openPicker,
-                    onWorkspaceTap: workspace.openPicker,
-                  ),
-                );
-              },
-            )
-          : null,
-    );
-    if (result == true && context.mounted && pane?.selectedId == channel.id) {
-      pane!.clear();
-    }
-    return result;
-  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -103,7 +108,7 @@ class SoloChatTile extends ConsumerWidget {
           channelId: channel.id,
           name: channel.name,
           isUnread: isUnread,
-          onLongPress: () => openDetails(
+          onLongPress: () => openConversationListDetails(
             context,
             channel,
             viewer,

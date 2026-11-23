@@ -1111,11 +1111,11 @@ void main() {
       expect(headerNativeView, findsOneWidget);
       await tester.longPress(find.text('General'));
       await tester.pumpAndSettle();
-      expect(find.text('Copy channel name'), findsOneWidget);
+      expect(find.text('Rename'), findsOneWidget);
       expect(headerNativeView, findsNothing);
       await tester.tapAt(const Offset(20, 20));
       await tester.pumpAndSettle();
-      expect(find.text('Copy channel name'), findsNothing);
+      expect(find.text('Rename'), findsNothing);
       expect(headerNativeView, findsOneWidget);
       await tester.pumpWidget(const SizedBox.shrink());
       debugDefaultTargetPlatformOverride = null;

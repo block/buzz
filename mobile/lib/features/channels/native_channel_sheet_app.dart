@@ -165,12 +165,15 @@ class ChannelSheetContent extends HookWidget {
               else
                 AppListCard(
                   iconColumnWidth: solo ? Grid.md : null,
-                  dividerIndent: !solo && details != null && index == 1
+                  dividerIndent:
+                      !solo &&
+                          details != null &&
+                          index == (data['memberSection'] ?? 1)
                       ? Grid.xs + 40 + Grid.xs
                       : null,
                   label:
                       details != null &&
-                          index == 1 &&
+                          index == (data['memberSection'] ?? 1) &&
                           (data['memberLabel'] as String? ?? '').isNotEmpty
                       ? data['memberLabel'] as String
                       : null,
@@ -229,7 +232,7 @@ class ChannelSheetContent extends HookWidget {
                         )
                       else if (row['memberAction'] == true ||
                           details != null &&
-                              index == 1 &&
+                              index == (data['memberSection'] ?? 1) &&
                               (row['label'] == 'Add members' ||
                                   row['label'] == 'See all'))
                         AppListRowRaw(

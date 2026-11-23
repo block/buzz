@@ -98,7 +98,7 @@ import 'channel_sections/section_reorder_sheet.dart';
 import '../../shared/custom_emoji/custom_emoji.dart' show normalizeShortcode;
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
 import '../../shared/custom_emoji/custom_emoji_render.dart';
-import 'me/me_page.dart' show SoloChatTile;
+import 'me/me_page.dart' show SoloChatTile, openConversationListDetails;
 import 'me/me_unread_provider.dart';
 import 'channel_sections/channel_sections_storage.dart';
 import 'channel_sort/channel_sort_provider.dart';

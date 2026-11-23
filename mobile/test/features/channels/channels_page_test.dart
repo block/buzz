@@ -1612,7 +1612,12 @@ void main() {
     for (final edge in edges) {
       await tester.longPressAt(edge);
       await tester.pumpAndSettle();
-      expect(find.byType(ChannelActionsSheet), findsOneWidget);
+      expect(find.byType(ChannelDetailsPage), findsOneWidget);
+      expect(
+        tester.getCenter(find.text('Mark as unread')).dx,
+        lessThan(tester.getCenter(find.text('Mute')).dx),
+      );
+      expect(find.text('Rename'), findsOneWidget);
       navigator.pop();
       await tester.pumpAndSettle();
 
@@ -4392,7 +4397,7 @@ void main() {
       if (viaMenu) {
         await tester.longPress(find.text('general'));
         await tester.pumpAndSettle();
-        await tester.tap(find.text('Mark Read'));
+        await tester.tap(find.text('Mark as read'));
         await tester.pumpAndSettle();
       } else {
         readState.markContextRead('thread-activity:$threadIdRoot', 30);
@@ -4556,7 +4561,7 @@ void main() {
       if (hiddenByUnreads) {
         await tester.longPress(find.text('general'));
         await tester.pumpAndSettle();
-        expect(find.text('Mark Read'), findsOneWidget);
+        expect(find.text('Mark as read'), findsOneWidget);
       }
 
       if (dot) {

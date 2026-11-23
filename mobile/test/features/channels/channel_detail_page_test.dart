@@ -126,7 +126,7 @@ import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:buzz/shared/widgets/frosted_scaffold.dart';
 import 'package:buzz/shared/widgets/flapping_bee.dart';
 import 'package:buzz/shared/widgets/keyboard_dismiss_on_drag.dart';
-import 'package:buzz/shared/widgets/tabler_star_icon.dart';
+import 'package:buzz/shared/widgets/app_list.dart';
 import 'package:buzz/shared/widgets/skeleton.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -709,6 +709,18 @@ const _directoryAlice =
     'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const _directoryBob =
     'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+Future<void> _scrollDetailsTo(WidgetTester tester, Finder target) async {
+  final list = find.byKey(const ValueKey('channel-details-page-list'));
+  await tester.scrollUntilVisible(
+    target,
+    220,
+    scrollable: find
+        .descendant(of: list, matching: find.byType(Scrollable))
+        .first,
+  );
+  await tester.pumpAndSettle();
+}
+
 void main() {
   _savedChannelPreviewTests();
   testWidgets('chat Back follows visibility of the conversation list', (
@@ -5124,6 +5136,10 @@ void main() {
           find.byKey(const ValueKey('channel-header-settings-trigger')),
         );
         await tester.pumpAndSettle();
+        await _scrollDetailsTo(
+          tester,
+          find.byKey(const ValueKey('channel-details-member-alice')),
+        );
         expect(find.text('3 members'), findsOneWidget);
         expect(find.text('You · Owner', findRichText: true), findsOneWidget);
         expect(find.text('Alice · Member', findRichText: true), findsOneWidget);
@@ -5202,6 +5218,10 @@ void main() {
         ChannelMember(pubkey: 'self', role: 'owner', joinedAt: DateTime(2025)),
       ]);
       await tester.pumpAndSettle();
+      await _scrollDetailsTo(
+        tester,
+        find.byKey(const ValueKey('channel-details-add-members-row')),
+      );
       expect(
         find.byKey(const ValueKey('channel-details-add-members-row')),
         findsOneWidget,
@@ -5224,6 +5244,10 @@ void main() {
         find.byKey(const ValueKey('channel-header-settings-trigger')),
       );
       await tester.pumpAndSettle();
+      await _scrollDetailsTo(
+        tester,
+        find.byKey(const ValueKey('channel-details-members-card')),
+      );
 
       expect(
         find.byKey(const ValueKey('channel-details-add-members-row')),
@@ -5260,6 +5284,10 @@ void main() {
         find.byKey(const ValueKey('channel-header-settings-trigger')),
       );
       await tester.pumpAndSettle();
+      await _scrollDetailsTo(
+        tester,
+        find.byKey(const ValueKey('channel-details-member-alice')),
+      );
       final addRow = find.byKey(
         const ValueKey('channel-details-add-members-row'),
       );
@@ -5302,32 +5330,25 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final starSemantics = tester.getSemantics(
-        find.byKey(const ValueKey('channel-details-star-action')),
+      final readSemantics = tester.getSemantics(
+        find.byKey(const ValueKey('channel-details-read-action')),
       );
-      expect(starSemantics.label, 'Star');
-      expect(starSemantics.flagsCollection.isButton, isTrue);
+      expect(readSemantics.label, 'Mark as unread');
+      expect(readSemantics.flagsCollection.isButton, isTrue);
       expect(
-        starSemantics.flagsCollection.isEnabled.toString(),
+        readSemantics.flagsCollection.isEnabled.toString(),
         'Tristate.isTrue',
       );
       expect(
-        starSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+        readSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
         isTrue,
       );
 
-      final editSemantics = tester.getSemantics(
-        find.byKey(const ValueKey('channel-details-edit-action')),
-      );
-      expect(editSemantics.label, 'Edit');
-      expect(editSemantics.flagsCollection.isButton, isTrue);
       expect(
-        editSemantics.flagsCollection.isEnabled.toString(),
-        'Tristate.isFalse',
-      );
-      expect(
-        editSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
-        isFalse,
+        tester
+            .widget<AppListRow>(find.widgetWithText(AppListRow, 'Rename'))
+            .onTap,
+        isNull,
       );
     });
 
@@ -5349,8 +5370,7 @@ void main() {
           const ValueKey('channel-details-mute-action'),
         );
         expect(find.text('Star'), findsOneWidget);
-        var star = tester.widget<TablerStarIcon>(find.byType(TablerStarIcon));
-        expect(star.filled, isFalse);
+        expect(find.byIcon(BuzzIcons.star), findsOneWidget);
         expect(find.text('Mute'), findsOneWidget);
         expect(find.byIcon(BuzzIcons.bellOff), findsOneWidget);
 
@@ -5358,10 +5378,7 @@ void main() {
         await tester.pump();
 
         expect(find.text('Unstar'), findsOneWidget);
-        star = tester.widget<TablerStarIcon>(find.byType(TablerStarIcon));
-        expect(star.filled, isTrue);
-        expect(star.color, AppTheme.light().colorScheme.primary);
-
+        expect(find.byIcon(BuzzIcons.starOff), findsOneWidget);
         await tester.tap(muteAction);
         await tester.pump();
 
@@ -5375,8 +5392,6 @@ void main() {
 
         expect(find.text('Star'), findsOneWidget);
         expect(find.text('Mute'), findsOneWidget);
-        star = tester.widget<TablerStarIcon>(find.byType(TablerStarIcon));
-        expect(star.filled, isFalse);
         expect(find.byIcon(BuzzIcons.bellOff), findsOneWidget);
       },
     );
@@ -5402,26 +5417,16 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      final starAction = find.byKey(
-        const ValueKey('channel-details-star-action'),
+      final readAction = find.byKey(
+        const ValueKey('channel-details-read-action'),
       );
       final muteAction = find.byKey(
         const ValueKey('channel-details-mute-action'),
       );
-      final editAction = find.byKey(
-        const ValueKey('channel-details-edit-action'),
-      );
-      expect(find.text('Star'), findsOneWidget);
-      expect(find.text('Mute'), findsOneWidget);
-      expect(find.text('Edit'), findsOneWidget);
-      expect(tester.getSize(starAction).height, greaterThan(84));
+      expect(tester.getSize(readAction).height, greaterThan(84));
       expect(
+        tester.getSize(readAction).height,
         tester.getSize(muteAction).height,
-        tester.getSize(starAction).height,
-      );
-      expect(
-        tester.getSize(editAction).height,
-        tester.getSize(starAction).height,
       );
       expect(tester.takeException(), isNull);
     });
@@ -5454,6 +5459,10 @@ void main() {
         find.byKey(const ValueKey('channel-header-settings-trigger')),
       );
       await tester.pumpAndSettle();
+      await _scrollDetailsTo(
+        tester,
+        find.byKey(const ValueKey('channel-details-members-card')),
+      );
 
       final rows = [
         // People, agents, then archived Alice, as in the members sheet.
@@ -5533,6 +5542,10 @@ void main() {
         find.byKey(const ValueKey('channel-header-settings-trigger')),
       );
       await tester.pumpAndSettle();
+      await _scrollDetailsTo(
+        tester,
+        find.byKey(const ValueKey('channel-details-members-card')),
+      );
 
       final previews = find.byWidgetPredicate((widget) {
         final key = widget.key;
@@ -5644,6 +5657,10 @@ void main() {
         find.byKey(const ValueKey('channel-header-settings-trigger')),
       );
       await tester.pumpAndSettle();
+      await _scrollDetailsTo(
+        tester,
+        find.byKey(const ValueKey('channel-details-add-members-row')),
+      );
       await tester.tap(
         find.byKey(const ValueKey('channel-details-add-members-row')),
       );
@@ -5683,6 +5700,10 @@ void main() {
         find.byKey(const ValueKey('channel-header-settings-trigger')),
       );
       await tester.pumpAndSettle();
+      await _scrollDetailsTo(
+        tester,
+        find.byKey(const ValueKey('channel-details-add-members-row')),
+      );
       await tester.tap(
         find.byKey(const ValueKey('channel-details-add-members-row')),
       );
@@ -5764,6 +5785,10 @@ void main() {
           find.byKey(const ValueKey('channel-header-settings-trigger')),
         );
         await tester.pumpAndSettle();
+        await _scrollDetailsTo(
+          tester,
+          find.byKey(const ValueKey('channel-details-add-members-row')),
+        );
         await tester.tap(
           find.byKey(const ValueKey('channel-details-add-members-row')),
         );
@@ -5998,11 +6023,7 @@ void main() {
         find.byKey(const ValueKey('channel-header-settings-trigger')),
       );
       await tester.pumpAndSettle();
-      await tester.drag(
-        find.byKey(const ValueKey('channel-details-page-list')),
-        const Offset(0, -300),
-      );
-      await tester.pumpAndSettle();
+      await _scrollDetailsTo(tester, find.text('Join channel'));
       await tester.tap(find.text('Join channel'));
       await tester.pumpAndSettle();
 
@@ -6169,11 +6190,7 @@ void main() {
         find.byKey(const ValueKey('channel-header-settings-trigger')),
       );
       await tester.pumpAndSettle();
-      await tester.drag(
-        find.byKey(const ValueKey('channel-details-page-list')),
-        const Offset(0, -300),
-      );
-      await tester.pumpAndSettle();
+      await _scrollDetailsTo(tester, find.text('Leave channel'));
       await tester.tap(find.text('Leave channel').last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('Leave'));
@@ -6232,11 +6249,7 @@ void main() {
           );
         }
         await tester.pumpAndSettle();
-        await tester.drag(
-          find.byKey(const ValueKey('channel-details-page-list')),
-          const Offset(0, -300),
-        );
-        await tester.pumpAndSettle();
+        await _scrollDetailsTo(tester, find.text('Leave channel'));
         await tester.tap(find.text('Leave channel').last);
         await tester.pumpAndSettle();
         await tester.tap(find.widgetWithText(FilledButton, 'Leave'));
@@ -6338,32 +6351,38 @@ void main() {
         find.byKey(const ValueKey('channel-header-settings-trigger')),
       );
       await tester.pumpAndSettle();
-      await tester.tap(
-        find.byKey(const ValueKey('channel-details-edit-action')),
-      );
+      await tester.tap(find.text('Rename'));
       await tester.pumpAndSettle();
-
-      expect(find.text('Mute'), findsOneWidget);
-      expect(find.text('Leave channel'), findsNothing);
-      expect(find.text('Topic'), findsNothing);
-      expect(find.text('Purpose'), findsNothing);
-      expect(find.text('Add Canvas'), findsOneWidget);
-
-      expect(find.text('Edit channel'), findsOneWidget);
       await tester.enterText(
-        find.byKey(const ValueKey('manage-channel-name')),
+        find.byKey(const ValueKey('text-editor-input')),
         '  #renamed  ',
       );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('text-editor-save')));
+      await tester.pumpAndSettle();
+      expect(updatedName, 'renamed');
+      expect(updatedDescription, isNull);
+      final descriptionRow = find.text('Edit description');
+      await tester.tap(descriptionRow);
+      await tester.pumpAndSettle();
       await tester.enterText(
-        find.byKey(const ValueKey('manage-channel-description')),
+        find.byKey(const ValueKey('text-editor-input')),
+        '',
+      );
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('text-editor-save')));
+      await tester.pumpAndSettle();
+      expect(updatedDescription, '');
+      await tester.tap(find.text('Add description'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const ValueKey('text-editor-input')),
         'A new description',
       );
       await tester.pump();
-      await tester.tap(
-        find.byKey(const ValueKey('manage-channel-save-details')),
-      );
+      await tester.tap(find.byKey(const ValueKey('text-editor-save')));
       await tester.pumpAndSettle();
-      expect(updatedName, 'renamed');
+      expect(updatedName, isNull);
       expect(updatedDescription, 'A new description');
       expect(find.text('renamed'), findsOneWidget);
       expect(find.text('A new description'), findsOneWidget);
@@ -17193,11 +17212,11 @@ void main() {
           findsOneWidget,
         );
         expect(find.text('General discussion'), findsOneWidget);
-        expect(find.text('5 members'), findsOneWidget);
+
         expect(find.text('Preferences'), findsNothing);
         expect(find.text('Star'), findsOneWidget);
         expect(find.text('Mute'), findsOneWidget);
-        expect(find.text('Edit'), findsOneWidget);
+        expect(find.text('Edit description'), findsOneWidget);
         expect(find.text('Actions'), findsNothing);
         expect(find.byTooltip('Back'), findsOneWidget);
 
@@ -17212,23 +17231,21 @@ void main() {
             .getRect(find.byKey(const ValueKey('channel-details-description')))
             .bottom;
         final firstActionTop = tester
-            .getRect(find.byKey(const ValueKey('channel-details-star-action')))
+            .getRect(find.byKey(const ValueKey('channel-details-read-action')))
             .top;
         expect(firstActionTop - descriptionBottom, closeTo(Grid.sm, 0.5));
         expect(
           tester
               .getSize(
-                find.byKey(const ValueKey('channel-details-star-action')),
+                find.byKey(const ValueKey('channel-details-read-action')),
               )
               .height,
           68 + (Grid.xxs * 2),
         );
 
-        final firstActionBottom = tester
-            .getRect(find.byKey(const ValueKey('channel-details-star-action')))
-            .bottom;
+        await _scrollDetailsTo(tester, find.text('5 members'));
         final membersLabelTop = tester.getRect(find.text('5 members')).top;
-        expect(membersLabelTop - firstActionBottom, closeTo(Grid.sm, 0.5));
+        expect(membersLabelTop, greaterThanOrEqualTo(0));
         expect(
           tester
               .widget<AppListCard>(
