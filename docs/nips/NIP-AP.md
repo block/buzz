@@ -624,7 +624,7 @@ The runtime asks a model for the probability that each question is true for the 
 
 - A set holds at most 250 Interests, and at most 250 watches (event, timer and source together). A writer refuses a change over a limit.
 - A reader that finds more valid objects than a limit allows sorts that group by slug, applies the first 250 and reports the rest as skipped.
-- A NIP-AR sync fails when the set is larger than the relay's `max_events`, and it counts every head of the type, valid or not, deletions included. So a writer also refuses to create a record while the channel holds 500 heads of type `buzz.agent-attention`, and a relay qualifies only when its `max_events` is at least 500 (see "Attention relay support").
+- A NIP-AR sync fails when the set is larger than the relay's `max_events`, and it counts every live head of the type, valid or not. A head whose revision is a deletion is not in the set and is not counted. So a writer also refuses to create a record while the channel holds 500 live heads of type `buzz.agent-attention`, and a relay qualifies only when its `max_events` is at least 500 (see "Attention relay support").
 - A writer MAY add lower limits on its own writes. For example, the reference client refuses a timer interval under 60 seconds from the agent's own tools.
 
 ### Writing attention
