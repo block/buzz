@@ -119,6 +119,35 @@ void main() {
         ['two'],
       );
     });
+
+    test('a run looks up no longer than the handler has left', () async {
+      fixture.addCommunity();
+      final budgets = <Duration>[];
+      final handler = PushWakeChannelHandler(
+        PushWakeRunner((budget) {
+          budgets.add(budget);
+          return fixture.wake(timeouts: PushWakeTimeouts(total: budget));
+        }),
+      );
+      // A slow engine start leaves less than the runner's own budget; a sent
+      // time past it, a missing one, or one already spent fall back to the
+      // budget, or to nothing.
+      for (final (arguments, expected) in [
+        ({'remainingMillis': 1200}, const Duration(milliseconds: 1200)),
+        ({'remainingMillis': 60000}, const Duration(seconds: 5)),
+        (null, const Duration(seconds: 5)),
+        ({'remainingMillis': -5}, Duration.zero),
+      ]) {
+        budgets.clear();
+        await handler.wake(remaining: wakeRemaining(arguments));
+        // The pass gets what is left of the run's budget, a hair under it.
+        expect(
+          (expected - budgets.single).inMilliseconds,
+          inInclusiveRange(0, 100),
+          reason: '$arguments',
+        );
+      }
+    });
   });
 
   test('a wake sends the relay the headers the community needs', () async {

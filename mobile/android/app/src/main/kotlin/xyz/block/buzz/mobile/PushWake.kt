@@ -38,6 +38,14 @@ internal object PushWake {
     private const val TAG = "BuzzPushWake"
     const val GENERIC_AFTER_MS = 2_000L
     const val WATCHDOG_MS = 8_000L
+
+    /**
+     * Watchdog time held back from Dart's lookup: its claim grace, the answer's
+     * trip back and posting. A slow engine start then shortens the lookup
+     * instead of letting the watchdog end it after messages were recorded as
+     * shown but before they were posted.
+     */
+    const val RESULT_RESERVE_MS = 1_000L
     private const val ENTRYPOINT = "androidPushWakeMain"
     private const val CHANNEL = "buzz/push_wake"
 
@@ -147,9 +155,10 @@ internal object PushWake {
 
         private fun requestWake() {
             outstanding++
+            val remaining = WATCHDOG_MS - RESULT_RESERVE_MS - (SystemClock.elapsedRealtime() - startedAt)
             channel!!.invokeMethod(
                 "wake",
-                null,
+                mapOf("remainingMillis" to remaining.coerceAtLeast(0)),
                 object : MethodChannel.Result {
                     override fun success(result: Any?) = answer { handleResult(result) }
                     override fun error(code: String, message: String?, details: Any?) =

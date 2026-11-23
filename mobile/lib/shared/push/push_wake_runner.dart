@@ -32,16 +32,24 @@ class PushWakeRunner {
   Future<PushWakeResult>? _running;
   bool _rerun = false;
 
-  Future<PushWakeResult> wake() {
+  /// Runs a wake, or joins the one in progress. [remaining] is the time the
+  /// caller has left, when it started counting before this call (the native
+  /// handler's watchdog runs from the push, not from when this engine became
+  /// ready). A new run takes the shorter of it and [budget]; a joined call
+  /// changes nothing, since the run in progress already ends inside it.
+  Future<PushWakeResult> wake({Duration? remaining}) {
     final running = _running;
     if (running != null) {
       _rerun = true;
       return running;
     }
-    return _running = _loop().whenComplete(() => _running = null);
+    final runBudget = remaining != null && remaining < budget
+        ? remaining
+        : budget;
+    return _running = _loop(runBudget).whenComplete(() => _running = null);
   }
 
-  Future<PushWakeResult> _loop() async {
+  Future<PushWakeResult> _loop(Duration budget) async {
     final elapsed = Stopwatch()..start();
     final notifications = <PushWakeNotification>[];
     final failed = <String>{};

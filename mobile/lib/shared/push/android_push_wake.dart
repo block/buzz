@@ -21,6 +21,13 @@ const androidPushWakeChannel = MethodChannel('buzz/push_wake');
 const wakeReadyMethod = 'ready';
 const wakeMethod = 'wake';
 
+/// The time the native handler has left for a wake's lookup, which it sends
+/// as `remainingMillis`, or null when it sends none.
+Duration? wakeRemaining(Object? arguments) {
+  final millis = arguments is Map ? arguments['remainingMillis'] : null;
+  return millis is int ? Duration(milliseconds: millis < 0 ? 0 : millis) : null;
+}
+
 /// What a wake sends the native handler.
 ///
 /// The handler may ask for another wake while one runs. [PushWakeRunner] folds
@@ -53,9 +60,10 @@ class PushWakeChannelHandler {
   final PushWakeRunner _runner;
   Future<PushWakeResult>? _latest;
 
-  /// Runs a wake, or joins the one in progress.
-  Future<Map<String, Object?>> wake() {
-    final run = _runner.wake();
+  /// Runs a wake, or joins the one in progress, within [remaining] when the
+  /// handler sends it.
+  Future<Map<String, Object?>> wake({Duration? remaining}) {
+    final run = _runner.wake(remaining: remaining);
     // The runner hands every caller of one run the same future.
     if (identical(run, _latest)) return run.then((_) => joinedWake);
     _latest = run;
@@ -84,7 +92,7 @@ Future<void> runAndroidPushWake() async {
   );
   androidPushWakeChannel.setMethodCallHandler(
     (call) => switch (call.method) {
-      wakeMethod => handler.wake(),
+      wakeMethod => handler.wake(remaining: wakeRemaining(call.arguments)),
       _ => throw MissingPluginException('Unknown ${call.method}'),
     },
   );
