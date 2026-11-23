@@ -1,7 +1,6 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -9,11 +8,14 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:duo_kit/duo_kit.dart';
 
 export 'conversation_pane_controller.dart';
+export 'conversation_pane_breakpoints.dart';
 export 'media_query_override.dart';
 
+import '../diagnostics/diagnostic_navigation_observer.dart';
 import 'duo_toolbar.dart';
 import 'app_route_observer.dart';
 import 'conversation_layout.dart';
+import 'conversation_pane_breakpoints.dart';
 import 'conversation_pane_controller.dart';
 import 'conversation_pane_modals.dart';
 import 'media_query_override.dart';
@@ -22,49 +24,9 @@ import 'conversation_thread_divider.dart';
 import 'conversation_thread_pane.dart';
 import 'conversation_thread_scope.dart';
 import 'covered_route_keyboard_insets.dart';
-import 'ios_navigation_metrics.dart';
 import 'duo_workspace_scaffold.dart';
 
 import '../theme/theme.dart';
-
-/// Duo uses the phone navigation model in portrait, even on its large display.
-/// Callers inside a pane supply the full window size.
-bool usesConversationPanes(
-  BuildContext context, {
-  FoldStrip? strip,
-  Size? windowSize,
-}) {
-  final size = windowSize ?? MediaQuery.sizeOf(context);
-  final rail = strip ?? FoldGeometry.of(context).strip;
-  // The portrait Duo status cluster becomes a tall top inset, not a side
-  // strip. Keep that phone layout compact without excluding ordinary iPads.
-  final phoneStatusCluster = MediaQuery.viewPaddingOf(context).top > 50;
-  if (defaultTargetPlatform == TargetPlatform.iOS &&
-      size.height >= size.width &&
-      (rail != null || phoneStatusCluster || size.shortestSide < 600)) {
-    return false;
-  }
-  final bookDivision = bookDivisionOf(context);
-  // A landscape phone is wide enough for the breakpoint, but not for two
-  // usable panes. Fold geometry keeps Duo eligible in its supported poses.
-  if (size.shortestSide < 600 && rail == null && bookDivision == null) {
-    return false;
-  }
-  return bookDivision != null || size.width - (rail?.width ?? 0) >= 640;
-}
-
-/// The active vertical fold, in window coordinates, when held like a book.
-Rect? bookDivisionOf(BuildContext context) {
-  final geometry = FoldGeometry.of(context);
-  final division = geometry.division;
-  if (division != null &&
-      division.axis == Axis.vertical &&
-      division.isHalfOpened) {
-    return division.bounds;
-  }
-  final native = IosNavigationMetrics.of(context);
-  return native.windowSize == geometry.size ? native.bookDivision : null;
-}
 
 final _compactPaneNavigators = Expando<GlobalKey<NavigatorState>>();
 
@@ -187,6 +149,10 @@ class AdaptiveConversationPane extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final routeObserver = useMemoized(appRouteObserver.createNestedObserver);
+    final screenObserver = useMemoized(
+      ref.read(diagnosticScreenTrailProvider).observer,
+    );
+    useEffect(() => screenObserver.dispose, [screenObserver]);
     final navigator = useMemoized(() => GlobalKey<NavigatorState>());
     final ownerRoute = ModalRoute.of(context);
     useEffect(() {
@@ -527,7 +493,12 @@ class AdaptiveConversationPane extends HookConsumerWidget {
                 Widget detail = Navigator(
                   requestFocus: selected != null,
                   key: navigator,
-                  observers: [routeObserver, detailRoutes, detailModals],
+                  observers: [
+                    routeObserver,
+                    screenObserver,
+                    detailRoutes,
+                    detailModals,
+                  ],
                   pages: [
                     if (!(wide && persistentSelection && selected != null))
                       MaterialPage<void>(

@@ -175,6 +175,10 @@ final _relayErrorPrefixPattern = RegExp(
 /// (`invalid: `, `blocked: `, `error: `, ...) so a relay refusal such as
 /// `invalid: an open channel named "Launch" already exists` reads as
 /// `An open channel named "Launch" already exists`.
+///
+/// Use this for a relay publish or request whose refusal is the message.
+/// To keep any error's text whole, minus only a plain [Exception]'s
+/// `Exception: `, use `relayErrorText` instead.
 String relayErrorMessage(Object error) {
   final text = error.toString().trim().replaceFirst(
     _relayErrorPrefixPattern,

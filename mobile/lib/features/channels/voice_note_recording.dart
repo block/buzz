@@ -10,6 +10,7 @@ import 'package:just_audio/just_audio.dart' as audio;
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 
+import '../../shared/http/app_http_client.dart';
 import '../../shared/relay/media_image.dart';
 import '../../shared/widgets/app_route_observer.dart';
 
@@ -619,6 +620,7 @@ class DeviceVoiceNotePlayerController extends VoiceNotePlayerController {
           .timeout(
             _downloadTimeout,
             onTimeout: () {
+              noteHttpDeadline(request);
               if (!requestAbort.isCompleted) requestAbort.complete();
               throw TimeoutException('Voice note download timed out');
             },
