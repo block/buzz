@@ -22,8 +22,11 @@ import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
 import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
 import 'package:buzz/shared/push/android_push_authority.dart';
+import 'package:buzz/shared/push/dev_push_lease.dart' show BuzzPushLeaseState;
 import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
+import 'package:buzz/shared/relay/signed_event_relay.dart'
+    show SignedEventUnacknowledged;
 import 'package:flutter/foundation.dart'
     show TargetPlatform, debugDefaultTargetPlatformOverride;
 import 'package:nostr/nostr.dart' as nostr;
@@ -438,11 +441,19 @@ void main() {
     test(
       'a refused opt-out with no confirmed lease stays off and guarded',
       () async {
+        Object failure = StateError('injected refusal');
         deactivator = (community, {generation, deadline}) async {
           deactivationGenerations.add(generation);
-          throw StateError('injected refusal');
+          throw failure;
         };
-        container = createContainer();
+        final leaseRead = Completer<BuzzPushLeaseState?>();
+        container = createContainer(
+          overrides: [
+            communityPushLeaseReaderProvider.overrideWithValue(
+              (_) => leaseRead.future,
+            ),
+          ],
+        );
         await container.read(communityListProvider.future);
         final subscription = BuzzPushSubscription(
           filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
@@ -473,6 +484,24 @@ void main() {
         expect(stored.pushNotificationsEnabled, isFalse);
         expect(stored.pushSubscriptionState.pendingTombstoneGeneration, 9);
         expect(deactivationGenerations, [9]);
+        expect(
+          container.read(pushOptOutStatusProvider)[community.id],
+          PushOptOutStatus.failed,
+        );
+
+        // A lease read starts, then a Retry publishes generation 10 and its
+        // answer is lost. The read predates that tombstone, so its answer
+        // (still active) can't settle it: push stays off and guarded.
+        final notifier = container.read(communityListProvider.notifier);
+        final reconcile = notifier.reconcilePushOptOut(community.id);
+        failure = SignedEventUnacknowledged(TimeoutException('no OK'));
+        await notifier.retryPushOptOut(community.id);
+        leaseRead.complete((active: true, generation: 8));
+        await reconcile;
+        final retried = (await communityStorage.loadAll()).single;
+        expect(retried.pushNotificationsEnabled, isFalse);
+        expect(retried.pushSubscriptionState.pendingTombstoneGeneration, 10);
+        expect(deactivationGenerations, [9, 10]);
         expect(
           container.read(pushOptOutStatusProvider)[community.id],
           PushOptOutStatus.failed,

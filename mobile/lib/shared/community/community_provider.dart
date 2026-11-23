@@ -132,7 +132,7 @@ final communityPushLeaseDeactivatorProvider =
 
 /// Reads the push lease the active community's relay holds for this
 /// installation, or null when it holds none. Throws when the relay doesn't
-/// answer.
+/// answer, or when the active community changes while the read is out.
 typedef CommunityPushLeaseReader =
     Future<BuzzPushLeaseState?> Function(Community community);
 
@@ -1012,15 +1012,22 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         .where((community) => community.id == id)
         .firstOrNull;
     if (statuses.isTurningOff(id) || !unsettled(community)) return;
-    final lease = await ref.read(communityPushLeaseReaderProvider)(community!);
+    final generation =
+        community!.pushSubscriptionState.pendingTombstoneGeneration;
+    final lease = await ref.read(communityPushLeaseReaderProvider)(community);
     final active = lease?.active ?? false;
     final settled = await _serializePushMutation(() async {
-      // A Retry may have started while the read was out.
+      // A Retry may have started while the read was out. Even once it has
+      // ended, the read predates its tombstone, so it can't settle it.
       if (statuses.isTurningOff(id)) return false;
       final storage = ref.read(communityStorageProvider);
       final current = state.value ?? await storage.loadAll();
       final index = current.indexWhere((community) => community.id == id);
       if (index < 0 || !unsettled(current[index])) return false;
+      if (current[index].pushSubscriptionState.pendingTombstoneGeneration !=
+          generation) {
+        return false;
+      }
       final community = current[index];
       final pushState = community.pushSubscriptionState;
       final updated = active
