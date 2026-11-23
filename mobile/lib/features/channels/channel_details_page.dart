@@ -36,12 +36,14 @@ Future<bool?> showChannelDetailsSheet({
   FutureOr<void> Function(BuildContext context, String pubkey)? onMemberTap,
   String? sectionId,
   bool personalChat = false,
+  bool? isUnread,
 }) {
   return _presentChannelListSheet(
     context,
     (context, {nativePresentation = false}) => ChannelDetailsPage(
       channel: channel,
       currentPubkey: currentPubkey,
+      isUnread: isUnread,
       onMemberTap:
           onMemberTap ??
           (context, pubkey) => showUserProfileSheet(
@@ -68,6 +70,7 @@ class ChannelDetailsPage extends HookConsumerWidget {
     required this.onMemberTap,
     this.sectionId,
     this.personalChat = false,
+    this.isUnread,
     this.inSheet = false,
     this.nativePresentation = false,
   });
@@ -81,6 +84,10 @@ class ChannelDetailsPage extends HookConsumerWidget {
   /// Solo chats are organized into Solo workspaces, not channel sections, so
   /// their details omit the channel-section move.
   final bool personalChat;
+
+  /// The channel list's unread state for this row. When set on a channel
+  /// (not a DM), the page offers Mark Read or Mark Unread.
+  final bool? isUnread;
 
   /// Renders only the scrolling content, without the page's app bar, for a
   /// bottom sheet that supplies its own drag handle.
@@ -345,6 +352,12 @@ class ChannelDetailsPage extends HookConsumerWidget {
           : notifier.starChannel(resolvedChannel.id);
     }
 
+    final readToggleIsUnread = resolvedChannel.isDm ? null : isUnread;
+    void toggleRead(bool unread) {
+      Navigator.of(context).pop();
+      _toggleChannelRead(context, ref, resolvedChannel.id, isUnread: unread);
+    }
+
     void toggleMute() {
       final notifier = ref.read(channelMutesProvider.notifier);
       isMuted
@@ -400,6 +413,11 @@ class ChannelDetailsPage extends HookConsumerWidget {
         heroIsAgent: counterpartProfile?.isAgent ?? false,
         memberLabel: isDirectDm ? null : memberLabel,
         groups: [
+          if (readToggleIsUnread != null)
+            _ChannelQuickActionsRow(
+              isUnread: readToggleIsUnread,
+              onToggleRead: () => toggleRead(readToggleIsUnread),
+            ),
           SheetActionSection(
             children: [
               action(
@@ -616,6 +634,19 @@ class ChannelDetailsPage extends HookConsumerWidget {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                if (readToggleIsUnread != null) ...[
+                  Expanded(
+                    child: BuzzActionTile(
+                      key: const ValueKey('channel-details-read-action'),
+                      icon: readToggleIsUnread
+                          ? BuzzIcons.checkCheck
+                          : BuzzIcons.circleDot,
+                      label: readToggleIsUnread ? 'Mark Read' : 'Mark Unread',
+                      onTap: () => toggleRead(readToggleIsUnread),
+                    ),
+                  ),
+                  const SizedBox(width: Grid.xxs),
+                ],
                 Expanded(
                   child: BuzzActionTile(
                     key: const ValueKey('channel-details-mute-action'),

@@ -206,6 +206,31 @@ void _markChannelReadNow(WidgetRef ref, String channelId) {
   }
 }
 
+/// Marks [channelId] read when [isUnread], otherwise unread, reporting a
+/// failed unread mark.
+void _toggleChannelRead(
+  BuildContext context,
+  WidgetRef ref,
+  String channelId, {
+  required bool isUnread,
+}) {
+  if (isUnread) {
+    _markChannelReadNow(ref, channelId);
+    return;
+  }
+  final marked = ref
+      .read(readStateProvider.notifier)
+      .markContextUnread(channelId, channelId: channelId);
+  if (!marked) {
+    ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
+      const SnackBar(
+        content: Text('Couldn’t mark this channel unread. Try again.'),
+      ),
+      kind: ToastKind.error,
+    );
+  }
+}
+
 /// Mobile action sheet for channel-level read, organization, and lifecycle
 /// operations.
 class ChannelActionsSheet extends HookConsumerWidget {
@@ -277,23 +302,7 @@ class ChannelActionsSheet extends HookConsumerWidget {
           isUnread: isUnread,
           onToggleRead: () {
             close();
-            if (isUnread) {
-              _markChannelReadNow(ref, channel.id);
-            } else {
-              final marked = ref
-                  .read(readStateProvider.notifier)
-                  .markContextUnread(channel.id, channelId: channel.id);
-              if (!marked) {
-                ScaffoldMessenger.maybeOf(context)?.showFeedbackSnackBar(
-                  const SnackBar(
-                    content: Text(
-                      'Couldn’t mark this channel unread. Try again.',
-                    ),
-                  ),
-                  kind: ToastKind.error,
-                );
-              }
-            }
+            _toggleChannelRead(context, ref, channel.id, isUnread: isUnread);
           },
         ),
         const SizedBox(height: Grid.xs),

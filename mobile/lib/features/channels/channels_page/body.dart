@@ -592,6 +592,9 @@ class _SliverChannelsList extends HookConsumerWidget {
                 sectionId: key != null && key.startsWith('group:')
                     ? teamIdOf(key)
                     : null,
+                isUnread:
+                    unreadChannelIds.contains(channel.id) ||
+                    attentionChannelIds.contains(channel.id),
               );
             },
             currentPubkey: currentPubkey,

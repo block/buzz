@@ -4591,10 +4591,10 @@ void main() {
     );
   });
 
-  for (final viaChannelRead in [false, true]) {
+  for (final viaMenu in [false, true]) {
     testWidgets(
       'dots, not bolds, channels with only unread thread replies '
-      '(cleared ${viaChannelRead ? 'by reading the channel' : 'by reading the thread'})',
+      '(cleared ${viaMenu ? 'from the row menu' : 'by reading the thread'})',
       (tester) async {
         final semantics = tester.ensureSemantics();
         final channels = [
@@ -4675,9 +4675,13 @@ void main() {
           'Needs your attention',
         );
 
-        if (viaChannelRead) {
-          readState.markContextRead('1', 30, clearForcedMessages: true);
-          await tester.pump();
+        if (viaMenu) {
+          await tester.longPress(find.text('general'));
+          await tester.pumpAndSettle();
+          expect(find.text('Mark Unread'), findsNothing);
+          await tester.tap(find.text('Mark Read'));
+          await tester.pumpAndSettle();
+          expect(readState.markedContexts['1'], 30);
         } else {
           readState.markContextRead('thread-activity:$threadIdRoot', 30);
           await tester.pump();
@@ -4689,6 +4693,54 @@ void main() {
       },
     );
   }
+
+  testWidgets('row menu marks a read channel unread', (tester) async {
+    final readState = _FakeReadStateNotifier(
+      const ReadStateState(
+        isReady: true,
+        pubkey: 'pk',
+        contexts: {'1': 30},
+        version: 0,
+      ),
+    );
+    await tester.pumpWidget(
+      buildTestable(
+        disableAnimations: true,
+        overrides: [
+          channelsProvider.overrideWith(
+            () => _FakeNotifier([
+              Channel(
+                id: '1',
+                name: 'general',
+                channelType: 'stream',
+                visibility: 'open',
+                description: 'General discussion',
+                createdBy: 'abc',
+                createdAt: DateTime(2025),
+                memberCount: 10,
+                lastMessageAt: DateTime.fromMillisecondsSinceEpoch(
+                  30 * 1000,
+                  isUtc: true,
+                ),
+                isMember: true,
+              ),
+            ]),
+          ),
+          readStateProvider.overrideWith(() => readState),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.longPress(find.text('general'));
+    await tester.pumpAndSettle();
+    expect(find.text('Mark Read'), findsNothing);
+    await tester.tap(find.text('Mark Unread'));
+    await tester.pumpAndSettle();
+
+    expect(readState.markedUnread, ['1']);
+    expect(find.text('Mark Unread'), findsNothing);
+  });
 
   for (final (label, events, seenAt, bold, dot) in [
     (
@@ -5189,6 +5241,7 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
   final ReadStateState _initialState;
   final Map<String, int> seededContexts = {};
   final Map<String, int> markedContexts = {};
+  final List<String> markedUnread = [];
 
   int retries = 0;
 
@@ -5243,6 +5296,17 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
   }) {
     markedContexts[contextId] = unixTimestamp;
     state = state.copyWithContext(contextId, unixTimestamp);
+  }
+
+  @override
+  bool markContextUnread(
+    String contextId, {
+    required String channelId,
+    String? threadRootId,
+    bool channelCatchUp = false,
+  }) {
+    markedUnread.add(contextId);
+    return true;
   }
 }
 

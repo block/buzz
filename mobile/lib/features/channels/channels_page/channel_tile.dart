@@ -231,6 +231,8 @@ class _ChannelTile extends ConsumerWidget {
       channel: channel,
       currentPubkey: currentPubkey,
       sectionId: sectionId,
+      // Mark read also clears the dot: the channel mark reads every reply.
+      isUnread: isUnread || hasAttention,
     );
   }
 }
