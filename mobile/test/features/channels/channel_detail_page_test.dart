@@ -4478,6 +4478,72 @@ void main() {
       expect(readState.markedContexts[threadContextKey(threadIdRoot)], 1100);
     });
 
+    testWidgets('a mentioned profile arriving rebuilds only the reply that '
+        'mentions it', (tester) async {
+      final mary = 'a' * 64;
+      final profiles = _FakeUserCacheNotifier({});
+      final root = _textMsg(
+        id: threadIdRoot,
+        pubkey: 'alice',
+        content: 'Question',
+        createdAt: 1000,
+      );
+      final replies = [
+        _textMsg(
+          id: 'reply-mention',
+          pubkey: 'bob',
+          content: 'ask @Mary Jane',
+          createdAt: 1100,
+          extraTags: [
+            ['e', threadIdRoot, '', 'reply'],
+            ['p', mary],
+          ],
+        ),
+        for (var i = 0; i < 3; i++)
+          _textMsg(
+            id: 'reply-$i',
+            pubkey: 'bob',
+            content: 'Answer $i',
+            createdAt: 1101 + i,
+            extraTags: const [
+              ['e', threadIdRoot, '', 'reply'],
+            ],
+          ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          userCacheNotifier: profiles,
+          messages: [root, ...replies],
+          threadReplies: {threadIdRoot: replies},
+          home: ThreadDetailPage(
+            threadHead: formatTimeline([root]).single,
+            allMessages: formatTimeline([root, ...replies]),
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Answer 2', findRichText: true), findsOneWidget);
+
+      final rebuilt = <Widget>[];
+      debugOnRebuildDirtyWidget = (element, _) => rebuilt.add(element.widget);
+      addTearDown(() => debugOnRebuildDirtyWidget = null);
+      profiles.replace(UserProfile(pubkey: mary, displayName: 'Mary Jane'));
+      await tester.pumpAndSettle();
+
+      expect(rebuilt.whereType<MessageContent>(), hasLength(1));
+      expect(
+        tester
+            .widget<MessageMentionPill>(find.byType(MessageMentionPill))
+            .label,
+        'Mary Jane',
+      );
+    });
+
     testWidgets('a thread with no replies reads its head', (tester) async {
       tester.view.physicalSize = const Size(400, 800);
       tester.view.devicePixelRatio = 1;
@@ -15382,6 +15448,62 @@ void main() {
       expect(preloaded, contains(drawn));
       expect(preloaded, isNot(anyOf(contains(quoted), contains(commented))));
     });
+
+    testWidgets(
+      'a tagged mention loads its profile and only its row rebuilds',
+      (tester) async {
+        final mary = 'a' * 64;
+        final requested = <String>{};
+        final profiles = _FakeUserCacheNotifier(
+          {},
+          preload: (pubkeys) async {
+            requested.addAll(pubkeys);
+            return true;
+          },
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            userCacheNotifier: profiles,
+            messages: [
+              _textMsg(
+                id: 'mention',
+                pubkey: 'alice',
+                content: 'thanks @Mary Jane',
+                extraTags: [
+                  ['p', mary],
+                ],
+              ),
+              for (var i = 0; i < 4; i++)
+                _textMsg(
+                  id: 'plain$i',
+                  pubkey: 'alice',
+                  content: 'Message $i',
+                  createdAt: 1001 + i,
+                ),
+            ],
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(requested, {mary});
+        expect(find.byType(MessageMentionPill), findsOneWidget);
+
+        final rebuilt = <Widget>[];
+        debugOnRebuildDirtyWidget = (element, _) => rebuilt.add(element.widget);
+        addTearDown(() => debugOnRebuildDirtyWidget = null);
+        profiles.replace(UserProfile(pubkey: mary, displayName: 'Mary Jane'));
+        await tester.pumpAndSettle();
+
+        expect(rebuilt.whereType<MessageContent>(), hasLength(1));
+        final pill = tester.widget<MessageMentionPill>(
+          find.byType(MessageMentionPill),
+        );
+        expect(pill.label, 'Mary Jane');
+        expect(pill.pubkey, mary);
+        // A named mention asks for nothing more.
+        expect(requested, {mary});
+      },
+    );
 
     testWidgets('edited messages show updated content and (edited) label', (
       tester,

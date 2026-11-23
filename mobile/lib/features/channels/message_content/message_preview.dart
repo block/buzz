@@ -34,6 +34,7 @@ class MessagePreview extends HookConsumerWidget {
     final style =
         baseStyle ??
         context.textTheme.bodyMedium?.copyWith(color: context.colors.onSurface);
+    final mentionPubkeys = loadMentionProfiles(ref, tags, mentionNames);
     final channelNames = ref.watch(channelIdsByNameProvider);
     final palette = ref.watch(customEmojiListProvider);
     final pieces = useMemoized(
@@ -45,7 +46,7 @@ class MessagePreview extends HookConsumerWidget {
           mentionBindings: renderedMentionBindings(
             source,
             mentionNames,
-            mentionedPubkeysFromTags(tags),
+            mentionPubkeys,
           ),
           mentionNames: mentionNames,
           mentionLabels: mentionLabels,

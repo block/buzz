@@ -60,30 +60,24 @@ class ForumPostCard extends HookConsumerWidget {
     final isAgent =
         ref.watch(agentMentionPubkeysProvider(post.channelId)).contains(pk) ||
         profile?.ownerPubkey != null;
-    final profileMentionNames = ref.watch(
-      userCacheProvider.select(
-        (cache) => _buildMentionNames(post.mentionPubkeys, cache),
-      ),
-    );
-    final profileOwnedMentionPubkeys = ref.watch(
-      userCacheProvider.select(
-        (cache) =>
-            (post.mentionPubkeys
-                    .where(
-                      (pubkey) =>
-                          cache[pubkey.toLowerCase()]?.ownerPubkey != null,
-                    )
-                    .map((pubkey) => pubkey.toLowerCase())
-                    .toList()
-                  ..sort())
-                .join('\u0000'),
-      ),
+    // Watch only profiles referenced by this post, so one arriving profile
+    // doesn't rebuild every post on screen.
+    final mentionProfiles = <String, UserProfile>{
+      for (final pubkey in post.mentionPubkeys)
+        pubkey.toLowerCase(): ?ref.watch(
+          userCacheProvider.select((cache) => cache[pubkey.toLowerCase()]),
+        ),
+    };
+    final profileMentionNames = _buildMentionNames(
+      post.mentionPubkeys,
+      mentionProfiles,
     );
     final agentMentionPubkeys = agentPubkeysWithProfileOwners(
       knownAgentPubkeys: ref.watch(agentMentionPubkeysProvider(post.channelId)),
-      profileOwnedAgentPubkeys: profileOwnedMentionPubkeys.isEmpty
-          ? const <String>[]
-          : profileOwnedMentionPubkeys.split('\u0000'),
+      profileOwnedAgentPubkeys: [
+        for (final profile in mentionProfiles.values)
+          if (profile.ownerPubkey != null) profile.pubkey,
+      ],
     );
     final mentionNames = mentionNamesWithDirectoryLabels(
       mentionPubkeys: post.mentionPubkeys,

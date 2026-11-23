@@ -351,17 +351,27 @@ class _OriginalPost extends ConsumerWidget {
         ref.read(userCacheProvider.notifier).get(pk);
     final displayName = watchChannelIdentityLabel(ref, post.channelId, pk);
 
-    final userCache = ref.watch(userCacheProvider);
+    // Watch only profiles referenced by this post, so one arriving profile
+    // doesn't rebuild every post on screen.
+    final mentionProfiles = <String, UserProfile>{
+      for (final pubkey in post.mentionPubkeys)
+        pubkey.toLowerCase(): ?ref.watch(
+          userCacheProvider.select((cache) => cache[pubkey.toLowerCase()]),
+        ),
+    };
     final agentMentionPubkeys = agentPubkeysWithProfileOwners(
       knownAgentPubkeys: ref.watch(agentMentionPubkeysProvider(post.channelId)),
       profileOwnedAgentPubkeys: [
-        for (final profile in userCache.values)
+        for (final profile in mentionProfiles.values)
           if (profile.ownerPubkey != null) profile.pubkey,
       ],
     );
     final mentionNames = mentionNamesWithDirectoryLabels(
       mentionPubkeys: post.mentionPubkeys,
-      profileMentionNames: _buildMentionNames(post.mentionPubkeys, userCache),
+      profileMentionNames: _buildMentionNames(
+        post.mentionPubkeys,
+        mentionProfiles,
+      ),
       directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
       agentMentionPubkeys: agentMentionPubkeys,
     );
@@ -474,17 +484,27 @@ class _ReplyRow extends ConsumerWidget {
         ref.read(userCacheProvider.notifier).get(pk);
     final displayName = watchChannelIdentityLabel(ref, channelId, pk);
 
-    final userCache = ref.watch(userCacheProvider);
+    // Watch only profiles referenced by this reply, so one arriving profile
+    // doesn't rebuild every reply on screen.
+    final mentionProfiles = <String, UserProfile>{
+      for (final pubkey in reply.mentionPubkeys)
+        pubkey.toLowerCase(): ?ref.watch(
+          userCacheProvider.select((cache) => cache[pubkey.toLowerCase()]),
+        ),
+    };
     final agentMentionPubkeys = agentPubkeysWithProfileOwners(
       knownAgentPubkeys: ref.watch(agentMentionPubkeysProvider(channelId)),
       profileOwnedAgentPubkeys: [
-        for (final profile in userCache.values)
+        for (final profile in mentionProfiles.values)
           if (profile.ownerPubkey != null) profile.pubkey,
       ],
     );
     final mentionNames = mentionNamesWithDirectoryLabels(
       mentionPubkeys: reply.mentionPubkeys,
-      profileMentionNames: _buildMentionNames(reply.mentionPubkeys, userCache),
+      profileMentionNames: _buildMentionNames(
+        reply.mentionPubkeys,
+        mentionProfiles,
+      ),
       directoryDisplayNames: ref.watch(agentDirectoryDisplayNamesProvider),
       agentMentionPubkeys: agentMentionPubkeys,
     );

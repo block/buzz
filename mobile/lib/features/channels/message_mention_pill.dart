@@ -4,6 +4,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/mentions/mention_identity_links.dart';
+import '../../shared/mentions/mention_tags.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/relay/relay_provider.dart';
 import '../../shared/widgets/buzz_agent_icon.dart';
@@ -227,4 +228,21 @@ class _IdentityLinkPill extends HookConsumerWidget {
       textStyle: style,
     );
   }
+}
+
+/// The keys a message's [tags] name. Requests, after this build, the
+/// profiles of those [mentionNames] can't name yet, so their plain "@Name"
+/// text becomes a chip once the profile arrives; a row that watches those
+/// profiles rebuilds then, and nothing else does.
+Set<String> loadMentionProfiles(
+  WidgetRef ref,
+  List<List<String>> tags,
+  Map<String, String> mentionNames,
+) {
+  final keys = mentionedPubkeysFromTags(tags);
+  requestLinkedProfiles(ref, [
+    for (final pubkey in keys)
+      if (!mentionNames.containsKey(pubkey)) pubkey,
+  ]);
+  return keys;
 }

@@ -88,19 +88,26 @@ class _ThreadMessage extends HookConsumerWidget {
         (profile?.ownerPubkey != null &&
             profile?.ownerPubkey == currentPubkey?.toLowerCase());
 
-    final userCache = ref.watch(userCacheProvider);
+    // Watch only profiles referenced by this message, as channel bubbles do,
+    // so one arriving profile doesn't rebuild every reply on screen.
+    final mentionProfiles = <String, UserProfile?>{
+      for (final pubkey in message.mentionPubkeys)
+        pubkey.toLowerCase(): ref.watch(
+          userCacheProvider.select((cache) => cache[pubkey.toLowerCase()]),
+        ),
+    };
     final knownAgentPubkeys = agentPubkeysWithProfileOwners(
       knownAgentPubkeys: ref.watch(agentMentionPubkeysProvider(channelId)),
       profileOwnedAgentPubkeys: [
-        for (final profile in userCache.values)
-          if (profile.ownerPubkey != null) profile.pubkey,
+        for (final entry in mentionProfiles.entries)
+          if (entry.value?.ownerPubkey != null) entry.key,
       ],
     );
     final mentionNames = <String, String>{};
     final agentMentionPubkeys = <String>{};
     for (final mpk in message.mentionPubkeys) {
       final normalizedPubkey = mpk.toLowerCase();
-      final p = userCache[normalizedPubkey];
+      final p = mentionProfiles[normalizedPubkey];
       if (p?.displayName != null) {
         mentionNames[normalizedPubkey] = p!.displayName!;
       }
