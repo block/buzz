@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../community/community.dart';
 import '../hosted/builderlab_account.dart';
+import '../http/app_http_client.dart';
 import '../hosted/hosted_relay_auth.dart';
 import '../hosted/organization_environment.dart';
 import '../relay/relay_provider.dart';
@@ -79,6 +80,9 @@ class PushWakeChannelHandler {
 Future<void> runAndroidPushWake() async {
   WidgetsFlutterBinding.ensureInitialized();
   DartPluginRegistrant.ensureInitialized();
+  // Each wake runs in a new engine, and a Cronet engine opened in it would
+  // outlive it.
+  useDartIoHttpOnly();
   final store = await _openShownMessageStore();
   final relayHeaders = _headlessRelayHeaders();
   final handler = PushWakeChannelHandler(
