@@ -2,6 +2,8 @@ import 'package:buzz/features/channels/voice_note_composer_recorder.dart';
 import 'package:clock/clock.dart';
 import 'package:buzz/features/channels/composer_transcription.dart';
 import 'package:buzz/shared/transcription/device_transcription.dart';
+import 'package:buzz/shared/emoji/emoji_data.dart';
+import 'package:buzz/shared/emoji/emoji_data_provider.dart';
 import 'package:buzz/shared/emoji/emoji_picker.dart';
 import 'package:buzz/shared/widgets/concentric_sheet_surface.dart';
 import 'package:flutter/scheduler.dart';
@@ -1997,6 +1999,81 @@ void main() {
       expect(find.byType(TextField), findsOneWidget);
       expect(textField.focusNode!.hasFocus, isTrue);
     });
+
+    testWidgets(
+      'colon search replaces only the emoji token at the caret',
+      (tester) async {
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            overrides: [
+              emojiDatasetOrEmptyProvider.overrideWithValue(
+                const EmojiDataset(
+                  categories: [],
+                  nativeToShortcode: {'😄': 'smile'},
+                  all: [
+                    EmojiEntry(
+                      id: 'smile',
+                      name: 'Smile',
+                      keywords: [],
+                      native: '😄',
+                      categoryId: 'people',
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            customEmoji: const [
+              CustomEmoji(
+                shortcode: 'blob-prayge',
+                url: 'https://example.com/blob.png',
+              ),
+            ],
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+        await _expandComposer(tester);
+        final field = find.byType(TextField);
+        final controller = tester.widget<TextField>(field).controller!;
+        final panel = find.byKey(const ValueKey('emoji-suggestions-popover'));
+        for (final text in [':', ':s', '10:30', 'https://']) {
+          await tester.enterText(field, text);
+          await tester.pump();
+          expect(panel, findsNothing);
+        }
+        await tester.enterText(field, ':sm');
+        await tester.pumpAndSettle();
+        expect(
+          find.descendant(of: panel, matching: find.text(':smile:')),
+          findsOneWidget,
+        );
+        await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+        await tester.pumpAndSettle();
+        expect(controller.text, '😄');
+        await tester.enterText(field, 'try :blob-pr later');
+        controller.selection = const TextSelection.collapsed(offset: 12);
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.descendant(
+            of: panel,
+            matching: find.widgetWithText(ListTile, ':blob-prayge:').first,
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(controller.text, 'try :blob-prayge: later');
+        expect(controller.selection.extentOffset, 17);
+        expect(panel, findsNothing);
+      },
+      variant: TargetPlatformVariant({
+        TargetPlatform.iOS,
+        TargetPlatform.android,
+      }),
+    );
 
     testWidgets('iOS measures each character only of shorter drafts', (
       tester,

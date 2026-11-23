@@ -213,6 +213,7 @@ class ComposeBar extends HookConsumerWidget {
     );
 
     // Channel autocomplete state ----------------------------------------------
+    final emojiQuery = useState<String?>(null);
     final channelQuery = useState<String?>(null);
     final channelStartIdx = useState(-1);
     final channelsAsync = ref.watch(channelsProvider);
@@ -373,6 +374,8 @@ class ComposeBar extends HookConsumerWidget {
           }
         }
 
+        emojiQuery.value = _emojiQuery(editingValue);
+
         // Channel autocomplete detection — only when no @mention is active.
         if (mentionChooser.track(previousValue, editingValue) ||
             !sel.isValid ||
@@ -403,6 +406,34 @@ class ComposeBar extends HookConsumerWidget {
     // Filter channels against the query.
     final channels = channelsAsync.asData?.value ?? <Channel>[];
     final channelSuggestions = filterChannels(channels, channelQuery.value);
+
+    final dataset = emojiQuery.value == null
+        ? null
+        : ref.watch(emojiDatasetOrEmptyProvider);
+    final emojiSuggestions = useMemoized(() {
+      final query = emojiQuery.value;
+      if (query == null || dataset == null) return const <_EmojiChoice>[];
+      final choices = <_EmojiChoice>[
+        for (final entry in customEmoji)
+          (code: entry.shortcode, text: ':${entry.shortcode}:', url: entry.url),
+        for (final entry in dataset.all)
+          if (entry.skinIndex == 0)
+            (code: entry.id, text: entry.native, url: null),
+      ];
+      return rankByShortcode(query, choices, (entry) => entry.code);
+    }, [emojiQuery.value, dataset, customEmoji]);
+
+    void selectEmoji(_EmojiChoice choice) {
+      final query = _emojiQuery(controller.value);
+      if (query == null || query != emojiQuery.value) return;
+      spliceAndMoveCursor(
+        controller,
+        focusNode,
+        start: controller.selection.end - query.length - 1,
+        replacement: choice.text,
+      );
+      emojiQuery.value = null;
+    }
 
     // Insert a selected channel into the text field.
     void insertChannel(Channel channel) {
@@ -869,7 +900,8 @@ class ComposeBar extends HookConsumerWidget {
     // can be edited.
     final pickerVisible =
         chooserOpen &&
-        (channelSuggestions.isNotEmpty ||
+        (emojiSuggestions.isNotEmpty ||
+            channelSuggestions.isNotEmpty ||
             suggestions.isNotEmpty ||
             mentionRows.searchFailed) &&
         attachmentSurface.value == _AttachmentSurface.closed &&
@@ -878,16 +910,22 @@ class ComposeBar extends HookConsumerWidget {
     final topMention = suggestions
         .where((s) => !mentionRows.unavailable.contains(s.pubkey))
         .firstOrNull;
-    final pickerQuery = (mentionChooser.query, channelQuery.value);
+    String? activeQuery() =>
+        emojiQuery.value == null ? channelQuery.value : ':${emojiQuery.value}';
+    final pickerQuery = (mentionChooser.query, activeQuery());
     KeyEventResult handleHardwareKey(FocusNode _, KeyEvent event) =>
         _handleComposerHardwareKey(
           event,
           controller,
           inputOwned: iosAttachmentPopover.isActive || isEmojiPickerOpen.value,
-          query: (mentionChooser.liveQuery.value, channelQuery.value),
+          query: (mentionChooser.liveQuery.value, activeQuery()),
           renderedQuery: pickerQuery,
           pickerVisible: pickerVisible,
-          acceptSuggestion: topChannel != null
+          acceptSuggestion: emojiSuggestions.isNotEmpty
+              ? () => _runComposerAction(
+                  () => selectEmoji(emojiSuggestions.first),
+                )
+              : topChannel != null
               ? () => _runComposerAction(() => insertChannel(topChannel))
               : topMention != null
               ? () => _runComposerAction(() => insertMention(topMention))
@@ -898,24 +936,43 @@ class ComposeBar extends HookConsumerWidget {
           },
         );
 
-    final suggestionPanel = _composerSuggestionPanel(
-      channelSuggestions: chooserOpen ? channelSuggestions : const [],
-      mentionSuggestions: chooserOpen ? suggestions : const [],
-      unavailableMentions: mentionRows.unavailable,
-      mentionSearchFailed: chooserOpen && mentionRows.searchFailed,
-      reserveMentionHeight: mentionRows.reserveHeight,
-      mentionSearching: mentionRows.searching,
-      onMentionSearchRetry: () {
-        if (mentionChooser.query case final query?) {
-          ref.invalidate(mentionUserSearchProvider(query));
-        }
-      },
-      userCache: userCache,
-      currentPubkey: currentPubkey,
-      isDmChannel: isDmChannel,
-      onChannelSelect: insertChannel,
-      onMentionSelect: insertMention,
-    );
+    final suggestionPanel = chooserOpen && emojiSuggestions.isNotEmpty
+        ? TextFieldTapRegion(
+            child: _ComposerSearchSuggestions<_EmojiChoice>(
+              surfaceKey: const ValueKey('emoji-suggestions-popover'),
+              suggestions: emojiSuggestions,
+              label: (entry) => ':${entry.code}:',
+              horizontalTitleGap: 8,
+              singleLineLabel: true,
+              labelStyle: context.textTheme.bodyLarge?.copyWith(fontSize: 14),
+              leading: (_, entry) => entry.url == null
+                  ? Text(entry.text, style: const TextStyle(fontSize: 26))
+                  : CustomEmojiImage(
+                      shortcode: entry.code,
+                      url: entry.url!,
+                      size: 26,
+                    ),
+              onSelect: selectEmoji,
+            ),
+          )
+        : _composerSuggestionPanel(
+            channelSuggestions: chooserOpen ? channelSuggestions : const [],
+            mentionSuggestions: chooserOpen ? suggestions : const [],
+            unavailableMentions: mentionRows.unavailable,
+            mentionSearchFailed: chooserOpen && mentionRows.searchFailed,
+            reserveMentionHeight: mentionRows.reserveHeight,
+            mentionSearching: mentionRows.searching,
+            onMentionSearchRetry: () {
+              if (mentionChooser.query case final query?) {
+                ref.invalidate(mentionUserSearchProvider(query));
+              }
+            },
+            userCache: userCache,
+            currentPubkey: currentPubkey,
+            isDmChannel: isDmChannel,
+            onChannelSelect: insertChannel,
+            onMentionSelect: insertMention,
+          );
     _AttachmentSurfacePanel buildOverlayPanel(_AttachmentSurface surface) {
       return _composerAttachmentPanel(
         preparePhotos: prepare,
@@ -1021,10 +1078,14 @@ class ComposeBar extends HookConsumerWidget {
             defaultTargetPlatform == TargetPlatform.iOS &&
             !interactionLocked &&
             !voiceNote.isRecording,
-        suggestions: mentionChooser.query != null || channelQuery.value != null
+        suggestions:
+            emojiSuggestions.isNotEmpty ||
+                mentionChooser.query != null ||
+                channelQuery.value != null
             ? suggestionPanel
             : null,
         onDismissSuggestions: () {
+          emojiQuery.value = null;
           mentionChooser.close();
           channelQuery.value = null;
         },
