@@ -1118,8 +1118,9 @@ class ThreadDetailPage extends HookConsumerWidget {
                     isMember: isMember,
                     isArchived: isArchived,
                     composerFocusNode: composerFocusNode,
-                    restoreComposerFocus: () =>
-                        restoreComposerFocus.value?.call(),
+                    restoreComposerFocus: canReply
+                        ? () => restoreComposerFocus.value?.call()
+                        : null,
                     childrenByParent: childrenByParent,
                   ),
                 ),

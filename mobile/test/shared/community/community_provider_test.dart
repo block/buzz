@@ -21,9 +21,14 @@ import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
 import 'package:buzz/shared/diagnostics/diagnostic_reporter.dart';
+import 'package:buzz/shared/push/android_push_authority.dart';
+import 'package:buzz/shared/push/push_bridge.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, debugDefaultTargetPlatformOverride;
 import 'package:nostr/nostr.dart' as nostr;
 
+import '../../helpers/android_push_fakes.dart';
 import 'community_storage_test.dart';
 
 void main() {
@@ -427,6 +432,120 @@ void main() {
         expect(stored.pushSubscriptionState.generationCursor, 9);
         expect(stored.pushSubscriptionState.pendingTombstoneGeneration, isNull);
         expect(deactivationGenerations, [8, 9]);
+      },
+    );
+
+    test(
+      'opt-out after a gateway change still tombstones with the saved lease id',
+      () async {
+        // The test binding answers every HttpClient request with a 400, but
+        // this test runs a real local relay.
+        final overrides = HttpOverrides.current;
+        HttpOverrides.global = null;
+        addTearDown(() => HttpOverrides.global = overrides);
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        addTearDown(() => server.close(force: true));
+        final origin = 'ws://127.0.0.1:${server.port}';
+        final tombstones = <Map<String, dynamic>>[];
+        server.listen((request) async {
+          if (WebSocketTransformer.isUpgradeRequest(request)) {
+            final socket = await WebSocketTransformer.upgrade(request);
+            socket.add(jsonEncode(['AUTH', 'challenge']));
+            socket.listen((message) {
+              final frame = jsonDecode(message as String) as List<dynamic>;
+              final event = frame[1] as Map<String, dynamic>;
+              if (frame.first == 'EVENT') tombstones.add(event);
+              socket.add(jsonEncode(['OK', event['id'], true, '']));
+            });
+            return;
+          }
+          request.response
+            ..headers.contentType = ContentType('application', 'nostr+json')
+            ..write(jsonEncode(_descriptorJson(origin)))
+            ..close();
+        });
+
+        // The phone enrolled with one gateway, then the app was built for
+        // another: that gateway's state reads empty, so no grant names the
+        // relay, but the community remembers its lease's installation id.
+        final store = _MemoryStore();
+        final keystore = FakeAndroidKeystore();
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final oldAuthority = AndroidPushAuthority(
+          keystore: keystore,
+          gateway: fakeGatewayClient(FakePushGateway(nowSeconds: () => now)),
+          store: store,
+          sleep: (_) async {},
+        );
+        await oldAuthority.enroll(
+          relayOrigin: origin,
+          relayPubkey: '2' * 64,
+          endpoint: 'token-1',
+          stillWanted: () => true,
+          desiredRelays: () => {origin},
+        );
+        debugAndroidPushAuthority = AndroidPushAuthority(
+          keystore: keystore,
+          gateway: fakeGatewayClient(
+            FakePushGateway(nowSeconds: () => now),
+            baseUrl: 'https://other-push.example',
+          ),
+          store: store,
+          sleep: (_) async {},
+        );
+        addTearDown(() => debugAndroidPushAuthority = null);
+        expect(await readBuzzPushEndpointGrants(), isEmpty);
+
+        final keys = nostr.Keys.generate();
+        final subscription = BuzzPushSubscription(
+          filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+          notificationClass: 'default',
+        );
+        final community =
+            Community.create(
+              name: 'Test',
+              relayUrl: 'http://127.0.0.1:${server.port}',
+              nsec: keys.nsec,
+            ).copyWith(
+              pushNotificationsEnabled: true,
+              pushLeaseInstallationId: 'd' * 32,
+              pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+                desired: [subscription],
+              ).withAccepted(subscriptions: [subscription], generation: 7),
+            );
+        // The real deactivator, unlike the injected one createContainer uses.
+        container = ProviderContainer(
+          overrides: [
+            communityStorageProvider.overrideWithValue(communityStorage),
+            communitySnapshotWriterProvider.overrideWithValue(
+              (communities) async {},
+            ),
+            communityPushLeaseRevocationEnqueuerProvider.overrideWithValue(
+              (community) async => true,
+            ),
+            communityPushLeaseRevocationTriggerProvider.overrideWithValue(
+              () async {},
+            ),
+          ],
+        );
+        await container.read(communityListProvider.future);
+        final notifier = container.read(communityListProvider.notifier);
+        await notifier.addCommunity(community);
+
+        await notifier.setPushNotificationsEnabled(community.id, false);
+        await notifier.retryPendingPushLeaseTombstone(community.id);
+
+        final stored = (await communityStorage.loadAll()).single;
+        expect(stored.pushSubscriptionState.pendingTombstoneGeneration, isNull);
+        final tombstone = tombstones.single;
+        expect(
+          (tombstone['tags'] as List).any(
+            (tag) => (tag as List).contains('d' * 32),
+          ),
+          isTrue,
+        );
       },
     );
 
@@ -1238,6 +1357,49 @@ class _FailingLoadStorage extends CommunityStorage {
     return super.loadAll();
   }
 }
+
+class _MemoryStore implements AndroidPushStateStore {
+  String? value;
+
+  @override
+  Future<String?> read() async => value;
+
+  @override
+  Future<void> write(String? next) async => value = next;
+}
+
+Map<String, dynamic> _descriptorJson(String origin) => {
+  'supported_extensions': ['nip-er', 'buzz-push-v1'],
+  'push': {
+    'origin': origin,
+    'keys': [
+      {
+        'id': 'relay-v1',
+        'pubkey': nostr.Keys('2' * 64).public,
+        'current': true,
+      },
+    ],
+    'push_kinds': [9, 40002, 45001, 45003],
+    'h_grammar': 'uuid-lowercase',
+    'class_support': {
+      'apns': ['default'],
+    },
+    'limitation': {
+      'max_lease_ttl': 2592000,
+      'max_leases_per_pubkey': 16,
+      'max_subscriptions_per_lease': 16,
+      'max_kinds': 16,
+      'max_authors': 20,
+      'max_h': 50,
+      'max_tag_values': 20,
+      'max_ignore': 8,
+      'max_content_len': 65536,
+      'max_plaintext_len': 32768,
+      'max_endpoint_len': 4096,
+      'max_string_len': 512,
+    },
+  },
+};
 
 class _ObservedSaveStorage extends CommunityStorage {
   _ObservedSaveStorage(FlutterSecureStorage secure) : super(secure: secure);
