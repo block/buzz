@@ -7,6 +7,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/me/default_agent.dart';
 import '../../shared/profile/user_cache_provider.dart';
+import '../../shared/relay/relay_provider.dart';
+import '../../shared/share/share_bestie.dart';
 import '../../shared/shortcuts/home_screen_shortcuts.dart';
 import '../../shared/widgets/adaptive_conversation_pane.dart';
 
@@ -46,6 +48,14 @@ class HomeScreenShortcutHost extends HookConsumerWidget {
     final bestieName = ref.watch(
       userCacheProvider.select((profiles) => profiles[bestiePubkey]?.label),
     );
+    final me = ref.watch(myPubkeyProvider);
+    useEffect(() {
+      if (bestie.isLoading || bestie.hasError || me == null) return null;
+      unawaited(
+        publishShareBestie(pubkey: me, bestie: bestiePubkey, name: bestieName),
+      );
+      return null;
+    }, [bestie.isLoading, bestie.hasError, me, bestiePubkey, bestieName]);
     final published = useRef<List<String>?>(null);
     useEffect(() {
       unawaited(listenForHomeScreenShortcuts());

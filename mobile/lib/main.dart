@@ -22,6 +22,9 @@ import 'shared/relay/relay_closed_policy.dart';
 import 'shared/relay/relay_websocket.dart';
 import 'shared/theme/theme_provider.dart';
 
+// Keeps the share extension's entry point in the app's compiled Dart code.
+export 'share_extension/share_extension_main.dart' show shareExtensionMain;
+
 void main() => runBuzzApp(const App());
 
 Future<void> runBuzzApp(Widget app) async {
