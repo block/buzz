@@ -4,6 +4,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/theme/buzz_icons.dart';
 
 import '../../shared/identity_archives/identity_archives.dart';
+import '../../shared/text/initial.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/sheet_action_section.dart';
 import '../../shared/widgets/avatar_image.dart';
@@ -236,7 +237,7 @@ class _MemberTile extends ConsumerWidget {
     // hex public key so the compact-npub label doesn't render `N` for all.
     final hasName = profile?.displayName?.trim().isNotEmpty == true;
     final initial = isSelf || hasName
-        ? name[0].toUpperCase()
+        ? avatarInitial(name)
         : (member.pubkey.isNotEmpty ? member.pubkey[0].toUpperCase() : '?');
     final showManagementActions = canManage && !isSelf && !member.isOwner;
     final showMenu = showManagementActions || onViewActivity != null;
