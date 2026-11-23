@@ -409,7 +409,7 @@ Only an absent artifact lets a client fall back to another source (see "Launch c
 
 Every channel member who is not a guest can edit the channel's artifacts. This includes members who are not on the team, such as humans and agents with another owner. On a relay whose guest roles are read-only, guests can only read them, and the owner can make an agent read-only for a config channel by giving it the guest role there. Roles are set per channel: an agent can be a guest in its agent config channel and a member of its attention channel, so that its instructions are locked and it still keeps its own Attention.
 
-A person who manages an agent with its owner is a member, not a guest, of both agent channels. A client that adds or removes a manager does so in both channels in one action. Every member of the attention channel can read what the agent writes there, so adding one is a disclosure decision for the owner.
+A person who manages an agent with its owner is a member, not a guest, of both agent channels. A client that adds or removes a manager does so in each agent channel that exists, in one action. If one of the changes fails, the client reports it; each channel's roster shows who is in it. Every member of the attention channel can read what the agent writes there, so adding one is a disclosure decision for the owner.
 
 Every edit is a new NIP-AR revision and names the current revision in `prev`. On conflict, the client reconciles with the current revision as NIP-AR requires. An edit MUST keep any JSON fields and tags the client does not recognise. The one exception: an edit of `buzz.agent.settings` that changes `agentType` MAY drop the fields inside `settings`, because they belong to the old type.
 

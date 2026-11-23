@@ -32,7 +32,7 @@ The attention channel is the NIP-AP agent attention channel. NIP-AP defines its 
 - The agent owner's client creates it when the agent owner turns on relay storage for the agent's Attention, and adds the agent with the `member` role. The agent owner is the only channel owner.
 - A client finds it with NIP-AP Discovery, from the agent owner that the agent's [NIP-OA](NIP-OA.md) attestation names. Discovery keeps only private channels. When more than one remains, every client uses the oldest, and no client deletes the others.
 - An agent with no recorded agent owner has no attention channel. Its Attention stays local.
-- The agent MUST NOT create, delete or archive an attention channel, or change its roster.
+- The agent MUST NOT create, delete or archive an attention channel, or change its roster. The relay enforces only part of this (see "Roster and trust").
 
 A private channel lets only its members read its artifacts, and NIP-AR lets only members with a writing role (`owner`, `admin` or `member`) write them. A member with the `guest` role can read but not write.
 
@@ -40,7 +40,7 @@ A private channel lets only its members read its artifacts, and NIP-AR lets only
 
 A reader does not check who signed a record. The relay accepts a write only from a member with a writing role, and the reader trusts that gate. So the roster decides whose records apply. Each roster change is a signed kind:9000 or kind:9001, so the channel's history shows who could write at each time.
 
-The agent owner decides who writes. To make the agent's Attention read-only to the agent, the agent owner gives it the `guest` role in the attention channel; its role in its agent config channel is separate. A person who manages the agent with the agent owner is a member (NIP-AP, "Editing"). The agent cannot remove the agent owner or change roles, because only a channel owner or admin can. As a member it can add another key as a member or guest (NIP-AP, "Membership"); the roster shows that key, and the agent owner can remove it.
+The agent owner decides who writes. To make the agent's Attention read-only to the agent, the agent owner gives it the `guest` role in the attention channel; its role in its agent config channel is separate. A person who manages the agent with the agent owner is a member (NIP-AP, "Editing"). The relay stops the agent from removing the agent owner or changing roles, because only a channel owner or admin can. It does not stop the agent from adding a key: NIP-AP lets any member add another key as a member or guest ("Membership"). So a prompt-injected agent can add a writer. The roster shows that key, and the agent owner can remove it.
 
 ### Lost access
 
@@ -50,7 +50,7 @@ The runtime runs no watches or timers from the channel, and reports why, when:
 - the agent is no longer a member;
 - the channel is deleted, or is no longer private.
 
-The runtime does not create another channel or repair the roster. Each of these is the agent owner's decision.
+The runtime does not create another channel or repair the roster. Each of these is the agent owner's decision. It runs Find again after NIP-AR's backoff (rule 7), with waits that grow to at most 10 minutes, and at once when the channel's metadata or roster changes. A runtime MAY also run Find on each kind:44100 notice to the agent with `["t", "system"]` (NIP-CL). Only a runtime that has switched to the relay does this (see "Turning relay storage on").
 
 An archived channel stays readable: writes fail with the archive reason, and runtimes keep running the set (NIP-AR, "Home channel lifecycle").
 
@@ -231,9 +231,23 @@ Within each step, by slug.
 | Changes from another member's client | that member |
 | Moving local Attention to the relay, and removals the agent owner confirms | the agent owner |
 
+## Turning relay storage on
+
+The agent owner's client moves the agent's local Attention to the relay in this order:
+
+1. **Find** the channel. If there is none, create it (NIP-AP, "Config channels"), without the agent.
+2. **Write** each local object (Writing), in the order above.
+3. **Read back** the set (Reading, steps 2 and 3) and compare it with the local set. If they differ, stop: nothing switches, and the local set keeps running.
+4. **Add the agent** with the `member` role, if it is not a member yet.
+5. **Switch** the runtime to the relay. This is a setting of the runtime, not a record.
+
+A runtime runs its local set until the switch. After it, the runtime runs the relay set from its first complete sync, and holds the events that its watches would match until then. A runtime never switches to a set it has not read back complete, so a move that stops part way leaves the local set running.
+
+A runtime that has not switched does not run Find for the agent.
+
 ## Reading
 
-1. **Find** the channel. If there is none, the set is empty. Check again when the agent writes, or after a delay.
+1. **Find** the channel. If there is none, the runtime runs nothing from the relay and reports it (see "Lost access").
 2. **Sync** with the filter from Writing, step 1. Buffer each `EVENT` until `EOSE`. At `EOSE`, replace the whole set with the buffer. Do not merge it into the old set.
 3. **Check each record.** A record is skipped, and reported, when any of these is true:
    - it does not have `["ar", "1"]`;
@@ -249,7 +263,7 @@ Within each step, by slug.
    - a kind:45010 head that no longer matches the sync filter.
 
    Any other kind:45010 head replaces the record, after step 3.
-5. **Errors.** On `CLOSED "resync: ..."` or `CLOSED "restricted: ..."`, start again from step 1. On `CLOSED "error: ..."` or a dropped connection, keep the last complete set, report the problem, and sync again after a delay. A runtime runs no watches or timers before its first complete set, unless it kept a complete set from an earlier read.
+5. **Errors.** On `CLOSED "resync: ..."` or `CLOSED "restricted: ..."`, drop the set: the roster or the records may have changed. Start again from step 1 after NIP-AR's backoff (rule 7). On `CLOSED "error: ..."` or a dropped connection, keep the last complete set, report the problem, and sync again after that backoff. A runtime runs no watches or timers before its first complete set, unless it kept a complete set from an earlier read.
 
 A reader shows skipped records to the agent owner, by slug and problem, so that the agent owner can remove them. A runtime does not run them.
 
@@ -298,7 +312,7 @@ A runtime writes in two cases only:
 - it removes a spent timer after the task for its last occurrence succeeds;
 - it removes a source watch after every task from its run succeeds.
 
-Each is a `delete` signed as the agent. The runtime first reads the record again (Writing, step 1). It deletes the record only if its value is still the one the task ran with, with `prev` = the head from that read. If the value changed, or the delete gets `conflict`, another writer changed the record during the task: the runtime keeps the record and applies the new head. A timer that is spent with no last task stays, and the runtime reports it as spent.
+Each is a `delete` signed as the agent. The runtime first reads the record again (Writing, step 1). It deletes the record only if its head is still the revision that the run started from, with `prev` = that revision. If the head is another revision, even one with the same value, or the delete gets `conflict`, another writer changed the record during the task, for example by removing and adding it again. The runtime keeps the record and applies the new head as a new registration, with none of the old one's run state. A timer that is spent with no last task stays, and the runtime reports it as spent.
 
 When a source run has a failed task, the runtime keeps the record, marks the run complete in its own state, and does not run it again until the record changes. A runtime with no such state runs a kept source once more.
 
