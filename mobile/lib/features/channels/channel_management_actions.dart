@@ -186,13 +186,21 @@ class ChannelActions {
         );
     NostrEvent result;
     try {
-      result = await submit(includeHistory: includeHistory);
-    } catch (error) {
-      if (!includeHistory || relayErrorText(error) != _onlyPeopleShareHistory) {
-        rethrow;
+      try {
+        result = await submit(includeHistory: includeHistory);
+      } catch (error) {
+        if (!includeHistory ||
+            relayErrorText(error) != _onlyPeopleShareHistory) {
+          rethrow;
+        }
+        _ensureCommunityValid();
+        result = await submit(includeHistory: false);
       }
-      _ensureCommunityValid();
-      result = await submit(includeHistory: false);
+    } on StateError {
+      rethrow;
+    } catch (error) {
+      await _throwIfAgentRefused(relayErrorText(error), adding: false);
+      rethrow;
     }
     _ensureCommunityValid();
     final response = parseCommandResponse(result.content);
@@ -315,6 +323,7 @@ class ChannelActions {
               reason == 'invalid: history must be "include", got "ask"')) {
         throw const DmNeedsHistoryChoice();
       }
+      await _throwIfAgentRefused(reason, adding: true);
       throw Exception(
         reason.contains('at most 9 people')
             ? dmAdditionFailedMessage
@@ -334,6 +343,31 @@ class ChannelActions {
       );
     }
     return openAddedDm(id);
+  }
+
+  /// Throws [DmAgentRefused] naming the agent when [reason] is an agent's
+  /// add-policy refusal of a DM. A failed name read still refuses, without
+  /// the name.
+  Future<void> _throwIfAgentRefused(
+    String reason, {
+    required bool adding,
+  }) async {
+    final refusal = dmAgentPolicyRefusal(reason);
+    if (refusal == null) return;
+    final cache = _ref.read(userCacheProvider.notifier);
+    final profile = await cache
+        .resolve([refusal.agent])
+        .then((profiles) => profiles[refusal.agent])
+        .catchError((Object _) => cache.get(refusal.agent));
+    _ensureCommunityValid();
+    final name = profile?.displayName;
+    throw DmAgentRefused(
+      dmAgentRefusedMessage(
+        adding: adding,
+        ownerOnly: refusal.ownerOnly,
+        name: name != null && name.trim().isNotEmpty ? name : null,
+      ),
+    );
   }
 
   /// Confirms through the writer that the current user is in the DM
