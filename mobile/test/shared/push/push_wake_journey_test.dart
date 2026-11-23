@@ -74,6 +74,16 @@ void main() {
 
     expect(result.incomplete, isFalse);
     expect(result.notifications.map((n) => n.eventId), [mention.id, direct.id]);
+
+    // Messages are read from the writer, so one that just arrived is not
+    // missed to a lagging replica. Names can come from any replica.
+    for (final filter in relay.queries.expand((query) => query)) {
+      expect(
+        filter['consistency'],
+        filter.containsKey('since') ? 'strong' : isNull,
+        reason: '$filter',
+      );
+    }
     final [first, second] = result.notifications;
     expect(first.category, PushWakeCategory.mention);
     expect(first.title, 'Friend');

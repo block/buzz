@@ -371,6 +371,9 @@ Future<void> _resolveCommunity(
               'since': since,
               'until': ?latest,
               'limit': limit,
+              // A wake is for a message that has just arrived, which a lagging
+              // replica may not have yet.
+              'consistency': 'strong',
             },
         ], timeout: timeouts.request);
       } on Object catch (error) {
