@@ -4,6 +4,7 @@ import 'package:buzz/shared/widgets/feedback_snackbar.dart';
 
 import 'package:buzz/shared/widgets/adaptive_conversation_pane.dart';
 import 'channel_unread.dart';
+import 'channel_sections/collapsed_section_provider.dart';
 import 'channel_filter/channel_filter_activity.dart';
 import 'channel_filter/channel_filter_provider.dart';
 import 'channel_filter/channel_filter_store.dart';
