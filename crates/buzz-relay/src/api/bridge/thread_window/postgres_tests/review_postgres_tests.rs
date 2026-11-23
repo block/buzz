@@ -40,7 +40,16 @@ async fn thread_window_signed_aux_requires_positional_target() {
             )
             .sign_with_keys(&f.keys)
             .unwrap();
-        ingest(&f, &edit).await;
+        if n == 3 {
+            // Model a row stored before admission required one target.
+            f.state
+                .db
+                .insert_event(f.community, &edit, Some(f.channel))
+                .await
+                .unwrap();
+        } else {
+            ingest(&f, &edit).await;
+        }
         edits.push(edit);
     }
     let filter = f.filter();

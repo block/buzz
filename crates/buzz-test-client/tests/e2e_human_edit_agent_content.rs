@@ -94,6 +94,182 @@ async fn connect_agent_with_owner(agent_keys: &Keys, owner_keys: &Keys) -> BuzzT
 
 // ─── kind:40003 message edit ───────────────────────────────────────────────
 
+async fn assert_edit_targets_rejected(cases: impl FnOnce(&str, &str) -> Vec<Vec<Tag>>) {
+    let author = Keys::generate();
+    let channel = create_agent_owned_channel(&author).await;
+    let mut client = BuzzTestClient::connect(&relay_url(), &author)
+        .await
+        .unwrap();
+    let first = client
+        .send_text_message(&author, &channel, "first", 9)
+        .await
+        .unwrap();
+    let second = client
+        .send_text_message(&author, &channel, "second", 9)
+        .await
+        .unwrap();
+    assert!(first.accepted, "{}", first.message);
+    assert!(second.accepted, "{}", second.message);
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+    for targets in cases(&first.event_id, &second.event_id) {
+        let target_count = targets.len();
+        let event = EventBuilder::new(Kind::Custom(40003), "replacement")
+            .tags(targets)
+            .tag(Tag::parse(["h", &channel]).unwrap())
+            .sign_with_keys(&author)
+            .unwrap();
+        assert_eq!(
+            event.tags.len(),
+            target_count + 1,
+            "preserve every target tag"
+        );
+        let ok = client.send_event(event.clone()).await.unwrap();
+        let response = http
+            .post(format!("{}/events", relay_http_url()))
+            .header("X-Pubkey", author.public_key().to_hex())
+            .json(&event)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert!(!ok.accepted, "edit must be rejected over WebSocket");
+        assert_eq!(
+            ok.message,
+            "invalid: edit target not found or not editable by you"
+        );
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"], ok.message);
+    }
+    client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn edit_requires_one_target_tag() {
+    assert_edit_targets_rejected(|_, _| vec![vec![]]).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn edit_requires_a_valid_target_id() {
+    assert_edit_targets_rejected(|first, _| {
+        let malformed = Tag::parse(["e", "not-an-event-id"]).unwrap();
+        vec![
+            vec![Tag::parse(["e"]).unwrap()],
+            vec![malformed.clone()],
+            vec![Tag::parse(["e", &"g".repeat(64)]).unwrap()],
+            vec![malformed.clone(), Tag::parse(["e", first]).unwrap()],
+            vec![Tag::parse(["e", first]).unwrap(), malformed],
+        ]
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn edit_requires_one_distinct_target() {
+    assert_edit_targets_rejected(|first, second| {
+        vec![vec![
+            Tag::parse(["e", first]).unwrap(),
+            Tag::parse(["e", second]).unwrap(),
+        ]]
+    })
+    .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn edit_requires_one_target_even_when_repeated() {
+    assert_edit_targets_rejected(|first, _| {
+        vec![vec![
+            Tag::parse(["e", first]).unwrap(),
+            Tag::parse(["e", first]).unwrap(),
+        ]]
+    })
+    .await;
+}
+
+async fn assert_edit_takes_effect(reader: &Keys, channel: &str, target: &str, edit: &nostr::Event) {
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap()
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", reader.public_key().to_hex())
+        .json(&serde_json::json!([{
+            "kinds": buzz_core::media::EDIT_GOVERNED_KINDS,
+            "ids": [target], "#h": [channel], "effective_edit": 1, "consistency": "strong",
+        }]))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(status.is_success(), "effective edit lookup: {body}");
+    assert_eq!(body["original"]["id"], target);
+    assert_eq!(body["edit"]["id"], edit.id.to_hex());
+    assert_eq!(body["edit"]["content"], edit.content);
+}
+
+#[tokio::test]
+#[ignore]
+async fn edit_with_one_target_from_author_takes_effect() {
+    let author = Keys::generate();
+    let channel = create_agent_owned_channel(&author).await;
+    let mut client = BuzzTestClient::connect(&relay_url(), &author)
+        .await
+        .unwrap();
+    let target = client
+        .send_text_message(&author, &channel, "original", 9)
+        .await
+        .unwrap();
+    assert!(target.accepted, "{}", target.message);
+    let edit = EventBuilder::new(Kind::Custom(40003), "author replacement")
+        .tags([
+            Tag::parse(["e", &target.event_id]).unwrap(),
+            Tag::parse(["h", &channel]).unwrap(),
+        ])
+        .sign_with_keys(&author)
+        .unwrap();
+    let ok = client.send_event(edit.clone()).await.unwrap();
+    assert!(ok.accepted, "{}", ok.message);
+    assert_edit_takes_effect(&author, &channel, &target.event_id, &edit).await;
+    client.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn edit_with_one_target_from_verified_agent_owner_takes_effect() {
+    let owner = Keys::generate();
+    let agent = Keys::generate();
+    let channel = create_agent_owned_channel(&agent).await;
+    let mut agent_client = connect_agent_with_owner(&agent, &owner).await;
+    let mut owner_client = BuzzTestClient::connect(&relay_url(), &owner).await.unwrap();
+    for kind in [9, 40002] {
+        let target = agent_client
+            .send_text_message(&agent, &channel, "agent original", kind)
+            .await
+            .unwrap();
+        assert!(target.accepted, "{}", target.message);
+        let edit = EventBuilder::new(Kind::Custom(40003), "owner replacement")
+            .tags([
+                Tag::parse(["e", &target.event_id]).unwrap(),
+                Tag::parse(["h", &channel]).unwrap(),
+            ])
+            .sign_with_keys(&owner)
+            .unwrap();
+        let ok = owner_client.send_event(edit.clone()).await.unwrap();
+        assert!(ok.accepted, "{}", ok.message);
+        assert_edit_takes_effect(&agent, &channel, &target.event_id, &edit).await;
+    }
+    agent_client.disconnect().await.unwrap();
+    owner_client.disconnect().await.unwrap();
+}
+
 /// Owner can edit a message authored by their agent via kind:40003.
 #[tokio::test]
 #[ignore]
