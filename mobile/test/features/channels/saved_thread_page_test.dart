@@ -93,8 +93,7 @@ void main() {
   late ProviderContainer container;
   late SavedMessageStore store;
 
-  setUp(() async {
-    root = await Directory.systemTemp.createTemp('buzz-thread-cache');
+  void openCacheSession() {
     relay = _Relay();
     container = ProviderContainer(
       retry: (_, _) => null,
@@ -106,6 +105,11 @@ void main() {
       ],
     );
     store = container.read(savedMessageStoreProvider);
+  }
+
+  setUp(() async {
+    root = await Directory.systemTemp.createTemp('buzz-thread-cache');
+    openCacheSession();
   });
 
   tearDown(() async {
@@ -118,6 +122,25 @@ void main() {
     binding.handleBeginFrame(null);
     binding.handleDrawFrame();
     await Future<void>.delayed(Duration.zero);
+  }
+
+  Future<List<NostrEvent>?> waitForSaved(
+    SavedMessagePage page,
+    Iterable<NostrEvent> expected,
+  ) async {
+    final ids = expected.map((event) => event.id).toSet();
+    final elapsed = Stopwatch()..start();
+    List<NostrEvent>? saved;
+    do {
+      saved = await store.read(store.capture(_scope, page));
+      if (saved != null &&
+          saved.length == ids.length &&
+          saved.every((event) => ids.contains(event.id)))
+        return saved;
+      // Yield to the write worker while observing the durable result.
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+    } while (elapsed.elapsed < const Duration(seconds: 2));
+    return saved;
   }
 
   for (final lateRefusal in [false, true]) {
@@ -141,7 +164,10 @@ void main() {
 
         Future<List<NostrEvent>?> readSaved() =>
             store.read(store.capture(_scope, _args.savedPage));
-        expect(await readSaved(), [oldReply, newReply]);
+        expect(await waitForSaved(_args.savedPage, [oldReply, newReply]), [
+          oldReply,
+          newReply,
+        ]);
 
         final refusal = RelayException(403, 'restricted: not a channel member');
         if (lateRefusal) {
@@ -189,13 +215,13 @@ void main() {
     expect(await readSaved(), isNull);
 
     relay.threadQueries.add(Future.value([reply]));
-    relay.writerEvents = [head, edit];
+    relay.writerEvents = [head, reply, edit];
     final replies = threadRepliesProvider(args);
     final openThread = container.listen(replies, (_, _) {});
     expect(await container.read(replies.future), [reply]);
     await paint();
 
-    final saved = await readSaved();
+    final saved = await waitForSaved(args.savedPage, [head, reply, edit]);
     expect(relay.writerFilters, hasLength(2));
     expect(saved, [head, reply, edit]);
     expect(
@@ -205,8 +231,11 @@ void main() {
       'Edited reply',
     );
     expect(relay.writerFilters, hasLength(2));
-    expect(relay.writerFilters.first.ids, [head.id]);
-    expect(relay.writerFilters.last.tags['#e'], [reply.id]);
+    expect(relay.writerFilters.first.ids, unorderedEquals([head.id, reply.id]));
+    expect(
+      relay.writerFilters.last.tags['#e'],
+      unorderedEquals([head.id, reply.id]),
+    );
     for (final filter in relay.writerFilters) {
       expect(filter.tags['#h'], [args.channelId]);
     }
@@ -221,13 +250,20 @@ void main() {
 
     openThread.close();
     await container.pump();
+    relay.writerEvents = [head, laterReply, edit];
     relay.threadQueries.add(Future.value([reply, laterReply]));
     final reopenedThread = container.listen(replies, (_, _) {});
     expect(await container.read(replies.future), [reply, laterReply]);
     await paint();
+    expect(
+      await waitForSaved(args.savedPage, [head, reply, laterReply, edit]),
+      unorderedEquals([head, reply, laterReply, edit]),
+    );
     expect(relay.writerFilters, hasLength(4));
-    expect(relay.writerFilters.last.tags['#e'], [reply.id]);
-    expect(await readSaved(), [head, reply, laterReply, edit]);
+    expect(
+      relay.writerFilters.last.tags['#e'],
+      unorderedEquals([reply.id, laterReply.id]),
+    );
 
     // The writer response is still untrusted. A forged edit cannot make the
     // already superseded original eligible for the saved page.
@@ -239,7 +275,10 @@ void main() {
     container.listen(replies, (_, _) {});
     expect(await container.read(replies.future), [reply, laterReply]);
     await paint();
-    expect(await readSaved(), [head, laterReply]);
+    expect(
+      await waitForSaved(args.savedPage, [head, laterReply]),
+      unorderedEquals([head, laterReply]),
+    );
   });
 
   test(
@@ -263,12 +302,59 @@ void main() {
       expect(await container.read(replies.future), [reply]);
       await paint();
       expect(relay.writerFilters, isEmpty);
-      expect(await store.read(store.capture(_scope, args.savedPage)), [
-        head,
-        reply,
-      ]);
+      expect(await waitForSaved(args.savedPage, [head, reply]), [head, reply]);
     },
   );
+
+  for (final prunedBeforeRestart in [false, true]) {
+    test(
+      'a replica cannot restore the original after restart (pruned: $prunedBeforeRestart)',
+      () async {
+        final head = _event('Older head', isRoot: true);
+        final args = ThreadRepliesArgs(
+          channelId: _args.channelId,
+          rootId: head.id,
+        );
+        final reply = _event('Original', args: args);
+        final edit = _event(
+          'Revised',
+          args: args,
+          kind: EventKind.streamMessageEdit,
+          deletionTarget: reply.id,
+        );
+        final ticket = store.capture(_scope, args.savedPage);
+        await store.save(
+          ticket,
+          prunedBeforeRestart ? [reply] : [head, reply, edit],
+          relayAuthor: null,
+        );
+        if (prunedBeforeRestart) {
+          store.removeChannelEvents(_scope, args.channelId, {
+            reply.id,
+          }, edited: true);
+          expect(
+            await store.read(store.capture(_scope, args.savedPage)),
+            isNull,
+          );
+        }
+        container.dispose();
+        openCacheSession();
+
+        relay.threadQueries.add(Future.value([reply]));
+        relay.writerEvents = [head, reply, edit];
+        final provider = threadRepliesProvider(args);
+        container.listen(provider, (_, _) {});
+        expect(await container.read(provider.future), [reply]);
+        await paint();
+        expect(await waitForSaved(args.savedPage, [head, reply, edit]), [
+          head,
+          reply,
+          edit,
+        ]);
+        expect(relay.writerFilters.last.tags['#e'], contains(reply.id));
+      },
+    );
+  }
 
   test(
     'an empty thread result cannot clear confirmed channel refusal',

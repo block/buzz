@@ -6,7 +6,7 @@ const _version = 3;
 const _maxDatabasePages = 11520; // 45 MiB at 4 KiB per page.
 const _maxWindowBytes = 2 * 1024 * 1024;
 
-enum _DiskAction { read, touch, save, removeChannel }
+enum _DiskAction { read, inspect, touch, save, removeChannel }
 
 final class _DiskRequest {
   const _DiskRequest({
@@ -63,17 +63,26 @@ _DiskResult _accessDatabase(_DiskRequest request) {
         ? _cacheCandidates(request.events, request.page).toList()
         : const <NostrEvent>[];
     var knownWires = const <String, String>{};
+    final requiredEdits = request.requiredEdits.toSet();
     if (existed && candidates.isNotEmpty) {
       // Recover any hot rollback journal before reading verified copies.
       db = sqlite3.open(request.path, mode: OpenMode.readWrite);
       _checkSchema(db);
       knownWires = _knownWires(db, candidates);
+      if (request.page.rootId.isNotEmpty) {
+        requiredEdits.addAll(_savedEditTargets(db, request.page));
+      }
       db.close();
       db = null;
     }
 
     // Signature verification runs with no SQLite connection open.
-    final (wires, byteSize) = _verifiedWires(request, candidates, knownWires);
+    final (wires, byteSize) = _verifiedWires(
+      request,
+      candidates,
+      knownWires,
+      requiredEdits,
+    );
     if (!existed) file.parent.createSync(recursive: true);
     db = sqlite3.open(request.path);
     db.execute('PRAGMA foreign_keys = ON');
@@ -85,6 +94,7 @@ _DiskResult _accessDatabase(_DiskRequest request) {
     db.execute('PRAGMA cache_spill = OFF');
     return switch (request.action) {
       _DiskAction.read => _readPage(db, request.page),
+      _DiskAction.inspect => _readPage(db, request.page, includePruned: true),
       _DiskAction.touch => _touchPage(db, request.page),
       _DiskAction.save => _saveWithEviction(db, request, wires, byteSize),
       _DiskAction.removeChannel => _removeChannel(
@@ -159,13 +169,27 @@ void _checkSchema(Database db) {
   if (version != _version) throw const FormatException('cache format');
 }
 
-_DiskResult _readPage(Database db, SavedMessagePage page) {
+_DiskResult _readPage(
+  Database db,
+  SavedMessagePage page, {
+  bool includePruned = false,
+}) {
   final key = [page.channelId, page.rootId];
   final rows = db.select('''
     SELECT wire FROM page_events JOIN events ON events.id = page_events.event_id
     WHERE channel_id = ? AND root_id = ? ORDER BY position
   ''', key);
-  if (rows.isEmpty) return const _DiskResult();
+  if (rows.isEmpty) {
+    final pruned =
+        includePruned &&
+        db
+            .select(
+              'SELECT 1 FROM pages WHERE channel_id = ? AND root_id = ?',
+              key,
+            )
+            .isNotEmpty;
+    return pruned ? const _DiskResult(events: []) : const _DiskResult();
+  }
   final events = <NostrEvent>[];
   try {
     for (final row in rows) {
@@ -208,10 +232,31 @@ Map<String, String> _knownWires(Database db, List<NostrEvent> candidates) {
   };
 }
 
+Iterable<String> _savedEditTargets(Database db, SavedMessagePage page) sync* {
+  for (final row in db.select(
+    r'''
+    SELECT wire FROM page_events JOIN events ON events.id = page_events.event_id
+    WHERE channel_id = ? AND root_id = ? AND json_extract(wire, '$.kind') = ?
+  ''',
+    [page.channelId, page.rootId, EventKind.streamMessageEdit],
+  )) {
+    final event = NostrEvent.fromJson(
+      jsonDecode(row['wire'] as String) as Map<String, dynamic>,
+    );
+    final target = _savedEditTarget(event);
+    if (target != null) yield target;
+  }
+}
+
+String? _savedEditTarget(NostrEvent event) => event.tags.reversed
+    .where((tag) => tag.length > 1 && tag[0] == 'e')
+    .firstOrNull?[1];
+
 (Map<String, String>, int) _verifiedWires(
   _DiskRequest request,
   List<NostrEvent> candidates,
   Map<String, String> knownWires,
+  Set<String> requiredEdits,
 ) {
   final page = request.page;
   final selected = <String, String>{};
@@ -249,13 +294,11 @@ Map<String, String> _knownWires(Database db, List<NostrEvent> candidates) {
     selected[event.id] = wire;
     if (EventKind.channelTimelineContentKinds.contains(event.kind)) {
       rootIds.add(event.id);
-    } else if (request.requiredEdits.isNotEmpty &&
+    } else if (requiredEdits.isNotEmpty &&
         event.kind == EventKind.streamMessageEdit) {
-      final target = event.tags.reversed
-          .where((tag) => tag.length > 1 && tag[0] == 'e')
-          .firstOrNull?[1];
+      final target = _savedEditTarget(event);
       if (target != null) edits[event.id] = target;
-    } else if (request.requiredEdits.isNotEmpty &&
+    } else if (requiredEdits.isNotEmpty &&
         (event.kind == EventKind.deletion ||
             event.kind == EventKind.nip29DeleteEvent)) {
       deleted.addAll(
@@ -271,7 +314,7 @@ Map<String, String> _knownWires(Database db, List<NostrEvent> candidates) {
       .where((edit) => !deleted.contains(edit.key))
       .map((edit) => edit.value)
       .toSet();
-  for (final id in request.requiredEdits.difference(confirmed)) {
+  for (final id in requiredEdits.difference(confirmed)) {
     final removed = selected.remove(id);
     if (removed != null) byteSize -= utf8.encode(removed).length;
   }
@@ -438,9 +481,12 @@ _DiskResult _removeChannel(Database db, String channel, Set<String>? targets) {
       ''',
         [channel],
       );
-      db.execute('DELETE FROM pages WHERE channel_id = ? AND byte_size = 0', [
-        channel,
-      ]);
+      // Keep a pruned thread's empty index entry. A later scan can use it
+      // to distinguish missing rows after a mutation from a first open.
+      db.execute(
+        "DELETE FROM pages WHERE channel_id = ? AND root_id = '' AND byte_size = 0",
+        [channel],
+      );
     }
     db.execute('COMMIT');
   } catch (_) {

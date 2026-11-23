@@ -195,6 +195,7 @@ final threadRepliesProvider = FutureProvider.autoDispose
                     cache,
                     ticket,
                     knownRoot,
+                    isCurrent: () => current && cache.isCurrent(ticket),
                   );
                 } catch (error, trace) {
                   if (current &&
@@ -226,8 +227,9 @@ Future<List<NostrEvent>> _readSavedThreadEvents(
   List<NostrEvent> events,
   SavedMessageStore store,
   SavedMessageTicket ticket,
-  NostrEvent? knownRoot,
-) async {
+  NostrEvent? knownRoot, {
+  required bool Function() isCurrent,
+}) async {
   if (events.length > SavedMessageStore.maxPageEvents) return const [];
   final targets = {
     args.rootId,
@@ -238,25 +240,46 @@ Future<List<NostrEvent>> _readSavedThreadEvents(
   // still has complete relay history, but cannot replace its saved page
   // without also verifying its edits.
   if (targets.length > _threadReplyPageSize + 1) return const [];
+  final prior = await store.read(ticket, includePruned: true);
+  if (!isCurrent()) return const [];
+  String? editTarget(NostrEvent event) => event.tags.reversed
+      .where((tag) => tag.length > 1 && tag[0] == 'e')
+      .firstOrNull?[1];
   final (:edited, :deleted) = store.threadMutations(ticket, {
     args.rootId,
     ...events.map((event) => event.id),
   });
-  final editTargets = targets.intersection(edited);
-  final needsRoot = knownRoot == null && !deleted.contains(args.rootId);
-  // Only ask the writer about targets whose edits already reached this
-  // client. The ordinary relay scan supplies aux for the rest.
+  deleted.addAll({
+    for (final event in prior ?? const <NostrEvent>[])
+      if (event.kind == EventKind.deletion ||
+          event.kind == EventKind.nip29DeleteEvent)
+        for (final tag in event.tags)
+          if (tag.length > 1 && tag[0] == 'e') tag[1],
+  });
+  final changed = prior == null
+      ? const <String>{}
+      : targets.difference(prior.map((event) => event.id).toSet());
+  final idsToVerify = {if (knownRoot == null) args.rootId, ...changed}
+    ..removeAll(deleted);
+  final editTargets = targets.intersection({
+    ...edited,
+    ...changed,
+    for (final event in prior ?? const <NostrEvent>[])
+      if (event.kind == EventKind.streamMessageEdit) ?editTarget(event),
+  })..removeAll(deleted);
+  // Trust the earlier signed snapshot to identify rows that need the
+  // writer. A missing row may have been pruned while history was offline.
   const editLimit = 1000;
   const strong = {'consistency': 'strong'};
   final filters = [
-    if (needsRoot)
+    if (idsToVerify.isNotEmpty)
       NostrFilter(
         kinds: EventKind.channelTimelineContentKinds,
-        ids: [args.rootId],
+        ids: idsToVerify.toList(),
         tags: {
           '#h': [args.channelId],
         },
-        limit: 1,
+        limit: idsToVerify.length,
         extensions: strong,
       ),
     if (editTargets.isNotEmpty)
@@ -278,16 +301,23 @@ Future<List<NostrEvent>> _readSavedThreadEvents(
       .toList();
   // At the limit the response may omit an edit. Clear the whole saved page.
   if (writerEdits.length >= editLimit) return const [];
-  String? editTarget(NostrEvent event) => event.tags.reversed
-      .where((tag) => tag.length > 1 && tag[0] == 'e')
-      .firstOrNull?[1];
+  final verifiedRows = current
+      .where(
+        (event) =>
+            idsToVerify.contains(event.id) &&
+            EventKind.channelTimelineContentKinds.contains(event.kind),
+      )
+      .toList();
   return [
-    if (knownRoot != null && !deleted.contains(knownRoot.id)) knownRoot,
-    for (final event in current)
-      if (event.id == args.rootId && !deleted.contains(event.id)) event,
+    if (knownRoot != null &&
+        !deleted.contains(knownRoot.id) &&
+        !idsToVerify.contains(knownRoot.id))
+      knownRoot,
+    ...verifiedRows,
     ...writerEdits.where((event) => !deleted.contains(event.id)),
     for (final event in events)
       if (!deleted.contains(event.id) &&
+          !idsToVerify.contains(event.id) &&
           !(event.kind == EventKind.streamMessageEdit &&
               editTargets.contains(editTarget(event))))
         event,

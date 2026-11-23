@@ -140,8 +140,14 @@ final class SavedMessageStore {
   }
 
   /// Reads a verified page and records that the conversation was opened.
-  Future<List<NostrEvent>?> read(SavedMessageTicket ticket) async {
-    final result = await _forPage(ticket, _DiskAction.read);
+  Future<List<NostrEvent>?> read(
+    SavedMessageTicket ticket, {
+    bool includePruned = false,
+  }) async {
+    final result = await _forPage(
+      ticket,
+      includePruned ? _DiskAction.inspect : _DiskAction.read,
+    );
     return isCurrent(ticket) ? result?.events : null;
   }
 
