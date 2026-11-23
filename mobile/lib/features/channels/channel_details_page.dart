@@ -35,8 +35,7 @@ Future<bool?> showChannelDetailsSheet({
   required BuildContext context,
   required Channel channel,
   required String? currentPubkey,
-  required FutureOr<void> Function(BuildContext context, String pubkey)
-  onMemberTap,
+  FutureOr<void> Function(BuildContext context, String pubkey)? onMemberTap,
   String? sectionId,
   bool isUnread = false,
 
@@ -44,20 +43,27 @@ Future<bool?> showChannelDetailsSheet({
   bool personalChat = false,
 }) {
   // Solo reuses the title menu, including its live agent and workspace pickers.
-  final native = _usesNativeChannelSheet(context);
-  Widget content(BuildContext context) => ChannelDetailsPage(
-    channel: channel,
-    currentPubkey: currentPubkey,
-    onMemberTap: onMemberTap,
-    sectionId: sectionId,
-    personalChat: personalChat,
-    sheetSoloSettings: soloSettings,
-    inSheet: true,
-    isUnread: isUnread,
-    nativePresentation: native,
-  );
-  if (native) return _showNativeChannelSheet(context, content);
-  return _showChannelLongPressSheet(context: context, builder: content);
+  Widget content(BuildContext context, {bool nativePresentation = false}) =>
+      ChannelDetailsPage(
+        channel: channel,
+        currentPubkey: currentPubkey,
+        onMemberTap:
+            onMemberTap ??
+            (context, pubkey) => showUserProfileSheet(
+              context,
+              pubkey,
+              names: channelIdentityNamesProvider(channel.id),
+              contextualActions: (_) =>
+                  ChannelMemberProfileActions(channel: channel, pubkey: pubkey),
+            ),
+        sectionId: sectionId,
+        personalChat: personalChat,
+        sheetSoloSettings: soloSettings,
+        inSheet: true,
+        isUnread: isUnread,
+        nativePresentation: nativePresentation,
+      );
+  return _presentChannelListSheet(context, content);
 }
 
 /// Combined channel identity, membership, organization, and lifecycle page.
@@ -120,6 +126,13 @@ class ChannelDetailsPage extends HookConsumerWidget {
             .store
             .channels[resolvedChannel.id]
             ?.muted ==
+        true;
+    final isPinned =
+        ref
+            .watch(channelPinsProvider)
+            .store
+            .channels[resolvedChannel.id]
+            ?.enabled ==
         true;
     final isStarred =
         ref
@@ -459,6 +472,14 @@ class ChannelDetailsPage extends HookConsumerWidget {
       iconColumnWidth: aligned ? Grid.md : null,
       verticalPadding: _channelDetailsSectionPadding,
       children: [
+        AppListRow(
+          key: const ValueKey('channel-details-pin-action'),
+          icon: isPinned ? BuzzIcons.pinnedOff : BuzzIcons.pinned,
+          title: isPinned ? 'Unpin' : 'Pin',
+          onTap: () => ref
+              .read(channelPinsProvider.notifier)
+              .setEnabled(resolvedChannel.id, !isPinned),
+        ),
         if (solo)
           AppListRow(
             icon: isStarred ? BuzzIcons.starOff : BuzzIcons.star,

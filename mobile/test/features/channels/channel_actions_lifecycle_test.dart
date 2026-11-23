@@ -122,7 +122,7 @@ void main() {
           await tester.pumpAndSettle();
         } else {
           await tester.scrollUntilVisible(
-            find.text('Archive chat'),
+            find.text('Archive chat').hitTestable(),
             200,
             scrollable: find.byType(Scrollable).last,
           );

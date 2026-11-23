@@ -447,6 +447,7 @@ Widget _buildTestable({
       if (!useRealChannelProviders)
         channelsProvider.overrideWith(() => fakeChannelsNotifier),
       channelStarsProvider.overrideWith(_FakeChannelStarsNotifier.new),
+      channelPinsProvider.overrideWith(_FakeChannelStarsNotifier.new),
       channelMutesProvider.overrideWith(_FakeChannelMutesNotifier.new),
       if (!useRealChannelProviders)
         channelDetailsProvider(_channelId).overrideWith(
@@ -1976,7 +1977,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        find.byKey(const ValueKey('channel-details-star-action')),
+        find.byKey(const ValueKey('channel-details-pin-action')),
         findsOneWidget,
       );
       expect(
@@ -5386,22 +5387,42 @@ void main() {
         );
         await tester.pumpAndSettle();
 
-        final starAction = find.byKey(
-          const ValueKey('channel-details-star-action'),
+        final pinAction = find.byKey(
+          const ValueKey('channel-details-pin-action'),
         );
         final muteAction = find.byKey(
           const ValueKey('channel-details-mute-action'),
         );
-        expect(find.text('Star'), findsOneWidget);
-        expect(find.byIcon(BuzzIcons.star), findsOneWidget);
+        expect(find.text('Pin'), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.pinned), findsOneWidget);
         expect(find.text('Mute'), findsOneWidget);
         expect(find.byIcon(BuzzIcons.bellOff), findsOneWidget);
 
-        await tester.tap(starAction);
+        await Scrollable.ensureVisible(
+          tester.element(pinAction),
+          alignment: 0.5,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(pinAction);
         await tester.pump();
 
+        expect(find.text('Unpin'), findsOneWidget);
+        await Scrollable.ensureVisible(
+          tester.element(find.text('Star')),
+          alignment: 0.5,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Star'));
+        await tester.pump();
         expect(find.text('Unstar'), findsOneWidget);
-        expect(find.byIcon(BuzzIcons.starOff), findsOneWidget);
+        expect(find.text('Unpin'), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.pinnedOff), findsOneWidget);
+
+        await Scrollable.ensureVisible(
+          tester.element(muteAction),
+          alignment: 0.5,
+        );
+        await tester.pumpAndSettle();
         await tester.tap(muteAction);
         await tester.pump();
 
@@ -5409,12 +5430,23 @@ void main() {
         final activeBell = tester.widget<Icon>(find.byIcon(BuzzIcons.bell));
         expect(activeBell.color, AppTheme.light().colorScheme.primary);
 
-        await tester.tap(starAction);
+        await Scrollable.ensureVisible(
+          tester.element(pinAction),
+          alignment: 0.5,
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(pinAction);
+        await Scrollable.ensureVisible(
+          tester.element(muteAction),
+          alignment: 0.5,
+        );
+        await tester.pumpAndSettle();
         await tester.tap(muteAction);
         await tester.pump();
 
-        expect(find.text('Star'), findsOneWidget);
+        expect(find.text('Pin'), findsOneWidget);
         expect(find.text('Mute'), findsOneWidget);
+        expect(find.byIcon(BuzzIcons.pinned), findsOneWidget);
         expect(find.byIcon(BuzzIcons.bellOff), findsOneWidget);
       },
     );
@@ -5430,7 +5462,7 @@ void main() {
       await tester.pumpWidget(
         _buildTestable(
           messages: const [],
-          textScaler: const TextScaler.linear(2),
+          textScaler: const TextScaler.linear(3),
         ),
       );
       await tester.pumpAndSettle();
@@ -5631,7 +5663,7 @@ void main() {
       );
       expect(_previewRowAvatarInitial(tester, 'self'), 'Y');
 
-      await tester.ensureVisible(seeAllRow);
+      await Scrollable.ensureVisible(tester.element(seeAllRow), alignment: 0.5);
       await tester.pumpAndSettle();
       await tester.tap(seeAllRow);
       await tester.pumpAndSettle();
@@ -6512,19 +6544,19 @@ void main() {
       }
       final aliceName = find.text('Alice');
       final aliceText = tester.widget<Text>(aliceName);
-      expect(aliceText.style?.fontSize, 11);
+      expect(aliceText.style?.fontSize, 12);
       expect(aliceText.style?.fontWeight, FontWeight.w500);
-      expect(aliceText.style?.height, 17 / 11);
+      expect(aliceText.style?.height, 1.25);
       final aliceUsername = tester.widget<Text>(
         find.byKey(const ValueKey('message-username-msg1')),
       );
       final aliceTimestamp = tester.widget<Text>(
         find.byKey(const ValueKey('message-timestamp-msg1')),
       );
-      expect(aliceUsername.style?.fontSize, 11);
+      expect(aliceUsername.style?.fontSize, 12);
       expect(aliceUsername.style?.fontWeight, FontWeight.w400);
-      expect(aliceUsername.style?.height, 17 / 11);
-      expect(aliceTimestamp.style?.fontSize, 11);
+      expect(aliceUsername.style?.height, 1.25);
+      expect(aliceTimestamp.style?.fontSize, 12);
       expect(aliceTimestamp.style?.fontWeight, FontWeight.w400);
       final timeFinder = find.byKey(const ValueKey('message-timestamp-msg1'));
       expect(
@@ -6892,7 +6924,7 @@ void main() {
           'Photo 1 of 2',
         );
         expect(
-          carouselRect.left + Grid.xs,
+          carouselRect.left + messageBubbleHorizontalInset,
           tester
               .getRect(find.byKey(const ValueKey('message-author-gallery')))
               .left,
@@ -7178,6 +7210,7 @@ void main() {
         unreadRect.top,
         frostedAppBarHeight(
               tester.element(unreadButton),
+              bottomHeight: Grid.xxs,
               titleContentHeight: tester
                   .widget<FrostedAppBar>(find.byType(FrostedAppBar).first)
                   .titleContentHeight,
@@ -8903,6 +8936,7 @@ void main() {
           closeTo(
             frostedAppBarHeight(
                   tester.element(stickyHeader),
+                  bottomHeight: Grid.xxs,
                   titleContentHeight: tester
                       .widget<FrostedAppBar>(find.byType(FrostedAppBar).first)
                       .titleContentHeight,
@@ -15747,7 +15781,12 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.byType(ComposeBar));
+      await tester.tap(
+        find.descendant(
+          of: find.byType(ComposeBar),
+          matching: find.text('Message'),
+        ),
+      );
       await tester.pumpAndSettle();
       final editor = find.descendant(
         of: find.byType(ComposeBar),
@@ -19205,7 +19244,7 @@ void main() {
           const ValueKey('thread-message-timestamp-$threadIdThreadDashRoot'),
         ),
       );
-      expect(threadTimestamp.style?.fontSize, 11);
+      expect(threadTimestamp.style?.fontSize, 12);
       expect(
         find.descendant(
           of: find.byKey(
@@ -19720,7 +19759,7 @@ void main() {
               id: 'reply-$i',
               pubkey: 'bob',
               content: i == 29
-                  ? List.filled(31, 'Tall reply').join('\n')
+                  ? List.filled(27, 'Tall reply').join('\n')
                   : 'Reply $i',
               createdAt: 1100 + i,
               extraTags: const [
@@ -20086,7 +20125,7 @@ void main() {
               id: 'reply-$i',
               pubkey: 'bob',
               content: i == 29
-                  ? List.filled(14, 'Tall reply').join('\n')
+                  ? List.filled(12, 'Tall reply').join('\n')
                   : 'Reply $i',
               createdAt: 1100 + i,
               extraTags: const [
