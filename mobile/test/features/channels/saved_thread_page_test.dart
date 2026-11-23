@@ -135,8 +135,9 @@ void main() {
       saved = await store.read(store.capture(_scope, page));
       if (saved != null &&
           saved.length == ids.length &&
-          saved.every((event) => ids.contains(event.id)))
+          saved.every((event) => ids.contains(event.id))) {
         return saved;
+      }
       // Yield to the write worker while observing the durable result.
       await Future<void>.delayed(const Duration(milliseconds: 1));
     } while (elapsed.elapsed < const Duration(seconds: 2));
