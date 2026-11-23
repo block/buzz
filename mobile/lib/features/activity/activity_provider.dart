@@ -755,25 +755,20 @@ final activityProvider =
       ActivityNotifier.new,
     );
 
-/// Conversation-grouped inbox rows derived from the raw feed. DM messages
-/// group by DM channel so one conversation renders as one row.
-final inboxItemsProvider = Provider<List<InboxItem>>((ref) {
-  final feed = ref.watch(activityProvider).value;
+/// Activity items for the DM messages, mentions and eligible thread replies
+/// the channel list received. Channel discovery already catches up and
+/// subscribes to joined channels, so Activity, the bell and the icon have
+/// these even when a history read fails, lags or misses them, and no extra
+/// subscription or read is needed. They always belong to the current
+/// community: the channel list resets when it changes.
+final observedActivityItemsProvider = Provider<List<FeedItem>>((ref) {
   final channels =
       ref.watch(channelsProvider).asData?.value ?? const <Channel>[];
-  final dmChannelIds = {
-    for (final channel in channels)
-      if (channel.isDm) channel.id,
-  };
   final myPk = ref.watch(myPubkeyProvider);
-  final channelsNotifier = ref.read(channelsProvider.notifier);
-  // Channel discovery already catches up and subscribes to joined channels.
-  // Its received DM messages, mentions and eligible replies join the feed
-  // here, so Activity, the bell and the icon have them even when a history
-  // read fails or misses them, and no extra subscription or read is needed.
-  final byId = <String, FeedItem>{
-    for (final event in channelsNotifier.observedActivityEvents(channels))
-      event.id: FeedItem(
+  return [
+    for (final event
+        in ref.read(channelsProvider.notifier).observedActivityEvents(channels))
+      FeedItem(
         id: event.id,
         kind: event.kind,
         pubkey: event.pubkey,
@@ -786,11 +781,38 @@ final inboxItemsProvider = Provider<List<InboxItem>>((ref) {
             ? 'mention'
             : 'activity',
       ),
+  ];
+});
+
+/// Conversation-grouped inbox rows derived from the raw feed. DM messages
+/// group by DM channel so one conversation renders as one row.
+final inboxItemsProvider = Provider<List<InboxItem>>((ref) {
+  final feed = ref.watch(activityProvider).value;
+  final channelsNotifier = ref.read(channelsProvider.notifier);
+  final byId = <String, FeedItem>{
+    for (final item in ref.watch(observedActivityItemsProvider)) item.id: item,
     // The addressed feed owns category precedence for overlapping events.
     // The channel list applies live deletions; the feed does not see them.
     for (final item in feed?.all ?? const <FeedItem>[])
       if (!channelsNotifier.isUnreadDeleted(item.id, channelId: item.channelId))
         item.id: item,
   };
-  return buildInboxItems(byId.values, isDmChannel: dmChannelIds.contains);
+  return _inboxRows(ref, byId.values);
 });
+
+/// Inbox rows for only the events the channel list received. The icon reads
+/// these while the feed loads, because a loading feed can still hold the
+/// previous community's rows.
+final observedInboxItemsProvider = Provider<List<InboxItem>>(
+  (ref) => _inboxRows(ref, ref.watch(observedActivityItemsProvider)),
+);
+
+List<InboxItem> _inboxRows(Ref ref, Iterable<FeedItem> items) {
+  final channels =
+      ref.watch(channelsProvider).asData?.value ?? const <Channel>[];
+  final dmChannelIds = {
+    for (final channel in channels)
+      if (channel.isDm) channel.id,
+  };
+  return buildInboxItems(items, isDmChannel: dmChannelIds.contains);
+}

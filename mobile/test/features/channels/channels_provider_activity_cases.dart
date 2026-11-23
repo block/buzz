@@ -348,24 +348,26 @@ void _threadActivityCases() {
     ];
     Future<void> deliver(NostrEvent event) async {
       session.emit(event);
-      // Let the live Activity refresh it triggers run, and fail.
-      await Future<void>.delayed(const Duration(milliseconds: 100));
       await _settle();
     }
 
     // Only the live channel subscriptions still deliver: every history read
-    // fails, so no Activity read can return these events.
+    // fails, so no Activity read can return these events, and the feed that
+    // the reload publishes is incomplete.
     session.latestBatchError = StateError('history unavailable');
     session.messageHistoryError = StateError('history unavailable');
+    container.invalidate(activityProvider);
+    final failed = await container.read(activityProvider.future);
+    expect(failed.complete, isFalse);
 
     // Ordinary channel traffic and quiet agent messages stay out.
     await deliver(message('ordinary', _channelA, 10));
     await deliver(message('quiet', _channelA, 11, mention: true, quiet: true));
     expect(activityIds(), isEmpty);
-    expect(container.read(activityProvider).requireValue.complete, isFalse);
     expect(container.read(unreadBadgeProvider), UnreadBadge.pending);
 
-    // A mention from a sender whose clock is far behind still counts.
+    // A mention from a sender whose clock is far behind still counts, as
+    // long as it is newer than the channel's read marker.
     await deliver(message('skewed-mention', _channelA, 12, mention: true));
     expect(activityIds(), ['skewed-mention']);
     expect(container.read(inboxHasUnreadProvider), isTrue);
@@ -387,6 +389,70 @@ void _threadActivityCases() {
     });
     expect(container.read(inboxHasUnreadProvider), isFalse);
     expect(container.read(unreadBadgeProvider), UnreadBadge.pending);
+  });
+
+  test('a received mention raises the icon while Activity reloads, and the '
+      'next account does not inherit it', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, 'me')],
+      metadata: [_meta(id: _channelA, name: 'general')],
+    );
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final container = _buildContainer(
+      session: session,
+      overrides: [
+        savedPrefsProvider.overrideWithValue(prefs),
+        authProvider.overrideWith(_SignedInAuth.new),
+        readStateProvider.overrideWith(_ReadyReadState.new),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(channelsProvider.future);
+    await container.read(channelsProvider.notifier).waitForUnreadCatchUp();
+    await container.read(activityProvider.future);
+    final badge = container.listen(unreadBadgeProvider, (_, _) {});
+    addTearDown(badge.close);
+    await _settle();
+    expect(container.read(unreadBadgeProvider), UnreadBadge.clear);
+
+    // Hold Activity's reload open, as after a reconnect.
+    final reload = Completer<void>();
+    addTearDown(() {
+      if (!reload.isCompleted) reload.complete();
+    });
+    session.latestBatchGate = reload;
+    container.invalidate(activityProvider);
+    await _settle();
+    expect(container.read(activityProvider).isLoading, isTrue);
+    expect(container.read(unreadBadgeProvider), UnreadBadge.pending);
+
+    session.emit(
+      NostrEvent(
+        id: 'live-mention',
+        pubkey: 'alice',
+        createdAt: 50,
+        kind: 9,
+        tags: const [
+          ['h', _channelA],
+          ['p', 'me'],
+        ],
+        content: 'Look at this',
+        sig: '',
+      ),
+    );
+    await _settle();
+    expect(container.read(activityProvider).isLoading, isTrue);
+    expect(container.read(inboxHasUnreadProvider), isTrue);
+    expect(container.read(unreadBadgeProvider), UnreadBadge.unread);
+
+    // The channel list resets for another account, so the received mention
+    // does not carry over to it.
+    container.read(_testPubkeyProvider.notifier).set('other-user');
+    await container.read(channelsProvider.future);
+    await _settle();
+    expect(container.read(observedInboxItemsProvider), isEmpty);
+    expect(container.read(unreadBadgeProvider), isNot(UnreadBadge.unread));
   });
 }
 

@@ -2,6 +2,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/read_state/read_state_provider.dart';
 import 'activity_provider.dart';
+import 'inbox_item.dart';
 import 'inbox_local_state_provider.dart';
 import 'inbox_read_state.dart';
 
@@ -31,6 +32,25 @@ final inboxUnreadProvider = Provider<InboxUnread>((ref) {
       () => ref.read(inboxLocalStateProvider.notifier).clearUnread(stale),
     );
   }
+  return _inboxUnread(items, readState, localState);
+});
+
+/// [inboxUnreadProvider]'s rule over only the events the channel list
+/// received, which always belong to the current community. The icon uses it
+/// while the Activity feed loads.
+final observedInboxUnreadProvider = Provider<InboxUnread>((ref) {
+  final items = ref.watch(observedInboxItemsProvider);
+  final readState = ref.watch(readStateProvider);
+  final localState = ref.watch(inboxLocalStateProvider);
+  if (!readState.isReady) return InboxUnread.pending;
+  return _inboxUnread(items, readState, localState);
+});
+
+InboxUnread _inboxUnread(
+  List<InboxItem> items,
+  ReadStateState readState,
+  InboxLocalState localState,
+) {
   final anyUnread = items.any(
     (item) => !isInboxItemDone(
       item,
@@ -41,7 +61,7 @@ final inboxUnreadProvider = Provider<InboxUnread>((ref) {
     ),
   );
   return anyUnread ? InboxUnread.unread : InboxUnread.read;
-});
+}
 
 /// The bell reflects unread Activity rows; pending read state shows no dot.
 final inboxHasUnreadProvider = Provider<bool>(

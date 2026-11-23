@@ -43,8 +43,13 @@ final unreadBadgeProvider = Provider<UnreadBadge>((ref) {
   // Known unread sets the icon even when an Activity source failed. Missing
   // data only holds back a clear.
   if (hasForcedUnreadChannel(channels, readState)) return UnreadBadge.unread;
-  // A loading feed can still hold the previous community's rows.
-  if (feed == _FeedState.unknown) return UnreadBadge.pending;
+  // A loading feed can still hold the previous community's rows, so only
+  // the events the channel list received count until it loads.
+  if (feed == _FeedState.unknown) {
+    return ref.watch(observedInboxUnreadProvider) == InboxUnread.unread
+        ? UnreadBadge.unread
+        : UnreadBadge.pending;
+  }
   if (inbox == InboxUnread.unread) return UnreadBadge.unread;
   return feed == _FeedState.complete ? UnreadBadge.clear : UnreadBadge.pending;
 });
