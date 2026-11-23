@@ -22,8 +22,8 @@ typedef MediaDiskCacheHit = ({Uint8List bytes, bool isStale});
 /// Built on `flutter_cache_manager`. It keeps the bytes each URL served, so a
 /// relay thumbnail and its original are separate entries. Each community and
 /// account has its own directory under the caches root (see
-/// [mediaCacheRootProvider]), deleted with the community or account. Least recently used files are evicted once
-/// the directory holds more than [maxBytes].
+/// [mediaCacheRootProvider]), deleted with its community. Least recently used
+/// files are evicted once the directory holds more than [maxBytes].
 ///
 /// Relay media URLs are content hashes and never go stale. Other URLs can
 /// change in place, so they are served from disk but refetched in the

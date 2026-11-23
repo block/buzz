@@ -131,7 +131,8 @@ class OpenChannelDirectoryStorage {
   }
 
   /// Stops every later read and write, as when the community or account is
-  /// retired. The file itself is deleted by [removeOrphans].
+  /// retired. The file is deleted with its community, by
+  /// [MediaDiskCache.removeOrphans].
   void close() => _closed = true;
 
   Future<void> _discard(File file) async {
