@@ -108,6 +108,7 @@ class _Player extends VideoPlayerPlatform {
   }
 }
 
+final _share = find.byKey(const ValueKey('message-media-video-viewer-share'));
 final _surface = find.byKey(
   const ValueKey('message-media-video-viewer-gesture'),
 );
@@ -777,7 +778,7 @@ void main() {
     await _disposeVideo(tester);
   });
 
-  testWidgets('portrait video uses the same bounded stage as photos', (
+  testWidgets('portrait video fills the phone height under the chrome', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(390, 844);
@@ -786,14 +787,62 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     addTearDown(tester.view.resetViewPadding);
-    await _pumpVideo(tester, videoSize: const Size(900, 3000));
+    await _pumpVideo(tester, videoSize: const Size(390, 1000));
     final bounds = tester.getRect(find.byType(VideoPlayer));
-    expect(bounds.top, closeTo(59 + 48 + 8, 0.01));
-    expect(bounds.bottom, closeTo(844 - 34 - 56 - 16, 0.01));
-    expect(bounds.width / bounds.height, closeTo(900 / 3000, 0.001));
+    expect(bounds.top, closeTo(0, 0.01));
+    expect(bounds.bottom, closeTo(844, 0.01));
+    expect(bounds.width / bounds.height, closeTo(390 / 1000, 0.001));
+    expect(
+      tester.getRect(_share).bottom,
+      greaterThan(bounds.top),
+      reason: 'The chrome overlays the video instead of shrinking it',
+    );
     await tester.tap(_surface);
     await tester.pumpAndSettle();
+    expect(_opacity(tester), 0);
     expect(tester.getRect(find.byType(VideoPlayer)), bounds);
+    await _disposeVideo(tester);
+  });
+
+  testWidgets('share button shares the downloaded video file', (tester) async {
+    const shareChannel = MethodChannel('dev.fluttercommunity.plus/share');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final calls = <MethodCall>[];
+    messenger.setMockMethodCallHandler(shareChannel, (call) async {
+      calls.add(call);
+      return 'dev.fluttercommunity.plus/share/unavailable';
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(shareChannel, null));
+    await _pumpVideo(tester);
+    await tester.runAsync(() async {
+      await tester.tap(_share);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    });
+    await tester.pump();
+    expect(calls, hasLength(1));
+    final paths = (calls.single.arguments as Map)['paths'] as List;
+    expect(paths.single as String, contains('buzz-video-'));
+    await _disposeVideo(tester);
+  });
+
+  testWidgets('landscape video fills the phone height', (tester) async {
+    tester.view.physicalSize = const Size(956, 440);
+    tester.view.devicePixelRatio = 1;
+    tester.view.viewPadding = const FakeViewPadding(
+      left: 62,
+      right: 62,
+      bottom: 21,
+    );
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetViewPadding);
+    await _pumpVideo(tester, videoSize: const Size(1600, 1000));
+    final bounds = tester.getRect(find.byType(VideoPlayer));
+    expect(bounds.top, closeTo(0, 0.01));
+    expect(bounds.bottom, closeTo(440, 0.01));
+    expect(bounds.center.dx, closeTo(956 / 2, 0.01));
+    expect(bounds.width / bounds.height, closeTo(1600 / 1000, 0.001));
     await _disposeVideo(tester);
   });
 
