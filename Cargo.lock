@@ -1276,6 +1276,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-ingress-gateway"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "nostr 0.44.7",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "buzz-media"
 version = "0.1.0"
 dependencies = [

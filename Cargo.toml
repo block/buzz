@@ -5,6 +5,7 @@ members = [
     "crates/ifc-core",
     "crates/buzz-conformance",
     "crates/buzz-push-gateway",
+    "crates/buzz-ingress-gateway",
     "crates/buzz-db",
     "crates/buzz-pubsub",
     "crates/buzz-auth",
