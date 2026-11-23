@@ -40,6 +40,7 @@ class _ThreadMessage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final container = ProviderScope.containerOf(context, listen: false);
     final startsThreads = ref.watch(channelStartsThreadsProvider(channelId));
     final messageSnapshotKey = useMemoized(GlobalKey.new, const []);
     final swipeContentKey = useMemoized(GlobalKey.new, const []);
@@ -200,14 +201,13 @@ class _ThreadMessage extends HookConsumerWidget {
                                 reactions: message.reactions,
                                 onToggle: (emoji) => toggleReaction(
                                   context,
-                                  ref,
+                                  container,
                                   message,
                                   emoji,
                                 ),
                                 showAddButton: isMember && !isArchived,
-                                onAddReaction: () => showAddReactionPicker(
+                                onAddReaction: addReactionPickerFor(
                                   context: context,
-                                  ref: ref,
                                   message: message,
                                 ),
                               ),

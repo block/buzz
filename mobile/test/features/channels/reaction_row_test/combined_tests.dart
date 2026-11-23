@@ -67,7 +67,12 @@ void combinedReactionTests() {
               messageId: message.id,
               channelId: 'channel',
               reactions: message.reactions,
-              onToggle: (emoji) => toggleReaction(context, ref, message, emoji),
+              onToggle: (emoji) => toggleReaction(
+                context,
+                ProviderScope.containerOf(context, listen: false),
+                message,
+                emoji,
+              ),
             ),
           ),
         ),
@@ -92,6 +97,190 @@ void combinedReactionTests() {
     );
     expect(find.text('2'), findsNothing);
     expect(find.text('1'), findsNWidgets(2));
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('native tray Add still opens the picker after the row is '
+      'rebuilt away', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    resetIosEmojiPickerPresentationForTest();
+    final completion = Completer<Map<String, Object?>>();
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      NativeMessagePresentation.channel,
+      (call) async =>
+          call.method == 'reactions' ? completion.future : <String, Object?>{},
+    );
+    final pickerCalls = <String>[];
+    const picker = MethodChannel('buzz/native_emoji_picker');
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(picker, (
+      call,
+    ) async {
+      pickerCalls.add(call.method);
+      return true;
+    });
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger
+        ..setMockMethodCallHandler(NativeMessagePresentation.channel, null)
+        ..setMockMethodCallHandler(picker, null);
+    });
+    final message = TimelineMessage(
+      id: _messageId,
+      pubkey: _alice,
+      createdAt: 1,
+      content: '',
+      reactions: [
+        _reaction(count: 1, userPubkeys: const ['other']),
+      ],
+    );
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final rowMounted = ValueNotifier(true);
+    addTearDown(rowMounted.dispose);
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
+          channelActionsProvider.overrideWithValue(_RecordingReactionActions()),
+          userCacheProvider.overrideWith(() => _FakeUserCacheNotifier({})),
+        ],
+        child: ValueListenableBuilder<bool>(
+          valueListenable: rowMounted,
+          builder: (_, mounted, _) => mounted
+              ? Builder(
+                  builder: (context) => ReactionRow(
+                    combined: true,
+                    messageId: message.id,
+                    channelId: 'channel',
+                    reactions: message.reactions,
+                    onToggle: (_) {},
+                    showAddButton: true,
+                    onAddReaction: addReactionPickerFor(
+                      context: context,
+                      message: message,
+                    ),
+                  ),
+                )
+              : const SizedBox.shrink(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('combined-reaction-tray')));
+    await tester.pump();
+
+    // A new message shifts the timeline while the native tray is open.
+    rowMounted.value = false;
+    await tester.pump();
+    completion.complete({'action': 'addReaction'});
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(pickerCalls, contains('present'));
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('tray picks made after the active community switched are '
+      'dropped', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    resetIosEmojiPickerPresentationForTest();
+    final completion = Completer<Map<String, Object?>>();
+    Map<Object?, Object?>? payload;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      NativeMessagePresentation.channel,
+      (call) async {
+        if (call.method != 'reactions') return <String, Object?>{};
+        payload = call.arguments as Map<Object?, Object?>;
+        return completion.future;
+      },
+    );
+    final pickerCalls = <String>[];
+    const picker = MethodChannel('buzz/native_emoji_picker');
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(picker, (
+      call,
+    ) async {
+      pickerCalls.add(call.method);
+      return true;
+    });
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger
+        ..setMockMethodCallHandler(NativeMessagePresentation.channel, null)
+        ..setMockMethodCallHandler(picker, null);
+    });
+    final message = TimelineMessage(
+      id: _messageId,
+      pubkey: _alice,
+      createdAt: 1,
+      content: '',
+      reactions: [
+        _reaction(count: 1, userPubkeys: const ['other']),
+      ],
+    );
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final actions = _RecordingReactionActions();
+    await tester.pumpWidget(
+      WidgetHelpers.testable(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          emojiDatasetOrEmptyProvider.overrideWithValue(_dataset),
+          channelActionsProvider.overrideWithValue(actions),
+          userCacheProvider.overrideWith(() => _FakeUserCacheNotifier({})),
+        ],
+        child: Builder(
+          builder: (context) => ReactionRow(
+            combined: true,
+            messageId: message.id,
+            channelId: 'channel',
+            reactions: message.reactions,
+            onToggle: (emoji) => toggleReaction(
+              context,
+              ProviderScope.containerOf(context, listen: false),
+              message,
+              emoji,
+            ),
+            showAddButton: true,
+            onAddReaction: addReactionPickerFor(
+              context: context,
+              message: message,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(ReactionRow)),
+      listen: false,
+    );
+    final recentsBefore = container.read(recentEmojiProvider);
+    await tester.tap(find.byKey(const ValueKey('combined-reaction-tray')));
+    await tester.pump();
+
+    // A notification tap moves the app to another community while the
+    // native tray is still up.
+    container
+        .read(relayConfigProvider.notifier)
+        .update(baseUrl: 'https://other.example');
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      NativeMessagePresentation.channel.name,
+      const StandardMethodCodec().encodeMethodCall(
+        MethodCall('toggleReaction', {
+          'requestId': payload!['requestId'],
+          'emoji': _fire,
+        }),
+      ),
+      (_) {},
+    );
+    completion.complete({'action': 'addReaction'});
+    await tester.pumpAndSettle();
+
+    expect(actions.added, isEmpty);
+    expect(pickerCalls, isNot(contains('present')));
+    expect(container.read(recentEmojiProvider), recentsBefore);
+    expect(container.read(pendingReactionBurstProvider), isNull);
     debugDefaultTargetPlatformOverride = null;
   });
 
@@ -327,7 +516,12 @@ void combinedReactionTests() {
             messageId: message.id,
             channelId: 'channel',
             reactions: message.reactions,
-            onToggle: (emoji) => toggleReaction(context, ref, message, emoji),
+            onToggle: (emoji) => toggleReaction(
+              context,
+              ProviderScope.containerOf(context, listen: false),
+              message,
+              emoji,
+            ),
           ),
         ),
       ),
