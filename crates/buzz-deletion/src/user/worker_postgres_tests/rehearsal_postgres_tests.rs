@@ -182,6 +182,13 @@ async fn rehearsal_resumes_real_previews_delegates_owner_and_finishes_without_de
         .iter()
         .find(|s| s.stage == "purge_profile" && s.target_community_id == Some(member))
         .unwrap();
+    let counts = &profile.metadata_json["result"]["profile"];
+    assert_eq!(
+        counts["delete"]["events_by_kind"],
+        serde_json::json!({"0": 1})
+    );
+    assert_eq!(counts["delete"]["by_table"]["users"], 1);
+    assert_eq!(counts["replace_archive_snapshot"]["rows"], 0);
     assert!(!profile.metadata_json["result"]["prerequisites"]
         .as_array()
         .unwrap()

@@ -1,6 +1,6 @@
 //! Offline profile erasure. Preview and deletion share the exact immutable plan.
 //! Writers must remain stopped until the caller's full deletion verification ends.
-use super::{normalize_user_deletion_pubkey, UserDeletionStore};
+use super::{content_batches::ContentRowCounts, normalize_user_deletion_pubkey, UserDeletionStore};
 use crate::{DbError, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -32,6 +32,9 @@ pub struct ProfileBatchOptions {
 /// Result for this profile scope, never a claim of complete account erasure.
 #[derive(Debug, Serialize)]
 pub struct ProfileBatchSummary {
+    /// Action counts returned by the workflow profile preview.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<ProfileCounts>,
     /// preview_complete, preview_with_prerequisites, or delete_complete.
     pub record: &'static str,
     /// Proposed or committed row mutations.
@@ -44,6 +47,31 @@ pub struct ProfileBatchSummary {
     pub account_erasure_complete: bool,
     /// Observed prerequisites, still present because prior previews do not mutate data.
     pub prerequisites: Vec<String>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct ProfileCounts {
+    delete: ContentRowCounts,
+    replace_archive_snapshot: ContentRowCounts,
+}
+
+impl ProfileCounts {
+    fn from_plan(plan: &Plan) -> Self {
+        let mut counts = Self::default();
+        for op in &plan.ops {
+            let group = if op.snapshot.is_some() {
+                &mut counts.replace_archive_snapshot
+            } else {
+                &mut counts.delete
+            };
+            group.rows += 1;
+            *group.by_table.entry(op.table.name.to_owned()).or_default() += 1;
+            if let Some(kind) = op.event_kind {
+                *group.events_by_kind.entry(i64::from(kind)).or_default() += 1;
+            }
+        }
+        counts
+    }
 }
 
 #[derive(Clone)]
@@ -241,6 +269,7 @@ impl UserDeletionStore {
             tx.commit().await?;
         }
         let summary = ProfileBatchSummary {
+            profile: report_prerequisites.then(|| ProfileCounts::from_plan(&plan)),
             record: if delete {
                 "delete_complete"
             } else if plan.blockers.is_empty() {

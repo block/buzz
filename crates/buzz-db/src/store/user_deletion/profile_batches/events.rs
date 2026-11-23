@@ -11,6 +11,7 @@ pub(super) struct Snapshot {
     survivors: Arc<Vec<String>>,
 }
 pub(super) struct Selected {
+    pub kind: i32,
     pub id: Vec<u8>,
     pub key: Value,
     pub fingerprint: String,
@@ -182,6 +183,7 @@ pub(super) async fn select(
                 }
             }
             out.push(Selected {
+                kind,
                 id: row.try_get("id")?,
                 key: row.try_get("key")?,
                 fingerprint: row.try_get("fingerprint")?,

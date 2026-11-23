@@ -85,6 +85,15 @@ select the same row because the rehearsal leaves source data intact.
 Detailed batch keys still stream during the run. For events they also carry
 the event kind. Earlier completed rows keep their saved totals.
 
+After a completed `purge_profile` preview, read `metadata_json.result.profile` in
+the stepped command's stdout or a later `user-deletions inspect <request-id>`.
+Both action groups (`delete` and `replace_archive_snapshot`) give affected row
+counts by table and event counts by kind. A snapshot replacement counts once in
+its group and twice in the existing `items` mutation total. The stage result
+also records target public keys and any unmet prerequisites. The persisted
+profile step sends diagnostics to stderr and keeps its preview in the journal.
+Older completed stages keep the result written when they ran.
+
 The last community automatically transitions to global cleanup. With no matched
 communities, media transitions directly to global cleanup. The shared inventory method
 used by `inventory`, ordinary `submit`, and `submit --read-only` saves only communities with target-linked cleanup candidates: memberships,

@@ -148,18 +148,20 @@ pub(super) async fn preview_handler(
             Ok(serde_json::to_value(summary)?)
         }
         "purge_profile" => {
-            let summary = users
-                .preview_profile_plan(
-                    &ProfileBatchOptions {
-                        community: community.context("missing profile community")?,
-                        pubkey: subject.into(),
-                        relay_pubkeys: options.relay_pubkey.iter().cloned().collect(),
-                        batch_size: options.batch_size,
-                        max_items: options.max_items,
-                    },
-                    &mut output,
-                )
-                .await?;
+            let profile = ProfileBatchOptions {
+                community: community.context("missing profile community")?,
+                pubkey: subject.into(),
+                relay_pubkeys: options.relay_pubkey.iter().cloned().collect(),
+                batch_size: options.batch_size,
+                max_items: options.max_items,
+            };
+            let summary = if options.read_only {
+                users
+                    .preview_profile_plan(&profile, &mut std::io::sink())
+                    .await?
+            } else {
+                users.preview_profile_plan(&profile, &mut output).await?
+            };
             Ok(serde_json::to_value(summary)?)
         }
         "delete_owned_community" => Ok(

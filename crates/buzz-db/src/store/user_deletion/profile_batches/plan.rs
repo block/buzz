@@ -59,6 +59,7 @@ pub(super) async fn inspect(conn: &mut PgConnection, scope: Scope, max_items: u3
     for event in selected {
         let op = rows::Operation {
             table: &rows::EVENTS,
+            event_kind: Some(event.kind),
             key: event.key,
             fingerprint: event.fingerprint,
             snapshot: event.snapshot,

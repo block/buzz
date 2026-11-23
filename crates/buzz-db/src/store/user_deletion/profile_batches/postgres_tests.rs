@@ -175,6 +175,36 @@ async fn preview_delete_retry_preserve_other_identities_and_communities() {
     assert!(output.contains("replace_archive_snapshot"));
     assert!(!output.contains("configuration"));
     assert!(!output.contains("human profile"));
+    let preview = f
+        .store
+        .preview_profile_plan(&opts, &mut Vec::new())
+        .await
+        .unwrap();
+    let counts = preview.profile.unwrap();
+    assert_eq!(
+        counts.delete.by_table,
+        [
+            ("events".into(), 4),
+            ("users".into(), 2),
+            ("archived_identities".into(), 1),
+            ("event_mentions".into(), 1),
+            ("nip_fi_profile_heads".into(), 1)
+        ]
+        .into()
+    );
+    assert_eq!(
+        counts.delete.events_by_kind,
+        [(0, 1), (10100, 1), (30177, 1), (30382, 1)].into()
+    );
+    assert_eq!(
+        counts.replace_archive_snapshot.events_by_kind,
+        [(13535, 1)].into()
+    );
+    assert_eq!(counts.replace_archive_snapshot.rows, 1);
+    assert_eq!(
+        preview.items,
+        counts.delete.rows + 2 * counts.replace_archive_snapshot.rows
+    );
     let mut deletion = Vec::new();
     let actual = f
         .store

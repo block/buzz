@@ -11,6 +11,7 @@ pub(super) struct Table {
 
 pub(super) struct Operation {
     pub table: &'static Table,
+    pub event_kind: Option<i32>,
     pub key: Value,
     pub fingerprint: String,
     pub snapshot: Option<events::Snapshot>,
@@ -87,6 +88,7 @@ pub(super) async fn collect(
             plan,
             Operation {
                 table,
+                event_kind: None,
                 key: row.try_get("key")?,
                 fingerprint: row.try_get("fingerprint")?,
                 snapshot: None,
