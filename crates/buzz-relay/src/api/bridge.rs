@@ -936,6 +936,33 @@ const AUX_PAGE_LIMIT: i64 = buzz_db::DEFAULT_MAX_PAGE_LIMIT;
 /// loop forever against a pathological write pattern.
 const AUX_MAX_PAGES: usize = 64;
 
+/// How far before the oldest retained window row the aux hops still look.
+/// Ingest rejects any event more than 900 s from the relay clock
+/// (`MAX_TIMESTAMP_DRIFT_SECS` in `handlers/ingest.rs`), so an aux event can
+/// predate its target by at most ~30 min; a day covers that with room for
+/// data that reached the store another way. The bound lets the `#e` GIN
+/// probes prune older `events` partitions instead of scanning the
+/// community's whole history.
+const WINDOW_AUX_SINCE_MARGIN_SECS: i64 = 24 * 60 * 60;
+
+/// Lower `created_at` bound for both window aux hops: the oldest retained
+/// row minus [`WINDOW_AUX_SINCE_MARGIN_SECS`]. A hop-2 deletion postdates the
+/// aux event it deletes, so the same bound covers both hops. `None` for an
+/// empty window (no hops run).
+fn window_aux_since(
+    rows: &[buzz_db::thread::ChannelWindowRow],
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let oldest = rows
+        .iter()
+        .map(|row| row.stored_event.event.created_at.as_secs())
+        .min()?;
+    let since = i64::try_from(oldest)
+        .ok()?
+        .saturating_sub(WINDOW_AUX_SINCE_MARGIN_SECS)
+        .max(0);
+    chrono::DateTime::from_timestamp(since, 0)
+}
+
 fn build_aux_query(
     community: buzz_core::CommunityId,
     target_ids: Vec<String>,
@@ -1109,9 +1136,11 @@ async fn handle_channel_window_filter(
         let mut seen_aux: std::collections::HashSet<nostr::EventId> =
             std::collections::HashSet::new();
         let mut hop_ids = row_ids_hex.clone();
+        let aux_since = window_aux_since(&window.rows);
         for hop_kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
-            let aux_query =
+            let mut aux_query =
                 build_aux_query(tenant.community(), std::mem::take(&mut hop_ids), hop_kinds);
+            aux_query.since = aux_since;
             let aux_events = query_all_pages(
                 aux_query,
                 AUX_PAGE_LIMIT,
