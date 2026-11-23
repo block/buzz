@@ -368,7 +368,8 @@ class ChannelActions {
   /// add-policy refusal of a DM. The agent and its verified owner are named
   /// as the app's identity labels do, compared against [context] (the DM's
   /// people, as its own label compares them) and this account, so namesakes
-  /// stay distinguishable. A failed name read still refuses, without the name.
+  /// stay distinguishable, using whichever of them are cached. A failed name
+  /// read still refuses, without the name.
   Future<void> _throwIfAgentRefused(
     String reason, {
     required bool adding,
@@ -391,17 +392,28 @@ class ChannelActions {
       for (final key in [...context, ?_currentPubkey])
         if (isHexPubkey(key.toLowerCase())) key.toLowerCase(),
     };
-    await load(keys);
+    // Wait only for names the sentence uses: the agent's, and its owner's
+    // when the refusal names who may add it. Other keys label from cache,
+    // except that a namesake in the context needs both agents' owners, read
+    // together, to tell the two apart.
+    await load([refusal.agent]);
     var sources = _ref.read(identityNameSourcesProvider);
-    // Every agent's owner loads together, so same-named owners get told apart.
+    final owner = sources.factFor(refusal.agent)?.ownerPubkey;
+    String? nameOf(String? key) =>
+        key == null ? null : sources.factFor(key)?.name.trim().toLowerCase();
+    final clashing = {nameOf(refusal.agent), ?nameOf(owner)};
+    final namesakes = [
+      for (final key in keys)
+        if (key != refusal.agent && clashing.contains(nameOf(key))) key,
+    ];
     final owners = {
-      for (final key in keys) ?sources.factFor(key)?.ownerPubkey,
+      if (refusal.ownerOnly || namesakes.isNotEmpty) ?owner,
+      for (final key in namesakes) ?sources.factFor(key)?.ownerPubkey,
     }.difference(keys);
     if (owners.isNotEmpty) {
       await load(owners);
       sources = _ref.read(identityNameSourcesProvider);
     }
-    final owner = sources.factFor(refusal.agent)?.ownerPubkey;
     _ensureCommunityValid();
     final names = sources.scope(
       {...keys, ...owners},

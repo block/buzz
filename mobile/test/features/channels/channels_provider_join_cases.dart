@@ -638,6 +638,39 @@ void _confirmedJoinCases() {
         open(scout, [], true),
         shows('Only the owner of Scout can add it to a DM.'),
       );
+
+      // A refusal waits only for the names its sentence uses. Naming a
+      // cached, uniquely named agent reads no profile, though its owner,
+      // the DM's other people and this account are uncached; a refusal that
+      // names who may add the agent still reads its owner.
+      final stranger = '7' * 64;
+      final unloadedOwner = '8' * 64;
+      container
+          .read(userCacheProvider.notifier)
+          .put(
+            UserProfile(
+              pubkey: scout,
+              displayName: 'Scout',
+              ownerPubkey: unloadedOwner,
+            ),
+          );
+      List<List<String>?> profileReads() => [
+        for (final filter in session.historyFilters)
+          if (filter.kinds.contains(0)) filter.authors,
+      ];
+      session.historyFilters.clear();
+      await expectLater(
+        open(scout, [stranger], false),
+        shows('Scout can’t be added to a DM.'),
+      );
+      expect(profileReads(), isEmpty);
+      await expectLater(
+        open(scout, [stranger], true),
+        shows('Only the owner of Scout can add it to a DM.'),
+      );
+      expect(profileReads(), [
+        [unloadedOwner],
+      ]);
     });
 
     group('a refused agent added to a DM', () {
