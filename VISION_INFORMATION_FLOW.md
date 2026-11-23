@@ -68,7 +68,7 @@ On every policy, for every action, whatever the membership:
 1. **Read:** you can read a channel only if your clearance is at least its label.
 2. **Write (agents only):** an agent can write in a channel only if its label is at least the agent's clearance.
 
-So a cleared agent reads at or below its clearance and writes at or above it. DMs are unlabelled unless someone labels them, as private channels are. Everything outside channels is at *none*, so a cleared agent cannot write there, except for its profile with the owner's approval. A channel that a cleared agent creates gets the agent's clearance as its label.
+So a cleared agent reads at or below its clearance and writes at or above it. Every place starts unlabelled: open and private channels, Solo chats, DMs and Huddles. They differ only in where a label can be set: on a private channel, and on a Huddle room through its parent chat. Labelling DMs is a possible later change. Everything outside channels is at *none*, so a cleared agent cannot write there, except for its profile with the owner's approval. A channel that a cleared agent creates gets the agent's clearance as its label.
 
 When a label goes up or a clearance goes down, nobody is removed. The rules refuse what they no longer allow.
 
@@ -84,7 +84,7 @@ An agent with no clearance works as it does now. To protect a channel from it, l
 #### Ratchets and authority
 
 - Labels only go up.
-- A labelled channel is private by definition, and stays private. Only a private channel can be labelled, and the relay refuses to make a labelled channel open, because that would give its content to everyone.
+- A labelled channel is private by definition, and stays private. Only a private channel that is not a DM can be labelled, and the relay refuses to make a labelled channel open, because that would give its content to everyone.
 - An agent's clearance only goes up, because it remembers what it read.
 - A clearance can expire. For an agent, expiry cuts its reads, and its write floor stays.
 - Each policy's administrators set people's clearances. An owner can clear their agent up to the owner's own clearance.
@@ -112,11 +112,13 @@ Some cases have names:
 - **Unrestricted** is an agent with no clearance.
 - **Restricted** is a cleared agent.
 - **Public** is an agent with no clearance kept out of private channels. It reads nothing private. Anyone can open a DM with it, so one person's DM can reach another person. Clients tell people to treat what they tell it as public. A public agent cannot stay in a channel that becomes private, so an open-to-private change is refused while a public agent is in the channel: remove the public agents first.
-- **Personal** is an agent cleared on its owner's personal policy. It reads with the owner's authority, so the app gives the owner's read tools only to personal agents. Buzz cannot see what it sends outside Buzz, through other tools or through model inference on another member's node (see [What this doesn't stop](#what-this-doesnt-stop)).
+- **Personal** is an agent cleared on its owner's personal policy. It reads only the channels its owner adds it to, and open channels. Buzz cannot see what it sends outside Buzz, through other tools or through model inference on another member's node (see [What this doesn't stop](#what-this-doesnt-stop)).
 
 One rule applies to every channel, whatever the agent's clearance: no private-to-open changes, except in an unlabelled channel that has only ever held its opener and the opener's agents (see [Membership is a decision about the channel](#membership-is-a-decision-about-the-channel)). It protects people as well as agents.
 
 **Possible: a write-only role.** A member that can post in a channel but cannot read it. R grows and W doesn't. It fits integrations and notifiers that post into many private channels: they no longer read those channels, so content can't move between them through the key. The relay refuses the key's reads of that channel on every read path. A missed read path only lets W grow, as it does today.
+
+**Possible: humans only.** A built-in policy with one level above *none*. Every person is cleared for it, and no agent can be, so a channel with this label admits no agent. The relay knows an agent only by its recorded owner, so an agent with no owner attestation still gets in.
 
 ### Only the owner puts an agent in a channel
 
@@ -146,7 +148,7 @@ A Huddle is a private channel: its room. Listening is reading and speaking is wr
 
 - **Label:** a room gets its parent chat's label when it starts. Labels only go up.
 - **Admission:** members of the parent chat join the room automatically. That is the room's admission rule, so the people in R include the parent chat's members and anyone added to the room. Every join, automatic or not, passes rule 1.
-- **Agents:** an agent takes part only as a member of the room. Members can add agents, as in any private channel. A cleared agent joins only when its owner adds it, and only a room labelled at or above its clearance. The audio relay refuses its audio in any other room.
+- **Agents:** an agent takes part only as a member of the room. Members can add agents, as in any private channel. A cleared agent joins only when its owner adds it. The audio relay refuses its audio in any room labelled lower than its clearance.
 - **What the agent hears:** the relay sends the agent all of the room's audio. Its client chooses whose speech it acts on, but that is not enforcement, so W includes everything said in the room.
 
 ### Agents don't publish outside channels
@@ -165,9 +167,11 @@ Some work needs more than the agent's own access, for example summarizing a priv
 
 One possible answer is a step-up: an action with the owner's authority that the owner approves explicitly, for a stated scope and time, that is attributable to the agent, counted in W and R, and revocable. This is not part of this design. It widens what an agent can reach, so it would need careful boundaries and its own spec.
 
+Changing the owner's Buzz configuration is an open question. It may need its own authorizations.
+
 ### Membership is a decision about the channel
 
-By default, private channels and DMs trust their members, for agents as for people. A member who adds an agent chooses to share what they can read with the agent's R, as a member who adds a person shares the history with that person. Clients show each agent in a conversation and where it can post. The level rules still apply: a cleared agent cannot enter a channel or DM labelled lower than its clearance on any policy. A channel that needs more than member trust gets a label.
+By default, private channels and DMs trust their members, for agents as for people. A member who adds an agent chooses to share what they can read with the agent's R, as a member who adds a person shares the history with that person. DMs work the same way: any DM member can add an agent with the DM's history, and the agent reads what was said before it joined. Clients show each agent in a conversation and where it can post. The level rules still apply: a cleared agent reads only where its clearance covers the label, and writes only where rule 2 allows. A channel that needs more than member trust gets a label.
 
 The owner cannot control who joins someone else's channel. So when the owner makes the agent a member of a channel, what the owner accepts is the channel's **admission rules**, not its current member list. R includes everyone those rules might let in later, and because new members can read history, those people also get everything the agent wrote before they arrived. Clients have to say this:
 
@@ -178,7 +182,7 @@ The owner cannot control who joins someone else's channel. So when the owner mak
 
 Accepting the rules only means something if the rules stay put. One relay change makes sure they do:
 
-- **Refuse private-to-open visibility changes, with one exception.** Making a private channel open changes the admission rules out from under everyone who joined under the old ones, people included. That is a good rule with or without agents. An admin who wants an open channel can create one.
+- **Refuse private-to-open visibility changes, with one exception.** Making a private channel open changes the admission rules out from under everyone who joined under the old ones, people included. That is a good rule with or without agents. In an unlabelled channel, privacy is mostly a convenience, not a secrecy mechanism. The refusal holds anyway, because members wrote under the channel's admission rules, and opening it would change those rules for everything they already wrote. An admin who wants an open channel can create one.
   The exception is an unlabelled channel where no other person was ever a member. Every current and former member must be that person or one of that person's agents. A cleared agent writes only in labelled channels, which never open, so no cleared agent's writes are in such a channel. Opening it, for example a Solo chat, is a one-time disclosure by a person of what that person can already read. After it opens, it is an ordinary open channel, and rule 2 keeps the owner's cleared agents from writing there.
 
 **Later improvement: limit adds to admins.** Every private channel has the same admission rule: any member can add anyone. So making the agent a member of a private channel means trusting every current member's judgment. A later channel setting can limit adds to owners and admins. With it, an owner can choose a private channel where only the admins can grow R, and what the owner accepts becomes trust in the channel's admins. This is not needed for safety, because the owner accepts whatever the admission rules are. It gives the owner a tighter R to choose. The same setting helps announce channels, where it keeps the set of writers under the admins' control.
