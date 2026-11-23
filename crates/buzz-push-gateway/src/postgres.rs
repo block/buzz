@@ -295,20 +295,25 @@ impl AuthorityStore for PostgresAuthorityStore {
     ) -> Result<Installation, AuthorityError> {
         use sha2::{Digest, Sha256};
         let mut tx = self.pool.begin().await.map_err(db)?;
-        // The challenge row stays locked until this transaction ends. A
-        // concurrent replay's DELETE waits here, then sees either the
-        // installation this transaction committed or, after a rollback
-        // (including a cancelled request), the challenge itself.
-        let consumed = sqlx::query("DELETE FROM push_gateway_challenges WHERE id=$1 AND challenge_hash=$2 AND expires_at >= $3")
-            .bind(challenge_id)
-            .bind(Sha256::digest(challenge).to_vec())
-            .bind(at(now)?)
-            .execute(&mut *tx)
-            .await
-            .map_err(db)?;
-        if consumed.rows_affected() != 1 {
+        // Lock the matching challenge before judging its expiry. A concurrent
+        // request that already spent it holds this row until its transaction
+        // ends, so the lock waits for that outcome: after a commit the row is
+        // gone and this statement sees the committed installation; after a
+        // rollback (including a cancelled request) the row is back and its
+        // expiry decides. Testing expiry first would skip a locked row that
+        // crossed its deadline and answer "rejected" while the earlier
+        // request could still commit.
+        let expires_at: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "SELECT expires_at FROM push_gateway_challenges WHERE id=$1 AND challenge_hash=$2 FOR UPDATE",
+        )
+        .bind(challenge_id)
+        .bind(Sha256::digest(challenge).to_vec())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db)?;
+        let Some(expires_at) = expires_at else {
             // Read committed: this statement sees what the request that spent
-            // the challenge committed while the DELETE waited.
+            // the challenge committed while the lock waited.
             return matching_installation_in(
                 &mut *tx,
                 &n.app_attest_key_id,
@@ -319,7 +324,15 @@ impl AuthorityStore for PostgresAuthorityStore {
             )
             .await?
             .ok_or(AuthorityError::Rejected);
+        };
+        if ts(expires_at) < now {
+            return Err(AuthorityError::Rejected);
         }
+        sqlx::query("DELETE FROM push_gateway_challenges WHERE id=$1")
+            .bind(challenge_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
         let created = Installation {
             id: n.id,
             platform: n.platform,
@@ -1194,14 +1207,16 @@ mod postgres_tests {
     // An enrollment whose challenge is spent but whose installation has not
     // committed yet, raced by an exact replay (a client retry after a
     // timeout). The replay must wait for the outcome, never answer "not
-    // authorized" while the first request can still commit.
+    // authorized" while the first request can still commit, including when
+    // the challenge expires between the two attempts.
     #[tokio::test]
     #[ignore = "requires PostgreSQL"]
     async fn enrollment_replay_waits_for_an_uncommitted_enrollment() {
-        for commits in [true, false] {
+        for (commits, replay_delay) in [(true, 0), (false, 0), (true, 301), (false, 301)] {
             let (pool, schema) = full_schema(2).await;
             let store = PostgresAuthorityStore::new(pool.clone());
             let now = Utc::now().timestamp();
+            let replay_at = now + replay_delay;
             let challenge_id = Uuid::new_v4();
             seed_enrollment_challenge(&store, challenge_id, now).await;
 
@@ -1222,28 +1237,46 @@ mod postgres_tests {
             let replay_id = Uuid::new_v4();
             let replay = tokio::spawn(async move {
                 replay_store
-                    .enroll_installation(challenge_id, [6; 32], enrollment(replay_id, now), now)
+                    .enroll_installation(
+                        challenge_id,
+                        [6; 32],
+                        enrollment(replay_id, now),
+                        replay_at,
+                    )
                     .await
             });
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             assert!(
                 !replay.is_finished(),
-                "the replay waits on the original request's challenge row"
+                "the replay waits on the original request's challenge row \
+                 (commits={commits}, replay_delay={replay_delay})"
             );
             let expected = if commits {
                 original.commit().await.expect("commit original");
-                original_id
+                Some(original_id)
             } else {
                 // A cancelled request rolls back, and its challenge with it.
                 original.rollback().await.expect("roll back original");
-                replay_id
+                // The restored challenge is live only if it has not expired.
+                (replay_delay == 0).then_some(replay_id)
             };
-            let installation = replay
-                .await
-                .expect("replay task")
-                .expect("the replay recovers an installation");
-            assert_eq!(installation.id, expected);
-            assert!(store.installation(expected, now).await.is_ok());
+            let result = replay.await.expect("replay task");
+            match expected {
+                Some(expected) => {
+                    let installation = result.expect("the replay recovers an installation");
+                    assert_eq!(installation.id, expected);
+                    assert!(store.installation(expected, replay_at).await.is_ok());
+                }
+                None => {
+                    assert_eq!(result.map(|i| i.id), Err(AuthorityError::Rejected));
+                    let installations: i64 =
+                        sqlx::query_scalar("SELECT count(*) FROM push_gateway_installations")
+                            .fetch_one(&pool)
+                            .await
+                            .expect("count installations");
+                    assert_eq!(installations, 0);
+                }
+            }
 
             pool.close().await;
             drop_schema(&schema).await;
