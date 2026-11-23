@@ -57,14 +57,18 @@ FeedItem _item({
   category: category,
 );
 
-HomeFeedResponse _feed(List<FeedItem> items) => HomeFeedResponse(
-  mentions: items.where((item) => item.category == 'mention').toList(),
-  needsAction: items.where((item) => item.category == 'needs_action').toList(),
-  activity: items.where((item) => item.category == 'activity').toList(),
-  agentActivity: items
-      .where((item) => item.category == 'agent_activity')
-      .toList(),
-);
+HomeFeedResponse _feed(List<FeedItem> items, {bool complete = true}) =>
+    HomeFeedResponse(
+      mentions: items.where((item) => item.category == 'mention').toList(),
+      needsAction: items
+          .where((item) => item.category == 'needs_action')
+          .toList(),
+      activity: items.where((item) => item.category == 'activity').toList(),
+      agentActivity: items
+          .where((item) => item.category == 'agent_activity')
+          .toList(),
+      complete: complete,
+    );
 
 class _Fixture {
   _Fixture({
@@ -498,6 +502,60 @@ void main() {
       expect(fixture.badge, UnreadBadge.unread);
     },
   );
+
+  group('while an Activity source is missing', () {
+    test('an unread row raises a clear icon', () async {
+      var feed = _feed(const []);
+      final fixture = _Fixture(activity: _ActivityNotifier((_) async => feed));
+      await fixture.load();
+      expect(fixture.badge, UnreadBadge.clear);
+
+      feed = _feed([_item()], complete: false);
+      fixture.container.invalidate(activityProvider);
+      await fixture.container.read(activityProvider.future);
+      expect(fixture.badge, UnreadBadge.unread);
+    });
+
+    for (final context in ['ch-a', 'msg:abc']) {
+      test('a mark-unread flag ($context) raises a clear icon', () async {
+        var feed = _feed(const []);
+        final fixture = _Fixture(
+          activity: _ActivityNotifier((_) async => feed),
+        );
+        await fixture.load();
+        expect(fixture.badge, UnreadBadge.clear);
+
+        feed = _feed(const [], complete: false);
+        fixture.container.invalidate(activityProvider);
+        await fixture.container.read(activityProvider.future);
+        expect(fixture.badge, UnreadBadge.pending);
+
+        (fixture.container.read(readStateProvider.notifier)
+                as _ReadStateNotifier)
+            .setState(
+              ReadStateState(
+                isReady: true,
+                pubkey: 'reader',
+                contexts: const {},
+                version: 2,
+                forcedUnreadContexts: {context: 'ch-a'},
+              ),
+            );
+        expect(fixture.badge, UnreadBadge.unread);
+      });
+    }
+
+    test('nothing known unread holds rather than clears', () async {
+      final fixture = _Fixture(
+        activity: _ActivityNotifier(
+          (_) async => _feed([_item()], complete: false),
+        ),
+        contexts: {'ch-a': 100},
+      );
+      await fixture.load();
+      expect(fixture.badge, UnreadBadge.pending);
+    });
+  });
 
   test('platformCount maps pending to null, clear to 0, unread to 1', () {
     expect(UnreadBadge.pending.platformCount, isNull);

@@ -17,9 +17,10 @@ class ObservedUnreadEvent {
   /// bolding it.
   bool get attention => countsTowardBadge;
 
-  /// Reply payload for Activity's existing thread rows. Retained in the same
-  /// bounded registry as its unread evidence, so eviction and deletion agree.
-  final NostrEvent? threadReply;
+  /// The event itself when Activity lists it: a DM message, a mention, or a
+  /// thread reply that earns attention. Retained in the same bounded registry
+  /// as its unread evidence, so eviction and deletion agree.
+  final NostrEvent? activityEvent;
 
   const ObservedUnreadEvent({
     required this.id,
@@ -28,7 +29,7 @@ class ObservedUnreadEvent {
     required this.highPriority,
     required this.countsTowardBadge,
     this.channelCatchUp = false,
-    this.threadReply,
+    this.activityEvent,
   });
 }
 
@@ -70,7 +71,7 @@ ObservedUnreadEvent makeObservedUnreadEvent({
   required String? channelType,
   required bool isThreadedReply,
   bool isBroadcast = false,
-  NostrEvent? threadReply,
+  NostrEvent? activityEvent,
 }) {
   final isDm = channelType == 'dm';
   return ObservedUnreadEvent(
@@ -86,7 +87,7 @@ ObservedUnreadEvent makeObservedUnreadEvent({
       isReply: isThreadedReply || isBroadcast,
       highPriority: highPriority,
     ),
-    threadReply: threadReply,
+    activityEvent: activityEvent,
   );
 }
 

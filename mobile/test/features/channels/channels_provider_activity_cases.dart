@@ -283,4 +283,132 @@ void _threadActivityCases() {
       expect(container.read(inboxItemsProvider), isEmpty);
     },
   );
+
+  test('received mentions and DMs reach Activity, the bell and the icon '
+      'when history reads fail or miss them', () async {
+    const dm = '33333333-3333-4333-8333-333333333333';
+    NostrEvent message(
+      String id,
+      String channel,
+      int at, {
+      bool mention = false,
+      bool quiet = false,
+    }) => NostrEvent(
+      id: id,
+      pubkey: 'alice',
+      createdAt: at,
+      kind: 9,
+      tags: [
+        ['h', channel],
+        if (mention) const ['p', 'me'],
+        if (quiet) const ['audience', 'agents'],
+      ],
+      content: 'Message $id',
+      sig: '',
+    );
+    final session = _FakeRelaySession(
+      memberships: [
+        _membership(_channelA, 'me'),
+        _membership(dm, 'me', additionalPubkey: 'alice'),
+      ],
+      metadata: [
+        _meta(id: _channelA, name: 'general'),
+        _meta(
+          id: dm,
+          name: 'alice',
+          channelType: 'dm',
+          visibility: 'private',
+          participants: const ['me', 'alice'],
+        ),
+      ],
+    );
+    // The bell's local Activity state lives in preferences.
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+    final container = _buildContainer(
+      session: session,
+      overrides: [
+        savedPrefsProvider.overrideWithValue(prefs),
+        authProvider.overrideWith(_SignedInAuth.new),
+        readStateProvider.overrideWith(_ReadyReadState.new),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(channelsProvider.future);
+    await container.read(channelsProvider.notifier).waitForUnreadCatchUp();
+    await container.read(activityProvider.future);
+    final badge = container.listen(unreadBadgeProvider, (_, _) {});
+    addTearDown(badge.close);
+    await _settle();
+    expect(container.read(unreadBadgeProvider), UnreadBadge.clear);
+
+    List<String> activityIds() => [
+      for (final row in container.read(inboxItemsProvider))
+        for (final item in row.groupItems) item.id,
+    ];
+    Future<void> deliver(NostrEvent event) async {
+      session.emit(event);
+      // Let the live Activity refresh it triggers run, and fail.
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      await _settle();
+    }
+
+    // Only the live channel subscriptions still deliver: every history read
+    // fails, so no Activity read can return these events.
+    session.latestBatchError = StateError('history unavailable');
+    session.messageHistoryError = StateError('history unavailable');
+
+    // Ordinary channel traffic and quiet agent messages stay out.
+    await deliver(message('ordinary', _channelA, 10));
+    await deliver(message('quiet', _channelA, 11, mention: true, quiet: true));
+    expect(activityIds(), isEmpty);
+    expect(container.read(activityProvider).requireValue.complete, isFalse);
+    expect(container.read(unreadBadgeProvider), UnreadBadge.pending);
+
+    // A mention from a sender whose clock is far behind still counts.
+    await deliver(message('skewed-mention', _channelA, 12, mention: true));
+    expect(activityIds(), ['skewed-mention']);
+    expect(container.read(inboxHasUnreadProvider), isTrue);
+    expect(container.read(unreadBadgeProvider), UnreadBadge.unread);
+
+    // So does a DM message.
+    await deliver(message('dm-message', dm, 13));
+    expect(activityIds(), containsAll(['skewed-mention', 'dm-message']));
+    final dmRow = container
+        .read(inboxItemsProvider)
+        .singleWhere((row) => row.groupItems.any((e) => e.id == 'dm-message'));
+    expect(dmRow.groupItems.single.channelId, dm);
+
+    // Reading both clears the bell. The icon holds rather than clears,
+    // because the feed is still incomplete.
+    (container.read(readStateProvider.notifier) as _ReadyReadState).read({
+      _channelA: 12,
+      dm: 13,
+    });
+    expect(container.read(inboxHasUnreadProvider), isFalse);
+    expect(container.read(unreadBadgeProvider), UnreadBadge.pending);
+  });
+}
+
+class _SignedInAuth extends AuthNotifier {
+  @override
+  Future<AuthState> build() async =>
+      const AuthState(status: AuthStatus.authenticated);
+}
+
+class _ReadyReadState extends ReadStateNotifier {
+  @override
+  ReadStateState build() => const ReadStateState(
+    isReady: true,
+    pubkey: 'me',
+    contexts: {},
+    version: 1,
+  );
+
+  void read(Map<String, int> contexts) => state = ReadStateState(
+    isReady: true,
+    pubkey: 'me',
+    contexts: contexts,
+    version: state.version + 1,
+  );
 }

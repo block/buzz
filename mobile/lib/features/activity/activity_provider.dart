@@ -8,7 +8,6 @@ import '../../shared/relay/relay.dart';
 import '../channels/channel.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/channels_provider.dart';
-import '../channels/unread_badge/observed_unread_event.dart';
 import '../../shared/agents/is_quiet_agent_message.dart';
 import 'dm_resurface.dart';
 import 'feed_item.dart';
@@ -103,65 +102,12 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
       _clearLiveSubscriptions();
     });
 
-    // The relay sends channel events only to `#h` subscriptions, so the `#p`
-    // subscription below never sees a mention in a channel. The channel list
-    // already subscribes to joined channels: read again when it records a
-    // mention this feed lacks.
-    final mentions = _ChannelMentionWatch(
-      since: DateTime.now().millisecondsSinceEpoch ~/ 1000 - 5,
-    );
-    ref.listen(channelsProvider, (_, _) {
-      if (!state.isLoading) {
-        _refreshForChannelMentions(generation, state.value, mentions);
-      }
-    });
-
     final response = await _fetch();
     if (sessionState.status == SessionStatus.connected &&
         generation == _subscriptionGeneration) {
       unawaited(_subscribeLive(generation));
-      _refreshForChannelMentions(generation, response, mentions);
     }
     return response;
-  }
-
-  /// Schedules a refresh when a joined channel has a top-level mention, seen
-  /// since this build started, that [feed] lacks. Thread replies already reach
-  /// Activity through `observedThreadReplies`, and DMs have their own
-  /// subscription.
-  void _refreshForChannelMentions(
-    int generation,
-    HomeFeedResponse? feed,
-    _ChannelMentionWatch watch,
-  ) {
-    if (generation != _subscriptionGeneration || feed == null) return;
-    final channels = ref.read(channelsProvider).asData?.value;
-    if (channels == null) return;
-    final observed = ref
-        .read(channelsProvider.notifier)
-        .observedUnreadEventsByChannel;
-    final revisionOf = observed is ObservedUnreadSnapshot
-        ? observed.revisionOf
-        : null;
-    final known = {for (final item in feed.all) item.id};
-    var missing = false;
-    for (final channel in channels) {
-      if (!channel.isMember || channel.isArchived || channel.isDm) continue;
-      final revision = revisionOf?.call(channel.id);
-      if (revision != null && watch.revisions[channel.id] == revision) continue;
-      for (final event
-          in observed[channel.id]?.values ?? const <ObservedUnreadEvent>[]) {
-        if (event.highPriority &&
-            event.threadReply == null &&
-            event.createdAt >= watch.since &&
-            !known.contains(event.id) &&
-            watch.requested.add(event.id)) {
-          missing = true;
-        }
-      }
-      if (revision != null) watch.revisions[channel.id] = revision;
-    }
-    if (missing) _scheduleLiveRefresh(generation);
   }
 
   Future<void> _subscribeLive(int generation) async {
@@ -793,20 +739,6 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
   }
 }
 
-/// One build's channel mentions already checked against its feed.
-class _ChannelMentionWatch {
-  _ChannelMentionWatch({required this.since});
-
-  /// Earlier mentions are in the build's own read.
-  final int since;
-
-  /// Mentions a refresh was already scheduled for.
-  final Set<String> requested = {};
-
-  /// The observed-event revision last checked, by channel.
-  final Map<String, int> revisions = {};
-}
-
 /// A generation-owned, in-flight hidden-DM resurface attempt. `generation` ties
 /// the entry to the subscription that started it so a follower on a rebuilt
 /// subscription never coalesces into a suspended attempt that will never
@@ -835,11 +767,12 @@ final inboxItemsProvider = Provider<List<InboxItem>>((ref) {
   };
   final myPk = ref.watch(myPubkeyProvider);
   final channelsNotifier = ref.read(channelsProvider.notifier);
-  // Channel discovery already catches up and subscribes to eligible replies.
-  // Keep that one source of truth for the dots and their Activity destination,
-  // rather than opening another set of channel subscriptions here.
+  // Channel discovery already catches up and subscribes to joined channels.
+  // Its received DM messages, mentions and eligible replies join the feed
+  // here, so Activity, the bell and the icon have them even when a history
+  // read fails or misses them, and no extra subscription or read is needed.
   final byId = <String, FeedItem>{
-    for (final event in channelsNotifier.observedThreadReplies(channels))
+    for (final event in channelsNotifier.observedActivityEvents(channels))
       event.id: FeedItem(
         id: event.id,
         kind: event.kind,
