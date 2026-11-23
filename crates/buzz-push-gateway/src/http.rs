@@ -1,6 +1,6 @@
 //! Stateful installation, delegation, delivery, and health APIs.
 use crate::{
-    android_attestation::{self, AndroidAttestationVerifier},
+    android_attestation::{self, AndroidAttestationError, AndroidAttestationVerifier},
     apns::{DeliveryAttempt, DeliveryOutcome, PushTransport},
     app_attest::AppAttestVerifier,
     authority::{
@@ -330,8 +330,8 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
     let verified = match verify_enrollment_attestation(&s, &r, signed.as_bytes()) {
-        Some(value) => value,
-        None => return error(StatusCode::UNAUTHORIZED, "invalid_attestation"),
+        Ok(value) => value,
+        Err(response) => return response,
     };
     let fingerprint = endpoint_fingerprint(platform, &token);
     match s
@@ -405,26 +405,44 @@ struct VerifiedKey {
 }
 
 /// Verify the enrollment's one attestation against the exact transcript.
-/// `None` rejects it; the response never says why (rejections are logged).
+/// A rejection answers 401 and never says why (rejections are logged). When
+/// the gateway cannot judge an Android chain yet (no fresh revocation list,
+/// as right after a restart), it answers a retryable 503 instead, so the
+/// client keeps its key and replays the same request later.
+#[allow(clippy::result_large_err)] // Response is the natural error type for axum handlers
 fn verify_enrollment_attestation(
     s: &AppState,
     r: &InstallationEnrollRequest,
     transcript: &[u8],
-) -> Option<VerifiedKey> {
+) -> Result<VerifiedKey, Response> {
+    let rejected = || error(StatusCode::UNAUTHORIZED, "invalid_attestation");
     if let Some(attestation) = &r.attestation {
+        let key_id = r.key_id.as_deref().ok_or_else(rejected)?;
         let verified = s
             .application
             .app_attest
-            .verify_attestation(attestation, r.key_id.as_deref()?, transcript)
-            .ok()?;
-        return Some(VerifiedKey {
+            .verify_attestation(attestation, key_id, transcript)
+            .map_err(|_| rejected())?;
+        return Ok(VerifiedKey {
             key_id: verified.key_id,
             public_key: verified.public_key,
         });
     }
-    let android = s.application.android.as_ref()?;
-    let chain = decode_android_chain(r.android_attestation.as_deref()?)?;
-    let proven = android.attestation.verify(&chain, transcript).ok()?;
+    let android = s.application.android.as_ref().ok_or_else(rejected)?;
+    let chain = r
+        .android_attestation
+        .as_deref()
+        .and_then(decode_android_chain)
+        .ok_or_else(rejected)?;
+    let proven = android
+        .attestation
+        .verify(&chain, transcript)
+        .map_err(|e| match e {
+            AndroidAttestationError::Unavailable => {
+                error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable")
+            }
+            AndroidAttestationError::Invalid => rejected(),
+        })?;
     use sha2::{Digest, Sha256};
     // The key must be a P-256 point. Its id is its digest; the attestation
     // challenge binds the key to this transcript.
@@ -434,6 +452,7 @@ fn verify_enrollment_attestation(
         key_id: Sha256::digest(&proven.public_key).to_vec(),
         public_key: proven.public_key,
     })
+    .ok_or_else(rejected)
 }
 
 /// Decode a bounded Key Attestation chain of base64 DER certificates.

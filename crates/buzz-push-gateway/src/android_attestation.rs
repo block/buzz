@@ -35,6 +35,10 @@ pub struct VerifiedAndroidKey {
 pub enum AndroidAttestationError {
     #[error("invalid Android attestation")]
     Invalid,
+    /// The gateway cannot judge the chain right now (no fresh revocation
+    /// list yet, as after a restart). Not the client's fault: retry later.
+    #[error("Android attestation cannot be checked yet")]
+    Unavailable,
 }
 
 /// Verifies an Android Key Attestation chain (DER certificates, leaf first).
