@@ -456,8 +456,11 @@ async fn independent_deletions_require_ordered_matching_confirmations() {
             if case == "login_wrong_target" {
                 login["pubkey"] = json!("another-user");
             }
+            if case == "success" {
+                std::fs::remove_file(&f.token_file).unwrap();
+            }
             respond(stream, &login).await;
-            if case == "login_wrong_target" {
+            if case == "login_wrong_target" || case == "success" {
                 return;
             }
             let stream = f
@@ -480,6 +483,21 @@ async fn independent_deletions_require_ordered_matching_confirmations() {
             respond(stream, &account).await;
         });
         if case == "success" {
+            assert!(result.unwrap_err().to_string().contains("token file"));
+            f.assert_no_more_http().await;
+            std::fs::write(&f.token_file, ROTATED_TOKEN).unwrap();
+            let (result, ()) = tokio::join!(f.run("resume-account", &options), async {
+                let stream = f
+                    .accept_post(
+                        "/api/goose/v1/identity/delete-builderlab-account",
+                        ROTATED_TOKEN,
+                        &body,
+                    )
+                    .await;
+                let mut account = f.subject();
+                account["account_deleted"] = json!(true);
+                respond(stream, &account).await;
+            });
             assert_eq!(result.unwrap(), 0);
             assert_eq!(f.inspect().await.request.status, "completed");
             assert_eq!(f.run("again", &options).await.unwrap(), 0);

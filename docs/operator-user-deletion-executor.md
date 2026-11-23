@@ -75,7 +75,7 @@ Request IDs correlate calls. After an error, lost response, or interruption,
 inspect the stage's waiting reason and the original login and account before
 taking further action. Re-running the worker leaves an uncertain delete on hold.
 A 409 for a missing account cannot establish which operation removed it.
-The existing stage inspection shows the login receipt if the account call began.
+The worker saves the verified login receipt before reading the account-call token. If the token mount is missing at this point, restore it and rerun with cleanup confirmation. The worker resumes at account deletion using the saved login receipt.
 
 ## Content batches
 

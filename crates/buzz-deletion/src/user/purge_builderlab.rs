@@ -23,19 +23,33 @@ pub(super) async fn handle(
     );
     // A prior process may have sent a destructive request before losing its
     // response or lease. The service does not deduplicate by request ID.
-    if let Some(saved) = row.metadata_json.get("waiting") {
-        ensure!(
-            saved["reason"] == "awaiting_verified_buzz_cleanup",
-            "inspect the external deletion outcome before proceeding: {}",
-            saved["reason"]
-        );
+    let saved_login = if let Some(saved) = row.metadata_json.get("waiting") {
+        match saved["reason"].as_str() {
+            Some("awaiting_verified_buzz_cleanup") => None,
+            Some("login_deleted") => {
+                let login = &saved["login_receipt"];
+                ensure!(
+                    matches_receipt(login, request.id, &request.target, "auth0_deleted"),
+                    "invalid saved login deletion receipt"
+                );
+                Some(login.clone())
+            }
+            _ => anyhow::bail!(
+                "inspect the external deletion outcome before proceeding: {}",
+                saved["reason"]
+            ),
+        }
     } else {
         ensure!(
             row.status == "pending",
             "inspect the previous account deletion attempt before proceeding"
         );
-    }
+        None
+    };
     if !options.cleanup_verified {
+        if saved_login.is_some() {
+            return Ok(DispatchOutcome::Waiting);
+        }
         store.start_stage(lease, row.id).await?;
         store
             .save_stage_waiting(
@@ -51,21 +65,36 @@ pub(super) async fn handle(
         .as_ref()
         .context("finalization requires configured identity URLs and token file")?;
     let body = json!({"request_id":request.id,"pubkey":request.target,"cleanup_verified":true});
-    let login_request = identity.prepare_delete_login(&body).await?;
+    let login = match saved_login {
+        Some(login) => login,
+        None => {
+            let outbound = identity.prepare_delete_login(&body).await?;
+            store.start_stage(lease, row.id).await?;
+            store
+                .save_stage_waiting(
+                    lease,
+                    row.id,
+                    json!({"reason":"inspect_login_deletion_outcome"}),
+                )
+                .await?;
+            let response = identity.send(outbound).await?;
+            ensure!(
+                matches_receipt(&response, request.id, &request.target, "auth0_deleted"),
+                "login deletion unconfirmed; inspect the external login"
+            );
+            let login =
+                json!({"request_id":request.id,"pubkey":request.target,"auth0_deleted":true});
+            store
+                .save_stage_waiting(
+                    lease,
+                    row.id,
+                    json!({"reason":"login_deleted","login_receipt":login}),
+                )
+                .await?;
+            login
+        }
+    };
     let account_request = identity.prepare_delete_account(&body).await?;
-    store.start_stage(lease, row.id).await?;
-    store
-        .save_stage_waiting(
-            lease,
-            row.id,
-            json!({"reason":"inspect_login_deletion_outcome"}),
-        )
-        .await?;
-    let login = identity.send(login_request).await?;
-    ensure!(
-        matches_receipt(&login, request.id, &request.target, "auth0_deleted"),
-        "login deletion unconfirmed; inspect the external login"
-    );
     store
         .save_stage_waiting(
             lease,
