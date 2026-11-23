@@ -418,6 +418,7 @@ class _ComposeBarLayout extends HookWidget {
       readOnly: readOnly,
       inputFormatters: [_ComposerChipEditingFormatter(controller)],
       keyboardType: TextInputType.multiline,
+      textCapitalization: TextCapitalization.sentences,
       textInputAction: TextInputAction.newline,
       contextMenuBuilder: contextMenuBuilder,
       // Flutter's Cupertino magnifier rebuilds its overlay on every
