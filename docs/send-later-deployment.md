@@ -34,7 +34,8 @@ before any process begins the next.
 3. Every process marks the old key `retiring`.
 
 A process accepts an instruction under its `current` key and under every key
-it lists as `standby` (check 10 of the NIP's acceptance checks). So while the
+it lists as `standby` (check 10 of the NIP's
+[acceptance checks](nips/NIP-SL.md#acceptance-checks)). So while the
 processes disagree about a step, each of them accepts an instruction under the
 key that any of them advertises as `current`, and each lists the key that any
 of them signs a status with.

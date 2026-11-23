@@ -138,7 +138,7 @@ When a send ends for any reason other than the author's own cancel, the relay pu
 }
 ```
 
-`generation` is the one that ended. `e` is present only for `sent` and holds the id of the stored message. `expiration` ([NIP-40](40.md)) is `created_at + status_retention`. `created_at` is the relay's clock when it signs, never earlier than the end of the send.
+`d` is the author's pubkey in lowercase hex, a colon and the send id. `generation` is the one that ended. `e` is present only for `sent` and holds the id of the stored message. `expiration` ([NIP-40](40.md)) is `created_at + status_retention`. `created_at` is the relay's clock when it signs, never earlier than the end of the send.
 
 | `status` | `reason` | The send ends this way when |
 |----------|----------|-----------------------------|
@@ -181,7 +181,7 @@ A client follows its sends with one live subscription. After its `EOSE`, the rel
 
 ### Complete read
 
-The relay's default limit can cut the stored events of that subscription short, and an instruction carries its author's clock, so a `since` cursor can miss an edit from another device. A client therefore MUST NOT refresh `kind:30360` with `since`. It derives state from a complete read: two requests made as the author, with no `since` or `until`, after the `EOSE` of the live subscription and while that subscription stays open.
+The relay's default limit can cut the stored events of that subscription short, and an instruction carries its author's clock, so a `since` cursor can miss an edit from another device. A client therefore MUST NOT refresh `kind:30360` with `since`. It derives state from a complete read, which it makes after each reconnect: two requests made as the author, with no `since` or `until`, after the `EOSE` of the live subscription and while that subscription stays open.
 
 1. Instructions: `{"kinds": [30360], "authors": ["<own pubkey>"], "limit": <max_limit>}`, with the relay's NIP-11 `max_limit`.
 2. Statuses: `{"kinds": [30361], "#p": ["<own pubkey>"], "#d": [<status d values>], "limit": <number of values>}`, split so that no request has more than `max_limit` values. The values name every send the client holds as pending or as ended with an unknown outcome, and every send whose message-holding instruction request 1 returned.
@@ -265,13 +265,13 @@ A client offers send later only while `accepting` is `true`, and keeps `T` and i
 
 ## Late arrival
 
-A released message carries `created_at` `T` and can reach readers up to `release_window` later. A reader that fetches new messages with `since` SHOULD set it back by at least the relay's `created_at` tolerance, and discard by `id` the events it already holds.
+A released message carries `created_at` `T` and can reach readers up to `release_window` later. A reader that opens a live subscription or fetches new messages with `since` SHOULD set it back by at least the relay's `created_at` tolerance, and discard by `id` the events it already holds.
 
 That delivers a late message. It does not make it unread. A reader that records a channel as read up to a `created_at` value counts a late message as read, and this NIP does not remove that limitation. The time or order in which one device received a message is not evidence that the message is unread, and a client MUST NOT substitute it. Counting a late message as unread on every device of a user needs read state that those devices share and that does not depend on `created_at`: an order that follows when the relay stored a message, or a complete record of the messages read by `id`. A client with such read state SHOULD count a late message as unread.
 
 ## Federated identity
 
-Where a community requires NIP-FI, a send is a deferred action under [Deferred actions](NIP-FI.md#deferred-actions), because a release happens without a session. That section defines what the relay records with each accepted generation, which sends a disconnect command cancels (those of the target key and of every key it owns, accepted under the command's issuer, in every community) and when check 13 refuses an instruction. A relay MUST NOT enable send later in such a community unless it implements that section.
+Where a community requires NIP-FI, a send is a deferred action under [Deferred actions](NIP-FI.md#deferred-actions), because a release happens without a session. Each accepted generation is an acceptance of the deferred action, so the relay records the admission that carried it. That section defines which sends a disconnect command cancels (those of the target key and of every key it owns, accepted under the command's issuer, in every community) and when check 13 refuses an instruction. A relay MUST NOT enable send later in such a community unless it implements that section.
 
 Nothing else in NIP-FI ends an accepted send. The relay does not contact the issuer at release, require a recent assertion or evaluate the community's issuer policy again, and an issuer that only stops issuing assertions does not stop a pending send.
 
