@@ -77,12 +77,14 @@ _DiskResult _accessDatabase(_DiskRequest request) {
     }
 
     // Signature verification runs with no SQLite connection open.
-    final (wires, byteSize) = _verifiedWires(
+    final verified = _verifiedWires(
       request,
       candidates,
       knownWires,
       requiredEdits,
     );
+    if (verified == null) return const _DiskResult();
+    final (wires, byteSize) = verified;
     if (!existed) file.parent.createSync(recursive: true);
     db = sqlite3.open(request.path);
     db.execute('PRAGMA foreign_keys = ON');
@@ -252,7 +254,7 @@ String? _savedEditTarget(NostrEvent event) => event.tags.reversed
     .where((tag) => tag.length > 1 && tag[0] == 'e')
     .firstOrNull?[1];
 
-(Map<String, String>, int) _verifiedWires(
+(Map<String, String>, int)? _verifiedWires(
   _DiskRequest request,
   List<NostrEvent> candidates,
   Map<String, String> knownWires,
@@ -286,6 +288,14 @@ String? _savedEditTarget(NostrEvent event) => event.tags.reversed
     final length = utf8.encode(wire).length;
     if (knownWires[event.id] != wire &&
         !verifySavedMessageEvent(event, relayAuthor: request.relayAuthor)) {
+      // Keep the previous thread page when we cannot verify a mutation.
+      // Dropping it alone could restore the text it edits or deletes.
+      if (page.rootId.isNotEmpty &&
+          (event.kind == EventKind.streamMessageEdit ||
+              event.kind == EventKind.deletion ||
+              event.kind == EventKind.nip29DeleteEvent)) {
+        return null;
+      }
       continue;
     }
     // A truncated response can expose originals whose edits or deletions

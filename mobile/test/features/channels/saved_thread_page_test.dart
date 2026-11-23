@@ -277,8 +277,8 @@ void main() {
     expect(await container.read(replies.future), [reply, laterReply]);
     await paint();
     expect(
-      await waitForSaved(args.savedPage, [head, laterReply]),
-      unorderedEquals([head, laterReply]),
+      await waitForSaved(args.savedPage, [head, reply, laterReply, edit]),
+      unorderedEquals([head, reply, laterReply, edit]),
     );
   });
 
@@ -356,6 +356,48 @@ void main() {
       },
     );
   }
+
+  test(
+    'an invalid edit cannot replace a pruned thread after restart',
+    () async {
+      final head = _event('Older head', isRoot: true);
+      final args = ThreadRepliesArgs(
+        channelId: _args.channelId,
+        rootId: head.id,
+      );
+      final reply = _event('Original', args: args);
+      final edit = _event(
+        'Revised',
+        args: args,
+        kind: EventKind.streamMessageEdit,
+        deletionTarget: reply.id,
+      );
+      await store.save(store.capture(_scope, args.savedPage), [
+        reply,
+      ], relayAuthor: null);
+      store.removeChannelEvents(_scope, args.channelId, {
+        reply.id,
+      }, edited: true);
+      expect(
+        await store.read(
+          store.capture(_scope, args.savedPage),
+          includePruned: true,
+        ),
+        isEmpty,
+      );
+      container.dispose();
+      openCacheSession();
+
+      final ticket = store.capture(_scope, args.savedPage);
+      final forged = NostrEvent.fromJson({
+        ...edit.toJson(),
+        'content': 'Forged',
+      });
+      await store.save(ticket, [head, reply, forged], relayAuthor: null);
+      expect(await store.read(ticket), isNull);
+      expect(await store.read(ticket, includePruned: true), isEmpty);
+    },
+  );
 
   test(
     'an empty thread result cannot clear confirmed channel refusal',
