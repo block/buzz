@@ -41,7 +41,7 @@ class _MentionMd {
       return TextSpan(text: text, style: style);
     }
 
-    final name = raw.substring(1).replaceAll('\u00A0', ' ').toLowerCase();
+    final name = foldMentionLabel(raw.substring(1).replaceAll('\u00A0', ' '));
     final matches = bindings[name] ?? const <String>{};
     final pubkey = matches.length == 1 ? matches.single : null;
     if (bindings.containsKey(name) && matches.length != 1) {
@@ -54,10 +54,7 @@ class _MentionMd {
     final isAgent =
         pubkey != null && agentMentionPubkeys.contains(pubkey.toLowerCase());
     final fullLabel = displayName ?? raw.substring(1);
-    final visibleLabel = fullLabel.replaceAllMapped(
-      RegExp(r'\(([0-9a-f]{64})\)'),
-      (m) => '(${m[1]!.substring(0, 8)}…${m[1]!.substring(60)})',
-    );
+    final visibleLabel = mentionVisibleLabel(fullLabel);
     final pill = MessageMentionPill(
       label: visibleLabel,
       pubkey: pubkey,
@@ -97,6 +94,8 @@ extension _MentionLinks on MessageContent {
         link,
         url,
         fallbackStyle ?? link.style,
+        mentionLabels,
+        mentionNames,
         agentMentionPubkeys,
         onMentionTap,
         ownBubble: bubble && ownMessage,

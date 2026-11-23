@@ -35,6 +35,12 @@ String mentionIdentityLink(String label, String pubkey) {
 String? mentionIdentityLinkKey(String target) =>
     _target.hasMatch(target) ? typedPublicKey(target) : null;
 
+/// [name], a mention name for an identity link to [pubkey], or null when it
+/// is only the compact npub a nameless tagged agent's mention name falls back
+/// to, so the link keeps its written label instead.
+String? mentionIdentityLinkName(String pubkey, String? name) =>
+    name == null || name == shortPubkey(pubkey) ? null : name;
+
 /// Whether [label], a link's visible text, reads as a mention.
 bool isMentionIdentityLabel(String label) =>
     label.length > 1 && label.startsWith('@');

@@ -8,14 +8,20 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 void main() {
-  test('without a native session, clients come from http.Client()', () {
-    final mock = MockClient((_) async => http.Response('', 200));
+  test('without a native session, clients come from http.Client()', () async {
+    var requests = 0;
+    final mock = MockClient((_) async {
+      requests++;
+      return http.Response('', 200);
+    });
     for (final traffic in HttpTraffic.values) {
-      expect(
-        http.runWithClient(() => newAppHttpClient(traffic), () => mock),
-        same(mock),
+      final client = http.runWithClient(
+        () => newAppHttpClient(traffic),
+        () => mock,
       );
+      await client.get(Uri.parse('https://relay.example/'));
     }
+    expect(requests, HttpTraffic.values.length);
   });
 
   test('closing a shared-session handle leaves the session usable', () async {

@@ -526,6 +526,34 @@ void main() {
     }
   });
 
+  testWidgets('a name two tagged people share after folding opens as text', (
+    tester,
+  ) async {
+    // Review of #9841: `Sam` and `ſam` fold to one name, as the text scan
+    // compares them, so neither tag order may seed a chip for either key.
+    final sam = '1' * 64, longS = '2' * 64;
+    for (final tagged in [
+      [sam, longS],
+      [longS, sam],
+    ]) {
+      await _openEditSheet(
+        tester,
+        message: _message('ask @Sam', mentions: tagged),
+        members: Future.value([
+          for (final (key, name) in [(sam, 'Sam'), (longS, '\u017Fam')])
+            ChannelMember(
+              pubkey: key,
+              displayName: name,
+              role: 'member',
+              joinedAt: DateTime(2025),
+            ),
+        ]),
+      );
+      expect(controllerOf(tester).text, 'ask @Sam', reason: '$tagged');
+      expect(personChip, findsNothing, reason: '$tagged');
+    }
+  });
+
   testWidgets('two picked namesakes save as links and never as raw keys', (
     tester,
   ) async {

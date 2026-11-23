@@ -19,6 +19,7 @@ import '../../shared/widgets/modal_presentation.dart';
 import '../channels/compose_bar.dart';
 import '../channels/channel_identity_names_provider.dart';
 import '../channels/message_content.dart';
+import '../channels/message_mention_pill.dart';
 import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import '../profile/user_profile_sheet.dart';
@@ -428,19 +429,22 @@ class _OriginalPost extends ConsumerWidget {
             ],
           ),
           const SizedBox(height: Grid.xxs),
-          MessageContent(
-            content: post.content,
-            mentionNames: mentionNames,
-            mentionLabels: mentionLabels,
-            agentMentionPubkeys: agentMentionPubkeys,
-            tags: post.tags,
-            baseStyle: messageBodyTextStyle.copyWith(
-              color: context.colors.onSurface,
-            ),
-            onMentionTap: (pubkey) => showUserProfileSheet(
-              context,
-              pubkey,
-              names: channelIdentityNamesProvider(post.channelId),
+          IdentityLinkChannel(
+            channelId: post.channelId,
+            child: MessageContent(
+              content: post.content,
+              mentionNames: mentionNames,
+              mentionLabels: mentionLabels,
+              agentMentionPubkeys: agentMentionPubkeys,
+              tags: post.tags,
+              baseStyle: messageBodyTextStyle.copyWith(
+                color: context.colors.onSurface,
+              ),
+              onMentionTap: (pubkey) => showUserProfileSheet(
+                context,
+                pubkey,
+                names: channelIdentityNamesProvider(post.channelId),
+              ),
             ),
           ),
         ],
@@ -566,19 +570,22 @@ class _ReplyRow extends ConsumerWidget {
           ),
           Padding(
             padding: const EdgeInsets.only(left: 32, top: Grid.half),
-            child: MessageContent(
-              content: reply.content,
-              mentionNames: mentionNames,
-              mentionLabels: mentionLabels,
-              agentMentionPubkeys: agentMentionPubkeys,
-              tags: reply.tags,
-              baseStyle: messageBodyTextStyle.copyWith(
-                color: context.colors.onSurface,
-              ),
-              onMentionTap: (pubkey) => showUserProfileSheet(
-                context,
-                pubkey,
-                names: channelIdentityNamesProvider(channelId),
+            child: IdentityLinkChannel(
+              channelId: channelId,
+              child: MessageContent(
+                content: reply.content,
+                mentionNames: mentionNames,
+                mentionLabels: mentionLabels,
+                agentMentionPubkeys: agentMentionPubkeys,
+                tags: reply.tags,
+                baseStyle: messageBodyTextStyle.copyWith(
+                  color: context.colors.onSurface,
+                ),
+                onMentionTap: (pubkey) => showUserProfileSheet(
+                  context,
+                  pubkey,
+                  names: channelIdentityNamesProvider(channelId),
+                ),
               ),
             ),
           ),

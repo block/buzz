@@ -5087,6 +5087,7 @@ class _PendingDmActions implements ChannelActions {
   Future<Channel> openDm({
     required List<String> pubkeys,
     bool waitForChannelList = true,
+    bool includeHistory = false,
   }) {
     waits.add(waitForChannelList);
     return Completer<Channel>().future;
