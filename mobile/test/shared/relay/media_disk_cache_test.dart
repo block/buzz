@@ -260,15 +260,11 @@ void main() {
     replaceExternal = null;
     expect(fetched, _externalUrls.take(2));
 
-    // A replaced account's directory goes, including writes that land after
-    // its delete; removing the community deletes its directory.
+    // Removing the community deletes its directory.
     expect(await directory.exists(), isTrue);
-    await MediaDiskCache.removeOrphans(root, () => {'community-1': 'signer-2'});
-    expect(await directory.exists(), isFalse);
-    await directory.create(recursive: true);
-    await MediaDiskCache.removeOrphans(root, () => {'community-1': 'signer-1'});
+    await MediaDiskCache.removeOrphans(root, () => {'community-1'});
     expect(await directory.exists(), isTrue);
-    await MediaDiskCache.removeOrphans(root, () => {'community-2': 'signer-1'});
+    await MediaDiskCache.removeOrphans(root, () => {'community-2'});
     expect(
       await MediaDiskCache.communityDirectory(root, 'community-1').exists(),
       isFalse,

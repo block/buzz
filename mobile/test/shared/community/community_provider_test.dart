@@ -703,10 +703,6 @@ void main() {
           MediaDiskCache.communityDirectory(mediaRoot, 'restored'),
         );
         final oldDirectory = await seedDirectory(community.id, oldKeys.public);
-        final retiredDirectory = await seedDirectory(
-          community.id,
-          nostr.Keys.generate().public,
-        );
         container = createContainer(
           overrides: [
             savedPrefsProvider.overrideWithValue(prefs),
@@ -719,7 +715,6 @@ void main() {
         expect(await cache.write(restoredToken, snapshot), isFalse);
         expect(await eventuallyExists(orphanMedia), isFalse);
         expect(await oldMedia.exists(), isTrue);
-        expect(await eventuallyExists(retiredDirectory), isFalse);
         expect(await oldDirectory.exists(), isTrue);
 
         await communityStorage.saveActiveId(community.id);
