@@ -729,6 +729,20 @@ class _MessageList extends HookConsumerWidget {
     }, [appView, itemScrollController]);
 
     _useInitialThreadRoute(context, ref);
+    _useMessageReveal(
+      context,
+      ref,
+      controller: itemScrollController,
+      positions: itemPositionsListener.itemPositions,
+      indexOf: reversedIndexOf,
+      viewportHeight: () => timelineViewportHeight.value,
+      bottomInset: navigationBottomInset,
+      onJump: () {
+        followsLatest.value = false;
+        hasUserScrolled.value = false;
+        isAtLatest.value = false;
+      },
+    );
 
     useEffect(() {
       final targetIndex = reversedIndexOf(initialMessageId);

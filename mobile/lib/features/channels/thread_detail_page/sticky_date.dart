@@ -122,3 +122,23 @@ class _ThreadStickyDateIndex {
     );
   }
 }
+
+/// The floating date pill, pinned below the thread header and its "up" row.
+Widget _threadStickyDateForeground(
+  double headerHeight,
+  ValueListenable<StickyDateHeaderState> state,
+  ValueListenable<bool> scrollVisible,
+) => Stack(
+  children: [
+    Positioned(
+      left: 0,
+      right: 0,
+      top: headerHeight + Grid.twelve,
+      child: StickyDateHeader(
+        key: const ValueKey('thread-sticky-date-header'),
+        state: state,
+        scrollVisible: scrollVisible,
+      ),
+    ),
+  ],
+);

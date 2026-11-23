@@ -1,24 +1,33 @@
 part of '../thread_detail_page.dart';
 
+/// The conversation's name as its own header shows it.
+String _threadConversationName(
+  WidgetRef ref,
+  Channel channel,
+  String? currentPubkey,
+) => channel.isDm
+    ? ref.watch(
+        identityNameSourcesProvider.select(
+          (names) => resolveDmChannelDisplayLabel(
+            channel,
+            currentPubkey: currentPubkey,
+            names: names,
+          ),
+        ),
+      )
+    : channel.name;
+
 FrostedAppBar _threadAppBar(
   BuildContext context,
   WidgetRef ref,
   Channel? channel,
   String? currentPubkey,
+  _ThreadUpLevel up,
 ) {
   final channelDisplayName = channel == null
       ? ''
-      : channel.isDm
-      ? ref.watch(
-          identityNameSourcesProvider.select(
-            (names) => resolveDmChannelDisplayLabel(
-              channel,
-              currentPubkey: currentPubkey,
-              names: names,
-            ),
-          ),
-        )
-      : channel.name;
+      : _threadConversationName(ref, channel, currentPubkey);
+  final upRow = up.row;
   final usesNativeIosGlassBackButton =
       Navigator.canPop(context) &&
       Theme.of(context).platform == TargetPlatform.iOS;
@@ -27,7 +36,13 @@ FrostedAppBar _threadAppBar(
     horizontalInset: Theme.of(context).platform == TargetPlatform.android
         ? Grid.gutter
         : Grid.xxs,
-    bottomHeight: conversationNavigationBottomPadding(context),
+    bottomHeight: conversationNavigationBottomPadding(context) + up.height,
+    bottom: upRow == null
+        ? null
+        : Align(
+            alignment: Alignment.topCenter,
+            child: SizedBox(height: up.height, child: upRow),
+          ),
     alwaysFrosted: true,
     nativeViewSuppressed: messageActionBackdropActive,
     nativeTitle: 'Thread',
@@ -56,7 +71,8 @@ FrostedAppBar _threadAppBar(
   );
 }
 
-double _threadHeaderHeight(BuildContext context) => frostedAppBarHeight(
-  context,
-  bottomHeight: conversationNavigationBottomPadding(context),
-);
+double _threadHeaderHeight(BuildContext context, _ThreadUpLevel up) =>
+    frostedAppBarHeight(
+      context,
+      bottomHeight: conversationNavigationBottomPadding(context) + up.height,
+    );

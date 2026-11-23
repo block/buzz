@@ -24,7 +24,9 @@ import '../../shared/identity_names/identity_names_provider.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/app_route_observer.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/ios_glass_navigation_button.dart';
@@ -34,6 +36,7 @@ import '../../shared/profile/user_cache_provider.dart';
 import '../../shared/profile/user_profile.dart';
 import 'android_ime_lift.dart';
 import 'channel.dart';
+import 'channel_detail_page.dart';
 import 'channel_management_provider.dart' show currentPubkeyProvider;
 import 'channel_identity_names_provider.dart';
 import 'channel_link_navigation.dart';
@@ -42,6 +45,7 @@ import 'channel_typing_provider.dart';
 import 'inline_agent_typing.dart';
 import '../../shared/me/me_assistants.dart';
 import 'thread_replies_provider.dart';
+import 'open_channel_routes.dart';
 import 'channel_ids_by_name_provider.dart';
 import 'channels_provider.dart';
 import 'compose_bar.dart';
@@ -82,11 +86,9 @@ part 'thread_detail_page/tail_alignment.dart';
 part 'thread_detail_page/thread_message.dart';
 part 'thread_detail_page/avatar.dart';
 part 'thread_detail_page/app_bar.dart';
-
-const _landingHighlightDuration = Duration(seconds: 3);
-const _landingHighlightDelay = Duration(milliseconds: 50);
-const _landingHighlightTransitionDuration = Duration(milliseconds: 300);
-const _landingHighlightOpacity = 0.12;
+part 'thread_detail_page/landing_highlight.dart';
+part 'thread_detail_page/up_level.dart';
+part 'thread_detail_page/up_level_row.dart';
 
 /// Full-screen thread detail page.
 ///
@@ -174,67 +176,20 @@ class ThreadDetailPage extends HookConsumerWidget {
       initialMessageId: initialMessageId,
     );
     final relayRepliesAvailable = relayReplyState.value != null;
-    final routeAnimation = ModalRoute.of(context)?.animation;
-    final reducedLandingHighlightMotion = MediaQuery.disableAnimationsOf(
+    final up = _useThreadUpLevel(
       context,
+      ref,
+      this,
+      allMsgs,
+      currentPubkey,
+      repliesSettled: hasFetchedReplies || relayReplyState.hasError,
     );
-    final highlightedMessageId = useState<String?>(null);
+    final headerHeight = _threadHeaderHeight(context, up);
     final initialTargetReadyForHighlight = useState(false);
-    useEffect(
-      () {
-        final messageId = initialMessageId;
-        if (messageId == null || !initialTargetReadyForHighlight.value) {
-          return null;
-        }
-        var disposed = false;
-        Timer? revealTimer;
-        Timer? dismissTimer;
-
-        void revealHighlight() {
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (disposed) return;
-            revealTimer = Timer(_landingHighlightDelay, () {
-              if (disposed) return;
-              highlightedMessageId.value = messageId;
-              dismissTimer = Timer(
-                _landingHighlightDuration +
-                    (reducedLandingHighlightMotion
-                        ? Duration.zero
-                        : _landingHighlightTransitionDuration),
-                () {
-                  if (!disposed) highlightedMessageId.value = null;
-                },
-              );
-            });
-          });
-        }
-
-        void handleRouteStatus(AnimationStatus status) {
-          if (status != AnimationStatus.completed) return;
-          routeAnimation?.removeStatusListener(handleRouteStatus);
-          revealHighlight();
-        }
-
-        if (routeAnimation == null ||
-            routeAnimation.status == AnimationStatus.completed) {
-          revealHighlight();
-        } else {
-          routeAnimation.addStatusListener(handleRouteStatus);
-        }
-
-        return () {
-          disposed = true;
-          routeAnimation?.removeStatusListener(handleRouteStatus);
-          revealTimer?.cancel();
-          dismissTimer?.cancel();
-        };
-      },
-      [
-        initialMessageId,
-        initialTargetReadyForHighlight.value,
-        reducedLandingHighlightMotion,
-        routeAnimation,
-      ],
+    final highlightedMessageId = _useLandingHighlight(
+      context,
+      initialMessageId,
+      ready: initialTargetReadyForHighlight.value,
     );
 
     // Index all messages by parentId so we can find direct children of any
@@ -321,7 +276,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       final update = stickyDateIndex.resolve(
         positions: positions,
         viewportHeight: viewportHeight,
-        stickyTop: _threadHeaderHeight(context) + Grid.twelve,
+        stickyTop: headerHeight + Grid.twelve,
         stickyHeaderHeight: StickyDateHeader.heightOf(context),
       );
       stickyDateHeaderState.value = update.state;
@@ -623,7 +578,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     // scrolled up to read, leave them where they are.
     final previousReplyCount = useRef(replies.length);
     final topOverlayFraction = viewportHeight > 0
-        ? _threadHeaderHeight(context) / viewportHeight
+        ? headerHeight / viewportHeight
         : 0.0;
     final settleGeometry = (
       composerDockHeight.value,
@@ -998,23 +953,14 @@ class ThreadDetailPage extends HookConsumerWidget {
 
     return FrostedScaffold(
       foreground: threadViewportVisible
-          ? Stack(
-              children: [
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  top: _threadHeaderHeight(context) + Grid.twelve,
-                  child: StickyDateHeader(
-                    key: const ValueKey('thread-sticky-date-header'),
-                    state: stickyDateHeaderState,
-                    scrollVisible: dateScrollActivity,
-                  ),
-                ),
-              ],
+          ? _threadStickyDateForeground(
+              headerHeight,
+              stickyDateHeaderState,
+              dateScrollActivity,
             )
           : null,
       resizeToAvoidBottomInset: !usesFixedAndroidImeViewport,
-      appBar: _threadAppBar(context, ref, channel, currentPubkey),
+      appBar: _threadAppBar(context, ref, channel, currentPubkey, up),
       body: Stack(
         fit: StackFit.expand,
         children: [
@@ -1053,6 +999,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                       if (context.mounted) headHeight.value = height;
                     },
                     viewport: listViewport,
+                    topInset: up.height,
                     onUserScrollStart: () {
                       hidesLatestForInitialTailSettle.value = false;
                       hidesLatestForComposerTailCorrection.value = false;
@@ -1113,7 +1060,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                     channelNames: channelNamesMap,
                     channelId: channelId,
                     currentPubkey: currentPubkey,
-                    highlightedMessageId: highlightedMessageId.value,
+                    highlightedMessageId: highlightedMessageId,
                     allMessages: allMsgs,
                     isMember: isMember,
                     isArchived: isArchived,
