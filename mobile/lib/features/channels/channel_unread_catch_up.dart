@@ -96,6 +96,12 @@ extension _UnreadCatchUp on ChannelsNotifier {
         );
       }
 
+      // A channel with a gap to read is unknown until that read answers, so a
+      // newer refresh that retires this catch-up leaves the row visible.
+      final unknownGaps = {...deferredGaps, ...gapFilters.keys};
+      if (_activity.noteCatchUp(unknownGaps, unknownGaps)) {
+        _publishUnreadCatchUp(const {});
+      }
       final failedChannelIds = <String>{};
       final events = await _fetchChannelHistoryBatch(
         session,
@@ -240,14 +246,10 @@ extension _UnreadCatchUp on ChannelsNotifier {
       // deadline-unavailable latest-message batch leaves it unset.
       // So does a channel whose activity became unknown. Newer activity and
       // channels that became known republish once their signatures are
-      // checked. A channel with a gap to read is unknown until that read
-      // answers, so a newer refresh that retires it leaves the row visible.
+      // checked.
       gapFilters.removeWhere((id, _) => failedChannelIds.contains(id));
       deferredGaps.removeAll(failedChannelIds);
-      final unknownGaps = {...deferredGaps, ...gapFilters.keys};
-      final coverageChanged =
-          _activity.noteCatchUp(unknownGaps, unknownGaps) |
-          _activity.forgetHeads(batchDeletedIds);
+      final coverageChanged = _activity.forgetHeads(batchDeletedIds);
       if (recordedAtByChannel.isNotEmpty ||
           appliedDeletion ||
           coverageChanged) {

@@ -2947,25 +2947,42 @@ void main() {
     // A channel with a gap to read is unknown until that read answers. A pull
     // to refresh drops the answer, and one that then fails starts no new
     // catch-up, so the channel stays unknown rather than settling on activity
-    // the gap could hide.
-    final parked = message('parked', now - 25);
-    session.recentMessages = [old, offline, parked];
-    final gapGate = session.gapBatchGate = Completer<void>();
-    await reconnect();
-    await _waitUntil(() => session.gapBatchGate == null);
-    expect(notifier.activityFor(_channelA).known, isFalse);
-    session
-      ..pauseNextMemberMetadataQuery()
-      ..failClaimedMemberMetadataQuery = true;
-    final failing = notifier.refresh();
-    await session.nextMemberMetadataQueryStarted;
-    gapGate.complete();
-    await _settle();
-    session.resumePausedMemberMetadataQuery();
-    await failing;
-    session.failClaimedMemberMetadataQuery = false;
-    await _settle();
-    expect(notifier.activityFor(_channelA).known, isFalse);
+    // the gap could hide. The pull can land while the unread request or the
+    // gap read is in flight.
+    for (final parkUnread in [true, false]) {
+      session.recentMessages = [old, offline];
+      await notifier.refresh();
+      await notifier.waitForUnreadCatchUp();
+      await _waitUntil(() => notifier.activityFor(_channelA).known);
+      session.recentMessages = [old, offline, message('parked', now - 25)];
+      final gapGate = Completer<void>();
+      if (parkUnread) {
+        session.pauseNextUnreadCatchUpQuery();
+        final sent = session.nextUnreadCatchUpQueryStarted;
+        session.setStatus(SessionStatus.reconnecting);
+        session.setStatus(SessionStatus.connected);
+        await sent;
+      } else {
+        session.gapBatchGate = gapGate;
+        await reconnect();
+        await _waitUntil(() => session.gapBatchGate == null);
+      }
+      expect(notifier.activityFor(_channelA).known, isFalse);
+      session
+        ..pauseNextMemberMetadataQuery()
+        ..failClaimedMemberMetadataQuery = true;
+      final failing = notifier.refresh();
+      await session.nextMemberMetadataQueryStarted;
+      parkUnread
+          ? session.resumePausedUnreadCatchUpQuery()
+          : gapGate.complete();
+      await _settle();
+      session.resumePausedMemberMetadataQuery();
+      await failing;
+      session.failClaimedMemberMetadataQuery = false;
+      await _settle();
+      expect(notifier.activityFor(_channelA).known, isFalse);
+    }
 
     // A rebuild while disconnected resets the unread cursor, so the next
     // catch-up starts after the read marker; the post read meanwhile on
