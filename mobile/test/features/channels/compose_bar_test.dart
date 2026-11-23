@@ -1,3 +1,5 @@
+import 'package:buzz/features/channels/message_content.dart';
+import 'package:buzz/features/channels/message_mention_pill.dart';
 import 'package:buzz/features/channels/voice_note_composer_recorder.dart';
 import 'package:clock/clock.dart';
 import 'package:buzz/features/channels/composer_transcription.dart';
@@ -6666,6 +6668,7 @@ void main() {
         tester,
       ) async {
         final signer = nostr.Keys.generate();
+        String? sentContent;
         List<String>? sentRecipients;
         List<List<String>>? sentTags;
         await tester.pumpWidget(
@@ -6682,7 +6685,12 @@ void main() {
             ],
             searchPeople: (query) async => [maryJane],
             onSend:
-                (_, recipients, {mediaTags = const <List<String>>[]}) async {
+                (
+                  content,
+                  recipients, {
+                  mediaTags = const <List<String>>[],
+                }) async {
+                  sentContent = content;
                   sentRecipients = recipients;
                   sentTags = mediaTags;
                 },
@@ -6693,6 +6701,44 @@ void main() {
         expect(find.byType(AlertDialog), findsNothing);
         expect(sentRecipients, isNot(contains(maryJane.pubkey)));
         expect(sentTags, contains(orderedEquals(['mention', maryJane.pubkey])));
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(ComposeBar)),
+        );
+        container
+            .read(userCacheProvider.notifier)
+            .put(
+              UserProfile(
+                pubkey: maryJane.pubkey,
+                avatarUrl: 'https://example.org/mary.png',
+              ),
+            );
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: MaterialApp(
+              home: Scaffold(
+                body: AppMarkdownTheme(
+                  child: MessageContent(
+                    content: sentContent!,
+                    tags: sentTags!,
+                    bubble: true,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        final chip = tester.widget<MessageMentionPill>(
+          find.byType(MessageMentionPill),
+        );
+        expect(chip.label, 'Mary Jane');
+        expect(chip.pubkey, maryJane.pubkey);
+        expect(chip.isAgent, isFalse);
+        expect(
+          tester.widget<AvatarImage>(find.byType(AvatarImage)).imageUrl,
+          'https://example.org/mary.png',
+        );
       });
 
       testWidgets('a DM without membership uses its participants and sends', (

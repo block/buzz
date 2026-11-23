@@ -46,6 +46,7 @@ class MessagePreview extends HookConsumerWidget {
             source,
             mentionNames,
             mentionedPubkeysFromTags(tags),
+            mentionLabels,
           ),
           mentionNames: mentionNames,
           mentionLabels: mentionLabels,

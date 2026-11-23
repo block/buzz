@@ -14,10 +14,18 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+const _personKey =
+    'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+const _agentKey =
+    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
 class _Profiles extends UserCacheNotifier {
   @override
   Map<String, UserProfile> build() => const {
-    'bob': UserProfile(pubkey: 'bob', avatarUrl: 'https://example.org/bob.png'),
+    _personKey: UserProfile(
+      pubkey: _personKey,
+      avatarUrl: 'https://example.org/bob.png',
+    ),
   };
 }
 
@@ -41,11 +49,11 @@ void main() {
     (tester) async {
       final profiles = userCacheProvider.overrideWith(_Profiles.new);
       final container = ProviderContainer(
-        overrides: [myPubkeyProvider.overrideWithValue('alice'), profiles],
+        overrides: [myPubkeyProvider.overrideWithValue(_agentKey), profiles],
       );
       addTearDown(container.dispose);
       String? tapped;
-      const names = {'alice': 'Alice', 'bob': 'Bob'};
+      const names = {_agentKey: 'Alice', _personKey: 'Bob'};
       for (final brightness in Brightness.values) {
         for (final own in [false, true]) {
           final theme = mobileAppearanceTheme(brightness, '#c0a2f1');
@@ -65,7 +73,16 @@ void main() {
                       child: SizedBox(
                         width: 320,
                         child: MessageContent(
-                          content: 'Hello @Alice and @Bob',
+                          content: '@Helper @Bob Smith',
+                          mentionLabels: const {
+                            _personKey: 'Bob Smith',
+                            _agentKey: 'Helper',
+                          },
+                          tags: const [
+                            ['p', _personKey],
+                            ['p', _agentKey],
+                          ],
+                          agentMentionPubkeys: const {_agentKey},
                           mentionNames: names,
                           bubble: true,
                           ownMessage: own,
@@ -91,38 +108,59 @@ void main() {
           }
 
           expect(
-            fill('Alice'),
+            fill('Helper'),
             own ? chatCodeTint(chat.foreground, .18) : chat.outgoing,
           );
           expect(
-            fill('Bob'),
+            fill('Bob Smith'),
             own
                 ? chatCodeTint(chat.foreground, .18)
                 : (brightness == Brightness.dark
                       ? Colors.white.withValues(alpha: .16)
                       : Colors.black.withValues(alpha: .10)),
           );
+          final chips = find.byType(MessageMentionPill);
+          expect(
+            tester.widget<MessageMentionPill>(chips.first).isAgent,
+            isTrue,
+          );
+          expect(
+            tester.widget<MessageMentionPill>(chips.last).isAgent,
+            isFalse,
+          );
+          Rect paintedChip(Finder chip) => tester.getRect(
+            find
+                .descendant(of: chip, matching: find.byType(DecoratedBox))
+                .first,
+          );
+          final agentRect = paintedChip(chips.first);
+          final personRect = paintedChip(chips.last);
+          expect(
+            agentRect.right < personRect.left ||
+                agentRect.bottom < personRect.top,
+            isTrue,
+          );
           final portrait = tester.widget<AvatarImage>(find.byType(AvatarImage));
           expect(portrait.imageUrl, 'https://example.org/bob.png');
           expect(portrait.isAgent, isFalse);
           tapped = null;
-          await tester.tap(find.text('Bob'));
-          expect(tapped, 'bob');
+          await tester.tap(find.text('Bob Smith'));
+          expect(tapped, _personKey);
           expect(tester.takeException(), isNull);
 
           // Switching identity updates already-parsed spans, without new content.
           container.updateOverrides([
             profiles,
-            myPubkeyProvider.overrideWithValue('bob'),
+            myPubkeyProvider.overrideWithValue(_personKey),
           ]);
           await tester.pump();
           if (!own) {
-            expect(fill('Bob'), chat.outgoing);
-            expect(fill('Alice'), isNot(chat.outgoing));
+            expect(fill('Bob Smith'), chat.outgoing);
+            expect(fill('Helper'), isNot(chat.outgoing));
           }
           container.updateOverrides([
             profiles,
-            myPubkeyProvider.overrideWithValue('alice'),
+            myPubkeyProvider.overrideWithValue(_agentKey),
           ]);
           await tester.pump();
         }

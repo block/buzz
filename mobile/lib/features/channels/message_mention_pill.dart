@@ -112,6 +112,10 @@ class MessageMentionPill extends ConsumerWidget {
         : BuzzAgentIcon(size: size, color: ink);
 
     return Container(
+      margin: EdgeInsets.symmetric(
+        horizontal: fontSize / 17,
+        vertical: 2 * fontSize / 17,
+      ),
       padding: EdgeInsetsDirectional.fromSTEB(
         hasPicture ? Grid.quarter : Grid.quarter * 1.5,
         Grid.quarter,

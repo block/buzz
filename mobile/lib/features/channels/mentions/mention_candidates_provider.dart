@@ -64,7 +64,14 @@ final mentionUserSearchProvider = FutureProvider.autoDispose
             ),
       ];
       // A search that outlived its query or community is not kept.
-      if (!disposed) ref.read(mentionSearchCacheProvider).put(trimmed, people);
+      if (!disposed) {
+        final profiles = ref.read(userCacheProvider.notifier);
+        for (final person in found) {
+          if (person.profile case final event?)
+            profiles.cacheProfileEvent(event);
+        }
+        ref.read(mentionSearchCacheProvider).put(trimmed, people);
+      }
       return people;
     });
 
