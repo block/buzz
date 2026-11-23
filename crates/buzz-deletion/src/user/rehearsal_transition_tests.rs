@@ -45,6 +45,7 @@ fn rehearsal_routes_owned_and_former_communities_then_global_report_and_terminal
         vec![
             "participant",
             "owner",
+            "past_participant",
             "former_participant",
             "stored_community",
         ],

@@ -174,7 +174,7 @@ pub(super) async fn generate_rehearsal_inventory_on(
         let relationship = match row.role.as_deref() {
             Some("owner") => "owner",
             Some("admin" | "member") => "participant",
-            None => "stored_community",
+            None => "past_participant",
             _ => return Err(DbError::DeletionSafety("unsupported membership role".into())),
         };
         Ok(json!({"community_id":row.community_id,"label":row.host,"relationship":relationship}))

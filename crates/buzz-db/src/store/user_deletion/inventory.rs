@@ -85,7 +85,11 @@ impl UserDeletionInventory {
         let mut seen = HashSet::new();
         let mut communities = Vec::new();
         for row in rows {
-            if row["relationship"] == "stored_community" && !rehearsal {
+            if matches!(
+                row["relationship"].as_str(),
+                Some("stored_community" | "past_participant")
+            ) && !rehearsal
+            {
                 return Err(invalid(
                     "all-community inspection is only supported for rehearsals",
                 ));
@@ -102,7 +106,13 @@ impl UserDeletionInventory {
                 || (!legacy && row.get("action").is_some())
                 || !matches!(
                     row["relationship"].as_str(),
-                    Some("participant" | "former_participant" | "owner" | "stored_community")
+                    Some(
+                        "participant"
+                            | "past_participant"
+                            | "former_participant"
+                            | "owner"
+                            | "stored_community"
+                    )
                 )
             {
                 return Err(invalid("duplicate community or unsupported deletion scope"));

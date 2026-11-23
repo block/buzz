@@ -2,7 +2,11 @@
 -- Include inactive agents and removed memberships. A current owned-agent profile
 -- already selects its community; do not carry its key into another community.
 -- Keep all predicates inside the limit so unrelated tenants cannot exhaust it.
-SELECT c.id AS community_id, c.host, m.role
+SELECT c.id AS community_id, c.host,
+    COALESCE(m.role, CASE WHEN EXISTS (
+        SELECT 1 FROM channel_members WHERE community_id = c.id
+            AND pubkey = decode($1, 'hex') AND removed_at IS NULL
+    ) THEN 'member' END) AS role
 FROM communities c
 LEFT JOIN relay_members m ON m.community_id = c.id AND m.pubkey = $1
 WHERE m.pubkey IS NOT NULL

@@ -70,6 +70,12 @@ attribution and profile subjects remain candidates until the handlers validate
 them; inventory inclusion does not authorize deleting their rows. The community
 limit applies after filtering. Existing requests keep their saved inventory;
 a new run discovers the current scope. Standalone `account-scope` is unchanged.
+New rehearsal inventories label current non-owner members `participant` and
+matched communities without current membership `past_participant`. The latter
+includes communities with only owned-agent data; it does not assert that the
+human previously joined. Both use the same content, account and profile previews.
+`owner` selects the owned-community branch. Older saved relationship labels
+remain readable without rewriting their inventories or approval digests.
 Unavailable or non-active communities and unresolvable ownership still fail
 visibly; this milestone does not invent a disposition for those cases.
 

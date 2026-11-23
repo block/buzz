@@ -38,12 +38,13 @@ async fn rehearsal_discovers_residue_and_scoped_agents_without_unrelated_communi
     for (sql, role) in [
         ("INSERT INTO relay_members(community_id,pubkey,role) VALUES($1,$2,'owner')", "owner"),
         ("INSERT INTO relay_members(community_id,pubkey,role) VALUES($1,$2,'member')", "participant"),
-        ("INSERT INTO channel_members(community_id,channel_id,pubkey,removed_at) VALUES($1,gen_random_uuid(),decode($2,'hex'),now())", "stored_community"),
-        ("INSERT INTO api_tokens(community_id,token_hash,owner_pubkey,name,scopes,revoked_at) VALUES($1,decode($2,'hex'),decode($2,'hex'),'old','[]',now())", "stored_community"),
-        ("INSERT INTO personal_read_accounts(community_id,actor) VALUES($1,decode($2,'hex'))", "stored_community"),
-        ("INSERT INTO nip_fi_profile_heads(community_id,pubkey,issuer,issued_at,event) VALUES($1,$2,'example.org',1,'{}')", "stored_community"),
-        ("INSERT INTO media_uploaders(community_id,pubkey,sha256) VALUES($1,decode($2,'hex'),repeat('01',32))", "stored_community"),
-        ("INSERT INTO pubkey_allowlist(community_id,pubkey,added_by) VALUES($1,decode(repeat('02',32),'hex'),decode($2,'hex'))", "stored_community"),
+        ("INSERT INTO channel_members(community_id,channel_id,pubkey) VALUES($1,gen_random_uuid(),decode($2,'hex'))", "participant"),
+        ("INSERT INTO channel_members(community_id,channel_id,pubkey,removed_at) VALUES($1,gen_random_uuid(),decode($2,'hex'),now())", "past_participant"),
+        ("INSERT INTO api_tokens(community_id,token_hash,owner_pubkey,name,scopes,revoked_at) VALUES($1,decode($2,'hex'),decode($2,'hex'),'old','[]',now())", "past_participant"),
+        ("INSERT INTO personal_read_accounts(community_id,actor) VALUES($1,decode($2,'hex'))", "past_participant"),
+        ("INSERT INTO nip_fi_profile_heads(community_id,pubkey,issuer,issued_at,event) VALUES($1,$2,'example.org',1,'{}')", "past_participant"),
+        ("INSERT INTO media_uploaders(community_id,pubkey,sha256) VALUES($1,decode($2,'hex'),repeat('01',32))", "past_participant"),
+        ("INSERT INTO pubkey_allowlist(community_id,pubkey,added_by) VALUES($1,decode(repeat('02',32),'hex'),decode($2,'hex'))", "past_participant"),
     ] {
         let id = community(&pool).await;
         sqlx::query(sql).bind(id).bind(&human).execute(&pool).await.unwrap();
@@ -52,7 +53,7 @@ async fn rehearsal_discovers_residue_and_scoped_agents_without_unrelated_communi
     let archived = community(&pool).await;
     sqlx::query("INSERT INTO archived_identities(community_id,pubkey,actor,consent_path,request_event_id) VALUES($1,$2,$3,'admin','archive-request')")
         .bind(archived).bind(&other).bind(&human).execute(&pool).await.unwrap();
-    expected.push((archived, "stored_community"));
+    expected.push((archived, "past_participant"));
     let owned = community(&pool).await;
     sqlx::query(
         "INSERT INTO users(community_id,pubkey,agent_owner_pubkey,deactivated_at)
@@ -64,7 +65,7 @@ async fn rehearsal_discovers_residue_and_scoped_agents_without_unrelated_communi
     .execute(&pool)
     .await
     .unwrap();
-    expected.push((owned, "stored_community"));
+    expected.push((owned, "past_participant"));
     let transferred = community(&pool).await;
     sqlx::query(
         "INSERT INTO users(community_id,pubkey,agent_owner_pubkey)
@@ -88,7 +89,7 @@ async fn rehearsal_discovers_residue_and_scoped_agents_without_unrelated_communi
     ] {
         let id = community(&pool).await;
         event(&pool, id, author, kind, tags).await;
-        expected.push((id, "stored_community"));
+        expected.push((id, "past_participant"));
     }
     let retained = community(&pool).await;
     event(&pool, retained, &human, 30617, json!([])).await;
@@ -140,7 +141,7 @@ async fn rehearsal_discovers_residue_and_scoped_agents_without_unrelated_communi
             .as_array()
             .unwrap()
             .len(),
-        2
+        3
     );
     sqlx::query("INSERT INTO users(community_id,pubkey) VALUES($1,decode($2,'hex'))")
         .bind(retained)
