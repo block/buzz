@@ -158,9 +158,9 @@ final huddleTransportFactoryProvider = Provider<HuddleTransportFactory>((ref) {
   final auth = ref.watch(hostedRelayAuthProvider);
   return (parameters) => HuddleTransport(
     parameters: parameters,
-    headers: () => auth.headers(
+    headers: ({required fresh}) => auth.headers(
       RelayConfig(baseUrl: parameters.relayWebSocketUrl, nsec: parameters.nsec),
-      fresh: true,
+      fresh: fresh,
     ),
   );
 });
@@ -170,6 +170,18 @@ final huddleReconnectDelaysProvider = Provider<List<Duration>>(
     Duration.zero,
     Duration(milliseconds: 100),
     Duration(milliseconds: 250),
+    Duration(milliseconds: 500),
+    Duration(seconds: 1),
+    Duration(seconds: 2),
+    Duration(seconds: 2),
+  ],
+);
+
+/// Waits between first-admission attempts after a temporary refusal: five
+/// connects over about 5.5 s. Unlike [huddleReconnectDelaysProvider] it has
+/// no immediate retry, because the relay has just refused this join.
+final huddleAdmissionRetryDelaysProvider = Provider<List<Duration>>(
+  (_) => const [
     Duration(milliseconds: 500),
     Duration(seconds: 1),
     Duration(seconds: 2),
@@ -208,6 +220,7 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
   var _reconnectAttempt = 0;
   var _reconnectInFlight = false;
   var _wasConnected = false;
+  Completer<void>? _admissionWait;
 
   @override
   HuddleSessionState build() {
@@ -626,24 +639,34 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
   }
 
   /// First admission. A relay that can't check authorization yet refuses
-  /// briefly, so that refusal is retried on the reconnect schedule; [join]
-  /// returns only once admitted or failed.
+  /// briefly, so that refusal is retried on its own bounded schedule; [join]
+  /// returns only once admitted or failed. Only the first attempt rereads
+  /// relay discovery, and leaving ends a pending wait at once.
   Future<void> _admit(HuddleTransportClient transport, int generation) async {
-    final delays = ref.read(huddleReconnectDelaysProvider);
+    final delays = ref.read(huddleAdmissionRetryDelaysProvider);
     for (var attempt = 0; ; attempt++) {
       try {
-        await transport.connect();
+        await transport.connect(freshDiscovery: attempt == 0);
         return;
       } on HuddleTransportError catch (error) {
         if (!_admissionRetryable(error) || attempt >= delays.length) rethrow;
       }
-      await Future<void>.delayed(delays[attempt]);
+      final wait = _admissionWait = Completer<void>();
+      final timer = Timer(delays[attempt], () {
+        if (!wait.isCompleted) wait.complete();
+      });
+      try {
+        await wait.future;
+      } finally {
+        timer.cancel();
+        if (identical(_admissionWait, wait)) _admissionWait = null;
+      }
       _ensureCurrent(generation);
     }
   }
 
   static bool _admissionRetryable(HuddleTransportError? error) =>
-      error?.code == HuddleTransportErrorCode.authorizationUnavailable;
+      error?.code == HuddleTransportErrorCode.temporarilyUnavailable;
 
   void _scheduleReconnect(
     HuddleTransportClient transport,
@@ -733,6 +756,11 @@ final class HuddleSessionNotifier extends Notifier<HuddleSessionState> {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     _reconnectInFlight = false;
+    final admissionWait = _admissionWait;
+    _admissionWait = null;
+    if (admissionWait != null && !admissionWait.isCompleted) {
+      admissionWait.complete();
+    }
     for (final timer in _speakerTimers.values) {
       timer.cancel();
     }

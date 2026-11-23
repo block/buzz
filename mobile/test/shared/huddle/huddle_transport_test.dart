@@ -51,7 +51,7 @@ void main() {
     var opened = false;
     final waiting = HuddleTransport(
       parameters: transport.parameters,
-      headers: () => stalled.future,
+      headers: ({required fresh}) => stalled.future,
       channelFactory: (_) {
         opened = true;
         return _ControlledWebSocketChannel();
@@ -409,31 +409,36 @@ void main() {
   });
 
   // NIP-FI refuses audio at the upgrade or with a frame after AUTH; only
-  // `authorization unavailable` is temporary.
-  for (final (refusal, upgradeError, frame, code) in [
+  // `authorization unavailable` is temporary. A 503 can also mean the relay
+  // is at its connection limit, so its copy doesn't blame authorization.
+  for (final (refusal, upgradeError, frame, code, message) in [
     (
       'a 503 upgrade',
       const WebSocketException('503', 503),
       null,
-      HuddleTransportErrorCode.authorizationUnavailable,
+      HuddleTransportErrorCode.temporarilyUnavailable,
+      'The Huddle audio relay is temporarily unavailable.',
     ),
     (
       'a 403 upgrade',
       const WebSocketException('403', 403),
       null,
       HuddleTransportErrorCode.connectionFailed,
+      'Unable to connect to the Huddle audio relay.',
     ),
     (
       'authorization unavailable',
       null,
       'restricted: authorization unavailable',
-      HuddleTransportErrorCode.authorizationUnavailable,
+      HuddleTransportErrorCode.temporarilyUnavailable,
+      'Huddle authorization is temporarily unavailable.',
     ),
     (
       'authorization denied',
       null,
       'restricted: authorization denied',
       HuddleTransportErrorCode.relayRejected,
+      'Huddle access was denied.',
     ),
   ]) {
     test('$refusal fails the join as ${code.name}', () async {
@@ -455,7 +460,9 @@ void main() {
       await expectLater(
         connect,
         throwsA(
-          isA<HuddleTransportError>().having((e) => e.code, 'code', code),
+          isA<HuddleTransportError>()
+              .having((e) => e.code, 'code', code)
+              .having((e) => e.message, 'message', message),
         ),
       );
       expect(transport.state.phase, HuddleTransportPhase.failed);

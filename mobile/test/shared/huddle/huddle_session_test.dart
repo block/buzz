@@ -227,14 +227,14 @@ void main() {
   });
 
   test('a first join waits out a relay that cannot check authorization yet, '
-      'within the reconnect schedule', () async {
+      'within its admission schedule', () async {
     final media = _FakeMedia();
     final transport = _FakeTransport()..refusals = 2;
     final container = ProviderContainer(
       overrides: [
         huddleMediaFactoryProvider.overrideWithValue(() => media),
         huddleTransportFactoryProvider.overrideWithValue((_) => transport),
-        huddleReconnectDelaysProvider.overrideWithValue(const [
+        huddleAdmissionRetryDelaysProvider.overrideWithValue(const [
           Duration.zero,
           Duration.zero,
         ]),
@@ -246,6 +246,8 @@ void main() {
     await notifier.join(_parameters());
 
     expect(transport.connectCalls, 3);
+    // Only the first attempt rereads relay discovery.
+    expect(transport.freshDiscovery, [true, false, false]);
     expect(
       container.read(huddleSessionProvider).phase,
       HuddleSessionPhase.connected,
@@ -260,6 +262,35 @@ void main() {
     expect(failed.phase, HuddleSessionPhase.failed);
     expect(failed.error, 'Huddle authorization is temporarily unavailable.');
     expect(transport.connectCalls, 6);
+  });
+
+  test('leaving ends a pending admission retry at once', () async {
+    final media = _FakeMedia();
+    final transport = _FakeTransport()..refusals = 1;
+    final container = ProviderContainer(
+      overrides: [
+        huddleMediaFactoryProvider.overrideWithValue(() => media),
+        huddleTransportFactoryProvider.overrideWithValue((_) => transport),
+        huddleAdmissionRetryDelaysProvider.overrideWithValue(const [
+          Duration(hours: 1),
+        ]),
+      ],
+    );
+    addTearDown(container.dispose);
+    final notifier = container.read(huddleSessionProvider.notifier);
+
+    final join = notifier.join(_parameters());
+    while (transport.connectCalls == 0) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    await notifier.leave();
+    await join.timeout(const Duration(seconds: 1));
+
+    expect(transport.connectCalls, 1);
+    expect(
+      container.read(huddleSessionProvider).phase,
+      HuddleSessionPhase.idle,
+    );
   });
 
   test('surfaces native audio interruptions without leaving', () async {
@@ -587,6 +618,7 @@ final class _FakeTransport implements HuddleTransportClient {
   final _issues = StreamController<HuddleTransportError>.broadcast(sync: true);
   final List<HuddleLocalAudioFrame> sentFrames = [];
   var connectCalls = 0;
+  final List<bool> freshDiscovery = [];
   var disposeCalls = 0;
 
   /// Connects that the relay refuses, as it does while it can't check
@@ -634,12 +666,13 @@ final class _FakeTransport implements HuddleTransportClient {
   Stream<HuddleTransportError> get issues => _issues.stream;
 
   @override
-  Future<void> connect() async {
+  Future<void> connect({bool freshDiscovery = true}) async {
     connectCalls += 1;
+    this.freshDiscovery.add(freshDiscovery);
     if (refusals > 0) {
       refusals -= 1;
       const error = HuddleTransportError(
-        code: HuddleTransportErrorCode.authorizationUnavailable,
+        code: HuddleTransportErrorCode.temporarilyUnavailable,
         message: 'Huddle authorization is temporarily unavailable.',
       );
       _state = HuddleTransportState(

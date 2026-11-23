@@ -31,9 +31,10 @@ enum HuddleTransportErrorCode {
   authenticationFailed,
   relayRejected,
 
-  /// The relay can't check authorization right now, for example while it
-  /// restores its revocation list; the same join can succeed shortly.
-  authorizationUnavailable,
+  /// The relay refused this join for now: it can't check authorization yet
+  /// (for example while it restores its revocation list) or it is at its
+  /// connection limit. The same join can succeed shortly.
+  temporarilyUnavailable,
   protocolViolation,
   socketClosed,
   sendFailed,
@@ -128,7 +129,9 @@ abstract interface class HuddleTransportClient {
   Stream<HuddlePeerEvent> get peerEvents;
   Stream<HuddleTransportError> get issues;
 
-  Future<void> connect();
+  /// Opens the socket. [freshDiscovery] rereads the relay's NIP-FI discovery
+  /// before authenticating; a retry of the same join can reuse the last read.
+  Future<void> connect({bool freshDiscovery = true});
   void sendOpusFrame({
     required HuddleAudioHeader header,
     required Uint8List opusPayload,
@@ -142,7 +145,7 @@ final class HuddleTransport implements HuddleTransportClient {
   final Duration connectTimeout;
   final Duration handshakeTimeout;
   final HuddleWebSocketFactory? _channelFactory;
-  final Future<Map<String, String>> Function()? headers;
+  final Future<Map<String, String>> Function({required bool fresh})? headers;
 
   final StreamController<HuddleTransportState> _stateController =
       StreamController.broadcast(sync: true);
@@ -190,7 +193,7 @@ final class HuddleTransport implements HuddleTransportClient {
   Stream<HuddleTransportError> get issues => _issueController.stream;
 
   @override
-  Future<void> connect() async {
+  Future<void> connect({bool freshDiscovery = true}) async {
     if (_disposed) {
       throw const HuddleTransportError(
         code: HuddleTransportErrorCode.disposed,
@@ -236,7 +239,7 @@ final class HuddleTransport implements HuddleTransportClient {
     try {
       final deadline = Stopwatch()..start();
       final authentication =
-          await headers?.call().timeout(connectTimeout) ??
+          await headers?.call(fresh: freshDiscovery).timeout(connectTimeout) ??
           const <String, String>{};
       if (!_isCurrent(generation)) return;
       final channel =
@@ -289,8 +292,8 @@ final class HuddleTransport implements HuddleTransportClient {
     } catch (error) {
       final failure = _upgradeUnavailable(error)
           ? HuddleTransportError(
-              code: HuddleTransportErrorCode.authorizationUnavailable,
-              message: 'Huddle authorization is temporarily unavailable.',
+              code: HuddleTransportErrorCode.temporarilyUnavailable,
+              message: 'The Huddle audio relay is temporarily unavailable.',
               cause: error,
             )
           : HuddleTransportError(
@@ -887,7 +890,10 @@ final class HuddleTransport implements HuddleTransportClient {
     }
   }
 
-  /// A 503 upgrade is the HTTP form of the same temporary refusal.
+  /// A 503 upgrade is the HTTP form of the same temporary refusal. The audio
+  /// route also answers 503 when it is at its connection limit, and dart:io
+  /// discards the body that tells them apart, so the copy stays neutral.
+  /// Both are temporary.
   static bool _upgradeUnavailable(Object error) {
     final inner = error is WebSocketChannelException ? error.inner : error;
     return inner is WebSocketException &&
@@ -902,7 +908,7 @@ final class HuddleTransport implements HuddleTransportClient {
     _fail(
       HuddleTransportError(
         code: unavailable
-            ? HuddleTransportErrorCode.authorizationUnavailable
+            ? HuddleTransportErrorCode.temporarilyUnavailable
             : HuddleTransportErrorCode.relayRejected,
         message: unavailable
             ? 'Huddle authorization is temporarily unavailable.'

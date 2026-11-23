@@ -12495,6 +12495,140 @@ void main() {
     );
 
     testWidgets(
+      'a Huddle left while its admission retries cannot take over the next '
+      "Huddle's membership",
+      (tester) async {
+        const secondId = 'd88a88c2-6c9c-48b7-a901-e021b20896f5';
+        final first = _HuddleTestTransport(
+          connectError: const HuddleTransportError(
+            code: HuddleTransportErrorCode.temporarilyUnavailable,
+            message: 'Huddle authorization is temporarily unavailable.',
+          ),
+        );
+        final leaves = <String>[];
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            users: const {'self': UserProfile(pubkey: 'self')},
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            relaySessionNotifier: _ReconnectingRelaySession(),
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: _HuddleTestMedia.new,
+            huddleTransportFactory: (parameters) =>
+                parameters.ephemeralChannelId == secondId
+                ? _HuddleTestTransport()
+                : first,
+            huddleHumanCountLoader: (_) async => 2,
+            createChannelActions: (ref) => _FakeChannelActions(
+              ref,
+              onLeaveChannel: (id) async => leaves.add(id),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MobileHuddleShell)),
+        );
+        final controller = container.read(
+          mobileHuddleControllerProvider.notifier,
+        );
+
+        // Huddle A is refused once and waits to retry when the user hangs up.
+        var firstSettled = false;
+        final firstJoin = controller
+            .join(
+              parentChannelId: _channelId,
+              ephemeralChannelId: _huddleChannelId,
+              startedBy: 'desktop',
+              startedEventId: 'A',
+            )
+            .whenComplete(() => firstSettled = true);
+        await tester.pump();
+        await tester.pump();
+        expect(first.connectCalls, 1);
+        await controller.leave();
+        await tester.pump();
+        expect(firstSettled, isTrue);
+        await firstJoin;
+
+        await controller.join(
+          parentChannelId: _channelId,
+          ephemeralChannelId: secondId,
+          startedBy: 'desktop',
+          startedEventId: 'B',
+        );
+        expect(container.read(huddleSessionProvider).wasAdmitted, isTrue);
+        await tester.pump(const Duration(seconds: 6));
+        await controller.leave();
+
+        expect(first.connectCalls, 1);
+        expect(leaves, [secondId]);
+      },
+    );
+
+    testWidgets(
+      'community transition stops a Huddle start that is waiting out a '
+      'temporary refusal',
+      (tester) async {
+        final media = _HuddleTestMedia();
+        final transport = _HuddleTestTransport(
+          connectError: const HuddleTransportError(
+            code: HuddleTransportErrorCode.temporarilyUnavailable,
+            message: 'Huddle authorization is temporarily unavailable.',
+          ),
+        );
+        String? archivedChannelId;
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: const [],
+            users: const {'self': UserProfile(pubkey: 'self')},
+            relayConfigNotifier: _HuddleRelayConfigNotifier(),
+            relaySessionNotifier: _ReconnectingRelaySession(),
+            huddleCurrentPubkey: 'self',
+            huddleMediaFactory: () => media,
+            huddleTransportFactory: (_) => transport,
+            createChannelActions: (ref) => _FakeChannelActions(
+              ref,
+              onArchiveChannel: (channelId) async =>
+                  archivedChannelId = channelId,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final container = ProviderScope.containerOf(
+          tester.element(find.byType(MobileHuddleShell)),
+        );
+
+        final start = expectLater(
+          container
+              .read(mobileHuddleControllerProvider.notifier)
+              .start(parentChannelId: _channelId),
+          throwsA(anything),
+        );
+        await tester.pump();
+        await tester.pump();
+        expect(transport.connectCalls, 1);
+        expect(media.state.phase, HuddleMediaPhase.active);
+
+        var switched = false;
+        final transition = container
+            .read(communityTransitionProvider)
+            .run()
+            .then((_) => switched = true);
+        await tester.pump();
+        await tester.pump();
+
+        expect(switched, isTrue);
+        expect(media.state.phase, isNot(HuddleMediaPhase.active));
+        expect(archivedChannelId, isNotNull);
+        await start;
+        await transition;
+        await tester.pump(const Duration(seconds: 6));
+        expect(transport.connectCalls, 1);
+      },
+    );
+
+    testWidgets(
       'keeps an admitted iOS Huddle active across pause and resume until detach',
       (tester) async {
         final media = _HuddleTestMedia();
@@ -23714,6 +23848,7 @@ final class _HuddleTestTransport implements HuddleTransportClient {
 
   final HuddleTransportError? connectError;
   final Future<void>? connectGate;
+  var connectCalls = 0;
   final Map<int, HuddlePeer> _peers;
   final _states = StreamController<HuddleTransportState>.broadcast(sync: true);
   final _remoteFrames = StreamController<HuddleRemoteAudioFrame>.broadcast(
@@ -23786,7 +23921,8 @@ final class _HuddleTestTransport implements HuddleTransportClient {
   Stream<HuddleTransportError> get issues => _issues.stream;
 
   @override
-  Future<void> connect() async {
+  Future<void> connect({bool freshDiscovery = true}) async {
+    connectCalls += 1;
     if (connectGate case final gate?) await gate;
     if (connectError case final error?) throw error;
     _state = HuddleTransportState(
