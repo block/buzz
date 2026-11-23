@@ -33,6 +33,7 @@ class AppearanceModeNotifier extends Notifier<ThemeMode> {
         ThemeMode.system;
   }
 
+  /// Saves [mode] on this device only; it is never synced.
   void setMode(ThemeMode mode) {
     if (mode == state) return;
     state = mode;
@@ -42,6 +43,7 @@ class AppearanceModeNotifier extends Notifier<ThemeMode> {
   }
 }
 
+/// This device's Light, Dark or System choice. See [AppearanceModeNotifier].
 final appearanceModeProvider =
     NotifierProvider<AppearanceModeNotifier, ThemeMode>(
       AppearanceModeNotifier.new,

@@ -12,7 +12,8 @@ class _ThemePreviewExperience extends HookConsumerWidget {
     final inRail = DuoToolbarScope.maybeOf(context)?.strip != null;
     final stored = ref.read(communityThemeProvider);
     final draftMode = useState(ref.read(appearanceModeProvider));
-    final draftAccent = useState(chatColorIndex(stored.accent));
+    final storedAccentIndex = chatColorIndex(stored.accent);
+    final draftAccent = useState(storedAccentIndex);
     final platformBrightness = MediaQuery.platformBrightnessOf(context);
     final reduceMotion = MediaQuery.disableAnimationsOf(context);
     final brightness = switch (draftMode.value) {
@@ -44,14 +45,18 @@ class _ThemePreviewExperience extends HookConsumerWidget {
       unawaited(HapticFeedback.mediumImpact());
       ref.read(appearanceModeProvider.notifier).setMode(draftMode.value);
       // Only the chat color syncs. The synced theme and followSystem stay as
-      // they are, so this device's mode never changes other devices.
+      // they are, so this device's mode never changes other devices. An
+      // unchanged color keeps its saved value, so a legacy color that only
+      // maps to a swatch is not republished as that swatch.
       final current = ref.read(communityThemeProvider);
       ref
           .read(communityThemeProvider.notifier)
           .setPreference(
             CommunityThemePreference(
               theme: current.theme,
-              accent: chatColorChoices[draftAccent.value].wireValue,
+              accent: draftAccent.value == storedAccentIndex
+                  ? current.accent
+                  : chatColorChoices[draftAccent.value].wireValue,
               followSystem: current.followSystem,
             ),
           );

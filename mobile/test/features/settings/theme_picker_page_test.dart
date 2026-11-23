@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:buzz/shared/widgets/ios_navigation_bar.dart';
 import 'package:buzz/shared/widgets/ios_glass_navigation_button.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../helpers/widget_helpers.dart';
@@ -264,16 +265,17 @@ void main() {
   testWidgets('picker uses the device mode and keeps the synced one', (
     tester,
   ) async {
+    // Desktop's legacy Cyan only maps to the Jade swatch; a mode-only Set
+    // must not republish it as Jade's Green to other devices.
     const synced = CommunityThemePreference(
       theme: buzzDarkThemeName,
-      accent: '#3b82f6',
+      accent: '#06b6d4',
       followSystem: false,
     );
-    final notifier = _RecordingCommunityThemeNotifier(synced);
     final prefs = await _pumpPicker(
       tester,
       prefs: {appearanceModeKey: ThemeMode.light.name},
-      themeNotifier: () => notifier,
+      themeNotifier: () => _SeededCommunityThemeNotifier(synced),
     );
     expect(find.text('Light'), findsOneWidget);
     // Light -> Dark -> System.
@@ -287,8 +289,12 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(prefs.getString(appearanceModeKey), ThemeMode.system.name);
-    // The synced theme and followSystem survive a mode change untouched.
-    expect(notifier.lastPreference, synced);
+    // The synced preference survives a mode change untouched, through the
+    // real setPreference path.
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(MaterialApp)),
+    );
+    expect(container.read(communityThemeProvider), synced);
   });
 
   for (final brightness in Brightness.values) {
@@ -396,14 +402,11 @@ void main() {
 }
 
 class _RecordingCommunityThemeNotifier extends CommunityThemeNotifier {
-  _RecordingCommunityThemeNotifier([this.initial = defaultCommunityTheme]);
-
-  final CommunityThemePreference initial;
   int preferenceWrites = 0;
   CommunityThemePreference? lastPreference;
 
   @override
-  CommunityThemePreference build() => initial;
+  CommunityThemePreference build() => defaultCommunityTheme;
 
   @override
   void setPreference(CommunityThemePreference preference) {
@@ -411,4 +414,14 @@ class _RecordingCommunityThemeNotifier extends CommunityThemeNotifier {
     lastPreference = preference;
     state = preference;
   }
+}
+
+/// Real notifier, seeded with a synced preference.
+class _SeededCommunityThemeNotifier extends CommunityThemeNotifier {
+  _SeededCommunityThemeNotifier(this.initial);
+
+  final CommunityThemePreference initial;
+
+  @override
+  CommunityThemePreference build() => initial;
 }
