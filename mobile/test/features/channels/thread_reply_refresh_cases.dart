@@ -24,6 +24,7 @@ void threadReplyRefreshTests() {
     WidgetTester tester,
     Future<List<NostrEvent>> Function() load, {
     bool retry = false,
+    bool productionRetry = false,
     TextScaler textScaler = TextScaler.noScaling,
     Future<List<NostrEvent>?>? savedThreadPreview,
     _FakeMessagesNotifier? messagesNotifier,
@@ -37,8 +38,9 @@ void threadReplyRefreshTests() {
         readStateNotifier: readStateNotifier,
         textScaler: textScaler,
         threadReplyLoaders: {args.rootId: load},
-        providerRetry: (_, _) =>
-            retry ? const Duration(milliseconds: 200) : null,
+        providerRetry: productionRetry
+            ? relayProviderRetry
+            : (_, _) => retry ? const Duration(milliseconds: 200) : null,
       ),
     );
     await tester.pumpAndSettle();
@@ -525,6 +527,95 @@ void threadReplyRefreshTests() {
       },
     );
   }
+
+  testWidgets('a linked saved reply highlights during production retries', (
+    tester,
+  ) async {
+    final retry = Completer<List<NostrEvent>>();
+    var calls = 0;
+    final (navigator, container) = await mount(
+      tester,
+      () => ++calls == 1
+          ? Future.error(const SocketException('Offline'))
+          : retry.future,
+      productionRetry: true,
+      savedThreadPreview: Future.value([reply]),
+    );
+    open(navigator, initialMessageId: reply.id);
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(milliseconds: 150));
+
+    final state = container.read(threadRepliesProvider(args));
+    expect(state.isLoading, isTrue);
+    expect(state.hasValue, isFalse);
+    final target = find.byKey(ValueKey('thread-message-${reply.id}'));
+    final highlight =
+        tester.widget<DecoratedBox>(target).decoration as BoxDecoration;
+    expect(highlight.color!.a, greaterThan(0));
+  });
+
+  testWidgets('scrolling saved replies supersedes a pending link jump', (
+    tester,
+  ) async {
+    final preview = List.generate(
+      40,
+      (index) => _textMsg(
+        id: 'linked-preview-reply-$index',
+        pubkey: 'bob',
+        content: 'Saved reply $index',
+        createdAt: 1100 + index,
+        extraTags: [
+          ['e', args.rootId, '', 'reply'],
+        ],
+      ),
+    );
+    final query = Completer<List<NostrEvent>>();
+    final (navigator, _) = await mount(
+      tester,
+      () => query.future,
+      savedThreadPreview: Future.value(preview),
+    );
+    open(navigator, initialMessageId: preview.first.id);
+    await tester.pumpAndSettle();
+
+    final list = find.byKey(const ValueKey('thread-message-list'));
+    await tester.drag(list, const Offset(0, -700));
+    await tester.pumpAndSettle();
+    final first = findRichText(preview.first.content).hitTestable();
+    expect(first, findsNothing);
+
+    query.complete(preview);
+    await tester.pumpAndSettle();
+    expect(first, findsNothing);
+  });
+
+  testWidgets('a deleted thread head keeps the saved reply status and Retry', (
+    tester,
+  ) async {
+    final deletion = NostrEvent(
+      id: 'deleted-thread-head',
+      pubkey: root.pubkey,
+      createdAt: 1002,
+      kind: EventKind.deletion,
+      tags: [
+        ['e', root.id],
+      ],
+      content: '',
+      sig: '',
+    );
+    final (navigator, _) = await mount(
+      tester,
+      () => Future.error(const SocketException('Offline')),
+      savedThreadPreview: Future.value([reply, deletion]),
+    );
+    open(navigator, initialMessageId: reply.id);
+    await tester.pumpAndSettle();
+
+    expect(find.text('This message was deleted'), findsOneWidget);
+    expect(find.text('Showing saved replies. Refresh failed.'), findsOneWidget);
+    expect(find.byTooltip('Retry'), findsOneWidget);
+    expect(findRichText(reply.content), findsOneWidget);
+  });
 
   testWidgets('thread loads an edit made to a reply before it opened', (
     tester,

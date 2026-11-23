@@ -109,44 +109,48 @@ class _ThreadMessageList extends HookWidget {
         ),
       );
     }
-    if (headIsDeleted) {
-      return const Padding(
-        key: ValueKey('thread-message-deleted'),
-        padding: EdgeInsets.only(bottom: Grid.xs),
-        child: Text('This message was deleted'),
-      );
-    }
     final head = this.head;
-    if (head == null) return const Text('This message is unavailable');
     return Padding(
-      key: ValueKey('thread-message-group-${head.id}'),
+      key: head == null || headIsDeleted
+          ? null
+          : ValueKey('thread-message-group-${head.id}'),
       padding: const EdgeInsets.only(bottom: Grid.xs),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          DayDivider(
-            label: formatDayHeading(head.createdAt),
-            dayTimestamp: head.createdAt,
-            stickyDayTimestamp: stickyDayTimestamp,
-            scrollVisible: dateScrollActivity,
-          ),
-          _ThreadMessage(
-            message: head,
-            startsDay: true,
-            channelNames: channelNames,
-            channelId: channelId,
-            currentPubkey: currentPubkey,
-            showAuthor: true,
-            isHighlighted: head.id == highlightedMessageId,
-            allMessages: liveMessages.any((message) => message.id == head.id)
-                ? liveMessages
-                : null,
-            isMember: isMember,
-            isArchived: isArchived,
-            isThreadHead: true,
-            composerFocusNode: composerFocusNode,
-            restoreComposerFocus: restoreComposerFocus,
-          ),
+          if (headIsDeleted)
+            const Padding(
+              key: ValueKey('thread-message-deleted'),
+              padding: EdgeInsets.only(bottom: Grid.xs),
+              child: Text('This message was deleted'),
+            )
+          else if (head == null)
+            const Text('This message is unavailable')
+          else ...[
+            DayDivider(
+              label: formatDayHeading(head.createdAt),
+              dayTimestamp: head.createdAt,
+              stickyDayTimestamp: stickyDayTimestamp,
+              scrollVisible: dateScrollActivity,
+            ),
+            _ThreadMessage(
+              message: head,
+              startsDay: true,
+              channelNames: channelNames,
+              channelId: channelId,
+              currentPubkey: currentPubkey,
+              showAuthor: true,
+              isHighlighted: head.id == highlightedMessageId,
+              allMessages: liveMessages.any((message) => message.id == head.id)
+                  ? liveMessages
+                  : null,
+              isMember: isMember,
+              isArchived: isArchived,
+              isThreadHead: true,
+              composerFocusNode: composerFocusNode,
+              restoreComposerFocus: restoreComposerFocus,
+            ),
+          ],
           Padding(
             padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
             child: Row(

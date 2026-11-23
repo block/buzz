@@ -171,6 +171,7 @@ class ThreadDetailPage extends HookConsumerWidget {
       allMessages,
       currentPubkey,
       headFromSavedPage: headFromSavedPage,
+      initialMessageId: initialMessageId,
     );
     final relayRepliesAvailable = relayReplyState.value != null;
     final routeAnimation = ModalRoute.of(context)?.animation;
@@ -532,8 +533,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     useEffect(
       () {
         final messageId = initialMessageId;
-        // Wait for relay history or the settled fallback after a terminal
-        // query error before consuming the one-shot jump.
+        // The target may come from relay history or the saved fallback.
         if (messageId == null ||
             !canUseMessagesForInitialTarget ||
             headHeight.value == null) {
@@ -1059,6 +1059,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                       hidesLatestForComposerTailCorrection.value = false;
                       initialTailSettle.abandon();
                       initialViewportReady.value = true;
+                      didJumpToInitialMessage.value = true;
                       tailCorrectionInProgress.value = false;
                       isNavigatingToThreadTail.value = false;
                       tailIntent.beginDrag();

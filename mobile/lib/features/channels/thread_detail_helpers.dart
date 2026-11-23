@@ -198,6 +198,7 @@ _watchThreadMessages(
   List<TimelineMessage> routeSnapshot,
   String? currentPubkey, {
   required bool headFromSavedPage,
+  required String? initialMessageId,
 }) {
   final relayReplyState = ref.watch(threadRepliesProvider(args));
   final replyEvents = ref.watch(threadRepliesWithLocalProvider(args)).value;
@@ -233,6 +234,10 @@ _watchThreadMessages(
             threadHead,
           ...observed,
         ];
+  final hasSavedTarget =
+      initialMessageId != null &&
+      (saved?.any((event) => event.id == initialMessageId) ?? false) &&
+      allMsgs.any((message) => message.id == initialMessageId);
   return (
     relayReplyState: relayReplyState,
     allMsgs: allMsgs,
@@ -269,14 +274,14 @@ _watchThreadMessages(
     accessDenied: accessDenied,
     liveDeletionHidesHead: headDeleted,
     hasFetchedReplies: replyEvents != null,
-    // After a terminal error, let the saved-page read settle before resolving
-    // the target index in the fallback timeline.
+    // After a failed fetch, a target in the saved page can be shown during
+    // retries. Other targets wait for relay history or a settled fallback.
     canUseMessagesForInitialTarget:
         !accessDenied &&
         (relayRepliesAvailable ||
             (preview?.isLoading != true &&
                 relayReplyState.hasError &&
-                !relayReplyState.retrying)),
+                (!relayReplyState.retrying || hasSavedTarget))),
   );
 }
 
