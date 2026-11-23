@@ -127,6 +127,7 @@ internal object AndroidImageProcessor {
 }
 
 class MainActivity : FlutterFragmentActivity() {
+    private var conversationPopup: ConversationPopup? = null
     private var mediaUploadChannel: MethodChannel? = null
     private var ageSignalChannel: MethodChannel? = null
     private val ageSignalRequest = AgeSignalRequest()
@@ -141,6 +142,7 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        conversationPopup = ConversationPopup(this, flutterEngine.dartExecutor.binaryMessenger)
         deviceTranscriptionPlugin = DeviceTranscriptionPlugin(flutterEngine.dartExecutor.binaryMessenger)
         pushRegistrationPlugin = PushRegistrationPlugin(this, flutterEngine.dartExecutor.binaryMessenger)
         pushKeystorePlugin = PushKeystorePlugin(flutterEngine.dartExecutor.binaryMessenger)
@@ -242,6 +244,7 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     override fun onDestroy() {
+        conversationPopup?.dispose()
         deviceTranscriptionPlugin?.dispose()
         deviceTranscriptionPlugin = null
         browserAuthPlugin?.dispose()

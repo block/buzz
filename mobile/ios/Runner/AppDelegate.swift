@@ -49,6 +49,7 @@ import os.log
   private var ageSignalRequestID: UUID?
   private var ageSignalResult: FlutterResult?
   private var concentricSheetSurfaceChannel: FlutterMethodChannel?
+  private var conversationMenu: ConversationMenu?
   private var nativePhotoZoomCoordinator: NativePhotoZoomCoordinator?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
   private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
@@ -85,6 +86,9 @@ import os.log
       registrar.register(IosMediaCarouselFactory(messenger: registrar.messenger()), withId: "buzz/ios_media_carousel")
     }
 
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "ConversationMenuRow") {
+      conversationMenu = ConversationMenu(messenger: registrar.messenger()) { registrar.viewController }
+    }
     let messenger = engineBridge.applicationRegistrar.messenger()
     let keyboardChannel = FlutterMethodChannel(
       name: "buzz/community_keyboard", binaryMessenger: messenger)

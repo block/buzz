@@ -46,11 +46,13 @@ class _ChannelTile extends ConsumerWidget {
         ConversationPaneScope.maybeOf(context)?.selectedId == channel.id;
     // The gutter insets only the selection paint; the whole row width
     // still opens the channel and its actions.
-    return GestureDetector(
+    final nativeHold =
+        usesIosConversationMenu && (!channel.isDm || channel.isSolo);
+    final row = GestureDetector(
       behavior: HitTestBehavior.opaque,
       excludeFromSemantics: true,
       onTap: onTap,
-      onLongPress: () => _showChannelActions(context, ref),
+      onLongPress: nativeHold ? null : () => _showChannelActions(context, ref),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: Grid.gutter - Grid.xxs),
         child: DecoratedBox(
@@ -59,12 +61,17 @@ class _ChannelTile extends ConsumerWidget {
             borderRadius: BorderRadius.circular(Radii.container),
           ),
           child: Semantics(
+            onLongPress: nativeHold
+                ? () => _showChannelActions(context, ref)
+                : null,
             selected: selected,
             value: hasAttention ? 'Needs your attention' : null,
             child: InkWell(
               borderRadius: BorderRadius.circular(Radii.container),
               onTap: onTap,
-              onLongPress: () => _showChannelActions(context, ref),
+              onLongPress: nativeHold
+                  ? null
+                  : () => _showChannelActions(context, ref),
               child: Padding(
                 padding: const EdgeInsets.only(
                   left: Grid.xxs,
@@ -212,9 +219,31 @@ class _ChannelTile extends ConsumerWidget {
         ),
       ),
     );
+    if (channel.isDm && !channel.isSolo) return row;
+    return IosConversationMenuRow(
+      onMenu: (session) => _showChannelActions(context, ref, session),
+      child: row,
+    );
   }
 
-  void _showChannelActions(BuildContext context, WidgetRef ref) {
+  void _showChannelActions(
+    BuildContext context,
+    WidgetRef ref, [
+    ConversationMenuSession? session,
+  ]) {
+    if (!channel.isDm || channel.isSolo) {
+      openConversationListDetails(
+        context,
+        channel,
+        currentPubkey,
+        isUnread: isUnread || hasAttention,
+        sectionId: sectionId,
+        nativeSession: session,
+        personal:
+            channel.isSolo && channel.isPersonalChat(currentPubkey, const []),
+      );
+      return;
+    }
     showChannelActionsSheet(
       context: context,
       channel: channel,

@@ -1,6 +1,29 @@
 part of '../channel_messages_provider.dart';
 
 extension _ChannelHistoryPagination on ChannelMessagesNotifier {
+  Future<ChannelWindowPage> _fetchWindowPage(
+    RelaySessionNotifier session,
+    ChannelPageCursor? cursor,
+  ) async {
+    final events = await session.queryRelay([_channelWindowFilter(cursor)]);
+    return parseChannelWindowResponse(events, channelId, cursor);
+  }
+
+  NostrFilter _channelWindowFilter(ChannelPageCursor? cursor) => NostrFilter(
+    kinds: EventKind.channelWindowPageKinds,
+    tags: {
+      '#h': [channelId],
+    },
+    limit: 50,
+    until: cursor?.createdAt,
+    extensions: {
+      'top_level': true,
+      'include_summaries': true,
+      'include_aux': true,
+      if (cursor != null) 'before_id': cursor.eventId,
+    },
+  );
+
   Future<bool> _fetchOlder() async {
     if (_reachedOldest || _initInFlight || _accessDenial != null) return false;
     final initVersion = _initVersion;
