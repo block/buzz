@@ -55,3 +55,8 @@ FrostedAppBar _threadAppBar(
     titleStyle: channelTitleTextStyle,
   );
 }
+
+double _threadHeaderHeight(BuildContext context) => frostedAppBarHeight(
+  context,
+  bottomHeight: conversationNavigationBottomPadding(context),
+);
