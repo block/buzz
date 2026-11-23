@@ -129,9 +129,9 @@ async fn head(
 /// What one ref's decision relied on, as audit sequence numbers.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Counted {
-    /// Approvals offered to the gate for this ref and tip.
+    /// Currently eligible approvals of this ref and tip.
     pub evidence: BTreeSet<String>,
-    /// Check results offered to the gate for this ref's required checks.
+    /// Newest trusted passing results for this ref's applicable checks.
     pub checks: BTreeSet<String>,
 }
 
@@ -345,7 +345,8 @@ fn assemble(
         }
     }
     let mut approvals = Vec::new();
-    for row in latest_approvals(rows) {
+    let approval_rows = latest_approvals(rows);
+    for row in &approval_rows {
         let read = approvers
             .get(&row.actor)
             .ok_or_else(|| DbError::InvalidData("approver facts not read".into()))?;
@@ -373,7 +374,7 @@ fn assemble(
         approvals,
         posts,
     };
-    let counted = counted(&input, updates, rows, &mut ids);
+    let counted = counted(&input, updates, &approval_rows);
     let verdict = if gate::decide(&input) {
         Ok(())
     } else {
@@ -510,42 +511,34 @@ fn expand(
     out
 }
 
-/// The evidence each ref's decision was offered: approvals naming its ref
-/// and new tip, and results for the checks its rules require on that tip.
+/// Map the gate's receipt selection back to durable audit sequence numbers.
+/// Approval rows have exactly the same order as `input.approvals`.
 fn counted(
     input: &gate::Input,
     updates: &[RefUpdate],
-    rows: &[EvidenceRow],
-    ids: &mut Interner,
+    approval_rows: &[&EvidenceRow],
 ) -> BTreeMap<String, Counted> {
-    let mut out = BTreeMap::new();
-    for (u, c) in updates.iter().zip(&input.cmds) {
-        let required: BTreeSet<u64> = input
-            .floor
-            .iter()
-            .chain(&input.repo_rules)
-            .filter(|r| r.git_ref == c.git_ref && r.req == gate::Req::Check)
-            .map(|r| r.check)
-            .collect();
-        let mut counted = Counted::default();
-        for row in rows {
-            let e = &row.evidence;
-            if e.head != u.new_oid {
-                continue;
-            }
-            match &e.body {
-                EvidenceBody::Approval { approved: true } if e.git_ref == u.ref_name => {
-                    counted.evidence.insert(row.seq.to_string());
-                }
-                EvidenceBody::Check { name, .. } if required.contains(&ids.check(name)) => {
-                    counted.checks.insert(row.seq.to_string());
-                }
-                _ => {}
-            }
-        }
-        out.insert(u.ref_name.clone(), counted);
-    }
-    out
+    updates
+        .iter()
+        .zip(&input.cmds)
+        .map(|(u, c)| {
+            let evidence = input
+                .approvals
+                .iter()
+                .zip(approval_rows)
+                .filter(|(a, _)| gate::counted_approval(input, c, **a))
+                .map(|(_, row)| row.seq.to_string())
+                .collect();
+            let checks = input
+                .posts
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| gate::counted_check(input, c, *j))
+                .map(|(_, post)| post.seq.to_string())
+                .collect();
+            (u.ref_name.clone(), Counted { evidence, checks })
+        })
+        .collect()
 }
 
 /// Strings to the gate's opaque ids, one namespace per kind. Id 0 is

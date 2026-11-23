@@ -454,3 +454,93 @@ fn a_restricted_relay_admits_an_agent_through_its_owner() {
     };
     assert!(!admitted(&person), "a person needs its own membership");
 }
+
+/// Receipts match GitGovernance.Decision, including refused pushes: eligible
+/// approvals and only applicable, newest trusted passing check results.
+#[test]
+fn receipts_exclude_candidates_that_did_not_count() {
+    let mut scoped = rule(
+        &[MAIN],
+        vec![Requirement::Check {
+            name: "lint".into(),
+        }],
+    );
+    scoped.labels.insert("tier".into(), "prod".into());
+    let mut c = Case::new(policy(
+        vec![scoped],
+        vec![rule(
+            &[MAIN],
+            vec![review(1), Requirement::Check { name: "ci".into() }],
+        )],
+    ));
+    c.policy
+        .trusted
+        .value
+        .insert("lint".into(), BTreeSet::from([CI.into()]));
+    c.rows = vec![
+        approve(1, ALICE),
+        approve(2, ALICE),
+        approve(3, PUSHER),
+        approve(4, CI),
+        check(5, CI, "ci", true),
+        check(6, CI, "ci", true),
+        check(7, PUSHER, "ci", true),
+        check(8, CI, "lint", true),
+    ];
+    let expected = |e: &[&str], q: &[&str]| Counted {
+        evidence: e.iter().map(|s| s.to_string()).collect(),
+        checks: q.iter().map(|s| s.to_string()).collect(),
+    };
+    assert!(c.lands());
+    assert_eq!(c.decide().counted[MAIN], expected(&["2"], &["6"]));
+    c.rows.push(approve(11, BOB));
+    assert_eq!(
+        c.decide().counted[MAIN],
+        expected(&["2", "11"], &["6"]),
+        "review(1) retains both eligible approvals"
+    );
+    c.rows.pop();
+    // Current role and freshness decide which approval IDs survive.
+    for facts in [
+        person("guest"),
+        agent("member", "member"),
+        git_land::KeyFacts {
+            key: Facts {
+                banned: true,
+                ..facts("member")
+            },
+            owner: None,
+        },
+    ] {
+        c.approvers.insert(ALICE.into(), facts);
+        assert!(!c.lands());
+        assert_eq!(c.decide().counted[MAIN], expected(&[], &["6"]));
+    }
+    c.approvers.insert(ALICE.into(), person("member"));
+    c.rows[1].evidence.base = NEW.into();
+    assert_eq!(c.decide().counted[MAIN], expected(&["1"], &["6"]));
+    c.rows[0].evidence.body = EvidenceBody::Approval { approved: false };
+    assert_eq!(c.decide().counted[MAIN], expected(&[], &["6"]));
+    c.policy.rules.value[0]
+        .require
+        .push(Requirement::FreshTarget { required: false });
+    assert_eq!(c.decide().counted[MAIN], expected(&["2"], &["6"]));
+    c.rows.push(row(
+        9,
+        ALICE,
+        MAIN,
+        NEW,
+        EvidenceBody::Approval { approved: false },
+    ));
+    c.rows.last_mut().unwrap().evidence.base = NEW.into();
+    c.rows.push(check(10, CI, "ci", false));
+    assert!(!c.lands());
+    assert_eq!(c.decide().counted[MAIN], expected(&[], &[]));
+    c.policy.labels.value.insert("tier".into(), "prod".into());
+    assert_eq!(c.decide().counted[MAIN], expected(&[], &["8"]));
+    c.updates.push(RefUpdate {
+        ref_name: "refs/heads/other".into(),
+        ..ff()
+    });
+    assert_eq!(c.decide().counted["refs/heads/other"], Counted::default());
+}

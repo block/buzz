@@ -296,6 +296,9 @@ fn moving_a_ref_to_an_already_shown_commit_makes_the_pusher_an_author() {
         !decide(&i),
         "b brought the commit, so b's approval is not independent"
     );
+    assert!(!counted_approval(&i, &i.cmds[0], i.approvals[0]));
+    i.cmds[0].authors.clear();
+    assert!(counted_approval(&i, &i.cmds[0], i.approvals[0]));
     // and the pusher of a change that brings anything is its author
     let mut i = reviewed(b, b);
     i.cmds[0].authors = vec![];

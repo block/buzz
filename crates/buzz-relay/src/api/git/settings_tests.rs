@@ -3844,22 +3844,38 @@ mod external_infra {
         check_land_trace(&refused, &required).unwrap();
         assert!(!refused.iter().any(|s| s.action.kind() == "land"));
 
-        // An approval of exactly this tip on this target, through ingress.
-        let approval = Evidence {
-            community: *f.tenant.community().as_uuid(),
-            repo: repo.to_string(),
-            git_ref: "refs/heads/main".into(),
-            head: tip.clone(),
-            base: base.clone(),
-            body: EvidenceBody::Approval { approved: true },
-        }
-        .builder()
-        .unwrap()
-        .sign_with_keys(&f.member)
-        .unwrap();
-        crate::handlers::ingest::ingest_event(&f.state, &f.tenant, approval, auth(&f.member))
-            .await
+        // Self-approval and a withdrawn earlier approval are candidates, but
+        // only the member's final approval belongs in the model's receipt.
+        let mut approval_id = nostr::EventId::all_zeros();
+        for (n, (keys, approved)) in [
+            (&f.owner, true),
+            (&f.member, true),
+            (&f.member, false),
+            (&f.member, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let approval = Evidence {
+                community: *f.tenant.community().as_uuid(),
+                repo: repo.to_string(),
+                git_ref: "refs/heads/main".into(),
+                head: tip.clone(),
+                base: base.clone(),
+                body: EvidenceBody::Approval { approved },
+            }
+            .builder()
+            .unwrap()
+            .custom_created_at(nostr::Timestamp::from(
+                nostr::Timestamp::now().as_secs() - 4 + n as u64,
+            ))
+            .sign_with_keys(keys)
             .unwrap();
+            approval_id = approval.id;
+            crate::handlers::ingest::ingest_event(&f.state, &f.tenant, approval, auth(keys))
+                .await
+                .unwrap();
+        }
         assert_eq!(
             f.land_push_as(&f.owner, None, &push, &parent).await,
             Verdict::Landed
@@ -3889,6 +3905,16 @@ mod external_infra {
         assert_eq!(
             stored,
             counted.iter().map(|o| o.0.clone()).collect::<Vec<_>>()
+        );
+
+        let approved_seq: i64 = sqlx::query_scalar(
+            "SELECT seq FROM audit_log WHERE community_id = $1 AND action = 'git_evidence' AND object_id = $2",
+        ).bind(f.tenant.community().as_uuid()).bind(approval_id.to_hex())
+            .fetch_one(&f.pool).await.unwrap();
+        assert_eq!(
+            stored,
+            vec![approved_seq.to_string()],
+            "receipt contains only the approval that counted"
         );
 
         // The checker sees a broken fact in this same real trace.

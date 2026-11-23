@@ -452,6 +452,68 @@ fn check_passes(i: &Input, check: u64, head: u64) -> (out: bool)
     false
 }
 
+/// Whether an approval belongs in this ref's receipt, including refusals.
+/// This is the approval set in TLA+'s `Decision`, not a threshold-sized subset.
+pub fn counted_approval(i: &Input, c: &Cmd, a: Approval) -> (out: bool)
+    ensures out == reviews(*i, *c, a),
+{
+    counts(i, c, a, wants_fresh(i, c))
+}
+
+/// Whether a check is required by a rule in force for this ref.
+pub open spec fn required_check(i: Input, c: Cmd, check: u64) -> bool {
+    (exists|j: int| 0 <= j < i.floor.len() && floor_governs(i, c, i.floor[j])
+        && i.floor[j].req == Req::Check && i.floor[j].check == check)
+    || (exists|j: int| 0 <= j < i.repo_rules.len() && i.repo_rules[j].git_ref == c.git_ref
+        && i.repo_rules[j].req == Req::Check && i.repo_rules[j].check == check)
+}
+
+/// Whether post j belongs in this ref's receipt: a required check's newest
+/// trusted passing result, exactly as in TLA+'s `Decision`.
+pub fn counted_check(i: &Input, c: &Cmd, j: usize) -> (out: bool)
+    requires j < i.posts.len(),
+    ensures out == (required_check(*i, *c, i.posts[j as int].check)
+        && trusted_result(*i, i.posts[j as int].check, c.new, i.posts[j as int])
+        && i.posts[j as int].pass
+        && forall|k: int| 0 <= k < i.posts.len() && k != j
+            && trusted_result(*i, i.posts[j as int].check, c.new, i.posts[k])
+            ==> i.posts[k].seq < i.posts[j as int].seq),
+{
+    let q = i.posts[j];
+    check_required(i, c, q.check) && trusted_post(i, q.check, c.new, q)
+        && q.pass && newest(i, q.check, c.new, j)
+}
+
+fn check_required(i: &Input, c: &Cmd, check: u64) -> (out: bool)
+    ensures out == required_check(*i, *c, check),
+{
+    let mut k: usize = 0;
+    while k < i.floor.len()
+        invariant k <= i.floor.len(),
+            forall|m: int| 0 <= m < k ==> !(floor_governs(*i, *c, i.floor[m])
+                && i.floor[m].req == Req::Check && i.floor[m].check == check),
+        decreases i.floor.len() - k,
+    {
+        let r = i.floor[k];
+        if floor_on(i, c, r) && matches!(r.req, Req::Check) && r.check == check { return true; }
+        k += 1;
+    }
+    let mut k: usize = 0;
+    while k < i.repo_rules.len()
+        invariant k <= i.repo_rules.len(),
+            forall|m: int| 0 <= m < i.floor.len() ==> !(floor_governs(*i, *c, i.floor[m])
+                && i.floor[m].req == Req::Check && i.floor[m].check == check),
+            forall|m: int| 0 <= m < k ==> !(i.repo_rules[m].git_ref == c.git_ref
+                && i.repo_rules[m].req == Req::Check && i.repo_rules[m].check == check),
+        decreases i.repo_rules.len() - k,
+    {
+        let r = i.repo_rules[k];
+        if r.git_ref == c.git_ref && matches!(r.req, Req::Check) && r.check == check { return true; }
+        k += 1;
+    }
+    false
+}
+
 fn meets(i: &Input, c: &Cmd, x: Rule, fresh: bool) -> (out: bool)
     requires fresh == fresh_target(*i, *c), i.approvals.len() < u64::MAX,
     ensures out == satisfied(*i, *c, x),

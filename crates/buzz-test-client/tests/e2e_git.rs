@@ -646,3 +646,118 @@ fn tempdir_named(prefix: &str) -> TempDir {
     std::fs::create_dir_all(&p).unwrap();
     TempDir(p)
 }
+
+/// The receipt's approval IDs survive signed HTTP ingress, real Git transport,
+/// and durable land: candidates that were withdrawn or self-authored do not.
+#[tokio::test]
+#[ignore = "requires isolated live relay + Postgres + MinIO + git"]
+async fn governed_push_receipts_contain_only_counted_approvals() {
+    use buzz_core::governance::{command_builder, Evidence, EvidenceBody, ExpectedHead};
+    use nostr::ToBech32;
+    let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let community: uuid::Uuid = std::env::var("BUZZ_E2E_GIT_COMMUNITY_ID")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let owner = Keys::generate();
+    let reviewer = Keys::generate();
+    let owner_hex = owner.public_key().to_hex();
+    let nsec = owner.secret_key().to_bech32().unwrap();
+    let repo = format!("receipt-{}", uuid::Uuid::new_v4());
+    let coordinate = format!("30617:{owner_hex}:{repo}");
+    let channel = create_test_channel(&owner).await;
+    post_event(
+        &EventBuilder::new(Kind::Custom(9000), "")
+            .tags([
+                Tag::parse(["h", &channel]).unwrap(),
+                Tag::parse(["p", &reviewer.public_key().to_hex(), "member"]).unwrap(),
+            ])
+            .sign_with_keys(&owner)
+            .unwrap(),
+    )
+    .await;
+    post_event(
+        &EventBuilder::new(Kind::from(30617), "")
+            .tags([
+                Tag::parse(["d", &repo]).unwrap(),
+                Tag::parse(["buzz-channel", &channel]).unwrap(),
+            ])
+            .sign_with_keys(&owner)
+            .unwrap(),
+    )
+    .await;
+    let tmp = tempdir();
+    let url = format!("{}/git/{owner_hex}/{repo}", relay_http_url());
+    git(&["clone", "--quiet", &url, "repo"], tmp.path(), &nsec);
+    let dir = tmp.path().join("repo");
+    std::fs::write(dir.join("README.md"), "base\n").unwrap();
+    git(&["add", "."], &dir, &nsec);
+    git(&["commit", "--quiet", "-m", "base"], &dir, &nsec);
+    git(&["branch", "-M", "main"], &dir, &nsec);
+    git(&["push", "--quiet", "origin", "main"], &dir, &nsec);
+    let base = git(&["rev-parse", "HEAD"], &dir, &nsec).trim().to_string();
+    let rules = r#"{"version":1,"body":{"type":"rules","rules":[{"id":"review","refs":["refs/heads/main"],"labels":{},"require":[{"type":"review","count":1,"group":null}]}]}}"#;
+    post_event(
+        &command_builder(
+            community,
+            &format!("rules:{coordinate}").parse().unwrap(),
+            &ExpectedHead::Absent,
+            rules,
+        )
+        .unwrap()
+        .sign_with_keys(&owner)
+        .unwrap(),
+    )
+    .await;
+    std::fs::write(dir.join("README.md"), "reviewed\n").unwrap();
+    git(&["commit", "--quiet", "-am", "reviewed"], &dir, &nsec);
+    let tip = git(&["rev-parse", "HEAD"], &dir, &nsec).trim().to_string();
+    assert!(!git_status(&["push", "origin", "main"], &dir, &nsec)
+        .status
+        .success());
+    let mut last_id = nostr::EventId::all_zeros();
+    for (n, (keys, approved)) in [
+        (&owner, true),
+        (&reviewer, true),
+        (&reviewer, false),
+        (&reviewer, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let e = Evidence {
+            community,
+            repo: coordinate.clone(),
+            git_ref: "refs/heads/main".into(),
+            head: tip.clone(),
+            base: base.clone(),
+            body: EvidenceBody::Approval { approved },
+        }
+        .builder()
+        .unwrap()
+        .custom_created_at(nostr::Timestamp::from(
+            nostr::Timestamp::now().as_secs() - 4 + n as u64,
+        ))
+        .sign_with_keys(keys)
+        .unwrap();
+        last_id = e.id;
+        post_event(&e).await;
+    }
+    git(&["push", "--quiet", "origin", "main"], &dir, &nsec);
+    let approved_seq: i64 = sqlx::query_scalar("SELECT seq FROM audit_log WHERE community_id=$1 AND action='git_evidence' AND object_id=$2")
+        .bind(community).bind(last_id.to_hex()).fetch_one(&pool).await.unwrap();
+    let detail: serde_json::Value = sqlx::query_scalar("SELECT detail FROM audit_log WHERE community_id=$1 AND action='git_landed' AND object_id=$2 ORDER BY seq DESC LIMIT 1")
+        .bind(community).bind(&coordinate).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        detail["counted"]["refs/heads/main"]["evidence"],
+        serde_json::json!([approved_seq.to_string()])
+    );
+    assert_eq!(
+        git(&["ls-remote", "origin", "refs/heads/main"], &dir, &nsec)
+            .split_whitespace()
+            .next(),
+        Some(tip.as_str())
+    );
+}
