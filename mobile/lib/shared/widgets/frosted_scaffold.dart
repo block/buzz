@@ -47,6 +47,9 @@ class FrostedScaffold extends HookWidget {
   /// Reserves the native large title above fixed controls.
   final bool nativePinnedBody;
 
+  /// Authoritative depth when the page owns its primary scroll controller.
+  final ValueListenable<double>? navigationScrollOffset;
+
   /// Lets a conversation header span the rail while its body stays inset.
   final bool extendHeaderUnderRail;
 
@@ -61,6 +64,7 @@ class FrostedScaffold extends HookWidget {
     this.backgroundGradient,
     this.useUtilitySurfaceTheme = false,
     this.nativePinnedBody = false,
+    this.navigationScrollOffset,
     this.extendHeaderUnderRail = false,
   });
 
@@ -218,7 +222,7 @@ class FrostedScaffold extends HookWidget {
             }
           : null,
       child: IosNavigationScrollScope(
-        offset: scrollOffset,
+        offset: navigationScrollOffset ?? scrollOffset,
         child: Scaffold(
           backgroundColor: backgroundColor,
           resizeToAvoidBottomInset: resizeToAvoidBottomInset,

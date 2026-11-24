@@ -66,7 +66,7 @@ void agentPrefillTests() {
       prefillScopeMessages: scope,
       onSend: (_, mentions, {mediaTags = const []}) async => sent = mentions,
     );
-    // The collapsed composer previews its trimmed text, or the hint.
+    // The collapsed composer previews its full text, or the hint.
     String text() => find.byType(TextField).evaluate().isNotEmpty
         ? tester.widget<TextField>(find.byType(TextField)).controller!.text
         : find.text(agentName).evaluate().isNotEmpty

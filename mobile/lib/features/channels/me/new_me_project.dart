@@ -137,7 +137,7 @@ Future<String?> _name(
   String noun = 'project',
 }) async {
   if (defaultTargetPlatform == TargetPlatform.iOS) {
-    final theme = utilitySurfaceThemeData(Theme.of(context));
+    final theme = utilitySheetThemeData(Theme.of(context));
     try {
       return await const MethodChannel(
         'buzz/profile_text_editor',

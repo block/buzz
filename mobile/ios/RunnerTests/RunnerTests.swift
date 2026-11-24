@@ -1333,7 +1333,21 @@ class RunnerTests: XCTestCase {
       messenger.scroll(to: boundary)
       await assertCompactTitleOpacity(1)
       XCTAssertEqual(navigation.navigationBar.frame.height, compact, accuracy: 0.5)
+      if leadingTitle {
+        let sheet = UIViewController()
+        sheet.modalPresentationStyle = .pageSheet
+        await withCheckedContinuation { continuation in
+          parent.present(sheet, animated: true) { continuation.resume() }
+        }
+        XCTAssertEqual(navigation.topViewController?.navigationItem.title, "")
+        await withCheckedContinuation { continuation in
+          parent.dismiss(animated: true) { continuation.resume() }
+        }
+        XCTAssertEqual(navigation.topViewController?.navigationItem.title, "")
+        XCTAssertEqual(centeredTitle.text, "Home")
+      }
       messenger.scroll(to: 0)
+      XCTAssertEqual(navigation.topViewController?.navigationItem.title, "Home")
       bar.view().frame.size.height += boundary * 0.7
       bar.view().setNeedsLayout()
       bar.view().layoutIfNeeded()
