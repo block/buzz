@@ -31,6 +31,10 @@ impl UserDeletionStore {
         writer: &mut impl Write,
         stage: Option<(&EntityLease, Uuid)>,
     ) -> Result<ContentBatchSummary> {
+        // This runs outside the relay (`buzz-admin user-deletions`), where
+        // nothing else turns the outbox on: without it, scrubbed and erased
+        // messages would keep their documents in the search index.
+        crate::search_outbox::enable_if_indexed(&self.pool).await?;
         // A private one-connection pool pins the temporary worklist's session
         // while allowing each batch to own an admitted transaction. It never
         // returns temporary tables or session settings to the serving pool.

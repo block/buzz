@@ -10,6 +10,7 @@
 //! relay re-reads every hit from Postgres, so the index holds only what search
 //! needs.
 
+use std::ops::Range;
 use std::time::Duration;
 
 use buzz_core::CommunityId;
@@ -20,6 +21,7 @@ use opensearch::http::transport::{SingleNodeConnectionPool, TransportBuilder};
 use opensearch::http::Url;
 use opensearch::indices::IndicesRefreshParts;
 use opensearch::indices::{IndicesCreateParts, IndicesDeleteParts, IndicesExistsParts};
+use opensearch::params::VersionType;
 use opensearch::{BulkOperation, BulkParts, OpenSearch, SearchParts};
 use serde_json::{json, Value};
 
@@ -38,6 +40,40 @@ pub const DEFAULT_INDEX_PREFIX: &str = "buzz-";
 /// Bound on every request, so a stalled cluster cannot hold an indexer batch
 /// (and its admitted transaction) or a search open.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The status OpenSearch throttles with, notably Serverless while it scales.
+const THROTTLED: u16 = 429;
+/// Item status when the index holds the document at a newer version.
+const VERSION_CONFLICT: u64 = 409;
+
+/// Most bytes of documents sent in one bulk request. A batch over it goes
+/// out as several requests: OpenSearch refuses a request above its
+/// `http.max_content_length` (10 MiB on the smallest AWS domains) with HTTP
+/// 413, and a refused request would keep its community's queue from moving.
+const MAX_BULK_BYTES: usize = 8 * 1024 * 1024;
+/// Bytes allowed for one item's action line, and for a whole delete.
+const BULK_ITEM_OVERHEAD: usize = 256;
+
+/// What a bulk write did, item by item.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BulkOutcome {
+    /// Events whose item failed: their outbox rows stay queued.
+    pub failed: Vec<[u8; 32]>,
+    /// How many of those OpenSearch refused for good (HTTP 400 or 413):
+    /// retrying them fails the same way until the document or mapping
+    /// changes.
+    pub rejected: usize,
+    /// How many of those the index already held at this version or a newer
+    /// one (HTTP 409). A request applied after its batch ended has no one
+    /// reading its response, and a live batch holds its events' partitions,
+    /// so it is their newest writer: its conflict means the version source
+    /// went back or repeated, and its newer state must stay queued.
+    pub conflicts: usize,
+    /// Whether OpenSearch throttled the request or any item (HTTP 429).
+    pub throttled: bool,
+    /// The first failure's error type: a fixed description, never content.
+    pub reason: Option<String>,
+}
 
 /// OpenSearch's default `index.max_result_window`: `from + size` beyond it is
 /// rejected, so pages past it are empty.
@@ -171,19 +207,68 @@ impl SearchIndex {
         checked(response).await.map(drop)
     }
 
-    /// Upsert `documents` and delete `removed` for one community, in one
-    /// bulk request through the alias. Fails unless every item succeeded;
-    /// deleting a document that is not there succeeds. The request requires
+    /// Upsert `documents` and delete `removed` for one community through the
+    /// alias, and report each item's result. A batch of more than
+    /// [`MAX_BULK_BYTES`] goes out as several bulk requests, one after the
+    /// other; once one is throttled the rest are not sent and count as
+    /// failed.
+    /// Deleting a document that is not there succeeds. The request requires
     /// the alias, so a missing index fails the write instead of being created
     /// with a dynamic mapping.
+    ///
+    /// Every item carries `version` as an external version, so the cluster
+    /// keeps the newest state of each document: a request it applies after
+    /// its writer gave up cannot undo a later write. An item the index
+    /// already holds at this version or a newer one fails as a conflict.
+    ///
+    /// A throttled request (HTTP 429) comes back as an outcome in which every
+    /// item failed; any other failed request is an error.
     pub async fn write(
         &self,
         community: CommunityId,
         documents: &[SearchDocument],
         removed: &[[u8; 32]],
-    ) -> Result<(), SearchError> {
+        version: i64,
+    ) -> Result<BulkOutcome, SearchError> {
+        let sizes = documents
+            .iter()
+            .map(|document| document_bytes(community, document))
+            .chain(removed.iter().map(|_| BULK_ITEM_OVERHEAD));
+        let mut outcome = BulkOutcome::default();
+        for range in request_ranges(sizes, MAX_BULK_BYTES) {
+            let (documents, removed) = split_items(documents, removed, &range);
+            if outcome.throttled {
+                // Not sent: the cluster asked for less.
+                outcome
+                    .failed
+                    .extend(documents.iter().map(|document| document.event_id));
+                outcome.failed.extend(removed);
+                continue;
+            }
+            let part = self
+                .write_request(community, documents, removed, version)
+                .await?;
+            outcome.failed.extend(part.failed);
+            outcome.rejected += part.rejected;
+            outcome.conflicts += part.conflicts;
+            outcome.throttled = part.throttled;
+            if outcome.reason.is_none() {
+                outcome.reason = part.reason;
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// One bulk request of [`SearchIndex::write`].
+    async fn write_request(
+        &self,
+        community: CommunityId,
+        documents: &[SearchDocument],
+        removed: &[[u8; 32]],
+        version: i64,
+    ) -> Result<BulkOutcome, SearchError> {
         if documents.is_empty() && removed.is_empty() {
-            return Ok(());
+            return Ok(BulkOutcome::default());
         }
         let index = &self.alias;
         let mut operations: Vec<BulkOperation<Value>> =
@@ -193,6 +278,8 @@ impl SearchIndex {
                 BulkOperation::index(document_source(community, document))
                     .id(document_id(community, &document.event_id))
                     .index(index)
+                    .version(version)
+                    .version_type(VersionType::External)
                     .into(),
             );
         }
@@ -200,9 +287,17 @@ impl SearchIndex {
             operations.push(
                 BulkOperation::delete(document_id(community, event_id))
                     .index(index)
+                    .version(version)
+                    .version_type(VersionType::External)
                     .into(),
             );
         }
+        // Items come back in request order.
+        let events: Vec<[u8; 32]> = documents
+            .iter()
+            .map(|document| document.event_id)
+            .chain(removed.iter().copied())
+            .collect();
         let response = self
             .client
             .bulk(BulkParts::None)
@@ -211,33 +306,52 @@ impl SearchIndex {
             .send()
             .await
             .map_err(transport_error)?;
+        if response.status_code().as_u16() == THROTTLED {
+            return Ok(BulkOutcome {
+                failed: events,
+                rejected: 0,
+                conflicts: 0,
+                throttled: true,
+                reason: Some(format!("HTTP {THROTTLED}")),
+            });
+        }
         let body = checked(response).await?;
         if body["errors"] != true {
-            return Ok(());
+            return Ok(BulkOutcome::default());
         }
-        let failed = body["items"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|item| item.as_object()?.values().next())
-            .filter(|result| result.get("error").is_some())
-            .collect::<Vec<_>>();
-        let reason = failed
-            .first()
-            .and_then(|result| result["error"]["type"].as_str())
-            .unwrap_or("unknown");
-        let description = format!("{} bulk items failed ({reason})", failed.len());
-        // Only a batch whose every failure is the documents' own fault is
-        // rejected; anything else may succeed on a retry.
-        let rejected = !failed.is_empty()
-            && failed
-                .iter()
-                .all(|result| result["status"].as_u64().is_some_and(rejects));
-        Err(if rejected {
-            SearchError::Rejected(description)
-        } else {
-            SearchError::Engine(description)
-        })
+        let items = body["items"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+        if items.len() != events.len() {
+            return Err(SearchError::Engine(
+                "bulk response items do not match the request".into(),
+            ));
+        }
+        let mut outcome = BulkOutcome::default();
+        for (event, item) in events.into_iter().zip(items) {
+            let Some(result) = item.as_object().and_then(|item| item.values().next()) else {
+                return Err(SearchError::Engine("malformed bulk response item".into()));
+            };
+            if result.get("error").is_none() {
+                continue;
+            }
+            let status = result["status"].as_u64().unwrap_or(0);
+            if status == VERSION_CONFLICT {
+                outcome.conflicts += 1;
+            }
+            outcome.throttled |= status == u64::from(THROTTLED);
+            if rejects(status) {
+                outcome.rejected += 1;
+            }
+            if outcome.reason.is_none() {
+                outcome.reason = Some(
+                    result["error"]["type"]
+                        .as_str()
+                        .unwrap_or("unknown")
+                        .to_string(),
+                );
+            }
+            outcome.failed.push(event);
+        }
+        Ok(outcome)
     }
 
     /// Run a message search against the alias.
@@ -311,6 +425,44 @@ fn index_definition(alias: &str) -> Value {
 
 fn document_id(community: CommunityId, event_id: &[u8; 32]) -> String {
     format!("{}:{}", community.as_uuid(), hex::encode(event_id))
+}
+
+/// The bytes `document` takes in a bulk request.
+fn document_bytes(community: CommunityId, document: &SearchDocument) -> usize {
+    BULK_ITEM_OVERHEAD
+        + serde_json::to_vec(&document_source(community, document)).map_or(0, |source| source.len())
+}
+
+/// Split items of the given sizes, in order, into runs of at most `limit`
+/// bytes each. An item over the limit gets a run of its own.
+fn request_ranges(sizes: impl Iterator<Item = usize>, limit: usize) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let (mut start, mut end, mut bytes) = (0, 0, 0usize);
+    for size in sizes {
+        if end > start && bytes + size > limit {
+            ranges.push(start..end);
+            (start, bytes) = (end, 0);
+        }
+        bytes += size;
+        end += 1;
+    }
+    if end > start {
+        ranges.push(start..end);
+    }
+    ranges
+}
+
+/// The part of a batch, counted documents first, that `range` covers.
+fn split_items<'a>(
+    documents: &'a [SearchDocument],
+    removed: &'a [[u8; 32]],
+    range: &Range<usize>,
+) -> (&'a [SearchDocument], &'a [[u8; 32]]) {
+    let count = documents.len();
+    (
+        &documents[range.start.min(count)..range.end.min(count)],
+        &removed[range.start.saturating_sub(count)..range.end.saturating_sub(count)],
+    )
 }
 
 fn document_source(community: CommunityId, document: &SearchDocument) -> Value {
@@ -439,5 +591,19 @@ fn transport_error(error: opensearch::Error) -> SearchError {
         SearchError::Engine("request timed out".into())
     } else {
         SearchError::Engine("request failed".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::request_ranges;
+
+    #[test]
+    fn a_batch_over_the_request_limit_is_split_in_order() {
+        // Mutation: never start a new run → RED.
+        assert_eq!(
+            request_ranges([4, 4, 4, 9, 1].into_iter(), 8),
+            [0..2, 2..3, 3..4, 4..5]
+        );
     }
 }

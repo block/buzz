@@ -662,7 +662,10 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                 .await
                 .map_err(|e| anyhow::anyhow!("search outbox: {e}"))?;
             info!(url = %opensearch.url, "search outbox enabled");
-            Some(buzz_search::indexer::Indexer::new(db.clone(), index))
+            Some(
+                buzz_search::indexer::Indexer::new(db.clone(), index)
+                    .with_workers(config.search_indexer_workers),
+            )
         }
         None => None,
     };
