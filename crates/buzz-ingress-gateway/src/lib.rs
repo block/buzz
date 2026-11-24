@@ -3,6 +3,9 @@
 //! Nostr events.
 pub mod config;
 pub mod http;
+pub mod management;
 pub mod metrics;
 pub mod postgres;
+pub mod secrets;
+pub mod store;
 pub use http::{router, router_with_metrics, AppState};

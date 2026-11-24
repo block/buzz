@@ -1,5 +1,5 @@
 use buzz_ingress_gateway::{
-    config::Config, postgres::PostgresStore, router_with_metrics, AppState,
+    config::Config, postgres::PostgresStore, router_with_metrics, secrets::SecretKeyring, AppState,
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -31,6 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let c = Config::from_env()?;
     let metrics_handle = buzz_ingress_gateway::metrics::install()?;
+    let secrets = Arc::new(SecretKeyring::from_config(&c.secret_keyring)?);
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(20)
         .connect(&c.database_url)
@@ -60,6 +61,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (public, private) = router_with_metrics(
         AppState {
             store,
+            secrets,
+            relay_pubkeys: Arc::new(c.relay_pubkeys.clone()),
+            now: chrono::Utc::now,
             accepting: accepting.clone(),
         },
         Some(metrics_handle),
