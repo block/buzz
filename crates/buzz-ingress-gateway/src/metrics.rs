@@ -33,6 +33,36 @@ pub fn record_readiness_failure(cause: ReadinessFailure) {
     metrics::counter!("ingress_gateway_readiness_failures_total", "cause" => label).increment(1);
 }
 
+/// How an intake request ended. Every label is a compile-time constant.
+#[derive(Debug, Clone, Copy)]
+pub enum IntakeOutcome {
+    Queued,
+    Duplicate,
+    NotFound,
+    Disabled,
+    PendingSecret,
+    Invalid,
+    Unauthorized,
+    RateLimited,
+    Unavailable,
+}
+
+/// Record the outcome of one `POST /webhooks/{id}` request.
+pub fn record_intake(outcome: IntakeOutcome) {
+    let label = match outcome {
+        IntakeOutcome::Queued => "queued",
+        IntakeOutcome::Duplicate => "duplicate",
+        IntakeOutcome::NotFound => "not_found",
+        IntakeOutcome::Disabled => "disabled",
+        IntakeOutcome::PendingSecret => "pending_secret",
+        IntakeOutcome::Invalid => "invalid",
+        IntakeOutcome::Unauthorized => "unauthorized",
+        IntakeOutcome::RateLimited => "rate_limited",
+        IntakeOutcome::Unavailable => "unavailable",
+    };
+    metrics::counter!("ingress_gateway_intake_total", "outcome" => label).increment(1);
+}
+
 /// Record a retention-reaper sweep failure.
 pub fn record_reaper_failure() {
     metrics::counter!("ingress_gateway_reaper_failures_total").increment(1);
@@ -50,12 +80,17 @@ mod tests {
         record_readiness_failure(ReadinessFailure::NotAccepting);
         record_readiness_failure(ReadinessFailure::Store);
         record_reaper_failure();
+        record_intake(IntakeOutcome::Queued);
+        record_intake(IntakeOutcome::Unauthorized);
         let rendered = handle.render();
         for needle in [
             "ingress_gateway_readiness_failures_total",
             "ingress_gateway_reaper_failures_total",
+            "ingress_gateway_intake_total",
             "cause=\"not_accepting\"",
             "cause=\"store\"",
+            "outcome=\"queued\"",
+            "outcome=\"unauthorized\"",
         ] {
             assert!(rendered.contains(needle), "missing {needle}: {rendered}");
         }

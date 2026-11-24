@@ -1,5 +1,6 @@
 use buzz_ingress_gateway::{
-    config::Config, postgres::PostgresStore, router_with_metrics, secrets::SecretKeyring, AppState,
+    config::Config, http::IntakeLimits, intake::RateLimiter, postgres::PostgresStore,
+    router_with_metrics, secrets::SecretKeyring, AppState,
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -63,6 +64,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             store,
             secrets,
             relay_pubkeys: Arc::new(c.relay_pubkeys.clone()),
+            intake: IntakeLimits {
+                max_body_bytes: c.max_body_bytes,
+                timestamp_tolerance_seconds: c.timestamp_tolerance_seconds,
+            },
+            rate_limiter: Arc::new(RateLimiter::new(c.rate_limit_per_minute)),
             now: chrono::Utc::now,
             accepting: accepting.clone(),
         },
