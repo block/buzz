@@ -138,7 +138,7 @@ final class NavigationTitleView: UIVisualEffectView, UIGestureRecognizerDelegate
   }
 
   /// Layout gap between the subtitle's leading artwork and its text.
-  static let subtitleIconGap: CGFloat = 1
+  static let subtitleIconGap: CGFloat = 2
 
   /// Leads the subtitle with artwork tinted as its text. A nil image holds
   /// the slot while Flutter renders it, so the label does not shift.

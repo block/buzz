@@ -281,7 +281,7 @@ void threadUpLevelTests() {
         expect(_shownThread(tester).threadHead.id, threadIdRoot);
 
         // The list's glyph stands where a "#" would otherwise be written,
-        // as close to the name as one: a prefix, not a separate mark.
+        // about as close to the name as one: a prefix, not a separate mark.
         expect(_threadUpLabel(tester), label);
         expect(_threadUpIcon(tester)?.icon, icon);
         expect(icon, conversationListIcon(channel, legacySoloChannels: legacy));
@@ -295,7 +295,7 @@ void threadUpLevelTests() {
                 tester
                     .getRect(find.byKey(const ValueKey('thread-up-level-icon')))
                     .right,
-            Grid.quarter,
+            3,
           );
         }
         // It reads as "opens something", in the theme's own muted ink.

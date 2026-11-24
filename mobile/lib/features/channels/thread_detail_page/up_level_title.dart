@@ -8,6 +8,12 @@ double _threadUpLevelTitleHeight(BuildContext context) {
   return line(context.textTheme.titleSmall) + line(context.textTheme.bodySmall);
 }
 
+/// Layout gap between the title's icon and the name. The glyph's own margin
+/// adds as much again, so what shows is a little over a word space: the same
+/// clear space for the text size as the iOS capsule's
+/// `NavigationTitleView.subtitleIconGap` leaves around its smaller text.
+const _threadUpLevelIconGap = 3.0;
+
 /// The thread title wherever Flutter draws it: "Thread" over the place the
 /// thread lives in, which the whole title goes to. iOS shows the same in its
 /// native title capsule.
@@ -63,9 +69,8 @@ class _ThreadUpLevelTitle extends StatelessWidget {
                             size: iconSize,
                             color: muted,
                           ),
-                          // A prefix of the name, as a typed "#" would
-                          // be: the glyph's own margin is most of the gap.
-                          const SizedBox(width: Grid.quarter),
+                          // A prefix of the name, as a typed "#" would be.
+                          const SizedBox(width: _threadUpLevelIconGap),
                         ],
                         Flexible(
                           child: Text(

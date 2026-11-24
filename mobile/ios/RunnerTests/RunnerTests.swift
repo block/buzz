@@ -1078,7 +1078,7 @@ class RunnerTests: XCTestCase {
     // The icon sits against the name as a typed "#" would, not as a
     // separate element; the chevron keeps its own small gap.
     XCTAssertEqual(frames[1].minX - frames[0].maxX, NavigationTitleView.subtitleIconGap, accuracy: 0.01)
-    XCTAssertEqual(NavigationTitleView.subtitleIconGap, 1)
+    XCTAssertEqual(NavigationTitleView.subtitleIconGap, 2)
     XCTAssertLessThanOrEqual(frames[1].maxX, frames[2].minX)
     XCTAssertEqual(icon.bounds.size, CGSize(width: 13, height: 13))
     XCTAssertGreaterThan(chevron.bounds.width, 0)
