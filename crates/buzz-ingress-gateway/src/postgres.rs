@@ -66,8 +66,8 @@ impl PostgresStore {
         Ok(())
     }
 
-    /// Delete terminal deliveries and applied operations older than the
-    /// retention window. Queued deliveries are never reaped here.
+    /// Delete terminal deliveries, applied operations, and retired secrets
+    /// older than the retention window. Queued deliveries are never reaped here.
     pub async fn reap_expired(
         &self,
         now: DateTime<Utc>,
@@ -88,11 +88,23 @@ impl PostgresStore {
                 .execute(&self.pool)
                 .await?
                 .rows_affected();
-        Ok(deliveries + operations)
+        let secrets = sqlx::query(
+            "DELETE FROM ingress_gateway_integration_secrets
+             WHERE retired_at IS NOT NULL AND (grace_until IS NULL OR grace_until < $1)",
+        )
+        .bind(cutoff)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(deliveries + operations + secrets)
     }
 }
 
 fn integration_from_row(row: PgRow) -> Result<Integration, StoreError> {
+    integration_from_row_ref(&row)
+}
+
+fn integration_from_row_ref(row: &PgRow) -> Result<Integration, StoreError> {
     let provider: String = row.try_get("provider")?;
     Ok(Integration {
         id: row.try_get("id")?,
@@ -125,26 +137,32 @@ fn operation_from_row(row: PgRow) -> Result<AppliedOperation, StoreError> {
         operation_id: row.try_get("operation_id")?,
         integration_id: row.try_get("integration_id")?,
         revision: row.try_get("revision")?,
+        fingerprint: row.try_get("request_fingerprint")?,
         response: row.try_get("response")?,
         applied_at: row.try_get("applied_at")?,
     })
 }
 
-async fn load_secrets(
+const VERIFYING_SECRETS_SQL: &str =
+    "SELECT id, integration_id, key_id, secret_ciphertext, created_at, retired_at, grace_until
+     FROM ingress_gateway_integration_secrets
+     WHERE integration_id = $1
+       AND (retired_at IS NULL OR grace_until > $2)
+     ORDER BY created_at DESC, id DESC";
+
+async fn load_verifying_secrets(
     tx: &mut Transaction<'_, Postgres>,
     integration_id: Uuid,
+    now: DateTime<Utc>,
 ) -> Result<Vec<IntegrationSecret>, StoreError> {
-    sqlx::query(
-        "SELECT id, integration_id, key_id, secret_ciphertext, created_at, retired_at,
-                    grace_until FROM ingress_gateway_integration_secrets
-         WHERE integration_id = $1 ORDER BY created_at DESC, id DESC",
-    )
-    .bind(integration_id)
-    .fetch_all(&mut **tx)
-    .await?
-    .into_iter()
-    .map(secret_from_row)
-    .collect()
+    sqlx::query(VERIFYING_SECRETS_SQL)
+        .bind(integration_id)
+        .bind(now)
+        .fetch_all(&mut **tx)
+        .await?
+        .into_iter()
+        .map(secret_from_row)
+        .collect()
 }
 
 #[async_trait]
@@ -171,32 +189,69 @@ impl Store for PostgresStore {
         .transpose()
     }
 
+    async fn integration_with_secrets(
+        &self,
+        id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<Option<(Integration, Vec<IntegrationSecret>)>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT i.id, i.community_host, i.provider, i.revision, i.enabled, i.disabled_at,
+                    i.created_at, i.updated_at,
+                    s.id AS secret_id, s.key_id, s.secret_ciphertext,
+                    s.created_at AS secret_created_at, s.retired_at, s.grace_until
+             FROM ingress_gateway_integrations i
+             LEFT JOIN ingress_gateway_integration_secrets s
+               ON s.integration_id = i.id
+              AND (s.retired_at IS NULL OR s.grace_until > $2)
+             WHERE i.id = $1
+             ORDER BY s.created_at DESC, s.id DESC",
+        )
+        .bind(id)
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await?;
+        let Some(first) = rows.first() else {
+            return Ok(None);
+        };
+        let integration = integration_from_row_ref(first)?;
+        let mut secrets = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let secret_id: Option<Uuid> = row.try_get("secret_id")?;
+            if let Some(secret_id) = secret_id {
+                secrets.push(IntegrationSecret {
+                    id: secret_id,
+                    integration_id: id,
+                    key_id: row.try_get("key_id")?,
+                    ciphertext: row.try_get("secret_ciphertext")?,
+                    created_at: row.try_get("secret_created_at")?,
+                    retired_at: row.try_get("retired_at")?,
+                    grace_until: row.try_get("grace_until")?,
+                });
+            }
+        }
+        Ok(Some((integration, secrets)))
+    }
+
     async fn verifying_secrets(
         &self,
         integration_id: Uuid,
         now: DateTime<Utc>,
     ) -> Result<Vec<IntegrationSecret>, StoreError> {
-        sqlx::query(
-            "SELECT id, integration_id, key_id, secret_ciphertext, created_at, retired_at,
-                    grace_until FROM ingress_gateway_integration_secrets
-             WHERE integration_id = $1
-               AND (retired_at IS NULL OR grace_until > $2)
-             ORDER BY created_at DESC, id DESC",
-        )
-        .bind(integration_id)
-        .bind(now)
-        .fetch_all(&self.pool)
-        .await?
-        .into_iter()
-        .map(secret_from_row)
-        .collect()
+        sqlx::query(VERIFYING_SECRETS_SQL)
+            .bind(integration_id)
+            .bind(now)
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(secret_from_row)
+            .collect()
     }
 
     async fn applied_operation(
         &self,
         operation_id: Uuid,
     ) -> Result<Option<AppliedOperation>, StoreError> {
-        sqlx::query("SELECT operation_id, integration_id, revision, response, applied_at FROM ingress_gateway_applied_operations
+        sqlx::query("SELECT operation_id, integration_id, revision, request_fingerprint, response, applied_at FROM ingress_gateway_applied_operations
              WHERE operation_id = $1")
         .bind(operation_id)
         .fetch_optional(&self.pool)
@@ -218,14 +273,19 @@ impl Store for PostgresStore {
             .bind(operation.integration_id)
             .execute(&mut *tx)
             .await?;
-        if let Some(row) = sqlx::query("SELECT operation_id, integration_id, revision, response, applied_at FROM ingress_gateway_applied_operations
+        if let Some(row) = sqlx::query("SELECT operation_id, integration_id, revision, request_fingerprint, response, applied_at FROM ingress_gateway_applied_operations
              WHERE operation_id = $1")
         .bind(operation.operation_id)
         .fetch_optional(&mut *tx)
         .await?
         {
             tx.commit().await?;
-            return Ok(ApplyOutcome::Replayed(operation_from_row(row)?));
+            let applied = operation_from_row(row)?;
+            return Ok(if applied.matches(&operation) {
+                ApplyOutcome::Replayed(applied)
+            } else {
+                ApplyOutcome::Conflict
+            });
         }
         let integration = sqlx::query(
             "SELECT id, community_host, provider, revision, enabled, disabled_at,
@@ -237,7 +297,7 @@ impl Store for PostgresStore {
         .await?
         .map(integration_from_row)
         .transpose()?;
-        let mut secrets = load_secrets(&mut tx, operation.integration_id).await?;
+        let mut secrets = load_verifying_secrets(&mut tx, operation.integration_id, now).await?;
         let before: Vec<Uuid> = secrets.iter().map(|s| s.id).collect();
         let next = match transition(integration, &mut secrets, &operation, now) {
             Ok(next) => next,
@@ -268,33 +328,30 @@ impl Store for PostgresStore {
         .bind(next.updated_at)
         .execute(&mut *tx)
         .await?;
-        if matches!(operation.mutation, Mutation::PutSecret { .. }) {
-            for secret in &secrets {
-                if before.contains(&secret.id) {
-                    sqlx::query(
-                        "UPDATE ingress_gateway_integration_secrets
-                         SET retired_at = $2, grace_until = $3
-                         WHERE id = $1 AND retired_at IS NULL",
-                    )
-                    .bind(secret.id)
-                    .bind(secret.retired_at)
-                    .bind(secret.grace_until)
-                    .execute(&mut *tx)
-                    .await?;
-                } else {
-                    sqlx::query(
-                        "INSERT INTO ingress_gateway_integration_secrets
-                             (id, integration_id, key_id, secret_ciphertext, created_at)
-                         VALUES ($1, $2, $3, $4, $5)",
-                    )
-                    .bind(secret.id)
-                    .bind(secret.integration_id)
-                    .bind(&secret.key_id)
-                    .bind(&secret.ciphertext)
-                    .bind(secret.created_at)
-                    .execute(&mut *tx)
-                    .await?;
-                }
+        if let Mutation::PutSecret { grace, .. } = &operation.mutation {
+            sqlx::query(
+                "UPDATE ingress_gateway_integration_secrets
+                 SET retired_at = $2, grace_until = $3
+                 WHERE integration_id = $1 AND retired_at IS NULL",
+            )
+            .bind(operation.integration_id)
+            .bind(now)
+            .bind(now + *grace)
+            .execute(&mut *tx)
+            .await?;
+            for secret in secrets.iter().filter(|s| !before.contains(&s.id)) {
+                sqlx::query(
+                    "INSERT INTO ingress_gateway_integration_secrets
+                         (id, integration_id, key_id, secret_ciphertext, created_at)
+                     VALUES ($1, $2, $3, $4, $5)",
+                )
+                .bind(secret.id)
+                .bind(secret.integration_id)
+                .bind(&secret.key_id)
+                .bind(&secret.ciphertext)
+                .bind(secret.created_at)
+                .execute(&mut *tx)
+                .await?;
             }
         }
         let verifying: Vec<_> = secrets
@@ -308,21 +365,34 @@ impl Store for PostgresStore {
             operation_id: operation.operation_id,
             integration_id: operation.integration_id,
             revision: operation.revision,
+            fingerprint: operation.fingerprint(),
             response,
             applied_at: now,
         };
-        sqlx::query(
+        // The advisory lock serializes operations per integration only, so a
+        // concurrent request reusing this operation_id on another integration
+        // can race past the replay check and lose here on the primary key.
+        let inserted = sqlx::query(
             "INSERT INTO ingress_gateway_applied_operations
-                 (operation_id, integration_id, revision, response, applied_at)
-             VALUES ($1, $2, $3, $4, $5)",
+                 (operation_id, integration_id, revision, request_fingerprint, response, applied_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(applied.operation_id)
         .bind(applied.integration_id)
         .bind(applied.revision)
+        .bind(&applied.fingerprint)
         .bind(&applied.response)
         .bind(applied.applied_at)
         .execute(&mut *tx)
-        .await?;
+        .await;
+        match inserted {
+            Ok(_) => {}
+            Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
+                tx.rollback().await?;
+                return Ok(ApplyOutcome::Conflict);
+            }
+            Err(e) => return Err(e.into()),
+        }
         tx.commit().await?;
         Ok(ApplyOutcome::Applied(applied))
     }
