@@ -50,6 +50,7 @@ class WakeNotifierGenericTest {
         // message: it is kept, and later clean wakes leave it.
         notifier.postGeneric()
         val timerCard = awaitGeneric(Generic.SHOWING)
+        paceUpdate()
         assertTrue(notifier.keepGeneric(shownThisWake = true, silent = true))
         awaitRepost(timerCard, Generic.LOST)
         notifier.cancelGeneric()
@@ -58,6 +59,7 @@ class WakeNotifierGenericTest {
 
         // A later wake's 2-second card re-posts it and keeps the mark.
         val kept = activeGeneric()!!
+        paceUpdate()
         notifier.postGeneric()
         awaitRepost(kept, Generic.LOST)
 
@@ -100,6 +102,12 @@ class WakeNotifierGenericTest {
         }
         assertEquals(expected, generic())
     }
+
+    // Android silently drops an update to a showing card while the app
+    // posts faster than max_notification_enqueue_rate (5 a second), and the
+    // estimate carries over between runs. 700 ms with no post keeps the
+    // rate under that, so quick reruns don't shed the test's updates.
+    private fun paceUpdate() = SystemClock.sleep(700)
 
     // Before asserting that nothing changed: a barrier card posted and
     // cancelled after the step is applied after it too.
