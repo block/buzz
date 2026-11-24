@@ -8,6 +8,11 @@
 	<string>$(AppIdentifierPrefix)$(BUZZ_KEYCHAIN_ACCESS_GROUP)</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
+	<!-- Render through CAMetalLayer: FlutterMetalLayer can hand the renderer a
+	     surface that is still on screen, which shows frames out of order
+	     (flutter/flutter#189373). Remove once Flutter is upgraded past that fix. -->
+	<key>FLTUseFlutterMetalLayer</key>
+	<false/>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
