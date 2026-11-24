@@ -29,9 +29,10 @@
 SET lock_timeout = '5s';
 SET statement_timeout = :'invite_repair_timeout';
 
--- Share the issuer/current-owner policy between both batches and validation.
--- This is a session-local, non-materialized view, not a schema change; each
--- statement sees current restrictions while holding the admission lock.
+-- Validation mirrors the inline issuer/current-owner lookups in both batches.
+-- Do not self-join this view in a batch: with several similar-sized communities,
+-- even PK-bounded inputs can hash-join and scan the entire remaining suffix.
+-- This session-local, non-materialized view is not a schema change.
 CREATE TEMP VIEW invite_repair_restrictions AS
 SELECT invite.community_id, invite.id,
        ((invite.legacy_admission AND (
@@ -111,11 +112,35 @@ BEGIN
             -- Split first/successor statements so generic plans can seek by PK.
             IF last_invite IS NULL THEN
                 WITH candidates AS (
-                    SELECT invite.id, restriction_state.should_revoke
+                    SELECT invite.id,
+                           ((invite.legacy_admission AND (
+                               issuer.pubkey IS NULL OR restriction_state.has_retained_restriction
+                           )) OR restriction_state.has_active_ban) AS should_revoke
                     FROM relay_invites AS invite
-                    JOIN invite_repair_restrictions AS restriction_state
-                      ON restriction_state.community_id = invite.community_id
-                     AND restriction_state.id = invite.id
+                    CROSS JOIN LATERAL (
+                        SELECT CASE
+                            WHEN octet_length(invite.created_by) = 64
+                                 AND invite.created_by !~ '[^0-9a-f]'
+                            THEN decode(invite.created_by, 'hex')
+                        END AS pubkey
+                    ) AS issuer
+                    CROSS JOIN LATERAL (
+                        SELECT COALESCE(bool_or(true), false) AS has_retained_restriction,
+                               COALESCE(bool_or(
+                                   restriction.banned
+                                   AND (restriction.ban_expires_at IS NULL
+                                        OR restriction.ban_expires_at > clock_timestamp())
+                               ), false) AS has_active_ban
+                        FROM community_bans AS restriction
+                        WHERE restriction.community_id = invite.community_id
+                          AND restriction.pubkey IN (
+                              issuer.pubkey,
+                              (SELECT user_row.agent_owner_pubkey
+                               FROM users AS user_row
+                               WHERE user_row.community_id = invite.community_id
+                                 AND user_row.pubkey = issuer.pubkey)
+                          )
+                    ) AS restriction_state
                     WHERE invite.community_id = target_community
                       AND (
                         invite.legacy_admission
@@ -144,16 +169,37 @@ BEGIN
                 FROM updated;
             ELSE
                 WITH candidates AS (
-                    SELECT invite.id, restriction_state.should_revoke
+                    SELECT invite.id,
+                           ((invite.legacy_admission AND (
+                               issuer.pubkey IS NULL OR restriction_state.has_retained_restriction
+                           )) OR restriction_state.has_active_ban) AS should_revoke
                     FROM relay_invites AS invite
-                    JOIN invite_repair_restrictions AS restriction_state
-                      ON restriction_state.community_id = invite.community_id
-                     AND restriction_state.id = invite.id
+                    CROSS JOIN LATERAL (
+                        SELECT CASE
+                            WHEN octet_length(invite.created_by) = 64
+                                 AND invite.created_by !~ '[^0-9a-f]'
+                            THEN decode(invite.created_by, 'hex')
+                        END AS pubkey
+                    ) AS issuer
+                    CROSS JOIN LATERAL (
+                        SELECT COALESCE(bool_or(true), false) AS has_retained_restriction,
+                               COALESCE(bool_or(
+                                   restriction.banned
+                                   AND (restriction.ban_expires_at IS NULL
+                                        OR restriction.ban_expires_at > clock_timestamp())
+                               ), false) AS has_active_ban
+                        FROM community_bans AS restriction
+                        WHERE restriction.community_id = invite.community_id
+                          AND restriction.pubkey IN (
+                              issuer.pubkey,
+                              (SELECT user_row.agent_owner_pubkey
+                               FROM users AS user_row
+                               WHERE user_row.community_id = invite.community_id
+                                 AND user_row.pubkey = issuer.pubkey)
+                          )
+                    ) AS restriction_state
                     WHERE invite.community_id = target_community
                       AND invite.id > last_invite
-                      -- PostgreSQL does not propagate the range across this
-                      -- self-join: bound the view's invite input explicitly too.
-                      AND restriction_state.id > last_invite
                       AND (
                         invite.legacy_admission
                         OR (invite.revoked_at IS NULL AND restriction_state.has_active_ban)

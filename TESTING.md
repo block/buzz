@@ -227,6 +227,11 @@ invitation admission paused, using the same traffic/writer controls if needed.
 It also requires `BUZZ_AUTO_MIGRATE` off: with auto-migration on (the Helm
 default), the old binary fails at startup with SQLx `VersionMissing(75)`. See
 [docs/database.md](docs/database.md) Rule 5.
+Before running the repair, capture an operator-approved snapshot of candidate
+invitation IDs, community IDs, `revoked_at` and `legacy_admission`. Revocation is
+permanent; retain the snapshot for audit and any separately reviewed recovery.
+The repair does not provide an automatic rollback.
+
 Run the approved historical invitation repair script with the operator command:
 
 ```bash
