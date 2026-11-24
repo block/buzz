@@ -39,7 +39,7 @@ class ForumPostCard extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final mentionPubkeys = useMemoized(
       () =>
-          post.mentionPubkeys.map((pubkey) => pubkey.toLowerCase()).toSet()
+          post.addressedPubkeys.map((pubkey) => pubkey.toLowerCase()).toSet()
             ..remove(post.pubkey.toLowerCase()),
       [post],
     );

@@ -182,6 +182,12 @@ class _CountingForumSession extends RelaySessionNotifier {
   /// (`#e`), excluding shared sub-providers such as profiles and emoji.
   int forumAttempts = 0;
 
+  final List<NostrFilter> profileFilters = [];
+
+  int profileRequestsFor(String pubkey) => profileFilters
+      .where((filter) => filter.authors?.contains(pubkey) ?? false)
+      .length;
+
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
 
@@ -191,6 +197,7 @@ class _CountingForumSession extends RelaySessionNotifier {
     Duration timeout = const Duration(seconds: 8),
   }) async {
     fetchCount++;
+    if (filter.kinds.contains(0)) profileFilters.add(filter);
     if (filter.ids == null &&
         (filter.kinds.contains(45001) || filter.tags.containsKey('#e'))) {
       forumAttempts++;
@@ -391,6 +398,48 @@ void main() {
 
       expect(find.text('Alice'), findsOneWidget);
       expect(find.text('Hello forum'), findsOneWidget);
+    });
+
+    testWidgets('asks once for a referenced key that has no profile', (
+      tester,
+    ) async {
+      final mary = 'b' * 64;
+      final session = _CountingForumSession(null);
+      final post = _makePost(
+        content: 'Thanks @Mary',
+        tags: [
+          ['h', _channelId],
+          ['mention', mary],
+        ],
+      );
+      Widget card(bool mounted) => ProviderScope(
+        overrides: [
+          relaySessionProvider.overrideWith(() => session),
+          knownAgentPubkeysProvider.overrideWithValue(const {}),
+          savedPrefsProvider.overrideWithValue(_testPrefs),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: mounted
+                ? ForumPostCard(post: post, currentPubkey: 'self', onTap: () {})
+                : const SizedBox(),
+          ),
+        ),
+      );
+
+      // The relay answers with no profile for Mary; remounting the card
+      // must not ask again.
+      for (final mounted in [true, false, true]) {
+        await tester.pumpWidget(card(mounted));
+        await tester.pump(const Duration(milliseconds: 100));
+        await tester.pump();
+      }
+
+      await tester.pumpWidget(card(false));
+      await tester.pump(const Duration(seconds: 1));
+
+      expect(session.profileRequestsFor(mary), 1);
     });
 
     testWidgets('shows compact npub when no profile', (tester) async {

@@ -234,16 +234,18 @@ class _ThreadContent extends HookConsumerWidget {
     final post = thread.post;
     final replies = thread.replies;
 
-    // Preload profiles for all participants and tagged mentions.
+    // Preload profiles for all participants and `p`-tagged mentions.
     final allPubkeys = useMemoized(() {
       final pks = <String>{
         post.pubkey.toLowerCase(),
-        ...post.mentionPubkeys.map((pubkey) => pubkey.toLowerCase()),
+        ...post.addressedPubkeys.map((pubkey) => pubkey.toLowerCase()),
       };
       for (final reply in replies) {
         pks
           ..add(reply.pubkey.toLowerCase())
-          ..addAll(reply.mentionPubkeys.map((pubkey) => pubkey.toLowerCase()));
+          ..addAll(
+            reply.addressedPubkeys.map((pubkey) => pubkey.toLowerCase()),
+          );
       }
       return pks.toList()..sort();
     }, [post, replies]);

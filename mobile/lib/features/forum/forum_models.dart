@@ -59,6 +59,11 @@ class ForumPost {
 
   /// Keys the post mentions: `p` tags and `mention` references.
   List<String> get mentionPubkeys => mentionedPubkeysFromTags(tags).toList();
+
+  /// Keys the post addresses with `p` tags, for eager profile preloads.
+  /// `mention` references load through the rendered body instead, which
+  /// backs off keys the relay said have no profile.
+  List<String> get addressedPubkeys => readMentionTags(tags).mentions;
 }
 
 /// Summary of replies on a forum post.
@@ -153,6 +158,11 @@ class ThreadReply {
 
   /// Keys the reply mentions: `p` tags and `mention` references.
   List<String> get mentionPubkeys => mentionedPubkeysFromTags(tags).toList();
+
+  /// Keys the reply addresses with `p` tags, for eager profile preloads.
+  /// `mention` references load through the rendered body instead, which
+  /// backs off keys the relay said have no profile.
+  List<String> get addressedPubkeys => readMentionTags(tags).mentions;
 }
 
 /// Paginated response for forum posts.
