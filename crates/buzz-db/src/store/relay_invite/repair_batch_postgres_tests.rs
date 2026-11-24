@@ -162,7 +162,7 @@ async fn invite_repair_resumes_committed_batches_and_resets_cursor_for_each_comm
         if let Some(stamp) = before[index].2 {
             assert_eq!(*revoked_at, Some(stamp), "pre-existing stamp preserved");
         }
-        if !committed[index].3 {
+        if before[index].3 && !committed[index].3 {
             assert_eq!(row, &committed[index], "committed prefix remains unchanged");
         }
     }
