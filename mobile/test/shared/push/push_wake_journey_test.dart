@@ -736,6 +736,23 @@ void main() {
       // never returned, so the wake says so.
       expect(cutShort.unreported, isTrue);
 
+      // A stalled claim for a message with nothing to show would not have
+      // been returned anyway, so nothing is lost.
+      final blank = fixture.addCommunity();
+      blank.message(blank.dmChannel(), blank.person('Friend'), '  \n\t ');
+      final blankStall = await fixture
+          .wake(
+            store: StalledShownMessageStore(
+              fixture.openStore(),
+              blank.communityId,
+              succeed: 0,
+            ),
+            timeouts: tight,
+          )
+          .timeout(const Duration(seconds: 3));
+      expect(blankStall.failedCommunityIds, [blank.communityId]);
+      expect(blankStall.unreported, isFalse);
+
       // Once the budget is spent, nothing more is sent to a relay.
       final gate = Completer<void>();
       int queried() => fixture.relays.fold(0, (n, r) => n + r.queries.length);

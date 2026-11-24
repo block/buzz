@@ -273,7 +273,11 @@ Future<PushWakeResult> resolvePushWake({
     ).timeout(_claimGrace, onTimeout: () => const []);
     // Read with the claimed snapshot below, with no await between: a claim
     // that finishes after this point is not returned, so it is unreported.
-    final unreported = run.claiming > 0;
+    // A message with nothing to show would not be returned anyway. Its body
+    // is formatted only here, so claims that answer in time never pay for it.
+    final unreported = run.claiming.values.any(
+      (event) => notificationBody(event.content).isNotEmpty,
+    );
     for (final community in eligible) {
       if (!run.done.contains(community.id)) run.failed.add(community.id);
     }
@@ -305,8 +309,9 @@ class _WakeRun {
   final done = <String>{};
   final claims = <Future<void>>[];
 
-  /// Claims started and not yet answered.
-  var claiming = 0;
+  /// The message each community is claiming now, until its claim answers.
+  /// A community claims one message at a time.
+  final claiming = <String, NostrEvent>{};
 
   /// What each community running now has claimed so far, which is returned if
   /// the wake ends before the community does.
@@ -536,7 +541,7 @@ Future<void> _resolveCommunity(
       // The messages claimed before it are returned, since they are already
       // recorded as shown, and the community is reported as incomplete.
       final bool won;
-      run.claiming++;
+      run.claiming[community.id] = event;
       try {
         won = await store.claim(community.id, event.id, createdAt);
       } on Object {
@@ -545,7 +550,7 @@ Future<void> _resolveCommunity(
       } finally {
         // Nothing awaits between here and adding the message to `claimed`,
         // so a claim the wake has stopped waiting for is still counted.
-        run.claiming--;
+        run.claiming.remove(community.id);
       }
       if (!won) continue;
       final body = notificationBody(event.content);

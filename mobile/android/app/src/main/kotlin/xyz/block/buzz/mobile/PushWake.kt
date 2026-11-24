@@ -100,7 +100,6 @@ internal object PushWake {
         private var outstanding = 0
         private var answered = false
         private var genericShown = false
-        private var genericKept = false
         private var finished = false
         private val genericCheck = Runnable {
             if (!answered) {
@@ -193,22 +192,24 @@ internal object PushWake {
             if (map["joined"] == true) return
             log("dart_result")
             val notifications = (map["notifications"] as List<*>).map { WakeNotification.fromDart(it) }
-            // A message claimed but never returned can't be named, and no
-            // later wake finds it, so the generic notification stands in for
-            // it beside the named ones.
-            val unreported = map["unreported"] == true
-            if (unreported) genericKept = true
             answered = true
+            if (notifications.isNotEmpty()) {
+                notifier.postConversations(notifications, silent = genericShown)
+                log("posted count=${notifications.size}")
+            }
             when {
-                notifications.isNotEmpty() -> {
-                    notifier.postConversations(notifications, silent = genericShown)
-                    log("posted count=${notifications.size}")
-                    // The named notifications already alerted.
-                    if (unreported) showGeneric(silent = true) else removeGeneric()
-                }
-                map["incomplete"] == true || unreported -> showGeneric()
+                // A message claimed but never returned can't be named, and no
+                // later wake finds it, so the generic notification stands in
+                // for it, beside any named ones, until the user clears it.
+                map["unreported"] == true -> keepGeneric(silent = genericShown || notifications.isNotEmpty())
+                notifications.isEmpty() && map["incomplete"] == true -> showGeneric()
                 else -> removeGeneric()
             }
+        }
+
+        private fun keepGeneric(silent: Boolean) {
+            genericShown = true
+            notifier.postGeneric(silent, lost = true)
         }
 
         private fun showGeneric(silent: Boolean = false) {
@@ -219,8 +220,6 @@ internal object PushWake {
 
         /** Also clears the generic notification an earlier run left behind. */
         private fun removeGeneric() {
-            // It stands in for a lost message, so later results don't remove it.
-            if (genericKept) return
             genericShown = false
             notifier.cancelGeneric()
         }

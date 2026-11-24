@@ -4,6 +4,7 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Bundle
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -103,6 +104,7 @@ internal class WakeNotifier(private val context: Context) {
         private const val GENERIC_ID = 2
         private const val GENERIC_TAG = "generic"
         private const val EVENT_ID_EXTRA = "eventId"
+        private const val LOST_EXTRA = "xyz.block.buzz.mobile.lost"
 
         private fun conversationTag(conversationId: String) = "conversation:$conversationId"
     }
@@ -185,8 +187,12 @@ internal class WakeNotifier(private val context: Context) {
         }
     }
 
-    /** [silent] posts it without alerting, beside notifications that did. */
-    fun postGeneric(silent: Boolean = false) {
+    /**
+     * [silent] posts it without alerting, beside notifications that did.
+     * [lost] marks it as standing in for a message no wake can name, so
+     * [cancelGeneric] leaves it. Re-posting a marked one keeps the mark.
+     */
+    fun postGeneric(silent: Boolean = false, lost: Boolean = false) {
         val tap = PendingIntent.getActivity(
             context,
             GENERIC_ID,
@@ -205,11 +211,22 @@ internal class WakeNotifier(private val context: Context) {
                 .setAutoCancel(true)
                 .setContentIntent(tap)
                 .setSilent(silent)
+                .addExtras(Bundle().apply { putBoolean(LOST_EXTRA, lost || genericLost()) })
                 .build(),
         )
     }
 
-    fun cancelGeneric() = manager.cancel(GENERIC_TAG, GENERIC_ID)
+    /** Leaves a generic notification that stands in for a lost message. */
+    fun cancelGeneric() {
+        if (!genericLost()) manager.cancel(GENERIC_TAG, GENERIC_ID)
+    }
+
+    private fun genericLost(): Boolean =
+        manager.activeNotifications
+            .firstOrNull { it.tag == GENERIC_TAG && it.id == GENERIC_ID }
+            ?.notification
+            ?.extras
+            ?.getBoolean(LOST_EXTRA) == true
 
     private fun existingStyle(tag: String): NotificationCompat.MessagingStyle? =
         manager.activeNotifications
