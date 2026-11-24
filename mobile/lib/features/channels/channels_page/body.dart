@@ -293,11 +293,8 @@ class _SliverChannelsList extends HookConsumerWidget {
     final seedCompleteForPubkey =
         seededPubkey.value == readState.pubkey && initialSeedComplete.value;
 
-    // After a failed load a missing mark is unknown, not absent: baselining
-    // then would read every channel.
-    final loaded = readState.isReady && !readState.loadPending;
     useEffect(() {
-      if (!loaded) {
+      if (!readState.isReady) {
         return null;
       }
 
@@ -322,10 +319,12 @@ class _SliverChannelsList extends HookConsumerWidget {
             seeds[channel.id] = lastMessageAt;
           }
         }
+        // Captured now; applied once synced read state loads, since a
+        // missing mark is unknown until then.
         ref.read(readStateProvider.notifier).seedContextsRead(seeds);
         initialSeedComplete.value = true;
       });
-    }, [loaded, readState.pubkey, visibleChannels]);
+    }, [readState.isReady, readState.pubkey, visibleChannels]);
 
     final highlights = computeChannelListHighlights(
       channels: visibleChannels,

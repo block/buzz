@@ -237,6 +237,9 @@ class ReadStateManager {
   Object? _liveOwner;
   bool _initialized = false;
   bool _initialSeedComplete = false;
+  // The first landing's baseline, captured once and journaled, until the
+  // load it waits for lets it apply.
+  Map<String, int>? _seedBaseline;
   // The one sync loop, while it runs. Each pass opens the live subscription
   // if it is missing, then reads the snapshot, so two passes never each
   // install a subscription and leak one. A request before a pass starts its
@@ -374,16 +377,6 @@ class ReadStateManager {
     seedContextsRead({contextId: unixTimestamp});
   }
 
-  /// Baseline the first channel-list landing once per identity/community.
-  /// The journal persists even an empty scope: later channels remain unread
-  /// after process death, rather than becoming a new "first" snapshot.
-  void seedInitialContextsRead(Map<String, int> contexts) {
-    if (_disposed || _initialSeedComplete) return;
-    _initialSeedComplete = true;
-    seedContextsRead(contexts);
-    _persistLocalState();
-  }
-
   /// Advance local-only seeds together, saving and notifying once per batch.
   void seedContextsRead(Map<String, int> contexts) {
     var changed = false;
@@ -498,6 +491,7 @@ class ReadStateManager {
       _mergeEvents(events);
       if (newest) _dropAbsentPeerFollows(heads, _capacitySnapshot = events);
       _followsLoaded = true;
+      _applySeedBaseline();
       _retryRefusedReadingClears();
       await _persistLocalState();
       _followsRecovered = true;
@@ -525,7 +519,7 @@ class ReadStateManager {
         _snapshotError = error;
       }
       debugPrint('[ReadStateManager] snapshot failed: $error');
-      _scheduleSnapshotRetry();
+      _retrySnapshotUnlessPermanent(error);
       _onChanged();
       return false;
     }
@@ -785,7 +779,7 @@ class ReadStateManager {
           // Retry on the same backoff as a failed sync; the retry re-syncs
           // and publishes the journaled marks.
           if (_settleSnapshot(read, succeeded: false)) _snapshotError = error;
-          _scheduleSnapshotRetry();
+          _retrySnapshotUnlessPermanent(error);
           rethrow;
         }
         final newest = _settleSnapshot(read, succeeded: true);
@@ -807,6 +801,7 @@ class ReadStateManager {
         _mergeEvents(events);
         if (newest) _dropAbsentPeerFollows(heads, _capacitySnapshot = events);
         _followsLoaded = recovered = true;
+        _applySeedBaseline();
         _retryRefusedReadingClears();
         // Unchanged slots publish nothing, so no echo would announce marks
         // this snapshot brought in.
@@ -1177,7 +1172,10 @@ class ReadStateManager {
       debugPrint(
         '[ReadStateManager] publish failed (journal retained): $error',
       );
-      if (_isPermanentReadStateRemoteError(error)) _remoteUnsupported = true;
+      if (_isPermanentReadStateRemoteError(error)) {
+        _remoteUnsupported = true;
+        _applySeedBaseline();
+      }
     }
   }
 

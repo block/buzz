@@ -441,7 +441,9 @@ Both event count and bytes are hard bounded. More than 4096 events, more than
 compact encoded event-array bytes fails the whole request (HTTP 413). No partial
 envelope is returned. Row reconstruction, signature verification, serialization,
 or database failure produces an explicit non-success response (HTTP 503 after
-authentication). Invalid extension requests produce HTTP 400; normal auth,
+authentication). A stored event that cannot be read back, which every retry
+repeats, carries the body `{"error":"read_state_snapshot_unreadable"}`; other 503
+bodies may be temporary. Invalid extension requests produce HTTP 400; normal auth,
 unknown-host, membership, replay and admission errors retain their bridge status.
 Clients MUST treat **all** such errors as `cannot prove complete`. There is no
 permission to delete old coordinates to get under the snapshot cap.
